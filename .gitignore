@@ -1,0 +1,27 @@
+# Build output
+/bin/
+/dist/
+*.exe
+
+# Go test / coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Go workspace files (local-only)
+go.work
+go.work.sum
+
+# Local configuration and secrets — never commit these
+.env
+.env.*
+*.local.yaml
+*.local.yml
+
+# Tooling caches
+.impeccable/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
