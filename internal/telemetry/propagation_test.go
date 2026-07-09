@@ -57,6 +57,65 @@ func TestInjectExtractRoundTrip(t *testing.T) {
 	}
 }
 
+func TestInjectNilCarrierDoesNotPanic(t *testing.T) {
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:     trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+		TraceFlags: trace.FlagsSampled,
+	})
+	// A nil carrier (e.g. a work item whose metadata decoded from JSON as
+	// null) must be a no-op, not a nil-map-write panic.
+	telemetry.Inject(trace.ContextWithSpanContext(context.Background(), sc), nil)
+}
+
+func TestInjectReplacesStaleCaseVariantEntries(t *testing.T) {
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19},
+		SpanID:     trace.SpanID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		TraceFlags: trace.FlagsSampled,
+	})
+	// A forwarding hop reuses a carrier flattened from net/http headers:
+	// stale upstream entries arrive canonically cased. Inject must replace
+	// them, not leave two case-variant traceparent entries whose winner
+	// depends on map iteration order at Extract time.
+	carrier := map[string]string{
+		"Traceparent": "00-99999999999999999999999999999999-9999999999999999-01",
+		"Tracestate":  "up=stale",
+		"X-Custom":    "kept",
+	}
+	telemetry.Inject(trace.ContextWithSpanContext(context.Background(), sc), carrier)
+
+	want := fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID())
+	if got := carrier["traceparent"]; got != want {
+		t.Errorf("carrier[traceparent] = %q, want %q", got, want)
+	}
+	if _, ok := carrier["Traceparent"]; ok {
+		t.Errorf("stale Traceparent entry survived Inject")
+	}
+	if _, ok := carrier["Tracestate"]; ok {
+		t.Errorf("stale Tracestate entry survived Inject")
+	}
+	if v, ok := carrier["tracestate"]; ok {
+		t.Errorf("tracestate = %q, want absent (fresh context carries none)", v)
+	}
+	if carrier["X-Custom"] != "kept" {
+		t.Errorf("unrelated carrier entries must be preserved")
+	}
+}
+
+func TestInjectWithoutSpanContextLeavesCarrierUntouched(t *testing.T) {
+	carrier := map[string]string{
+		"Traceparent": "00-aabbccddeeff0102030405060708090a-1122334455667788-01",
+	}
+	telemetry.Inject(context.Background(), carrier)
+	if got := carrier["Traceparent"]; got != "00-aabbccddeeff0102030405060708090a-1122334455667788-01" {
+		t.Errorf("passthrough entry modified: %q", got)
+	}
+	if len(carrier) != 1 {
+		t.Errorf("carrier = %v, want single passthrough entry", carrier)
+	}
+}
+
 func TestExtractIsCaseInsensitive(t *testing.T) {
 	// Maps flattened from net/http headers carry Go's canonical key form;
 	// W3C header names are case-insensitive.

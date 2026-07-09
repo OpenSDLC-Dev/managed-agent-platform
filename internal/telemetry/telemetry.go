@@ -32,38 +32,40 @@ type Config struct {
 	// Insecure dials the collector without TLS (local dev, in-cluster
 	// collectors behind the service mesh).
 	Insecure bool
-	// SampleRatio is the fraction of new root traces sampled, in [0, 1].
-	// 0 means unset and defaults to 1 (sample everything). Child spans
-	// always follow their parent's decision, so a trace is never torn.
-	SampleRatio float64
+	// SampleRatio is the fraction of new root traces sampled, in [0, 1];
+	// 0 samples nothing (metrics still flow). nil defaults to 1 (sample
+	// everything). Child spans always follow their parent's decision, so
+	// a trace is never torn.
+	SampleRatio *float64
 }
 
 // Init installs the global W3C trace-context propagator and, when an
 // endpoint is configured, global OTLP-exporting tracer and meter providers.
-// The returned shutdown flushes buffered telemetry; call it once at process
-// exit.
+// On error no global state has been touched. The returned shutdown flushes
+// buffered telemetry; call it once at process exit.
 func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) {
 	if cfg.ServiceName == "" {
 		return nil, errors.New("telemetry: ServiceName is required")
 	}
 	// Negated form so NaN is rejected too.
-	if !(cfg.SampleRatio >= 0 && cfg.SampleRatio <= 1) {
-		return nil, fmt.Errorf("telemetry: SampleRatio %v outside [0, 1]", cfg.SampleRatio)
+	if cfg.SampleRatio != nil && !(*cfg.SampleRatio >= 0 && *cfg.SampleRatio <= 1) {
+		return nil, fmt.Errorf("telemetry: SampleRatio %v outside [0, 1]", *cfg.SampleRatio)
 	}
 
-	otel.SetTextMapPropagator(propagator)
-
 	if cfg.Endpoint == "" {
+		otel.SetTextMapPropagator(propagator)
 		return func(context.Context) error { return nil }, nil
 	}
 
-	// resource.Default's schema URL matches the semconv version imported
-	// above; merging with any other version fails at runtime.
 	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
 		semconv.SchemaURL,
 		semconv.ServiceName(cfg.ServiceName),
 	))
-	if err != nil {
+	// After an SDK bump, resource.Default's schema URL can trail the
+	// semconv version imported here; Merge then reports a conflict but
+	// still returns a usable merged resource, so only real failures are
+	// fatal.
+	if err != nil && !errors.Is(err, resource.ErrSchemaURLConflict) {
 		return nil, fmt.Errorf("telemetry: build resource: %w", err)
 	}
 
@@ -80,16 +82,17 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	}
 	metricExporter, err := otlpmetricgrpc.New(ctx, metricOpts...)
 	if err != nil {
+		_ = traceExporter.Shutdown(ctx)
 		return nil, fmt.Errorf("telemetry: create metric exporter: %w", err)
 	}
 
-	ratio := cfg.SampleRatio
-	if ratio == 0 {
-		ratio = 1
+	sampleRatio := 1.0
+	if cfg.SampleRatio != nil {
+		sampleRatio = *cfg.SampleRatio
 	}
 	tracerProvider := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))),
+		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(sampleRatio))),
 		sdktrace.WithBatcher(traceExporter),
 	)
 	meterProvider := sdkmetric.NewMeterProvider(
@@ -97,6 +100,8 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
 	)
 
+	// Globals are only touched once nothing can fail anymore.
+	otel.SetTextMapPropagator(propagator)
 	otel.SetTracerProvider(tracerProvider)
 	otel.SetMeterProvider(meterProvider)
 

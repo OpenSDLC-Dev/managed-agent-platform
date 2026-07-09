@@ -12,15 +12,17 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
 
+func ratio(f float64) *float64 { return &f }
+
 func TestInitRejectsInvalidConfig(t *testing.T) {
 	cases := []struct {
 		name string
 		cfg  telemetry.Config
 	}{
 		{"missing service name", telemetry.Config{Endpoint: "localhost:4317"}},
-		{"negative sample ratio", telemetry.Config{ServiceName: "t", SampleRatio: -0.1}},
-		{"sample ratio above one", telemetry.Config{ServiceName: "t", SampleRatio: 1.5}},
-		{"NaN sample ratio", telemetry.Config{ServiceName: "t", SampleRatio: math.NaN()}},
+		{"negative sample ratio", telemetry.Config{ServiceName: "t", SampleRatio: ratio(-0.1)}},
+		{"sample ratio above one", telemetry.Config{ServiceName: "t", SampleRatio: ratio(1.5)}},
+		{"NaN sample ratio", telemetry.Config{ServiceName: "t", SampleRatio: ratio(math.NaN())}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -39,6 +41,9 @@ func TestInitWithoutEndpointIsNoOp(t *testing.T) {
 	}
 	if otel.GetTracerProvider() != before {
 		t.Errorf("disabled Init must not replace the global tracer provider")
+	}
+	if fields := otel.GetTextMapPropagator().Fields(); !slices.Contains(fields, "traceparent") {
+		t.Errorf("global propagator fields = %v, want W3C traceparent installed", fields)
 	}
 	if err := shutdown(context.Background()); err != nil {
 		t.Errorf("no-op shutdown: %v", err)
@@ -92,7 +97,7 @@ func TestSampleRatioIsApplied(t *testing.T) {
 		ServiceName: "sampling-test",
 		Endpoint:    collector.addr,
 		Insecure:    true,
-		SampleRatio: 0.0001,
+		SampleRatio: ratio(0.0001),
 	})
 	if err != nil {
 		t.Fatalf("Init: %v", err)
@@ -114,5 +119,45 @@ func TestSampleRatioIsApplied(t *testing.T) {
 	// effectively zero; receiving that many means the ratio was ignored.
 	if got := len(collector.spanNames()); got >= 60 {
 		t.Errorf("collector received %d/%d spans at ratio 0.0001, sampler not applied", got, total)
+	}
+}
+
+func TestSampleRatioZeroSendsNoTraces(t *testing.T) {
+	collector := startFakeCollector(t)
+	ctx := context.Background()
+
+	// Ratio 0 is the operator's "keep metrics, drop traces" switch — it
+	// must not be conflated with "unset, sample everything" (nil).
+	shutdown, err := telemetry.Init(ctx, telemetry.Config{
+		ServiceName: "zero-ratio-test",
+		Endpoint:    collector.addr,
+		Insecure:    true,
+		SampleRatio: ratio(0),
+	})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	for i := 0; i < 50; i++ {
+		_, span := otel.Tracer("contract").Start(ctx, "dropped-op")
+		span.End()
+	}
+	counter, err := otel.Meter("contract").Int64Counter("still_flowing")
+	if err != nil {
+		t.Fatalf("Int64Counter: %v", err)
+	}
+	counter.Add(ctx, 1)
+
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := shutdown(flushCtx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	if names := collector.spanNames(); len(names) != 0 {
+		t.Errorf("ratio 0 exported spans %v, want none", names)
+	}
+	if names := collector.metricNames(); !slices.Contains(names, "still_flowing") {
+		t.Errorf("ratio 0 must not stop metrics; collector metrics = %v", names)
 	}
 }
