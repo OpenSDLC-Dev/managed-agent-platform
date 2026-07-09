@@ -46,7 +46,8 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	if cfg.ServiceName == "" {
 		return nil, errors.New("telemetry: ServiceName is required")
 	}
-	if cfg.SampleRatio < 0 || cfg.SampleRatio > 1 {
+	// Negated form so NaN is rejected too.
+	if !(cfg.SampleRatio >= 0 && cfg.SampleRatio <= 1) {
 		return nil, fmt.Errorf("telemetry: SampleRatio %v outside [0, 1]", cfg.SampleRatio)
 	}
 

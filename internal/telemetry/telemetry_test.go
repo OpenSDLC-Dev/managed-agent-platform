@@ -2,6 +2,7 @@ package telemetry_test
 
 import (
 	"context"
+	"math"
 	"slices"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ func TestInitRejectsInvalidConfig(t *testing.T) {
 		{"missing service name", telemetry.Config{Endpoint: "localhost:4317"}},
 		{"negative sample ratio", telemetry.Config{ServiceName: "t", SampleRatio: -0.1}},
 		{"sample ratio above one", telemetry.Config{ServiceName: "t", SampleRatio: 1.5}},
+		{"NaN sample ratio", telemetry.Config{ServiceName: "t", SampleRatio: math.NaN()}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
