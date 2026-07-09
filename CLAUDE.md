@@ -11,6 +11,8 @@ We take Anthropic's **Claude Managed Agents** as our **reference implementation*
 
 Full design doc: `~/.claude/plans/agent-managed-agent-encapsulated-moonbeam.md` (approved plan; read it before large changes).
 
+**Current progress: [STATE.md](./STATE.md)** — which delivery slice is done, what's next, and the open questions. Read it at the start of a session; update it whenever a slice changes status.
+
 ## Core architecture — decouple brain / hands / session
 
 An agent is three independently-swappable pieces (a pattern we take from the reference):
