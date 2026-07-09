@@ -8,9 +8,9 @@ Running record of where this project actually stands, so work can resume cleanly
 
 ## Snapshot
 
-- **Last updated:** 2026-07-09
-- **Phase:** Foundation — both cross-cutting bases (domain + telemetry) exist; nothing runs end-to-end yet.
-- **Current slice:** 0 complete; next up is slice 1 (Postgres schema + migrations).
+- **Last updated:** 2026-07-10
+- **Phase:** Foundation — cross-cutting bases (domain + telemetry) and the Postgres schema exist; nothing runs end-to-end yet.
+- **Current slice:** 1 complete; next up is slice 2 (control plane CRUD).
 - **Build status:** `go build ./...`, `go vet ./...`, `go test ./...` all green.
 
 ## Reference documents
@@ -34,7 +34,7 @@ The model backend must be pointable at either an Anthropic-protocol endpoint or 
 | # | Slice | Status |
 |---|---|---|
 | 0 | `internal/domain` (Anthropic-native types) + `internal/telemetry` (OTel/OTLP, context propagation) | ✅ Done |
-| 1 | Postgres schema + migrations (`internal/store`), reserved multi-tenant columns | ⬜ Not started |
+| 1 | Postgres schema + migrations (`internal/store`), reserved multi-tenant columns | ✅ Done |
 | 2 | Control plane CRUD (agents / environments / sessions) + optimistic versioning + ID prefixes + `x-api-key` auth | ⬜ Not started |
 | 3 | Append-only event log (seq allocation) + `POST /events` + SSE stream (`event_start` / `event_delta` reconciliation) + `span.*` emitted from the same point as OTel spans | ⬜ Not started |
 | 4 | `ModelProvider` (config-driven: protocol / model / base_url / api_key) + `model_providers` routing; first provider passing a single model turn; verify a custom `base_url` works | ⬜ Not started |
@@ -81,12 +81,26 @@ Uses `go.opentelemetry.io/otel` (+ OTLP/gRPC exporters) — the first external d
 
 **Test coverage:** contract tests drive an in-process fake OTLP/gRPC collector and assert what actually leaves the process: exported span names, `service.name` resource attribute, exported metrics, and that `SampleRatio` is honored. Plus traceparent inject/extract round-trip (IDs, sampled flag, remote flag, tracestate) and config validation. `span.*` domain-event emission from these spans lands in slice 3.
 
+### `internal/store` — Postgres schema + migrations
+
+Uses `github.com/jackc/pgx/v5` (pool + wire protocol). No ORM, no migration library — migrations are embedded SQL applied by a ~60-line migrator.
+
+| File | Contents |
+|---|---|
+| `migrations/0001_init.sql` | Core schema: `agents` + `agent_versions` (optimistic `version`, immutable snapshots), `environments` (kind CHECK `cloud/self_hosted`, config required with a CHECK forcing `config->>'type' = kind` — the wire keeps the discriminator inside the config union), `sessions` (resolved-agent jsonb snapshot, status CHECK, composite FK `(agent_id, agent_version) → agent_versions` so the audit trail can't dangle, `vault_ids` seam, audit-only `created_by`, **no user_id**), `events` (append-only log, `UNIQUE (session_id, seq)`), `work_items` (`state` CHECK matches the wire enum; `kind` CHECK `model_turn/tool_exec` is the plan's **internal** queue taxonomy, not a wire field; lease + heartbeat columns; poll + session indexes), `api_keys` / `environment_keys` (hash only, `revoked_at` rotation). Wire-required plain strings (`sessions.title`, `environments.description`) are `NOT NULL DEFAULT ''`. Every top-level table reserves `org_id`/`workspace_id`/`project_id` (default `'default'`). |
+| `migrate.go` | `Migrate`: embedded-FS migrations in filename order, one transaction for the whole run (all-or-nothing), `pg_advisory_xact_lock` so concurrently starting binaries don't race, versions recorded in `schema_migrations`. |
+| `store.go` | `Open(ctx, dsn)`: pool + ping + migrate; the single startup entry point for every binary. |
+
+**Test coverage:** contract tests run against a real Postgres started in Docker by `TestMain` (`postgres:16-alpine`, random port, fresh database per test): fresh-migrate creates every table, idempotent re-run, 4 concurrent `Open`s don't conflict, `(session_id, seq)` uniqueness (and same seq OK across sessions), enum CHECKs reject invalid values and accept **every** valid value (all 4 session statuses, all 5 work states, both kinds/environment kinds), kind/config disagreement rejected, config required, dangling `agent_version` rejected, `title`/`description` scan into plain strings, `work_items(session_id)` index present, tenancy defaults, migration failures roll back atomically (conflicting object, broken/variant `schema_migrations`), unreachable/malformed DSN.
+
+**Wire-drift note (recorded 2026-07-10):** the SDK checkout's current `BetaEnvironment` has no `state` field (lifecycle = `archived_at` only) and also carries post-plan surface we deliberately did not add (`scope`, session `stats`/`outcome_evaluations`/`deployment_id`, session `archived_at`). The `environments.state` column follows the approved plan and `internal/domain`; revisit these (incl. whether sessions need `archived_at`) in slice 2's CRUD and when the SDK dependency is pinned in slice 4.
+
 ---
 
 ## Next up
 
-1. **Slice 1:** Postgres schema + migrations (`internal/store`). Tables: `agents` + `agent_versions`, `environments`, `sessions`, `events` (append-only, unique `(session_id, seq)`), `work_items`, `api_keys` / `environment_keys`. Every core table carries reserved `org_id` / `workspace_id` / `project_id`.
-2. **Slice 2:** Control plane CRUD (agents / environments / sessions) + optimistic versioning + ID prefixes + `x-api-key` auth.
+1. **Slice 2:** Control plane CRUD (agents / environments / sessions) + optimistic versioning + ID prefixes + `x-api-key` auth.
+2. **Slice 3:** Append-only event log (seq allocation) + `POST /events` + SSE stream + `span.*` events emitted from the same instrumentation point as OTel spans.
 
 ---
 
@@ -121,7 +135,7 @@ Full rationale lives in the plan and `CLAUDE.md`; these are the ones most likely
 ## Environment notes
 
 - **Go 1.26.5** (installed via Homebrew).
-- **Docker** available. **`psql` is not installed** — use the Postgres container for database work.
+- **Docker** available. **`psql` is not installed** — use the Postgres container for database work. The `internal/store` tests start their own `postgres:16-alpine` container automatically (and fail loudly, not skip, without Docker — skipping would hollow out the coverage gate).
 - **Repository:** <https://github.com/OpenSDLC-Dev/managed-agent-platform> (public).
 - **Module path:** `github.com/OpenSDLC-Dev/managed-agent-platform` — note the owner's mixed case is intentional and must match the GitHub owner exactly; Go escapes the uppercase letters in the module cache.
 
