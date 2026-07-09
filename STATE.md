@@ -93,7 +93,7 @@ Uses `github.com/jackc/pgx/v5` (pool + wire protocol). No ORM, no migration libr
 
 **Test coverage:** contract tests run against a real Postgres started in Docker by `TestMain` (`postgres:16-alpine`, random port, fresh database per test): fresh-migrate creates every table, idempotent re-run, 4 concurrent `Open`s don't conflict, `(session_id, seq)` uniqueness (and same seq OK across sessions), enum CHECKs reject invalid + accept all valid values, tenancy defaults, migration failures roll back atomically (conflicting object, broken/variant `schema_migrations`), unreachable/malformed DSN.
 
-**Wire-drift note (recorded 2026-07-10):** the SDK checkout's current `BetaEnvironment` has no `state` field (lifecycle = `archived_at` only) and also carries post-plan surface we deliberately did not add (`scope`, session `stats`/`outcome_evaluations`/`deployment_id`). The `environments.state` column follows the approved plan and `internal/domain`; revisit when the SDK dependency is pinned in slice 4.
+**Wire-drift note (recorded 2026-07-10):** the SDK checkout's current `BetaEnvironment` has no `state` field (lifecycle = `archived_at` only) and also carries post-plan surface we deliberately did not add (`scope`, session `stats`/`outcome_evaluations`/`deployment_id`, session `archived_at`). The `environments.state` column follows the approved plan and `internal/domain`; revisit these (incl. whether sessions need `archived_at`) in slice 2's CRUD and when the SDK dependency is pinned in slice 4.
 
 ---
 
