@@ -27,4 +27,18 @@ jobs:
             echo "$unformatted" >&2
             exit 1
           fi
-      - run: go test -count=1 ./...
+      - name: test + coverage gate (>= 90%)
+        run: |
+          go test -count=1 -coverpkg=./internal/... -coverprofile=coverage.out ./...
+          # Exact total from the profile: `go tool cover -func` rounds to 0.1%,
+          # which would let ~89.95% pass as "90.0". Duplicate blocks (same
+          # package covered by several test binaries) merge with OR semantics;
+          # an empty profile fails closed.
+          awk 'NR>1 { stmts[$1]=$2; if ($3>0) covered[$1]=1 }
+               END {
+                 for (k in stmts) { t+=stmts[k]; if (k in covered) c+=stmts[k] }
+                 if (t==0) { print "no statements in coverage profile"; exit 1 }
+                 pct=100*c/t
+                 printf "total statement coverage: %.2f%%\n", pct
+                 exit !(pct >= 90.0)
+               }' coverage.out

@@ -64,3 +64,18 @@ func TestPrefixEmptyWhenNoUnderscore(t *testing.T) {
 		t.Errorf("Prefix() = %q, want empty", got)
 	}
 }
+
+func TestIDIsZero(t *testing.T) {
+	if !ID("").IsZero() {
+		t.Errorf("empty ID should be zero")
+	}
+	if NewID(PrefixAgent).IsZero() {
+		t.Errorf("generated ID should not be zero")
+	}
+}
+
+func TestIDString(t *testing.T) {
+	if got := ID("agent_abc").String(); got != "agent_abc" {
+		t.Errorf("String() = %q, want %q", got, "agent_abc")
+	}
+}
