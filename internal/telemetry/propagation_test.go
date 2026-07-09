@@ -57,6 +57,25 @@ func TestInjectExtractRoundTrip(t *testing.T) {
 	}
 }
 
+func TestExtractIsCaseInsensitive(t *testing.T) {
+	// Maps flattened from net/http headers carry Go's canonical key form;
+	// W3C header names are case-insensitive.
+	carrier := map[string]string{
+		"Traceparent": "00-aabbccddeeff0102030405060708090a-1122334455667788-01",
+		"Tracestate":  "vendor=value",
+	}
+	sc := trace.SpanContextFromContext(telemetry.Extract(context.Background(), carrier))
+	if !sc.IsValid() {
+		t.Fatalf("Extract missed canonically-cased Traceparent key")
+	}
+	if got, want := sc.TraceID().String(), "aabbccddeeff0102030405060708090a"; got != want {
+		t.Errorf("TraceID = %s, want %s", got, want)
+	}
+	if sc.TraceState().String() != "vendor=value" {
+		t.Errorf("TraceState = %q, want %q", sc.TraceState().String(), "vendor=value")
+	}
+}
+
 func TestExtractWithoutTraceparentIsInvalid(t *testing.T) {
 	ctx := telemetry.Extract(context.Background(), map[string]string{})
 	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {

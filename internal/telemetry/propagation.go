@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"strings"
 
 	"go.opentelemetry.io/otel/propagation"
 )
@@ -21,5 +22,12 @@ func Inject(ctx context.Context, carrier map[string]string) {
 // Extract returns a copy of ctx carrying the remote span context found in
 // carrier, or ctx unchanged when carrier holds no valid traceparent.
 func Extract(ctx context.Context, carrier map[string]string) context.Context {
-	return propagator.Extract(ctx, propagation.MapCarrier(carrier))
+	// W3C header names are case-insensitive, and maps flattened from
+	// net/http headers arrive canonically cased ("Traceparent"), while
+	// MapCarrier looks up verbatim — so match on lowered keys.
+	lowered := make(map[string]string, len(carrier))
+	for k, v := range carrier {
+		lowered[strings.ToLower(k)] = v
+	}
+	return propagator.Extract(ctx, propagation.MapCarrier(lowered))
 }
