@@ -26,7 +26,7 @@ Run in order; report each rung separately.
    - `/Users/hele/Projects/anthropic-cli` — client behavior (`pkg/cmd/beta*.go`, `pkg/cmd/worker.go`)
 
    Cite file:line for every comparison. A field we add, drop, rename, or re-type relative to the reference is a finding unless CLAUDE.md documents it as a deliberate divergence.
-6. **Docs consistency:** STATE.md, README.md, and CHANGELOG.md must correctly describe the change under review. Check each against the code, not against the PR description: slice statuses and "Next up" in STATE.md, the status line / roadmap checkboxes / development notes in README.md, and a CHANGELOG.md entry for every notable change (in the same PR). A stale checkbox, an overclaim ("all X tested" when the tests cover a subset), or a missing/wrong changelog entry is a finding.
+6. **Docs consistency:** STATE.md, README.md, and CHANGELOG.md must correctly describe the change under review. Check each against the code, not against the PR description: slice statuses and "Next up" in STATE.md, the status line / development notes in README.md (its roadmap defers to STATE.md and CHANGELOG.md — reintroduced per-slice tracking there is itself a finding), and a CHANGELOG.md entry for every notable change (in the same PR). A stale checkbox, an overclaim ("all X tested" when the tests cover a subset), or a missing/wrong changelog entry is a finding.
 
 ## Report format
 

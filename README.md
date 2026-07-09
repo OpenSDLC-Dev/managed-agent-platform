@@ -43,17 +43,10 @@ Two security invariants, adopted from the reference design:
 
 v1 targets the core loop: `create agent → create environment → create session → send a message → the model calls a tool → an executor runs it in a sandbox → results stream back over SSE → a human approves a gated tool → the session goes idle`.
 
-- [x] `internal/domain` — Anthropic-native core types (IDs, event taxonomy, session state machine)
-- [x] OpenTelemetry / OTLP foundation
-- [x] Postgres schema and migrations
-- [ ] Control plane: wire-compatible resource CRUD
-- [ ] Append-only event log + SSE streaming
-- [ ] Model providers (Anthropic-protocol, OpenAI-compatible)
-- [ ] Brain orchestration loop
-- [ ] Work queue + executor + Docker sandbox provider
-- [ ] Permission policies + human-in-the-loop approval
-- [ ] BYOC worker (wire-compatible work API)
-- [ ] Kubernetes sandbox provider + Helm chart
+Progress is tracked in two places, updated in the same PR as every change:
+
+- **[CHANGELOG.md](./CHANGELOG.md)** — what has landed, newest first.
+- **[STATE.md](./STATE.md)** — live slice-by-slice delivery status and what's next.
 
 Deferred past v1 (seams reserved, not implemented): secret vaults and egress credential injection, scheduled deployments, memory stores, multi-agent threads, skills, and multi-tenant RBAC/SSO.
 

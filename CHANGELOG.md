@@ -14,7 +14,9 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 - Docs-consistency rule in the iteration workflow: STATE.md, README.md, and
   CHANGELOG.md move with the code in the same PR, and the verifier checks
-  them as a dedicated rung. CHANGELOG.md introduced and backfilled. (#6)
+  them as a dedicated rung. CHANGELOG.md introduced and backfilled;
+  README's roadmap checkboxes replaced by pointers to STATE.md and
+  CHANGELOG.md so per-slice progress lives in one place. (#6)
 - `internal/store` — Postgres schema + embedded migrations (slice 1):
   `agents`/`agent_versions`, `environments` (kind ⇄ config-discriminator
   agreement CHECK), `sessions` (composite FK onto immutable agent-version
@@ -41,3 +43,8 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   `internal/domain` — Anthropic-native core types (prefixed IDs, the full
   `{domain}.{action}` event taxonomy, session status machine,
   agent/environment resources).
+
+### Changed
+
+- Module path set to the canonical GitHub owner,
+  `github.com/OpenSDLC-Dev/managed-agent-platform`.
