@@ -55,7 +55,7 @@ The model backend must be pointable at either an Anthropic-protocol endpoint or 
 - `README.md` — public-facing, states "early development" honestly.
 - `CLAUDE.md` — architecture, 5 non-negotiable design principles, wire-compat rules, working conventions.
 - `.claude/agents/verifier.md` — independent verifier subagent; every slice must pass it before being marked done. Local reference checkouts (SDK / `ant` CLI / Claude Code source) documented in CLAUDE.md as wire-schema ground truth.
-- CI (`.github/workflows/ci.yml`: build / vet / gofmt / `test -count=1`) + branch→PR→CI→squash-merge iteration workflow (CLAUDE.md → "Iteration workflow").
+- CI (`.github/workflows/ci.yml`: build / vet / gofmt / `test -count=1`) + branch→review→PR→CI→squash-merge iteration workflow with dual code review (`/codex:review` + `/code-review`) (CLAUDE.md → "Iteration workflow").
 
 ### `internal/domain` — Anthropic-native core types
 Zero external dependencies (stdlib only), enforcing the rule that the domain layer never depends on adk-go, genai, or a provider SDK.

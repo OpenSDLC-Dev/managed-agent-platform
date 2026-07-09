@@ -87,16 +87,17 @@ docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+b
 
 Verify wire-compat end-to-end by pointing the real `ant` CLI at the local server (`ANTHROPIC_BASE_URL=http://localhost:PORT`) and running `ant beta:agents/environments/sessions ...` and `ant beta:worker poll`.
 
-## Iteration workflow (branch → PR → CI → squash merge)
+## Iteration workflow (branch → review → PR → CI → squash merge)
 
 Every change lands through a PR; **never commit directly to `main`**.
 
 1. Branch off a fresh `main`: `git checkout main && git pull && git checkout -b <type>/<short-name>` (e.g. `feat/telemetry`, `fix/event-seq`, `chore/ci`).
 2. Develop on the branch (TDD as below). A slice's STATE.md status flip belongs in the same PR as the slice.
-3. Run the **verifier subagent** (see "Independent verification"); fix findings before opening the PR.
-4. Push and open the PR (`gh pr create`); include the verifier verdict in the description.
-5. Wait for CI (`.github/workflows/ci.yml`) to be fully green: `gh pr checks --watch`. Red CI → fix on the branch; never merge red.
-6. **Squash merge** (`gh pr merge --squash --delete-branch`), then sync local: `git checkout main && git pull`.
+3. Run the **verifier subagent** (see "Independent verification"); fix findings before review.
+4. **Dual code review**, one pass each: `/codex:review --background` (Codex reviewer) and `/code-review` (Claude reviewer). `/codex:review` is user-invocable only (`disable-model-invocation`); from a session, run the underlying reviewer as a background Bash task: `node "<plugin-root>/scripts/codex-companion.mjs" review "--background --scope branch --base main"`, where `<plugin-root>` is the newest directory under `~/.claude/plugins/cache/openai-codex/codex/`, and the scope flags are this workflow's choice (review the branch diff against `main`). Read the task's output file when it completes. Address findings from both reviewers; if a fix changes behavior, re-run the verifier.
+5. Push and open the PR (`gh pr create`); include the verifier verdict and both review outcomes in the description.
+6. Wait for CI (`.github/workflows/ci.yml`) to be fully green: `gh pr checks --watch`. Red CI → fix on the branch; never merge red.
+7. **Squash merge** (`gh pr merge --squash --delete-branch`), then sync local: `git checkout main && git pull`.
 
 ## How to work in this repo
 
