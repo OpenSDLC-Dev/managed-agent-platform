@@ -39,7 +39,17 @@ Processes (each a `cmd/` binary): `controlplane` (REST + event log + queue + sta
 - Accept and ignore `anthropic-version` / `anthropic-beta` headers; honor `?beta=true` where the reference does.
 - Auth: management via `x-api-key`; workers via environment key (`Authorization: Bearer`, scoped to one environment's work queue).
 - Event taxonomy is `{domain}.{action}` — see the plan's Component 2 for the full list. SSE deltas use `content_delta` (NOT Messages API's `content_block_delta`).
-- When a receive-direction event's exact JSON isn't in the public docs, verify against the real `ant` CLI (record the stream) rather than guessing.
+- Never guess at a wire shape. Resolution order: public docs → the local reference checkouts below (the Go SDK's typed schema first, then the `ant` CLI source) → recording a real `ant` CLI stream for behavior the types can't capture (ordering, SSE framing, defaults).
+
+## Reference source checkouts (local)
+
+Three read-only local checkouts serve as ground truth where the public docs are silent. In a new session, `/add-dir` them when needed.
+
+- `/Users/hele/Projects/anthropic-sdk-go` — official Go SDK (also our primary dependency). The **typed wire schema** for everything managed-agents: `betasessionevent.go` (full event taxonomy, both directions), `betaagent.go` / `betaenvironment.go` / `betasession.go` (resources), `betaenvironmentwork.go` (work API).
+- `/Users/hele/Projects/anthropic-cli` — the real `ant` CLI source. `pkg/cmd/beta*.go` and `pkg/cmd/worker.go` show **client-side behavior**: polling, SSE/stream handling, defaults, headers.
+- `/Users/hele/Projects/claude-code-source` — Claude Code source. **Design reference only** for harness concerns (agent loop, tool orchestration, permission flow). Not a wire-schema source; never copy code from it.
+
+Caveats: these checkouts track the API's tip and already contain post-plan surface (`agent.thread_*` events, memory-store betas). Wire-compat is judged against the SDK version pinned in `go.mod` (once that dependency lands — today `go.mod` has none); new surface in the checkouts is not an invitation to build ahead of the current slice.
 
 ## Repo layout
 
@@ -77,11 +87,22 @@ docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+b
 
 Verify wire-compat end-to-end by pointing the real `ant` CLI at the local server (`ANTHROPIC_BASE_URL=http://localhost:PORT`) and running `ant beta:agents/environments/sessions ...` and `ant beta:worker poll`.
 
+## Iteration workflow (branch → PR → CI → squash merge)
+
+Every change lands through a PR; **never commit directly to `main`**.
+
+1. Branch off a fresh `main`: `git checkout main && git pull && git checkout -b <type>/<short-name>` (e.g. `feat/telemetry`, `fix/event-seq`, `chore/ci`).
+2. Develop on the branch (TDD as below). A slice's STATE.md status flip belongs in the same PR as the slice.
+3. Run the **verifier subagent** (see "Independent verification"); fix findings before opening the PR.
+4. Push and open the PR (`gh pr create`); include the verifier verdict in the description.
+5. Wait for CI (`.github/workflows/ci.yml`) to be fully green: `gh pr checks --watch`. Red CI → fix on the branch; never merge red.
+6. **Squash merge** (`gh pr merge --squash --delete-branch`), then sync local: `git checkout main && git pull`.
+
 ## How to work in this repo
 
 These bias toward caution over speed. For trivial changes, use judgment.
 
-**Think before coding.** State assumptions explicitly rather than picking silently. This codebase has a specific failure mode: *guessing at the wire schema*. When a receive-direction event's exact JSON isn't in the public docs, do not invent it — record the real `ant` CLI stream and match it. Likewise, if a requirement admits two readings (e.g. whether a field is session-local or agent-level), surface both and ask. If something is confusing, stop and name what's confusing. If a simpler approach exists, say so — push back when warranted.
+**Think before coding.** State assumptions explicitly rather than picking silently. This codebase has a specific failure mode: *guessing at the wire schema*. When an exact JSON shape isn't in the public docs, do not invent it — read the reference checkouts (SDK types first), and record a real `ant` CLI stream when only behavior can answer. Likewise, if a requirement admits two readings (e.g. whether a field is session-local or agent-level), surface both and ask. If something is confusing, stop and name what's confusing. If a simpler approach exists, say so — push back when warranted.
 
 **Simplicity first.** Write the minimum code that solves the problem; nothing speculative. The plan deliberately *reserves seams* for vaults, deployments, memory, multi-agent threads, and skills — reserving a seam means a column or an interface boundary, **not** an implementation. Do not build ahead of the current slice. No abstractions for single-use code, no configurability nobody asked for, no error handling for impossible states. If 200 lines could be 50, rewrite it. The test: would a senior engineer call this overcomplicated?
 
@@ -94,6 +115,8 @@ These bias toward caution over speed. For trivial changes, use judgment.
 ```
 
 Concretely here: "add validation" → write the failing test for invalid input first; "fix the bug" → write the reproducing test first; "refactor X" → tests green before and after. Strong success criteria let you loop to done without check-ins; weak ones ("make it work") don't.
+
+**Independent verification (definition of done).** The implementer never certifies their own work. Before a slice or any nontrivial change is declared done — before STATE.md flips a status, before a commit that claims working behavior — dispatch the **`verifier` subagent** (`.claude/agents/verifier.md`) with what changed and the success criteria. It re-derives expectations from the docs, reruns every check itself (`go test -count=1`, no cached results), exercises runtime behavior where a surface exists, and diffs wire-compat claims field-by-field against the reference checkouts. A FAIL or unresolved blocker finding means the work is **not done**: fix, then re-verify. The verifier's verdict and evidence belong in the final report to the user.
 
 **Testing conventions.**
 - **TDD** for anything with behavior: contract test first, then implement. This matters most for provider adapters, event/JSON round-trips against the wire schema, sandbox providers, and the work-queue lease state machine.

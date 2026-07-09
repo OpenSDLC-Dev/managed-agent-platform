@@ -2,7 +2,7 @@
 
 Running record of where this project actually stands, so work can resume cleanly across sessions.
 
-**Keep it honest.** A slice is only "done" when its code builds, its tests pass, and its behavior has been verified. Update this file whenever a slice changes status.
+**Keep it honest.** A slice is only "done" when its code builds, its tests pass, and its behavior has been verified by the independent **`verifier` subagent** (`.claude/agents/verifier.md`; protocol in CLAUDE.md → "Independent verification"). Update this file whenever a slice changes status.
 
 ---
 
@@ -11,13 +11,13 @@ Running record of where this project actually stands, so work can resume cleanly
 - **Last updated:** 2026-07-09
 - **Phase:** Foundation — the domain layer exists; nothing runs end-to-end yet.
 - **Current slice:** 0 (cross-cutting foundations) — half done.
-- **HEAD:** `9a1ca75` — *Initial commit: project foundation and domain layer*
 - **Build status:** `go build ./...`, `go vet ./...`, `go test ./...` all green.
 
 ## Reference documents
 
 - **Approved design plan:** `~/.claude/plans/agent-managed-agent-encapsulated-moonbeam.md` — read before any large change.
 - **[CLAUDE.md](./CLAUDE.md)** — architecture, non-negotiable design principles, working conventions.
+- **Local reference checkouts** (paths + authority order in CLAUDE.md → "Reference source checkouts"): `anthropic-sdk-go` (typed wire schema — `betasessionevent.go` covers the full event taxonomy), `anthropic-cli` (real `ant` client behavior), `claude-code-source` (harness design reference only).
 
 ## v1 goal
 
@@ -54,6 +54,8 @@ The model backend must be pointable at either an Anthropic-protocol endpoint or 
 - `.gitignore` for Go (build output, coverage, `go.work`, `.env`/secrets, editor/OS files, `.impeccable/` tool cache).
 - `README.md` — public-facing, states "early development" honestly.
 - `CLAUDE.md` — architecture, 5 non-negotiable design principles, wire-compat rules, working conventions.
+- `.claude/agents/verifier.md` — independent verifier subagent; every slice must pass it before being marked done. Local reference checkouts (SDK / `ant` CLI / Claude Code source) documented in CLAUDE.md as wire-schema ground truth.
+- CI (`.github/workflows/ci.yml`: build / vet / gofmt / `test -count=1`) + branch→PR→CI→squash-merge iteration workflow (CLAUDE.md → "Iteration workflow").
 
 ### `internal/domain` — Anthropic-native core types
 Zero external dependencies (stdlib only), enforcing the rule that the domain layer never depends on adk-go, genai, or a provider SDK.
@@ -114,4 +116,4 @@ Full rationale lives in the plan and `CLAUDE.md`; these are the ones most likely
 
 ## Open questions / blockers
 
-- **No CI workflow**, deliberately — it was not requested. A `go build` / `go test` / `gofmt` check is the obvious first one when wanted.
+- None right now.
