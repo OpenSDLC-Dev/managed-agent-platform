@@ -169,6 +169,8 @@ func TestEnumCheckConstraints(t *testing.T) {
 		{"environment kind", `INSERT INTO environments (id, name, kind, config) VALUES ('env_bad', 'e', 'hybrid', '{"type":"hybrid"}')`},
 		{"environment kind/config disagreement", `INSERT INTO environments (id, name, kind, config)
 		                                          VALUES ('env_bad2', 'e', 'self_hosted', '{"type":"cloud"}')`},
+		{"environment config missing type", `INSERT INTO environments (id, name, kind, config)
+		                                     VALUES ('env_bad3', 'e', 'cloud', '{}')`},
 		{"work kind", `INSERT INTO work_items (id, environment_id, session_id, kind)
 		               VALUES ('work_bad', 'env_1', 'sesn_1', 'shell_exec')`},
 		{"work state", `INSERT INTO work_items (id, environment_id, session_id, kind, state)

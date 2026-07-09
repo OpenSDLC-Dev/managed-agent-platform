@@ -56,7 +56,9 @@ CREATE TABLE environments (
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
     archived_at  timestamptz,
-    CONSTRAINT environments_kind_config_agree CHECK (config->>'type' = kind)
+    -- IS NOT DISTINCT FROM: a config missing 'type' yields SQL NULL, which
+    -- a plain = comparison would wave through the CHECK.
+    CONSTRAINT environments_kind_config_agree CHECK ((config->>'type') IS NOT DISTINCT FROM kind)
 );
 
 CREATE TABLE sessions (

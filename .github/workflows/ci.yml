@@ -18,6 +18,9 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go build ./...
+      # The BYOC worker is meant to cross-compile; 32-bit-only breakage
+      # (e.g. an untyped 64-bit const) is invisible to the host build.
+      - run: GOOS=linux GOARCH=arm go build ./internal/...
       - run: go vet ./...
       - name: gofmt
         run: |
