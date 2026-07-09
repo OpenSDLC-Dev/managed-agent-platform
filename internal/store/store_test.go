@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -15,8 +16,10 @@ import (
 )
 
 const (
-	pgUniqueViolation = "23505"
-	pgCheckViolation  = "23514"
+	pgUniqueViolation     = "23505"
+	pgCheckViolation      = "23514"
+	pgForeignKeyViolation = "23503"
+	pgNotNullViolation    = "23502"
 )
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
@@ -29,14 +32,15 @@ func open(t *testing.T, dsn string) *pgxpool.Pool {
 	return pool
 }
 
-// seedSessionChain inserts the minimal FK chain (agent -> environment ->
-// session) so tests can exercise child tables.
+// seedSessionChain inserts the minimal FK chain (agent -> version snapshot ->
+// environment -> session) so tests can exercise child tables.
 func seedSessionChain(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
 	for _, q := range []string{
 		`INSERT INTO agents (id, name, spec) VALUES ('agent_1', 'a', '{}')`,
-		`INSERT INTO environments (id, name, kind) VALUES ('env_1', 'e', 'cloud')`,
+		`INSERT INTO agent_versions (agent_id, version, name, spec) VALUES ('agent_1', 1, 'a', '{}')`,
+		`INSERT INTO environments (id, name, kind, config) VALUES ('env_1', 'e', 'cloud', '{"type":"cloud"}')`,
 		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id)
 		 VALUES ('sesn_1', 'agent_1', 1, '{}', 'env_1')`,
 	} {
@@ -162,7 +166,9 @@ func TestEnumCheckConstraints(t *testing.T) {
 	}{
 		{"session status", `INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id, status)
 		                    VALUES ('sesn_bad', 'agent_1', 1, '{}', 'env_1', 'paused')`},
-		{"environment kind", `INSERT INTO environments (id, name, kind) VALUES ('env_bad', 'e', 'hybrid')`},
+		{"environment kind", `INSERT INTO environments (id, name, kind, config) VALUES ('env_bad', 'e', 'hybrid', '{"type":"hybrid"}')`},
+		{"environment kind/config disagreement", `INSERT INTO environments (id, name, kind, config)
+		                                          VALUES ('env_bad2', 'e', 'self_hosted', '{"type":"cloud"}')`},
 		{"work kind", `INSERT INTO work_items (id, environment_id, session_id, kind)
 		               VALUES ('work_bad', 'env_1', 'sesn_1', 'shell_exec')`},
 		{"work state", `INSERT INTO work_items (id, environment_id, session_id, kind, state)
@@ -178,18 +184,86 @@ func TestEnumCheckConstraints(t *testing.T) {
 		})
 	}
 
-	// The legitimate enum values must all be accepted.
-	valid := []string{
-		`INSERT INTO work_items (id, environment_id, session_id, kind) VALUES ('work_1', 'env_1', 'sesn_1', 'model_turn')`,
-		`INSERT INTO work_items (id, environment_id, session_id, kind, state) VALUES ('work_2', 'env_1', 'sesn_1', 'tool_exec', 'active')`,
-		`INSERT INTO environments (id, name, kind) VALUES ('env_sh', 'e2', 'self_hosted')`,
-		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id, status)
-		 VALUES ('sesn_r', 'agent_1', 1, '{}', 'env_1', 'rescheduling')`,
+	// Every legitimate enum value must be accepted — a typo in a CHECK list
+	// for a value the suite never inserts would otherwise ship green.
+	var valid []string
+	for i, status := range []string{"idle", "running", "rescheduling", "terminated"} {
+		valid = append(valid, fmt.Sprintf(
+			`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id, status)
+			 VALUES ('sesn_s%d', 'agent_1', 1, '{}', 'env_1', '%s')`, i, status))
 	}
+	for i, state := range []string{"queued", "starting", "active", "stopping", "stopped"} {
+		valid = append(valid, fmt.Sprintf(
+			`INSERT INTO work_items (id, environment_id, session_id, kind, state)
+			 VALUES ('work_s%d', 'env_1', 'sesn_1', 'tool_exec', '%s')`, i, state))
+	}
+	valid = append(valid,
+		`INSERT INTO work_items (id, environment_id, session_id, kind) VALUES ('work_mt', 'env_1', 'sesn_1', 'model_turn')`,
+		`INSERT INTO environments (id, name, kind, config) VALUES ('env_sh', 'e2', 'self_hosted', '{"type":"self_hosted"}')`,
+	)
 	for _, q := range valid {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			t.Errorf("valid insert rejected: %q: %v", q, err)
 		}
+	}
+}
+
+func TestEnvironmentConfigIsRequired(t *testing.T) {
+	pool := open(t, freshDB(t))
+	// The wire's environment config union always carries a type; a row
+	// without a config cannot round-trip, so the column has no default.
+	_, err := pool.Exec(context.Background(),
+		`INSERT INTO environments (id, name, kind) VALUES ('env_nc', 'e', 'cloud')`)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != pgNotNullViolation {
+		t.Errorf("environment without config => %v, want not-null violation %s", err, pgNotNullViolation)
+	}
+}
+
+func TestSessionRequiresAgentVersionSnapshot(t *testing.T) {
+	pool := open(t, freshDB(t))
+	ctx := context.Background()
+	seedSessionChain(t, pool)
+
+	// (agent_id, agent_version) must point at a real immutable snapshot;
+	// a dangling version would silently lose the audit trail.
+	_, err := pool.Exec(ctx,
+		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id)
+		 VALUES ('sesn_dangling', 'agent_1', 2, '{}', 'env_1')`)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != pgForeignKeyViolation {
+		t.Errorf("session with dangling agent_version => %v, want FK violation %s", err, pgForeignKeyViolation)
+	}
+}
+
+func TestWireRequiredTextColumnsNeverNull(t *testing.T) {
+	pool := open(t, freshDB(t))
+	ctx := context.Background()
+	seedSessionChain(t, pool)
+
+	// session.title and environment.description are required plain strings
+	// on the wire and non-pointer strings in the domain; rows created
+	// without them must read back as '', never NULL.
+	var title, description string
+	if err := pool.QueryRow(ctx, `SELECT title FROM sessions WHERE id = 'sesn_1'`).Scan(&title); err != nil {
+		t.Errorf("scan sessions.title into string: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT description FROM environments WHERE id = 'env_1'`).Scan(&description); err != nil {
+		t.Errorf("scan environments.description into string: %v", err)
+	}
+}
+
+func TestWorkItemsSessionIndexExists(t *testing.T) {
+	pool := open(t, freshDB(t))
+	// work_items.session_id cascades on session delete; without an index
+	// every session delete seq-scans the queue.
+	var exists bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = 'work_items' AND indexdef LIKE '%(session_id)%')`).Scan(&exists); err != nil {
+		t.Fatalf("query pg_indexes: %v", err)
+	}
+	if !exists {
+		t.Errorf("no index on work_items(session_id)")
 	}
 }
 
@@ -245,13 +319,15 @@ func TestMigrateSurfacesFailures(t *testing.T) {
 	})
 
 	t.Run("conflicting object rolls back atomically", func(t *testing.T) {
-		pool := rawPool(t, freshDB(t))
+		dsn := freshDB(t)
+		pool := rawPool(t, dsn)
 		if _, err := pool.Exec(ctx, `CREATE TABLE agents (id integer)`); err != nil {
 			t.Fatalf("conflicting table: %v", err)
 		}
-		err := store.Migrate(ctx, pool)
+		// Through Open, so its migration-error propagation is covered too.
+		_, err := store.Open(ctx, dsn)
 		if err == nil {
-			t.Fatalf("Migrate over a conflicting agents table must fail")
+			t.Fatalf("Open over a conflicting agents table must fail")
 		}
 		if !strings.Contains(err.Error(), "0001_init.sql") {
 			t.Errorf("error %q does not name the failing migration", err)
@@ -288,18 +364,6 @@ func TestMigrateSurfacesFailures(t *testing.T) {
 			t.Errorf("agents table exists after failed recording; run was not atomic")
 		}
 	})
-}
-
-func TestOpenFailsWhenMigrationFails(t *testing.T) {
-	ctx := context.Background()
-	dsn := freshDB(t)
-	pool := rawPool(t, dsn)
-	if _, err := pool.Exec(ctx, `CREATE TABLE agents (id integer)`); err != nil {
-		t.Fatalf("conflicting table: %v", err)
-	}
-	if _, err := store.Open(ctx, dsn); err == nil {
-		t.Errorf("Open must surface a failed migration")
-	}
 }
 
 func TestOpenRejectsUnreachableDatabase(t *testing.T) {

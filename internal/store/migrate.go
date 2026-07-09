@@ -10,16 +10,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Migration filenames are the applied-version record in schema_migrations:
+// never rename a migration once it has merged, or every existing database
+// re-applies it under the new name.
+//
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
 // migrateLockID serializes concurrent migrators (several binaries Open the
-// same database at startup) on a Postgres advisory lock.
-const migrateLockID = 7355608041991001
+// same database at startup) on a Postgres advisory lock. Explicitly int64:
+// untyped it would overflow int on 32-bit builds (the BYOC worker is meant
+// to cross-compile).
+const migrateLockID int64 = 7355608041991001
 
 // Migrate applies any migrations not yet recorded in schema_migrations, in
 // filename order, all inside one transaction: either the database reaches
-// the current schema or it is left untouched.
+// the current schema or it is left untouched. (Consequence: a migration can
+// never use statements Postgres forbids inside a transaction block, e.g.
+// CREATE INDEX CONCURRENTLY — extend the migrator if that day comes.)
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	names, err := fs.Glob(migrationsFS, "migrations/*.sql")
 	if err != nil {

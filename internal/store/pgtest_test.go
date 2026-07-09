@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,17 +28,24 @@ func TestMain(m *testing.M) {
 }
 
 func testMain(m *testing.M) int {
+	// stdout carries exactly the container ID; image-pull noise goes to
+	// stderr (surfaced via ExitError on failure).
 	out, err := exec.Command("docker", "run", "--rm", "-d",
 		"-e", "POSTGRES_PASSWORD=test",
-		"-p", "127.0.0.1:0:5432", pgImage).CombinedOutput()
+		"-p", "127.0.0.1:0:5432", pgImage).Output()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "store tests require Docker for Postgres: %v\n%s\n", err, out)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			err = fmt.Errorf("%w: %s", err, exitErr.Stderr)
+		}
+		fmt.Fprintf(os.Stderr, "store tests require Docker for Postgres: %v\n", err)
 		return 1
 	}
-	// docker run may prepend image-pull noise; the container ID is the last
-	// non-empty line.
-	lines := strings.Fields(strings.TrimSpace(string(out)))
-	containerID := lines[len(lines)-1]
+	containerID := strings.TrimSpace(string(out))
+	if containerID == "" {
+		fmt.Fprintln(os.Stderr, "docker run printed no container ID")
+		return 1
+	}
 	defer func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() }()
 
 	port, err := hostPort(containerID)
@@ -70,9 +78,10 @@ func waitReady(dsn string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// Connect completes the full startup/auth handshake; success is
+		// readiness, no extra ping needed.
 		conn, err := pgx.Connect(ctx, dsn)
 		if err == nil {
-			err = conn.Ping(ctx)
 			_ = conn.Close(ctx)
 		}
 		cancel()
