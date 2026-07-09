@@ -9,8 +9,8 @@ Running record of where this project actually stands, so work can resume cleanly
 ## Snapshot
 
 - **Last updated:** 2026-07-09
-- **Phase:** Foundation — the domain layer exists; nothing runs end-to-end yet.
-- **Current slice:** 0 (cross-cutting foundations) — half done.
+- **Phase:** Foundation — both cross-cutting bases (domain + telemetry) exist; nothing runs end-to-end yet.
+- **Current slice:** 0 complete; next up is slice 1 (Postgres schema + migrations).
 - **Build status:** `go build ./...`, `go vet ./...`, `go test ./...` all green.
 
 ## Reference documents
@@ -33,7 +33,7 @@ The model backend must be pointable at either an Anthropic-protocol endpoint or 
 
 | # | Slice | Status |
 |---|---|---|
-| 0 | `internal/domain` (Anthropic-native types) + `internal/telemetry` (OTel/OTLP, context propagation) | 🟡 **In progress** — domain done, telemetry not started |
+| 0 | `internal/domain` (Anthropic-native types) + `internal/telemetry` (OTel/OTLP, context propagation) | ✅ Done |
 | 1 | Postgres schema + migrations (`internal/store`), reserved multi-tenant columns | ⬜ Not started |
 | 2 | Control plane CRUD (agents / environments / sessions) + optimistic versioning + ID prefixes + `x-api-key` auth | ⬜ Not started |
 | 3 | Append-only event log (seq allocation) + `POST /events` + SSE stream (`event_start` / `event_delta` reconciliation) + `span.*` emitted from the same point as OTel spans | ⬜ Not started |
@@ -70,12 +70,23 @@ Zero external dependencies (stdlib only), enforcing the rule that the domain lay
 
 **Test coverage so far:** ID prefixes / uniqueness / token format; event domain, direction, and persistence classification; `Model` dual-form JSON round-trip. `session.go` and `environment.go` are plain types with no dedicated tests yet — they will be covered by the store and API round-trip tests in slices 1–3.
 
+### `internal/telemetry` — OTel init + W3C trace-context propagation
+
+Uses `go.opentelemetry.io/otel` (+ OTLP/gRPC exporters) — the first external dependency in the module.
+
+| File | Contents |
+|---|---|
+| `telemetry.go` | `Config` (`ServiceName` / `Endpoint` / `Insecure` / `SampleRatio`) + `Init`: installs the global W3C propagator; with an endpoint configured, installs OTLP/gRPC-exporting tracer + meter providers (`ParentBased(TraceIDRatioBased)` sampler, `service.name` resource). Empty endpoint = fully offline no-op. Returns a flush-at-exit shutdown func. |
+| `propagation.go` | `Inject` / `Extract` — W3C `traceparent`/`tracestate` over any `map[string]string` carrier (HTTP headers and work-item metadata both flatten to this shape). Fixed propagator, works without `Init`. |
+
+**Test coverage:** contract tests drive an in-process fake OTLP/gRPC collector and assert what actually leaves the process: exported span names, `service.name` resource attribute, exported metrics, and that `SampleRatio` is honored. Plus traceparent inject/extract round-trip (IDs, sampled flag, remote flag, tracestate) and config validation. `span.*` domain-event emission from these spans lands in slice 3.
+
 ---
 
 ## Next up
 
-1. **Finish slice 0:** `internal/telemetry` — OTel tracer/meter init, OTLP exporter, W3C `traceparent` propagation helpers. Must be in place before the event log so `span.*` events and OTel spans can be emitted from a single instrumentation point.
-2. **Slice 1:** Postgres schema + migrations. Tables: `agents` + `agent_versions`, `environments`, `sessions`, `events` (append-only, unique `(session_id, seq)`), `work_items`, `api_keys` / `environment_keys`. Every core table carries reserved `org_id` / `workspace_id` / `project_id`.
+1. **Slice 1:** Postgres schema + migrations (`internal/store`). Tables: `agents` + `agent_versions`, `environments`, `sessions`, `events` (append-only, unique `(session_id, seq)`), `work_items`, `api_keys` / `environment_keys`. Every core table carries reserved `org_id` / `workspace_id` / `project_id`.
+2. **Slice 2:** Control plane CRUD (agents / environments / sessions) + optimistic versioning + ID prefixes + `x-api-key` auth.
 
 ---
 
