@@ -1,3 +1,3 @@
-module github.com/opensdlc/managed-agent-platform
+module github.com/OpenSDLC-Dev/managed-agent-platform
 
 go 1.25

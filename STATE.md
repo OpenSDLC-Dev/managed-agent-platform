@@ -109,10 +109,9 @@ Full rationale lives in the plan and `CLAUDE.md`; these are the ones most likely
 
 - **Go 1.26.5** (installed via Homebrew).
 - **Docker** available. **`psql` is not installed** — use the Postgres container for database work.
-- `gh` CLI authenticated as `helebest`.
+- **Repository:** <https://github.com/OpenSDLC-Dev/managed-agent-platform> (public).
+- **Module path:** `github.com/OpenSDLC-Dev/managed-agent-platform` — note the owner's mixed case is intentional and must match the GitHub owner exactly; Go escapes the uppercase letters in the module cache.
 
 ## Open questions / blockers
 
-- **Module path is unconfirmed.** `go.mod` declares `github.com/opensdlc/managed-agent-platform`, inferred from the local directory layout. It is baked into every future import, so it is cheapest to change now (the domain package currently has no cross-package imports). Confirm the real GitHub owner before the import graph grows.
-- **No GitHub remote configured.** Repo owner, name, and public/private are undecided; nothing has been pushed.
 - **No CI workflow**, deliberately — it was not requested. A `go build` / `go test` / `gofmt` check is the obvious first one when wanted.
