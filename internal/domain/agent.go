@@ -39,40 +39,32 @@ type PermissionPolicy struct {
 	Type PermissionPolicyType `json:"type"`
 }
 
-// Tool is a member of an agent's tools[] union. The concrete shape depends on
-// Type ("agent_toolset_20260401" | "mcp_toolset" | "custom"); v1 keeps the
-// full body as Raw and only lifts the discriminator fields it routes on.
-type Tool struct {
-	Type          string          `json:"type"`
-	MCPServerName string          `json:"mcp_server_name,omitempty"` // mcp_toolset
-	Name          string          `json:"name,omitempty"`            // custom
-	Raw           json.RawMessage `json:"-"`                         // full original object
-}
-
-// MCPServer is an entry in an agent's mcp_servers[]. Type must be "url".
-type MCPServer struct {
-	Type string `json:"type"`
-	Name string `json:"name"`
-	URL  string `json:"url"`
-}
-
-// Skill is an entry in an agent's skills[] (anthropic pre-built or custom).
-type Skill struct {
-	Type    string `json:"type"`     // "anthropic" | "custom"
-	SkillID string `json:"skill_id"` // e.g. "xlsx" or "skill_…"
-	Version string `json:"version,omitempty"`
-}
-
 // AgentSpec is the mutable configuration of an agent, shared by the stored
-// Agent resource and the per-session ResolvedAgent snapshot.
+// Agent resource and the per-session ResolvedAgent snapshot. This is the wire
+// shape: every field is always present (the surface is api:"required"), and
+// tools/mcp_servers/skills entries stay raw wire JSON so they pass through
+// byte-for-byte — validation happens at the API boundary.
 type AgentSpec struct {
-	Model       Model           `json:"model"`
-	System      string          `json:"system,omitempty"`
-	Tools       []Tool          `json:"tools,omitempty"`
-	MCPServers  []MCPServer     `json:"mcp_servers,omitempty"`
-	Skills      []Skill         `json:"skills,omitempty"`
-	Multiagent  json.RawMessage `json:"multiagent,omitempty"`
-	Description *string         `json:"description,omitempty"`
+	Model       Model             `json:"model"`
+	System      string            `json:"system"`
+	Description string            `json:"description"`
+	Tools       []json.RawMessage `json:"tools"`
+	MCPServers  []json.RawMessage `json:"mcp_servers"`
+	Skills      []json.RawMessage `json:"skills"`
+	Multiagent  json.RawMessage   `json:"multiagent"` // reserved seam: always null in v1
+}
+
+// Normalize guarantees non-nil collections so JSON renders [] rather than null.
+func (s *AgentSpec) Normalize() {
+	if s.Tools == nil {
+		s.Tools = []json.RawMessage{}
+	}
+	if s.MCPServers == nil {
+		s.MCPServers = []json.RawMessage{}
+	}
+	if s.Skills == nil {
+		s.Skills = []json.RawMessage{}
+	}
 }
 
 // Agent is a versioned, reusable configuration. Updates use optimistic locking
@@ -93,12 +85,14 @@ type Agent struct {
 }
 
 // ResolvedAgent is the agent config actually applied to a session, after any
-// per-session overrides. ID/Version still reference the base agent.
+// per-session overrides (BetaManagedAgentsSessionAgent). ID/Version still
+// reference the base agent. Stored verbatim in sessions.resolved_agent, so
+// rendering is a passthrough.
 type ResolvedAgent struct {
-	AgentSpec
-
-	Type    string `json:"type"`
+	Type    string `json:"type"` // "agent"
 	ID      ID     `json:"id"`
-	Version int    `json:"version"`
-	Name    string `json:"name,omitempty"`
+	Version int64  `json:"version"`
+	Name    string `json:"name"`
+
+	AgentSpec
 }

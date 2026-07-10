@@ -16,21 +16,9 @@ import (
 )
 
 // sessionAgentJSON is the resolved-agent snapshot embedded in a session
-// (BetaManagedAgentsSessionAgent). It is stored verbatim in
-// sessions.resolved_agent, so rendering is a passthrough.
-type sessionAgentJSON struct {
-	Type        string            `json:"type"` // "agent"
-	ID          string            `json:"id"`
-	Version     int64             `json:"version"`
-	Name        string            `json:"name"`
-	Model       domain.Model      `json:"model"`
-	System      string            `json:"system"`
-	Description string            `json:"description"`
-	Tools       []json.RawMessage `json:"tools"`
-	MCPServers  []json.RawMessage `json:"mcp_servers"`
-	Skills      []json.RawMessage `json:"skills"`
-	Multiagent  json.RawMessage   `json:"multiagent"` // reserved seam: always null in v1
-}
+// (BetaManagedAgentsSessionAgent) — the domain wire shape, stored verbatim
+// in sessions.resolved_agent, so rendering is a passthrough.
+type sessionAgentJSON = domain.ResolvedAgent
 
 type cacheCreationJSON struct {
 	Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
@@ -278,12 +266,11 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		}
 		spec.Skills = items
 	}
-	spec.normalize()
+	spec.Normalize()
 
 	return sessionAgentJSON{
-		Type: "agent", ID: agentID, Version: version, Name: name,
-		Model: spec.Model, System: spec.System, Description: spec.Description,
-		Tools: spec.Tools, MCPServers: spec.MCPServers, Skills: spec.Skills,
+		Type: "agent", ID: domain.ID(agentID), Version: version, Name: name,
+		AgentSpec: spec,
 	}, nil
 }
 

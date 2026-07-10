@@ -16,33 +16,27 @@ import (
 // agentJSON is the BetaManagedAgentsAgent wire shape: every field is
 // api:"required" and always rendered.
 type agentJSON struct {
-	ID          string            `json:"id"`
-	Type        string            `json:"type"`
-	Name        string            `json:"name"`
-	Version     int64             `json:"version"`
-	Model       domain.Model      `json:"model"`
-	System      string            `json:"system"`
-	Description string            `json:"description"`
-	Tools       []json.RawMessage `json:"tools"`
-	MCPServers  []json.RawMessage `json:"mcp_servers"`
-	Skills      []json.RawMessage `json:"skills"`
-	Metadata    map[string]string `json:"metadata"`
-	Multiagent  json.RawMessage   `json:"multiagent"` // reserved seam: always null in v1
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
-	ArchivedAt  *time.Time        `json:"archived_at"`
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Version int64  `json:"version"`
+
+	domain.AgentSpec
+
+	Metadata   map[string]string `json:"metadata"`
+	CreatedAt  time.Time         `json:"created_at"`
+	UpdatedAt  time.Time         `json:"updated_at"`
+	ArchivedAt *time.Time        `json:"archived_at"`
 }
 
 func renderAgent(id, name string, version int64, spec agentSpec, metadata map[string]string,
 	createdAt, updatedAt time.Time, archivedAt *time.Time) agentJSON {
-	spec.normalize()
+	spec.Normalize()
 	if metadata == nil {
 		metadata = map[string]string{}
 	}
 	return agentJSON{
-		ID: id, Type: "agent", Name: name, Version: version,
-		Model: spec.Model, System: spec.System, Description: spec.Description,
-		Tools: spec.Tools, MCPServers: spec.MCPServers, Skills: spec.Skills,
+		ID: id, Type: "agent", Name: name, Version: version, AgentSpec: spec,
 		Metadata: metadata, CreatedAt: createdAt.UTC(), UpdatedAt: updatedAt.UTC(),
 		ArchivedAt: utcPtr(archivedAt),
 	}
@@ -121,7 +115,7 @@ func (s *server) createAgent(r *http.Request) (any, error) {
 	if err := parseAgentSpecFields(obj, &spec); err != nil {
 		return nil, err
 	}
-	spec.normalize()
+	spec.Normalize()
 	metadata, err := parseMetadata(obj)
 	if err != nil {
 		return nil, err
@@ -299,7 +293,7 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	if err := parseAgentSpecFields(obj, &spec); err != nil {
 		return nil, err
 	}
-	spec.normalize()
+	spec.Normalize()
 	if raw, ok := obj["metadata"]; ok {
 		metadata, err = patchMetadata(metadata, raw, false)
 		if err != nil {
