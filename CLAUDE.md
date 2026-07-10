@@ -102,10 +102,29 @@ Every change lands through a PR; **never commit directly to `main`**.
 1. Branch off a fresh `main`: `git checkout main && git pull && git checkout -b <type>/<short-name>` (e.g. `feat/telemetry`, `fix/event-seq`, `chore/ci`).
 2. Develop on the branch (TDD as below). **Docs move with code, in the same PR:** a slice's STATE.md status flip; a CHANGELOG.md entry for every notable change; README.md (status line, development notes) whenever the change alters what it describes — README's roadmap section deliberately defers to STATE.md and CHANGELOG.md instead of tracking slices itself. A doc that overclaims or lags the code is a defect, not a nice-to-have — the verifier checks docs consistency as a dedicated rung.
 3. Run the **verifier subagent** (see "Independent verification"); fix findings before review.
-4. **Dual code review**, one pass each: `/codex:review --background` (Codex reviewer) and `/code-review` (Claude reviewer). `/codex:review` is user-invocable only (`disable-model-invocation`); from a session, run the underlying reviewer as a background Bash task: `node "<plugin-root>/scripts/codex-companion.mjs" review "--scope branch --base main"`, where `<plugin-root>` is the newest directory under `~/.claude/plugins/cache/openai-codex/codex/` (backgrounding comes from the Bash task, not a flag) and the scope flags are this workflow's choice. Branch scope reviews the **committed** diff against `main` — commit before launching it, or uncommitted fixes escape the review. Read the task's output file when it completes. Address findings from both reviewers; if a fix changes behavior, re-run the verifier.
+4. **Dual code review**, one pass each: `/codex:review --background` (Codex reviewer) and `/code-review` (Claude reviewer). `/codex:review` is user-invocable only (`disable-model-invocation`); from a session, run the underlying reviewer as a background Bash task (backgrounding comes from the Bash task, not a flag), where `<plugin-root>` is the newest directory under `~/.claude/plugins/cache/openai-codex/codex/`. **Model and reasoning effort are not defaults you may accept — a weak reviewer finds nothing and its silence reads like a clean bill of health.** See "Codex reviewer settings" below for the invocation. Branch scope reviews the **committed** diff against `main` — commit before launching it, or uncommitted fixes escape the review. Read the task's output file when it completes. Address findings from both reviewers; if a fix changes behavior, re-run the verifier. **Verify every finding against the source before acting on it** — both reviewers have produced confidently-argued findings that were false (see the `dec.More()` note in `internal/provider/config.go`); refute with evidence rather than "fixing" working code.
 5. Push and open the PR (`gh pr create`); include the verifier verdict and both review outcomes in the description.
 6. Wait for CI (`.github/workflows/ci.yml`) to be fully green: `gh pr checks --watch`. Red CI → fix on the branch; never merge red.
 7. **Squash merge** (`gh pr merge --squash --delete-branch`), then sync local: `git checkout main && git pull`.
+
+### Codex reviewer settings
+
+**A reviewer running on the wrong model or too little reasoning effort finds nothing, and its silence is indistinguishable from a clean bill of health.** Choose both deliberately.
+
+The `review` subcommand of `codex-companion.mjs` passes `--model` but **never passes `--effort`**, so it silently inherits `model_reasoning_effort` from `~/.codex/config.toml` (currently `low`). A low-effort review of a concurrency-heavy diff returns shallow findings and misses the real defects. Do not fix this by editing the user's `~/.codex/config.toml`. Run the review through the `task` subcommand instead: it honors `--effort`, and it sandboxes `read-only` when `--write` is omitted.
+
+```
+node "<plugin-root>/scripts/codex-companion.mjs" task --model gpt-5.5 --effort xhigh \
+  "<read-only review prompt: name the diff range and the invariants to attack>"
+```
+
+Model choice on this machine (`codex-cli 0.144.1`): **`gpt-5.5` is the strongest usable model.** It is verified real rather than a silent fallback — an invented name such as `gpt-5-9-totally-fake` is rejected with HTTP 400, while `gpt-5.5` runs clean with no fallback-metadata warning. `gpt-5.6-sol`, the config default, is rejected by the server as requiring a newer CLI than the latest published `@openai/codex`. `gpt-5.3-codex-spark` (the `spark` alias) works but is weaker. Re-check all three when the CLI is upgraded.
+
+For a plain `review`-subcommand pass, pin the model explicitly — accepting the config default fails outright:
+
+```
+node "<plugin-root>/scripts/codex-companion.mjs" review "--scope branch --base main --model gpt-5.5"
+```
 
 ## How to work in this repo
 

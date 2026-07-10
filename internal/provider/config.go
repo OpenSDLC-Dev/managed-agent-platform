@@ -38,7 +38,10 @@ func LoadRoutes(path string) ([]Route, error) {
 		return nil, fmt.Errorf("model providers config %s: must be a JSON array: %w", path, err)
 	}
 	// Decode reads one JSON value; a merge artifact appending a second array
-	// would otherwise vanish silently, and its routes with it.
+	// would otherwise vanish silently, and its routes with it. More peeks the
+	// next non-space byte: at top level, after a complete value, that means
+	// "another value follows" (it only means "another element" while inside
+	// an array or object).
 	if dec.More() {
 		return nil, fmt.Errorf("model providers config %s: trailing data after the routes array", path)
 	}
