@@ -594,6 +594,30 @@ func TestReclaimedTurnSurfacesRecovery(t *testing.T) {
 	}
 }
 
+func TestArchivedSessionTurnIsDiscarded(t *testing.T) {
+	// Archiving freezes the status column at running, so the brain must
+	// check archived_at itself: without it, every append rejects with
+	// ErrSessionArchived and the item reclaim-loops forever (Codex P2).
+	h := newHarness(t, nil, nil) // no scripts: the provider must not be called
+	h.wake(t, "hi")
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET archived_at = now() WHERE id = $1`, h.sessionID.String()); err != nil {
+		t.Fatal(err)
+	}
+
+	h.runOnce(t) // must not error and must not touch the provider
+
+	if n := len(h.provider.calls); n != 0 {
+		t.Errorf("provider called %d times on an archived session", n)
+	}
+	var live int
+	_ = h.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM work_items WHERE session_id=$1 AND state != 'stopped'`, h.sessionID.String()).Scan(&live)
+	if live != 0 {
+		t.Errorf("%d work items still live for the archived session", live)
+	}
+}
+
 func TestRunDrainsAndStops(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		{textChunk(0, "ok"), done("end_turn", 1)},

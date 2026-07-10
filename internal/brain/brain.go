@@ -104,17 +104,21 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 
 	var agentJSON []byte
 	var status string
+	var archivedAt *time.Time
 	err := b.pool.QueryRow(ctx,
-		`SELECT resolved_agent, status FROM sessions WHERE id = $1`, sid.String()).
-		Scan(&agentJSON, &status)
+		`SELECT resolved_agent, status, archived_at FROM sessions WHERE id = $1`, sid.String()).
+		Scan(&agentJSON, &status, &archivedAt)
 	if err != nil {
 		return fmt.Errorf("load session: %w", err)
 	}
-	if status != string(domain.SessionRunning) {
+	if status != string(domain.SessionRunning) || archivedAt != nil {
 		// Stale work: the session moved on — it settled idle and then the
 		// settling brain lost the race to complete its item, or it was
-		// archived. Checked BEFORE any recovery emission so a reclaim of
-		// finished work never flips an idle session back to running.
+		// archived (archiving freezes status, so the column alone can't
+		// tell; an archived session rejects every append and would
+		// otherwise reclaim-loop forever). Checked BEFORE any recovery
+		// emission so a reclaim of finished work never flips an idle
+		// session back to running.
 		return b.queue.Complete(ctx, b.pool, item)
 	}
 
