@@ -69,8 +69,15 @@ const (
 	// defaultKillGrace is how long Exec waits past a command's deadline for the
 	// in-container watchdog to finish the kill. Past that it stops waiting and
 	// reports the timeout on its own authority, so a command that disabled the
-	// watchdog buys itself this much overrun and no more.
+	// watchdog buys itself this much wall clock and no more.
 	defaultKillGrace = 2 * time.Second
+	// defaultOverrunSlop is how much of the measured time Exec charges to itself
+	// rather than to the command: draining the command's output happens after it
+	// has exited. Beyond that, a command that outlived its deadline and still
+	// chose its own exit code can only have disabled the watchdog, and the
+	// answer is a timeout whatever the command says. It must stay under
+	// killGrace, or Exec stops waiting before it could ever notice.
+	defaultOverrunSlop = 500 * time.Millisecond
 	// defaultExitBudget bounds the wait for the daemon to publish an exit code
 	// once the exec's output has closed. It is normally instant; the budget is
 	// there so a daemon that never stops calling the exec "running" fails
@@ -173,7 +180,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 func (p *Provider) attach(id, workdir string) *container {
 	return &container{
 		api: p.api, id: id, workdir: workdir,
-		killGrace: defaultKillGrace, exitBudget: defaultExitBudget,
+		killGrace: defaultKillGrace, overrunSlop: defaultOverrunSlop, exitBudget: defaultExitBudget,
 	}
 }
 
@@ -188,20 +195,26 @@ func networkMode(net domain.Networking) string {
 }
 
 type container struct {
-	api        *apiClient
-	id         string
-	workdir    string
-	killGrace  time.Duration
-	exitBudget time.Duration
+	api         *apiClient
+	id          string
+	workdir     string
+	killGrace   time.Duration
+	overrunSlop time.Duration
+	exitBudget  time.Duration
 }
 
 func (c *container) ID() string { return c.id }
 
-// Exec runs the command and returns within Timeout + killGrace. The deadline is
-// enforced twice, and only the second one is a guarantee: the watchdog inside
-// the container does the killing, but it is a process the command can kill, so
-// Exec also stops waiting on its own. Nothing the command does inside the
-// sandbox can make its call outrun the deadline or hide that it hit one.
+// Exec waits at most Timeout + killGrace for the command itself; the daemon
+// round trips around it (create the exec, collect its code) are bounded by ctx
+// and exitBudget instead.
+//
+// The deadline is enforced twice, and only the second one is a guarantee. The
+// watchdog inside the container does the killing, but it is a process sitting
+// beside the command, so the command can kill it; Exec therefore stops waiting
+// on its own clock, and treats any command that outlived its deadline as timed
+// out no matter what exit code it chose. The one thing a command buys by
+// killing its watchdog is overrunSlop of unnoticed overrun.
 func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	seconds := 0
 	if req.Timeout > 0 {
@@ -229,11 +242,13 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 		defer cancel()
 	}
 
-	start := time.Now()
 	stream, err := c.api.execStart(runCtx, execID)
 	if err != nil {
 		return sandbox.ExecResult{}, c.wrap(err)
 	}
+	// Time the command from the moment the daemon hands back its stream, which
+	// is as close to "the command started" as the sandbox can stand.
+	start := time.Now()
 	stdout, stderr, truncated, err := demux(stream, sandbox.MaxOutputBytes)
 	stream.Close()
 	elapsed := time.Since(start)
@@ -258,17 +273,21 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	if err != nil {
 		return sandbox.ExecResult{}, err
 	}
-	// A timeout is a SIGKILL that arrived no earlier than the watchdog's
-	// deadline. A command cannot survive SIGKILL to fake the code, and one that
-	// exits 137 by itself does so before the watchdog could have fired. (A
-	// command the kernel OOM-kills past its deadline reads as a timeout. It hit
-	// a limit and produced nothing; the label is close enough, and the
-	// alternative is to guess.)
+	// Two ways a finished command can have hit its deadline. The watchdog killed
+	// it: SIGKILL, no earlier than the deadline — a command cannot survive
+	// SIGKILL to fake that, and one that kills itself does so before the
+	// watchdog could have fired. Or it outlived the deadline and exited anyway,
+	// which on the honest path is impossible, because the watchdog would have
+	// killed it first. (A command the kernel OOM-kills past its deadline reads
+	// as a timeout. It hit a limit and produced nothing; the label is close
+	// enough, and the alternative is to guess.)
+	timedOut := seconds > 0 &&
+		((code == sigkillExit && elapsed >= deadline) || elapsed >= deadline+c.overrunSlop)
 	return sandbox.ExecResult{
 		Stdout:    string(stdout),
 		Stderr:    string(stderr),
 		ExitCode:  code,
-		TimedOut:  seconds > 0 && code == sigkillExit && elapsed >= deadline,
+		TimedOut:  timedOut,
 		Truncated: truncated,
 	}, nil
 }

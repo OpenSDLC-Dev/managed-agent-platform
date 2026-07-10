@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -316,12 +317,16 @@ func TestExecWaitsForTheExitCode(t *testing.T) {
 // passed — and the deadline that passed is the watchdog's own, which is the
 // caller's request rounded up to whole seconds.
 func TestTimedOutNeedsTheWatchdogsDeadlineNotTheCallers(t *testing.T) {
+	// The daemon answers execStart at once and holds the stream open while the
+	// command runs, as a real one does; the delay is the command's runtime.
 	newFake := func(delay time.Duration, code int) *container {
 		p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case strings.HasSuffix(r.URL.Path, "/exec"):
 				io.WriteString(w, `{"Id":"e1"}`)
 			case r.URL.Path == "/exec/e1/start":
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
 				time.Sleep(delay)
 			case r.URL.Path == "/exec/e1/json":
 				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, code)
@@ -368,14 +373,52 @@ func TestTimedOutNeedsTheWatchdogsDeadlineNotTheCallers(t *testing.T) {
 		t.Error("a SIGKILL past the deadline did not read as a timeout")
 	}
 
-	// Any other exit code is never a timeout, however long it took.
-	res, err = newFake(1200*time.Millisecond, 124).Exec(context.Background(),
-		sandbox.ExecRequest{Command: "exit 124", Timeout: time.Second})
+	// A command that drifts a hair past the deadline and exits on its own is
+	// not accused of anything: that much is the sandbox's own measurement noise.
+	res, err = newFake(1100*time.Millisecond, 0).Exec(context.Background(),
+		sandbox.ExecRequest{Command: "echo hi", Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
 	if res.TimedOut {
-		t.Error("exit 124 past the deadline read as a timeout — only SIGKILL is one")
+		t.Error("a command finishing within the slop read as a timeout")
+	}
+}
+
+// The bypass that survived the first fix: kill the watchdog, overrun the
+// deadline, then exit before Exec's own bound fires and report success. On the
+// honest path a command cannot outlive its deadline and still choose its exit
+// code — the watchdog would have killed it — so that is a timeout whatever it
+// claims, whatever code it picks.
+func TestOverrunningTheDeadlineIsATimeoutWhateverTheCommandClaims(t *testing.T) {
+	for _, code := range []int{0, 124, 1} {
+		p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/exec"):
+				io.WriteString(w, `{"Id":"e1"}`)
+			case r.URL.Path == "/exec/e1/start":
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				time.Sleep(1500 * time.Millisecond) // deadline 1s, bound 1s+3s
+			case r.URL.Path == "/exec/e1/json":
+				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, code)
+			}
+		})
+		c := p.attach("abc", "/workspace")
+		c.killGrace, c.overrunSlop = 3*time.Second, 200*time.Millisecond
+
+		res, err := c.Exec(context.Background(), sandbox.ExecRequest{
+			Command: "kill the watchdog; sleep 2; exit " + strconv.Itoa(code), Timeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if !res.TimedOut {
+			t.Errorf("a command that outran its deadline and exited %d hid the timeout: %+v", code, res)
+		}
+		if res.ExitCode != code {
+			t.Errorf("exit code = %d, want the command's own %d", res.ExitCode, code)
+		}
 	}
 }
 
@@ -749,7 +792,9 @@ func TestExecRefusesToInventAnExitCode(t *testing.T) {
 
 // The whole point, against a real daemon: a command that finds and kills the
 // watchdog guarding it still cannot outrun its deadline, and still cannot
-// report success. This is the exact bypass a reviewer demonstrated.
+// report success. Both bypasses reviewers demonstrated are covered — running
+// long past the deadline (Exec's own bound catches it) and slipping just past
+// it before Exec stops waiting (the overrun does).
 func TestRealSandboxDeadlineSurvivesTheCommandKillingItsWatchdog(t *testing.T) {
 	provider, err := New(Config{})
 	if err != nil {
@@ -765,23 +810,31 @@ func TestRealSandboxDeadlineSurvivesTheCommandKillingItsWatchdog(t *testing.T) {
 	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
 
 	// The watchdog is the command's sibling: same parent, different pid.
-	sabotage := `
+	killTheWatchdog := `
 	  for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do
 	    [ "$p" != "$$" ] && kill -9 -"$p" 2>/dev/null
 	  done
-	  sleep 300`
-
-	start := time.Now()
-	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: sabotage, Timeout: time.Second})
-	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("exec: %v", err)
-	}
-	if !res.TimedOut {
-		t.Errorf("a command that killed its watchdog was not reported as timed out: %+v", res)
-	}
-	if elapsed > 8*time.Second {
-		t.Errorf("the command outran its 1s deadline by %s", elapsed)
+	`
+	for _, tc := range []struct{ name, after string }{
+		{"runs far past the deadline", `sleep 300`},
+		{"slips past it and exits clean", `sleep 2; exit 0`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+				Command: killTheWatchdog + tc.after, Timeout: time.Second,
+			})
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("exec: %v", err)
+			}
+			if !res.TimedOut {
+				t.Errorf("a command that killed its watchdog hid the timeout: %+v", res)
+			}
+			if elapsed > 8*time.Second {
+				t.Errorf("the command outran its 1s deadline by %s", elapsed)
+			}
+		})
 	}
 }
 

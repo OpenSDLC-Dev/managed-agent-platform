@@ -170,6 +170,10 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			if err != nil || res.ExitCode != 0 {
 				t.Fatalf("exec: %+v, %v", res, err)
 			}
+			// Reaping the deadline's machinery must be as quiet as arming it.
+			if res.Stderr != "" {
+				t.Errorf("tearing down the deadline leaked %q into the tool result", res.Stderr)
+			}
 		}
 		// SIGKILL is delivered asynchronously; give the kernel a moment.
 		var after int

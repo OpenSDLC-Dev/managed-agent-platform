@@ -25,9 +25,13 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   command's process group (Docker offers no way to kill a running exec
   from outside), and `Exec` itself stops waiting shortly after the
   deadline regardless. Only the second is a guarantee — the watchdog is a
-  process the sandboxed command can find and kill — so no command can
-  outrun its deadline or hide that it hit one, and one that merely dies
-  of SIGKILL on its own is never mistaken for a timeout. Output is capped
+  process the sandboxed command can find and kill — so `Exec` decides
+  the verdict outside the container, on its own clock: a command that
+  outlived its deadline timed out whatever exit code it reports, because
+  on the honest path the watchdog would have killed it first. No command
+  can outrun its deadline by more than the grace period, none can hide an
+  overrun, and one that merely dies of SIGKILL on its own is never
+  mistaken for a timeout. Output is capped
   at 1 MiB per stream, drained rather than buffered so a noisy command
   still finishes; a read above 4 MiB is refused rather than silently
   truncated. `limited` networking fails closed — the container gets no
@@ -203,7 +207,7 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   execute exactly when a suite fails. Counting them measured nothing and
   diluted the gate, the same reason `cmd/` main glue was always outside
   it. Stated plainly, because the change is load-bearing rather than
-  cosmetic: under the old denominator this PR reads **89.72%** and CI
+  cosmetic: under the old denominator this PR reads **89.70%** and CI
   would be red; under the new one it reads **91.53%** against the
   unchanged ≥ 90% bar. What justifies it is the categorization, not the
   number — the sandbox implementation itself sits at 95.4%, and the only
