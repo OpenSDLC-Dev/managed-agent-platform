@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -440,6 +442,8 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 
+	prevTitle, prevMetaJSON, prevAgentJSON := row.title, row.metaJSON, row.agentJSON
+
 	if title, set, null, err := stringField(obj, "title"); err != nil {
 		return nil, err
 	} else if set {
@@ -494,6 +498,31 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		id, row.agentJSON, row.title, row.metaJSON).Scan(&row.updatedAt); err != nil {
 		return nil, err
 	}
+
+	// session.updated is emitted only when the update changed at least one
+	// field, and carries only the changed fields (metadata additionally only
+	// when the new value is non-empty) — the SDK-documented shape. Appended
+	// in the same transaction as the update itself.
+	payload := map[string]any{}
+	if row.title != prevTitle {
+		payload["title"] = row.title
+	}
+	if !bytes.Equal(row.metaJSON, prevMetaJSON) && len(metadata) > 0 {
+		payload["metadata"] = metadata
+	}
+	if !bytes.Equal(row.agentJSON, prevAgentJSON) {
+		payload["agent"] = json.RawMessage(row.agentJSON)
+	}
+	changed := row.title != prevTitle || !bytes.Equal(row.metaJSON, prevMetaJSON) ||
+		!bytes.Equal(row.agentJSON, prevAgentJSON)
+	if changed {
+		if _, err := s.log.AppendInTx(ctx, tx, domain.ID(id), []events.NewEvent{
+			{Type: domain.EventSessionUpdated, Payload: mustJSON(payload)},
+		}, events.AppendOptions{}); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}

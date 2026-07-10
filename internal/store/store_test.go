@@ -24,7 +24,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 2
+const wantMigrations = 3
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -198,10 +198,12 @@ func TestEnumCheckConstraints(t *testing.T) {
 			`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id, status)
 			 VALUES ('sesn_s%d', 'agent_1', 1, '{}', 'env_1', '%s')`, i, status))
 	}
+	// Distinct sessions per live state: only one queued/starting/active item
+	// may exist per (session, kind) since 0003_work_dedup.
 	for i, state := range []string{"queued", "starting", "active", "stopping", "stopped"} {
 		valid = append(valid, fmt.Sprintf(
 			`INSERT INTO work_items (id, environment_id, session_id, kind, state)
-			 VALUES ('work_s%d', 'env_1', 'sesn_1', 'tool_exec', '%s')`, i, state))
+			 VALUES ('work_s%d', 'env_1', 'sesn_s%d', 'tool_exec', '%s')`, i, i%4, state))
 	}
 	valid = append(valid,
 		`INSERT INTO work_items (id, environment_id, session_id, kind) VALUES ('work_mt', 'env_1', 'sesn_1', 'model_turn')`,

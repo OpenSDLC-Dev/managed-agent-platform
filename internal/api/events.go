@@ -12,6 +12,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -39,12 +40,25 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, err
 	}
 
+	// The whole send is one transaction: the session row lock is taken up
+	// front (FOR UPDATE OF s) so the state-machine decision — flip to
+	// running? enqueue a turn? — is made against a status no concurrent
+	// send can move underneath us, and commits atomically with the append.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	// user.tool_result is only valid on self_hosted environments, so the
 	// batch is validated against the session's environment kind.
-	var envKind string
-	err = s.pool.QueryRow(ctx,
-		`SELECT e.kind FROM sessions s JOIN environments e ON e.id = s.environment_id WHERE s.id = $1`,
-		id).Scan(&envKind)
+	var envKind, status string
+	var envID domain.ID
+	err = tx.QueryRow(ctx,
+		`SELECT e.kind, s.status, s.environment_id
+		 FROM sessions s JOIN environments e ON e.id = s.environment_id
+		 WHERE s.id = $1 FOR UPDATE OF s`,
+		id).Scan(&envKind, &status, &envID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("session %s not found", id)
 	}
@@ -57,7 +71,39 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, errInvalid("%s", err)
 	}
 
-	appended, err := s.log.Append(ctx, domain.ID(id), newEvents)
+	// State-machine triggers (the session's turn scheduler, per the plan's
+	// "enqueue model-turn" arrow): a user.message wakes an idle session —
+	// flip to running, say so on the log, queue a turn. A tool result while
+	// running resumes the suspended turn with a fresh model_turn item; the
+	// session never left running, so no new status event. Everything else
+	// only appends (a user.message mid-turn is picked up by the brain's
+	// end-of-turn watermark check).
+	var hasUserMessage, hasToolResult bool
+	for _, ev := range newEvents {
+		switch ev.Type {
+		case domain.EventUserMessage:
+			hasUserMessage = true
+		case domain.EventUserToolResult, domain.EventUserCustomToolRes:
+			hasToolResult = true
+		}
+	}
+	batch := newEvents
+	var opts events.AppendOptions
+	enqueueTurn := func(ctx context.Context, tx pgx.Tx) error {
+		_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), queue.ModelTurn)
+		return err
+	}
+	switch {
+	case hasUserMessage && status == string(domain.SessionIdle):
+		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
+		running := domain.SessionRunning
+		opts.SetStatus = &running
+		opts.Then = enqueueTurn
+	case hasToolResult && status == string(domain.SessionRunning):
+		opts.Then = enqueueTurn
+	}
+
+	appended, err := s.log.AppendInTx(ctx, tx, domain.ID(id), batch, opts)
 	switch {
 	case errors.Is(err, events.ErrSessionNotFound):
 		return nil, errNotFound("session %s not found", id)
@@ -66,9 +112,14 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	case err != nil:
 		return nil, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
 
-	data := make([]any, 0, len(appended))
-	for _, ev := range appended {
+	// The response echoes the posted events only, not the platform's
+	// state-machine reaction (which clients observe on the stream/log).
+	data := make([]any, 0, len(newEvents))
+	for _, ev := range appended[:len(newEvents)] {
 		wire, err := eventWire(ev)
 		if err != nil {
 			return nil, err

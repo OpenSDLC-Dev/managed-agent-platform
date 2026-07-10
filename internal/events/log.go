@@ -79,6 +79,27 @@ func (l *Log) Append(ctx context.Context, sessionID domain.ID, evs []NewEvent) (
 
 // AppendWith is Append plus atomic session-state side effects.
 func (l *Log) AppendWith(ctx context.Context, sessionID domain.ID, evs []NewEvent, opts AppendOptions) ([]domain.Event, error) {
+	tx, err := l.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	out, err := l.AppendInTx(ctx, tx, sessionID, evs, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AppendInTx is AppendWith inside a caller-owned transaction, for callers
+// that must decide the batch under the session row lock (the API's state
+// machine reads the current status FOR UPDATE, builds the batch, and appends
+// — all one commit). The NOTIFY still fires only on the caller's commit.
+func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, evs []NewEvent, opts AppendOptions) ([]domain.Event, error) {
 	if len(evs) == 0 {
 		return nil, errors.New("append requires at least one event")
 	}
@@ -88,14 +109,8 @@ func (l *Log) AppendWith(ctx context.Context, sessionID domain.ID, evs []NewEven
 		}
 	}
 
-	tx, err := l.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	var archivedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT archived_at FROM sessions WHERE id = $1 FOR UPDATE`, sessionID.String()).Scan(&archivedAt)
+	err := tx.QueryRow(ctx, `SELECT archived_at FROM sessions WHERE id = $1 FOR UPDATE`, sessionID.String()).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrSessionNotFound
 	}
@@ -215,9 +230,6 @@ func (l *Log) AppendWith(ctx context.Context, sessionID domain.ID, evs []NewEven
 	// rows. The payload is just a pointer — subscribers re-read the log.
 	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`,
 		channelEvents, `{"session_id":"`+sessionID.String()+`"}`); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return out, nil

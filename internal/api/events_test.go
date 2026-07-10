@@ -329,6 +329,9 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		sendEvents(t, s, sid, userMessage(fmt.Sprintf("m%d", i)))
 	}
 	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+	// The first user.message also woke the idle session, so the log carries
+	// one platform event on top of the six posted ones:
+	// m0, session.status_running, m1..m4, user.interrupt.
 
 	// Default: chronological asc, everything, next_page null.
 	status, res := s.do(http.MethodGet, path, nil)
@@ -336,8 +339,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Fatalf("list: %d %v", status, res)
 	}
 	all := listData(t, res)
-	if len(all) != 6 {
-		t.Fatalf("listed %d, want 6", len(all))
+	if len(all) != 7 {
+		t.Fatalf("listed %d, want 7", len(all))
 	}
 	if all[0]["content"].([]any)[0].(map[string]any)["text"] != "m0" {
 		t.Errorf("default order is not chronological: first = %v", all[0])
@@ -368,8 +371,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 			t.Fatal("cursor walk did not terminate")
 		}
 	}
-	if len(walked) != 6 {
-		t.Errorf("cursor walk saw %d events, want 6", len(walked))
+	if len(walked) != 7 {
+		t.Errorf("cursor walk saw %d events, want 7", len(walked))
 	}
 	for i, ev := range all {
 		if walked[i] != ev["id"].(string) {
@@ -380,8 +383,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	// desc reverses.
 	_, res = s.do(http.MethodGet, path+"?order=desc", nil)
 	desc := listData(t, res)
-	if desc[0]["id"] != all[5]["id"] {
-		t.Errorf("desc first = %v, want %v", desc[0]["id"], all[5]["id"])
+	if desc[0]["id"] != all[6]["id"] {
+		t.Errorf("desc first = %v, want %v", desc[0]["id"], all[6]["id"])
 	}
 
 	// types filter, both spellings.
@@ -407,8 +410,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, res = s.do(http.MethodGet, path+"?created_at[gt]="+midCreated, nil)
-	if got := listData(t, res); len(got) != 3 {
-		t.Errorf("created_at[gt] mid returned %d, want 3", len(got))
+	if got := listData(t, res); len(got) != 4 {
+		t.Errorf("created_at[gt] mid returned %d, want 4", len(got))
 	}
 	_, res = s.do(http.MethodGet, path+"?created_at[lte]="+midCreated, nil)
 	if got := listData(t, res); len(got) != 3 {
