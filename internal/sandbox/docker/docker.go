@@ -495,8 +495,11 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 
 	// Two ways a finished command can have hit its deadline. The watchdog killed
 	// it: SIGKILL, and the command was alive to receive it — a command cannot
-	// survive SIGKILL to fake that, and one that kills itself early was already
-	// gone when we looked. Or it was still running after the deadline and the
+	// survive SIGKILL to fake that, and one that kills itself before the
+	// pre-deadline probe was already gone when we looked. (A self-SIGKILL inside
+	// the probe's short lead reads as the watchdog's: the deliberate cost of
+	// sampling a lead ahead of the deadline, and it errs toward a timeout.) Or it
+	// was still running after the deadline and the
 	// slop, and exited anyway, which on the honest path is impossible, because
 	// the watchdog would have killed it first. (A command the kernel OOM-kills
 	// past its deadline reads as a timeout. It hit a limit and produced nothing;

@@ -265,6 +265,12 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			// miss, and it exercises the command-exits path rather than the
 			// give-up path the forever-markers take.
 			{"overrunning its deadline then exiting clean", killWatchdog, "sleep 2", true},
+			// Muting its own output does not hide an overrun. Closing the exec's
+			// stdout and stderr EOFs the output stream while the process runs on,
+			// so a backend that reads the stream closing as the command finishing
+			// would cancel its outside-the-sandbox deadline check and report the
+			// overrun as a clean finish. The process is still there to be counted.
+			{"muting its output then overrunning", killWatchdog + "exec 1>&- 2>&-\n", "sleep 987323", true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				start := time.Now()
@@ -312,6 +318,26 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 		if elapsed := time.Since(start); elapsed > 10*time.Second {
 			t.Errorf("a command that exited at once took %s to report", elapsed)
+		}
+	})
+
+	// 124 is the exit code GNU timeout(1) gives a command it killed, so a
+	// backend might be tempted to read it as its own timeout signal. It must
+	// not: a command that merely exits 124 well inside its deadline finished on
+	// its own, and only the enforcement point — not the exit code — says timeout.
+	t.Run("ExecFastExit124IsNotATimeout", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+			Command: `exit 124`, Timeout: 30 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if res.ExitCode != 124 {
+			t.Errorf("exit code = %d, want 124", res.ExitCode)
+		}
+		if res.TimedOut {
+			t.Error("a command that exited 124 well inside its deadline read as a timeout")
 		}
 	})
 

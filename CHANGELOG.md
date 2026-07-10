@@ -43,8 +43,10 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   rather than when the probe asked, so a command that times a daemon
   `ps`-stall to fall just after its own exit can hide a sub-grace-period
   overrun, for which the reserved cgroup limits are the real containment.
-  A command that merely dies of SIGKILL on its own is never mistaken for a
-  timeout, and one that leaves a background process holding its output
+  A command that dies of SIGKILL on its own is not mistaken for a timeout
+  (save inside the 50 ms probe lead, where a self-kill cannot be told from
+  the watchdog's and is read as a timeout — a tool-call cost in the safe
+  direction), and one that leaves a background process holding its output
   open is timed by its own life rather than by its straggler's. Output is capped
   at 1 MiB per stream, drained rather than buffered so a noisy command
   still finishes; a read above 4 MiB is refused rather than silently
