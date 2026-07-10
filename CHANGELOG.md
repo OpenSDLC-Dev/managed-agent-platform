@@ -12,6 +12,11 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- GitHub checks: the CI coverage gate now runs as its own named check
+  (`coverage`) with a per-package job summary and the profile uploaded as an
+  artifact; `.coderabbit.yaml` configures CodeRabbit PR reviews (wire-compat
+  and migration-immutability instructions); `AGENTS.md` gives Codex and
+  other AI reviewers the repo's ground rules, pointing at CLAUDE.md. (#8)
 - `internal/api` + `cmd/controlplane` — wire-compatible control-plane CRUD
   (slice 2): agents (optimistic `version` in the POST-update body, mismatch →
   409; immutable version snapshots; pinned `?version=` reads; archive),
