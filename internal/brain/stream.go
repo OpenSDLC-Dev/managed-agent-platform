@@ -37,6 +37,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 
 	turn := &turnResult{}
 	var msgPreview, thinkingPreview *events.Preview
+	var thinkingIndex int64
 	// entry maps a provider content-block index to its slot in turn.text:
 	// the wire delta index addresses "which entry in the previewed event's
 	// content array", not the provider's block numbering.
@@ -68,8 +69,15 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		switch c.Kind {
 		case provider.KindThinkingDelta:
 			// The preview is start-only (agent.thinking carries no content);
-			// one event per thinking block, appended when the block closes.
+			// one event per thinking block — a delta on a new provider block
+			// index closes the previous block's event and opens the next.
+			if thinkingPreview != nil && c.Index != thinkingIndex {
+				if err := closeThinking(); err != nil {
+					return nil, err
+				}
+			}
 			if thinkingPreview == nil {
+				thinkingIndex = c.Index
 				thinkingPreview, err = b.log.StartPreview(ctx, sid, domain.EventAgentThinking)
 				if err != nil {
 					return nil, err

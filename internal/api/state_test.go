@@ -109,7 +109,7 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 	if err != nil || item == nil {
 		t.Fatalf("claim: %+v %v", item, err)
 	}
-	if err := q.Complete(ctx, item); err != nil {
+	if err := q.Complete(ctx, s.pool, item); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,7 +137,7 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 	if err != nil || item == nil {
 		t.Fatal(err)
 	}
-	if err := q.Complete(ctx, item); err != nil {
+	if err := q.Complete(ctx, s.pool, item); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.pool.Exec(ctx,

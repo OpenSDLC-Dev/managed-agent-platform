@@ -436,6 +436,53 @@ func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 	}
 }
 
+func TestToolResultDuringSettleIsNotLost(t *testing.T) {
+	// The verifier-found race: a tool result posted while the brain's item
+	// is still active has its enqueue suppressed by the live slot. The
+	// suspend settlement must catch the already-landed result and requeue
+	// its own item, or the session hangs running with no work.
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_x", Name: "lookup", Input: json.RawMessage(`{}`)}},
+			done("tool_use", 3),
+		},
+		{textChunk(0, "resumed"), done("end_turn", 2)},
+	}, nil)
+	// The result lands after replay but before settlement — appended with
+	// NO enqueue, exactly what the API does when the live item swallows it.
+	h.provider.onGenerate = func(call int) {
+		if call != 0 {
+			return
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"custom_tool_use_id": "sevt_posted_early",
+			"content":            []map[string]string{{"type": "text", "text": "fast result"}},
+		})
+		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+			{Type: domain.EventUserCustomToolRes, Payload: payload},
+		}); err != nil {
+			t.Errorf("mid-settle result append: %v", err)
+		}
+	}
+	h.wake(t, "use the tool")
+	h.runOnce(t)
+
+	// The settlement saw the early result: the item is queued again, not
+	// completed, and the session is still running.
+	var queued int
+	_ = h.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM work_items WHERE session_id=$1 AND state='queued'`,
+		h.sessionID.String()).Scan(&queued)
+	if queued != 1 {
+		t.Fatalf("queued items after mid-settle result = %d, want 1 (requeued)", queued)
+	}
+	h.runOnce(t)
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status after resumed turn = %q, want idle", got)
+	}
+}
+
 func TestProviderErrorFailsTurnVisibly(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		{textChunk(0, "partial")},

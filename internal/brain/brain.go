@@ -89,25 +89,34 @@ func (b *Brain) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil || item == nil {
 		return false, err
 	}
-	requeued, err := b.runTurn(ctx, item)
-	if err != nil {
-		return true, fmt.Errorf("session %s: %w", item.SessionID, err)
-	}
-	if requeued {
-		// The turn chained follow-on work by handing its own item back.
-		return true, nil
-	}
-	if err := b.queue.Complete(ctx, item); err != nil {
-		// Lease lost mid-turn: a reclaiming brain is re-running this turn.
-		// Our appends stand (the log is append-only); duplicated events are
-		// the documented cost of a lease sized below a real turn.
+	if err := b.runTurn(ctx, item); err != nil {
+		// Infra failure or a lost lease: the item is left to its lease —
+		// expiry hands it to another brain. Our appends stand (the log is
+		// append-only); duplicated events are the documented cost of a
+		// lease sized below a real turn.
 		return true, fmt.Errorf("session %s: %w", item.SessionID, err)
 	}
 	return true, nil
 }
 
-func (b *Brain) runTurn(ctx context.Context, item *queue.Item) (requeued bool, err error) {
+func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 	sid := item.SessionID
+
+	var agentJSON []byte
+	var status string
+	err := b.pool.QueryRow(ctx,
+		`SELECT resolved_agent, status FROM sessions WHERE id = $1`, sid.String()).
+		Scan(&agentJSON, &status)
+	if err != nil {
+		return fmt.Errorf("load session: %w", err)
+	}
+	if status != string(domain.SessionRunning) {
+		// Stale work: the session moved on — it settled idle and then the
+		// settling brain lost the race to complete its item, or it was
+		// archived. Checked BEFORE any recovery emission so a reclaim of
+		// finished work never flips an idle session back to running.
+		return b.queue.Complete(ctx, b.pool, item)
+	}
 
 	if item.Reclaimed {
 		// The previous claimant died mid-turn. Surface the recovery on the
@@ -117,53 +126,40 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) (requeued bool, e
 			{Type: domain.EventSessionStatusRescheduled},
 			{Type: domain.EventSessionStatusRunning},
 		}, events.AppendOptions{SetStatus: &running}); err != nil {
-			return false, fmt.Errorf("recovery events: %w", err)
+			return fmt.Errorf("recovery events: %w", err)
 		}
 	}
 
-	var agentJSON []byte
-	var status string
-	err = b.pool.QueryRow(ctx,
-		`SELECT resolved_agent, status FROM sessions WHERE id = $1`, sid.String()).
-		Scan(&agentJSON, &status)
-	if err != nil {
-		return false, fmt.Errorf("load session: %w", err)
-	}
-	if status != string(domain.SessionRunning) {
-		// Stale work: the session moved on (deleted sessions cascade their
-		// items away; archived ones stop accepting appends). Nothing to run.
-		return false, nil
-	}
 	var agent domain.ResolvedAgent
 	if err := json.Unmarshal(agentJSON, &agent); err != nil {
-		return false, fmt.Errorf("decode resolved agent: %w", err)
+		return fmt.Errorf("decode resolved agent: %w", err)
 	}
 
 	history, err := b.log.List(ctx, sid, events.ListQuery{})
 	if err != nil {
-		return false, fmt.Errorf("replay: %w", err)
+		return fmt.Errorf("replay: %w", err)
 	}
 	req, watermark, err := buildRequest(agent, history)
 	if err != nil {
-		return false, fmt.Errorf("replay: %w", err)
+		return fmt.Errorf("replay: %w", err)
 	}
 
 	p, err := b.registry.Provider(agent.Model.ID)
 	if err != nil {
 		// A model with no route is a configuration error, not a transient
 		// fault: fail the turn visibly rather than retry forever.
-		return false, b.failTurn(ctx, sid, watermark, fmt.Sprintf("no provider for model %q", agent.Model.ID))
+		return b.failTurn(ctx, sid, item, watermark, fmt.Sprintf("no provider for model %q", agent.Model.ID))
 	}
 
 	sctx, span, err := b.log.StartModelRequest(ctx, sid)
 	if err != nil {
-		return false, fmt.Errorf("span start: %w", err)
+		return fmt.Errorf("span start: %w", err)
 	}
 
 	turn, streamErr := b.streamTurn(sctx, sid, item, p, req)
 	if streamErr != nil {
 		_ = span.End(sctx, true, domain.ModelUsage{})
-		return false, b.failTurn(ctx, sid, watermark, streamErr.Error())
+		return b.failTurn(ctx, sid, item, watermark, streamErr.Error())
 	}
 
 	// The buffered agent.message (closing its preview) and the tool-use
@@ -173,33 +169,47 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) (requeued bool, e
 	if len(turn.text) > 0 {
 		content, err := json.Marshal(map[string]any{"content": turn.text})
 		if err != nil {
-			return false, err
+			return err
 		}
 		batch = append(batch, events.NewEvent{
 			ID: turn.messageEventID, Type: domain.EventAgentMessage, Payload: content,
 		})
 	}
 	for _, tu := range turn.toolUses {
-		payload, err := json.Marshal(map[string]any{"name": tu.Name, "input": tu.Input})
+		payload, err := json.Marshal(map[string]any{
+			"name": tu.Name, "input": tu.Input, "session_thread_id": nil,
+		})
 		if err != nil {
-			return false, err
+			return err
 		}
 		batch = append(batch, events.NewEvent{Type: domain.EventAgentCustomToolUse, Payload: payload})
 	}
 	if len(batch) > 0 {
 		if _, err := b.log.Append(ctx, sid, batch); err != nil {
-			return false, fmt.Errorf("emit turn events: %w", err)
+			return fmt.Errorf("emit turn events: %w", err)
 		}
 	}
 	if err := span.End(sctx, false, turn.usage); err != nil {
-		return false, fmt.Errorf("span end: %w", err)
+		return fmt.Errorf("span end: %w", err)
 	}
 
 	return b.settleTurn(ctx, sid, item, turn, watermark)
 }
 
-// settleTurn drives the state machine after a successful model response.
-func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, turn *turnResult, watermark int64) (bool, error) {
+// resumeEventTypes are the inbound events whose arrival resumes a suspended
+// turn — the same set the API's tool-result trigger fires on.
+var resumeEventTypes = []string{
+	string(domain.EventUserToolResult), string(domain.EventUserCustomToolRes),
+}
+
+// settleTurn drives the state machine after a successful model response and
+// decides the work item's fate in the same transaction as the state it
+// writes. That atomicity is the liveness guarantee: the API's triggers and
+// this settlement serialize on the session row lock, so a tool result posted
+// mid-settle either sees our live item (its enqueue is suppressed, and we see
+// the result and requeue) or sees it completed (its enqueue succeeds) — never
+// the gap where both sides stand down.
+func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, turn *turnResult, watermark int64) error {
 	opts := events.AppendOptions{
 		AddUsage:             &turn.usage,
 		MarkProcessedThrough: watermark,
@@ -209,8 +219,23 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		// Suspend: the turn resumes when the result event arrives (the
 		// control plane enqueues the next model_turn on it). Session stays
 		// running — awaiting a tool is still working, not awaiting input.
+		// A result that already landed (its enqueue was suppressed by our
+		// live item) is caught here and chains immediately.
+		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+			var arrived bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM events
+				  WHERE session_id = $1 AND type = ANY($2) AND processed_at IS NULL AND seq > $3)`,
+				sid.String(), resumeEventTypes, watermark).Scan(&arrived); err != nil {
+				return err
+			}
+			if arrived {
+				return b.queue.Requeue(ctx, tx, item)
+			}
+			return b.queue.Complete(ctx, tx, item)
+		}
 		_, err := b.log.AppendWith(ctx, sid, nil, opts)
-		return false, err
+		return err
 	}
 
 	// end_turn (and everything else — max_tokens, stop_sequence — treated
@@ -222,7 +247,7 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		  WHERE session_id = $1 AND type = $2 AND processed_at IS NULL AND seq > $3)`,
 		sid.String(), string(domain.EventUserMessage), watermark).Scan(&pending)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if pending {
 		// Chain by handing our own item back to the queue (a fresh Enqueue
@@ -232,26 +257,29 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 			return b.queue.Requeue(ctx, tx, item)
 		}
 		_, err := b.log.AppendWith(ctx, sid, nil, opts)
-		return err == nil, err
+		return err
 	}
 
 	idle := domain.SessionIdle
 	opts.SetStatus = &idle
+	opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+		return b.queue.Complete(ctx, tx, item)
+	}
 	payload, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "end_turn"}})
 	if err != nil {
-		return false, err
+		return err
 	}
 	_, err = b.log.AppendWith(ctx, sid, []events.NewEvent{
 		{Type: domain.EventSessionStatusIdle, Payload: payload},
 	}, opts)
-	return false, err
+	return err
 }
 
 // failTurn records a model-side failure on the log and idles the session
 // with retries_exhausted. v1 has no automatic retry budget (documented in
 // STATE.md): one failed request ends the turn, and the next user.message
 // starts a fresh one.
-func (b *Brain) failTurn(ctx context.Context, sid domain.ID, watermark int64, msg string) error {
+func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, watermark int64, msg string) error {
 	errPayload, err := json.Marshal(map[string]any{"error": map[string]any{
 		"type": "model_request_failed_error", "message": msg,
 		"retry_status": map[string]any{"type": "exhausted"},
@@ -267,6 +295,12 @@ func (b *Brain) failTurn(ctx context.Context, sid domain.ID, watermark int64, ms
 	_, err = b.log.AppendWith(ctx, sid, []events.NewEvent{
 		{Type: domain.EventSessionError, Payload: errPayload},
 		{Type: domain.EventSessionStatusIdle, Payload: idlePayload},
-	}, events.AppendOptions{SetStatus: &idle, MarkProcessedThrough: watermark})
+	}, events.AppendOptions{
+		SetStatus:            &idle,
+		MarkProcessedThrough: watermark,
+		Then: func(ctx context.Context, tx pgx.Tx) error {
+			return b.queue.Complete(ctx, tx, item)
+		},
+	})
 	return err
 }

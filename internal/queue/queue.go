@@ -150,11 +150,15 @@ func (q *Queue) Requeue(ctx context.Context, db DB, item *Item) error {
 	return nil
 }
 
-// Complete marks the item finished. Losing the lease first (another claimant
-// took over after expiry) is an error: the caller's work may have raced the
-// replacement's and must not be treated as cleanly finished.
-func (q *Queue) Complete(ctx context.Context, item *Item) error {
-	tag, err := q.pool.Exec(ctx,
+// Complete marks the item finished, in the caller's transaction when one is
+// passed (a turn's settlement completes its item atomically with the state
+// it writes, so a concurrent trigger serialized behind the same session lock
+// always sees either a live item or a completed one — never a gap). Losing
+// the lease first (another claimant took over after expiry) is an error: the
+// caller's work may have raced the replacement's and must not be treated as
+// cleanly finished.
+func (q *Queue) Complete(ctx context.Context, db DB, item *Item) error {
+	tag, err := db.Exec(ctx,
 		`UPDATE work_items
 		 SET state = 'stopped', lease_expires_at = NULL, updated_at = now()
 		 WHERE id = $1 AND state = 'active' AND lease_expires_at = $2`,

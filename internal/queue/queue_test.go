@@ -47,7 +47,7 @@ func TestEnqueueClaimComplete(t *testing.T) {
 		t.Errorf("item id %q not work_-prefixed", item.ID)
 	}
 
-	if err := q.Complete(ctx, item); err != nil {
+	if err := q.Complete(ctx, pool, item); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	again, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
@@ -99,7 +99,7 @@ func TestEnqueueIdempotentWhileLive(t *testing.T) {
 	}
 
 	// … and completion frees the slot.
-	if err := q.Complete(ctx, item); err != nil {
+	if err := q.Complete(ctx, pool, item); err != nil {
 		t.Fatal(err)
 	}
 	created, err = q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn)
@@ -219,11 +219,11 @@ func TestExpiredLeaseIsReclaimed(t *testing.T) {
 	}
 
 	// The first claimant lost the lease: its Complete must fail loudly.
-	if err := q.Complete(ctx, item); err == nil {
+	if err := q.Complete(ctx, pool, item); err == nil {
 		t.Error("Complete after losing the lease succeeded silently")
 	} else {
 		// The new claimant still owns it.
-		if err := q.Complete(ctx, re); err != nil {
+		if err := q.Complete(ctx, pool, re); err != nil {
 			t.Errorf("new claimant Complete: %v", err)
 		}
 	}
@@ -250,7 +250,7 @@ func TestExtendRenewsTheLease(t *testing.T) {
 		t.Errorf("extended lease was reclaimed: %+v %v", got, err)
 	}
 
-	if err := q.Complete(ctx, item); err != nil {
+	if err := q.Complete(ctx, pool, item); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	// Extending a finished item is a lost lease, surfaced as an error.
@@ -299,10 +299,10 @@ func TestRequeueHandsTheItemBack(t *testing.T) {
 	}
 
 	// The old claimant's lease died with the requeue.
-	if err := q.Complete(ctx, item); err == nil {
+	if err := q.Complete(ctx, pool, item); err == nil {
 		t.Error("Complete with the pre-requeue lease succeeded")
 	}
-	if err := q.Complete(ctx, re); err != nil {
+	if err := q.Complete(ctx, pool, re); err != nil {
 		t.Errorf("Complete with the fresh lease: %v", err)
 	}
 }
