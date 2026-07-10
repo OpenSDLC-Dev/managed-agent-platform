@@ -311,6 +311,27 @@ func TestGenerateUpstreamError(t *testing.T) {
 	}
 }
 
+func TestGenerateRejectsInvalidRequestJSON(t *testing.T) {
+	// Verbatim passthrough still fails fast on structurally invalid JSON —
+	// with the index in the error, before anything reaches the endpoint.
+	p := start(t, &fakeServer{})
+
+	_, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`{broken`)}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "messages[0]") {
+		t.Errorf("invalid message content error = %v, want messages[0] context", err)
+	}
+
+	_, err = p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		Tools:    []json.RawMessage{json.RawMessage(`{"name":"ok","input_schema":{}}`), json.RawMessage(`{broken`)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "tools[1]") {
+		t.Errorf("invalid tool error = %v, want tools[1] context", err)
+	}
+}
+
 func TestGenerateParallelToolUseInputsStayIntact(t *testing.T) {
 	// Two tool_use blocks in one turn (parallel tool use): the first
 	// emitted ToolUse.Input must survive the second block's accumulation —
