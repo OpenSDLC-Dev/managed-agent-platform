@@ -12,6 +12,20 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- `internal/provider` (slice 4): the config-driven model-provider layer.
+  A provider is constructed from `protocol` / `model` / `base_url` /
+  `api_key` (+ optional headers); the first adapter speaks the Anthropic
+  Messages protocol against **any** endpoint (gateway, proxy, self-hosted
+  model — `base_url` is required, never an implicit api.anthropic.com),
+  streaming `text_delta` / `thinking_delta` / accumulated `tool_use` /
+  `done` chunks with `stop_reason` and usage. The model→provider registry
+  routes agent model strings by exact match with a `"*"` default.
+  `github.com/anthropics/anthropic-sdk-go` pinned as a direct dependency
+  at v1.56.0 (same version as the wire-reference checkout). Verified by a
+  real streamed turn against the self-hosted Anthropic-protocol endpoint
+  configured in `.env`; the integration test skips cleanly where no
+  endpoint is configured. The `openai` protocol adapter is deferred
+  behind the factory seam. (#10)
 - `internal/events` + events API (slice 3): the append-only session event
   log — the single source of truth for session state — with per-session
   `seq` allocation serialized under the session row lock, wire-compatible

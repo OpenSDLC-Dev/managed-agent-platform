@@ -4,7 +4,7 @@ An open-source, self-hostable platform for **long-horizon AI agents**, written i
 
 Run the whole thing on-prem or in your own VPC — **your data and your compute never leave your boundary**.
 
-> **Status: early development.** The domain types, OpenTelemetry, the Postgres schema, the control-plane CRUD API, and the session event log (send / list / SSE stream — the real `ant` CLI drives all of it unchanged) are in place; the harness and sandbox executor are being built slice by slice. Not yet usable end-to-end. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
+> **Status: early development.** The domain types, OpenTelemetry, the Postgres schema, the control-plane CRUD API, the session event log (send / list / SSE stream — the real `ant` CLI drives all of it unchanged), and the config-driven model-provider layer (verified against a self-hosted Anthropic-protocol endpoint) are in place; the harness and sandbox executor are being built slice by slice. Not yet usable end-to-end. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Why
 
@@ -12,7 +12,7 @@ Most agent platforms are SaaS: your source code, your prompts, and your tool out
 
 This project is that platform, self-hosted:
 
-- **Bring your own model.** Providers are config-driven (`protocol` · `model` · `base_url` · `api_key`). The Anthropic-protocol provider works against *any* endpoint speaking Anthropic Messages — a gateway, a proxy, or a self-hosted model. An OpenAI-compatible provider covers vLLM and most internal gateways. Nothing hard-codes a vendor endpoint.
+- **Bring your own model.** Providers are config-driven (`protocol` · `model` · `base_url` · `api_key`). The Anthropic-protocol provider works against *any* endpoint speaking Anthropic Messages — a gateway, a proxy, or a self-hosted model. An OpenAI-compatible provider (planned) will cover vLLM and most internal gateways. Nothing hard-codes a vendor endpoint.
 - **Bring your own compute.** Sandboxes run on Docker or Kubernetes under your control. Customer-run workers pull work from the platform, so **no inbound network access is required** into your environment.
 - **Observability is built in.** OpenTelemetry traces, metrics, and logs over standard OTLP — point it at your existing Jaeger/Tempo/Prometheus stack.
 
