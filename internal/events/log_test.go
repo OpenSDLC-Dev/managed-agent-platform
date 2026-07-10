@@ -79,6 +79,18 @@ func TestAppendCallerSuppliedIDAndProcessedAt(t *testing.T) {
 	if got[0].ProcessedAt == nil || !got[0].ProcessedAt.Equal(now) {
 		t.Errorf("processed_at = %v, want %v", got[0].ProcessedAt, now)
 	}
+
+	// Platform-emitted events carry a required processed_at on the wire, so
+	// an emitter that omits it gets emission time, never null.
+	auto, err := log.Append(context.Background(), sid, []events.NewEvent{
+		{Type: domain.EventAgentThinking},
+	})
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if auto[0].ProcessedAt == nil {
+		t.Error("platform event processed_at defaulted to nil; want emission time")
+	}
 }
 
 func TestAppendSessionErrors(t *testing.T) {

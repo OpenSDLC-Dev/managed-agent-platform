@@ -410,20 +410,27 @@ func validateBlock(raw json.RawMessage, allowed map[string]bool) error {
 		if _, err := requireString(obj, "title"); err != nil {
 			return err
 		}
-		if raw, set := obj["citations"]; set && !isNullRaw(raw) {
-			cit, err := asObject(raw, "citations")
-			if err != nil {
-				return err
-			}
-			if err := allowKeys(cit, "enabled"); err != nil {
-				return err
-			}
+		// citations and citations.enabled are both required on the wire.
+		raw, set := obj["citations"]
+		if !set || isNullRaw(raw) {
+			return fmt.Errorf("citations is required on search_result blocks")
+		}
+		cit, err := asObject(raw, "citations")
+		if err != nil {
+			return err
+		}
+		if err := allowKeys(cit, "enabled"); err != nil {
+			return err
+		}
+		var enabled bool
+		if raw, ok := cit["enabled"]; !ok || isNullRaw(raw) || json.Unmarshal(raw, &enabled) != nil {
+			return fmt.Errorf("citations requires a boolean enabled field")
 		}
 		content, ok := obj["content"]
 		if !ok || isNullRaw(content) {
 			return fmt.Errorf("search_result requires content")
 		}
-		_, err := validateBlocks(content, "content", blocksTextOnly)
+		_, err = validateBlocks(content, "content", blocksTextOnly)
 		return err
 	}
 	return nil

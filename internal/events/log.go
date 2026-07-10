@@ -108,6 +108,13 @@ func (l *Log) Append(ctx context.Context, sessionID domain.ID, evs []NewEvent) (
 		if len(payload) == 0 {
 			payload = json.RawMessage("{}")
 		}
+		// Platform-emitted events carry a required processed_at on the wire
+		// (only client events are nullable while queued): emission is
+		// processing, so default it rather than stream a malformed shape.
+		if ev.ProcessedAt == nil && !ev.Type.Inbound() {
+			now := time.Now().UTC()
+			ev.ProcessedAt = &now
+		}
 		if i > 0 {
 			sb.WriteString(", ")
 		}

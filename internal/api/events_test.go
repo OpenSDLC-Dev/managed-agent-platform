@@ -174,16 +174,21 @@ func TestSendContentBlockKinds(t *testing.T) {
 		t.Errorf("document title lost: %v", doc)
 	}
 
-	// search_result is a tool-result-only block; its source is a plain URL string.
+	// search_result is a tool-result-only block; its source is a plain URL
+	// string, and citations.enabled is required on the wire.
 	echo = sendEvents(t, s, sid, map[string]any{
 		"type": "user.custom_tool_result", "custom_tool_use_id": "sevt_x",
 		"content": []any{map[string]any{
 			"type": "search_result", "source": "https://example.com", "title": "hit",
-			"content": []any{map[string]any{"type": "text", "text": "body"}}}},
+			"citations": map[string]any{"enabled": false},
+			"content":   []any{map[string]any{"type": "text", "text": "body"}}}},
 	})
 	sr := echo[0]["content"].([]any)[0].(map[string]any)
 	if sr["source"] != "https://example.com" || sr["title"] != "hit" {
 		t.Errorf("search_result did not round-trip: %v", sr)
+	}
+	if cit, _ := sr["citations"].(map[string]any); cit == nil || cit["enabled"] != false {
+		t.Errorf("citations did not round-trip: %v", sr["citations"])
 	}
 }
 
