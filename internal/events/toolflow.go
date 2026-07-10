@@ -10,13 +10,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Tool-flow checks shared by the control plane's tool-result trigger and the
-// brain's settlement. Both sides gate turn scheduling on one definition of an
-// outstanding tool call — a tool-use event with no result referencing it —
-// so they can never disagree about whether a session is ready to resume. The
-// model protocol requires every tool_use answered before the conversation
-// continues, which makes these checks correctness, not bookkeeping: resuming
-// on a partial result set replays a request the protocol rejects.
+// Tool-flow checks for the control plane's POST /events: a tool result is
+// validated against the log before it is accepted, and it schedules the next
+// turn only once every outstanding tool call — a tool-use event with no
+// result referencing it — has been answered. The model protocol requires
+// every tool_use answered before the conversation continues, which makes
+// these checks correctness, not bookkeeping: resuming on a partial result
+// set replays a request the protocol rejects, and the log is append-only, so
+// a bad reference can never be taken back.
+//
+// The brain does not consult these: a suspended turn's own intents commit
+// with its settlement, so nothing can have answered them yet, and it simply
+// completes its work item and waits for the trigger above.
 
 // Querier is the slice of pgx shared by pools and transactions, so the
 // checks can run inside a caller's transaction.

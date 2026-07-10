@@ -336,10 +336,11 @@ func TestUpdateSessionEmitsOnlyChangedFields(t *testing.T) {
 	wantExactKeys(t, last, "id", "type", "processed_at", "title")
 }
 
-func TestUpdateSessionDetectsLargeIntegerChange(t *testing.T) {
-	// Change detection must not decode numbers as float64: two int64s that
-	// differ past 2^53 would collapse onto one float and the change would
-	// be swallowed.
+func TestUpdateSessionComparesNumbersByValue(t *testing.T) {
+	// Change detection sees the client's literal on one side and Postgres's
+	// jsonb normalization on the other, so numbers must be compared as
+	// values: 1e2 IS 100 (no phantom event), while two integers that differ
+	// past 2^53 are distinct (float64 would collapse them).
 	s := newTestServer(t)
 	sessionID := eventsFixture(t, s)
 
@@ -349,15 +350,28 @@ func TestUpdateSessionDetectsLargeIntegerChange(t *testing.T) {
 			"input_schema": map[string]any{"type": "object", "maximum": max},
 		}}}}
 	}
-	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sessionID, toolWithMax("9007199254740992")); status != http.StatusOK {
-		t.Fatalf("first agent update: %d %v", status, res)
+	patch := func(max json.Number) {
+		t.Helper()
+		if status, res := s.do(http.MethodPost, "/v1/sessions/"+sessionID, toolWithMax(max)); status != http.StatusOK {
+			t.Fatalf("agent update %s: %d %v", max, status, res)
+		}
 	}
+
+	patch("9007199254740992") // 2^53
 	before := len(s.eventTypes(sessionID))
 
-	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sessionID, toolWithMax("9007199254740993")); status != http.StatusOK {
-		t.Fatalf("second agent update: %d %v", status, res)
-	}
+	patch("9007199254740993") // 2^53 + 1: a real change
 	if after := len(s.eventTypes(sessionID)); after != before+1 {
-		t.Errorf("a change past 2^53 emitted no session.updated (%d -> %d)", before, after)
+		t.Fatalf("a change past 2^53 emitted no session.updated (%d -> %d)", before, after)
+	}
+	before++
+
+	// Re-sending the same value in exponent form changes nothing: Postgres
+	// stored 100, the client's raw bytes still say 1e2.
+	patch("100")
+	before++
+	patch("1e2")
+	if after := len(s.eventTypes(sessionID)); after != before {
+		t.Errorf("1e2 vs stored 100 emitted a phantom session.updated (%d -> %d)", before, after)
 	}
 }

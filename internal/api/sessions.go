@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -393,10 +393,11 @@ func mustJSON(v any) []byte {
 }
 
 // jsonEqual compares two JSON documents by value: stored jsonb comes back
-// with Postgres's own spacing and key order, so a byte comparison against a
-// fresh Go marshal would call every no-op update a change. Numbers decode as
-// json.Number rather than float64, so integers past 2^53 (a tool schema's
-// bounds, say) stay distinguishable instead of collapsing onto one float.
+// with Postgres's own spacing, key order, and number formatting, so neither a
+// byte comparison nor a literal one can tell a no-op update from a change.
+// Numbers are compared as exact rationals — `1e2` equals `100` (Postgres
+// rewrites one as the other), while two integers past 2^53 stay distinct
+// (float64 would collapse them).
 func jsonEqual(a, b []byte) bool {
 	x, err := decodeJSONValue(a)
 	if err != nil {
@@ -406,7 +407,7 @@ func jsonEqual(a, b []byte) bool {
 	if err != nil {
 		return false
 	}
-	return reflect.DeepEqual(x, y)
+	return sameJSON(x, y)
 }
 
 func decodeJSONValue(raw []byte) (any, error) {
@@ -417,6 +418,48 @@ func decodeJSONValue(raw []byte) (any, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+func sameJSON(a, b any) bool {
+	switch x := a.(type) {
+	case map[string]any:
+		y, ok := b.(map[string]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for k, v := range x {
+			w, ok := y[k]
+			if !ok || !sameJSON(v, w) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		y, ok := b.([]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !sameJSON(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	case json.Number:
+		y, ok := b.(json.Number)
+		return ok && numberEqual(x, y)
+	default:
+		return a == b // string, bool, null
+	}
+}
+
+func numberEqual(a, b json.Number) bool {
+	if a == b {
+		return true
+	}
+	x, xok := new(big.Rat).SetString(a.String())
+	y, yok := new(big.Rat).SetString(b.String())
+	return xok && yok && x.Cmp(y) == 0
 }
 
 func (s *server) getSession(r *http.Request) (any, error) {

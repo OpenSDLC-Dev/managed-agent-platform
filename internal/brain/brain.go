@@ -256,9 +256,13 @@ func (b *Brain) keepLease(ctx context.Context, item *queue.Item) (context.Contex
 			case <-t.C:
 				// Bounded: close() waits for this goroutine, so an Extend
 				// blocked on an exhausted pool or a stalled database would
-				// otherwise hang the turn forever. A renewal that cannot
-				// finish within a tick is a lost lease.
-				ectx, ecancel := context.WithTimeout(kctx, b.cfg.LeaseTTL/3)
+				// otherwise hang the turn forever. The budget is the lease
+				// the last renewal bought minus the tick we waited — an
+				// Extend that overruns it has let the lease lapse anyway.
+				// A duration, not the lease timestamp: the deadline must
+				// not depend on agreement between the database clock and
+				// this process's.
+				ectx, ecancel := context.WithTimeout(kctx, b.cfg.LeaseTTL-b.cfg.LeaseTTL/3)
 				err := b.queue.Extend(ectx, item, b.cfg.LeaseTTL)
 				ecancel()
 				if err != nil {
@@ -348,7 +352,7 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 }
 
 func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, watermark int64) error {
-	batch, err := turnEvents(turn)
+	head, err := turnEvents(turn)
 	if err != nil {
 		return err
 	}
@@ -356,20 +360,10 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	if err != nil {
 		return err
 	}
-	batch = append(batch, endEv)
+	head = append(head, endEv)
 	opts := events.AppendOptions{
 		AddUsage:             &turn.usage,
 		MarkProcessedThrough: watermark,
-	}
-
-	tx, err := b.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx,
-		`SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
-		return err
 	}
 
 	if turn.stopReason == "tool_use" {
@@ -384,34 +378,86 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Complete(ctx, tx, item)
 		}
-	} else {
-		// end_turn (and everything else — max_tokens, stop_sequence —
-		// treated as a completed turn in v1): if input arrived mid-turn,
-		// chain straight into the next turn; otherwise idle with end_turn.
-		pending, err := pendingInput(ctx, tx, sid, watermark)
+		return b.commitUnderLock(ctx, sid, head, opts)
+	}
+
+	// end_turn (and everything else — max_tokens, stop_sequence — treated
+	// as a completed turn in v1).
+	return b.settle(ctx, sid, item, watermark, opts, func(chained bool) ([]events.NewEvent, error) {
+		if chained {
+			return head, nil
+		}
+		payload, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "end_turn"}})
 		if err != nil {
+			return nil, err
+		}
+		return append(head, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: payload}), nil
+	})
+}
+
+// settle is the one place a finished turn decides its own end: under the
+// session row lock it asks whether input arrived mid-turn, lets the caller
+// build the events that outcome calls for, and commits them together with
+// the status, the watermark, and the work item's fate. Chaining hands our
+// own item back to the queue (a fresh Enqueue would be suppressed by this
+// very item's live slot) and leaves the session running; idling completes
+// the item. Both success and failure settle here so the two can never drift.
+func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, watermark int64,
+	opts events.AppendOptions, build func(chained bool) ([]events.NewEvent, error)) error {
+
+	tx, err := b.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+		return err
+	}
+
+	// A watermark of zero means the turn failed before replay resolved
+	// anything (corrupt state): chaining on the session's own unprocessed
+	// events would loop the same failure forever.
+	chained := false
+	if watermark > 0 {
+		if chained, err = pendingInput(ctx, tx, sid, watermark); err != nil {
 			return err
 		}
-		if pending {
-			// Chain by handing our own item back to the queue (a fresh
-			// Enqueue would be suppressed by this very item's live slot).
-			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-				return b.queue.Requeue(ctx, tx, item)
-			}
-		} else {
-			idle := domain.SessionIdle
-			opts.SetStatus = &idle
-			payload, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "end_turn"}})
-			if err != nil {
-				return err
-			}
-			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: payload})
-			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-				return b.queue.Complete(ctx, tx, item)
-			}
+	}
+	batch, err := build(chained)
+	if err != nil {
+		return err
+	}
+	if chained {
+		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+			return b.queue.Requeue(ctx, tx, item)
+		}
+	} else {
+		idle := domain.SessionIdle
+		opts.SetStatus = &idle
+		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+			return b.queue.Complete(ctx, tx, item)
 		}
 	}
 
+	if _, err := b.log.AppendInTx(ctx, tx, sid, batch, opts); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// commitUnderLock commits a batch and its options with the session row
+// locked first, for the settlement that has no chain-or-idle decision.
+func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID, batch []events.NewEvent, opts events.AppendOptions) error {
+	tx, err := b.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+		return err
+	}
 	if _, err := b.log.AppendInTx(ctx, tx, sid, batch, opts); err != nil {
 		return err
 	}
@@ -434,63 +480,41 @@ func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, s
 }
 
 func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg string) error {
-	var batch []events.NewEvent
+	var head []events.NewEvent
 	if span != nil {
 		endEv, err := span.EndEvent(true, domain.ModelUsage{})
 		if err != nil {
 			return err
 		}
-		batch = append(batch, endEv)
-	}
-	errPayload, err := json.Marshal(map[string]any{"error": map[string]any{
-		"type": "model_request_failed_error", "message": msg,
-		"retry_status": map[string]any{"type": "exhausted"},
-	}})
-	if err != nil {
-		return err
-	}
-	batch = append(batch, events.NewEvent{Type: domain.EventSessionError, Payload: errPayload})
-	opts := events.AppendOptions{MarkProcessedThrough: watermark}
-
-	tx, err := b.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx,
-		`SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
-		return err
+		head = append(head, endEv)
 	}
 
-	// Only a turn that consumed input can chain on pending input: a
-	// watermark of zero means the failure hit before replay even resolved
-	// (corrupt state), where requeueing on the session's own unprocessed
-	// events would loop the same failure forever.
-	pending := false
-	if watermark > 0 {
-		if pending, err = pendingInput(ctx, tx, sid, watermark); err != nil {
-			return err
-		}
-	}
-	if pending {
-		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-			return b.queue.Requeue(ctx, tx, item)
-		}
-	} else {
-		idlePayload, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "retries_exhausted"}})
-		if err != nil {
-			return err
-		}
-		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: idlePayload})
-		idle := domain.SessionIdle
-		opts.SetStatus = &idle
-		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-			return b.queue.Complete(ctx, tx, item)
-		}
-	}
-
-	if _, err := b.log.AppendInTx(ctx, tx, sid, batch, opts); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return b.settle(ctx, sid, item, watermark, events.AppendOptions{MarkProcessedThrough: watermark},
+		func(chained bool) ([]events.NewEvent, error) {
+			// retry_status tells the client whether the platform will make
+			// another attempt. A chained turn is one: the session stays
+			// running and the pending input gets its answer, so calling it
+			// "exhausted" — the terminal variant — would tell a client the
+			// session is dead while it is still producing events.
+			retry := "exhausted"
+			if chained {
+				retry = "retrying"
+			}
+			errPayload, err := json.Marshal(map[string]any{"error": map[string]any{
+				"type": "model_request_failed_error", "message": msg,
+				"retry_status": map[string]any{"type": retry},
+			}})
+			if err != nil {
+				return nil, err
+			}
+			batch := append(head, events.NewEvent{Type: domain.EventSessionError, Payload: errPayload})
+			if chained {
+				return batch, nil
+			}
+			idlePayload, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "retries_exhausted"}})
+			if err != nil {
+				return nil, err
+			}
+			return append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: idlePayload}), nil
+		})
 }

@@ -172,6 +172,27 @@ func (h *harness) liveWork(t *testing.T) int {
 	return n
 }
 
+// retryStatus reads the retry_status variant of the session's last
+// session.error event.
+func (h *harness) retryStatus(t *testing.T) string {
+	t.Helper()
+	evs, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"session.error"}})
+	if err != nil || len(evs) == 0 {
+		t.Fatalf("no session.error events: %v", err)
+	}
+	var p struct {
+		Error struct {
+			RetryStatus struct {
+				Type string `json:"type"`
+			} `json:"retry_status"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(evs[len(evs)-1].Body, &p); err != nil {
+		t.Fatal(err)
+	}
+	return p.Error.RetryStatus.Type
+}
+
 func (h *harness) countType(t *testing.T, typ string) int {
 	t.Helper()
 	n := 0
@@ -618,6 +639,12 @@ func TestFailedTurnChainsPendingMessage(t *testing.T) {
 	if got := h.status(t); got != "running" {
 		t.Errorf("status = %q, want running (chained)", got)
 	}
+	// The session is about to retry, so the error must not claim its
+	// retries are exhausted: "exhausted" is the terminal variant, and a
+	// client that stops reading on it would miss the chained turn.
+	if got := h.retryStatus(t); got != "retrying" {
+		t.Errorf("chained session.error retry_status = %q, want retrying", got)
+	}
 
 	h.runOnce(t)
 	if got := h.status(t); got != "idle" {
@@ -948,6 +975,7 @@ func TestProviderErrorFailsTurnVisibly(t *testing.T) {
 	if err := json.Unmarshal(evs[0].Body, &errPayload); err != nil {
 		t.Fatal(err)
 	}
+	// Nothing pending: this failure really is the end of the turn.
 	if errPayload.Error.Type != "model_request_failed_error" || errPayload.Error.RetryStatus.Type != "exhausted" {
 		t.Errorf("session.error payload = %s", evs[0].Body)
 	}

@@ -47,24 +47,30 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   fate — commits as one transaction under the session row lock with the
   queue's lease proof inside it, so a brain that lost its claim rolls
   the whole turn back instead of leaving half-turns that poison replay;
-  tool-result resume is gated on the full result set (parallel tool
-  calls wait for their last result, API-side and settle-side); inbound
+  tool-result resume is gated on the full result set, so parallel tool
+  calls wait for their last result before a turn is scheduled; inbound
   tool results are validated against the log (unknown, kind-mismatched,
   duplicate, or already-answered references are a 400, not a wedged
   session); failed turns chain pending mid-turn input instead of
-  stranding it; brain-side infra errors abandon the turn to lease
+  stranding it, and the `session.error` they emit reports
+  `retry_status: retrying` when a chained turn is about to run rather
+  than the terminal `exhausted`, so a client that stops reading on a
+  terminal error never abandons a session that is still producing
+  events; brain-side infra errors abandon the turn to lease
   expiry with nothing on the wire (only model/deterministic failures
   produce `session.error`); a lease-keeper goroutine re-extends the
   work-item lease during long time-to-first-token, each renewal bounded
-  by its own timeout so a stalled database cannot hang the turn; a
+  by the lease it races so a stalled database can neither hang the turn
+  nor make a healthy renewal look like a lost lease; a
   `tool_use` whose input is not a JSON object fails the turn visibly
   instead of reaching the append-only log; empty text deltas are
   skipped before they allocate a content index, so an empty block
   neither stores a malformed `text` block nor shifts the stored content
   off the delta indices already streamed to SSE clients; and
-  `session.updated` change detection compares jsonb semantically with
-  exact number handling, killing phantom events on idempotent PATCH
-  retries without swallowing changes past 2^53. (#11)
+  `session.updated` change detection compares jsonb semantically, with
+  numbers compared as exact rationals: an idempotent PATCH emits
+  nothing even when Postgres rewrote `1e2` as `100`, while a change
+  past 2^53 is still a change. (#11)
 
 - `internal/provider` (slice 4): the config-driven model-provider layer.
   A provider is constructed from `protocol` / `model` / `base_url` /
