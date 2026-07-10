@@ -37,10 +37,15 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   command still running at the second instant timed out whatever exit
   code it later reports, because on the honest path the watchdog would
   have killed it first. No command can outrun its deadline by more than
-  the grace period, none can hide an overrun larger than the slop, one
-  that merely dies of SIGKILL on its own is never mistaken for a timeout,
-  and one that leaves a background process holding its output open is
-  timed by its own life rather than by its straggler's. Output is capped
+  the grace period — a hard bound, decided outside the container.
+  Detecting an overrun *inside* that window is softer: it rests on the
+  daemon's process list, whose reply reflects when the daemon ran `ps`
+  rather than when the probe asked, so a command that times a daemon
+  `ps`-stall to fall just after its own exit can hide a sub-grace-period
+  overrun, for which the reserved cgroup limits are the real containment.
+  A command that merely dies of SIGKILL on its own is never mistaken for a
+  timeout, and one that leaves a background process holding its output
+  open is timed by its own life rather than by its straggler's. Output is capped
   at 1 MiB per stream, drained rather than buffered so a noisy command
   still finishes; a read above 4 MiB is refused rather than silently
   truncated. `limited` networking fails closed — the container gets no
