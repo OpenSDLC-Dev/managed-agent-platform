@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -100,7 +101,9 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 	})
 
 	// A hung command must not hang the executor, and it must not poison the
-	// sandbox: the next tool call still works.
+	// sandbox: the next tool call still works. Nothing the sandbox does to
+	// enforce the deadline may show up as output the command appears to have
+	// written.
 	t.Run("ExecTimeoutKillsAndSurvives", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -113,6 +116,9 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 		if !res.TimedOut {
 			t.Errorf("result = %+v, want TimedOut", res)
+		}
+		if res.Stdout != "" || res.Stderr != "" {
+			t.Errorf("the kill leaked into the tool result: stdout=%q stderr=%q", res.Stdout, res.Stderr)
 		}
 		if elapsed := time.Since(start); elapsed > 30*time.Second {
 			t.Errorf("timeout took %s — the command was not killed", elapsed)
@@ -127,24 +133,70 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
-	// A command that exits with timeout(1)'s own code, quickly, is not a
-	// timeout: the flag comes from the sandbox killing it, not from a number.
-	// And a command that finishes early is reported early — a deadline must
-	// never be enforced by waiting the deadline out.
-	t.Run("ExecFastExit124IsNotATimeout", func(t *testing.T) {
+	// Killing the command's shell is not killing the command: its children
+	// keep running, and they hold the pipes the sandbox is reading.
+	t.Run("ExecTimeoutKillsTheWholeProcessTree", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
-		start := time.Now()
-		res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
-			Command: `exit 124`, Timeout: 30 * time.Second,
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// 987654 is just a distinctive duration to count for afterwards.
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: `sleep 987654 & wait`, Timeout: time.Second,
 		})
 		if err != nil {
 			t.Fatalf("exec: %v", err)
 		}
-		if res.ExitCode != 124 {
-			t.Errorf("exit code = %d, want 124", res.ExitCode)
+		if !res.TimedOut {
+			t.Fatalf("result = %+v, want TimedOut", res)
+		}
+		if n := countProcesses(t, sb, "sleep 987654"); n != 0 {
+			t.Errorf("%d descendant(s) of the killed command survived the deadline", n)
+		}
+	})
+
+	// Whatever enforces the deadline must die with the command it guarded. A
+	// long-running agent issues thousands of quick commands under a multi-minute
+	// tool timeout; one leftover process each would fill the sandbox.
+	t.Run("ExecLeavesNoDeadlineMachineryBehind", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		before := countProcesses(t, sb, "sleep ")
+		const runs = 3
+		for range runs {
+			res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: `echo hi`, Timeout: time.Minute})
+			if err != nil || res.ExitCode != 0 {
+				t.Fatalf("exec: %+v, %v", res, err)
+			}
+		}
+		// SIGKILL is delivered asynchronously; give the kernel a moment.
+		var after int
+		for range 10 {
+			if after = countProcesses(t, sb, "sleep "); after <= before {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Errorf("%d process(es) outlived %d commands that exited at once", after-before, runs)
+	})
+
+	// SIGKILL is how a deadline is enforced, so a command that dies of SIGKILL
+	// on its own could be mistaken for one. It must not be: the kill has to
+	// have arrived at the deadline, not before it. (And a command that finishes
+	// early is reported early — a deadline is never enforced by waiting it out.)
+	t.Run("ExecSelfInflictedKillIsNotATimeout", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		start := time.Now()
+		res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+			Command: `kill -9 $$`, Timeout: 30 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
 		}
 		if res.TimedOut {
-			t.Error("exit 124 before the deadline must not read as a timeout")
+			t.Error("a command that killed itself well inside the deadline read as a timeout")
 		}
 		if elapsed := time.Since(start); elapsed > 10*time.Second {
 			t.Errorf("a command that exited at once took %s to report", elapsed)
@@ -349,6 +401,32 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			t.Error("unrestricted sandbox has no route out")
 		}
 	})
+}
+
+// countProcesses counts live processes in the sandbox whose command line starts
+// with prefix. It reads /proc directly: a minimal image has no ps.
+func countProcesses(t *testing.T, sb sandbox.Sandbox, prefix string) int {
+	t.Helper()
+	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: `
+		n=0
+		for p in /proc/[0-9]*; do
+		  [ -r "$p/cmdline" ] || continue
+		  case "$(tr '\0' ' ' < "$p/cmdline")" in
+		    "` + prefix + `"*) n=$((n+1)) ;;
+		  esac
+		done
+		echo "$n"`})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("count processes: exit %d: %s", res.ExitCode, res.Stderr)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(res.Stdout))
+	if err != nil {
+		t.Fatalf("count processes: %q: %v", res.Stdout, err)
+	}
+	return n
 }
 
 // routeCount reads the sandbox's kernel routing table, minus its header line.

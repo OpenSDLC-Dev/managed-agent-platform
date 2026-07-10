@@ -65,11 +65,17 @@ func statusIs(err error, code int) bool {
 	return errors.As(err, &ae) && ae.Status == code
 }
 
-// noSuchContainer distinguishes the two 404s the archive endpoints return: a
-// missing container (the sandbox is gone) from a missing path inside it.
-func noSuchContainer(err error) bool {
+// containerGone identifies the daemon's "no such container" 404. The status
+// alone cannot: the archive endpoints answer a missing path with "Could not
+// find the file <path> in container <id>", and the exec endpoints answer a
+// stale exec id with "No such exec instance". Neither means the sandbox died.
+//
+// The match is anchored, not a substring search, because that path is the
+// agent's to choose: a file named "No such container" would otherwise make its
+// own missing-file error read as a destroyed sandbox.
+func containerGone(err error) bool {
 	var ae *apiError
-	return errors.As(err, &ae) && ae.Status == 404 && strings.Contains(ae.Message, "No such container")
+	return errors.As(err, &ae) && ae.Status == 404 && strings.HasPrefix(ae.Message, "No such container")
 }
 
 // request issues one call. The response is returned open on success (2xx and
@@ -295,6 +301,15 @@ func (c *apiClient) putArchive(ctx context.Context, id, path string, tarball []b
 	return nil
 }
 
+// Docker's exec stream frame ids. Id 0 is stdin and never travels this way;
+// id 3 carries a daemon-side error about the exec itself, not the command's
+// output.
+const (
+	streamStdout    = 1
+	streamStderr    = 2
+	streamSystemErr = 3
+)
+
 // demux splits Docker's frame-multiplexed exec stream. Each frame is an 8-byte
 // header — stream id, then a big-endian payload length — followed by payload.
 // Output past limit is drained and dropped rather than buffered: the command
@@ -330,12 +345,38 @@ func demux(r io.Reader, limit int) (stdout, stderr []byte, truncated bool, err e
 			return stdout, stderr, truncated, fmt.Errorf("docker: read exec frame: %w", err)
 		}
 		size := int64(binary.BigEndian.Uint32(header[4:]))
-		dst := &stdout
-		if header[0] == 2 {
+
+		var dst *[]byte
+		switch header[0] {
+		case streamStdout:
+			dst = &stdout
+		case streamStderr:
 			dst = &stderr
+		case streamSystemErr:
+			// The daemon is reporting on the exec, not relaying the command.
+			// Folding this into stdout would hand the model a plausible-looking
+			// tool result built out of an infrastructure failure.
+			var reason []byte
+			if err := keepInto(r, &reason, size, 8<<10); err != nil {
+				return stdout, stderr, truncated, fmt.Errorf("docker: read exec frame: %w", err)
+			}
+			return stdout, stderr, truncated, fmt.Errorf("docker: exec stream error: %s", reason)
+		default:
+			return stdout, stderr, truncated, fmt.Errorf("docker: unknown exec stream id %d", header[0])
 		}
 		if err := keep(dst, size); err != nil {
 			return stdout, stderr, truncated, fmt.Errorf("docker: read exec frame: %w", err)
 		}
 	}
+}
+
+// keepInto reads n bytes, retaining at most limit of them.
+func keepInto(r io.Reader, dst *[]byte, n int64, limit int64) error {
+	if n > limit {
+		n = limit
+	}
+	buf := make([]byte, n)
+	_, err := io.ReadFull(r, buf)
+	*dst = buf
+	return err
 }

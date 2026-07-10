@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -311,29 +312,122 @@ func TestExecWaitsForTheExitCode(t *testing.T) {
 	}
 }
 
-// TimedOut needs both the watchdog's code and a deadline that actually passed.
-func TestExec124BeforeTheDeadlineIsNotATimeout(t *testing.T) {
-	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/exec"):
-			io.WriteString(w, `{"Id":"e1"}`)
-		case r.URL.Path == "/exec/e1/start":
-		case r.URL.Path == "/exec/e1/json":
-			io.WriteString(w, `{"Running":false,"ExitCode":124}`)
-		}
-	})
-	c := &container{api: p.api, id: "abc", workdir: "/workspace"}
-	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "exit 124", Timeout: time.Hour})
+// TimedOut needs both the watchdog's signal and a deadline that actually
+// passed — and the deadline that passed is the watchdog's own, which is the
+// caller's request rounded up to whole seconds.
+func TestTimedOutNeedsTheWatchdogsDeadlineNotTheCallers(t *testing.T) {
+	newFake := func(delay time.Duration, code int) *container {
+		p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/exec"):
+				io.WriteString(w, `{"Id":"e1"}`)
+			case r.URL.Path == "/exec/e1/start":
+				time.Sleep(delay)
+			case r.URL.Path == "/exec/e1/json":
+				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, code)
+			}
+		})
+		return &container{api: p.api, id: "abc", workdir: "/workspace"}
+	}
+
+	// A self-inflicted SIGKILL well inside the deadline is not a timeout.
+	res, err := newFake(0, sigkillExit).Exec(context.Background(),
+		sandbox.ExecRequest{Command: "kill -9 $$", Timeout: time.Hour})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
 	if res.TimedOut {
-		t.Error("exit 124 well inside the deadline read as a timeout")
+		t.Error("a SIGKILL well inside the deadline read as a timeout")
 	}
-	// And with no deadline at all, 124 is just an exit code.
-	res, err = c.Exec(context.Background(), sandbox.ExecRequest{Command: "exit 124"})
-	if err != nil || res.TimedOut {
+
+	// With no deadline at all, 137 is just an exit code.
+	if res, err := newFake(0, sigkillExit).Exec(context.Background(),
+		sandbox.ExecRequest{Command: "kill -9 $$"}); err != nil || res.TimedOut {
 		t.Errorf("res=%+v err=%v", res, err)
+	}
+
+	// The watchdog can only sleep whole seconds. A 1.1s request makes it sleep
+	// 2s, so a SIGKILL at 1.2s did not come from it — comparing against the
+	// caller's 1.1s would call this a timeout that never happened.
+	res, err = newFake(1200*time.Millisecond, sigkillExit).Exec(context.Background(),
+		sandbox.ExecRequest{Command: "kill -9 $$", Timeout: 1100 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if res.TimedOut {
+		t.Error("a SIGKILL before the watchdog's rounded-up deadline read as a timeout")
+	}
+
+	// Past the watchdog's own deadline, it is a timeout.
+	res, err = newFake(1200*time.Millisecond, sigkillExit).Exec(context.Background(),
+		sandbox.ExecRequest{Command: "sleep 300", Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !res.TimedOut {
+		t.Error("a SIGKILL past the deadline did not read as a timeout")
+	}
+
+	// Any other exit code is never a timeout, however long it took.
+	res, err = newFake(1200*time.Millisecond, 124).Exec(context.Background(),
+		sandbox.ExecRequest{Command: "exit 124", Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if res.TimedOut {
+		t.Error("exit 124 past the deadline read as a timeout — only SIGKILL is one")
+	}
+}
+
+// The wrapper must keep no state anywhere the agent's own commands can reach.
+// A marker file under /tmp — the previous design — let a command forge a
+// timeout it never hit, or erase one it did.
+func TestExecWrapperKeepsNoStateInsideTheContainer(t *testing.T) {
+	for _, writable := range []string{"/tmp", "/var/tmp", "/dev/shm", "/run", "/workspace"} {
+		if strings.Contains(execWrapper, writable) {
+			t.Errorf("the exec wrapper touches %s, which the sandboxed command can write", writable)
+		}
+	}
+	if !strings.Contains(execWrapper, "set -m") {
+		t.Error("the wrapper must enable job control so the deadline kills the command's process group")
+	}
+}
+
+// A 404 whose message merely mentions a container is not a missing container:
+// the archive endpoints echo the requested path, and the path is the agent's.
+func TestPathProseCannotFakeAMissingSandbox(t *testing.T) {
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		// Verbatim from a real daemon, for a file literally named
+		// "No such container".
+		io.WriteString(w, `{"message":"Could not find the file /workspace/No such container/f in container abc"}`)
+	})
+	c := &container{api: p.api, id: "abc", workdir: "/workspace"}
+	_, err := c.ReadFile(context.Background(), "/workspace/No such container/f")
+	if !errors.Is(err, sandbox.ErrFileNotExist) {
+		t.Errorf("read: %v, want ErrFileNotExist", err)
+	}
+}
+
+// The exec endpoints are keyed by exec id, so they have a 404 of their own.
+// A lost exec is not a lost sandbox, and telling the executor otherwise would
+// have it tear down a live session's container.
+func TestStaleExecIsNotAMissingSandbox(t *testing.T) {
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/exec") {
+			io.WriteString(w, `{"Id":"e1"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `{"message":"No such exec instance: e1"}`)
+	})
+	c := &container{api: p.api, id: "abc", workdir: "/workspace"}
+	_, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true"})
+	if err == nil || errors.Is(err, sandbox.ErrNotFound) {
+		t.Errorf("exec: %v, want the daemon's own error", err)
+	}
+	if !strings.Contains(err.Error(), "No such exec instance") {
+		t.Errorf("exec: %v", err)
 	}
 }
 
@@ -716,5 +810,29 @@ func TestDemuxRejectsTruncatedFrame(t *testing.T) {
 	// A header cut in half is equally not a clean end of stream.
 	if _, _, _, err := demux(bytes.NewReader(frame(1, "x")[:3]), 1024); err == nil {
 		t.Error("a truncated header decoded cleanly")
+	}
+}
+
+// Frame id 3 is the daemon talking about the exec, not the command talking.
+// Folding it into stdout would hand the model a tool result assembled out of
+// an infrastructure failure.
+func TestDemuxSurfacesTheDaemonsOwnErrorFrame(t *testing.T) {
+	raw := bytes.Join([][]byte{frame(1, "partial"), frame(3, "OCI runtime exec failed")}, nil)
+	stdout, _, _, err := demux(bytes.NewReader(raw), 1024)
+	if err == nil || !strings.Contains(err.Error(), "OCI runtime exec failed") {
+		t.Errorf("err = %v, want the daemon's reason", err)
+	}
+	if string(stdout) != "partial" {
+		t.Errorf("stdout = %q", stdout)
+	}
+}
+
+func TestDemuxRejectsUnknownStreamID(t *testing.T) {
+	if _, _, _, err := demux(bytes.NewReader(frame(7, "?")), 1024); err == nil {
+		t.Error("an unknown stream id was silently accepted as output")
+	}
+	// Id 0 is stdin; it never travels back and must not be read as stdout.
+	if _, _, _, err := demux(bytes.NewReader(frame(0, "?")), 1024); err == nil {
+		t.Error("a stdin frame was silently accepted as output")
 	}
 }

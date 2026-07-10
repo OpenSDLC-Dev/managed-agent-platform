@@ -199,7 +199,14 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   them — and their uncovered statements are the assertion branches that
   execute exactly when a suite fails. Counting them measured nothing and
   diluted the gate, the same reason `cmd/` main glue was always outside
-  it. Over the logic packages alone the number is higher, not lower:
-  91.46% against the unchanged ≥ 90% bar.
+  it. Stated plainly, because the change is load-bearing rather than
+  cosmetic: under the old denominator this PR reads **89.81%** and CI
+  would be red; under the new one it reads **91.46%** against the
+  unchanged ≥ 90% bar. What justifies it is the categorization, not the
+  number — the sandbox implementation itself sits at 94.8%, and the only
+  thing dragging the total under the bar is the contract suite's own
+  `t.Errorf` branches. Excluding just the new `sandboxtest` would also
+  pass (91.02%); `pgtest` goes with it because it is the same kind of
+  package and singling it out would leave the rule incoherent.
 - Module path set to the canonical GitHub owner,
   `github.com/OpenSDLC-Dev/managed-agent-platform`.

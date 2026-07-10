@@ -30,28 +30,38 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // execWrapper runs the tool's command under a watchdog. Docker has no API to
 // kill a running exec, so the kill has to come from inside the container: a
 // command that ignores its deadline would otherwise hold a slot forever.
+// $1 is the command, $2 the timeout in whole seconds ("0" = no limit).
 //
-// $1 is the command, $2 the timeout in whole seconds ("0" = no limit). The
-// watchdog marks before it kills, so exit 124 means "we killed it" and never
-// "the command chose to exit 124" — the marker cannot exist unless the sleep
-// elapsed with the command still running. Its stdio goes to /dev/null because
-// it outlives the command it guards: a watchdog still holding the exec's pipes
-// keeps the daemon's stream open for seconds after the command has exited, and
-// every tool call pays that.
+// A timeout is signalled by SIGKILL and nothing else. The wrapper keeps no
+// state the command could reach: everything inside the container is
+// agent-writable, so a marker file — however obscurely named — is a channel the
+// command can use to forge a timeout it did not hit, or erase one it did.
+//
+// `set -m` puts each job in its own process group, so the deadline kills the
+// command's whole tree. Killing only the command's shell leaves its children
+// running, holding the exec's pipes open long after the deadline.
+//
+// The shell's own diagnostics go to /dev/null and the command keeps the real
+// stderr on fd 3: bash announces a job it killed ("...Killed...") on stderr,
+// and that announcement would otherwise land in the tool result as if the
+// command had printed it.
 const execWrapper = `
-mark="/tmp/.map-exec-timeout.$$"
-/bin/bash -c "$1" &
+set -m
+exec 3>&2 2>/dev/null
+/bin/bash -c "$1" 2>&3 3>&- &
 pid=$!
 if [ "$2" != "0" ]; then
-  ( sleep "$2"; : > "$mark"; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  ( sleep "$2"; kill -9 -"$pid" 2>/dev/null ) >/dev/null 2>&1 &
   guard=$!
 fi
 wait "$pid"
 rc=$?
-if [ -n "${guard:-}" ]; then kill -9 "$guard" 2>/dev/null; fi
-if [ -e "$mark" ]; then rm -f "$mark"; exit 124; fi
+if [ -n "${guard:-}" ]; then kill -9 -"$guard" 2>/dev/null; fi
 exit "$rc"
 `
+
+// sigkillExit is what bash reports for a job killed by SIGKILL (128 + 9).
+const sigkillExit = 137
 
 // Config configures the backend. Host is a Docker daemon address
 // (unix:///... or tcp://host:port); empty falls back to DOCKER_HOST and then
@@ -115,8 +125,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		Labels:     map[string]string{sessionLabel: string(spec.SessionID)},
 		HostConfig: hostConfig{
 			NetworkMode: networkMode(spec.Networking),
-			// The watchdog leaves short-lived orphans behind; an init process
-			// reaps them instead of letting them pile up as zombies.
+			// Tools background processes and orphan them; an init process reaps
+			// them instead of letting them pile up as zombies for the session's
+			// whole lifetime.
 			Init: true,
 		},
 	}
@@ -194,14 +205,19 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	if err != nil {
 		return sandbox.ExecResult{}, err
 	}
+	// A timeout is a SIGKILL that arrived no earlier than the watchdog's own
+	// deadline — which is the rounded-up one it actually slept, not the
+	// caller's unrounded request. A command cannot survive SIGKILL to fake the
+	// code, and one that exits 137 by itself does so before the watchdog could
+	// have fired. (A command the kernel OOM-kills past its deadline reads as a
+	// timeout. It hit a limit and produced nothing; the label is close enough
+	// and the alternative is to guess.)
+	deadline := time.Duration(seconds) * time.Second
 	return sandbox.ExecResult{
-		Stdout:   string(stdout),
-		Stderr:   string(stderr),
-		ExitCode: code,
-		// The wrapper reports 124 only from the watchdog, which cannot have
-		// fired before the deadline. Both conditions together leave no way for
-		// a command's own exit 124 to be misread as a timeout.
-		TimedOut:  seconds > 0 && code == 124 && elapsed >= req.Timeout,
+		Stdout:    string(stdout),
+		Stderr:    string(stderr),
+		ExitCode:  code,
+		TimedOut:  seconds > 0 && code == sigkillExit && elapsed >= deadline,
 		Truncated: truncated,
 	}, nil
 }
@@ -231,7 +247,7 @@ func (c *container) exitCode(ctx context.Context, execID string) (int, error) {
 func (c *container) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	stream, err := c.api.getArchive(ctx, c.id, path)
 	if err != nil {
-		if statusIs(err, 404) && !noSuchContainer(err) {
+		if statusIs(err, 404) && !containerGone(err) {
 			return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
 		}
 		return nil, c.wrap(err)
@@ -267,7 +283,7 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 	}
 	dir := gopath.Dir(path)
 	err = c.api.putArchive(ctx, c.id, dir, tarball)
-	if statusIs(err, 404) && !noSuchContainer(err) {
+	if statusIs(err, 404) && !containerGone(err) {
 		// The archive endpoint does not create parents; only a missing
 		// directory can produce this 404, so make it and try once more.
 		if mkErr := c.mkdirAll(ctx, dir); mkErr != nil {
@@ -278,7 +294,7 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 	// Only the container's absence is ErrNotFound here — the other 404 means
 	// the path is wrong, and calling that a missing sandbox would send the
 	// executor looking for the wrong failure.
-	if noSuchContainer(err) {
+	if containerGone(err) {
 		return c.gone()
 	}
 	return err
@@ -304,13 +320,10 @@ func (c *container) Destroy(ctx context.Context) error {
 }
 
 // wrap turns "the container is gone" into the contract's sentinel; every other
-// failure keeps the daemon's own message. The exec endpoints have exactly one
-// way to 404 — no such container — so the status alone decides.
+// failure keeps the daemon's own message — including a 404 for a stale exec id,
+// which is a lost exec, not a lost sandbox.
 func (c *container) wrap(err error) error {
-	if err == nil {
-		return nil
-	}
-	if statusIs(err, 404) {
+	if containerGone(err) {
 		return c.gone()
 	}
 	return err
