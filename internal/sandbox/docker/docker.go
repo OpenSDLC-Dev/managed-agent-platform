@@ -14,6 +14,7 @@ import (
 	gopath "path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -273,7 +274,14 @@ type verdict struct {
 // container's process list — `ps` on the daemon's host, which the sandboxed
 // command can neither reach nor forge.
 //
-// It runs on two contexts. sleepCtx times the waits and is cancelled the moment
+// The two instants are watched independently, each on its own timer, because
+// the overrun check is the guarantee and nothing may delay it: run in sequence,
+// a first `top` that stalls on a slow daemon would still be waiting when the
+// command overran and exited, and the stream's close would then cancel the wait
+// before it ever reached the overrun instant — the overrun unmeasured, read as
+// a clean finish.
+//
+// They run on two contexts. sleepCtx times the waits and is cancelled the moment
 // the output stream closes: a probe still sleeping then never mattered, and the
 // close is what unblocks it. confirmCtx times only the overrun `top` — a probe
 // that has already reached the overrun instant and is mid-request. That request
@@ -282,23 +290,32 @@ type verdict struct {
 // read as "process gone" and its overrun erased. confirmCtx outlives the stream
 // close and dies only on Exec's own bound or the caller giving up.
 //
-// A pre-overrun probe that never runs answers false, and correctly: the stream
-// cannot close while the process that owns it is alive, so a close before the
-// deadline is a command that finished early.
+// A probe whose wait is cut short answers false, and correctly: the stream
+// cannot close while the process that owns it is alive, so a close before an
+// instant is a command that had already finished by it.
 func (c *container) probeDeadline(sleepCtx, confirmCtx context.Context, pid int, deadline time.Duration, start time.Time) <-chan verdict {
 	answer := make(chan verdict, 1)
+	var atDeadline, overran bool
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// Alive as the deadline arrived, so a SIGKILL that follows is the watchdog's?
 	go func() {
-		var v verdict
-		defer func() { answer <- v }()
-
-		if !sleepUntil(sleepCtx, start.Add(deadline-c.probeLead)) {
-			return
+		defer wg.Done()
+		if sleepUntil(sleepCtx, start.Add(deadline-c.probeLead)) {
+			atDeadline = c.alive(sleepCtx, pid)
 		}
-		v.aliveAtDeadline = c.alive(sleepCtx, pid)
-		if !sleepUntil(sleepCtx, start.Add(deadline+c.overrunSlop)) {
-			return
+	}()
+	// Still alive once the deadline and the slop had both passed? The guarantee,
+	// so it keeps its own clock and never waits on the probe above.
+	go func() {
+		defer wg.Done()
+		if sleepUntil(sleepCtx, start.Add(deadline+c.overrunSlop)) {
+			overran = c.aliveOrTimedOut(confirmCtx, pid)
 		}
-		v.overran = c.aliveOrTimedOut(confirmCtx, pid)
+	}()
+	go func() {
+		wg.Wait()
+		answer <- verdict{aliveAtDeadline: atDeadline, overran: overran}
 	}()
 	return answer
 }

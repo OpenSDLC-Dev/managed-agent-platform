@@ -1130,6 +1130,78 @@ func TestOverrunSurvivesTheStreamClosingDuringItsProbe(t *testing.T) {
 	}
 }
 
+// The overrun's sibling: it is the *pre-deadline* probe that stalls. A prober
+// that ran its two probes in sequence would still be waiting on that first `top`
+// when a watchdog-killed command overran and exited; the stream's close would
+// cancel the whole wait before the overrun instant was ever reached, and the
+// overrun would go unmeasured. The probes must keep independent clocks.
+func TestOverrunDetectedWhenTheFirstProbeStalls(t *testing.T) {
+	closeStream := make(chan struct{})
+	var closeOnce sync.Once
+	releaseStream := func() { closeOnce.Do(func() { close(closeStream) }) }
+
+	var mu sync.Mutex
+	var topCalls int
+	var streamClosed bool
+
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			io.WriteString(w, `{"Id":"e1"}`)
+
+		case r.URL.Path == "/exec/e1/start":
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			// The command overruns: its stream stays open well past
+			// deadline+overrunSlop, then closes as it exits.
+			go func() {
+				time.Sleep(1700 * time.Millisecond)
+				releaseStream()
+			}()
+			<-closeStream
+			mu.Lock()
+			streamClosed = true
+			mu.Unlock()
+
+		case r.URL.Path == "/exec/e1/json":
+			mu.Lock()
+			done := streamClosed
+			mu.Unlock()
+			fmt.Fprintf(w, `{"Running":%t,"ExitCode":0,"Pid":%d}`, !done, fakeExecPid)
+
+		case strings.HasSuffix(r.URL.Path, "/top"):
+			mu.Lock()
+			topCalls++
+			n := topCalls
+			mu.Unlock()
+			if n == 1 {
+				// The pre-deadline probe, stalled: it never answers on its own,
+				// and is cancelled only when the stream finally closes. A
+				// sequential prober is stuck here and never reaches the overrun
+				// instant below.
+				<-r.Context().Done()
+				return
+			}
+			// The overrun probe, reached on its own clock: the command is still
+			// alive at deadline+overrunSlop.
+			fmt.Fprintf(w, `{"Titles":["PID"],"Processes":[["1"],["%d"]]}`, fakeExecPid)
+
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	t.Cleanup(releaseStream)
+	c := p.attach("abc", "/workspace")
+
+	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "x", Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !res.TimedOut {
+		t.Errorf("a command that overran while its pre-deadline probe stalled was reported finished: %+v", res)
+	}
+}
+
 func tarball(t *testing.T, header *tar.Header, body string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
