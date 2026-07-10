@@ -12,6 +12,37 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The brain orchestration loop (slice 5): sessions now converse
+  end-to-end. `internal/brain` claims leased `model_turn` work, replays
+  the event log into one provider request (the log IS the conversation;
+  `tool_use` blocks are rebuilt under their event ids, which result
+  events reference), streams the response into `event_start`/
+  `event_delta` previews and Anthropic-native events (`agent.thinking`
+  per block, buffered `agent.message` before `span.model_request_end`,
+  `agent.custom_tool_use` per call), and settles the turn: `tool_use`
+  suspends with the session still `running`; `end_turn` idles with
+  `stop_reason` `end_turn` unless input arrived mid-turn, in which case
+  the turn requeues its own work item; failures append `session.error`
+  + idle `retries_exhausted`. `internal/queue` drives the work over the
+  existing `work_items` table (idempotent enqueue per session and kind,
+  leased claims with reclaim, lease-proof `Extend`/`Complete`/
+  `Requeue`). The control plane's `POST /events` became the session
+  state machine: `user.message` on an idle session flips it to
+  `running` + `session.status_running` + a queued turn, tool results
+  resume suspended turns, and session updates emit `session.updated`
+  with only the changed fields — all atomic with the append
+  (`AppendWith`/`AppendInTx` carry status flips, usage folding, and the
+  processed-inbound watermark under the session row lock). Providers
+  are wired from the `model_providers` JSON file (`provider.LoadRoutes`,
+  `MODEL_PROVIDERS_PATH`, `api_key_env` indirection) into the new
+  `cmd/brain` binary. The slice-2 wire-struct debt is settled:
+  `domain.AgentSpec`/`ResolvedAgent`/`Usage` are the wire shapes and
+  the api's private copies collapsed onto them. Verified with the real
+  `ant` CLI against the local stack driving the real Anthropic-protocol
+  endpoint from `.env`: full-turn event order on the log and the live
+  SSE stream, previews reconciling into the buffered message, session
+  usage folded. (#11)
+
 - `internal/provider` (slice 4): the config-driven model-provider layer.
   A provider is constructed from `protocol` / `model` / `base_url` /
   `api_key` (+ optional headers); the first adapter speaks the Anthropic
