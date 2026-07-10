@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -393,13 +394,29 @@ func mustJSON(v any) []byte {
 
 // jsonEqual compares two JSON documents by value: stored jsonb comes back
 // with Postgres's own spacing and key order, so a byte comparison against a
-// fresh Go marshal would call every no-op update a change.
+// fresh Go marshal would call every no-op update a change. Numbers decode as
+// json.Number rather than float64, so integers past 2^53 (a tool schema's
+// bounds, say) stay distinguishable instead of collapsing onto one float.
 func jsonEqual(a, b []byte) bool {
-	var x, y any
-	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+	x, err := decodeJSONValue(a)
+	if err != nil {
+		return false
+	}
+	y, err := decodeJSONValue(b)
+	if err != nil {
 		return false
 	}
 	return reflect.DeepEqual(x, y)
+}
+
+func decodeJSONValue(raw []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
 func (s *server) getSession(r *http.Request) (any, error) {

@@ -55,9 +55,16 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   stranding it; brain-side infra errors abandon the turn to lease
   expiry with nothing on the wire (only model/deterministic failures
   produce `session.error`); a lease-keeper goroutine re-extends the
-  work-item lease during long time-to-first-token; empty text blocks
-  are never stored; `session.updated` change detection compares jsonb
-  semantically, killing phantom events on idempotent PATCH retries. (#11)
+  work-item lease during long time-to-first-token, each renewal bounded
+  by its own timeout so a stalled database cannot hang the turn; a
+  `tool_use` whose input is not a JSON object fails the turn visibly
+  instead of reaching the append-only log; empty text deltas are
+  skipped before they allocate a content index, so an empty block
+  neither stores a malformed `text` block nor shifts the stored content
+  off the delta indices already streamed to SSE clients; and
+  `session.updated` change detection compares jsonb semantically with
+  exact number handling, killing phantom events on idempotent PATCH
+  retries without swallowing changes past 2^53. (#11)
 
 - `internal/provider` (slice 4): the config-driven model-provider layer.
   A provider is constructed from `protocol` / `model` / `base_url` /

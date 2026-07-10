@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -333,4 +334,30 @@ func TestUpdateSessionEmitsOnlyChangedFields(t *testing.T) {
 	evs = listData(t, res)
 	last = evs[len(evs)-1]
 	wantExactKeys(t, last, "id", "type", "processed_at", "title")
+}
+
+func TestUpdateSessionDetectsLargeIntegerChange(t *testing.T) {
+	// Change detection must not decode numbers as float64: two int64s that
+	// differ past 2^53 would collapse onto one float and the change would
+	// be swallowed.
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+
+	toolWithMax := func(max json.Number) map[string]any {
+		return map[string]any{"agent": map[string]any{"tools": []any{map[string]any{
+			"type": "custom", "name": "t", "description": "d",
+			"input_schema": map[string]any{"type": "object", "maximum": max},
+		}}}}
+	}
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sessionID, toolWithMax("9007199254740992")); status != http.StatusOK {
+		t.Fatalf("first agent update: %d %v", status, res)
+	}
+	before := len(s.eventTypes(sessionID))
+
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sessionID, toolWithMax("9007199254740993")); status != http.StatusOK {
+		t.Fatalf("second agent update: %d %v", status, res)
+	}
+	if after := len(s.eventTypes(sessionID)); after != before+1 {
+		t.Errorf("a change past 2^53 emitted no session.updated (%d -> %d)", before, after)
+	}
 }

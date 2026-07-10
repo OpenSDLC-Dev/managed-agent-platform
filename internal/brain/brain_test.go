@@ -684,7 +684,21 @@ func TestLongTimeToFirstTokenKeepsLease(t *testing.T) {
 	h := &harness{pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
 		provider: fake, brain: brain.New(pool, reg, brain.Config{LeaseTTL: 250 * time.Millisecond}),
 		sessionID: sid, envID: envID}
-	fake.onGenerate = func(int) { time.Sleep(600 * time.Millisecond) }
+	fake.onGenerate = func(int) {
+		// Well past the original lease, a rival brain must still find
+		// nothing to claim: the keeper has been renewing it while the
+		// model thinks. Without the keeper this claim succeeds and the
+		// turn forks.
+		time.Sleep(400 * time.Millisecond)
+		got, err := h.queue.Claim(context.Background(), queue.ModelTurn, time.Minute)
+		if err != nil {
+			t.Errorf("rival claim: %v", err)
+		}
+		if got != nil {
+			t.Errorf("healthy long turn was reclaimable mid-stream: the lease was not extended")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 
 	h.wake(t, "hi")
 	h.runOnce(t)
@@ -759,6 +773,92 @@ func TestEmptyTextBlockNotStored(t *testing.T) {
 	}
 	if got := h.status(t); got != "idle" {
 		t.Errorf("status = %q, want idle", got)
+	}
+}
+
+func TestEmptyLeadingBlockKeepsDeltaIndicesAligned(t *testing.T) {
+	// A block that produces no text must not consume a content index: the
+	// preview's delta indices address the buffered event's content array,
+	// so an empty block 0 followed by a real block 1 would otherwise have
+	// the stream say index 1 while the stored content puts the text at 0.
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, ""), textChunk(1, "real text"), done("end_turn", 1)},
+	}, nil)
+	h.wake(t, "hi")
+	h.runOnce(t)
+
+	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.message"}})
+	if len(evs) != 1 {
+		t.Fatalf("agent.message events = %d, want 1", len(evs))
+	}
+	var msg struct {
+		Content []domain.ContentBlock `json:"content"`
+	}
+	if err := json.Unmarshal(evs[0].Body, &msg); err != nil {
+		t.Fatal(err)
+	}
+	// One block, at index 0 — the index the preview's delta announced.
+	if len(msg.Content) != 1 || msg.Content[0].Text != "real text" {
+		t.Errorf("stored content = %+v, want one block \"real text\" at index 0", msg.Content)
+	}
+}
+
+func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
+	// A tool_use whose input is not a JSON object must never reach the log.
+	// Truncated JSON would abort every settlement (a silent reclaim loop);
+	// a valid non-object would replay into a request the model rejects,
+	// wedging the session forever on an append-only log.
+	for _, bad := range []string{`{`, `"oops"`, `[1,2]`, `42`} {
+		t.Run(bad, func(t *testing.T) {
+			h := newHarness(t, [][]provider.Chunk{{
+				provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+					ID: "toolu_x", Name: "lookup", Input: json.RawMessage(bad)}},
+				done("tool_use", 3),
+			}}, nil)
+			h.wake(t, "use the tool")
+			h.runOnce(t)
+
+			if n := h.countType(t, "agent.custom_tool_use"); n != 0 {
+				t.Errorf("malformed tool input %s reached the log", bad)
+			}
+			if n := h.countType(t, "session.error"); n != 1 {
+				t.Errorf("session.error count = %d, want 1", n)
+			}
+			if got := h.status(t); got != "idle" {
+				t.Errorf("status = %q, want idle", got)
+			}
+			if n := h.liveWork(t); n != 0 {
+				t.Errorf("%d work items still live (reclaim loop)", n)
+			}
+		})
+	}
+}
+
+func TestNullToolInputBecomesEmptyObject(t *testing.T) {
+	// An absent or null input is legal and means "no arguments"; it lands
+	// as {} so the emitted event carries a JSON object.
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_x", Name: "noop", Input: nil}},
+			done("tool_use", 1),
+		},
+	}, nil)
+	h.wake(t, "call it")
+	h.runOnce(t)
+
+	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.custom_tool_use"}})
+	if len(evs) != 1 {
+		t.Fatalf("tool intents = %d, want 1", len(evs))
+	}
+	var p struct {
+		Input map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(evs[0].Body, &p); err != nil {
+		t.Fatalf("input is not an object: %v (%s)", err, evs[0].Body)
+	}
+	if p.Input == nil || len(p.Input) != 0 {
+		t.Errorf("input = %v, want {}", p.Input)
 	}
 }
 

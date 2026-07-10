@@ -254,7 +254,14 @@ func (b *Brain) keepLease(ctx context.Context, item *queue.Item) (context.Contex
 			case <-kctx.Done():
 				return
 			case <-t.C:
-				if err := b.queue.Extend(kctx, item, b.cfg.LeaseTTL); err != nil {
+				// Bounded: close() waits for this goroutine, so an Extend
+				// blocked on an exhausted pool or a stalled database would
+				// otherwise hang the turn forever. A renewal that cannot
+				// finish within a tick is a lost lease.
+				ectx, ecancel := context.WithTimeout(kctx, b.cfg.LeaseTTL/3)
+				err := b.queue.Extend(ectx, item, b.cfg.LeaseTTL)
+				ecancel()
+				if err != nil {
 					k.failed = err
 					k.cancel() // aborts the in-flight provider stream
 					return
@@ -296,19 +303,12 @@ func pendingInput(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64
 
 // turnEvents renders the model's turn as its wire events: the buffered
 // agent.message under the preview-reserved id, then one intent event per
-// tool call. Text blocks that ended empty are dropped — a "text" block
-// without its text field is malformed on the wire, and replay would feed it
-// back to the model on every future turn.
+// tool call. turn.text holds no empty blocks — the stream never opens one —
+// so a "text" block always carries its required text field.
 func turnEvents(turn *turnResult) ([]events.NewEvent, error) {
 	var batch []events.NewEvent
-	var text []domain.ContentBlock
-	for _, blk := range turn.text {
-		if blk.Text != "" {
-			text = append(text, blk)
-		}
-	}
-	if len(text) > 0 {
-		content, err := json.Marshal(map[string]any{"content": text})
+	if len(turn.text) > 0 {
+		content, err := json.Marshal(map[string]any{"content": turn.text})
 		if err != nil {
 			return nil, err
 		}
@@ -376,18 +376,12 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		// Suspend: the session stays running (awaiting a tool is still
 		// working, not awaiting input) and the turn resumes when the full
 		// result set is in — the control plane's trigger fires on the
-		// completing result. If every intent is already answered by the
-		// time this commits (a producer that appends results outside the
-		// API — slice 6's executor — can race the settle), chain
-		// immediately: that result's enqueue was suppressed by our item.
+		// completing result. Nothing can be chained here: the intents
+		// commit in THIS transaction, and a result may only reference a
+		// committed tool use, so none of them is answered yet. A result
+		// for an earlier intent that landed mid-turn is not lost either —
+		// it stays unprocessed and the resuming turn replays it.
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-			unanswered, err := events.HasUnansweredToolUse(ctx, tx, sid, nil)
-			if err != nil {
-				return err
-			}
-			if !unanswered {
-				return b.queue.Requeue(ctx, tx, item)
-			}
 			return b.queue.Complete(ctx, tx, item)
 		}
 	} else {

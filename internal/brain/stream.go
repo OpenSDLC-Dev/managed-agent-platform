@@ -2,6 +2,7 @@ package brain
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -83,6 +84,14 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 			if err := closeThinking(); err != nil {
 				return nil, err
 			}
+			// An empty delta adds no text. Skipping it before anything is
+			// allocated keeps the content array dense: a block that never
+			// produces text gets no entry, so the preview's delta indices
+			// and the buffered event's content indices always agree, and
+			// no preview is opened for an event that will never land.
+			if c.Text == "" {
+				continue
+			}
 			if msgPreview == nil {
 				msgPreview, err = b.log.StartPreview(ctx, sid, domain.EventAgentMessage)
 				if err != nil {
@@ -105,7 +114,18 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 			if err := closeThinking(); err != nil {
 				return nil, err
 			}
-			turn.toolUses = append(turn.toolUses, *c.ToolUse)
+			// The event we are about to durably emit must carry a JSON
+			// object: the log is append-only, and a tool_use block whose
+			// input is `"oops"` or a truncated `{` would either abort every
+			// settlement (a silent reclaim loop) or make the model reject
+			// every future replay of this session.
+			tu := *c.ToolUse
+			input, err := normalizeToolInput(tu.Input)
+			if err != nil {
+				return nil, fmt.Errorf("tool %q: %w", tu.Name, err)
+			}
+			tu.Input = input
+			turn.toolUses = append(turn.toolUses, tu)
 
 		case provider.KindDone:
 			if err := closeThinking(); err != nil {
@@ -124,4 +144,17 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 		return nil, fmt.Errorf("model stream ended without a stop reason")
 	}
 	return turn, nil
+}
+
+// normalizeToolInput accepts an absent or null input as the empty object and
+// rejects anything that is not a JSON object.
+func normalizeToolInput(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return json.RawMessage("{}"), nil
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, fmt.Errorf("input must be a JSON object: %w", err)
+	}
+	return raw, nil
 }
