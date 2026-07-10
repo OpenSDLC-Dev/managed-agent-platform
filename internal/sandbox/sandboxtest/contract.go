@@ -217,44 +217,67 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
-	// The crown-jewel guarantee, and the one a backend is most likely to get
-	// wrong: whatever enforces the deadline lives where the command can reach
-	// it. Kill everything the command's shell was started alongside, then try to
-	// outlive the deadline — loudly, and then quietly.
+	// The crown-jewel invariant, stated so every backend is bound to it however
+	// it enforces the deadline: a command cannot both outlive its deadline and
+	// be reported as finished on time. It may leave an orphan behind — that is
+	// the container's to reap — but it may not hide that it ran long.
 	//
-	// A backend whose deadline is enforced only inside the sandbox passes every
-	// other subtest here and fails these two.
-	const killTheGuards = `
-	  for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do
-	    [ "$p" != "$$" ] && kill -9 -"$p" 2>/dev/null
-	  done
-	`
-	t.Run("ExecDeadlineOutlivesTheCommandKillingItsGuards", func(t *testing.T) {
+	// Each case attacks the deadline the way a past backend was actually
+	// defeated, then holds a uniquely named marker alive far past the deadline.
+	t.Run("ExecCannotOutliveItsDeadlineUnreported", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		for _, tc := range []struct{ name, after string }{
-			// Run far past the deadline: the backend must stop waiting.
-			{"and running long", `sleep 300`},
-			// Slip just past it and exit clean: the backend must not believe the
-			// exit code of a command that outlived its deadline.
-			{"and exiting clean", `sleep 2; exit 0`},
+		// Kill every process guarding the deadline that the command can see: a
+		// watchdog a backend runs beside the command (a child of its parent) or
+		// below it (a child of the command). Killed individually, not by group,
+		// so the command does not take itself down. Once they are gone, only an
+		// enforcement point outside the sandbox can still catch the overrun.
+		const killWatchdog = `
+		  for parent in $$ $PPID; do
+		    for p in $(cat /proc/$parent/task/$parent/children 2>/dev/null); do
+		      [ "$p" != "$$" ] && kill -9 "$p" 2>/dev/null
+		    done
+		  done
+		`
+		// ...and then kill the parent itself: a backend that decides the timeout
+		// by watching a wrapper the command runs under reports it finished while
+		// it runs on. (Where the command is itself the watched process, $PPID is
+		// outside the sandbox's namespace and this signals the command's own
+		// group — it simply dies, still no hidden overrun.)
+		const killWrapper = killWatchdog + "kill -9 \"$PPID\" 2>/dev/null\n"
+
+		for _, tc := range []struct {
+			name, sabotage, marker string
+			mustTimeout            bool
+		}{
+			{"killing its watchdog", killWatchdog, "sleep 987321", true},
+			{"killing the process a prober would watch", killWrapper, "sleep 987322", false},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				start := time.Now()
 				res, err := sb.Exec(ctx, sandbox.ExecRequest{
-					Command: killTheGuards + tc.after, Timeout: time.Second,
+					Command: tc.sabotage + tc.marker, Timeout: time.Second,
 				})
-				elapsed := time.Since(start)
 				if err != nil {
 					t.Fatalf("exec: %v", err)
 				}
-				if !res.TimedOut {
-					t.Errorf("a command that disarmed the deadline and outran it hid the timeout: %+v", res)
+				if elapsed := time.Since(start); elapsed > 20*time.Second {
+					t.Fatalf("the call outran its 1s deadline by %s", elapsed)
 				}
-				if elapsed > 20*time.Second {
-					t.Errorf("the call outran its 1s deadline by %s", elapsed)
+				// The invariant, and it is one-sided: a timeout may leave the
+				// marker running (an orphan the container reaps), but a live
+				// marker with no timeout is a command that hid its overrun.
+				if !res.TimedOut && countProcesses(t, sb, tc.marker) > 0 {
+					t.Errorf("a command outran its deadline but was reported finished: %+v", res)
+				}
+				// Where the command provably survived its own sabotage to run
+				// long, the honest answer is a timeout and the backend must give
+				// it — a stronger check than the invariant, for the case that
+				// admits one.
+				if tc.mustTimeout && !res.TimedOut {
+					t.Errorf("a command that disarmed its watchdog and ran long was not a timeout: %+v", res)
 				}
 			})
 		}

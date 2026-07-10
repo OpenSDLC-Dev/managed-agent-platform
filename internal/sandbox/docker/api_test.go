@@ -592,16 +592,23 @@ func TestExecWrapperKeepsNoStateInsideTheContainer(t *testing.T) {
 	if !strings.Contains(execWrapper, "set -m") {
 		t.Error("the wrapper must enable job control so the deadline kills the command's process group")
 	}
-	// Silencing the whole wrapper would swallow its own failures — a fork that
-	// hits RLIMIT_NPROC, a missing shell — and return them as an empty stderr.
-	if strings.Contains(execWrapper, "exec 3>&2") || strings.Contains(execWrapper, "exec 2>/dev/null") {
-		t.Error("the wrapper redirects its own stderr wholesale; only `wait` needs silencing")
+	// The command must BECOME the exec (exec /bin/bash -c "$1"), not run as a
+	// child of a wrapper shell. Otherwise the pid Exec watches is a wrapper the
+	// command can kill to look finished while it runs on — the bypass this
+	// structure closes.
+	if !strings.Contains(execWrapper, `exec /bin/bash -c "$1"`) {
+		t.Error("the wrapper must exec the command so the exec's pid is the command's own")
+	}
+	// The watchdog must poll rather than sleep the whole deadline, so it exits
+	// with a command that finishes early instead of leaving a stray sleep.
+	if !strings.Contains(execWrapper, "kill -0") {
+		t.Error("the watchdog must poll the command so it self-cleans on an early exit")
 	}
 }
 
-// The in-container watchdog is a process beside the command, so the command can
-// kill it. The deadline must therefore be enforced outside the container too:
-// once its own bound passes, Exec stops waiting and calls the timeout itself.
+// The in-container watchdog is a process the command can kill. The deadline
+// must therefore be enforced outside the container too: once its own bound
+// passes, Exec stops waiting and calls the timeout itself.
 func TestExecStopsWaitingWhenTheSandboxsWatchdogDoesNot(t *testing.T) {
 	var inspects int
 	c := execDaemon(t, fakeExec{

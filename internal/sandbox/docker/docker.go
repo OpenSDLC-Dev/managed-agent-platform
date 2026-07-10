@@ -31,35 +31,47 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // kill a running exec, so this has to happen inside the container. $1 is the
 // command, $2 the timeout in whole seconds ("0" = no limit).
 //
+// The command runs via `exec`, so it *becomes* this process — the pid Docker
+// reports for the exec is the command itself, not a shell wrapping it. That is
+// what lets Exec judge the deadline from outside by watching one pid: there is
+// no separate wrapper pid for the command to kill in order to look finished
+// while it keeps running (it cannot kill itself and continue). `set -m` makes
+// the command a process-group leader, so the watchdog's `kill -9 -"$PPID"`
+// takes its children with it — a process group, not a tree, so a child that
+// calls setsid still escapes and outlives the deadline (Exec's own bound, and
+// the container's eventual teardown, are what bound that).
+//
 // The watchdog is best effort by construction, and the sandbox never trusts it.
-// It runs beside the command, inside the container, where the command can find
-// and kill it: nothing in here is out of the agent's reach. What it buys is
+// It is a process inside the container, where the command can find and kill it:
+// nothing in here is out of the agent's reach. What it buys is
 // that an honest command's runaway loop stops burning the sandbox's CPU the
 // moment its deadline passes, and that the sandbox learns the real exit code.
 // Whether a call actually timed out is decided outside the container, by Exec.
 //
-// `set -m` puts each job in its own process group, so the kill takes the
-// command's children with it: killing the command's shell alone leaves them
-// running, holding the exec's pipes open long after the deadline. It is a
-// process group, not a process tree — a child that calls setsid escapes it —
-// which is another reason Exec keeps its own bound.
-//
-// Only `wait` has its stderr silenced: bash announces a job it killed
-// ("...Killed...") there, and that announcement would land in the tool result
-// as if the command had printed it. Redirecting the whole wrapper instead would
-// swallow its real failures — a fork that hits RLIMIT_NPROC, a missing shell.
+// The watchdog polls `kill -0 "$self"` — the wrapper's own pid, captured before
+// the exec, which the exec keeps — rather than sleeping the whole deadline: an
+// honest command that finishes early takes its watchdog with it within one
+// poll, so no stray `sleep` piles up across a session's thousands of quick
+// commands. ($$ is captured into a variable because bash freezes both $$ and
+// $PPID at the parent's values inside a subshell, and $PPID there is the
+// wrapper's parent, not the wrapper.) The watchdog's own output is discarded;
+// the command's stderr is the exec's, untouched, so a SIGKILL leaves no shell
+// "Killed" line in the tool result to begin with.
 const execWrapper = `
 set -m
-/bin/bash -c "$1" &
-pid=$!
+self=$$
 if [ "$2" != "0" ]; then
-  ( sleep "$2"; kill -9 -"$pid" 2>/dev/null ) >/dev/null 2>&1 &
-  guard=$!
+  (
+    n=0
+    while [ "$n" -lt "$2" ]; do
+      kill -0 "$self" 2>/dev/null || exit 0
+      sleep 1
+      n=$((n + 1))
+    done
+    kill -9 -"$self" 2>/dev/null
+  ) >/dev/null 2>&1 &
 fi
-wait "$pid" 2>/dev/null
-rc=$?
-if [ -n "${guard:-}" ]; then kill -9 -"$guard" 2>/dev/null; fi
-exit "$rc"
+exec /bin/bash -c "$1"
 `
 
 // sigkillExit is what bash reports for a job killed by SIGKILL (128 + 9).
@@ -192,11 +204,15 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 
 // ours refuses a container that merely wears this session's name. The name is
 // derived from the session id, so anything else on the daemon can hold it: a
-// leftover from an earlier deployment, or a container an attacker placed there.
-// Adopting one would hand the agent's commands to a filesystem, an image, and —
+// container left by an earlier deployment, or one that happens to collide.
+// Adopting it would hand the agent's commands to a filesystem, an image, and —
 // because a container's network mode is fixed when it is created — an egress
-// policy that are not the ones this session asked for. A `limited` session must
-// never inherit a `bridge` container's route out.
+// policy that are not the ones this session asked for; a `limited` session must
+// never inherit a `bridge` container's route out. This is not a trust boundary
+// against a hostile daemon co-tenant: the label is world-readable and
+// world-writable, and anyone with access to the daemon can forge it — but that
+// actor already controls every sandbox on the host. It defends against the
+// accidents, which are the realistic failure on a single-tenant daemon.
 func ours(info containerInfo, sessionID domain.ID) error {
 	if info.Config.Labels[sessionLabel] != string(sessionID) {
 		return fmt.Errorf("docker: container %s is not this platform's sandbox for session %s",
@@ -310,11 +326,11 @@ func (c *container) alive(ctx context.Context, pid int) bool {
 // and exitBudget instead.
 //
 // The deadline is enforced twice, and only the second one is a guarantee. The
-// watchdog inside the container does the killing, but it is a process sitting
-// beside the command, so the command can kill it; Exec therefore stops waiting
-// on its own clock, and treats any command that outlived its deadline as timed
-// out no matter what exit code it chose. The one thing a command buys by
-// killing its watchdog is overrunSlop of unnoticed overrun.
+// watchdog inside the container does the killing, but it is a process the
+// command can find and kill; Exec therefore stops waiting on its own clock, and
+// treats any command that outlived its deadline as timed out no matter what
+// exit code it chose. The one thing a command buys by killing its watchdog is
+// overrunSlop of unnoticed overrun.
 func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	seconds := 0
 	if req.Timeout > 0 {

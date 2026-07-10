@@ -23,11 +23,13 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   container only after checking the ownership label it wrote when it
   created it, because the container's name is derived from the session id
   and anything else on the daemon may hold that name. `Exec` runs
-  the command through `/bin/bash -c` in the session's workdir, and
-  enforces its deadline twice: a watchdog inside the container kills the
-  command's process group (Docker offers no way to kill a running exec
-  from outside), and `Exec` itself stops waiting shortly after the
-  deadline regardless. Only the second is a guarantee — the watchdog is a
+  the command in the session's workdir, `exec`ing it so the command
+  *becomes* the exec's own process — there is no wrapper shell pid for
+  the command to kill to look finished while it runs on — and enforces
+  its deadline twice: a watchdog inside the container kills the command's
+  process group (Docker offers no way to kill a running exec from
+  outside), and `Exec` itself stops waiting shortly after the deadline
+  regardless. Only the second is a guarantee — the watchdog is a
   process the sandboxed command can find and kill — so `Exec` decides the
   verdict outside the container, by asking the daemon twice whether the
   command's process is still alive: as the deadline arrives, and once the
