@@ -9,8 +9,8 @@ Running record of where this project actually stands, so work can resume cleanly
 ## Snapshot
 
 - **Last updated:** 2026-07-10
-- **Phase:** Control plane — the wire-compatible CRUD surface is live (the real `ant` CLI drives it); the event log, brain, and executor do not exist yet, so nothing runs end-to-end.
-- **Current slice:** 2 complete; next up is slice 3 (event log + SSE).
+- **Phase:** Control plane — the wire-compatible CRUD surface and the session event log (send/list/SSE stream) are live and driven by the real `ant` CLI; the brain and executor do not exist yet, so nothing runs end-to-end.
+- **Current slice:** 3 complete; next up is slice 4 (ModelProvider).
 - **Build status:** `go build ./...`, `go vet ./...`, `go test ./...` all green.
 
 ## Reference documents
@@ -36,7 +36,7 @@ The model backend must be pointable at either an Anthropic-protocol endpoint or 
 | 0 | `internal/domain` (Anthropic-native types) + `internal/telemetry` (OTel/OTLP, context propagation) | ✅ Done |
 | 1 | Postgres schema + migrations (`internal/store`), reserved multi-tenant columns | ✅ Done |
 | 2 | Control plane CRUD (agents / environments / sessions) + optimistic versioning + ID prefixes + `x-api-key` auth | ✅ Done |
-| 3 | Append-only event log (seq allocation) + `POST /events` + SSE stream (`event_start` / `event_delta` reconciliation) + `span.*` emitted from the same point as OTel spans | ⬜ Not started |
+| 3 | Append-only event log (seq allocation) + `POST /events` + SSE stream (`event_start` / `event_delta` reconciliation) + `span.*` emitted from the same point as OTel spans | ✅ Done |
 | 4 | `ModelProvider` (config-driven: protocol / model / base_url / api_key) + `model_providers` routing; first provider passing a single model turn; verify a custom `base_url` works | ⬜ Not started |
 | 5 | Brain orchestration loop (replay → assemble provider request → write Anthropic-native events). No adk runtime. | ⬜ Not started |
 | 6 | tool-exec queue (Postgres `FOR UPDATE SKIP LOCKED`) + executor + Docker sandbox provider + built-in toolset really executing inside the sandbox | ⬜ Not started |
@@ -116,14 +116,31 @@ Slice 2. The real `ant` CLI (built from the local checkout, v1.16.0) drives ever
 
 **Test coverage:** contract tests over real HTTP + Dockerized Postgres: full-surface response-shape assertions (every `api:"required"` field, `[]`/`{}`/null defaults, UTC `Z` timestamps), optimistic-version 409 + no-op on conflict, patch semantics (null clears, metadata upsert/delete), snapshot pinning + overrides, keyset pagination walks both directions incl. a concurrent-insert walk and prev-cursor round-trip, config-merge preservation, archived-immutability, bootstrap-key rotation, 413 oversize bodies, strict unknown-field rejection, OTel remote-parent span continuation, auth (missing/wrong/revoked key), error envelope on 404/405/500, corrupt-row and dropped-table defensive paths.
 
-**Known debt (recorded, slice 3):** `internal/api` declares its own wire structs (`agentSpec`, `agentJSON`, `sessionAgentJSON`) instead of reusing `internal/domain`'s `AgentSpec`/`ResolvedAgent`, because `domain.Tool` keeps tool bodies in a non-serializable `Raw` field and the domain tags use `omitempty` where the wire requires always-present fields. Reconcile the two when slice 3 aligns the event types with the wire (domain stays the single source of truth per CLAUDE.md rule 1).
+**Known debt (recorded slice 2, updated slice 3):** `internal/api` declares its own wire structs (`agentSpec`, `agentJSON`, `sessionAgentJSON`) instead of reusing `internal/domain`'s `AgentSpec`/`ResolvedAgent`, because `domain.Tool` keeps tool bodies in a non-serializable `Raw` field and the domain tags use `omitempty` where the wire requires always-present fields. Slice 3 honored the rule for its new surface — the event endpoints consume `domain.Event`/`domain.EventType`/`domain.ModelUsage` directly, no parallel event structs — and added no new drift. The agent-struct reconciliation moves to **slice 5**: nothing outside `internal/domain` consumes `AgentSpec`/`ResolvedAgent` today, and the brain's replay is their first real consumer, which is when the required shape becomes concrete (domain stays the single source of truth per CLAUDE.md rule 1).
+
+### `internal/events` + events API — append-only log, send/list, SSE stream (slice 3)
+
+The event log is the single source of truth for session state. Verified end-to-end with the real `ant` CLI (v1.16.0): `beta:sessions:events send/list/stream` against `cmd/controlplane` — batch echo parsed by the typed SDK client, `--type` filter, `--limit 1` auto-pagination following our cursors, live stream frames, and a clean exit when `session.deleted` terminated the stream.
+
+| File | Contents |
+|---|---|
+| `events/log.go` | `Log.Append` — per-session `seq` allocation under the session row lock (`SELECT … FOR UPDATE`; concurrent appends serialize per session, sessions don't contend), `sevt_` id assignment, `pg_notify` on commit only. `Log.List` — types / `created_at` ranges / seq-keyset / order / limit. Sentinels `ErrSessionNotFound` / `ErrSessionArchived`; stream-only types are unpersistable by construction. |
+| `events/inbound.go` | `NormalizeInbound` — the POST contract: only the wire's 7 inbound types; field-exact validation (content-block unions per carrier, source unions, `deny_message` only with `result:"deny"`, `user.tool_result` only on `self_hosted` environments, `system.message` at most one / final / immediately after a user payload event); nullable fields normalized to explicit nulls; validated blocks kept as the client's raw bytes so they round-trip byte-for-byte. |
+| `events/broker.go` | Postgres LISTEN/NOTIFY fan-out: one listening connection per process, held only while subscribers exist; wake signals are coalesced pointers ("re-read the log"), so a dropped notification can delay but never lose an event; reconnect re-wakes every subscriber; `Ready` lets the SSE handler snapshot its tail position only after LISTEN coverage is active (no subscribe-window gap). Frames (previews, `session.deleted`) are best-effort broadcast by contract. |
+| `events/preview.go` | `event_start` / `event_delta` preview frames (delta type is literally `content_delta`, **not** the Messages API's `content_block_delta`); `agent.message` streams text fragments, `agent.thinking` is start-only; the preview pre-allocates the buffered event's id for reconciliation; long fragments auto-split at the same index to fit the 8000-byte NOTIFY cap (JSON-escape-aware chunking). Previews are never persisted and never replayed. |
+| `events/span.go` | `StartModelRequest`/`End` — the `span.model_request_start`/`_end` wire events and the OTel client span come from one instrumentation point (CLAUDE.md principle 3), linked via `model_request_start_id` and carrying `model_usage`. |
+| `api/events.go` | `POST /v1/sessions/{id}/events` (batch `{"events":[…]}` → `{"data":[…]}` echo with server-assigned ids, `processed_at` null until processed), `GET …/events` (PageCursor envelope `{"data","next_page"}` — no `prev_page` on events — opaque seq-keyset cursor, `types[]` in both spellings, `created_at[gt|gte|lt|lte]`, `order`), `GET …/events/stream` (SSE `event:`+`data:` framing — the reference decoder drops unnamed frames — `ping` keepalive, `?event_deltas[]` opt-in previews filtered per subscriber, live tail from connect time). `DELETE /v1/sessions/{id}` now broadcasts an ephemeral `session.deleted` event that terminates active streams. |
+
+**Slice-3 wire/scope decisions (documented divergences):** the stream is a live tail from connect time — no history replay, no `Last-Event-ID` (the reference client parses neither; reconnecting clients seed via list). `POST /events` appends + streams but does not yet flip session status or enqueue brain work (slice 5), and `tool_use_id`/`custom_tool_use_id` existence is not cross-checked. `user.define_outcome` is rejected (outcome surface deferred; no `outc_` prefix in v1). A non-null `session_thread_id` is rejected (threads deferred). `session.updated`/`session.status_*` emission waits for the state machine (slice 5). `seq` is internal only — never a wire field; cursors carry it opaquely.
+
+**Test coverage:** events package contract tests against Dockerized Postgres — concurrent-append seq integrity (8×25 single session, gap/duplicate-free), cross-pool NOTIFY fan-out, listener kill via `pg_terminate_backend` → reconnect + heal-wake, garbage NOTIFY payloads survived, preview reconciliation (buffered event supersedes deltas under the preview id), JSON-escape-aware chunk reassembly, same-source span emission (one exported OTel span + linked start/end events per request). API contract tests over real HTTP — field-exact echo shapes per inbound type, ~30-case validation sweep (batch atomicity included), cursor walk, SSE framing parsed off the live socket, delta opt-in vs plain subscriber, ping keepalive, `session.deleted` stream termination, corrupt-row 500s.
 
 ---
 
 ## Next up
 
-1. **Slice 3:** Append-only event log (seq allocation) + `POST /events` + SSE stream + `span.*` events emitted from the same instrumentation point as OTel spans.
-2. **Slice 4:** `ModelProvider` (config-driven) + `model_providers` routing + first provider passing a single model turn (pin the SDK dependency; re-check wire-drift then).
+1. **Slice 4:** `ModelProvider` (config-driven) + `model_providers` routing + first provider passing a single model turn (pin the SDK dependency; re-check wire-drift then).
+2. **Slice 5:** Brain orchestration loop (replay → assemble provider request → write Anthropic-native events) — includes the agent-struct reconciliation debt above and the session state machine (`session.status_*`, `session.updated` emission, work enqueue on `user.message`).
 
 ---
 

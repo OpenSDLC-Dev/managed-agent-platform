@@ -100,8 +100,9 @@ type Event struct {
 type StopReasonType string
 
 const (
-	StopRequiresAction StopReasonType = "requires_action"
-	StopEndTurn        StopReasonType = "end_turn"
+	StopRequiresAction   StopReasonType = "requires_action"
+	StopEndTurn          StopReasonType = "end_turn"
+	StopRetriesExhausted StopReasonType = "retries_exhausted"
 )
 
 // StopReason accompanies a session.status_idle event. EventIDs lists the
@@ -116,4 +117,15 @@ type StopReason struct {
 type ContentBlock struct {
 	Type string `json:"type"` // "text", …
 	Text string `json:"text,omitempty"`
+}
+
+// ModelUsage is the token accounting attached to a span.model_request_end
+// event (wire field model_usage). All counters are always present on the
+// wire; speed is nullable ("standard" | "fast").
+type ModelUsage struct {
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
+	InputTokens              int64   `json:"input_tokens"`
+	OutputTokens             int64   `json:"output_tokens"`
+	Speed                    *string `json:"speed"`
 }

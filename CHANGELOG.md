@@ -12,6 +12,22 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- `internal/events` + events API (slice 3): the append-only session event
+  log — the single source of truth for session state — with per-session
+  `seq` allocation serialized under the session row lock, wire-compatible
+  `POST /v1/sessions/{id}/events` (batch send of the 7 inbound event types,
+  field-exact validation, echo with server-assigned `sevt_` ids),
+  `GET …/events` (cursor pagination, `types[]` and `created_at` range
+  filters), and the `GET …/events/stream` SSE tail (Postgres LISTEN/NOTIFY
+  fan-out across replicas, `ping` keepalives, opt-in
+  `event_start`/`event_delta` previews whose delta type is `content_delta`,
+  ephemeral `session.deleted` frames terminating streams on delete).
+  `span.model_request_start/_end` events and the OTel client span are
+  emitted from a single instrumentation point (`events.StartModelRequest`).
+  Verified end-to-end by driving the real `ant` CLI (send/list/stream).
+  Documented v1 divergences: streams are a live tail (reconnect seeds via
+  list), `user.define_outcome` and non-null `session_thread_id` are
+  rejected, session status transitions wait for the brain (slice 5). (#9)
 - GitHub checks: the CI coverage gate now runs as its own named check
   (`coverage`) with a per-package job summary and the profile uploaded as an
   artifact; `.coderabbit.yaml` configures CodeRabbit PR reviews (wire-compat

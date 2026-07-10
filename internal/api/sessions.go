@@ -689,5 +689,14 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if tag.RowsAffected() == 0 {
 		return nil, errNotFound("session %s not found", id)
 	}
+	// The session.deleted event terminates any active event stream. It
+	// cannot be persisted — the log rows just cascaded away with the
+	// session — so it goes out as an ephemeral broadcast, best-effort:
+	// the delete itself has already succeeded.
+	_ = s.log.PublishEventFrame(ctx, domain.ID(id), map[string]any{
+		"id":           domain.NewID("sevt").String(),
+		"type":         "session.deleted",
+		"processed_at": time.Now().UTC(),
+	})
 	return map[string]string{"id": id, "type": "session_deleted"}, nil
 }
