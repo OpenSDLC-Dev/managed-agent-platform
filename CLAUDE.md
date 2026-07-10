@@ -49,6 +49,10 @@ Three read-only local checkouts serve as ground truth where the public docs are 
 - `/Users/hele/Projects/anthropic-cli` — the real `ant` CLI source. `pkg/cmd/beta*.go` and `pkg/cmd/worker.go` show **client-side behavior**: polling, SSE/stream handling, defaults, headers.
 - `/Users/hele/Projects/claude-code-source` — Claude Code source. **Design reference only** for harness concerns (agent loop, tool orchestration, permission flow). Not a wire-schema source; never copy code from it.
 
+A fourth checkout exists for ideas only — it is NOT ground truth for anything:
+
+- `/Users/hele/Projects/adk-go` — google adk-go source. Governed entirely by design principle 2 above: a source of ideas, never a foundation. Consult it for *how they solved a problem* (e.g. loop structure, session service patterns), then implement Anthropic-native. Never copy its abstractions, its genai types, or its wire shapes; where it conflicts with the Anthropic model, it loses by rule.
+
 Caveats: these checkouts track the API's tip and already contain post-plan surface (`agent.thread_*` events, memory-store betas). Wire-compat is judged against the SDK version pinned in `go.mod` (once that dependency lands — today `go.mod` has none); new surface in the checkouts is not an invitation to build ahead of the current slice.
 
 ## Repo layout
