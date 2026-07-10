@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -17,12 +18,14 @@ import (
 )
 
 type server struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	log    *events.Log
+	broker *events.Broker
 }
 
 // NewHandler assembles the control-plane HTTP surface over the given pool.
 func NewHandler(pool *pgxpool.Pool) http.Handler {
-	s := &server{pool: pool}
+	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool)}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /v1/agents", s.handle(s.createAgent))
@@ -46,6 +49,10 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handle(s.deleteSession))
 	mux.HandleFunc("POST /v1/sessions/{id}/archive", s.handle(s.archiveSession))
 
+	mux.HandleFunc("POST /v1/sessions/{id}/events", s.handle(s.sendSessionEvents))
+	mux.HandleFunc("GET /v1/sessions/{id}/events", s.handle(s.listSessionEvents))
+	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", s.streamSessionEvents)
+
 	// The mux's built-in 404/405 write plain text; clients expect the wire
 	// error envelope, so register explicit fallbacks: "/" for unknown paths
 	// and a method-less pattern per route for unsupported methods.
@@ -56,6 +63,7 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 		"/v1/agents", "/v1/agents/{id}", "/v1/agents/{id}/versions", "/v1/agents/{id}/archive",
 		"/v1/environments", "/v1/environments/{id}", "/v1/environments/{id}/archive",
 		"/v1/sessions", "/v1/sessions/{id}", "/v1/sessions/{id}/archive",
+		"/v1/sessions/{id}/events", "/v1/sessions/{id}/events/stream",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest,
