@@ -1,0 +1,272 @@
+// Package brain is the orchestration loop (the plan's component 3): a
+// stateless harness that claims model_turn work, replays the session's event
+// log into a provider request, streams the model's turn back into
+// Anthropic-native events, and drives the session state machine at turn end.
+// It never runs tools in-process — a tool call is an emitted intent event,
+// and the turn resumes when the matching result event lands (a fresh
+// model_turn item enqueued by the control plane). Any brain can pick up any
+// turn: all durable state is the event log.
+package brain
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// Config sizes the loop.
+type Config struct {
+	// LeaseTTL is the work-item lease; it must comfortably exceed one
+	// provider round trip (the lease is re-extended mid-stream).
+	LeaseTTL time.Duration
+	// PollInterval is the idle wait between empty queue checks.
+	PollInterval time.Duration
+}
+
+const (
+	defaultLeaseTTL     = 2 * time.Minute
+	defaultPollInterval = 250 * time.Millisecond
+)
+
+// Brain runs model turns. All instances are interchangeable ("cattle"):
+// a crashed brain's lease expires and any other replays the session.
+type Brain struct {
+	pool     *pgxpool.Pool
+	log      *events.Log
+	queue    *queue.Queue
+	registry *provider.Registry
+	cfg      Config
+}
+
+func New(pool *pgxpool.Pool, registry *provider.Registry, cfg Config) *Brain {
+	if cfg.LeaseTTL <= 0 {
+		cfg.LeaseTTL = defaultLeaseTTL
+	}
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = defaultPollInterval
+	}
+	return &Brain{
+		pool:     pool,
+		log:      events.NewLog(pool),
+		queue:    queue.New(pool),
+		registry: registry,
+		cfg:      cfg,
+	}
+}
+
+// Run claims and executes turns until the context ends. Infra errors are
+// logged and retried — the turn's lease expires and is reclaimed.
+func (b *Brain) Run(ctx context.Context) error {
+	for {
+		found, err := b.RunOnce(ctx)
+		if err != nil {
+			slog.Error("brain: turn failed, lease left to expire", "error", err)
+		}
+		if found && err == nil {
+			continue // drain the queue before idling
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(b.cfg.PollInterval):
+		}
+	}
+}
+
+// RunOnce claims at most one model_turn and runs it to completion,
+// reporting whether there was work.
+func (b *Brain) RunOnce(ctx context.Context) (bool, error) {
+	item, err := b.queue.Claim(ctx, queue.ModelTurn, b.cfg.LeaseTTL)
+	if err != nil || item == nil {
+		return false, err
+	}
+	requeued, err := b.runTurn(ctx, item)
+	if err != nil {
+		return true, fmt.Errorf("session %s: %w", item.SessionID, err)
+	}
+	if requeued {
+		// The turn chained follow-on work by handing its own item back.
+		return true, nil
+	}
+	if err := b.queue.Complete(ctx, item); err != nil {
+		// Lease lost mid-turn: a reclaiming brain is re-running this turn.
+		// Our appends stand (the log is append-only); duplicated events are
+		// the documented cost of a lease sized below a real turn.
+		return true, fmt.Errorf("session %s: %w", item.SessionID, err)
+	}
+	return true, nil
+}
+
+func (b *Brain) runTurn(ctx context.Context, item *queue.Item) (requeued bool, err error) {
+	sid := item.SessionID
+
+	if item.Reclaimed {
+		// The previous claimant died mid-turn. Surface the recovery on the
+		// log, then run the turn normally — replay rebuilds everything.
+		running := domain.SessionRunning
+		if _, err := b.log.AppendWith(ctx, sid, []events.NewEvent{
+			{Type: domain.EventSessionStatusRescheduled},
+			{Type: domain.EventSessionStatusRunning},
+		}, events.AppendOptions{SetStatus: &running}); err != nil {
+			return false, fmt.Errorf("recovery events: %w", err)
+		}
+	}
+
+	var agentJSON []byte
+	var status string
+	err = b.pool.QueryRow(ctx,
+		`SELECT resolved_agent, status FROM sessions WHERE id = $1`, sid.String()).
+		Scan(&agentJSON, &status)
+	if err != nil {
+		return false, fmt.Errorf("load session: %w", err)
+	}
+	if status != string(domain.SessionRunning) {
+		// Stale work: the session moved on (deleted sessions cascade their
+		// items away; archived ones stop accepting appends). Nothing to run.
+		return false, nil
+	}
+	var agent domain.ResolvedAgent
+	if err := json.Unmarshal(agentJSON, &agent); err != nil {
+		return false, fmt.Errorf("decode resolved agent: %w", err)
+	}
+
+	history, err := b.log.List(ctx, sid, events.ListQuery{})
+	if err != nil {
+		return false, fmt.Errorf("replay: %w", err)
+	}
+	req, watermark, err := buildRequest(agent, history)
+	if err != nil {
+		return false, fmt.Errorf("replay: %w", err)
+	}
+
+	p, err := b.registry.Provider(agent.Model.ID)
+	if err != nil {
+		// A model with no route is a configuration error, not a transient
+		// fault: fail the turn visibly rather than retry forever.
+		return false, b.failTurn(ctx, sid, watermark, fmt.Sprintf("no provider for model %q", agent.Model.ID))
+	}
+
+	sctx, span, err := b.log.StartModelRequest(ctx, sid)
+	if err != nil {
+		return false, fmt.Errorf("span start: %w", err)
+	}
+
+	turn, streamErr := b.streamTurn(sctx, sid, item, p, req)
+	if streamErr != nil {
+		_ = span.End(sctx, true, domain.ModelUsage{})
+		return false, b.failTurn(ctx, sid, watermark, streamErr.Error())
+	}
+
+	// The buffered agent.message (closing its preview) and the tool-use
+	// intents land before the span ends: the SDK accumulator closes all
+	// open previews at span.model_request_end.
+	var batch []events.NewEvent
+	if len(turn.text) > 0 {
+		content, err := json.Marshal(map[string]any{"content": turn.text})
+		if err != nil {
+			return false, err
+		}
+		batch = append(batch, events.NewEvent{
+			ID: turn.messageEventID, Type: domain.EventAgentMessage, Payload: content,
+		})
+	}
+	for _, tu := range turn.toolUses {
+		payload, err := json.Marshal(map[string]any{"name": tu.Name, "input": tu.Input})
+		if err != nil {
+			return false, err
+		}
+		batch = append(batch, events.NewEvent{Type: domain.EventAgentCustomToolUse, Payload: payload})
+	}
+	if len(batch) > 0 {
+		if _, err := b.log.Append(ctx, sid, batch); err != nil {
+			return false, fmt.Errorf("emit turn events: %w", err)
+		}
+	}
+	if err := span.End(sctx, false, turn.usage); err != nil {
+		return false, fmt.Errorf("span end: %w", err)
+	}
+
+	return b.settleTurn(ctx, sid, item, turn, watermark)
+}
+
+// settleTurn drives the state machine after a successful model response.
+func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, turn *turnResult, watermark int64) (bool, error) {
+	opts := events.AppendOptions{
+		AddUsage:             &turn.usage,
+		MarkProcessedThrough: watermark,
+	}
+
+	if turn.stopReason == "tool_use" {
+		// Suspend: the turn resumes when the result event arrives (the
+		// control plane enqueues the next model_turn on it). Session stays
+		// running — awaiting a tool is still working, not awaiting input.
+		_, err := b.log.AppendWith(ctx, sid, nil, opts)
+		return false, err
+	}
+
+	// end_turn (and everything else — max_tokens, stop_sequence — treated
+	// as a completed turn in v1): if input arrived mid-turn, chain straight
+	// into the next turn; otherwise idle with end_turn.
+	var pending bool
+	err := b.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM events
+		  WHERE session_id = $1 AND type = $2 AND processed_at IS NULL AND seq > $3)`,
+		sid.String(), string(domain.EventUserMessage), watermark).Scan(&pending)
+	if err != nil {
+		return false, err
+	}
+	if pending {
+		// Chain by handing our own item back to the queue (a fresh Enqueue
+		// would be suppressed by this very item's live slot), atomically
+		// with the watermark and usage.
+		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+			return b.queue.Requeue(ctx, tx, item)
+		}
+		_, err := b.log.AppendWith(ctx, sid, nil, opts)
+		return err == nil, err
+	}
+
+	idle := domain.SessionIdle
+	opts.SetStatus = &idle
+	payload, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "end_turn"}})
+	if err != nil {
+		return false, err
+	}
+	_, err = b.log.AppendWith(ctx, sid, []events.NewEvent{
+		{Type: domain.EventSessionStatusIdle, Payload: payload},
+	}, opts)
+	return false, err
+}
+
+// failTurn records a model-side failure on the log and idles the session
+// with retries_exhausted. v1 has no automatic retry budget (documented in
+// STATE.md): one failed request ends the turn, and the next user.message
+// starts a fresh one.
+func (b *Brain) failTurn(ctx context.Context, sid domain.ID, watermark int64, msg string) error {
+	errPayload, err := json.Marshal(map[string]any{"error": map[string]any{
+		"type": "model_request_failed_error", "message": msg,
+		"retry_status": map[string]any{"type": "exhausted"},
+	}})
+	if err != nil {
+		return err
+	}
+	idlePayload, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "retries_exhausted"}})
+	if err != nil {
+		return err
+	}
+	idle := domain.SessionIdle
+	_, err = b.log.AppendWith(ctx, sid, []events.NewEvent{
+		{Type: domain.EventSessionError, Payload: errPayload},
+		{Type: domain.EventSessionStatusIdle, Payload: idlePayload},
+	}, events.AppendOptions{SetStatus: &idle, MarkProcessedThrough: watermark})
+	return err
+}

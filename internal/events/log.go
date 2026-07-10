@@ -100,7 +100,10 @@ func (l *Log) AppendWith(ctx context.Context, sessionID domain.ID, evs []NewEven
 // machine reads the current status FOR UPDATE, builds the batch, and appends
 // — all one commit). The NOTIFY still fires only on the caller's commit.
 func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, evs []NewEvent, opts AppendOptions) ([]domain.Event, error) {
-	if len(evs) == 0 {
+	// An empty batch is allowed when the options carry side effects (a turn
+	// that suspends on tool use changes state without saying anything new).
+	if len(evs) == 0 && opts.SetStatus == nil && opts.AddUsage == nil &&
+		opts.MarkProcessedThrough == 0 && opts.Then == nil {
 		return nil, errors.New("append requires at least one event")
 	}
 	for _, ev := range evs {
@@ -170,21 +173,23 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			ProcessedAt: utcOrNil(ev.ProcessedAt),
 		})
 	}
-	sb.WriteString(` RETURNING created_at`)
-	rows, err := tx.Query(ctx, sb.String(), args...)
-	if err != nil {
-		return nil, err
-	}
-	for i := 0; rows.Next(); i++ {
-		var createdAt time.Time
-		if err := rows.Scan(&createdAt); err != nil {
-			rows.Close()
+	if len(evs) > 0 {
+		sb.WriteString(` RETURNING created_at`)
+		rows, err := tx.Query(ctx, sb.String(), args...)
+		if err != nil {
 			return nil, err
 		}
-		out[i].CreatedAt = createdAt.UTC()
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		for i := 0; rows.Next(); i++ {
+			var createdAt time.Time
+			if err := rows.Scan(&createdAt); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[i].CreatedAt = createdAt.UTC()
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	if opts.SetStatus != nil {
@@ -228,9 +233,12 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 
 	// NOTIFY fires on commit, so subscribers only ever wake for committed
 	// rows. The payload is just a pointer — subscribers re-read the log.
-	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`,
-		channelEvents, `{"session_id":"`+sessionID.String()+`"}`); err != nil {
-		return nil, err
+	// An events-free append changed only session state, nothing to re-read.
+	if len(evs) > 0 {
+		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`,
+			channelEvents, `{"session_id":"`+sessionID.String()+`"}`); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

@@ -267,3 +267,42 @@ func TestEnqueueUnknownSessionFails(t *testing.T) {
 		t.Error("enqueue against missing session/environment succeeded")
 	}
 }
+
+func TestRequeueHandsTheItemBack(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+
+	// While active, a fresh enqueue is suppressed — Requeue is the only way
+	// to chain follow-on work under the live slot.
+	if err := q.Requeue(ctx, pool, item); err != nil {
+		t.Fatalf("Requeue: %v", err)
+	}
+	re, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || re == nil {
+		t.Fatalf("claim after requeue: %+v %v", re, err)
+	}
+	if re.ID != item.ID {
+		t.Errorf("requeued claim = %s, want %s", re.ID, item.ID)
+	}
+	if re.Reclaimed {
+		t.Error("requeued item flagged as a reclaim (it was handed back cleanly)")
+	}
+
+	// The old claimant's lease died with the requeue.
+	if err := q.Complete(ctx, item); err == nil {
+		t.Error("Complete with the pre-requeue lease succeeded")
+	}
+	if err := q.Complete(ctx, re); err != nil {
+		t.Errorf("Complete with the fresh lease: %v", err)
+	}
+}

@@ -131,6 +131,25 @@ func (q *Queue) Extend(ctx context.Context, item *Item, ttl time.Duration) error
 	return nil
 }
 
+// Requeue hands a claimed item back to the queue inside the caller's
+// transaction: the claimant discovered follow-on work for the same session
+// (input that arrived mid-turn) and chains it under the item's existing
+// live slot — an Enqueue would be suppressed by it. Requires the lease.
+func (q *Queue) Requeue(ctx context.Context, db DB, item *Item) error {
+	tag, err := db.Exec(ctx,
+		`UPDATE work_items
+		 SET state = 'queued', lease_expires_at = NULL, updated_at = now()
+		 WHERE id = $1 AND state = 'active' AND lease_expires_at = $2`,
+		item.ID, item.Lease)
+	if err != nil {
+		return fmt.Errorf("queue: requeue %s: %w", item.ID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("queue: requeue %s: %w", item.ID, ErrLeaseLost)
+	}
+	return nil
+}
+
 // Complete marks the item finished. Losing the lease first (another claimant
 // took over after expiry) is an error: the caller's work may have raced the
 // replacement's and must not be treated as cleanly finished.
