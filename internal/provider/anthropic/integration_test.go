@@ -19,6 +19,9 @@ import (
 // skips — never fails — when no endpoint is configured, so CI without
 // credentials is unaffected. Credential values are never logged.
 func TestIntegrationRealEndpoint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short mode: skipping the real model call")
+	}
 	loadDotEnv(t)
 	baseURL, apiKey, model := os.Getenv("MODEL_BASE_URL"), os.Getenv("MODEL_API_KEY"), os.Getenv("MODEL_ID")
 	if os.Getenv("MODEL_PROTOCOL") != "anthropic" || baseURL == "" || apiKey == "" || model == "" {
@@ -90,8 +93,16 @@ func loadDotEnv(t *testing.T) {
 		if !ok || strings.HasPrefix(line, "#") || !strings.HasPrefix(key, "MODEL_") {
 			continue
 		}
+		value = strings.TrimSpace(value)
+		// A quoted value is unwrapped as-is; an unquoted one loses any
+		// trailing inline comment.
+		if n := len(value); n >= 2 && (value[0] == '"' || value[0] == '\'') && value[n-1] == value[0] {
+			value = value[1 : n-1]
+		} else if i := strings.Index(value, " #"); i >= 0 {
+			value = strings.TrimSpace(value[:i])
+		}
 		if os.Getenv(key) == "" {
-			os.Setenv(key, strings.Trim(value, `"'`))
+			os.Setenv(key, value)
 		}
 	}
 }

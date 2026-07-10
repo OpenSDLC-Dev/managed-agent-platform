@@ -28,6 +28,11 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		return nil, fmt.Errorf("anthropic provider requires a model")
 	}
 	opts := []option.RequestOption{
+		// Constructed purely from configuration: without this, the SDK
+		// autoloads ambient ANTHROPIC_* credentials (auth-token env,
+		// profile files) underneath our options and would leak the
+		// operator's real Anthropic credential to a third-party base_url.
+		option.WithoutEnvironmentDefaults(),
 		option.WithBaseURL(cfg.BaseURL),
 		option.WithAPIKey(cfg.APIKey),
 	}
@@ -60,8 +65,12 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 	}
 	for i, m := range req.Messages {
 		var mp sdk.MessageParam
+		role, err := json.Marshal(m.Role)
+		if err != nil {
+			return nil, err
+		}
 		wire, err := json.Marshal(map[string]json.RawMessage{
-			"role":    json.RawMessage(`"` + m.Role + `"`),
+			"role":    role,
 			"content": m.Content,
 		})
 		if err != nil {
@@ -128,6 +137,13 @@ func (s *stream) Next() bool {
 
 		case "content_block_start":
 			if ev.ContentBlock.Type == "tool_use" {
+				if s.inTool {
+					// Losing the still-open tool call silently would make
+					// the brain dispatch a different tool set than the
+					// model produced; a malformed stream must fail loudly.
+					s.err = fmt.Errorf("tool_use block %d started before block %d closed", ev.Index, s.toolIndex)
+					return false
+				}
 				s.inTool = true
 				s.toolIndex = ev.Index
 				s.toolID = ev.ContentBlock.ID
@@ -138,11 +154,11 @@ func (s *stream) Next() bool {
 				// and streams the JSON via deltas, but other
 				// Anthropic-protocol endpoints may put the complete input
 				// on the start block; dropping it would invoke the tool
-				// with empty arguments.
-				if in := ev.ContentBlock.Input; in != nil {
-					if raw, err := json.Marshal(in); err == nil && string(raw) != "{}" && string(raw) != "null" {
-						s.toolSeed = raw
-					}
+				// with empty arguments. The raw bytes pass through
+				// verbatim — re-encoding a decoded value would round large
+				// integers through float64.
+				if raw := ev.ContentBlock.JSON.Input.Raw(); raw != "" && raw != "{}" && raw != "null" {
+					s.toolSeed = json.RawMessage(raw)
 				}
 			}
 
@@ -182,10 +198,15 @@ func (s *stream) Next() bool {
 			}
 
 		case "message_delta":
-			s.stopReason = string(ev.Delta.StopReason)
-			s.usage.OutputTokens = ev.Usage.OutputTokens
+			if r := string(ev.Delta.StopReason); r != "" {
+				s.stopReason = r
+			}
 			// Cumulative counters override the message_start snapshot when
-			// the endpoint reports them here.
+			// the endpoint reports them here; a frame without usage must
+			// not zero what an earlier frame already reported.
+			if ev.Usage.OutputTokens > 0 {
+				s.usage.OutputTokens = ev.Usage.OutputTokens
+			}
 			if ev.Usage.InputTokens > 0 {
 				s.usage.InputTokens = ev.Usage.InputTokens
 			}
@@ -197,6 +218,17 @@ func (s *stream) Next() bool {
 			}
 
 		case "message_stop":
+			if s.inTool {
+				s.err = fmt.Errorf("message_stop with tool_use block %d still open", s.toolIndex)
+				return false
+			}
+			if s.stopReason == "" {
+				// Without message_delta there is no stop reason and no
+				// output usage; a hollow done chunk would silently corrupt
+				// session state downstream.
+				s.err = fmt.Errorf("message_stop without a stop reason (missing message_delta)")
+				return false
+			}
 			s.done = true
 			usage := s.usage
 			s.cur = provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: &usage}

@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
@@ -102,15 +103,23 @@ type Route struct {
 
 // Registry resolves agent model strings to constructed providers. Routing is
 // exact-match with an optional "*" default, so an enterprise maps its model
-// names onto endpoints purely in configuration.
+// names onto endpoints purely in configuration. Constructed providers are
+// cached per model string — one client per backend, not one per turn.
 type Registry struct {
 	routes    map[string]Config
 	fallback  *Config
 	factories map[string]Factory
+
+	mu    sync.Mutex
+	cache map[string]Provider
 }
 
 func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error) {
-	r := &Registry{routes: make(map[string]Config, len(routes)), factories: factories}
+	r := &Registry{
+		routes:    make(map[string]Config, len(routes)),
+		factories: factories,
+		cache:     make(map[string]Provider),
+	}
 	for _, route := range routes {
 		if route.Model == "" {
 			return nil, fmt.Errorf("route model must not be empty (use %q for the default route)", "*")
@@ -121,26 +130,35 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 		if _, ok := factories[route.Config.Protocol]; !ok {
 			return nil, fmt.Errorf("route %q uses unknown protocol %q", route.Model, route.Config.Protocol)
 		}
+		// The registry owns its config copies: Headers is a reference
+		// type, and sharing it with the caller's Route slice would let a
+		// later mutation reach every constructed provider.
+		cfg := route.Config
+		cfg.Headers = cloneHeaders(route.Config.Headers)
 		if route.Model == "*" {
 			if r.fallback != nil {
 				return nil, fmt.Errorf("duplicate default (%q) route", "*")
 			}
-			cfg := route.Config
 			r.fallback = &cfg
 			continue
 		}
 		if _, dup := r.routes[route.Model]; dup {
 			return nil, fmt.Errorf("duplicate route for model %q", route.Model)
 		}
-		r.routes[route.Model] = route.Config
+		r.routes[route.Model] = cfg
 	}
 	return r, nil
 }
 
-// Provider constructs the provider for an agent's model string. When the
+// Provider resolves the provider for an agent's model string. When the
 // route's config has no upstream model set, the agent's own model string
 // passes through (a gateway that understands the platform's model names).
 func (r *Registry) Provider(model string) (Provider, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p, ok := r.cache[model]; ok {
+		return p, nil
+	}
 	cfg, ok := r.routes[model]
 	if !ok {
 		if r.fallback == nil {
@@ -151,5 +169,22 @@ func (r *Registry) Provider(model string) (Provider, error) {
 	if cfg.Model == "" {
 		cfg.Model = model
 	}
-	return r.factories[cfg.Protocol](cfg)
+	cfg.Headers = cloneHeaders(cfg.Headers)
+	p, err := r.factories[cfg.Protocol](cfg)
+	if err != nil {
+		return nil, err
+	}
+	r.cache[model] = p
+	return p, nil
+}
+
+func cloneHeaders(h map[string]string) map[string]string {
+	if h == nil {
+		return nil
+	}
+	out := make(map[string]string, len(h))
+	for k, v := range h {
+		out[k] = v
+	}
+	return out
 }

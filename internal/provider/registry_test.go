@@ -53,6 +53,35 @@ func TestRegistryRouting(t *testing.T) {
 	}
 }
 
+func TestRegistryCachesAndIsolatesConfig(t *testing.T) {
+	headers := map[string]string{"x-tenant": "acme"}
+	routes := []provider.Route{{Model: "m", Config: provider.Config{
+		Protocol: "anthropic", BaseURL: "http://gw", Headers: headers}}}
+	reg, err := provider.NewRegistry(routes, factories)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p1, err := reg.Provider("m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := reg.Provider("m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1 != p2 {
+		t.Error("providers are not cached: two calls constructed two instances")
+	}
+
+	// Mutating the caller's map after construction must not reach the
+	// provider's config.
+	headers["x-tenant"] = "mallory"
+	if got := p1.(*fakeProvider).cfg.Headers["x-tenant"]; got != "acme" {
+		t.Errorf("caller mutation leaked into provider config: %q", got)
+	}
+}
+
 func TestRegistryNoFallback(t *testing.T) {
 	reg, err := provider.NewRegistry([]provider.Route{
 		{Model: "known", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw"}},

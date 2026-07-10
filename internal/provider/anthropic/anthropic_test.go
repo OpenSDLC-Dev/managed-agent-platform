@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -304,6 +305,127 @@ func TestGenerateParallelToolUseInputsStayIntact(t *testing.T) {
 	}
 	if got := string(chunks[1].ToolUse.Input); got != `{"command":"pwd"}` {
 		t.Errorf("second tool input = %s", got)
+	}
+}
+
+func TestGenerateNeverSendsAmbientCredentials(t *testing.T) {
+	// The SDK autoloads ANTHROPIC_* env credentials by default; a provider
+	// pointed at a third-party gateway must never forward the operator's
+	// real Anthropic token.
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "ambient-secret-never-send")
+	t.Setenv("ANTHROPIC_API_KEY", "ambient-key-never-send")
+
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_6","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	collect(t, stream)
+
+	if got := f.gotHead.Get("authorization"); got != "" {
+		t.Errorf("ambient bearer token leaked to the endpoint: %q", got)
+	}
+	if got := f.gotHead.Get("x-api-key"); got != "test-key-123" {
+		t.Errorf("x-api-key = %q, want only the configured key", got)
+	}
+}
+
+func TestGenerateMalformedStreams(t *testing.T) {
+	base := `{"type":"message_start","message":{"id":"msg_7","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`
+	cases := []struct {
+		name string
+		sse  []string
+	}{
+		{"overlapping tool blocks", []string{base,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"bash","input":{}}}`,
+			`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_b","name":"bash","input":{}}}`,
+		}},
+		{"tool block never closed", []string{base,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"bash","input":{}}}`,
+			`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":2}}`,
+			`{"type":"message_stop"}`,
+		}},
+		{"missing message_delta", []string{base,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+			`{"type":"content_block_stop","index":0}`,
+			`{"type":"message_stop"}`,
+		}},
+	}
+	for _, tc := range cases {
+		f := &fakeServer{sse: tc.sse}
+		p := start(t, f)
+		stream, err := p.Generate(context.Background(), provider.Request{
+			Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"go"`)}},
+		})
+		if err != nil {
+			t.Fatalf("%s: Generate: %v", tc.name, err)
+		}
+		var sawDone bool
+		for stream.Next() {
+			if stream.Chunk().Kind == provider.KindDone {
+				sawDone = true
+			}
+		}
+		if sawDone || stream.Err() == nil {
+			t.Errorf("%s: done=%v err=%v — malformed streams must fail loudly", tc.name, sawDone, stream.Err())
+		}
+	}
+}
+
+func TestGenerateUsageSurvivesSparseDeltas(t *testing.T) {
+	// A second message_delta without a usage object must not zero the
+	// counters an earlier frame reported.
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_8","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":11,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":null,"stop_sequence":null},"usage":{"output_tokens":42,"cache_read_input_tokens":9}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+	done := chunks[len(chunks)-1]
+	if done.Kind != provider.KindDone || done.StopReason != "end_turn" {
+		t.Fatalf("done = %+v", done)
+	}
+	if done.Usage.OutputTokens != 42 || done.Usage.CacheReadInputTokens != 9 || done.Usage.InputTokens != 11 {
+		t.Errorf("usage zeroed by sparse delta: %+v", done.Usage)
+	}
+}
+
+func TestGenerateStartBlockInputPreservesBigIntegers(t *testing.T) {
+	// The start-block seed passes through as raw bytes: re-encoding a
+	// decoded value would round 9007199254740993 through float64.
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_9","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_c","name":"close_issue","input":{"issue_id":9007199254740993}}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":2}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"close it"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+	if !strings.Contains(string(chunks[0].ToolUse.Input), "9007199254740993") {
+		t.Errorf("big integer mangled in seed passthrough: %s", chunks[0].ToolUse.Input)
 	}
 }
 
