@@ -55,15 +55,20 @@ type Spec struct {
 }
 
 // ExecRequest runs Command through /bin/bash -c inside the sandbox's workdir.
-// A zero Timeout means "no limit".
+// A zero Timeout means "no limit", and then only the context bounds the call.
 type ExecRequest struct {
 	Command string
 	Timeout time.Duration
 }
 
-// ExecResult is a finished command. TimedOut means the sandbox killed it;
-// ExitCode is then the kill's code, not the command's intent. Truncated means
-// output exceeded MaxOutputBytes and the tail was discarded.
+// ExecResult is a finished command. TimedOut means the sandbox stopped it, or
+// stopped waiting for it; ExitCode is then the kill's code, not the command's
+// intent, and the output is whatever had arrived. Truncated means output
+// exceeded MaxOutputBytes and the tail was discarded.
+//
+// A backend must decide TimedOut where the sandboxed command cannot reach the
+// decision. Anything inside the sandbox is the agent's to tamper with, so a
+// deadline enforced only in there is a deadline the command can lift.
 type ExecResult struct {
 	Stdout    string
 	Stderr    string

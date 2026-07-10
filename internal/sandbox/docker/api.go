@@ -110,26 +110,17 @@ func (c *apiClient) request(ctx context.Context, method, path string, q url.Valu
 	return resp, nil
 }
 
-// postJSON sends a JSON body and decodes a JSON reply into out (out may be nil).
+// postJSON sends a JSON body and decodes the JSON reply into out.
 func (c *apiClient) postJSON(ctx context.Context, path string, q url.Values, body, out any) error {
-	var buf io.Reader
-	contentType := ""
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("docker: encode request: %w", err)
-		}
-		buf, contentType = bytes.NewReader(encoded), "application/json"
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("docker: encode request: %w", err)
 	}
-	resp, err := c.request(ctx, http.MethodPost, path, q, buf, contentType)
+	resp, err := c.request(ctx, http.MethodPost, path, q, bytes.NewReader(encoded), "application/json")
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if out == nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil
-	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("docker: decode %s reply: %w", path, err)
 	}

@@ -20,15 +20,18 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   rather than depending on the moby module tree. Provision is idempotent
   per session, so two executors handling two tool calls of one session
   converge on one container instead of racing to create two. `Exec` runs
-  the command through `/bin/bash -c` in the session's workdir under an
-  in-container watchdog, because Docker offers no way to kill a running
-  exec from outside: a command past its deadline comes back with
-  `TimedOut` set, the sandbox survives it, and a command that merely
-  exits with `timeout(1)`'s own code is never mistaken for one. Output
-  is capped at 1 MiB per stream, drained rather than buffered so a noisy
-  command still finishes; a read above 4 MiB is refused rather than
-  silently truncated. `limited` networking fails closed — the container
-  gets no route out at all until the egress proxy lands, never silently
+  the command through `/bin/bash -c` in the session's workdir, and
+  enforces its deadline twice: a watchdog inside the container kills the
+  command's process group (Docker offers no way to kill a running exec
+  from outside), and `Exec` itself stops waiting shortly after the
+  deadline regardless. Only the second is a guarantee — the watchdog is a
+  process the sandboxed command can find and kill — so no command can
+  outrun its deadline or hide that it hit one, and one that merely dies
+  of SIGKILL on its own is never mistaken for a timeout. Output is capped
+  at 1 MiB per stream, drained rather than buffered so a noisy command
+  still finishes; a read above 4 MiB is refused rather than silently
+  truncated. `limited` networking fails closed — the container gets no
+  route out at all until the egress proxy lands, never silently
   unrestricted egress. `internal/sandbox/sandboxtest` is the one
   contract suite every backend must pass (CLAUDE.md's rule for
   provider-, sandbox-, and queue-backend variability); the Docker
@@ -200,13 +203,13 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   execute exactly when a suite fails. Counting them measured nothing and
   diluted the gate, the same reason `cmd/` main glue was always outside
   it. Stated plainly, because the change is load-bearing rather than
-  cosmetic: under the old denominator this PR reads **89.81%** and CI
-  would be red; under the new one it reads **91.46%** against the
+  cosmetic: under the old denominator this PR reads **89.72%** and CI
+  would be red; under the new one it reads **91.53%** against the
   unchanged ≥ 90% bar. What justifies it is the categorization, not the
-  number — the sandbox implementation itself sits at 94.8%, and the only
+  number — the sandbox implementation itself sits at 95.4%, and the only
   thing dragging the total under the bar is the contract suite's own
   `t.Errorf` branches. Excluding just the new `sandboxtest` would also
-  pass (91.02%); `pgtest` goes with it because it is the same kind of
+  pass (91.10%); `pgtest` goes with it because it is the same kind of
   package and singling it out would leave the rule incoherent.
 - Module path set to the canonical GitHub owner,
   `github.com/OpenSDLC-Dev/managed-agent-platform`.

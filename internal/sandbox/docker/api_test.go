@@ -246,18 +246,18 @@ func TestNetworkModeFailsClosed(t *testing.T) {
 }
 
 func TestDestroyIsIdempotentAndSurfacesRealFailures(t *testing.T) {
-	c := &container{api: fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+	c := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `{"message":"No such container: gone"}`)
-	}).api, id: "gone"}
+	}).attach("gone", "/workspace")
 	if err := c.Destroy(context.Background()); err != nil {
 		t.Errorf("destroy of a missing container: %v, want nil", err)
 	}
 
-	c = &container{api: fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+	c = fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		io.WriteString(w, `{"message":"removal in progress"}`)
-	}).api, id: "busy"}
+	}).attach("busy", "/workspace")
 	if err := c.Destroy(context.Background()); err == nil {
 		t.Error("a failed removal reported success")
 	}
@@ -270,7 +270,7 @@ func TestGoneContainerMapsToErrNotFound(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `{"message":"No such container: gone"}`)
 	})
-	c := &container{api: p.api, id: "gone", workdir: "/workspace"}
+	c := p.attach("gone", "/workspace")
 	if _, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true"}); !errors.Is(err, sandbox.ErrNotFound) {
 		t.Errorf("exec: %v, want ErrNotFound", err)
 	}
@@ -302,7 +302,7 @@ func TestExecWaitsForTheExitCode(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := &container{api: p.api, id: "abc", workdir: "/workspace"}
+	c := p.attach("abc", "/workspace")
 	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "echo hi"})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
@@ -327,7 +327,7 @@ func TestTimedOutNeedsTheWatchdogsDeadlineNotTheCallers(t *testing.T) {
 				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, code)
 			}
 		})
-		return &container{api: p.api, id: "abc", workdir: "/workspace"}
+		return p.attach("abc", "/workspace")
 	}
 
 	// A self-inflicted SIGKILL well inside the deadline is not a timeout.
@@ -380,8 +380,8 @@ func TestTimedOutNeedsTheWatchdogsDeadlineNotTheCallers(t *testing.T) {
 }
 
 // The wrapper must keep no state anywhere the agent's own commands can reach.
-// A marker file under /tmp — the previous design — let a command forge a
-// timeout it never hit, or erase one it did.
+// A marker file under /tmp — the first design — let a command forge a timeout
+// it never hit, or erase one it did.
 func TestExecWrapperKeepsNoStateInsideTheContainer(t *testing.T) {
 	for _, writable := range []string{"/tmp", "/var/tmp", "/dev/shm", "/run", "/workspace"} {
 		if strings.Contains(execWrapper, writable) {
@@ -390,6 +390,79 @@ func TestExecWrapperKeepsNoStateInsideTheContainer(t *testing.T) {
 	}
 	if !strings.Contains(execWrapper, "set -m") {
 		t.Error("the wrapper must enable job control so the deadline kills the command's process group")
+	}
+	// Silencing the whole wrapper would swallow its own failures — a fork that
+	// hits RLIMIT_NPROC, a missing shell — and return them as an empty stderr.
+	if strings.Contains(execWrapper, "exec 3>&2") || strings.Contains(execWrapper, "exec 2>/dev/null") {
+		t.Error("the wrapper redirects its own stderr wholesale; only `wait` needs silencing")
+	}
+}
+
+// The in-container watchdog is a process beside the command, so the command can
+// kill it. The deadline must therefore be enforced outside the container too:
+// once its own bound passes, Exec stops waiting and calls the timeout itself.
+func TestExecStopsWaitingWhenTheSandboxsWatchdogDoesNot(t *testing.T) {
+	held := make(chan struct{})
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			io.WriteString(w, `{"Id":"e1"}`)
+		case r.URL.Path == "/exec/e1/start":
+			w.Write(frame(1, "partial output"))
+			w.(http.Flusher).Flush()
+			<-held // the command killed its watchdog; nothing ever closes this
+		case r.URL.Path == "/exec/e1/json":
+			t.Error("a command that never finished must not be asked for an exit code")
+		}
+	})
+	defer close(held)
+
+	c := p.attach("abc", "/workspace")
+	c.killGrace = 200 * time.Millisecond
+
+	start := time.Now()
+	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "kill the guard; sleep 300", Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !res.TimedOut || res.ExitCode != sigkillExit {
+		t.Errorf("result = %+v, want a timeout", res)
+	}
+	if res.Stdout != "partial output" {
+		t.Errorf("stdout = %q — output that did arrive must survive the timeout", res.Stdout)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("Exec waited %s past a 1s deadline", elapsed)
+	}
+}
+
+// The caller's own cancellation is not a timeout — it is the caller's error,
+// and reporting it as a clean "the command timed out" would hide a shutdown.
+// The stream must already be open when the caller gives up, so that the
+// cancellation lands where a sandbox deadline would: mid-read.
+func TestCallerCancellationIsNotATimeout(t *testing.T) {
+	held := make(chan struct{})
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			io.WriteString(w, `{"Id":"e1"}`)
+		case r.URL.Path == "/exec/e1/start":
+			w.Write(frame(1, "started"))
+			w.(http.Flusher).Flush()
+			<-held // the command is still running when the caller walks away
+		case r.URL.Path == "/exec/e1/json":
+			t.Error("a cancelled call must not go on to ask for an exit code")
+		}
+	})
+	defer close(held)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	c := p.attach("abc", "/workspace")
+	// A generous sandbox deadline, so only the caller's context can fire.
+	_, err := c.Exec(ctx, sandbox.ExecRequest{Command: "sleep 300", Timeout: time.Hour})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want the caller's context error", err)
 	}
 }
 
@@ -402,7 +475,7 @@ func TestPathProseCannotFakeAMissingSandbox(t *testing.T) {
 		// "No such container".
 		io.WriteString(w, `{"message":"Could not find the file /workspace/No such container/f in container abc"}`)
 	})
-	c := &container{api: p.api, id: "abc", workdir: "/workspace"}
+	c := p.attach("abc", "/workspace")
 	_, err := c.ReadFile(context.Background(), "/workspace/No such container/f")
 	if !errors.Is(err, sandbox.ErrFileNotExist) {
 		t.Errorf("read: %v, want ErrFileNotExist", err)
@@ -421,7 +494,7 @@ func TestStaleExecIsNotAMissingSandbox(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `{"message":"No such exec instance: e1"}`)
 	})
-	c := &container{api: p.api, id: "abc", workdir: "/workspace"}
+	c := p.attach("abc", "/workspace")
 	_, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true"})
 	if err == nil || errors.Is(err, sandbox.ErrNotFound) {
 		t.Errorf("exec: %v, want the daemon's own error", err)
@@ -455,7 +528,7 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := &container{api: p.api, id: "abc", workdir: "/workspace"}
+	c := p.attach("abc", "/workspace")
 	if err := c.WriteFile(context.Background(), "/workspace/a/b/f.txt", []byte("x")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -479,7 +552,7 @@ func TestWriteFileKeepsPathFailuresDistinctFromAMissingSandbox(t *testing.T) {
 			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
 		}
 	})
-	c := &container{api: p.api, id: "abc", workdir: "/workspace"}
+	c := p.attach("abc", "/workspace")
 	err := c.WriteFile(context.Background(), "/workspace/a/f.txt", []byte("x"))
 	if err == nil || errors.Is(err, sandbox.ErrNotFound) {
 		t.Fatalf("err = %v, want the daemon's path error", err)
@@ -503,7 +576,7 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 			io.WriteString(w, `{"Running":false,"ExitCode":1}`)
 		}
 	})
-	c := &container{api: p.api, id: "abc", workdir: "/workspace"}
+	c := p.attach("abc", "/workspace")
 	err := c.WriteFile(context.Background(), "/workspace/a/f.txt", []byte("x"))
 	if err == nil || !strings.Contains(err.Error(), "Read-only file system") {
 		t.Errorf("err = %v, want the mkdir's stderr", err)
@@ -637,7 +710,7 @@ func TestExecSurfacesStartAndInspectFailures(t *testing.T) {
 				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
 			}
 		})
-		return &container{api: p.api, id: "abc", workdir: "/workspace"}
+		return p.attach("abc", "/workspace")
 	}
 	for _, path := range []string{"/exec/e1/start", "/exec/e1/json"} {
 		_, err := failing(path).Exec(context.Background(), sandbox.ExecRequest{Command: "true"})
@@ -659,7 +732,8 @@ func TestExecRefusesToInventAnExitCode(t *testing.T) {
 			io.WriteString(w, `{"Running":true}`)
 		}
 	})
-	c := &container{api: p.api, id: "abc", workdir: "/workspace"}
+	c := p.attach("abc", "/workspace")
+	c.exitBudget = 200 * time.Millisecond
 	if _, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true"}); err == nil ||
 		!strings.Contains(err.Error(), "still running") {
 		t.Errorf("err = %v, want a stuck-exec error", err)
@@ -670,6 +744,44 @@ func TestExecRefusesToInventAnExitCode(t *testing.T) {
 	defer cancel()
 	if _, err := c.Exec(ctx, sandbox.ExecRequest{Command: "true"}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want the context's error", err)
+	}
+}
+
+// The whole point, against a real daemon: a command that finds and kills the
+// watchdog guarding it still cannot outrun its deadline, and still cannot
+// report success. This is the exact bypass a reviewer demonstrated.
+func TestRealSandboxDeadlineSurvivesTheCommandKillingItsWatchdog(t *testing.T) {
+	provider, err := New(Config{})
+	if err != nil {
+		t.Fatalf("this test requires Docker: %v", err)
+	}
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{
+		SessionID: domain.NewID("sesn"), Image: "debian:stable-slim", Workdir: "/workspace",
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
+
+	// The watchdog is the command's sibling: same parent, different pid.
+	sabotage := `
+	  for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do
+	    [ "$p" != "$$" ] && kill -9 -"$p" 2>/dev/null
+	  done
+	  sleep 300`
+
+	start := time.Now()
+	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: sabotage, Timeout: time.Second})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !res.TimedOut {
+		t.Errorf("a command that killed its watchdog was not reported as timed out: %+v", res)
+	}
+	if elapsed > 8*time.Second {
+		t.Errorf("the command outran its 1s deadline by %s", elapsed)
 	}
 }
 
@@ -691,7 +803,7 @@ func tarball(t *testing.T, header *tar.Header, body string) []byte {
 func TestReadFileRejectsWhatItCannotReturn(t *testing.T) {
 	serve := func(archive []byte) *container {
 		p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) { w.Write(archive) })
-		return &container{api: p.api, id: "abc", workdir: "/workspace"}
+		return p.attach("abc", "/workspace")
 	}
 
 	// A symlink carries no contents; returning its (empty) body as the file

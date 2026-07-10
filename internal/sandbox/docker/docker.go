@@ -27,34 +27,36 @@ const defaultWorkdir = "/workspace"
 // sandboxes this platform created without guessing from names.
 const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 
-// execWrapper runs the tool's command under a watchdog. Docker has no API to
-// kill a running exec, so the kill has to come from inside the container: a
-// command that ignores its deadline would otherwise hold a slot forever.
-// $1 is the command, $2 the timeout in whole seconds ("0" = no limit).
+// execWrapper kills the command when its deadline passes. Docker has no API to
+// kill a running exec, so this has to happen inside the container. $1 is the
+// command, $2 the timeout in whole seconds ("0" = no limit).
 //
-// A timeout is signalled by SIGKILL and nothing else. The wrapper keeps no
-// state the command could reach: everything inside the container is
-// agent-writable, so a marker file — however obscurely named — is a channel the
-// command can use to forge a timeout it did not hit, or erase one it did.
+// The watchdog is best effort by construction, and the sandbox never trusts it.
+// It runs beside the command, inside the container, where the command can find
+// and kill it: nothing in here is out of the agent's reach. What it buys is
+// that an honest command's runaway loop stops burning the sandbox's CPU the
+// moment its deadline passes, and that the sandbox learns the real exit code.
+// Whether a call actually timed out is decided outside the container, by Exec.
 //
-// `set -m` puts each job in its own process group, so the deadline kills the
-// command's whole tree. Killing only the command's shell leaves its children
-// running, holding the exec's pipes open long after the deadline.
+// `set -m` puts each job in its own process group, so the kill takes the
+// command's children with it: killing the command's shell alone leaves them
+// running, holding the exec's pipes open long after the deadline. It is a
+// process group, not a process tree — a child that calls setsid escapes it —
+// which is another reason Exec keeps its own bound.
 //
-// The shell's own diagnostics go to /dev/null and the command keeps the real
-// stderr on fd 3: bash announces a job it killed ("...Killed...") on stderr,
-// and that announcement would otherwise land in the tool result as if the
-// command had printed it.
+// Only `wait` has its stderr silenced: bash announces a job it killed
+// ("...Killed...") there, and that announcement would land in the tool result
+// as if the command had printed it. Redirecting the whole wrapper instead would
+// swallow its real failures — a fork that hits RLIMIT_NPROC, a missing shell.
 const execWrapper = `
 set -m
-exec 3>&2 2>/dev/null
-/bin/bash -c "$1" 2>&3 3>&- &
+/bin/bash -c "$1" &
 pid=$!
 if [ "$2" != "0" ]; then
   ( sleep "$2"; kill -9 -"$pid" 2>/dev/null ) >/dev/null 2>&1 &
   guard=$!
 fi
-wait "$pid"
+wait "$pid" 2>/dev/null
 rc=$?
 if [ -n "${guard:-}" ]; then kill -9 -"$guard" 2>/dev/null; fi
 exit "$rc"
@@ -62,6 +64,19 @@ exit "$rc"
 
 // sigkillExit is what bash reports for a job killed by SIGKILL (128 + 9).
 const sigkillExit = 137
+
+const (
+	// defaultKillGrace is how long Exec waits past a command's deadline for the
+	// in-container watchdog to finish the kill. Past that it stops waiting and
+	// reports the timeout on its own authority, so a command that disabled the
+	// watchdog buys itself this much overrun and no more.
+	defaultKillGrace = 2 * time.Second
+	// defaultExitBudget bounds the wait for the daemon to publish an exit code
+	// once the exec's output has closed. It is normally instant; the budget is
+	// there so a daemon that never stops calling the exec "running" fails
+	// loudly instead of hanging.
+	defaultExitBudget = 5 * time.Second
+)
 
 // Config configures the backend. Host is a Docker daemon address
 // (unix:///... or tcp://host:port); empty falls back to DOCKER_HOST and then
@@ -109,7 +124,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 				return nil, err
 			}
 		}
-		return &container{api: p.api, id: info.ID, workdir: workdir}, nil
+		return p.attach(info.ID, workdir), nil
 	case !statusIs(err, 404):
 		return nil, err
 	}
@@ -152,7 +167,14 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	if err := p.api.startContainer(ctx, id); err != nil {
 		return nil, err
 	}
-	return &container{api: p.api, id: id, workdir: workdir}, nil
+	return p.attach(id, workdir), nil
+}
+
+func (p *Provider) attach(id, workdir string) *container {
+	return &container{
+		api: p.api, id: id, workdir: workdir,
+		killGrace: defaultKillGrace, exitBudget: defaultExitBudget,
+	}
 }
 
 // networkMode fails closed. `limited` means "only AllowedHosts", which needs
@@ -166,18 +188,29 @@ func networkMode(net domain.Networking) string {
 }
 
 type container struct {
-	api     *apiClient
-	id      string
-	workdir string
+	api        *apiClient
+	id         string
+	workdir    string
+	killGrace  time.Duration
+	exitBudget time.Duration
 }
 
 func (c *container) ID() string { return c.id }
 
+// Exec runs the command and returns within Timeout + killGrace. The deadline is
+// enforced twice, and only the second one is a guarantee: the watchdog inside
+// the container does the killing, but it is a process the command can kill, so
+// Exec also stops waiting on its own. Nothing the command does inside the
+// sandbox can make its call outrun the deadline or hide that it hit one.
 func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
 	seconds := 0
 	if req.Timeout > 0 {
 		seconds = int(math.Ceil(req.Timeout.Seconds()))
 	}
+	// The watchdog can only sleep whole seconds, so its deadline — not the
+	// caller's unrounded request — is the one a kill has to have arrived after.
+	deadline := time.Duration(seconds) * time.Second
+
 	execID, err := c.api.execCreate(ctx, c.id, execConfig{
 		AttachStdout: true,
 		AttachStderr: true,
@@ -189,30 +222,48 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 		return sandbox.ExecResult{}, c.wrap(err)
 	}
 
+	runCtx := ctx
+	if seconds > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, deadline+c.killGrace)
+		defer cancel()
+	}
+
 	start := time.Now()
-	stream, err := c.api.execStart(ctx, execID)
+	stream, err := c.api.execStart(runCtx, execID)
 	if err != nil {
 		return sandbox.ExecResult{}, c.wrap(err)
 	}
 	stdout, stderr, truncated, err := demux(stream, sandbox.MaxOutputBytes)
 	stream.Close()
-	if err != nil {
-		return sandbox.ExecResult{}, err
-	}
 	elapsed := time.Since(start)
 
+	if err != nil {
+		// Our own deadline, not the caller's. The watchdog did not finish the
+		// job — a command can kill it, or leak a child into a new session that
+		// holds these pipes — so the timeout is called here instead. Whatever
+		// the command left running dies with the session's container.
+		if seconds > 0 && runCtx.Err() != nil && ctx.Err() == nil {
+			return sandbox.ExecResult{
+				Stdout: string(stdout), Stderr: string(stderr),
+				ExitCode: sigkillExit, TimedOut: true, Truncated: truncated,
+			}, nil
+		}
+		return sandbox.ExecResult{}, err
+	}
+
+	// The exec finished on its own. Inspect on the caller's context: runCtx is
+	// spent by definition on any command that ran to its deadline.
 	code, err := c.exitCode(ctx, execID)
 	if err != nil {
 		return sandbox.ExecResult{}, err
 	}
-	// A timeout is a SIGKILL that arrived no earlier than the watchdog's own
-	// deadline — which is the rounded-up one it actually slept, not the
-	// caller's unrounded request. A command cannot survive SIGKILL to fake the
-	// code, and one that exits 137 by itself does so before the watchdog could
-	// have fired. (A command the kernel OOM-kills past its deadline reads as a
-	// timeout. It hit a limit and produced nothing; the label is close enough
-	// and the alternative is to guess.)
-	deadline := time.Duration(seconds) * time.Second
+	// A timeout is a SIGKILL that arrived no earlier than the watchdog's
+	// deadline. A command cannot survive SIGKILL to fake the code, and one that
+	// exits 137 by itself does so before the watchdog could have fired. (A
+	// command the kernel OOM-kills past its deadline reads as a timeout. It hit
+	// a limit and produced nothing; the label is close enough, and the
+	// alternative is to guess.)
 	return sandbox.ExecResult{
 		Stdout:    string(stdout),
 		Stderr:    string(stderr),
@@ -225,7 +276,8 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 // exitCode polls the finished exec. The stream closes when the process exits,
 // but the daemon publishes the code a moment later.
 func (c *container) exitCode(ctx context.Context, execID string) (int, error) {
-	for attempt := 0; ; attempt++ {
+	giveUp := time.Now().Add(c.exitBudget)
+	for {
 		info, err := c.api.execInspect(ctx, execID)
 		if err != nil {
 			return 0, c.wrap(err)
@@ -233,7 +285,7 @@ func (c *container) exitCode(ctx context.Context, execID string) (int, error) {
 		if !info.Running {
 			return info.ExitCode, nil
 		}
-		if attempt >= 100 {
+		if time.Now().After(giveUp) {
 			return 0, fmt.Errorf("docker: exec %s still running after its output closed", execID)
 		}
 		select {
@@ -311,6 +363,9 @@ func (c *container) mkdirAll(ctx context.Context, dir string) error {
 	return nil
 }
 
+// Destroy takes any 404 as success, not just containerGone's: removal has one
+// way to miss, and the container's absence is the outcome asked for. No path
+// travels this endpoint, so no message can be spoofed into it.
 func (c *container) Destroy(ctx context.Context) error {
 	err := c.api.removeContainer(ctx, c.id)
 	if statusIs(err, 404) {
