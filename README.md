@@ -4,7 +4,7 @@ An open-source, self-hostable platform for **long-horizon AI agents**, written i
 
 Run the whole thing on-prem or in your own VPC — **your data and your compute never leave your boundary**.
 
-> **Status: early development.** The foundations — domain types, OpenTelemetry, and the Postgres schema — are in place; the control plane, harness, and sandbox executor are being built slice by slice. Not yet usable end-to-end. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
+> **Status: early development.** The domain types, OpenTelemetry, the Postgres schema, and the control-plane CRUD API (agents / environments / sessions — the real `ant` CLI drives it unchanged) are in place; the event log, harness, and sandbox executor are being built slice by slice. Not yet usable end-to-end. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Why
 
@@ -52,8 +52,8 @@ Deferred past v1 (seams reserved, not implemented): secret vaults and egress cre
 
 ## Development
 
-Requires **Go 1.25+** and Docker (the storage contract tests start their own
-disposable Postgres container).
+Requires **Go 1.25+** and Docker (the storage and API contract tests start
+their own disposable Postgres containers).
 
 ```bash
 go build ./...             # build

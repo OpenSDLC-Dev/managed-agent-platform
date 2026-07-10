@@ -1,0 +1,88 @@
+// Package api implements the wire-compatible control-plane REST surface:
+// Anthropic Managed Agents resource CRUD (agents / environments / sessions)
+// with the reference paths, JSON shapes, ID prefixes, pagination envelope,
+// error envelope, and x-api-key management auth. The `?beta=true` query and
+// anthropic-version / anthropic-beta headers are accepted and ignored.
+package api
+
+import (
+	"context"
+	"net/http"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type server struct {
+	pool *pgxpool.Pool
+}
+
+// NewHandler assembles the control-plane HTTP surface over the given pool.
+func NewHandler(pool *pgxpool.Pool) http.Handler {
+	s := &server{pool: pool}
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("POST /v1/agents", s.handle(s.createAgent))
+	mux.HandleFunc("GET /v1/agents", s.handle(s.listAgents))
+	mux.HandleFunc("GET /v1/agents/{id}", s.handle(s.getAgent))
+	mux.HandleFunc("POST /v1/agents/{id}", s.handle(s.updateAgent)) // update is POST on the wire, not PATCH
+	mux.HandleFunc("GET /v1/agents/{id}/versions", s.handle(s.listAgentVersions))
+	mux.HandleFunc("POST /v1/agents/{id}/archive", s.handle(s.archiveAgent))
+
+	mux.HandleFunc("POST /v1/environments", s.handle(s.createEnvironment))
+	mux.HandleFunc("GET /v1/environments", s.handle(s.listEnvironments))
+	mux.HandleFunc("GET /v1/environments/{id}", s.handle(s.getEnvironment))
+	mux.HandleFunc("POST /v1/environments/{id}", s.handle(s.updateEnvironment))
+	mux.HandleFunc("DELETE /v1/environments/{id}", s.handle(s.deleteEnvironment))
+	mux.HandleFunc("POST /v1/environments/{id}/archive", s.handle(s.archiveEnvironment))
+
+	mux.HandleFunc("POST /v1/sessions", s.handle(s.createSession))
+	mux.HandleFunc("GET /v1/sessions", s.handle(s.listSessions))
+	mux.HandleFunc("GET /v1/sessions/{id}", s.handle(s.getSession))
+	mux.HandleFunc("POST /v1/sessions/{id}", s.handle(s.updateSession))
+	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handle(s.deleteSession))
+	mux.HandleFunc("POST /v1/sessions/{id}/archive", s.handle(s.archiveSession))
+
+	// The mux's built-in 404/405 write plain text; clients expect the wire
+	// error envelope, so register explicit fallbacks: "/" for unknown paths
+	// and a method-less pattern per route for unsupported methods.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, r, errNotFound("no such endpoint: %s", r.URL.Path))
+	})
+	for _, pattern := range []string{
+		"/v1/agents", "/v1/agents/{id}", "/v1/agents/{id}/versions", "/v1/agents/{id}/archive",
+		"/v1/environments", "/v1/environments/{id}", "/v1/environments/{id}/archive",
+		"/v1/sessions", "/v1/sessions/{id}", "/v1/sessions/{id}/archive",
+	} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, r, &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest,
+				"method " + r.Method + " is not allowed on " + r.URL.Path})
+		})
+	}
+
+	return withRequestID(requireAPIKey(pool, mux))
+}
+
+// handle adapts a typed handler to http.HandlerFunc: JSON out, error envelope
+// on failure. The reference returns 200 for every successful call, including
+// creates.
+func (s *server) handle(fn func(*http.Request) (any, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		v, err := fn(r)
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, v)
+	}
+}
+
+// withRequestID stamps every response (success and error) with a request-id
+// header and threads the ID into the context for error envelopes.
+func withRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rid := domain.NewID("req").String()
+		w.Header().Set("request-id", rid)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyRequestID, rid)))
+	})
+}

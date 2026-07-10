@@ -1,0 +1,621 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/jackc/pgx/v5"
+)
+
+// sessionAgentJSON is the resolved-agent snapshot embedded in a session
+// (BetaManagedAgentsSessionAgent). It is stored verbatim in
+// sessions.resolved_agent, so rendering is a passthrough.
+type sessionAgentJSON struct {
+	Type        string            `json:"type"` // "agent"
+	ID          string            `json:"id"`
+	Version     int64             `json:"version"`
+	Name        string            `json:"name"`
+	Model       domain.Model      `json:"model"`
+	System      string            `json:"system"`
+	Description string            `json:"description"`
+	Tools       []json.RawMessage `json:"tools"`
+	MCPServers  []json.RawMessage `json:"mcp_servers"`
+	Skills      []json.RawMessage `json:"skills"`
+	Multiagent  json.RawMessage   `json:"multiagent"` // reserved seam: always null in v1
+}
+
+type cacheCreationJSON struct {
+	Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+	Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+}
+
+// usageJSON is the session-level usage wire shape (note: nested
+// cache_creation, unlike the event-level usage in internal/domain).
+type usageJSON struct {
+	InputTokens          int64             `json:"input_tokens"`
+	OutputTokens         int64             `json:"output_tokens"`
+	CacheReadInputTokens int64             `json:"cache_read_input_tokens"`
+	CacheCreation        cacheCreationJSON `json:"cache_creation"`
+}
+
+type statsJSON struct {
+	ActiveSeconds   float64 `json:"active_seconds"`
+	DurationSeconds float64 `json:"duration_seconds"`
+}
+
+// sessionJSON is the BetaManagedAgentsSession wire shape.
+type sessionJSON struct {
+	ID                 string            `json:"id"`
+	Type               string            `json:"type"` // "session"
+	Agent              sessionAgentJSON  `json:"agent"`
+	EnvironmentID      string            `json:"environment_id"`
+	Status             string            `json:"status"`
+	Title              string            `json:"title"`
+	Metadata           map[string]string `json:"metadata"`
+	Usage              usageJSON         `json:"usage"`
+	Stats              statsJSON         `json:"stats"`
+	OutcomeEvaluations []json.RawMessage `json:"outcome_evaluations"`
+	Resources          []json.RawMessage `json:"resources"`
+	VaultIDs           []string          `json:"vault_ids"`
+	DeploymentID       *string           `json:"deployment_id"` // deployments are post-v1: always null
+	CreatedAt          time.Time         `json:"created_at"`
+	UpdatedAt          time.Time         `json:"updated_at"`
+	ArchivedAt         *time.Time        `json:"archived_at"`
+}
+
+// normalizeSessionID maps the alternate wire spelling session_… onto the
+// canonical sesn_… form we store.
+func normalizeSessionID(id string) string {
+	if rest, ok := strings.CutPrefix(id, "session_"); ok {
+		return "sesn_" + rest
+	}
+	return id
+}
+
+// sessionRow carries one sessions row through scan → render.
+type sessionRow struct {
+	id                   string
+	agentJSON            []byte
+	environmentID        string
+	status, title        string
+	metaJSON, usageJSON  []byte
+	resourcesJSON        []byte
+	vaultIDs             []string
+	createdAt, updatedAt time.Time
+	archivedAt           *time.Time
+}
+
+const sessionColumns = `id, resolved_agent, environment_id, status, title,
+	metadata, usage, resources, vault_ids, created_at, updated_at, archived_at`
+
+func scanSession(row pgx.Row) (sessionRow, error) {
+	var r sessionRow
+	err := row.Scan(&r.id, &r.agentJSON, &r.environmentID, &r.status, &r.title,
+		&r.metaJSON, &r.usageJSON, &r.resourcesJSON, &r.vaultIDs,
+		&r.createdAt, &r.updatedAt, &r.archivedAt)
+	return r, err
+}
+
+func renderSession(r sessionRow) (sessionJSON, error) {
+	var agent sessionAgentJSON
+	if err := json.Unmarshal(r.agentJSON, &agent); err != nil {
+		return sessionJSON{}, fmt.Errorf("decode stored resolved agent: %w", err)
+	}
+	if agent.Tools == nil {
+		agent.Tools = []json.RawMessage{}
+	}
+	if agent.MCPServers == nil {
+		agent.MCPServers = []json.RawMessage{}
+	}
+	if agent.Skills == nil {
+		agent.Skills = []json.RawMessage{}
+	}
+	metadata := map[string]string{}
+	if err := json.Unmarshal(r.metaJSON, &metadata); err != nil {
+		return sessionJSON{}, err
+	}
+	var usage usageJSON
+	if err := json.Unmarshal(r.usageJSON, &usage); err != nil {
+		return sessionJSON{}, err
+	}
+	resources := []json.RawMessage{}
+	if err := json.Unmarshal(r.resourcesJSON, &resources); err != nil {
+		return sessionJSON{}, err
+	}
+	if resources == nil {
+		resources = []json.RawMessage{}
+	}
+	if r.vaultIDs == nil {
+		r.vaultIDs = []string{}
+	}
+	return sessionJSON{
+		ID: r.id, Type: "session", Agent: agent, EnvironmentID: r.environmentID,
+		Status: r.status, Title: r.title, Metadata: metadata, Usage: usage,
+		Stats: statsJSON{}, OutcomeEvaluations: []json.RawMessage{},
+		Resources: resources, VaultIDs: r.vaultIDs,
+		CreatedAt: r.createdAt.UTC(), UpdatedAt: r.updatedAt.UTC(), ArchivedAt: utcPtr(r.archivedAt),
+	}, nil
+}
+
+// resolveAgent resolves the create-time agent union (plain id string,
+// {type:"agent"}, or {type:"agent_with_overrides"}) into the immutable
+// snapshot the session will carry.
+func (s *server) resolveAgent(ctx context.Context, raw json.RawMessage) (sessionAgentJSON, error) {
+	var snap sessionAgentJSON
+
+	var agentID string
+	var version int64 // 0 = latest
+	overrides := map[string]json.RawMessage{}
+
+	if err := json.Unmarshal(raw, &agentID); err != nil {
+		var obj struct {
+			Type    string          `json:"type"`
+			ID      string          `json:"id"`
+			Version int64           `json:"version"`
+			Model   json.RawMessage `json:"model"`
+			System  json.RawMessage `json:"system"`
+			Tools   json.RawMessage `json:"tools"`
+			MCP     json.RawMessage `json:"mcp_servers"`
+			Skills  json.RawMessage `json:"skills"`
+		}
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return snap, errInvalid("agent must be an agent id string or an agent reference object")
+		}
+		if obj.ID == "" {
+			return snap, errInvalid("agent.id is required")
+		}
+		switch obj.Type {
+		case "agent":
+		case "agent_with_overrides":
+			for key, val := range map[string]json.RawMessage{
+				"model": obj.Model, "system": obj.System, "tools": obj.Tools,
+				"mcp_servers": obj.MCP, "skills": obj.Skills,
+			} {
+				if len(val) > 0 {
+					if isNull(val) {
+						return snap, errInvalid("agent override %s cannot be null", key)
+					}
+					overrides[key] = val
+				}
+			}
+		default:
+			return snap, errInvalid(`agent.type must be "agent" or "agent_with_overrides"`)
+		}
+		agentID, version = obj.ID, obj.Version
+		if version < 0 {
+			return snap, errInvalid("agent.version must be a positive integer")
+		}
+	}
+
+	var (
+		name       string
+		specJSON   []byte
+		archivedAt *time.Time
+	)
+	if version == 0 {
+		err := s.pool.QueryRow(ctx,
+			`SELECT name, version, spec, archived_at FROM agents WHERE id = $1`, agentID).
+			Scan(&name, &version, &specJSON, &archivedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return snap, errNotFound("agent %s not found", agentID)
+		}
+		if err != nil {
+			return snap, err
+		}
+	} else {
+		err := s.pool.QueryRow(ctx,
+			`SELECT v.name, v.spec, a.archived_at
+			 FROM agent_versions v JOIN agents a ON a.id = v.agent_id
+			 WHERE v.agent_id = $1 AND v.version = $2`, agentID, version).
+			Scan(&name, &specJSON, &archivedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return snap, errNotFound("agent %s version %d not found", agentID, version)
+		}
+		if err != nil {
+			return snap, err
+		}
+	}
+	if archivedAt != nil {
+		return snap, errInvalid("agent %s is archived", agentID)
+	}
+
+	var spec agentSpec
+	if err := json.Unmarshal(specJSON, &spec); err != nil {
+		return snap, fmt.Errorf("decode stored agent spec: %w", err)
+	}
+	if raw, ok := overrides["model"]; ok {
+		m, err := parseModel(raw)
+		if err != nil {
+			return snap, err
+		}
+		spec.Model = m
+	}
+	if raw, ok := overrides["system"]; ok {
+		if err := json.Unmarshal(raw, &spec.System); err != nil {
+			return snap, errInvalid("agent override system must be a string")
+		}
+	}
+	if raw, ok := overrides["tools"]; ok {
+		items, err := parseTools(raw)
+		if err != nil {
+			return snap, err
+		}
+		spec.Tools = items
+	}
+	if raw, ok := overrides["mcp_servers"]; ok {
+		items, err := parseMCPServers(raw)
+		if err != nil {
+			return snap, err
+		}
+		spec.MCPServers = items
+	}
+	if raw, ok := overrides["skills"]; ok {
+		items, err := parseSkills(raw)
+		if err != nil {
+			return snap, err
+		}
+		spec.Skills = items
+	}
+	spec.normalize()
+
+	return sessionAgentJSON{
+		Type: "agent", ID: agentID, Version: version, Name: name,
+		Model: spec.Model, System: spec.System, Description: spec.Description,
+		Tools: spec.Tools, MCPServers: spec.MCPServers, Skills: spec.Skills,
+	}, nil
+}
+
+// rejectUnsupportedList returns a wire error when a post-v1 feature list is
+// present and non-empty (empty lists are accepted as no-ops).
+func rejectUnsupportedList(obj map[string]json.RawMessage, key, feature string) error {
+	raw, ok := obj[key]
+	if !ok || isNull(raw) {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return errInvalid("%s must be an array", key)
+	}
+	if len(items) > 0 {
+		return errInvalid("%s are not supported yet", feature)
+	}
+	return nil
+}
+
+func (s *server) createSession(r *http.Request) (any, error) {
+	ctx := r.Context()
+	obj, err := decodeObject(r)
+	if err != nil {
+		return nil, err
+	}
+	envID, err := requiredString(obj, "environment_id")
+	if err != nil {
+		return nil, err
+	}
+	agentRaw, ok := obj["agent"]
+	if !ok || isNull(agentRaw) {
+		return nil, errInvalid("agent is required")
+	}
+	if err := rejectUnsupportedList(obj, "resources", "session resources"); err != nil {
+		return nil, err
+	}
+	if err := rejectUnsupportedList(obj, "vault_ids", "vaults"); err != nil {
+		return nil, err
+	}
+	title, _, null, err := stringField(obj, "title")
+	if err != nil {
+		return nil, err
+	}
+	if null {
+		title = ""
+	}
+	metadata, err := parseMetadata(obj)
+	if err != nil {
+		return nil, err
+	}
+
+	var envArchivedAt *time.Time
+	err = s.pool.QueryRow(ctx,
+		`SELECT archived_at FROM environments WHERE id = $1`, envID).Scan(&envArchivedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound("environment %s not found", envID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if envArchivedAt != nil {
+		return nil, errInvalid("environment %s is archived", envID)
+	}
+
+	agent, err := s.resolveAgent(ctx, agentRaw)
+	if err != nil {
+		return nil, err
+	}
+	agentJSON, err := json.Marshal(agent)
+	if err != nil {
+		return nil, err
+	}
+
+	id := domain.NewID(domain.PrefixSession).String()
+	var createdBy *string
+	if p := principalFrom(ctx); p != "" {
+		createdBy = &p
+	}
+	row := sessionRow{
+		id: id, agentJSON: agentJSON, environmentID: envID,
+		status: string(domain.SessionIdle), title: title,
+		metaJSON: mustJSON(metadata), usageJSON: []byte(`{}`), resourcesJSON: []byte(`[]`),
+	}
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id,
+		   status, title, metadata, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 RETURNING created_at, updated_at`,
+		id, agent.ID, agent.Version, agentJSON, envID, row.status, title, metadata, createdBy).
+		Scan(&row.createdAt, &row.updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return renderSession(row)
+}
+
+func mustJSON(v any) []byte {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		panic(err) // map[string]string cannot fail to marshal
+	}
+	return raw
+}
+
+func (s *server) getSession(r *http.Request) (any, error) {
+	ctx := r.Context()
+	id := normalizeSessionID(r.PathValue("id"))
+	row, err := scanSession(s.pool.QueryRow(ctx,
+		`SELECT `+sessionColumns+` FROM sessions WHERE id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound("session %s not found", id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return renderSession(row)
+}
+
+func (s *server) updateSession(r *http.Request) (any, error) {
+	ctx := r.Context()
+	id := normalizeSessionID(r.PathValue("id"))
+	obj, err := decodeObject(r)
+	if err != nil {
+		return nil, err
+	}
+	if raw, ok := obj["vault_ids"]; ok && !isNull(raw) {
+		// The reference server rejects this too ("Not yet supported").
+		return nil, errInvalid("vault_ids updates are not yet supported")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row, err := scanSession(tx.QueryRow(ctx,
+		`SELECT `+sessionColumns+` FROM sessions WHERE id = $1 FOR UPDATE`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound("session %s not found", id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	metadata := map[string]string{}
+	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
+		return nil, err
+	}
+
+	if title, set, null, err := stringField(obj, "title"); err != nil {
+		return nil, err
+	} else if set {
+		if null {
+			title = ""
+		}
+		row.title = title
+	}
+	if raw, ok := obj["metadata"]; ok {
+		metadata, err = patchMetadata(metadata, raw)
+		if err != nil {
+			return nil, err
+		}
+		row.metaJSON = mustJSON(metadata)
+	}
+	if raw, ok := obj["agent"]; ok && !isNull(raw) {
+		var patch map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &patch); err != nil {
+			return nil, errInvalid("agent must be an object")
+		}
+		var agent sessionAgentJSON
+		if err := json.Unmarshal(row.agentJSON, &agent); err != nil {
+			return nil, err
+		}
+		for key, val := range patch {
+			switch key {
+			case "tools":
+				items, err := parseTools(val)
+				if err != nil {
+					return nil, err
+				}
+				agent.Tools = items
+			case "mcp_servers":
+				items, err := parseMCPServers(val)
+				if err != nil {
+					return nil, err
+				}
+				agent.MCPServers = items
+			default:
+				return nil, errInvalid("only agent.tools and agent.mcp_servers can be updated on a session")
+			}
+		}
+		row.agentJSON, err = json.Marshal(agent)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.QueryRow(ctx,
+		`UPDATE sessions SET resolved_agent = $2, title = $3, metadata = $4, updated_at = now()
+		 WHERE id = $1 RETURNING updated_at`,
+		id, row.agentJSON, row.title, row.metaJSON).Scan(&row.updatedAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return renderSession(row)
+}
+
+var validSessionStatuses = map[string]bool{
+	string(domain.SessionIdle): true, string(domain.SessionRunning): true,
+	string(domain.SessionRescheduling): true, string(domain.SessionTerminated): true,
+}
+
+func (s *server) listSessions(r *http.Request) (any, error) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	page, err := parsePage(q)
+	if err != nil {
+		return nil, err
+	}
+	includeArchived, err := parseBoolParam(q, "include_archived")
+	if err != nil {
+		return nil, err
+	}
+	order := q.Get("order")
+	switch order {
+	case "":
+		order = "desc"
+	case "asc", "desc":
+	default:
+		return nil, errInvalid(`order must be "asc" or "desc"`)
+	}
+	statuses := append(q["statuses[]"], q["statuses"]...)
+	for _, st := range statuses {
+		if !validSessionStatuses[st] {
+			return nil, errInvalid("invalid session status %q", st)
+		}
+	}
+	if q.Get("agent_version") != "" && q.Get("agent_id") == "" {
+		return nil, errInvalid("agent_version requires agent_id")
+	}
+
+	// Deployments and memory stores are post-v1 features: no session can
+	// reference one, so filtering by them yields an empty result, not an error.
+	if q.Get("deployment_id") != "" || q.Get("memory_store_id") != "" {
+		return newBiPage(page, 0, nil), nil
+	}
+
+	query := `SELECT ` + sessionColumns + ` FROM sessions WHERE true`
+	var args []any
+	if !includeArchived {
+		query += ` AND archived_at IS NULL`
+	}
+	if agentID := q.Get("agent_id"); agentID != "" {
+		args = append(args, agentID)
+		query += fmt.Sprintf(` AND agent_id = $%d`, len(args))
+	}
+	if v := q.Get("agent_version"); v != "" {
+		version, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, errInvalid("agent_version must be an integer")
+		}
+		args = append(args, version)
+		query += fmt.Sprintf(` AND agent_version = $%d`, len(args))
+	}
+	if len(statuses) > 0 {
+		args = append(args, statuses)
+		query += fmt.Sprintf(` AND status = ANY($%d)`, len(args))
+	}
+	for key, op := range map[string]string{
+		"created_at[gt]": ">", "created_at[gte]": ">=",
+		"created_at[lt]": "<", "created_at[lte]": "<=",
+	} {
+		ts, err := parseTimeParam(q, key)
+		if err != nil {
+			return nil, err
+		}
+		if ts != nil {
+			args = append(args, *ts)
+			query += fmt.Sprintf(` AND created_at %s $%d`, op, len(args))
+		}
+	}
+	dir := "DESC"
+	if order == "asc" {
+		dir = "ASC"
+	}
+	args = append(args, page.limit+1, page.offset)
+	query += fmt.Sprintf(` ORDER BY created_at %s, id %s LIMIT $%d OFFSET $%d`,
+		dir, dir, len(args)-1, len(args))
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var data []any
+	fetched := 0
+	for rows.Next() {
+		fetched++
+		if fetched > page.limit {
+			break
+		}
+		row, err := scanSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		rendered, err := renderSession(row)
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, rendered)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return newBiPage(page, fetched, data), nil
+}
+
+func (s *server) archiveSession(r *http.Request) (any, error) {
+	ctx := r.Context()
+	id := normalizeSessionID(r.PathValue("id"))
+	row, err := scanSession(s.pool.QueryRow(ctx,
+		`UPDATE sessions SET
+		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
+		   archived_at = COALESCE(archived_at, now())
+		 WHERE id = $1 RETURNING `+sessionColumns, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound("session %s not found", id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return renderSession(row)
+}
+
+func (s *server) deleteSession(r *http.Request) (any, error) {
+	ctx := r.Context()
+	id := normalizeSessionID(r.PathValue("id"))
+	tag, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, errNotFound("session %s not found", id)
+	}
+	return map[string]string{"id": id, "type": "session_deleted"}, nil
+}
