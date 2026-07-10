@@ -86,8 +86,19 @@ func (l *Log) Append(ctx context.Context, sessionID domain.ID, evs []NewEvent) (
 		return nil, err
 	}
 
-	out := make([]domain.Event, 0, len(evs))
-	for _, ev := range evs {
+	// One multi-row INSERT: the session row lock is held for a single round
+	// trip however large the batch. created_at is clock_timestamp() — real
+	// time AFTER the lock was acquired — never the column default now(),
+	// which Postgres freezes at BEGIN and would let a transaction that
+	// waited on the lock write a higher seq with an earlier timestamp,
+	// breaking the seq/created_at agreement the list filters rely on.
+	var (
+		sb   strings.Builder
+		args []any
+		out  = make([]domain.Event, 0, len(evs))
+	)
+	sb.WriteString(`INSERT INTO events (id, session_id, seq, type, payload, processed_at, created_at) VALUES `)
+	for i, ev := range evs {
 		seq++
 		id := ev.ID
 		if id == "" {
@@ -97,15 +108,12 @@ func (l *Log) Append(ctx context.Context, sessionID domain.ID, evs []NewEvent) (
 		if len(payload) == 0 {
 			payload = json.RawMessage("{}")
 		}
-		var createdAt time.Time
-		err := tx.QueryRow(ctx,
-			`INSERT INTO events (id, session_id, seq, type, payload, processed_at)
-			 VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at`,
-			id.String(), sessionID.String(), seq, string(ev.Type), payload, utcOrNil(ev.ProcessedAt),
-		).Scan(&createdAt)
-		if err != nil {
-			return nil, err
+		if i > 0 {
+			sb.WriteString(", ")
 		}
+		n := len(args)
+		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, $%d, $%d, clock_timestamp())", n+1, n+2, n+3, n+4, n+5, n+6)
+		args = append(args, id.String(), sessionID.String(), seq, string(ev.Type), payload, utcOrNil(ev.ProcessedAt))
 		out = append(out, domain.Event{
 			ID:          id,
 			SessionID:   sessionID,
@@ -113,8 +121,23 @@ func (l *Log) Append(ctx context.Context, sessionID domain.ID, evs []NewEvent) (
 			Type:        ev.Type,
 			Body:        payload,
 			ProcessedAt: utcOrNil(ev.ProcessedAt),
-			CreatedAt:   createdAt.UTC(),
 		})
+	}
+	sb.WriteString(` RETURNING created_at`)
+	rows, err := tx.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; rows.Next(); i++ {
+		var createdAt time.Time
+		if err := rows.Scan(&createdAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out[i].CreatedAt = createdAt.UTC()
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	// NOTIFY fires on commit, so subscribers only ever wake for committed

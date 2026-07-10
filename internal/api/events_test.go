@@ -243,6 +243,7 @@ func TestSendValidationSweep(t *testing.T) {
 			"type": "user.tool_result", "tool_use_id": "sevt_1"}}}, "self_hosted"},
 		{"thread id rejected", map[string]any{"events": []any{map[string]any{
 			"type": "user.interrupt", "session_thread_id": "sthr_1"}}}, "threads are deferred"},
+		{"NUL in text", map[string]any{"events": []any{userMessage("a\x00b")}}, "U+0000"},
 		{"system.message alone", map[string]any{"events": []any{map[string]any{
 			"type": "system.message", "content": txt}}}, "immediately follow"},
 		{"system.message not last", map[string]any{"events": []any{
@@ -707,6 +708,100 @@ func sid2id(t *testing.T, sid string) domain.ID {
 		t.Fatalf("unexpected session id %q", sid)
 	}
 	return domain.ID(sid)
+}
+
+func TestListEventsDescCursorKeepsDirection(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	path := "/v1/sessions/" + sid + "/events"
+	for i := 0; i < 5; i++ {
+		sendEvents(t, s, sid, userMessage(fmt.Sprintf("d%d", i)))
+	}
+
+	status, res := s.do(http.MethodGet, path+"?order=desc&limit=2", nil)
+	if status != http.StatusOK {
+		t.Fatalf("desc page 1: %d", status)
+	}
+	page1 := listData(t, res)
+	cur := nextPage(t, res)
+	if cur == "" {
+		t.Fatal("desc page 1 has no next_page")
+	}
+
+	// Following next_page WITHOUT re-passing order must keep walking desc.
+	status, res = s.do(http.MethodGet, path+"?limit=2&page="+cur, nil)
+	if status != http.StatusOK {
+		t.Fatalf("desc page 2: %d", status)
+	}
+	page2 := listData(t, res)
+	texts := func(evs []map[string]any) (out []string) {
+		for _, ev := range evs {
+			out = append(out, ev["content"].([]any)[0].(map[string]any)["text"].(string))
+		}
+		return
+	}
+	got := append(texts(page1), texts(page2)...)
+	want := []string{"d4", "d3", "d2", "d1"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("desc walk = %v, want %v", got, want)
+		}
+	}
+
+	// An explicitly contradicting order is an error, not a silent restart.
+	status, res = s.do(http.MethodGet, path+"?order=asc&page="+cur, nil)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+func TestStreamErrorFrameOnCorruptRow(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	st := s.stream(t, "/v1/sessions/"+sid+"/events/stream")
+
+	// A corrupt row slipped in behind the API's back (no NOTIFY)…
+	if _, err := s.pool.Exec(context.Background(),
+		`INSERT INTO events (id, session_id, seq, type, payload) VALUES ($1, $2, 1, 'user.message', '[1]')`,
+		domain.NewID("sevt").String(), sid); err != nil {
+		t.Fatal(err)
+	}
+	// …and the next real append wakes the stream into rendering it.
+	status, _ := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events",
+		map[string]any{"events": []any{userMessage("wake")}})
+	if status != http.StatusOK {
+		t.Fatalf("send: %d", status)
+	}
+
+	f := st.next(t)
+	if f.name != "error" || f.data["type"] != "error" {
+		t.Fatalf("frame = %q %v, want the protocol error frame", f.name, f.data)
+	}
+	inner, _ := f.data["error"].(map[string]any)
+	if inner == nil || inner["type"] != "api_error" {
+		t.Errorf("error frame body = %v", f.data)
+	}
+	st.expectClosed(t)
+}
+
+func TestStreamDeletionBackstopViaPing(t *testing.T) {
+	restore := api.SetPingIntervalForTest(50 * time.Millisecond)
+	defer restore()
+
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	st := s.stream(t, "/v1/sessions/"+sid+"/events/stream")
+
+	// Delete the session row directly — simulating a lost session.deleted
+	// broadcast (another replica's NOTIFY missed during a reconnect gap).
+	// The ping-time existence check must still terminate the stream.
+	if _, err := s.pool.Exec(context.Background(),
+		`DELETE FROM sessions WHERE id = $1`, sid); err != nil {
+		t.Fatal(err)
+	}
+	f := st.next(t)
+	if f.name != "session.deleted" || f.data["type"] != "session.deleted" {
+		t.Fatalf("frame = %q %v", f.name, f.data)
+	}
+	st.expectClosed(t)
 }
 
 func TestStreamPingKeepalive(t *testing.T) {

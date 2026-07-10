@@ -61,6 +61,12 @@ type Subscription struct {
 	wake      chan struct{}
 	frames    chan json.RawMessage
 	closeOnce sync.Once
+	// lossyDeltas is set (under the broker mutex) when an event_delta had
+	// to be dropped: from then until the next event_start, further deltas
+	// are suppressed so the subscriber sees a clean prefix that simply
+	// stopped early — the wire contract's "best effort" — never a text
+	// with an interior hole.
+	lossyDeltas bool
 }
 
 func (s *Subscription) Wake() <-chan struct{}          { return s.wake }
@@ -132,6 +138,10 @@ func (b *Broker) listen(ctx context.Context) {
 		_, err = conn.Exec(ctx, "LISTEN "+channelEvents+"; LISTEN "+channelFrames)
 		if err != nil {
 			conn.Release()
+			// Same pacing as the Acquire failure path: LISTEN can fail
+			// persistently (e.g. a transaction-pooling proxy), and a
+			// backoff-free retry would spin a core against the database.
+			time.Sleep(200 * time.Millisecond)
 			continue
 		}
 		b.setReady(ctx, true)
@@ -211,12 +221,30 @@ func (b *Broker) dispatch(channel, payload string) {
 		if json.Unmarshal([]byte(payload), &m) != nil {
 			return
 		}
+		var ft struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal(m.Frame, &ft)
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		for s := range b.subs[domain.ID(m.SessionID)] {
+			// A fresh preview generation clears the lossy state: chunk
+			// suppression is per preview, not per connection.
+			if ft.Type == "event_start" {
+				s.lossyDeltas = false
+			}
+			if ft.Type == "event_delta" && s.lossyDeltas {
+				continue
+			}
 			select {
 			case s.frames <- m.Frame:
-			default: // best-effort: a stalled subscriber drops frames
+			default:
+				// Best-effort: a stalled subscriber drops frames — but a
+				// dropped delta poisons the rest of its preview (see
+				// lossyDeltas) so partial text is a prefix, never holed.
+				if ft.Type == "event_delta" {
+					s.lossyDeltas = true
+				}
 			}
 		}
 	}

@@ -27,7 +27,15 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   Verified end-to-end by driving the real `ant` CLI (send/list/stream).
   Documented v1 divergences: streams are a live tail (reconnect seeds via
   list), `user.define_outcome` and non-null `session_thread_id` are
-  rejected, session status transitions wait for the brain (slice 5). (#9)
+  rejected, session status transitions wait for the brain (slice 5).
+  Review hardening in the same PR: `created_at` taken under the session
+  lock (`clock_timestamp()`) so it can never run backwards against `seq`,
+  single multi-row insert per batch, `\u0000` and `text:null` rejected
+  cleanly, direction-bound list cursors, ordered preview delivery plus
+  bounded backlog reads and an `error` frame on mid-stream failures,
+  ping-time deletion backstop so streams on deleted sessions always
+  terminate, prefix-only delta loss, LISTEN retry backoff, and
+  append-before-span-close in the span.* helper. (#9)
 - GitHub checks: the CI coverage gate now runs as its own named check
   (`coverage`) with a per-package job summary and the profile uploaded as an
   artifact; `.coderabbit.yaml` configures CodeRabbit PR reviews (wire-compat

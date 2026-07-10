@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -39,5 +40,47 @@ func TestChunkTextEscapeBudget(t *testing.T) {
 
 	if got := chunkText("", 10); len(got) != 1 || got[0] != "" {
 		t.Errorf("empty text chunks = %q", got)
+	}
+}
+
+// White-box: a dropped event_delta must poison the remainder of its preview
+// (prefix, never an interior hole), and the next event_start resets it.
+func TestDispatchDropsDeltasAsPrefix(t *testing.T) {
+	b := &Broker{
+		subs:  make(map[domain.ID]map[*Subscription]struct{}),
+		ready: make(chan struct{}),
+	}
+	sub := &Subscription{
+		broker:    b,
+		sessionID: "sesn_x",
+		wake:      make(chan struct{}, 1),
+		frames:    make(chan json.RawMessage, 2),
+	}
+	b.subs["sesn_x"] = map[*Subscription]struct{}{sub: {}}
+
+	send := func(frame string) {
+		b.dispatch(channelFrames, `{"session_id":"sesn_x","frame":`+frame+`}`)
+	}
+	delta := func(text string) string {
+		return `{"type":"event_delta","event_id":"sevt_1","delta":{"type":"content_delta","index":0,"content":{"type":"text","text":"` + text + `"}}}`
+	}
+
+	send(delta("one"))
+	send(delta("two"))
+	send(delta("three")) // buffer full → dropped, preview poisoned
+	<-sub.frames
+	<-sub.frames
+	send(delta("four")) // space again, but the poisoned preview stays dry
+	select {
+	case f := <-sub.frames:
+		t.Fatalf("delta after a drop must be suppressed, got %s", f)
+	default:
+	}
+
+	// A new preview generation resets the subscriber.
+	send(`{"type":"event_start","event":{"id":"sevt_2","type":"agent.message"}}`)
+	send(delta("fresh"))
+	if got := len(sub.frames); got != 2 {
+		t.Fatalf("expected event_start + fresh delta, %d frames buffered", got)
 	}
 }

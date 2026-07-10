@@ -28,6 +28,10 @@ func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID) (conte
 		ProcessedAt: &now,
 	}})
 	if err != nil {
+		// No wire event landed, so the exported span must say why it is
+		// alone: an errored, immediately-ended span records an aborted
+		// attempt rather than silently drifting from the log.
+		span.SetStatus(codes.Error, "failed to append span.model_request_start: "+err.Error())
 		span.End()
 		return ctx, nil, err
 	}
@@ -46,18 +50,12 @@ type ModelRequest struct {
 // end event references as model_request_start_id.
 func (m *ModelRequest) StartEventID() domain.ID { return m.startID }
 
-// End closes the OTel span and emits span.model_request_end with the token
-// accounting — again both from this single point.
+// End emits span.model_request_end with the token accounting and closes the
+// OTel span — again both from this single point. The wire event is appended
+// first: if it cannot land, the span still closes but carries an explicit
+// error status naming the missing event, so the trace records the drift
+// instead of masking it as a clean request.
 func (m *ModelRequest) End(ctx context.Context, isError bool, usage domain.ModelUsage) error {
-	if isError {
-		m.span.SetStatus(codes.Error, "model request failed")
-	}
-	m.span.SetAttributes(
-		attribute.Int64("model.input_tokens", usage.InputTokens),
-		attribute.Int64("model.output_tokens", usage.OutputTokens),
-	)
-	m.span.End()
-
 	payload, err := json.Marshal(map[string]any{
 		"is_error":               isError,
 		"model_request_start_id": m.startID.String(),
@@ -67,10 +65,22 @@ func (m *ModelRequest) End(ctx context.Context, isError bool, usage domain.Model
 		return err
 	}
 	now := time.Now().UTC()
-	_, err = m.log.Append(ctx, m.sessionID, []NewEvent{{
+	_, appendErr := m.log.Append(ctx, m.sessionID, []NewEvent{{
 		Type:        domain.EventSpanModelRequestEnd,
 		Payload:     payload,
 		ProcessedAt: &now,
 	}})
-	return err
+
+	switch {
+	case appendErr != nil:
+		m.span.SetStatus(codes.Error, "failed to append span.model_request_end: "+appendErr.Error())
+	case isError:
+		m.span.SetStatus(codes.Error, "model request failed")
+	}
+	m.span.SetAttributes(
+		attribute.Int64("model.input_tokens", usage.InputTokens),
+		attribute.Int64("model.output_tokens", usage.OutputTokens),
+	)
+	m.span.End()
+	return appendErr
 }

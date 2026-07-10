@@ -35,6 +35,11 @@ type cursor struct {
 	// version-keyed position (agent versions); used when versioned is true
 	versioned bool
 	version   int64
+	// seq-keyed position (session events); binds the sort direction so a
+	// follow-up request that omits ?order= cannot flip the walk around.
+	seqKeyed bool
+	seqDesc  bool
+	seq      int64
 }
 
 type pageParams struct {
@@ -71,6 +76,15 @@ func encodeVersionCursor(version int64) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
+func encodeSeqCursor(desc bool, seq int64) string {
+	order := "a"
+	if desc {
+		order = "d"
+	}
+	raw := fmt.Sprintf("k1|%s|s|%s|%d", dirNext, order, seq)
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
 func decodeCursor(s string) (*cursor, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
@@ -99,6 +113,15 @@ func decodeCursor(s string) (*cursor, error) {
 			return nil, errInvalid("invalid page cursor")
 		}
 		return &cursor{dir: parts[1], versioned: true, version: version}, nil
+	case "s":
+		if len(parts) != 5 || (parts[3] != "a" && parts[3] != "d") {
+			return nil, errInvalid("invalid page cursor")
+		}
+		seq, err := strconv.ParseInt(parts[4], 10, 64)
+		if err != nil || seq < 1 {
+			return nil, errInvalid("invalid page cursor")
+		}
+		return &cursor{dir: parts[1], seqKeyed: true, seqDesc: parts[3] == "d", seq: seq}, nil
 	default:
 		return nil, errInvalid("invalid page cursor")
 	}

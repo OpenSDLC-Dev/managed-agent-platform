@@ -155,6 +155,13 @@ func TestAppendConcurrentSeqIntegrity(t *testing.T) {
 		if ev.Seq != int64(i+1) {
 			t.Fatalf("seq at %d = %d: sequence has gaps or duplicates", i, ev.Seq)
 		}
+		// created_at is taken under the session lock (clock_timestamp, not
+		// transaction-start now()), so it can never run backwards against
+		// seq — the created_at[gt] watermark pattern depends on this.
+		if i > 0 && ev.CreatedAt.Before(got[i-1].CreatedAt) {
+			t.Fatalf("created_at at seq %d precedes seq %d: %v < %v",
+				ev.Seq, got[i-1].Seq, ev.CreatedAt, got[i-1].CreatedAt)
+		}
 	}
 
 	// Other sessions allocate independently, starting at 1.

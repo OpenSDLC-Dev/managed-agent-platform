@@ -2,6 +2,7 @@ package events_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -37,7 +38,21 @@ func TestLogFailurePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// span helpers surface append failures (deleted session).
+	// span helpers surface append failures. End on an archived session must
+	// return the error (the wire event could not land) while still closing
+	// the OTel span with an error status rather than a clean one.
+	_, mr, err := log.StartModelRequest(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET archived_at = now() WHERE id = $1`, sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := mr.End(ctx, false, domain.ModelUsage{}); !errors.Is(err, events.ErrSessionArchived) {
+		t.Errorf("End on archived session err = %v, want ErrSessionArchived", err)
+	}
+
+	// And a deleted session fails the start append.
 	if _, err := pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sid.String()); err != nil {
 		t.Fatal(err)
 	}

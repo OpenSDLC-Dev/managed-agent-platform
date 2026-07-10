@@ -41,10 +41,52 @@ func NormalizeInbound(envKind string, raws []json.RawMessage) ([]NewEvent, error
 				return nil, fmt.Errorf("events[%d]: system.message must immediately follow a user.message, user.tool_result, or user.custom_tool_result in the same request", i)
 			}
 		}
+		if err := rejectNUL(ev.Payload); err != nil {
+			return nil, fmt.Errorf("events[%d]: %w", i, err)
+		}
 		prev = ev.Type
 		out = append(out, ev)
 	}
 	return out, nil
+}
+
+// rejectNUL walks every decoded string in the payload (values and keys) and
+// rejects U+0000: it is valid JSON (the \u0000 escape) but Postgres jsonb cannot store
+// it, and letting it through would turn a well-formed request into a 500 at
+// insert time.
+func rejectNUL(payload json.RawMessage) error {
+	var v any
+	if err := json.Unmarshal(payload, &v); err != nil {
+		return err
+	}
+	return walkStrings(v)
+}
+
+func walkStrings(v any) error {
+	switch x := v.(type) {
+	case string:
+		for _, r := range x {
+			if r == 0 {
+				return fmt.Errorf(`strings must not contain U+0000 (the \u0000 escape): it cannot be stored`)
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if err := walkStrings(e); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		for k, e := range x {
+			if err := walkStrings(k); err != nil {
+				return err
+			}
+			if err := walkStrings(e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func normalizeOne(envKind string, raw json.RawMessage) (NewEvent, error) {
@@ -332,8 +374,10 @@ func validateBlock(raw json.RawMessage, allowed map[string]bool) error {
 		if err := allowKeys(obj, "type", "text"); err != nil {
 			return err
 		}
+		// json.Unmarshal of null into a string is a silent no-op, so null
+		// must be ruled out explicitly.
 		var s string
-		if raw, ok := obj["text"]; !ok || json.Unmarshal(raw, &s) != nil {
+		if raw, ok := obj["text"]; !ok || isNullRaw(raw) || json.Unmarshal(raw, &s) != nil {
 			return fmt.Errorf("text block requires a string text field")
 		}
 		return nil

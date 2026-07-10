@@ -90,18 +90,25 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 		return nil, err
 	}
 	query := events.ListQuery{Limit: page.limit + 1}
-	if page.cur != nil {
-		if !page.cur.versioned {
-			return nil, errInvalid("invalid page cursor")
-		}
-		query.AfterSeq = &page.cur.version
-	}
 	switch q.Get("order") {
 	case "", "asc":
 	case "desc":
 		query.Desc = true
 	default:
 		return nil, errInvalid(`order must be "asc" or "desc"`)
+	}
+	if page.cur != nil {
+		if !page.cur.seqKeyed {
+			return nil, errInvalid("invalid page cursor")
+		}
+		// The cursor binds the direction it was minted under, so a
+		// follow-up that omits ?order= keeps walking the same way — and
+		// one that contradicts it is an error, not a silent restart.
+		if q.Get("order") != "" && query.Desc != page.cur.seqDesc {
+			return nil, errInvalid("order does not match the page cursor")
+		}
+		query.Desc = page.cur.seqDesc
+		query.AfterSeq = &page.cur.seq
 	}
 	query.Types = listParam(q, "types")
 	for key, dst := range map[string]**time.Time{
@@ -137,7 +144,7 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 	}
 	var next *string
 	if more {
-		c := encodeVersionCursor(evs[len(evs)-1].Seq)
+		c := encodeSeqCursor(query.Desc, evs[len(evs)-1].Seq)
 		next = &c
 	}
 	return pageJSON{Data: data, NextPage: next}, nil
@@ -196,9 +203,77 @@ func (s *server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 
 	// event_delta frames carry only event_id, so remember each previewed
 	// event's type from its event_start until the buffered event lands.
-	started := make(map[string]string)
+	// Aborted previews never land, so the tracker is capped.
+	started := previewTracker{types: make(map[string]string)}
 	ping := time.NewTicker(ssePingInterval)
 	defer ping.Stop()
+
+	// processFrame forwards one broadcast frame per the subscriber's
+	// preview opt-in; true means the stream is over.
+	processFrame := func(raw json.RawMessage) (terminate bool) {
+		var frame struct {
+			Type    string `json:"type"`
+			EventID string `json:"event_id"`
+			Event   struct {
+				ID   string `json:"id"`
+				Type string `json:"type"`
+			} `json:"event"`
+		}
+		if json.Unmarshal(raw, &frame) != nil {
+			return false
+		}
+		switch frame.Type {
+		case "event_start":
+			started.add(frame.Event.ID, frame.Event.Type)
+			if !previews[frame.Event.Type] {
+				return false
+			}
+		case "event_delta":
+			if !previews[started.types[frame.EventID]] {
+				return false
+			}
+		}
+		writeSSEFrame(w, frame.Type, raw)
+		flusher.Flush()
+		// The deleted session's row is gone; nothing further can arrive.
+		return frame.Type == "session.deleted"
+	}
+
+	// drainFrames forwards every queued frame. The wake path runs it before
+	// writing buffered events: preview frames were broadcast before their
+	// event committed (same NOTIFY connection, delivery in order), so
+	// draining first keeps event_start ahead of the event it previews —
+	// a bare select would order the two channels randomly.
+	drainFrames := func() (terminate bool) {
+		for {
+			select {
+			case raw := <-sub.Frames():
+				if processFrame(raw) {
+					return true
+				}
+			default:
+				return false
+			}
+		}
+	}
+
+	// sessionGone backstops the best-effort session.deleted broadcast: if
+	// that frame was lost (broker reconnect gap, full buffer), the row's
+	// absence is the durable signal, and the stream must still terminate.
+	sessionGone := func() bool {
+		err := s.sessionExists(ctx, id)
+		var apiErr *apiError
+		return errors.As(err, &apiErr) && apiErr.status == http.StatusNotFound
+	}
+	endDeleted := func() {
+		frame, _ := json.Marshal(map[string]any{
+			"id":           domain.NewID("sevt").String(),
+			"type":         "session.deleted",
+			"processed_at": time.Now().UTC(),
+		})
+		writeSSEFrame(w, "session.deleted", frame)
+		flusher.Flush()
+	}
 
 	for {
 		select {
@@ -206,56 +281,87 @@ func (s *server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 			return
 
 		case <-sub.Wake():
-			evs, err := s.log.List(ctx, domain.ID(id), events.ListQuery{AfterSeq: &lastSeq})
-			if err != nil {
+			if drainFrames() {
 				return
 			}
-			for _, ev := range evs {
-				wire, err := eventWire(ev)
+			wrote := 0
+			for {
+				evs, err := s.log.List(ctx, domain.ID(id), events.ListQuery{AfterSeq: &lastSeq, Limit: sseWakeBatch})
 				if err != nil {
+					writeErrorFrame(w, flusher)
 					return
 				}
-				writeSSEFrame(w, string(ev.Type), wire)
-				lastSeq = ev.Seq
-				delete(started, ev.ID.String())
+				for _, ev := range evs {
+					wire, err := eventWire(ev)
+					if err != nil {
+						writeErrorFrame(w, flusher)
+						return
+					}
+					writeSSEFrame(w, string(ev.Type), wire)
+					lastSeq = ev.Seq
+					started.remove(ev.ID.String())
+				}
+				flusher.Flush()
+				wrote += len(evs)
+				if len(evs) < sseWakeBatch {
+					break
+				}
 			}
-			flusher.Flush()
+			// An empty wake can mean the log vanished with its session.
+			if wrote == 0 && sessionGone() {
+				endDeleted()
+				return
+			}
 
 		case raw := <-sub.Frames():
-			var frame struct {
-				Type    string `json:"type"`
-				EventID string `json:"event_id"`
-				Event   struct {
-					ID   string `json:"id"`
-					Type string `json:"type"`
-				} `json:"event"`
-			}
-			if json.Unmarshal(raw, &frame) != nil {
-				continue
-			}
-			switch frame.Type {
-			case "event_start":
-				started[frame.Event.ID] = frame.Event.Type
-				if !previews[frame.Event.Type] {
-					continue
-				}
-			case "event_delta":
-				if !previews[started[frame.EventID]] {
-					continue
-				}
-			}
-			writeSSEFrame(w, frame.Type, raw)
-			flusher.Flush()
-			// The deleted session's row is gone; nothing further can arrive.
-			if frame.Type == "session.deleted" {
+			if processFrame(raw) {
 				return
 			}
 
 		case <-ping.C:
+			if sessionGone() {
+				endDeleted()
+				return
+			}
 			writeSSEFrame(w, "ping", []byte(`{"type":"ping"}`))
 			flusher.Flush()
 		}
 	}
+}
+
+// sseWakeBatch bounds how much backlog one wake materializes in memory; the
+// wake path loops until it drains.
+const sseWakeBatch = 500
+
+// writeErrorFrame surfaces a mid-stream server failure as the protocol's
+// error frame, so clients can tell a broken tail from an orderly end.
+func writeErrorFrame(w io.Writer, flusher http.Flusher) {
+	writeSSEFrame(w, "error", []byte(`{"type":"error","error":{"type":"api_error","message":"internal server error"}}`))
+	flusher.Flush()
+}
+
+// previewTracker maps in-flight preview event ids to their types, bounded
+// because aborted previews never reconcile.
+type previewTracker struct {
+	types map[string]string
+	order []string
+}
+
+const previewTrackerCap = 256
+
+func (p *previewTracker) add(id, typ string) {
+	if _, ok := p.types[id]; !ok {
+		p.order = append(p.order, id)
+		if len(p.order) > previewTrackerCap {
+			delete(p.types, p.order[0])
+			p.order = p.order[1:]
+		}
+	}
+	p.types[id] = typ
+}
+
+func (p *previewTracker) remove(id string) {
+	delete(p.types, id)
 }
 
 // ssePingInterval keeps idle streams alive through proxies. The reference
@@ -279,22 +385,13 @@ func eventWire(ev domain.Event) (json.RawMessage, error) {
 	if out == nil {
 		out = make(map[string]json.RawMessage)
 	}
-	idRaw, err := json.Marshal(ev.ID.String())
-	if err != nil {
-		return nil, err
-	}
-	typeRaw, err := json.Marshal(string(ev.Type))
-	if err != nil {
-		return nil, err
-	}
-	processedAt := json.RawMessage("null")
+	// Marshals of plain strings and database timestamps cannot fail.
+	out["id"], _ = json.Marshal(ev.ID.String())
+	out["type"], _ = json.Marshal(string(ev.Type))
+	out["processed_at"] = json.RawMessage("null")
 	if ev.ProcessedAt != nil {
-		processedAt, err = json.Marshal(ev.ProcessedAt.UTC())
-		if err != nil {
-			return nil, err
-		}
+		out["processed_at"], _ = json.Marshal(ev.ProcessedAt.UTC())
 	}
-	out["id"], out["type"], out["processed_at"] = idRaw, typeRaw, processedAt
 	return json.Marshal(out)
 }
 
