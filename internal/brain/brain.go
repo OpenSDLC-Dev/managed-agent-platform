@@ -244,13 +244,25 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 
 	// end_turn (and everything else — max_tokens, stop_sequence — treated
 	// as a completed turn in v1): if input arrived mid-turn, chain straight
-	// into the next turn; otherwise idle with end_turn.
+	// into the next turn; otherwise idle with end_turn. The pending check
+	// and the settle commit share one transaction, session row locked
+	// FIRST (the API trigger's own lock-then-decide shape): a user.message
+	// committed between an unlocked check and the settle could otherwise
+	// be stranded on an idle session.
+	tx, err := b.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sid.String()); err != nil {
+		return err
+	}
 	var pending bool
-	err := b.pool.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM events
 		  WHERE session_id = $1 AND type = $2 AND processed_at IS NULL AND seq > $3)`,
-		sid.String(), string(domain.EventUserMessage), watermark).Scan(&pending)
-	if err != nil {
+		sid.String(), string(domain.EventUserMessage), watermark).Scan(&pending); err != nil {
 		return err
 	}
 	if pending {
@@ -260,8 +272,10 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Requeue(ctx, tx, item)
 		}
-		_, err := b.log.AppendWith(ctx, sid, nil, opts)
-		return err
+		if _, err := b.log.AppendInTx(ctx, tx, sid, nil, opts); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 
 	idle := domain.SessionIdle
@@ -273,10 +287,12 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	if err != nil {
 		return err
 	}
-	_, err = b.log.AppendWith(ctx, sid, []events.NewEvent{
+	if _, err := b.log.AppendInTx(ctx, tx, sid, []events.NewEvent{
 		{Type: domain.EventSessionStatusIdle, Payload: payload},
-	}, opts)
-	return err
+	}, opts); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // failTurn records a model-side failure on the log and idles the session
