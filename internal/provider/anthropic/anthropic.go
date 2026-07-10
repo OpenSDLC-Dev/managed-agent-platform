@@ -102,6 +102,7 @@ type stream struct {
 	toolID    string
 	toolName  string
 	toolJSON  []byte
+	toolSeed  json.RawMessage // complete input carried on content_block_start
 	inTool    bool
 
 	usage      domain.ModelUsage
@@ -133,6 +134,17 @@ func (s *stream) Next() bool {
 				s.toolID = ev.ContentBlock.ID
 				s.toolName = ev.ContentBlock.Name
 				s.toolJSON = s.toolJSON[:0]
+				s.toolSeed = nil
+				// The official protocol starts tool blocks with input {}
+				// and streams the JSON via deltas, but other
+				// Anthropic-protocol endpoints may put the complete input
+				// on the start block; dropping it would invoke the tool
+				// with empty arguments.
+				if in := ev.ContentBlock.Input; in != nil {
+					if raw, err := json.Marshal(in); err == nil && string(raw) != "{}" && string(raw) != "null" {
+						s.toolSeed = raw
+					}
+				}
 			}
 
 		case "content_block_delta":
@@ -152,7 +164,12 @@ func (s *stream) Next() bool {
 		case "content_block_stop":
 			if s.inTool && ev.Index == s.toolIndex {
 				s.inTool = false
+				// Streamed deltas are authoritative; the start-block seed
+				// covers endpoints that sent the input up front instead.
 				input := json.RawMessage(s.toolJSON)
+				if len(input) == 0 {
+					input = s.toolSeed
+				}
 				if len(input) == 0 {
 					input = json.RawMessage("{}")
 				}

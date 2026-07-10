@@ -228,6 +228,33 @@ func TestGenerateEmptyToolInputAndStringContent(t *testing.T) {
 	}
 }
 
+func TestGenerateToolInputOnStartBlock(t *testing.T) {
+	// Non-Anthropic gateways may deliver the complete tool input on the
+	// start block with no input_json_delta frames at all.
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_3","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_5","name":"read","input":{"path":"/tmp/x"}}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":3}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"read it"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+	if len(chunks) != 2 || chunks[0].Kind != provider.KindToolUse {
+		t.Fatalf("chunks = %+v", chunks)
+	}
+	var input map[string]any
+	if err := json.Unmarshal(chunks[0].ToolUse.Input, &input); err != nil || input["path"] != "/tmp/x" {
+		t.Errorf("start-block tool input dropped: %s", chunks[0].ToolUse.Input)
+	}
+}
+
 func TestGenerateUpstreamError(t *testing.T) {
 	f := &fakeServer{status: http.StatusUnauthorized}
 	p := start(t, f)
