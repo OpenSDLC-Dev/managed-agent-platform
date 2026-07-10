@@ -37,6 +37,11 @@ func LoadRoutes(path string) ([]Route, error) {
 	if err := dec.Decode(&items); err != nil {
 		return nil, fmt.Errorf("model providers config %s: must be a JSON array: %w", path, err)
 	}
+	// Decode reads one JSON value; a merge artifact appending a second array
+	// would otherwise vanish silently, and its routes with it.
+	if dec.More() {
+		return nil, fmt.Errorf("model providers config %s: trailing data after the routes array", path)
+	}
 
 	routes := make([]Route, 0, len(items))
 	for i, item := range items {

@@ -60,6 +60,8 @@ func TestLoadRoutesValidation(t *testing.T) {
 		{"both key forms", `[{"model":"m","protocol":"anthropic","base_url":"http://x","api_key":"a","api_key_env":"B"}]`},
 		{"unset env key", `[{"model":"m","protocol":"anthropic","base_url":"http://x","api_key_env":"DEFINITELY_NOT_SET_XYZ"}]`},
 		{"empty file", ``},
+		{"trailing data", `[{"model":"m","protocol":"anthropic","base_url":"http://x","api_key":"a"}]
+[{"model":"n","protocol":"anthropic","base_url":"http://y","api_key":"b"}]`},
 	}
 	for _, tc := range cases {
 		path := writeConfig(t, tc.content)
