@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -96,6 +98,19 @@ func TestUserMessageWhileRunningOnlyAppends(t *testing.T) {
 	}
 }
 
+// appendToolUse plants a platform-emitted tool intent directly on the log
+// (what the brain's settlement commits) and returns its event id — the id a
+// client's tool result must reference.
+func appendToolUse(t *testing.T, s *tserver, sessionID string, typ domain.EventType) string {
+	t.Helper()
+	evs, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sessionID),
+		[]events.NewEvent{{Type: typ, Payload: []byte(`{"name":"lookup","input":{},"session_thread_id":null}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evs[0].ID.String()
+}
+
 func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 	s := newTestServer(t)
 	sessionID := selfHostedSession(t, s)
@@ -104,11 +119,13 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 
 	sendEvents(t, s, sessionID, userMessage("run a tool"))
 
-	// The brain's turn happened: claim and finish the queued model_turn.
+	// The brain's turn happened: it emitted a tool intent, then claim and
+	// finish the queued model_turn.
 	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
 	if err != nil || item == nil {
 		t.Fatalf("claim: %+v %v", item, err)
 	}
+	toolUseID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
 	if err := q.Complete(ctx, s.pool, item); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +133,7 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 	// A self-hosted worker posts the tool result → the next turn is queued,
 	// with no extra status_running (the session never left running).
 	sendEvents(t, s, sessionID, map[string]any{
-		"type": "user.tool_result", "tool_use_id": "sevt_00000000000000000000000001",
+		"type": "user.tool_result", "tool_use_id": toolUseID,
 		"content": []any{map[string]any{"type": "text", "text": "ok"}},
 	})
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
@@ -137,6 +154,7 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 	if err != nil || item == nil {
 		t.Fatal(err)
 	}
+	toolUseID2 := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
 	if err := q.Complete(ctx, s.pool, item); err != nil {
 		t.Fatal(err)
 	}
@@ -145,10 +163,90 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	sendEvents(t, s, sessionID, map[string]any{
-		"type": "user.tool_result", "tool_use_id": "sevt_00000000000000000000000002",
+		"type": "user.tool_result", "tool_use_id": toolUseID2,
 	})
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
 		t.Errorf("tool result on idle session enqueued %d turns, want 0", n)
+	}
+}
+
+func TestParallelToolResultsResumeOnFullSet(t *testing.T) {
+	// The reference protocol requires every tool_use answered before the
+	// conversation continues, so the resume trigger must not fire until the
+	// batch completes the set.
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	ctx := context.Background()
+	q := queue.New(s.pool)
+
+	sendEvents(t, s, sessionID, userMessage("do two things"))
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	idA := appendToolUse(t, s, sessionID, domain.EventAgentCustomToolUse)
+	idB := appendToolUse(t, s, sessionID, domain.EventAgentCustomToolUse)
+	if err := q.Complete(ctx, s.pool, item); err != nil {
+		t.Fatal(err)
+	}
+
+	sendEvents(t, s, sessionID, map[string]any{
+		"type": "user.custom_tool_result", "custom_tool_use_id": idA,
+		"content": []any{map[string]any{"type": "text", "text": "one"}},
+	})
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("partial result set scheduled %d turns, want 0", n)
+	}
+
+	sendEvents(t, s, sessionID, map[string]any{
+		"type": "user.custom_tool_result", "custom_tool_use_id": idB,
+		"content": []any{map[string]any{"type": "text", "text": "two"}},
+	})
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("completing result scheduled %d turns, want 1", n)
+	}
+}
+
+func TestInboundToolResultValidation(t *testing.T) {
+	// The log is append-only: a result with a wrong, unknown, or duplicate
+	// reference would poison every future replay, so it must be the
+	// client's 400 instead.
+	s := newTestServer(t)
+	sessionID := selfHostedSession(t, s)
+
+	sendEvents(t, s, sessionID, userMessage("hi"))
+	customID := appendToolUse(t, s, sessionID, domain.EventAgentCustomToolUse)
+
+	post := func(evs ...map[string]any) int {
+		status, _ := s.do(http.MethodPost, "/v1/sessions/"+sessionID+"/events", map[string]any{"events": evs})
+		return status
+	}
+	result := func(id string) map[string]any {
+		return map[string]any{
+			"type": "user.custom_tool_result", "custom_tool_use_id": id,
+			"content": []any{map[string]any{"type": "text", "text": "ok"}},
+		}
+	}
+
+	// Unknown reference.
+	if got := post(result("sevt_00000000000000000000000000")); got != http.StatusBadRequest {
+		t.Errorf("unknown tool_use ref: status %d, want 400", got)
+	}
+	// Kind mismatch: a user.tool_result cannot answer a custom tool call.
+	if got := post(map[string]any{"type": "user.tool_result", "tool_use_id": customID}); got != http.StatusBadRequest {
+		t.Errorf("kind mismatch: status %d, want 400", got)
+	}
+	// Duplicate within one request.
+	if got := post(result(customID), result(customID)); got != http.StatusBadRequest {
+		t.Errorf("intra-batch duplicate: status %d, want 400", got)
+	}
+	// The valid result lands…
+	if got := post(result(customID)); got != http.StatusOK {
+		t.Errorf("valid result: status %d, want 200", got)
+	}
+	// …and a second answer for the same call is rejected.
+	if got := post(result(customID)); got != http.StatusBadRequest {
+		t.Errorf("already answered: status %d, want 400", got)
 	}
 }
 
@@ -205,13 +303,34 @@ func TestUpdateSessionEmitsOnlyChangedFields(t *testing.T) {
 		t.Errorf("agent snapshot = %v", agent)
 	}
 
-	// A no-op update emits nothing.
+	// No-op updates emit nothing — including metadata and agent retries,
+	// where the stored jsonb never byte-matches a fresh marshal and only a
+	// semantic comparison can tell nothing changed.
 	before := len(s.eventTypes(sessionID))
-	status, _ = s.do(http.MethodPost, "/v1/sessions/"+sessionID, map[string]any{"title": "new title"})
-	if status != http.StatusOK {
-		t.Fatalf("noop update: %d", status)
+	for _, patch := range []map[string]any{
+		{"title": "new title"},
+		{"metadata": map[string]any{"k": "v"}},
+		{"agent": map[string]any{"tools": []any{map[string]any{"type": "agent_toolset_20260401"}}}},
+	} {
+		status, _ = s.do(http.MethodPost, "/v1/sessions/"+sessionID, patch)
+		if status != http.StatusOK {
+			t.Fatalf("noop update %v: %d", patch, status)
+		}
 	}
 	if after := len(s.eventTypes(sessionID)); after != before {
-		t.Errorf("no-op update emitted an event (%d -> %d)", before, after)
+		t.Errorf("no-op updates emitted events (%d -> %d)", before, after)
 	}
+
+	// A mixed patch (title changed, metadata identical) carries only the
+	// field that actually changed.
+	status, _ = s.do(http.MethodPost, "/v1/sessions/"+sessionID, map[string]any{
+		"title": "final title", "metadata": map[string]any{"k": "v"},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("mixed update: %d", status)
+	}
+	_, res = s.do(http.MethodGet, "/v1/sessions/"+sessionID+"/events", nil)
+	evs = listData(t, res)
+	last = evs[len(evs)-1]
+	wantExactKeys(t, last, "id", "type", "processed_at", "title")
 }

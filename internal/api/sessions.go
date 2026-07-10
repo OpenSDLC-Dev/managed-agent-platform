@@ -1,12 +1,12 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -391,6 +391,17 @@ func mustJSON(v any) []byte {
 	return raw
 }
 
+// jsonEqual compares two JSON documents by value: stored jsonb comes back
+// with Postgres's own spacing and key order, so a byte comparison against a
+// fresh Go marshal would call every no-op update a change.
+func jsonEqual(a, b []byte) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
+}
+
 func (s *server) getSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
@@ -502,19 +513,23 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	// session.updated is emitted only when the update changed at least one
 	// field, and carries only the changed fields (metadata additionally only
 	// when the new value is non-empty) — the SDK-documented shape. Appended
-	// in the same transaction as the update itself.
+	// in the same transaction as the update itself. Change detection is
+	// semantic, not byte-wise: the previous values come back jsonb-normalized
+	// (Postgres's spacing and key order), which never byte-matches a fresh Go
+	// marshal even for identical content.
+	metaChanged := !jsonEqual(row.metaJSON, prevMetaJSON)
+	agentChanged := !jsonEqual(row.agentJSON, prevAgentJSON)
 	payload := map[string]any{}
 	if row.title != prevTitle {
 		payload["title"] = row.title
 	}
-	if !bytes.Equal(row.metaJSON, prevMetaJSON) && len(metadata) > 0 {
+	if metaChanged && len(metadata) > 0 {
 		payload["metadata"] = metadata
 	}
-	if !bytes.Equal(row.agentJSON, prevAgentJSON) {
+	if agentChanged {
 		payload["agent"] = json.RawMessage(row.agentJSON)
 	}
-	changed := row.title != prevTitle || !bytes.Equal(row.metaJSON, prevMetaJSON) ||
-		!bytes.Equal(row.agentJSON, prevAgentJSON)
+	changed := row.title != prevTitle || metaChanged || agentChanged
 	if changed {
 		if _, err := s.log.AppendInTx(ctx, tx, domain.ID(id), []events.NewEvent{
 			{Type: domain.EventSessionUpdated, Payload: mustJSON(payload)},

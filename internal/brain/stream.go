@@ -3,12 +3,10 @@ package brain
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 // turnResult is one model response translated into event material.
@@ -26,9 +24,11 @@ type turnResult struct {
 
 // streamTurn drives one provider stream, broadcasting message previews as
 // deltas arrive and appending each agent.thinking as its block closes. The
-// work-item lease is re-extended mid-stream so a long generation cannot be
-// reclaimed while healthy.
-func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, item *queue.Item, p provider.Provider, req provider.Request) (*turnResult, error) {
+// lease keeper runs alongside; this function only distinguishes the two
+// failure worlds — provider errors surface bare (they become the turn's
+// session.error), brain-side database failures wrap as infra (the turn is
+// abandoned to lease expiry, not reported as a model failure).
+func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provider, req provider.Request) (*turnResult, error) {
 	stream, err := p.Generate(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("model request: %w", err)
@@ -42,7 +42,6 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	// the wire delta index addresses "which entry in the previewed event's
 	// content array", not the provider's block numbering.
 	entry := map[int64]int{}
-	extendAt := time.Now().Add(b.cfg.LeaseTTL / 2)
 
 	closeThinking := func() error {
 		if thinkingPreview == nil {
@@ -54,17 +53,13 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 			{ID: thinkingPreview.EventID(), Type: domain.EventAgentThinking},
 		})
 		thinkingPreview = nil
-		return err
+		if err != nil {
+			return infra("close thinking: %w", err)
+		}
+		return nil
 	}
 
 	for stream.Next() {
-		if time.Now().After(extendAt) {
-			if err := b.queue.Extend(ctx, item, b.cfg.LeaseTTL); err != nil {
-				return nil, fmt.Errorf("mid-stream: %w", err)
-			}
-			extendAt = time.Now().Add(b.cfg.LeaseTTL / 2)
-		}
-
 		c := stream.Chunk()
 		switch c.Kind {
 		case provider.KindThinkingDelta:
@@ -80,7 +75,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 				thinkingIndex = c.Index
 				thinkingPreview, err = b.log.StartPreview(ctx, sid, domain.EventAgentThinking)
 				if err != nil {
-					return nil, err
+					return nil, infra("thinking preview: %w", err)
 				}
 			}
 
@@ -91,7 +86,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 			if msgPreview == nil {
 				msgPreview, err = b.log.StartPreview(ctx, sid, domain.EventAgentMessage)
 				if err != nil {
-					return nil, err
+					return nil, infra("message preview: %w", err)
 				}
 				turn.messageEventID = msgPreview.EventID()
 			}
@@ -103,7 +98,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 			}
 			turn.text[idx].Text += c.Text
 			if err := msgPreview.Delta(ctx, int64(idx), c.Text); err != nil {
-				return nil, err
+				return nil, infra("message delta: %w", err)
 			}
 
 		case provider.KindToolUse:

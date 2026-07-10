@@ -41,7 +41,23 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   `ant` CLI against the local stack driving the real Anthropic-protocol
   endpoint from `.env`: full-turn event order on the log and the live
   SSE stream, previews reconciling into the buffered message, session
-  usage folded. (#11)
+  usage folded. Hardened by an adversarial multi-agent review of the
+  branch (15 confirmed defects fixed pre-merge): a turn's output —
+  emitted events, span end, status, usage, watermark, and work-item
+  fate — commits as one transaction under the session row lock with the
+  queue's lease proof inside it, so a brain that lost its claim rolls
+  the whole turn back instead of leaving half-turns that poison replay;
+  tool-result resume is gated on the full result set (parallel tool
+  calls wait for their last result, API-side and settle-side); inbound
+  tool results are validated against the log (unknown, kind-mismatched,
+  duplicate, or already-answered references are a 400, not a wedged
+  session); failed turns chain pending mid-turn input instead of
+  stranding it; brain-side infra errors abandon the turn to lease
+  expiry with nothing on the wire (only model/deterministic failures
+  produce `session.error`); a lease-keeper goroutine re-extends the
+  work-item lease during long time-to-first-token; empty text blocks
+  are never stored; `session.updated` change detection compares jsonb
+  semantically, killing phantom events on idempotent PATCH retries. (#11)
 
 - `internal/provider` (slice 4): the config-driven model-provider layer.
   A provider is constructed from `protocol` / `model` / `base_url` /

@@ -137,7 +137,9 @@ func (h *harness) wake(t *testing.T, text string) {
 	}
 }
 
-// postToolResult mimics the control plane's tool-result trigger.
+// postToolResult mimics the control plane's tool-result trigger: append,
+// and enqueue the next turn only when the result completes the set (no
+// tool use left unanswered).
 func (h *harness) postToolResult(t *testing.T, eventType domain.EventType, payload map[string]any) {
 	t.Helper()
 	raw, _ := json.Marshal(payload)
@@ -145,13 +147,45 @@ func (h *harness) postToolResult(t *testing.T, eventType domain.EventType, paylo
 		{Type: eventType, Payload: raw},
 	}, events.AppendOptions{
 		Then: func(ctx context.Context, tx pgx.Tx) error {
-			_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
+			unanswered, err := events.HasUnansweredToolUse(ctx, tx, h.sessionID, nil)
+			if err != nil || unanswered {
+				return err
+			}
+			_, err = h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
 			return err
 		},
 	})
 	if err != nil {
 		t.Fatalf("post tool result: %v", err)
 	}
+}
+
+// liveWork counts the session's not-yet-finished model_turn items.
+func (h *harness) liveWork(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM work_items WHERE session_id=$1 AND state != 'stopped'`,
+		h.sessionID.String()).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func (h *harness) countType(t *testing.T, typ string) int {
+	t.Helper()
+	n := 0
+	for _, got := range h.types(t) {
+		if got == typ {
+			n++
+		}
+	}
+	return n
+}
+
+func toolUseChunk(id, name string) provider.Chunk {
+	return provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+		ID: id, Name: name, Input: json.RawMessage(`{}`)}}
 }
 
 func (h *harness) runOnce(t *testing.T) {
@@ -436,50 +470,340 @@ func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 	}
 }
 
-func TestToolResultDuringSettleIsNotLost(t *testing.T) {
-	// The verifier-found race: a tool result posted while the brain's item
-	// is still active has its enqueue suppressed by the live slot. The
-	// suspend settlement must catch the already-landed result and requeue
-	// its own item, or the session hangs running with no work.
+func TestParallelToolCallsResumeOnFullSet(t *testing.T) {
+	// A turn with two parallel tool calls must not resume on the first
+	// result: the model protocol requires every tool_use answered in the
+	// next request, so a partial replay would 400 and wedge the session.
 	h := newHarness(t, [][]provider.Chunk{
-		{
-			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
-				ID: "toolu_x", Name: "lookup", Input: json.RawMessage(`{}`)}},
-			done("tool_use", 3),
-		},
-		{textChunk(0, "resumed"), done("end_turn", 2)},
+		{toolUseChunk("toolu_a", "lookup"), toolUseChunk("toolu_b", "lookup"), done("tool_use", 3)},
+		{textChunk(0, "both done"), done("end_turn", 2)},
 	}, nil)
-	// The result lands after replay but before settlement — appended with
-	// NO enqueue, exactly what the API does when the live item swallows it.
+	h.wake(t, "do two things")
+	h.runOnce(t)
+
+	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.custom_tool_use"}})
+	if len(evs) != 2 {
+		t.Fatalf("tool intents = %d, want 2", len(evs))
+	}
+	if h.liveWork(t) != 0 {
+		t.Fatalf("suspended turn left live work")
+	}
+
+	// First result: set incomplete, nothing scheduled, still running.
+	h.postToolResult(t, domain.EventUserCustomToolRes, map[string]any{
+		"custom_tool_use_id": evs[0].ID.String(),
+		"content":            []map[string]string{{"type": "text", "text": "one"}},
+	})
+	if n := h.liveWork(t); n != 0 {
+		t.Fatalf("partial result set scheduled a turn (%d live items)", n)
+	}
+	if got := h.status(t); got != "running" {
+		t.Errorf("status after partial results = %q, want running", got)
+	}
+
+	// Completing result: the turn resumes with both pairs in the replay.
+	h.postToolResult(t, domain.EventUserCustomToolRes, map[string]any{
+		"custom_tool_use_id": evs[1].ID.String(),
+		"content":            []map[string]string{{"type": "text", "text": "two"}},
+	})
+	if n := h.liveWork(t); n != 1 {
+		t.Fatalf("completing result scheduled %d turns, want 1", n)
+	}
+	h.runOnce(t)
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status after resume = %q, want idle", got)
+	}
+	req := h.provider.calls[1]
+	if len(req.Messages) != 3 {
+		t.Fatalf("resumed request has %d messages", len(req.Messages))
+	}
+	var assistant, user []map[string]any
+	_ = json.Unmarshal(req.Messages[1].Content, &assistant)
+	_ = json.Unmarshal(req.Messages[2].Content, &user)
+	if len(assistant) != 2 || assistant[0]["type"] != "tool_use" || assistant[1]["type"] != "tool_use" {
+		t.Errorf("assistant turn = %v", assistant)
+	}
+	if len(user) != 2 || user[0]["tool_use_id"] != assistant[0]["id"] || user[1]["tool_use_id"] != assistant[1]["id"] {
+		t.Errorf("tool_result pairing = %v vs %v", user, assistant)
+	}
+}
+
+func TestEndTurnSettleChainsUnconsumedToolResult(t *testing.T) {
+	// A tool result appended while a turn is mid-flight (its enqueue
+	// suppressed by the live item) must chain the next turn even when the
+	// in-flight turn settles end_turn — the end_turn pending check covers
+	// tool results, not just user messages.
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, "ok"), done("end_turn", 2)},
+		{textChunk(0, "consumed the result"), done("end_turn", 2)},
+	}, nil)
+	// An unanswered tool intent from before this turn (the executor seam:
+	// results for it are produced outside the API triggers).
+	evs, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{{
+		Type:    domain.EventAgentCustomToolUse,
+		Payload: json.RawMessage(`{"name":"lookup","input":{},"session_thread_id":null}`),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolID := evs[0].ID.String()
 	h.provider.onGenerate = func(call int) {
 		if call != 0 {
 			return
 		}
-		payload, _ := json.Marshal(map[string]any{
-			"custom_tool_use_id": "sevt_posted_early",
-			"content":            []map[string]string{{"type": "text", "text": "fast result"}},
-		})
+		payload, _ := json.Marshal(map[string]any{"custom_tool_use_id": toolID,
+			"content": []map[string]string{{"type": "text", "text": "late result"}}})
 		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
 			{Type: domain.EventUserCustomToolRes, Payload: payload},
 		}); err != nil {
-			t.Errorf("mid-settle result append: %v", err)
+			t.Errorf("mid-turn result append: %v", err)
 		}
 	}
-	h.wake(t, "use the tool")
+	h.wake(t, "hi")
 	h.runOnce(t)
 
-	// The settlement saw the early result: the item is queued again, not
-	// completed, and the session is still running.
+	// Settled without idling: the unconsumed result chained a turn.
+	if got := h.status(t); got != "running" {
+		t.Errorf("status after settle = %q, want running (chained)", got)
+	}
+	if n := h.countType(t, "session.status_idle"); n != 0 {
+		t.Errorf("session idled past an unconsumed tool result")
+	}
 	var queued int
 	_ = h.pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM work_items WHERE session_id=$1 AND state='queued'`,
 		h.sessionID.String()).Scan(&queued)
 	if queued != 1 {
-		t.Fatalf("queued items after mid-settle result = %d, want 1 (requeued)", queued)
+		t.Fatalf("queued items after settle = %d, want 1 (requeued)", queued)
 	}
+
 	h.runOnce(t)
 	if got := h.status(t); got != "idle" {
-		t.Errorf("status after resumed turn = %q, want idle", got)
+		t.Errorf("status after chained turn = %q, want idle", got)
+	}
+	evs, _ = h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"user.custom_tool_result"}})
+	if len(evs) != 1 || evs[0].ProcessedAt == nil {
+		t.Errorf("chained turn did not consume the result: %+v", evs)
+	}
+}
+
+func TestFailedTurnChainsPendingMessage(t *testing.T) {
+	// A message that arrives mid-turn must not be stranded by a failing
+	// model request: the failure is recorded, but the session stays running
+	// and the pending message gets its turn.
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, "partial")},
+		{textChunk(0, "answered"), done("end_turn", 2)},
+	}, []error{errors.New("upstream 529")})
+	h.provider.onGenerate = func(call int) {
+		if call != 0 {
+			return
+		}
+		payload, _ := json.Marshal(map[string]any{"content": "second"})
+		if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{
+			{Type: domain.EventUserMessage, Payload: payload},
+		}); err != nil {
+			t.Errorf("mid-turn append: %v", err)
+		}
+	}
+	h.wake(t, "first")
+	h.runOnce(t)
+
+	if n := h.countType(t, "session.error"); n != 1 {
+		t.Fatalf("session.error count = %d, want 1", n)
+	}
+	if n := h.countType(t, "session.status_idle"); n != 0 {
+		t.Errorf("failed turn idled past a pending message")
+	}
+	if got := h.status(t); got != "running" {
+		t.Errorf("status = %q, want running (chained)", got)
+	}
+
+	h.runOnce(t)
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status after chained turn = %q, want idle", got)
+	}
+	// The chained turn saw both messages.
+	req := h.provider.calls[1]
+	var merged []map[string]any
+	_ = json.Unmarshal(req.Messages[0].Content, &merged)
+	if len(merged) != 2 || merged[0]["text"] != "first" || merged[1]["text"] != "second" {
+		t.Errorf("chained request user turn = %v", merged)
+	}
+}
+
+func TestLeaseLostTurnCommitsNothing(t *testing.T) {
+	// The integrity half of atomic settlement: a brain that lost its claim
+	// mid-turn must not commit any of the turn's output. A committed
+	// half-turn (duplicate tool intents under fresh event ids) could never
+	// be fully answered and would poison every future replay.
+	h := newHarness(t, [][]provider.Chunk{
+		{toolUseChunk("toolu_x", "lookup"), done("tool_use", 3)},
+	}, nil)
+	h.provider.onGenerate = func(call int) {
+		// Mid-turn, the lease expires and another claimant takes the item.
+		if _, err := h.pool.Exec(context.Background(),
+			`UPDATE work_items SET lease_expires_at = now() - interval '1 second'
+			 WHERE session_id = $1`, h.sessionID.String()); err != nil {
+			t.Errorf("expire lease: %v", err)
+		}
+		item, err := h.queue.Claim(context.Background(), queue.ModelTurn, time.Minute)
+		if err != nil || item == nil {
+			t.Errorf("rival claim: %+v %v", item, err)
+		}
+	}
+	h.wake(t, "hi")
+
+	found, err := h.brain.RunOnce(context.Background())
+	if !found || err == nil {
+		t.Fatalf("RunOnce = (%v, %v), want found with a lease error", found, err)
+	}
+
+	want := []string{"user.message", "session.status_running", "span.model_request_start"}
+	if got := h.types(t); !typesEqual(got, want) {
+		t.Errorf("loser committed turn output:\n got %v\nwant %v", got, want)
+	}
+	if got := h.status(t); got != "running" {
+		t.Errorf("status = %q, want running (turn still owed)", got)
+	}
+}
+
+func TestLongTimeToFirstTokenKeepsLease(t *testing.T) {
+	// The model may think past the whole lease before the first chunk; the
+	// keeper must extend the lease while the stream is blocked, or a
+	// healthy turn gets reclaimed and forked.
+	pool := pgtest.NewPool(t)
+	sid, envID := pgtest.NewSession(t, pool, "self_hosted")
+	fake := &fakeProvider{scripts: [][]provider.Chunk{{textChunk(0, "slow but fine"), done("end_turn", 2)}}}
+	reg, err := provider.NewRegistry(
+		[]provider.Route{{Model: "*", Config: provider.Config{Protocol: "fake", BaseURL: "http://fake"}}},
+		map[string]provider.Factory{"fake": func(cfg provider.Config) (provider.Provider, error) { return fake, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
+		provider: fake, brain: brain.New(pool, reg, brain.Config{LeaseTTL: 250 * time.Millisecond}),
+		sessionID: sid, envID: envID}
+	fake.onGenerate = func(int) { time.Sleep(600 * time.Millisecond) }
+
+	h.wake(t, "hi")
+	h.runOnce(t)
+
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	if n := h.countType(t, "session.status_rescheduled"); n != 0 {
+		t.Errorf("healthy long turn was reclaimed %d times", n)
+	}
+	if len(fake.calls) != 1 {
+		t.Errorf("provider called %d times, want 1", len(fake.calls))
+	}
+}
+
+func TestLostLeaseMidStreamAbandonsQuietly(t *testing.T) {
+	// A lease the keeper cannot extend means another brain may own the
+	// turn: no session.error, no settle — abandon and let the log stay
+	// clean for the new owner.
+	pool := pgtest.NewPool(t)
+	sid, envID := pgtest.NewSession(t, pool, "self_hosted")
+	fake := &fakeProvider{scripts: [][]provider.Chunk{{textChunk(0, "doomed"), done("end_turn", 2)}}}
+	reg, err := provider.NewRegistry(
+		[]provider.Route{{Model: "*", Config: provider.Config{Protocol: "fake", BaseURL: "http://fake"}}},
+		map[string]provider.Factory{"fake": func(cfg provider.Config) (provider.Provider, error) { return fake, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
+		provider: fake, brain: brain.New(pool, reg, brain.Config{LeaseTTL: 250 * time.Millisecond}),
+		sessionID: sid, envID: envID}
+	fake.onGenerate = func(int) {
+		// Another claimant moved the lease from under us; the keeper's next
+		// extension fails while the stream is still open.
+		if _, err := pool.Exec(context.Background(),
+			`UPDATE work_items SET lease_expires_at = now() + interval '1 hour'
+			 WHERE session_id = $1`, sid.String()); err != nil {
+			t.Errorf("steal lease: %v", err)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	h.wake(t, "hi")
+	found, err := h.brain.RunOnce(context.Background())
+	if !found || err == nil {
+		t.Fatalf("RunOnce = (%v, %v), want found with a lease error", found, err)
+	}
+
+	if n := h.countType(t, "session.error"); n != 0 {
+		t.Errorf("lost lease was reported as a model failure on the wire")
+	}
+	if n := h.countType(t, "agent.message"); n != 0 {
+		t.Errorf("lost lease committed turn output")
+	}
+	if got := h.status(t); got != "running" {
+		t.Errorf("status = %q, want running", got)
+	}
+}
+
+func TestEmptyTextBlockNotStored(t *testing.T) {
+	// A text block whose deltas summed to nothing must not be stored:
+	// {"type":"text"} without text is malformed on the wire, and replay
+	// would feed it to the model on every future turn.
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, ""), done("end_turn", 1)},
+	}, nil)
+	h.wake(t, "hi")
+	h.runOnce(t)
+
+	if n := h.countType(t, "agent.message"); n != 0 {
+		t.Errorf("empty text turn stored an agent.message")
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+}
+
+func TestCorruptAgentFailsVisibly(t *testing.T) {
+	// A resolved_agent that cannot decode is deterministic: retrying via
+	// lease expiry would reclaim-loop forever, growing the log with
+	// recovery events and never telling anyone. It must fail the turn once,
+	// visibly.
+	h := newHarness(t, nil, nil) // provider must not be reached
+	h.wake(t, "hi")
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = '{"model": 42}' WHERE id = $1`,
+		h.sessionID.String()); err != nil {
+		t.Fatal(err)
+	}
+
+	h.runOnce(t)
+
+	if n := h.countType(t, "session.error"); n != 1 {
+		t.Errorf("session.error count = %d, want 1", n)
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	if n := h.liveWork(t); n != 0 {
+		t.Errorf("%d work items still live (reclaim loop)", n)
+	}
+}
+
+func TestToolUseStopWithoutBlocksFails(t *testing.T) {
+	// tool_use with no tool blocks has nothing to wait for and nothing to
+	// chain: settling as a suspension would wedge the session running
+	// forever, so it fails visibly instead.
+	h := newHarness(t, [][]provider.Chunk{{done("tool_use", 1)}}, nil)
+	h.wake(t, "hi")
+	h.runOnce(t)
+
+	if n := h.countType(t, "session.error"); n != 1 {
+		t.Errorf("session.error count = %d, want 1", n)
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	if n := h.liveWork(t); n != 0 {
+		t.Errorf("%d work items still live", n)
 	}
 }
 

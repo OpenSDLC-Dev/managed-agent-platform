@@ -38,12 +38,20 @@ func TestModelRequestSameSourceEmission(t *testing.T) {
 	if !oteltrace.SpanContextFromContext(spanCtx).IsValid() {
 		t.Error("returned context carries no span")
 	}
+	// The end is two-phase: the wire event is rendered for the caller to
+	// commit (the brain appends it atomically with the turn's settlement),
+	// then Finish closes the OTel side with the commit's fate.
 	speed := "standard"
-	if err := mr.End(spanCtx, true, domain.ModelUsage{
+	endEv, err := mr.EndEvent(true, domain.ModelUsage{
 		InputTokens: 100, OutputTokens: 25, CacheReadInputTokens: 7, Speed: &speed,
-	}); err != nil {
-		t.Fatalf("end: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("end event: %v", err)
 	}
+	if _, err := log.Append(spanCtx, sid, []events.NewEvent{endEv}); err != nil {
+		t.Fatalf("append end event: %v", err)
+	}
+	mr.Finish(true, nil)
 
 	// Exactly one OTel span left the process.
 	spans := recorder.Ended()

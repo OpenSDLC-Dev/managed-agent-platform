@@ -146,7 +146,7 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event) (provider.
 				return req, 0, fmt.Errorf("event %s: %w", ev.ID, err)
 			}
 			input := p.Input
-			if len(input) == 0 {
+			if len(input) == 0 || string(input) == "null" {
 				input = json.RawMessage("{}")
 			}
 			blk, err := json.Marshal(map[string]any{

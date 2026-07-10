@@ -101,14 +101,16 @@ func TestSendUserMessageEchoShape(t *testing.T) {
 func TestSendEchoShapesPerType(t *testing.T) {
 	s := newTestServer(t)
 	sid := selfHostedSession(t, s)
+	customID := appendToolUse(t, s, sid, domain.EventAgentCustomToolUse)
+	toolID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
 
 	echo := sendEvents(t, s, sid,
 		map[string]any{"type": "user.interrupt"},
 		map[string]any{"type": "user.tool_confirmation", "result": "deny",
 			"tool_use_id": "sevt_tu1", "deny_message": "too risky"},
-		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": "sevt_ct1",
+		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": customID,
 			"content": []any{map[string]any{"type": "text", "text": "ok"}}, "is_error": false},
-		map[string]any{"type": "user.tool_result", "tool_use_id": "sevt_tu2"},
+		map[string]any{"type": "user.tool_result", "tool_use_id": toolID},
 		map[string]any{"type": "user.message", "content": []any{map[string]any{"type": "text", "text": "hi"}}},
 		map[string]any{"type": "system.message", "content": []any{map[string]any{"type": "text", "text": "note"}}},
 	)
@@ -130,7 +132,7 @@ func TestSendEchoShapesPerType(t *testing.T) {
 
 	custom := echo[2]
 	wantExactKeys(t, custom, "id", "type", "custom_tool_use_id", "content", "is_error", "processed_at", "session_thread_id")
-	if custom["is_error"] != false || custom["custom_tool_use_id"] != "sevt_ct1" {
+	if custom["is_error"] != false || custom["custom_tool_use_id"] != customID {
 		t.Errorf("custom_tool_result echo = %v", custom)
 	}
 
@@ -177,7 +179,7 @@ func TestSendContentBlockKinds(t *testing.T) {
 	// search_result is a tool-result-only block; its source is a plain URL
 	// string, and citations.enabled is required on the wire.
 	echo = sendEvents(t, s, sid, map[string]any{
-		"type": "user.custom_tool_result", "custom_tool_use_id": "sevt_x",
+		"type": "user.custom_tool_result", "custom_tool_use_id": appendToolUse(t, s, sid, domain.EventAgentCustomToolUse),
 		"content": []any{map[string]any{
 			"type": "search_result", "source": "https://example.com", "title": "hit",
 			"citations": map[string]any{"enabled": false},
@@ -284,7 +286,7 @@ func TestSendToolResultOnSelfHosted(t *testing.T) {
 	s := newTestServer(t)
 	sid := selfHostedSession(t, s)
 	echo := sendEvents(t, s, sid, map[string]any{
-		"type": "user.tool_result", "tool_use_id": "sevt_t1", "is_error": true,
+		"type": "user.tool_result", "tool_use_id": appendToolUse(t, s, sid, domain.EventAgentToolUse), "is_error": true,
 		"content": []any{map[string]any{"type": "text", "text": "exit 1"}},
 	})
 	if echo[0]["is_error"] != true {

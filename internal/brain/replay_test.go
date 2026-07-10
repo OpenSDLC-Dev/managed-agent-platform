@@ -121,16 +121,20 @@ func TestBuildRequestCustomToolResultID(t *testing.T) {
 
 func TestBuildRequestEmptyToolInputDefaults(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}}}
-	req, _, err := buildRequest(agent, []domain.Event{
-		ev(1, domain.EventAgentToolUse, `{"name":"noop"}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var blocks []map[string]any
-	_ = json.Unmarshal(req.Messages[0].Content, &blocks)
-	if input, ok := blocks[0]["input"].(map[string]any); !ok || len(input) != 0 {
-		t.Errorf("missing input should default to {}: %v", blocks[0])
+	// Absent and JSON-null inputs both replay as {} — a tool_use block's
+	// input must be an object on the wire.
+	for _, payload := range []string{`{"name":"noop"}`, `{"name":"noop","input":null}`} {
+		req, _, err := buildRequest(agent, []domain.Event{
+			ev(1, domain.EventAgentToolUse, payload),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var blocks []map[string]any
+		_ = json.Unmarshal(req.Messages[0].Content, &blocks)
+		if input, ok := blocks[0]["input"].(map[string]any); !ok || len(input) != 0 {
+			t.Errorf("payload %s: input should replay as {}: %v", payload, blocks[0])
+		}
 	}
 }
 

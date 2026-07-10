@@ -70,11 +70,21 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, errInvalid("%s", err)
 	}
+	// A tool result must answer an outstanding tool call. The log is
+	// append-only: accepting a result with a wrong, unknown, or duplicate
+	// reference would poison every future replay with a request the model
+	// protocol rejects, permanently wedging the session — so bad references
+	// are the client's 400, not the session's funeral.
+	if err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents); err != nil {
+		return nil, errInvalid("%s", err)
+	}
 
 	// State-machine triggers (the session's turn scheduler, per the plan's
 	// "enqueue model-turn" arrow): a user.message wakes an idle session —
 	// flip to running, say so on the log, queue a turn. A tool result while
-	// running resumes the suspended turn with a fresh model_turn item; the
+	// running resumes the suspended turn — but only when it completes the
+	// set: the model protocol requires every tool_use answered in the next
+	// turn, so partial results of a parallel tool call keep waiting. The
 	// session never left running, so no new status event. Everything else
 	// only appends (a user.message mid-turn is picked up by the brain's
 	// end-of-turn watermark check).
@@ -100,7 +110,13 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		opts.SetStatus = &running
 		opts.Then = enqueueTurn
 	case hasToolResult && status == string(domain.SessionRunning):
-		opts.Then = enqueueTurn
+		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
+		if err != nil {
+			return nil, err
+		}
+		if !unanswered {
+			opts.Then = enqueueTurn
+		}
 	}
 
 	appended, err := s.log.AppendInTx(ctx, tx, domain.ID(id), batch, opts)

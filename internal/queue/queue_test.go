@@ -2,6 +2,7 @@ package queue_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -256,6 +257,37 @@ func TestExtendRenewsTheLease(t *testing.T) {
 	// Extending a finished item is a lost lease, surfaced as an error.
 	if err := q.Extend(ctx, item, time.Minute); err == nil {
 		t.Error("Extend after completion succeeded silently")
+	}
+}
+
+func TestAssertProvesOwnership(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ModelTurn, 50*time.Millisecond)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	if err := q.Assert(ctx, pool, item); err != nil {
+		t.Fatalf("Assert while owning the lease: %v", err)
+	}
+
+	// After expiry and a reclaim, the original claimant's proof is dead.
+	time.Sleep(60 * time.Millisecond)
+	re, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || re == nil {
+		t.Fatalf("reclaim: %+v %v", re, err)
+	}
+	if err := q.Assert(ctx, pool, item); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Errorf("Assert after losing the lease = %v, want ErrLeaseLost", err)
+	}
+	if err := q.Assert(ctx, pool, re); err != nil {
+		t.Errorf("new claimant Assert: %v", err)
 	}
 }
 

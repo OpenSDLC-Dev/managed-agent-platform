@@ -150,6 +150,25 @@ func (q *Queue) Requeue(ctx context.Context, db DB, item *Item) error {
 	return nil
 }
 
+// Assert verifies the claimant still owns the item, inside the caller's
+// transaction. Session state written mid-turn (the reclaim recovery
+// announcement) must carry this proof like every other state write: a
+// claimant that stalled past its lease could otherwise flip a session
+// another brain has since settled.
+func (q *Queue) Assert(ctx context.Context, db DB, item *Item) error {
+	var one int
+	err := db.QueryRow(ctx,
+		`SELECT 1 FROM work_items WHERE id = $1 AND state = 'active' AND lease_expires_at = $2`,
+		item.ID, item.Lease).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("queue: assert %s: %w", item.ID, ErrLeaseLost)
+	}
+	if err != nil {
+		return fmt.Errorf("queue: assert %s: %w", item.ID, err)
+	}
+	return nil
+}
+
 // Complete marks the item finished, in the caller's transaction when one is
 // passed (a turn's settlement completes its item atomically with the state
 // it writes, so a concurrent trigger serialized behind the same session lock
