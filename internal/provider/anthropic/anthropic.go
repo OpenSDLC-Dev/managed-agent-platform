@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 )
 
@@ -63,8 +64,11 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 	if req.System != "" {
 		params.System = []sdk.TextBlockParam{{Text: req.System}}
 	}
+	// param.SetJSON serializes the raw wire bytes verbatim. Round-tripping
+	// through the SDK's typed variants instead would silently drop fields
+	// and tool types the pinned SDK version doesn't model yet; validity is
+	// the endpoint's judgment, not this adapter's.
 	for i, m := range req.Messages {
-		var mp sdk.MessageParam
 		role, err := json.Marshal(m.Role)
 		if err != nil {
 			return nil, err
@@ -74,18 +78,18 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 			"content": m.Content,
 		})
 		if err != nil {
-			return nil, err
-		}
-		if err := mp.UnmarshalJSON(wire); err != nil {
 			return nil, fmt.Errorf("messages[%d]: %w", i, err)
 		}
+		var mp sdk.MessageParam
+		param.SetJSON(wire, &mp)
 		params.Messages = append(params.Messages, mp)
 	}
 	for i, t := range req.Tools {
-		var tp sdk.ToolUnionParam
-		if err := tp.UnmarshalJSON(t); err != nil {
-			return nil, fmt.Errorf("tools[%d]: %w", i, err)
+		if !json.Valid(t) {
+			return nil, fmt.Errorf("tools[%d]: invalid JSON", i)
 		}
+		var tp sdk.ToolUnionParam
+		param.SetJSON(t, &tp)
 		params.Tools = append(params.Tools, tp)
 	}
 

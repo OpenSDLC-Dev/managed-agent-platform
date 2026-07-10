@@ -203,8 +203,8 @@ func TestGenerateEmptyToolInputAndStringContent(t *testing.T) {
 	}}
 	p := start(t, f)
 
-	// String-form content is valid Anthropic shorthand; the SDK
-	// canonicalizes it to the equivalent single text block on the wire.
+	// String-form content is valid Anthropic shorthand and passes through
+	// verbatim — the adapter never rewrites it.
 	stream, err := p.Generate(context.Background(), provider.Request{
 		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"do nothing"`)}},
 	})
@@ -223,9 +223,46 @@ func TestGenerateEmptyToolInputAndStringContent(t *testing.T) {
 		t.Errorf("max_tokens defaulted to %v", f.gotBody["max_tokens"])
 	}
 	content := f.gotBody["messages"].([]any)[0].(map[string]any)["content"]
-	block, _ := content.([]any)[0].(map[string]any)
-	if block["type"] != "text" || block["text"] != "do nothing" {
-		t.Errorf("string content should canonicalize to one text block, got %v", content)
+	if content != "do nothing" {
+		t.Errorf("string content should pass through verbatim, got %v", content)
+	}
+}
+
+func TestGenerateVerbatimPassthrough(t *testing.T) {
+	// Fields and tool types unknown to the pinned SDK version must survive
+	// to the wire byte-preserved: round-tripping through the SDK's typed
+	// variants would silently drop anything the SDK doesn't model yet.
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_7","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{
+			{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"hi","future_block_field":{"nested":1}}]`)},
+		},
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"bash","input_schema":{"type":"object"},"future_tool_field":"kept"}`),
+			json.RawMessage(`{"type":"web_search_20990101","name":"search","max_uses":3}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	collect(t, stream)
+
+	block := f.gotBody["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if nested, _ := block["future_block_field"].(map[string]any); nested == nil || nested["nested"] != float64(1) {
+		t.Errorf("unknown content-block field dropped: %v", block)
+	}
+	tools := f.gotBody["tools"].([]any)
+	if tools[0].(map[string]any)["future_tool_field"] != "kept" {
+		t.Errorf("unknown tool field dropped: %v", tools[0])
+	}
+	if tools[1].(map[string]any)["type"] != "web_search_20990101" || tools[1].(map[string]any)["max_uses"] != float64(3) {
+		t.Errorf("unknown tool type mangled: %v", tools[1])
 	}
 }
 
