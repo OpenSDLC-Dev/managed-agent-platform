@@ -3,6 +3,7 @@ package api_test
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -420,11 +421,11 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	status, res = s.do(http.MethodGet, "/v1/sessions/sesn_missing/events", nil)
 	wantErr(t, status, res, http.StatusNotFound, "not_found_error")
 
-	// A time-keyed cursor from another list is rejected, not misread.
-	status, res = s.do(http.MethodGet, "/v1/sessions?limit=1", nil)
-	if status != http.StatusOK {
-		t.Fatal("sessions list failed")
-	}
+	// A time-keyed cursor (the resource lists' kind) is rejected, not
+	// misread as a seq position.
+	timeCursor := base64.RawURLEncoding.EncodeToString([]byte("k1|n|t|1752000000000000000|agent_x"))
+	status, res = s.do(http.MethodGet, path+"?page="+timeCursor, nil)
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 }
 
 // --- GET /v1/sessions/{id}/events/stream ---
