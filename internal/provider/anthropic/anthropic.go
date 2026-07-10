@@ -1,0 +1,181 @@
+// Package anthropic adapts any endpoint speaking the Anthropic Messages
+// protocol to the provider interface, via the official SDK with a
+// configurable base URL — an enterprise gateway, a proxy, or a self-hosted
+// model are all just configuration. Requests pass through near-verbatim:
+// content blocks and tool definitions are the Anthropic wire shapes already.
+package anthropic
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
+	sdk "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+)
+
+// New constructs the adapter from configuration alone.
+func New(cfg provider.Config) (provider.Provider, error) {
+	if cfg.BaseURL == "" {
+		// Deliberate: no silent fallback to api.anthropic.com (CLAUDE.md
+		// principle 4) — pointing at an endpoint is a conscious choice.
+		return nil, fmt.Errorf("anthropic provider requires a base_url")
+	}
+	if cfg.Model == "" {
+		return nil, fmt.Errorf("anthropic provider requires a model")
+	}
+	opts := []option.RequestOption{
+		option.WithBaseURL(cfg.BaseURL),
+		option.WithAPIKey(cfg.APIKey),
+		option.WithMaxRetries(2),
+	}
+	for k, v := range cfg.Headers {
+		opts = append(opts, option.WithHeader(k, v))
+	}
+	client := sdk.NewClient(opts...)
+	return &anthropicProvider{client: client, model: cfg.Model}, nil
+}
+
+type anthropicProvider struct {
+	client sdk.Client
+	model  string
+}
+
+// defaultMaxTokens applies when the request doesn't set one; the wire field
+// is required.
+const defaultMaxTokens = 8192
+
+func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) (provider.Stream, error) {
+	params := sdk.MessageNewParams{
+		Model:     sdk.Model(p.model),
+		MaxTokens: req.MaxTokens,
+	}
+	if params.MaxTokens == 0 {
+		params.MaxTokens = defaultMaxTokens
+	}
+	if req.System != "" {
+		params.System = []sdk.TextBlockParam{{Text: req.System}}
+	}
+	for i, m := range req.Messages {
+		var mp sdk.MessageParam
+		wire, err := json.Marshal(map[string]json.RawMessage{
+			"role":    json.RawMessage(`"` + m.Role + `"`),
+			"content": m.Content,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if err := mp.UnmarshalJSON(wire); err != nil {
+			return nil, fmt.Errorf("messages[%d]: %w", i, err)
+		}
+		params.Messages = append(params.Messages, mp)
+	}
+	for i, t := range req.Tools {
+		var tp sdk.ToolUnionParam
+		if err := tp.UnmarshalJSON(t); err != nil {
+			return nil, fmt.Errorf("tools[%d]: %w", i, err)
+		}
+		params.Tools = append(params.Tools, tp)
+	}
+
+	events := p.client.Messages.NewStreaming(ctx, params)
+	if err := events.Err(); err != nil {
+		return nil, err
+	}
+	return &stream{events: events}, nil
+}
+
+// stream translates the Messages API event stream into provider chunks:
+// text/thinking deltas pass through as they arrive; tool_use inputs
+// accumulate and emit once complete; message_delta carries stop reason and
+// output usage, emitted as the final done chunk.
+type stream struct {
+	events *ssestream.Stream[sdk.MessageStreamEventUnion]
+	cur    provider.Chunk
+	err    error
+
+	// tool_use accumulation for the currently open block
+	toolIndex int64
+	toolID    string
+	toolName  string
+	toolJSON  []byte
+	inTool    bool
+
+	usage      domain.ModelUsage
+	stopReason string
+	done       bool
+}
+
+func (s *stream) Chunk() provider.Chunk { return s.cur }
+func (s *stream) Err() error            { return s.err }
+func (s *stream) Close() error          { return s.events.Close() }
+
+func (s *stream) Next() bool {
+	if s.err != nil || s.done {
+		return false
+	}
+	for s.events.Next() {
+		ev := s.events.Current()
+		switch ev.Type {
+		case "message_start":
+			u := ev.Message.Usage
+			s.usage.InputTokens = u.InputTokens
+			s.usage.CacheCreationInputTokens = u.CacheCreationInputTokens
+			s.usage.CacheReadInputTokens = u.CacheReadInputTokens
+
+		case "content_block_start":
+			if ev.ContentBlock.Type == "tool_use" {
+				s.inTool = true
+				s.toolIndex = ev.Index
+				s.toolID = ev.ContentBlock.ID
+				s.toolName = ev.ContentBlock.Name
+				s.toolJSON = s.toolJSON[:0]
+			}
+
+		case "content_block_delta":
+			switch ev.Delta.Type {
+			case "text_delta":
+				s.cur = provider.Chunk{Kind: provider.KindTextDelta, Index: ev.Index, Text: ev.Delta.Text}
+				return true
+			case "thinking_delta":
+				s.cur = provider.Chunk{Kind: provider.KindThinkingDelta, Index: ev.Index, Text: ev.Delta.Thinking}
+				return true
+			case "input_json_delta":
+				if s.inTool && ev.Index == s.toolIndex {
+					s.toolJSON = append(s.toolJSON, ev.Delta.PartialJSON...)
+				}
+			}
+
+		case "content_block_stop":
+			if s.inTool && ev.Index == s.toolIndex {
+				s.inTool = false
+				input := json.RawMessage(s.toolJSON)
+				if len(input) == 0 {
+					input = json.RawMessage("{}")
+				}
+				s.cur = provider.Chunk{Kind: provider.KindToolUse, Index: ev.Index, ToolUse: &provider.ToolUse{
+					ID: s.toolID, Name: s.toolName, Input: input,
+				}}
+				return true
+			}
+
+		case "message_delta":
+			s.stopReason = string(ev.Delta.StopReason)
+			s.usage.OutputTokens = ev.Usage.OutputTokens
+			if ev.Usage.InputTokens > 0 {
+				s.usage.InputTokens = ev.Usage.InputTokens
+			}
+
+		case "message_stop":
+			s.done = true
+			usage := s.usage
+			s.cur = provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: &usage}
+			return true
+		}
+	}
+	s.err = s.events.Err()
+	return false
+}

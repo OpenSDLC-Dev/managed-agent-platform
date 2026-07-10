@@ -4,7 +4,7 @@ An open-source, self-hostable platform for **long-horizon AI agents**, written i
 
 Run the whole thing on-prem or in your own VPC — **your data and your compute never leave your boundary**.
 
-> **Status: early development.** The domain types, OpenTelemetry, the Postgres schema, the control-plane CRUD API, and the session event log (send / list / SSE stream — the real `ant` CLI drives all of it unchanged) are in place; the harness and sandbox executor are being built slice by slice. Not yet usable end-to-end. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
+> **Status: early development.** The domain types, OpenTelemetry, the Postgres schema, the control-plane CRUD API, the session event log (send / list / SSE stream — the real `ant` CLI drives all of it unchanged), and the config-driven model-provider layer (verified against a self-hosted Anthropic-protocol endpoint) are in place; the harness and sandbox executor are being built slice by slice. Not yet usable end-to-end. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Why
 

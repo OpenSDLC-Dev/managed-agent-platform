@@ -9,8 +9,8 @@ Running record of where this project actually stands, so work can resume cleanly
 ## Snapshot
 
 - **Last updated:** 2026-07-10
-- **Phase:** Control plane — the wire-compatible CRUD surface and the session event log (send/list/SSE stream) are live and driven by the real `ant` CLI; the brain and executor do not exist yet, so nothing runs end-to-end.
-- **Current slice:** 3 complete; next up is slice 4 (ModelProvider).
+- **Phase:** Control plane + model access — the wire-compatible CRUD surface and the session event log are live (real `ant` CLI drives them), and the config-driven model-provider layer passes real turns against a custom Anthropic-protocol endpoint; the brain and executor do not exist yet, so nothing runs end-to-end.
+- **Current slice:** 4 complete; next up is slice 5 (brain orchestration loop).
 - **Build status:** `go build ./...`, `go vet ./...`, `go test ./...` all green.
 
 ## Reference documents
@@ -37,7 +37,7 @@ The model backend must be pointable at either an Anthropic-protocol endpoint or 
 | 1 | Postgres schema + migrations (`internal/store`), reserved multi-tenant columns | ✅ Done |
 | 2 | Control plane CRUD (agents / environments / sessions) + optimistic versioning + ID prefixes + `x-api-key` auth | ✅ Done |
 | 3 | Append-only event log (seq allocation) + `POST /events` + SSE stream (`event_start` / `event_delta` reconciliation) + `span.*` emitted from the same point as OTel spans | ✅ Done |
-| 4 | `ModelProvider` (config-driven: protocol / model / base_url / api_key) + `model_providers` routing; first provider passing a single model turn; verify a custom `base_url` works | ⬜ Not started |
+| 4 | `ModelProvider` (config-driven: protocol / model / base_url / api_key) + `model_providers` routing; first provider passing a single model turn; verify a custom `base_url` works | ✅ Done |
 | 5 | Brain orchestration loop (replay → assemble provider request → write Anthropic-native events). No adk runtime. | ⬜ Not started |
 | 6 | tool-exec queue (Postgres `FOR UPDATE SKIP LOCKED`) + executor + Docker sandbox provider + built-in toolset really executing inside the sandbox | ⬜ Not started |
 | 7 | Permission policies + `requires_action` / `user.tool_confirmation` approval round-trip | ⬜ Not started |
@@ -137,12 +137,25 @@ The event log is the single source of truth for session state. Verified end-to-e
 
 **Test coverage:** events package contract tests against Dockerized Postgres — concurrent-append seq integrity (8×25 single session, gap/duplicate-free), cross-pool NOTIFY fan-out, listener kill via `pg_terminate_backend` → reconnect + heal-wake, garbage NOTIFY payloads survived, preview reconciliation (buffered event supersedes deltas under the preview id), JSON-escape-aware chunk reassembly, same-source span emission (one exported OTel span + linked start/end events per request). API contract tests over real HTTP — field-exact echo shapes per inbound type, ~30-case validation sweep (batch atomicity included), cursor walk, SSE framing parsed off the live socket, delta opt-in vs plain subscriber, ping keepalive, `session.deleted` stream termination, corrupt-row 500s.
 
+### `internal/provider` — config-driven model access (slice 4)
+
+The first provider: any endpoint speaking the Anthropic Messages protocol, constructed purely from configuration. Verified with a **real model turn against the self-hosted Anthropic-protocol endpoint in `.env`** (a non-Anthropic gateway model): text streamed, usage populated, `stop_reason` mapped — proving the custom `base_url` requirement end-to-end. `github.com/anthropics/anthropic-sdk-go` is now a pinned direct dependency at **v1.56.0** — the same version as the local reference checkout, so all wire-compat comparisons made in slices 2–3 hold against the pinned SDK verbatim.
+
+| File | Contents |
+|---|---|
+| `provider/provider.go` | `Config` (`protocol` / `model` / `base_url` / `api_key` / optional headers — CLAUDE.md principle 4), `Request`/`Message` in Anthropic Messages semantics with content blocks and tool definitions as **raw wire JSON** (the Anthropic adapter is near-zero-conversion; lossy mapping stays confined to future non-Anthropic adapters), `Chunk` stream (`text_delta` / `thinking_delta` / complete `tool_use` after input accumulation / `done` with `stop_reason` + `domain.ModelUsage`), `Provider`/`Stream`/`Factory` interfaces, and the model→provider `Registry` (exact match + `"*"` default; a route without an upstream `model` passes the agent's model string through to the endpoint). |
+| `provider/anthropic/anthropic.go` | The Anthropic-protocol adapter over the official SDK: `base_url` is **required** (no silent api.anthropic.com fallback), extra headers pass through for gateway routing, streaming events translate to chunks (tool_use inputs accumulate from `input_json_delta`, `message_delta` carries stop reason + output usage). |
+
+**Test coverage:** contract tests against a fake Anthropic-protocol `httptest` server — request assertions (path, `x-api-key`, `anthropic-version`, extra headers, model/max_tokens/stream/system/messages/tools round-trip) and chunk-translation assertions (thinking → text ×2 → accumulated tool_use → done with full usage), string-content canonicalization, empty tool input, upstream 401, config validation; registry routing/fallback/passthrough/validation. Plus the env-gated integration test (`TestIntegrationRealEndpoint`): reads `MODEL_*` from the environment or the gitignored `.env`, **skips cleanly when unconfigured** (verified — CI without credentials is unaffected), never logs credential values.
+
+**Slice-4 scope notes:** the `openai` protocol adapter is deferred (the `Factory` seam exists; the registry rejects unknown protocols at construction). Registry config loading from a file/table lands with the first consumer (slice 5 brain wiring) — the `Route` slice is the seam. Retry policy is the SDK default; nothing speculative added.
+
 ---
 
 ## Next up
 
-1. **Slice 4:** `ModelProvider` (config-driven) + `model_providers` routing + first provider passing a single model turn (pin the SDK dependency; re-check wire-drift then).
-2. **Slice 5:** Brain orchestration loop (replay → assemble provider request → write Anthropic-native events) — includes the agent-struct reconciliation debt above and the session state machine (`session.status_*`, `session.updated` emission, work enqueue on `user.message`).
+1. **Slice 5:** Brain orchestration loop (replay → assemble provider request → write Anthropic-native events) — includes the agent-struct reconciliation debt above, the session state machine (`session.status_*`, `session.updated` emission, work enqueue on `user.message`), and wiring the provider registry into configuration.
+2. **Slice 6:** tool-exec queue + executor + Docker sandbox provider.
 
 ---
 
