@@ -144,6 +144,9 @@ type containerInfo struct {
 	State struct {
 		Running bool `json:"Running"`
 	} `json:"State"`
+	Config struct {
+		Labels map[string]string `json:"Labels"`
+	} `json:"Config"`
 }
 
 func (c *apiClient) inspectContainer(ctx context.Context, ref string) (containerInfo, error) {

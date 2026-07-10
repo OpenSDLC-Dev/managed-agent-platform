@@ -39,6 +39,13 @@ func spec() sandbox.Spec {
 	return sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img:1"}
 }
 
+// inspectJSON is what the daemon says about a container this platform created
+// for s: the ownership label is what Provision checks before adopting it.
+func inspectJSON(id string, s sandbox.Spec, running bool) string {
+	return fmt.Sprintf(`{"Id":%q,"State":{"Running":%t},"Config":{"Labels":{%q:%q}}}`,
+		id, running, sessionLabel, string(s.SessionID))
+}
+
 func TestNewResolvesDaemonAddress(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "")
 	p, err := New(Config{Host: "unix:///var/run/docker.sock"})
@@ -72,18 +79,19 @@ func TestProvisionValidatesSpec(t *testing.T) {
 }
 
 func TestProvisionReusesRunningContainer(t *testing.T) {
+	s := spec()
 	var created bool
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/json"):
-			io.WriteString(w, `{"Id":"abc","State":{"Running":true}}`)
+			io.WriteString(w, inspectJSON("abc", s, true))
 		case r.URL.Path == "/containers/create":
 			created = true
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	sb, err := p.Provision(context.Background(), spec())
+	sb, err := p.Provision(context.Background(), s)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -96,11 +104,12 @@ func TestProvisionReusesRunningContainer(t *testing.T) {
 }
 
 func TestProvisionStartsStoppedContainer(t *testing.T) {
+	s := spec()
 	var started string
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/json"):
-			io.WriteString(w, `{"Id":"abc","State":{"Running":false}}`)
+			io.WriteString(w, inspectJSON("abc", s, false))
 		case strings.HasSuffix(r.URL.Path, "/start"):
 			started = r.URL.Path
 			w.WriteHeader(http.StatusNoContent)
@@ -108,11 +117,78 @@ func TestProvisionStartsStoppedContainer(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	if _, err := p.Provision(context.Background(), spec()); err != nil {
+	if _, err := p.Provision(context.Background(), s); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	if started != "/containers/abc/start" {
 		t.Errorf("stopped container not started (started=%q)", started)
+	}
+}
+
+// The container name is derived from the session id, so anything on the daemon
+// can hold it. Only the ownership label says the platform built it — and with
+// it, that the network mode baked in at create time is the one this session
+// asked for. A `limited` session must not adopt a `bridge` container.
+func TestProvisionRefusesAContainerItDoesNotOwn(t *testing.T) {
+	for _, tc := range []struct{ name, labels string }{
+		{"no labels at all", `{}`},
+		{"null labels", `null`},
+		{"another session's sandbox", `{"` + sessionLabel + `":"sesn_someone_else"}`},
+		{"the label under a different key", `{"session-id":"whatever"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var touched []string
+			p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				touched = append(touched, r.URL.Path)
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/json"):
+					fmt.Fprintf(w, `{"Id":"squatter","State":{"Running":false},"Config":{"Labels":%s}}`, tc.labels)
+				default:
+					w.WriteHeader(http.StatusNoContent)
+				}
+			})
+			_, err := p.Provision(context.Background(), spec())
+			if err == nil {
+				t.Fatal("adopted a container the platform does not own")
+			}
+			if !strings.Contains(err.Error(), "not this platform's sandbox") {
+				t.Errorf("err = %v", err)
+			}
+			for _, path := range touched {
+				if strings.HasSuffix(path, "/start") {
+					t.Error("a container the platform does not own was started")
+				}
+			}
+		})
+	}
+}
+
+// The create race has its own adoption path, and the winner is only presumed to
+// be a peer executor. Check the label there too.
+func TestProvisionRefusesToAdoptAnUnownedRaceWinner(t *testing.T) {
+	var inspects int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			inspects++
+			if inspects == 1 {
+				w.WriteHeader(http.StatusNotFound)
+				io.WriteString(w, `{"message":"No such container"}`)
+				return
+			}
+			io.WriteString(w, `{"Id":"squatter","State":{"Running":true},"Config":{"Labels":{}}}`)
+		case r.URL.Path == "/containers/create":
+			w.WriteHeader(http.StatusConflict)
+			io.WriteString(w, `{"message":"Conflict. The container name is already in use"}`)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			t.Error("an unowned race winner was started")
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	if _, err := p.Provision(context.Background(), spec()); err == nil ||
+		!strings.Contains(err.Error(), "not this platform's sandbox") {
+		t.Errorf("err = %v, want a refusal to adopt an unowned race winner", err)
 	}
 }
 
@@ -182,6 +258,7 @@ func TestProvisionSurfacesPullError(t *testing.T) {
 // Two executors provisioning one session: the create loser adopts the winner's
 // container instead of failing the tool call.
 func TestProvisionAdoptsRaceWinner(t *testing.T) {
+	s := spec()
 	var inspects int
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -192,7 +269,7 @@ func TestProvisionAdoptsRaceWinner(t *testing.T) {
 				io.WriteString(w, `{"message":"No such container"}`)
 				return
 			}
-			io.WriteString(w, `{"Id":"winner","State":{"Running":true}}`)
+			io.WriteString(w, inspectJSON("winner", s, true))
 		case r.URL.Path == "/containers/create":
 			w.WriteHeader(http.StatusConflict)
 			io.WriteString(w, `{"message":"Conflict. The container name is already in use"}`)
@@ -202,7 +279,7 @@ func TestProvisionAdoptsRaceWinner(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	sb, err := p.Provision(context.Background(), spec())
+	sb, err := p.Provision(context.Background(), s)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -629,6 +706,7 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 // The unix transport is the production path; tcp is only how these tests
 // reach a fake. Dial a real unix socket so the dialer itself is exercised.
 func TestUnixTransportDialsTheSocket(t *testing.T) {
+	s := spec()
 	socket := filepath.Join(t.TempDir(), "d.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -637,7 +715,7 @@ func TestUnixTransportDialsTheSocket(t *testing.T) {
 	srv := &httptest.Server{
 		Listener: listener,
 		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			io.WriteString(w, `{"Id":"over-unix","State":{"Running":true}}`)
+			io.WriteString(w, inspectJSON("over-unix", s, true))
 		})},
 	}
 	srv.Start()
@@ -647,7 +725,7 @@ func TestUnixTransportDialsTheSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	sb, err := p.Provision(context.Background(), spec())
+	sb, err := p.Provision(context.Background(), s)
 	if err != nil {
 		t.Fatalf("provision over unix socket: %v", err)
 	}
@@ -708,28 +786,28 @@ func TestGarbledDaemonRepliesFail(t *testing.T) {
 }
 
 func TestProvisionSurfacesStartFailure(t *testing.T) {
+	s := spec()
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/json"):
-			io.WriteString(w, `{"Id":"abc","State":{"Running":false}}`)
+			io.WriteString(w, inspectJSON("abc", s, false))
 		default:
 			w.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(w, `{"message":"cannot start"}`)
 		}
 	})
-	if _, err := p.Provision(context.Background(), spec()); err == nil ||
+	if _, err := p.Provision(context.Background(), s); err == nil ||
 		!strings.Contains(err.Error(), "cannot start") {
 		t.Errorf("err = %v", err)
 	}
 }
 
 func TestProvisionDefaultsTheWorkdir(t *testing.T) {
+	s := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img:1"} // no Workdir
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"Id":"abc","State":{"Running":true}}`)
+		io.WriteString(w, inspectJSON("abc", s, true))
 	})
-	sb, err := p.Provision(context.Background(), sandbox.Spec{
-		SessionID: domain.NewID("sesn"), Image: "img:1", // no Workdir
-	})
+	sb, err := p.Provision(context.Background(), s)
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}

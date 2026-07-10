@@ -126,6 +126,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	info, err := p.api.inspectContainer(ctx, name)
 	switch {
 	case err == nil:
+		if err := ours(info, spec.SessionID); err != nil {
+			return nil, err
+		}
 		if !info.State.Running {
 			if err := p.api.startContainer(ctx, info.ID); err != nil {
 				return nil, err
@@ -166,6 +169,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		if ierr != nil {
 			return nil, ierr
 		}
+		if ierr := ours(info, spec.SessionID); ierr != nil {
+			return nil, ierr
+		}
 		id, err = info.ID, nil
 	}
 	if err != nil {
@@ -175,6 +181,21 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		return nil, err
 	}
 	return p.attach(id, workdir), nil
+}
+
+// ours refuses a container that merely wears this session's name. The name is
+// derived from the session id, so anything else on the daemon can hold it: a
+// leftover from an earlier deployment, or a container an attacker placed there.
+// Adopting one would hand the agent's commands to a filesystem, an image, and —
+// because a container's network mode is fixed when it is created — an egress
+// policy that are not the ones this session asked for. A `limited` session must
+// never inherit a `bridge` container's route out.
+func ours(info containerInfo, sessionID domain.ID) error {
+	if info.Config.Labels[sessionLabel] != string(sessionID) {
+		return fmt.Errorf("docker: container %s is not this platform's sandbox for session %s",
+			info.ID, sessionID)
+	}
+	return nil
 }
 
 func (p *Provider) attach(id, workdir string) *container {

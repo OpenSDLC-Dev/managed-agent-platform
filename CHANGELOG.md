@@ -19,7 +19,10 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   the Docker Engine API over the daemon socket, hand-rolled in one file
   rather than depending on the moby module tree. Provision is idempotent
   per session, so two executors handling two tool calls of one session
-  converge on one container instead of racing to create two. `Exec` runs
+  converge on one container instead of racing to create two; it adopts a
+  container only after checking the ownership label it wrote when it
+  created it, because the container's name is derived from the session id
+  and anything else on the daemon may hold that name. `Exec` runs
   the command through `/bin/bash -c` in the session's workdir, and
   enforces its deadline twice: a watchdog inside the container kills the
   command's process group (Docker offers no way to kill a running exec
@@ -30,7 +33,8 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   outlived its deadline timed out whatever exit code it reports, because
   on the honest path the watchdog would have killed it first. No command
   can outrun its deadline by more than the grace period, none can hide an
-  overrun, and one that merely dies of SIGKILL on its own is never
+  overrun of more than the half-second of measurement slop `Exec` charges
+  to itself, and one that merely dies of SIGKILL on its own is never
   mistaken for a timeout. Output is capped
   at 1 MiB per stream, drained rather than buffered so a noisy command
   still finishes; a read above 4 MiB is refused rather than silently
