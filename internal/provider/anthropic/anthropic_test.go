@@ -273,6 +273,69 @@ func TestGenerateUpstreamError(t *testing.T) {
 	}
 }
 
+func TestGenerateParallelToolUseInputsStayIntact(t *testing.T) {
+	// Two tool_use blocks in one turn (parallel tool use): the first
+	// emitted ToolUse.Input must survive the second block's accumulation —
+	// the accumulator's backing array is reused between blocks.
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_5","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"bash","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls -la\"}"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_b","name":"bash","input":{}}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":9}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"go"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream) // full drain BEFORE inspecting inputs
+	if len(chunks) != 3 {
+		t.Fatalf("chunks = %+v", chunks)
+	}
+	if got := string(chunks[0].ToolUse.Input); got != `{"command":"ls -la"}` {
+		t.Errorf("first tool input corrupted after drain: %s", got)
+	}
+	if got := string(chunks[1].ToolUse.Input); got != `{"command":"pwd"}` {
+		t.Errorf("second tool input = %s", got)
+	}
+}
+
+func TestGenerateTruncatedStream(t *testing.T) {
+	// A stream that drains without message_stop is a truncated turn and
+	// must surface as an error, never as a quiet success.
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_4","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cut o"}}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	var sawDone bool
+	for stream.Next() {
+		if stream.Chunk().Kind == provider.KindDone {
+			sawDone = true
+		}
+	}
+	if sawDone {
+		t.Error("truncated stream produced a done chunk")
+	}
+	if stream.Err() == nil {
+		t.Error("truncated stream must surface an error")
+	}
+}
+
 func TestConfigValidation(t *testing.T) {
 	if _, err := anthropic.New(provider.Config{Model: "m"}); err == nil {
 		t.Error("missing base_url should error — no silent api.anthropic.com fallback")

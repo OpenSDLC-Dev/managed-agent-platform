@@ -78,6 +78,10 @@ func TestRegistryValidation(t *testing.T) {
 			{Model: "m", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://x"}},
 			{Model: "m", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://y"}},
 		}},
+		{"duplicate default route", []provider.Route{
+			{Model: "*", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://x"}},
+			{Model: "*", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://y"}},
+		}},
 	}
 	for _, tc := range cases {
 		if _, err := provider.NewRegistry(tc.routes, factories); err == nil {

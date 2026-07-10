@@ -122,6 +122,9 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 			return nil, fmt.Errorf("route %q uses unknown protocol %q", route.Model, route.Config.Protocol)
 		}
 		if route.Model == "*" {
+			if r.fallback != nil {
+				return nil, fmt.Errorf("duplicate default (%q) route", "*")
+			}
 			cfg := route.Config
 			r.fallback = &cfg
 			continue

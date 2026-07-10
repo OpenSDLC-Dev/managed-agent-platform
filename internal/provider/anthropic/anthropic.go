@@ -30,7 +30,6 @@ func New(cfg provider.Config) (provider.Provider, error) {
 	opts := []option.RequestOption{
 		option.WithBaseURL(cfg.BaseURL),
 		option.WithAPIKey(cfg.APIKey),
-		option.WithMaxRetries(2),
 	}
 	for k, v := range cfg.Headers {
 		opts = append(opts, option.WithHeader(k, v))
@@ -166,7 +165,10 @@ func (s *stream) Next() bool {
 				s.inTool = false
 				// Streamed deltas are authoritative; the start-block seed
 				// covers endpoints that sent the input up front instead.
-				input := json.RawMessage(s.toolJSON)
+				// The emitted input must be a copy — s.toolJSON's backing
+				// array is reused by the next tool block, and an aliased
+				// slice would corrupt an already-delivered chunk.
+				input := json.RawMessage(append([]byte(nil), s.toolJSON...))
 				if len(input) == 0 {
 					input = s.toolSeed
 				}
@@ -182,8 +184,16 @@ func (s *stream) Next() bool {
 		case "message_delta":
 			s.stopReason = string(ev.Delta.StopReason)
 			s.usage.OutputTokens = ev.Usage.OutputTokens
+			// Cumulative counters override the message_start snapshot when
+			// the endpoint reports them here.
 			if ev.Usage.InputTokens > 0 {
 				s.usage.InputTokens = ev.Usage.InputTokens
+			}
+			if ev.Usage.CacheCreationInputTokens > 0 {
+				s.usage.CacheCreationInputTokens = ev.Usage.CacheCreationInputTokens
+			}
+			if ev.Usage.CacheReadInputTokens > 0 {
+				s.usage.CacheReadInputTokens = ev.Usage.CacheReadInputTokens
 			}
 
 		case "message_stop":
@@ -194,5 +204,11 @@ func (s *stream) Next() bool {
 		}
 	}
 	s.err = s.events.Err()
+	// A drained stream without message_stop is a truncated turn, not a
+	// success: callers must never mistake it for a turn that merely
+	// produced no done chunk.
+	if s.err == nil {
+		s.err = fmt.Errorf("model stream ended before message_stop")
+	}
 	return false
 }
