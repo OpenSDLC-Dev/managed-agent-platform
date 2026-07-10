@@ -8,7 +8,7 @@ Running record of where this project actually stands, so work can resume cleanly
 
 ## Snapshot
 
-- **Last updated:** 2026-07-10
+- **Last updated:** 2026-07-11
 - **Phase:** The platform converses — the brain orchestration loop is live: a `user.message` sent by the real `ant` CLI flips the session to running, a brain claims the turn, replays the log against the configured model endpoint, streams previews over SSE, and idles the session with `end_turn`. Custom tools round-trip as `agent.custom_tool_use` / `user.custom_tool_result`. The *hands* now exist too — a Docker-backed per-session sandbox — but nothing has picked them up yet: no executor, no built-in toolset, so no `agent.tool_use` is ever emitted. Permissions and the wire work API are still ahead.
 - **Current slice:** 6 in progress — the sandbox layer landed; the executor, the `agent_toolset_20260401` expansion, and the `tool_exec` consumer are what remain.
 - **Build status:** `go build ./...`, `go vet ./...`, `go test ./...` all green.

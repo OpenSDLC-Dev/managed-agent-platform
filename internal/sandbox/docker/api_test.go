@@ -1173,6 +1173,7 @@ func TestOverrunDetectedWhenTheFirstProbeStalls(t *testing.T) {
 			mu.Lock()
 			topCalls++
 			n := topCalls
+			gone := streamClosed
 			mu.Unlock()
 			if n == 1 {
 				// The pre-deadline probe, stalled: it never answers on its own,
@@ -1182,8 +1183,16 @@ func TestOverrunDetectedWhenTheFirstProbeStalls(t *testing.T) {
 				<-r.Context().Done()
 				return
 			}
-			// The overrun probe, reached on its own clock: the command is still
-			// alive at deadline+overrunSlop.
+			// The overrun probe. The command is listed while it is alive and gone
+			// once it has exited (its stream closed). Independent scheduling
+			// reaches this at deadline+overrunSlop, while the command still runs,
+			// and sees it alive; a sequential prober only reaches it after the
+			// stalled first probe is cancelled at stream-close, by which point
+			// the command has exited and it sees gone — the sixth bug.
+			if gone {
+				fmt.Fprint(w, `{"Titles":["PID"],"Processes":[["1"]]}`)
+				return
+			}
 			fmt.Fprintf(w, `{"Titles":["PID"],"Processes":[["1"],["%d"]]}`, fakeExecPid)
 
 		default:
