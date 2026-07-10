@@ -12,6 +12,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // sessionAgentJSON is the resolved-agent snapshot embedded in a session
@@ -144,10 +145,16 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	}, nil
 }
 
+// querier is the read surface shared by pgxpool.Pool and pgx.Tx, letting
+// resolution run inside the caller's transaction.
+type querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // resolveAgent resolves the create-time agent union (plain id string,
 // {type:"agent"}, or {type:"agent_with_overrides"}) into the immutable
 // snapshot the session will carry.
-func (s *server) resolveAgent(ctx context.Context, raw json.RawMessage) (sessionAgentJSON, error) {
+func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessage) (sessionAgentJSON, error) {
 	var snap sessionAgentJSON
 
 	var agentID string
@@ -158,7 +165,7 @@ func (s *server) resolveAgent(ctx context.Context, raw json.RawMessage) (session
 		var obj struct {
 			Type    string          `json:"type"`
 			ID      string          `json:"id"`
-			Version int64           `json:"version"`
+			Version *int64          `json:"version"`
 			Model   json.RawMessage `json:"model"`
 			System  json.RawMessage `json:"system"`
 			Tools   json.RawMessage `json:"tools"`
@@ -179,7 +186,9 @@ func (s *server) resolveAgent(ctx context.Context, raw json.RawMessage) (session
 				"mcp_servers": obj.MCP, "skills": obj.Skills,
 			} {
 				if len(val) > 0 {
-					if isNull(val) {
+					// Only system documents null semantics ("set to null to
+					// clear the agent's system prompt").
+					if isNull(val) && key != "system" {
 						return snap, errInvalid("agent override %s cannot be null", key)
 					}
 					overrides[key] = val
@@ -188,9 +197,13 @@ func (s *server) resolveAgent(ctx context.Context, raw json.RawMessage) (session
 		default:
 			return snap, errInvalid(`agent.type must be "agent" or "agent_with_overrides"`)
 		}
-		agentID, version = obj.ID, obj.Version
-		if version < 0 {
-			return snap, errInvalid("agent.version must be a positive integer")
+		agentID = obj.ID
+		if obj.Version != nil {
+			// Explicit versions must be >= 1; only omission means "latest".
+			if *obj.Version < 1 {
+				return snap, errInvalid("agent.version must be a positive integer")
+			}
+			version = *obj.Version
 		}
 	}
 
@@ -200,7 +213,7 @@ func (s *server) resolveAgent(ctx context.Context, raw json.RawMessage) (session
 		archivedAt *time.Time
 	)
 	if version == 0 {
-		err := s.pool.QueryRow(ctx,
+		err := db.QueryRow(ctx,
 			`SELECT name, version, spec, archived_at FROM agents WHERE id = $1`, agentID).
 			Scan(&name, &version, &specJSON, &archivedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -210,7 +223,7 @@ func (s *server) resolveAgent(ctx context.Context, raw json.RawMessage) (session
 			return snap, err
 		}
 	} else {
-		err := s.pool.QueryRow(ctx,
+		err := db.QueryRow(ctx,
 			`SELECT v.name, v.spec, a.archived_at
 			 FROM agent_versions v JOIN agents a ON a.id = v.agent_id
 			 WHERE v.agent_id = $1 AND v.version = $2`, agentID, version).
@@ -238,7 +251,9 @@ func (s *server) resolveAgent(ctx context.Context, raw json.RawMessage) (session
 		spec.Model = m
 	}
 	if raw, ok := overrides["system"]; ok {
-		if err := json.Unmarshal(raw, &spec.System); err != nil {
+		if isNull(raw) {
+			spec.System = "" // null clears the agent's system prompt
+		} else if err := json.Unmarshal(raw, &spec.System); err != nil {
 			return snap, errInvalid("agent override system must be a string")
 		}
 	}
@@ -295,6 +310,10 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectUnknownKeys(obj, "agent", "environment_id", "title", "metadata",
+		"resources", "vault_ids"); err != nil {
+		return nil, err
+	}
 	envID, err := requiredString(obj, "environment_id")
 	if err != nil {
 		return nil, err
@@ -321,9 +340,18 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 
+	// One transaction around check → resolve → insert: FOR SHARE on the
+	// environment row blocks a concurrent delete/archive from slipping in
+	// between the check and the insert.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var envArchivedAt *time.Time
-	err = s.pool.QueryRow(ctx,
-		`SELECT archived_at FROM environments WHERE id = $1`, envID).Scan(&envArchivedAt)
+	err = tx.QueryRow(ctx,
+		`SELECT archived_at FROM environments WHERE id = $1 FOR SHARE`, envID).Scan(&envArchivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("environment %s not found", envID)
 	}
@@ -334,7 +362,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		return nil, errInvalid("environment %s is archived", envID)
 	}
 
-	agent, err := s.resolveAgent(ctx, agentRaw)
+	agent, err := s.resolveAgent(ctx, tx, agentRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -353,14 +381,24 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		status: string(domain.SessionIdle), title: title,
 		metaJSON: mustJSON(metadata), usageJSON: []byte(`{}`), resourcesJSON: []byte(`[]`),
 	}
-	err = s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id,
 		   status, title, metadata, created_by)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING created_at, updated_at`,
 		id, agent.ID, agent.Version, agentJSON, envID, row.status, title, metadata, createdBy).
 		Scan(&row.createdAt, &row.updatedAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop
+		if strings.Contains(pgErr.ConstraintName, "environment") {
+			return nil, errNotFound("environment %s not found", envID)
+		}
+		return nil, errNotFound("agent %s version %d not found", agent.ID, agent.Version)
+	}
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return renderSession(row)
@@ -395,6 +433,9 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectUnknownKeys(obj, "title", "metadata", "agent", "vault_ids"); err != nil {
+		return nil, err
+	}
 	if raw, ok := obj["vault_ids"]; ok && !isNull(raw) {
 		// The reference server rejects this too ("Not yet supported").
 		return nil, errInvalid("vault_ids updates are not yet supported")
@@ -413,6 +454,9 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if row.archivedAt != nil {
+		return nil, errInvalid("session %s is archived", id)
 	}
 	metadata := map[string]string{}
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
@@ -509,14 +553,11 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 			return nil, errInvalid("invalid session status %q", st)
 		}
 	}
-	if q.Get("agent_version") != "" && q.Get("agent_id") == "" {
-		return nil, errInvalid("agent_version requires agent_id")
-	}
 
 	// Deployments and memory stores are post-v1 features: no session can
 	// reference one, so filtering by them yields an empty result, not an error.
 	if q.Get("deployment_id") != "" || q.Get("memory_store_id") != "" {
-		return newBiPage(page, 0, nil), nil
+		return biPageJSON{Data: []any{}}, nil
 	}
 
 	query := `SELECT ` + sessionColumns + ` FROM sessions WHERE true`
@@ -533,8 +574,12 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 		if err != nil {
 			return nil, errInvalid("agent_version must be an integer")
 		}
-		args = append(args, version)
-		query += fmt.Sprintf(` AND agent_version = $%d`, len(args))
+		// Per the reference: "Only applies when agent_id is also set" —
+		// without agent_id the parameter is ignored, not rejected.
+		if q.Get("agent_id") != "" {
+			args = append(args, version)
+			query += fmt.Sprintf(` AND agent_version = $%d`, len(args))
+		}
 	}
 	if len(statuses) > 0 {
 		args = append(args, statuses)
@@ -553,13 +598,22 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 			query += fmt.Sprintf(` AND created_at %s $%d`, op, len(args))
 		}
 	}
-	dir := "DESC"
+	sortDir := "DESC"
 	if order == "asc" {
-		dir = "ASC"
+		sortDir = "ASC"
 	}
-	args = append(args, page.limit+1, page.offset)
-	query += fmt.Sprintf(` ORDER BY created_at %s, id %s LIMIT $%d OFFSET $%d`,
-		dir, dir, len(args)-1, len(args))
+	orderDir, reversed := sortDir, false
+	if page.cur != nil {
+		if page.cur.versioned {
+			return nil, errInvalid("invalid page cursor")
+		}
+		var clause string
+		clause, orderDir, reversed = keysetClause(sortDir, page.cur, len(args))
+		args = append(args, page.cur.t, page.cur.id)
+		query += clause
+	}
+	args = append(args, page.limit+1)
+	query += fmt.Sprintf(` ORDER BY created_at %s, id %s LIMIT $%d`, orderDir, orderDir, len(args))
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -568,6 +622,11 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	defer rows.Close()
 
 	var data []any
+	type rowKey struct {
+		t  time.Time
+		id string
+	}
+	var keys []rowKey
 	fetched := 0
 	for rows.Next() {
 		fetched++
@@ -583,11 +642,24 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 			return nil, err
 		}
 		data = append(data, rendered)
+		keys = append(keys, rowKey{row.createdAt, row.id})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return newBiPage(page, fetched, data), nil
+	if reversed {
+		for i, j := 0, len(data)-1; i < j; i, j = i+1, j-1 {
+			data[i], data[j] = data[j], data[i]
+			keys[i], keys[j] = keys[j], keys[i]
+		}
+	}
+	out := biPageJSON{Data: data}
+	if out.Data == nil {
+		out.Data = []any{}
+	}
+	out.NextPage, out.PrevPage = pageEdges(len(data), fetched > page.limit, page.cur != nil, reversed,
+		func(i int) (time.Time, string) { return keys[i].t, keys[i].id })
+	return out, nil
 }
 
 func (s *server) archiveSession(r *http.Request) (any, error) {

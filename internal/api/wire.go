@@ -3,8 +3,10 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -18,9 +20,15 @@ const maxBodyBytes = 4 << 20
 // field so handlers can distinguish omitted / null / value — the reference
 // updates are patches where that distinction is semantic.
 func decodeObject(r *http.Request) (map[string]json.RawMessage, error) {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+	// Read one byte past the limit so oversize bodies are detected as such
+	// instead of being truncated into a misleading JSON parse error.
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
 		return nil, errInvalid("could not read request body")
+	}
+	if len(raw) > maxBodyBytes {
+		return nil, &apiError{http.StatusRequestEntityTooLarge, errTypeRequestTooLarge,
+			fmt.Sprintf("request body larger than %d bytes", maxBodyBytes)}
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return map[string]json.RawMessage{}, nil
@@ -33,6 +41,18 @@ func decodeObject(r *http.Request) (map[string]json.RawMessage, error) {
 		return map[string]json.RawMessage{}, nil
 	}
 	return obj, nil
+}
+
+// rejectUnknownKeys mirrors the reference API's strict parameter validation:
+// unrecognized body fields are an error, not a silent no-op — a typo'd field
+// name must not vanish into accepted-but-ignored input.
+func rejectUnknownKeys(obj map[string]json.RawMessage, allowed ...string) error {
+	for key := range obj {
+		if !slices.Contains(allowed, key) {
+			return errInvalid("unknown field %q", key)
+		}
+	}
+	return nil
 }
 
 func isNull(raw json.RawMessage) bool {

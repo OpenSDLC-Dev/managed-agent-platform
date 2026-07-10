@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -51,9 +52,13 @@ type limitedNetworkJSON struct {
 	AllowPackageManagers bool     `json:"allow_package_managers"`
 }
 
-// parseEnvConfig validates and normalizes the config union. A missing config
-// defaults to cloud with unrestricted networking and no packages.
-func parseEnvConfig(raw json.RawMessage) (kind string, normalized []byte, err error) {
+// normalizeEnvConfig validates the config union and produces the stored,
+// fully-populated form. existing is the currently stored config when merging
+// an update (nil on create): per the reference's update semantics, omitted
+// cloud sub-fields preserve their existing values rather than resetting to
+// defaults. A type switch (cloud ⇄ self_hosted) starts from defaults — the
+// other union arm has nothing to preserve.
+func normalizeEnvConfig(raw json.RawMessage, existing []byte) (kind string, normalized []byte, err error) {
 	if raw == nil || isNull(raw) {
 		raw = []byte(`{"type":"cloud"}`)
 	}
@@ -74,92 +79,136 @@ func parseEnvConfig(raw json.RawMessage) (kind string, normalized []byte, err er
 		}
 		return typ, []byte(`{"type":"self_hosted"}`), nil
 	case string(domain.EnvCloud):
-		cfg := cloudConfigJSON{Type: typ}
 		for key := range obj {
 			if key != "type" && key != "networking" && key != "packages" {
 				return "", nil, errInvalid("unknown cloud config field %q", key)
 			}
 		}
-		cfg.Networking, err = parseNetworking(obj["networking"])
-		if err != nil {
-			return "", nil, err
+		// Base: the existing cloud config when updating, defaults otherwise.
+		base := cloudConfigJSON{
+			Type:       typ,
+			Networking: json.RawMessage(`{"type":"unrestricted"}`),
+			Packages: packagesJSON{
+				Apt: []string{}, Cargo: []string{}, Gem: []string{},
+				Go: []string{}, Npm: []string{}, Pip: []string{},
+			},
 		}
-		cfg.Packages, err = parsePackages(obj["packages"])
-		if err != nil {
-			return "", nil, err
+		if existing != nil {
+			var prev cloudConfigJSON
+			if err := json.Unmarshal(existing, &prev); err == nil && prev.Type == typ {
+				base.Networking, base.Packages = prev.Networking, prev.Packages
+			}
 		}
-		normalized, err = json.Marshal(cfg)
+		if nw, ok := obj["networking"]; ok && !isNull(nw) {
+			base.Networking, err = parseNetworking(nw, base.Networking)
+			if err != nil {
+				return "", nil, err
+			}
+		}
+		if pk, ok := obj["packages"]; ok && !isNull(pk) {
+			base.Packages, err = parsePackages(pk, base.Packages)
+			if err != nil {
+				return "", nil, err
+			}
+		}
+		normalized, err = json.Marshal(base)
 		return typ, normalized, err
 	default:
 		return "", nil, errInvalid(`config.type must be "cloud" or "self_hosted"`)
 	}
 }
 
-func parseNetworking(raw json.RawMessage) (json.RawMessage, error) {
-	if raw == nil || isNull(raw) {
-		return json.RawMessage(`{"type":"unrestricted"}`), nil
-	}
-	var probe struct {
-		Type                 string   `json:"type"`
-		AllowedHosts         []string `json:"allowed_hosts"`
-		AllowMCPServers      bool     `json:"allow_mcp_servers"`
-		AllowPackageManagers bool     `json:"allow_package_managers"`
-	}
-	if err := json.Unmarshal(raw, &probe); err != nil {
+// parseNetworking validates a networking object strictly (unknown fields are
+// rejected — a typo'd allowed_hosts must not silently lock all egress open or
+// closed). When both the patch and prior are "limited", omitted fields keep
+// their prior values.
+func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
 		return nil, errInvalid("networking must be an object")
 	}
-	switch probe.Type {
+	var typ string
+	if rawType, ok := obj["type"]; ok {
+		_ = json.Unmarshal(rawType, &typ)
+	}
+	switch typ {
 	case string(domain.NetUnrestricted):
+		for key := range obj {
+			if key != "type" {
+				return nil, errInvalid("unknown unrestricted networking field %q", key)
+			}
+		}
 		return json.RawMessage(`{"type":"unrestricted"}`), nil
 	case string(domain.NetLimited):
-		if probe.AllowedHosts == nil {
-			probe.AllowedHosts = []string{}
+		out := limitedNetworkJSON{Type: typ, AllowedHosts: []string{}}
+		var prev limitedNetworkJSON
+		if json.Unmarshal(prior, &prev) == nil && prev.Type == typ {
+			out = prev
 		}
-		return json.Marshal(limitedNetworkJSON{
-			Type:                 probe.Type,
-			AllowedHosts:         probe.AllowedHosts,
-			AllowMCPServers:      probe.AllowMCPServers,
-			AllowPackageManagers: probe.AllowPackageManagers,
-		})
+		for key, val := range obj {
+			switch key {
+			case "type":
+			case "allowed_hosts":
+				var hosts []string
+				if !isNull(val) {
+					if err := json.Unmarshal(val, &hosts); err != nil {
+						return nil, errInvalid("allowed_hosts must be a list of hostnames")
+					}
+				}
+				if hosts == nil {
+					hosts = []string{}
+				}
+				out.AllowedHosts = hosts
+			case "allow_mcp_servers":
+				if err := json.Unmarshal(val, &out.AllowMCPServers); err != nil {
+					return nil, errInvalid("allow_mcp_servers must be a boolean")
+				}
+			case "allow_package_managers":
+				if err := json.Unmarshal(val, &out.AllowPackageManagers); err != nil {
+					return nil, errInvalid("allow_package_managers must be a boolean")
+				}
+			default:
+				return nil, errInvalid("unknown limited networking field %q", key)
+			}
+		}
+		return json.Marshal(out)
 	default:
 		return nil, errInvalid(`networking.type must be "unrestricted" or "limited"`)
 	}
 }
 
-func parsePackages(raw json.RawMessage) (packagesJSON, error) {
-	pkgs := packagesJSON{
-		Apt: []string{}, Cargo: []string{}, Gem: []string{},
-		Go: []string{}, Npm: []string{}, Pip: []string{},
+// parsePackages merges a packages patch onto base: managers present in the
+// patch replace their list (null clears), absent managers keep base values.
+func parsePackages(raw json.RawMessage, base packagesJSON) (packagesJSON, error) {
+	var byManager map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &byManager); err != nil || byManager == nil {
+		return base, errInvalid("packages must map package managers to lists of packages")
 	}
-	if raw == nil || isNull(raw) {
-		return pkgs, nil
-	}
-	var byManager map[string][]string
-	if err := json.Unmarshal(raw, &byManager); err != nil {
-		return pkgs, errInvalid("packages must map package managers to lists of packages")
-	}
-	for manager, list := range byManager {
-		if list == nil {
-			list = []string{}
+	for manager, rawList := range byManager {
+		list := []string{}
+		if !isNull(rawList) {
+			if err := json.Unmarshal(rawList, &list); err != nil {
+				return base, errInvalid("packages.%s must be a list of packages", manager)
+			}
 		}
 		switch manager {
 		case "apt":
-			pkgs.Apt = list
+			base.Apt = list
 		case "cargo":
-			pkgs.Cargo = list
+			base.Cargo = list
 		case "gem":
-			pkgs.Gem = list
+			base.Gem = list
 		case "go":
-			pkgs.Go = list
+			base.Go = list
 		case "npm":
-			pkgs.Npm = list
+			base.Npm = list
 		case "pip":
-			pkgs.Pip = list
+			base.Pip = list
 		default:
-			return pkgs, errInvalid("unknown package manager %q", manager)
+			return base, errInvalid("unknown package manager %q", manager)
 		}
 	}
-	return pkgs, nil
+	return base, nil
 }
 
 // parseScope enforces v1's single-tenant posture: only the default
@@ -196,6 +245,9 @@ func (s *server) createEnvironment(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectUnknownKeys(obj, "name", "description", "config", "scope", "metadata"); err != nil {
+		return nil, err
+	}
 	name, err := requiredString(obj, "name")
 	if err != nil {
 		return nil, err
@@ -210,7 +262,7 @@ func (s *server) createEnvironment(r *http.Request) (any, error) {
 	if null {
 		description = ""
 	}
-	kind, config, err := parseEnvConfig(obj["config"])
+	kind, config, err := normalizeEnvConfig(obj["config"], nil)
 	if err != nil {
 		return nil, err
 	}
@@ -267,6 +319,9 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectUnknownKeys(obj, "name", "description", "config", "scope", "metadata"); err != nil {
+		return nil, err
+	}
 	if err := parseScope(obj); err != nil {
 		return nil, err
 	}
@@ -290,6 +345,9 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if row.archivedAt != nil {
+		return nil, errInvalid("environment %s is archived", id)
+	}
 	metadata := map[string]string{}
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
 		return nil, err
@@ -312,7 +370,7 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 		row.description = desc
 	}
 	if raw, ok := obj["config"]; ok && !isNull(raw) {
-		kind, row.config, err = parseEnvConfig(raw)
+		kind, row.config, err = normalizeEnvConfig(raw, row.config)
 		if err != nil {
 			return nil, err
 		}
@@ -354,18 +412,30 @@ func (s *server) listEnvironments(r *http.Request) (any, error) {
 
 	query := `SELECT id, name, description, config, metadata, created_at, updated_at, archived_at
 	          FROM environments WHERE true`
+	var args []any
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
 	}
-	query += ` ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2`
+	if page.cur != nil {
+		// Unidirectional list: only forward time cursors are valid here.
+		if page.cur.versioned || page.cur.dir != dirNext {
+			return nil, errInvalid("invalid page cursor")
+		}
+		args = append(args, page.cur.t, page.cur.id)
+		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
+	}
+	args = append(args, page.limit+1)
+	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
 
-	rows, err := s.pool.Query(ctx, query, page.limit+1, page.offset)
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var data []any
+	var lastT time.Time
+	var lastID string
 	fetched := 0
 	for rows.Next() {
 		fetched++
@@ -384,11 +454,20 @@ func (s *server) listEnvironments(r *http.Request) (any, error) {
 		}
 		data = append(data, renderEnvironment(id, row.name, row.description, row.config, metadata,
 			row.createdAt, row.updatedAt, row.archivedAt))
+		lastT, lastID = row.createdAt, id
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return newPage(page, fetched, data), nil
+	out := pageJSON{Data: data}
+	if out.Data == nil {
+		out.Data = []any{}
+	}
+	if fetched > page.limit {
+		c := encodeTimeCursor(dirNext, lastT, lastID)
+		out.NextPage = &c
+	}
+	return out, nil
 }
 
 func (s *server) archiveEnvironment(r *http.Request) (any, error) {

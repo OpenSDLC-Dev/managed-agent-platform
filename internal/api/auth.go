@@ -18,15 +18,32 @@ func hashKey(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// EnsureAPIKey inserts a management API key (hashed) if it is not already
-// present. It is the bootstrap path: cmd/controlplane calls it at startup
-// with the operator-configured key, and tests use it to seed credentials.
+// EnsureAPIKey makes key the one live credential for the named logical key:
+// it inserts (or un-revokes) the hash and revokes every other unrevoked key
+// under the same name. That gives rotation-by-restart semantics — changing
+// CONTROLPLANE_API_KEY and restarting cmd/controlplane revokes the previous
+// key instead of leaving it valid forever. All replicas must therefore share
+// one key value per name.
 func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) error {
-	_, err := pool.Exec(ctx,
+	hash := hashKey(key)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO api_keys (id, name, key_hash) VALUES ($1, $2, $3)
-		 ON CONFLICT (key_hash) DO NOTHING`,
-		domain.NewID("apikey").String(), name, hashKey(key))
-	return err
+		 ON CONFLICT (key_hash) DO UPDATE SET revoked_at = NULL, name = EXCLUDED.name`,
+		domain.NewID("apikey").String(), name, hash); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE api_keys SET revoked_at = now()
+		 WHERE name = $1 AND key_hash <> $2 AND revoked_at IS NULL`,
+		name, hash); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // authenticate resolves an x-api-key value to the key's row ID, or "" if the

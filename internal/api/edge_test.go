@@ -27,6 +27,7 @@ func TestCreateValidationEdgeCases(t *testing.T) {
 		"metadata not object":     map[string]any{"name": "x", "model": "m", "metadata": []any{}},
 		"metadata non-string val": map[string]any{"name": "x", "model": "m", "metadata": map[string]any{"k": 1}},
 		"body is array":           `[1,2]`,
+		"unknown field":           map[string]any{"name": "x", "model": "m", "sytem": "typo"},
 	}
 	for name, body := range agentCases {
 		status, res := s.do(http.MethodPost, "/v1/agents", body)
@@ -45,6 +46,12 @@ func TestCreateValidationEdgeCases(t *testing.T) {
 		"cloud unknown field":   map[string]any{"name": "x", "config": map[string]any{"type": "cloud", "gpu": true}},
 		"scope wrong type":      map[string]any{"name": "x", "scope": 1},
 		"scope unknown value":   map[string]any{"name": "x", "scope": "galaxy"},
+		"unknown top-level":     map[string]any{"name": "x", "descripton": "typo"},
+		"networking typo field": map[string]any{"name": "x", "config": map[string]any{"type": "cloud", "networking": map[string]any{"type": "limited", "allowedHosts": []any{"a"}}}},
+		"unrestricted extras":   map[string]any{"name": "x", "config": map[string]any{"type": "cloud", "networking": map[string]any{"type": "unrestricted", "allowed_hosts": []any{"a"}}}},
+		"hosts not a list":      map[string]any{"name": "x", "config": map[string]any{"type": "cloud", "networking": map[string]any{"type": "limited", "allowed_hosts": "internal.corp"}}},
+		"flag not a bool":       map[string]any{"name": "x", "config": map[string]any{"type": "cloud", "networking": map[string]any{"type": "limited", "allow_mcp_servers": "yes"}}},
+		"package not a list":    map[string]any{"name": "x", "config": map[string]any{"type": "cloud", "packages": map[string]any{"pip": "requests"}}},
 	}
 	for name, body := range envCases {
 		status, res := s.do(http.MethodPost, "/v1/environments", body)
@@ -60,11 +67,13 @@ func TestCreateValidationEdgeCases(t *testing.T) {
 		"agent wrong type":        map[string]any{"agent": 7, "environment_id": envID},
 		"agent object no id":      map[string]any{"agent": map[string]any{"type": "agent"}, "environment_id": envID},
 		"negative version":        map[string]any{"agent": map[string]any{"type": "agent", "id": agentID, "version": -1}, "environment_id": envID},
-		"null override":           map[string]any{"agent": map[string]any{"type": "agent_with_overrides", "id": agentID, "system": nil}, "environment_id": envID},
+		"null model override":     map[string]any{"agent": map[string]any{"type": "agent_with_overrides", "id": agentID, "model": nil}, "environment_id": envID},
+		"explicit version zero":   map[string]any{"agent": map[string]any{"type": "agent", "id": agentID, "version": 0}, "environment_id": envID},
 		"non-string sys override": map[string]any{"agent": map[string]any{"type": "agent_with_overrides", "id": agentID, "system": 5}, "environment_id": envID},
 		"bad override tools":      map[string]any{"agent": map[string]any{"type": "agent_with_overrides", "id": agentID, "tools": []any{map[string]any{"type": "bogus"}}}, "environment_id": envID},
 		"title wrong type":        map[string]any{"agent": agentID, "environment_id": envID, "title": 3},
 		"resources not array":     map[string]any{"agent": agentID, "environment_id": envID, "resources": map[string]any{}},
+		"unknown field":           map[string]any{"agent": agentID, "environment_id": envID, "titel": "typo"},
 	}
 	for name, body := range sessionCases {
 		status, res := s.do(http.MethodPost, "/v1/sessions", body)
@@ -96,6 +105,7 @@ func TestUpdateValidationEdgeCases(t *testing.T) {
 		"agent malformed body":     {"/v1/agents/" + agentID, `{"version"`},
 		"env name cleared":         {"/v1/environments/" + envID, map[string]any{"name": ""}},
 		"env bad config":           {"/v1/environments/" + envID, map[string]any{"config": map[string]any{"type": "bad"}}},
+		"env account scope":        {"/v1/environments/" + envID, map[string]any{"scope": "account"}},
 		"session agent not object": {"/v1/sessions/" + sessID, map[string]any{"agent": "raw"}},
 		"session bad tools":        {"/v1/sessions/" + sessID, map[string]any{"agent": map[string]any{"tools": "x"}}},
 		"session bad mcp":          {"/v1/sessions/" + sessID, map[string]any{"agent": map[string]any{"mcp_servers": []any{map[string]any{"type": "url"}}}}},
@@ -165,6 +175,16 @@ func TestNullFieldLeniency(t *testing.T) {
 	nw, _ := cfg["networking"].(map[string]any)
 	if hosts, ok := nw["allowed_hosts"].([]any); !ok || len(hosts) != 0 {
 		t.Errorf("limited without allowed_hosts should default []: %v", nw)
+	}
+	// Explicit null allowed_hosts also normalizes to [].
+	nullHosts := createEnvironment(t, s, map[string]any{
+		"name": "e2",
+		"config": map[string]any{"type": "cloud",
+			"networking": map[string]any{"type": "limited", "allowed_hosts": nil}},
+	})
+	cfg2, _ := nullHosts["config"].(map[string]any)
+	if nw2, _ := cfg2["networking"].(map[string]any); nw2["allowed_hosts"] == nil {
+		t.Errorf("null allowed_hosts should render []: %v", nw2)
 	}
 	pkgs, _ := cfg["packages"].(map[string]any)
 	if cargo, ok := pkgs["cargo"].([]any); !ok || len(cargo) != 0 {
@@ -246,22 +266,25 @@ func TestCorruptStoredDataSurfacesAsAPIError(t *testing.T) {
 	// The corrupt rows also break the list, session-update, archive, and
 	// pinned-version paths that decode them. Order matters: archiving the
 	// corrupt session commits before its render fails, hiding it from the
-	// default list — so the list checks run first.
-	for _, req := range []struct{ name, method, path string }{
-		{"agents list", http.MethodGet, "/v1/agents"},
-		{"environments list", http.MethodGet, "/v1/environments"},
-		{"sessions list", http.MethodGet, "/v1/sessions"},
-		{"session archive", http.MethodPost, "/v1/sessions/" + sessID + "/archive"},
+	// default list and freezing it against updates — so those checks run first.
+	for _, req := range []struct {
+		name, method, path string
+		body               any
+	}{
+		{"agents list", http.MethodGet, "/v1/agents", nil},
+		{"environments list", http.MethodGet, "/v1/environments", nil},
+		{"sessions list", http.MethodGet, "/v1/sessions", nil},
+		{"session update", http.MethodPost, "/v1/sessions/" + sessID,
+			map[string]any{"agent": map[string]any{"tools": []any{}}}},
+		{"session archive", http.MethodPost, "/v1/sessions/" + sessID + "/archive", nil},
 	} {
-		status, body := s.do(req.method, req.path, nil)
+		status, body := s.do(req.method, req.path, req.body)
 		if status != http.StatusInternalServerError {
 			t.Errorf("%s: status %d, want 500 (%v)", req.name, status, body)
 			continue
 		}
 		wantErr(t, status, body, http.StatusInternalServerError, "api_error")
 	}
-	status, body = s.do(http.MethodPost, "/v1/sessions/"+sessID, map[string]any{"agent": map[string]any{"tools": []any{}}})
-	wantErr(t, status, body, http.StatusInternalServerError, "api_error")
 
 	// Corrupt agent metadata breaks the versions list and the pinned read
 	// (both join the parent row's metadata).

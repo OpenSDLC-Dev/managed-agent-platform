@@ -12,10 +12,11 @@ import (
 // no dedicated conflict type; optimistic-version mismatches surface as
 // invalid_request_error with HTTP 409.
 const (
-	errTypeInvalidRequest = "invalid_request_error"
-	errTypeAuthentication = "authentication_error"
-	errTypeNotFound       = "not_found_error"
-	errTypeAPI            = "api_error"
+	errTypeInvalidRequest  = "invalid_request_error"
+	errTypeAuthentication  = "authentication_error"
+	errTypeNotFound        = "not_found_error"
+	errTypeAPI             = "api_error"
+	errTypeRequestTooLarge = "request_too_large" // 413, per the public API docs
 )
 
 // apiError is an error that maps onto the Anthropic wire error envelope.

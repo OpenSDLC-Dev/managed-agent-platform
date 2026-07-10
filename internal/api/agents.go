@@ -106,6 +106,10 @@ func (s *server) createAgent(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectUnknownKeys(obj, "name", "model", "system", "description",
+		"tools", "mcp_servers", "skills", "metadata", "multiagent"); err != nil {
+		return nil, err
+	}
 	name, err := requiredString(obj, "name")
 	if err != nil {
 		return nil, err
@@ -235,6 +239,10 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := rejectUnknownKeys(obj, "version", "name", "model", "system", "description",
+		"tools", "mcp_servers", "skills", "metadata", "multiagent"); err != nil {
+		return nil, err
+	}
 	rawVersion, ok := obj["version"]
 	if !ok || isNull(rawVersion) {
 		return nil, errInvalid("version is required")
@@ -266,6 +274,9 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if archivedAt != nil {
+		return nil, errInvalid("agent %s is archived", id)
 	}
 	if expected != current {
 		return nil, errConflict("agent version mismatch: expected %d, currently %d", expected, current)
@@ -351,8 +362,16 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 		args = append(args, *lte)
 		query += fmt.Sprintf(` AND created_at <= $%d`, len(args))
 	}
-	args = append(args, page.limit+1, page.offset)
-	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
+	if page.cur != nil {
+		// Unidirectional list: only forward time cursors are valid here.
+		if page.cur.versioned || page.cur.dir != dirNext {
+			return nil, errInvalid("invalid page cursor")
+		}
+		args = append(args, page.cur.t, page.cur.id)
+		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
+	}
+	args = append(args, page.limit+1)
+	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -361,6 +380,8 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 	defer rows.Close()
 
 	var data []any
+	var lastT time.Time
+	var lastID string
 	fetched := 0
 	for rows.Next() {
 		fetched++
@@ -382,11 +403,20 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 			return nil, err
 		}
 		data = append(data, renderAgent(id, name, version, spec, metadata, createdAt, updatedAt, archivedAt))
+		lastT, lastID = createdAt, id
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return newPage(page, fetched, data), nil
+	out := pageJSON{Data: data}
+	if out.Data == nil {
+		out.Data = []any{}
+	}
+	if fetched > page.limit {
+		c := encodeTimeCursor(dirNext, lastT, lastID)
+		out.NextPage = &c
+	}
+	return out, nil
 }
 
 func (s *server) listAgentVersions(r *http.Request) (any, error) {
@@ -416,16 +446,27 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	rows, err := s.pool.Query(ctx,
-		`SELECT version, name, spec, created_at FROM agent_versions
-		 WHERE agent_id = $1 ORDER BY version DESC LIMIT $2 OFFSET $3`,
-		id, page.limit+1, page.offset)
+	query := `SELECT version, name, spec, created_at FROM agent_versions WHERE agent_id = $1`
+	args := []any{id}
+	if page.cur != nil {
+		// Version lists paginate on the version number itself.
+		if !page.cur.versioned || page.cur.dir != dirNext {
+			return nil, errInvalid("invalid page cursor")
+		}
+		args = append(args, page.cur.version)
+		query += fmt.Sprintf(` AND version < $%d`, len(args))
+	}
+	args = append(args, page.limit+1)
+	query += fmt.Sprintf(` ORDER BY version DESC LIMIT $%d`, len(args))
+
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var data []any
+	var lastVersion int64
 	fetched := 0
 	for rows.Next() {
 		fetched++
@@ -446,11 +487,20 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 			return nil, err
 		}
 		data = append(data, renderAgent(id, name, version, spec, metadata, createdAt, vAt, archivedAt))
+		lastVersion = version
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return newPage(page, fetched, data), nil
+	out := pageJSON{Data: data}
+	if out.Data == nil {
+		out.Data = []any{}
+	}
+	if fetched > page.limit {
+		c := encodeVersionCursor(lastVersion)
+		out.NextPage = &c
+	}
+	return out, nil
 }
 
 func (s *server) archiveAgent(r *http.Request) (any, error) {

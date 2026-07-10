@@ -329,6 +329,25 @@ func TestAgentVersionsSnapshotHistory(t *testing.T) {
 	// Versions of an unknown agent → 404.
 	status, body = s.do(http.MethodGet, "/v1/agents/agent_missing/versions", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+
+	// Version lists paginate on the version number.
+	status, page1 := s.do(http.MethodGet, "/v1/agents/"+id+"/versions?limit=2", nil)
+	if status != http.StatusOK {
+		t.Fatalf("versions page 1: %d", status)
+	}
+	if entries := listData(t, page1); len(entries) != 2 || entries[0]["version"] != float64(3) {
+		t.Fatalf("versions page 1 = %v", entries)
+	}
+	status, page2 := s.do(http.MethodGet, "/v1/agents/"+id+"/versions?limit=2&page="+nextPage(t, page1), nil)
+	if status != http.StatusOK {
+		t.Fatalf("versions page 2: %d", status)
+	}
+	if entries := listData(t, page2); len(entries) != 1 || entries[0]["version"] != float64(1) {
+		t.Errorf("versions page 2 = %v, want just version 1", entries)
+	}
+	if got := nextPage(t, page2); got != "" {
+		t.Errorf("versions final page next_page = %q, want null", got)
+	}
 }
 
 func TestAgentListPagination(t *testing.T) {

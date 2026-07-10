@@ -19,11 +19,17 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   (agent-union resolution into a full `resolved_agent` snapshot,
   `session_`/`sesn_` prefix equivalence, bidirectional list cursors,
   archive/delete) — all under `x-api-key` auth with the reference error
-  envelope, cursor pagination, and UTC timestamps. Session `archived_at`
-  added by migration `0002`. Verified end-to-end by driving the real `ant`
-  CLI (v1.16.0) against `cmd/controlplane`. Deliberate v1 divergences are
-  rejected with clear errors (multiagent, session resources, non-empty
-  vault_ids on create, `scope:"account"`). (#7)
+  envelope, keyset cursor pagination (stable under concurrent writes), and
+  UTC timestamps. Session `archived_at` added by migration `0002`. Review
+  hardening in the same PR: bootstrap-key rotation revokes the previous key,
+  HTTP server slow-client timeouts, environment config updates merge instead
+  of resetting omitted sub-fields, archived resources are read-only,
+  transactional session creation, strict unknown-field validation, 413 on
+  oversize bodies, and per-request OTel server spans continuing inbound
+  `traceparent`. Verified end-to-end by driving the real `ant` CLI (v1.16.0)
+  against `cmd/controlplane`. Deliberate v1 divergences are rejected with
+  clear errors (multiagent, session resources, non-empty vault_ids on
+  create, `scope:"account"`). (#7)
 - Docs-consistency rule in the iteration workflow: STATE.md, README.md, and
   CHANGELOG.md move with the code in the same PR, and the verifier checks
   them as a dedicated rung. CHANGELOG.md introduced and backfilled;

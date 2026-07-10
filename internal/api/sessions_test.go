@@ -147,6 +147,15 @@ func TestSessionCreatePinsAgentVersionAndSupportsOverrides(t *testing.T) {
 	if base["system"] != "v2 system" {
 		t.Errorf("base agent mutated by overrides: %v", base["system"])
 	}
+
+	// system:null explicitly clears the system prompt (SDK-documented).
+	cleared := createSession(t, s, map[string]any{
+		"agent":          map[string]any{"type": "agent_with_overrides", "id": agentID, "system": nil},
+		"environment_id": envID,
+	})
+	if a, _ := cleared["agent"].(map[string]any); a["system"] != "" {
+		t.Errorf("system:null override should clear, got %v", a["system"])
+	}
 }
 
 func TestSessionCreateValidation(t *testing.T) {
@@ -320,6 +329,30 @@ func TestSessionListFiltersAndBidirectionalPagination(t *testing.T) {
 	}
 	if prev, _ := page2["prev_page"].(string); prev == "" {
 		t.Errorf("page 2 prev_page = %v, want a cursor", page2["prev_page"])
+	}
+
+	// Following prev_page from page 2 returns exactly page 1 again.
+	prev, _ := page2["prev_page"].(string)
+	status, back := s.do(http.MethodGet, "/v1/sessions?agent_id="+agentID+"&limit=2&page="+prev, nil)
+	if status != http.StatusOK {
+		t.Fatalf("prev page: %d", status)
+	}
+	db := listData(t, back)
+	if len(db) != 2 || db[0]["id"] != ids[2] || db[1]["id"] != ids[1] {
+		t.Errorf("prev page = %v, want page 1 content", db)
+	}
+	// Walking backwards from page 2 there is nothing before page 1, and the
+	// forward cursor must lead back to page 2.
+	if v, ok := back["prev_page"]; !ok || v != nil {
+		t.Errorf("prev_page of first page = %v (present %v), want null", v, ok)
+	}
+	next2, _ := back["next_page"].(string)
+	if next2 == "" {
+		t.Fatalf("next_page after backwards walk missing: %v", back)
+	}
+	status, fwd := s.do(http.MethodGet, "/v1/sessions?agent_id="+agentID+"&limit=2&page="+next2, nil)
+	if status != http.StatusOK || listData(t, fwd)[0]["id"] != ids[0] {
+		t.Errorf("forward after backwards walk: %d %v", status, fwd)
 	}
 
 	// order=asc flips it.

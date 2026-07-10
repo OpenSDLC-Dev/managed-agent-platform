@@ -10,7 +10,10 @@ import (
 	"net/http"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type server struct {
@@ -60,7 +63,7 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 		})
 	}
 
-	return withRequestID(requireAPIKey(pool, mux))
+	return withRequestID(withTracing(requireAPIKey(pool, mux)))
 }
 
 // handle adapts a typed handler to http.HandlerFunc: JSON out, error envelope
@@ -84,5 +87,25 @@ func withRequestID(next http.Handler) http.Handler {
 		rid := domain.NewID("req").String()
 		w.Header().Set("request-id", rid)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyRequestID, rid)))
+	})
+}
+
+// withTracing continues the caller's W3C trace context and opens one server
+// span per request (CLAUDE.md: every cross-process call propagates OTel
+// context). With no tracer provider installed this is a no-op passthrough.
+func withTracing(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		carrier := make(map[string]string, len(r.Header))
+		for k, v := range r.Header {
+			if len(v) > 0 {
+				carrier[k] = v[0]
+			}
+		}
+		ctx := telemetry.Extract(r.Context(), carrier)
+		ctx, span := otel.GetTracerProvider().
+			Tracer("github.com/OpenSDLC-Dev/managed-agent-platform/internal/api").
+			Start(ctx, r.Method+" "+r.URL.Path, trace.WithSpanKind(trace.SpanKindServer))
+		defer span.End()
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
