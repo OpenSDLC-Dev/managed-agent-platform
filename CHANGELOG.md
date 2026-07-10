@@ -12,6 +12,66 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The brain orchestration loop (slice 5): sessions now converse
+  end-to-end. `internal/brain` claims leased `model_turn` work, replays
+  the event log into one provider request (the log IS the conversation;
+  `tool_use` blocks are rebuilt under their event ids, which result
+  events reference), streams the response into `event_start`/
+  `event_delta` previews and Anthropic-native events (`agent.thinking`
+  per block, buffered `agent.message` before `span.model_request_end`,
+  `agent.custom_tool_use` per call), and settles the turn: `tool_use`
+  suspends with the session still `running`; `end_turn` idles with
+  `stop_reason` `end_turn` unless input arrived mid-turn, in which case
+  the turn requeues its own work item; failures append `session.error`
+  + idle `retries_exhausted`. `internal/queue` drives the work over the
+  existing `work_items` table (idempotent enqueue per session and kind,
+  leased claims with reclaim, lease-proof `Extend`/`Complete`/
+  `Requeue`). The control plane's `POST /events` became the session
+  state machine: `user.message` on an idle session flips it to
+  `running` + `session.status_running` + a queued turn, tool results
+  resume suspended turns, and session updates emit `session.updated`
+  with only the changed fields — all atomic with the append
+  (`AppendWith`/`AppendInTx` carry status flips, usage folding, and the
+  processed-inbound watermark under the session row lock). Providers
+  are wired from the `model_providers` JSON file (`provider.LoadRoutes`,
+  `MODEL_PROVIDERS_PATH`, `api_key_env` indirection) into the new
+  `cmd/brain` binary. The slice-2 wire-struct debt is settled:
+  `domain.AgentSpec`/`ResolvedAgent`/`Usage` are the wire shapes and
+  the api's private copies collapsed onto them. Verified with the real
+  `ant` CLI against the local stack driving the real Anthropic-protocol
+  endpoint from `.env`: full-turn event order on the log and the live
+  SSE stream, previews reconciling into the buffered message, session
+  usage folded. Hardened by an adversarial multi-agent review of the
+  branch (15 confirmed defects fixed pre-merge): a turn's output —
+  emitted events, span end, status, usage, watermark, and work-item
+  fate — commits as one transaction under the session row lock with the
+  queue's lease proof inside it, so a brain that lost its claim rolls
+  the whole turn back instead of leaving half-turns that poison replay;
+  tool-result resume is gated on the full result set, so parallel tool
+  calls wait for their last result before a turn is scheduled; inbound
+  tool results are validated against the log (unknown, kind-mismatched,
+  duplicate, or already-answered references are a 400, not a wedged
+  session); failed turns chain pending mid-turn input instead of
+  stranding it, and the `session.error` they emit reports
+  `retry_status: retrying` when a chained turn is about to run rather
+  than the terminal `exhausted`, so a client that stops reading on a
+  terminal error never abandons a session that is still producing
+  events; brain-side infra errors abandon the turn to lease
+  expiry with nothing on the wire (only model/deterministic failures
+  produce `session.error`); a lease-keeper goroutine re-extends the
+  work-item lease during long time-to-first-token, each renewal bounded
+  by the lease it races so a stalled database can neither hang the turn
+  nor make a healthy renewal look like a lost lease; a
+  `tool_use` whose input is not a JSON object fails the turn visibly
+  instead of reaching the append-only log; empty text deltas are
+  skipped before they allocate a content index, so an empty block
+  neither stores a malformed `text` block nor shifts the stored content
+  off the delta indices already streamed to SSE clients; and
+  `session.updated` change detection compares jsonb semantically, with
+  numbers compared as exact rationals: an idempotent PATCH emits
+  nothing even when Postgres rewrote `1e2` as `100`, while a change
+  past 2^53 is still a change. (#11)
+
 - `internal/provider` (slice 4): the config-driven model-provider layer.
   A provider is constructed from `protocol` / `model` / `base_url` /
   `api_key` (+ optional headers); the first adapter speaks the Anthropic

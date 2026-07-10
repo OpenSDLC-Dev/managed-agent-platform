@@ -15,8 +15,10 @@ import (
 // byte-for-byte.
 //
 // v1 divergences (documented in STATE.md): user.define_outcome is rejected
-// (outcome surface is deferred), session_thread_id must be null/absent
-// (threads are deferred), and tool_use_id existence is not cross-checked.
+// (outcome surface is deferred) and session_thread_id must be null/absent
+// (threads are deferred). Tool-result references are cross-checked against
+// the log by ValidateToolResults (toolflow.go) — that needs a database, so
+// it runs in the API's send transaction, not here.
 
 // NormalizeInbound validates one send batch. envKind is the session's
 // environment kind ("cloud" | "self_hosted"), which gates user.tool_result.

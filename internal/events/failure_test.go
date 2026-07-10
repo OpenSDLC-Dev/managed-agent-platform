@@ -38,9 +38,9 @@ func TestLogFailurePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// span helpers surface append failures. End on an archived session must
-	// return the error (the wire event could not land) while still closing
-	// the OTel span with an error status rather than a clean one.
+	// span helpers surface append failures. The end event render never
+	// touches the database; committing it on an archived session must
+	// return the error, and Finish records that fate on the OTel span.
 	_, mr, err := log.StartModelRequest(ctx, sid)
 	if err != nil {
 		t.Fatal(err)
@@ -48,9 +48,15 @@ func TestLogFailurePaths(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE sessions SET archived_at = now() WHERE id = $1`, sid.String()); err != nil {
 		t.Fatal(err)
 	}
-	if err := mr.End(ctx, false, domain.ModelUsage{}); !errors.Is(err, events.ErrSessionArchived) {
-		t.Errorf("End on archived session err = %v, want ErrSessionArchived", err)
+	endEv, err := mr.EndEvent(false, domain.ModelUsage{})
+	if err != nil {
+		t.Fatal(err)
 	}
+	_, err = log.Append(ctx, sid, []events.NewEvent{endEv})
+	if !errors.Is(err, events.ErrSessionArchived) {
+		t.Errorf("end event append on archived session err = %v, want ErrSessionArchived", err)
+	}
+	mr.Finish(false, err)
 
 	// And a deleted session fails the start append.
 	if _, err := pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sid.String()); err != nil {
@@ -81,9 +87,14 @@ func TestClosedPoolFailurePaths(t *testing.T) {
 	if _, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("x")}}); err == nil {
 		t.Error("append on closed pool should error")
 	}
-	if err := mr.End(ctx, false, domain.ModelUsage{}); err == nil {
-		t.Error("span end on closed pool should error")
+	endEv, err := mr.EndEvent(false, domain.ModelUsage{})
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, err := log.Append(ctx, sid, []events.NewEvent{endEv}); err == nil {
+		t.Error("span end append on closed pool should error")
+	}
+	mr.Finish(false, err)
 	if err := preview.Delta(ctx, 0, "x"); err == nil {
 		t.Error("delta on closed pool should error")
 	}

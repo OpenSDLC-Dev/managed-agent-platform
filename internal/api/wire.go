@@ -265,26 +265,6 @@ func utcPtr(t *time.Time) *time.Time {
 	return &u
 }
 
-// agentSpec is the stored (and rendered) agent configuration. Every field is
-// always present so responses satisfy the wire's api:"required" surface.
-type agentSpec struct {
-	Model       domain.Model      `json:"model"`
-	System      string            `json:"system"`
-	Description string            `json:"description"`
-	Tools       []json.RawMessage `json:"tools"`
-	MCPServers  []json.RawMessage `json:"mcp_servers"`
-	Skills      []json.RawMessage `json:"skills"`
-}
-
-// normalize guarantees non-nil collections so JSON renders [] rather than null.
-func (s *agentSpec) normalize() {
-	if s.Tools == nil {
-		s.Tools = []json.RawMessage{}
-	}
-	if s.MCPServers == nil {
-		s.MCPServers = []json.RawMessage{}
-	}
-	if s.Skills == nil {
-		s.Skills = []json.RawMessage{}
-	}
-}
+// agentSpec is the stored (and rendered) agent configuration — the domain
+// wire shape (always-present fields, raw collection entries).
+type agentSpec = domain.AgentSpec

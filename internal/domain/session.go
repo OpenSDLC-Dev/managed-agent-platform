@@ -13,12 +13,31 @@ const (
 	SessionTerminated   SessionStatus = "terminated"   // unrecoverable, ended
 )
 
-// Usage accumulates token counts over the session, mirroring the wire shape.
+// Usage accumulates token counts over the session — the session-resource
+// wire shape, with cache-creation tokens nested per TTL bucket (unlike the
+// flat event-level ModelUsage on span.model_request_end). Stored verbatim in
+// sessions.usage.
 type Usage struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	InputTokens          int64         `json:"input_tokens"`
+	OutputTokens         int64         `json:"output_tokens"`
+	CacheReadInputTokens int64         `json:"cache_read_input_tokens"`
+	CacheCreation        CacheCreation `json:"cache_creation"`
+}
+
+// CacheCreation splits cache-creation input tokens by cache TTL.
+type CacheCreation struct {
+	Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+	Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+}
+
+// Add folds one model turn's usage into the session totals. The flat
+// cache_creation_input_tokens counter lands in the 5-minute bucket: providers
+// don't report a TTL split, and 5m is the protocol's default cache TTL.
+func (u *Usage) Add(m ModelUsage) {
+	u.InputTokens += m.InputTokens
+	u.OutputTokens += m.OutputTokens
+	u.CacheReadInputTokens += m.CacheReadInputTokens
+	u.CacheCreation.Ephemeral5m += m.CacheCreationInputTokens
 }
 
 // Scope is the reserved multi-tenant scoping carried by every core resource.

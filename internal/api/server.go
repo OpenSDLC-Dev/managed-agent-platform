@@ -11,6 +11,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -21,11 +22,12 @@ type server struct {
 	pool   *pgxpool.Pool
 	log    *events.Log
 	broker *events.Broker
+	queue  *queue.Queue
 }
 
 // NewHandler assembles the control-plane HTTP surface over the given pool.
 func NewHandler(pool *pgxpool.Pool) http.Handler {
-	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool)}
+	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool)}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /v1/agents", s.handle(s.createAgent))

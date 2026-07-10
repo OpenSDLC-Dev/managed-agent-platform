@@ -44,43 +44,51 @@ type ModelRequest struct {
 	sessionID domain.ID
 	startID   domain.ID
 	span      trace.Span
+	usage     domain.ModelUsage // recorded by EndEvent for Finish's attributes
 }
 
 // StartEventID is the id of the span.model_request_start event, which the
 // end event references as model_request_start_id.
 func (m *ModelRequest) StartEventID() domain.ID { return m.startID }
 
-// End emits span.model_request_end with the token accounting and closes the
-// OTel span — again both from this single point. The wire event is appended
-// first: if it cannot land, the span still closes but carries an explicit
-// error status naming the missing event, so the trace records the drift
-// instead of masking it as a clean request.
-func (m *ModelRequest) End(ctx context.Context, isError bool, usage domain.ModelUsage) error {
+// EndEvent renders the span.model_request_end wire event for the caller to
+// append — the turn's settlement commits it atomically with the rest of the
+// turn's output, so an uncommitted turn leaves no half-told span on the log.
+// Finish then closes the OTel side; both halves live on ModelRequest so the
+// wire event and the OTel span still come from one instrumentation point
+// (CLAUDE.md principle 3).
+func (m *ModelRequest) EndEvent(isError bool, usage domain.ModelUsage) (NewEvent, error) {
 	payload, err := json.Marshal(map[string]any{
 		"is_error":               isError,
 		"model_request_start_id": m.startID.String(),
 		"model_usage":            usage,
 	})
 	if err != nil {
-		return err
+		return NewEvent{}, err
 	}
+	m.usage = usage
 	now := time.Now().UTC()
-	_, appendErr := m.log.Append(ctx, m.sessionID, []NewEvent{{
+	return NewEvent{
 		Type:        domain.EventSpanModelRequestEnd,
 		Payload:     payload,
 		ProcessedAt: &now,
-	}})
+	}, nil
+}
 
+// Finish closes the OTel span. commitErr is the fate of the transaction that
+// carried the EndEvent (or the reason no end event was attempted): non-nil
+// records the drift explicitly, so the trace never masks an aborted request
+// as a clean one.
+func (m *ModelRequest) Finish(isError bool, commitErr error) {
 	switch {
-	case appendErr != nil:
-		m.span.SetStatus(codes.Error, "failed to append span.model_request_end: "+appendErr.Error())
+	case commitErr != nil:
+		m.span.SetStatus(codes.Error, "span.model_request_end not committed: "+commitErr.Error())
 	case isError:
 		m.span.SetStatus(codes.Error, "model request failed")
 	}
 	m.span.SetAttributes(
-		attribute.Int64("model.input_tokens", usage.InputTokens),
-		attribute.Int64("model.output_tokens", usage.OutputTokens),
+		attribute.Int64("model.input_tokens", m.usage.InputTokens),
+		attribute.Int64("model.output_tokens", m.usage.OutputTokens),
 	)
 	m.span.End()
-	return appendErr
 }

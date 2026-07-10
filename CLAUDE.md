@@ -49,6 +49,10 @@ Three read-only local checkouts serve as ground truth where the public docs are 
 - `/Users/hele/Projects/anthropic-cli` — the real `ant` CLI source. `pkg/cmd/beta*.go` and `pkg/cmd/worker.go` show **client-side behavior**: polling, SSE/stream handling, defaults, headers.
 - `/Users/hele/Projects/claude-code-source` — Claude Code source. **Design reference only** for harness concerns (agent loop, tool orchestration, permission flow). Not a wire-schema source; never copy code from it.
 
+A fourth checkout exists for ideas only — it is NOT ground truth for anything:
+
+- `/Users/hele/Projects/adk-go` — google adk-go source. Governed entirely by design principle 2 above: a source of ideas, never a foundation. Consult it for *how they solved a problem* (e.g. loop structure, session service patterns), then implement Anthropic-native. Never copy its abstractions, its genai types, or its wire shapes; where it conflicts with the Anthropic model, it loses by rule.
+
 Caveats: these checkouts track the API's tip and already contain post-plan surface (`agent.thread_*` events, memory-store betas). Wire-compat is judged against the SDK version pinned in `go.mod` (once that dependency lands — today `go.mod` has none); new surface in the checkouts is not an invitation to build ahead of the current slice.
 
 ## Repo layout
@@ -98,16 +102,50 @@ Every change lands through a PR; **never commit directly to `main`**.
 1. Branch off a fresh `main`: `git checkout main && git pull && git checkout -b <type>/<short-name>` (e.g. `feat/telemetry`, `fix/event-seq`, `chore/ci`).
 2. Develop on the branch (TDD as below). **Docs move with code, in the same PR:** a slice's STATE.md status flip; a CHANGELOG.md entry for every notable change; README.md (status line, development notes) whenever the change alters what it describes — README's roadmap section deliberately defers to STATE.md and CHANGELOG.md instead of tracking slices itself. A doc that overclaims or lags the code is a defect, not a nice-to-have — the verifier checks docs consistency as a dedicated rung.
 3. Run the **verifier subagent** (see "Independent verification"); fix findings before review.
-4. **Dual code review**, one pass each: `/codex:review --background` (Codex reviewer) and `/code-review` (Claude reviewer). `/codex:review` is user-invocable only (`disable-model-invocation`); from a session, run the underlying reviewer as a background Bash task: `node "<plugin-root>/scripts/codex-companion.mjs" review "--scope branch --base main"`, where `<plugin-root>` is the newest directory under `~/.claude/plugins/cache/openai-codex/codex/` (backgrounding comes from the Bash task, not a flag) and the scope flags are this workflow's choice. Branch scope reviews the **committed** diff against `main` — commit before launching it, or uncommitted fixes escape the review. Read the task's output file when it completes. Address findings from both reviewers; if a fix changes behavior, re-run the verifier.
+4. **Dual code review**, one pass each: `/codex:review --background` (Codex reviewer) and `/code-review` (Claude reviewer). `/codex:review` is user-invocable only (`disable-model-invocation`); from a session, run the underlying reviewer as a background Bash task (backgrounding comes from the Bash task, not a flag), where `<plugin-root>` is the newest directory under `~/.claude/plugins/cache/openai-codex/codex/`. **Model and reasoning effort are not defaults you may accept — a weak reviewer finds nothing and its silence reads like a clean bill of health.** See "Reviewer settings" below; it governs both reviewers and the verifier. Branch scope reviews the **committed** diff against `main` — commit before launching it, or uncommitted fixes escape the review. Read the task's output file when it completes. Address findings from both reviewers; if a fix changes behavior, re-run the verifier. **Verify every finding against the source before acting on it** — both reviewers have produced confidently-argued findings that were false (see the `dec.More()` note in `internal/provider/config.go`); refute with evidence rather than "fixing" working code.
 5. Push and open the PR (`gh pr create`); include the verifier verdict and both review outcomes in the description.
 6. Wait for CI (`.github/workflows/ci.yml`) to be fully green: `gh pr checks --watch`. Red CI → fix on the branch; never merge red.
 7. **Squash merge** (`gh pr merge --squash --delete-branch`), then sync local: `git checkout main && git pull`.
+
+### Reviewer settings
+
+**A reviewer running on the wrong model or too little reasoning effort finds nothing, and its silence is indistinguishable from a clean bill of health.** Choose both deliberately, for both reviewers. Evidence from slice 5: two low-effort Codex passes returned one finding between them, and it was a false positive; the same diff at `gpt-5.5`/`xhigh` returned five real defects, four of which were fixed pre-merge.
+
+#### Claude side (verifier subagent, `/code-review`)
+
+Subagents **inherit the main loop's model** unless told otherwise, so a session running a weaker or rate-limited model silently hands that model to its reviewers. Pin it:
+
+- Verifier: `Agent({subagent_type: "verifier", model: "opus", …})`.
+- Review workflow: the `code-review` script's `agent()` calls omit `model`. When it matters, edit the persisted script (its path is returned by the `Workflow` tool) to pass `model: "opus"` in every `agent()` opts object, then re-invoke with `scriptPath`. Confirm afterwards by grepping the run's agent transcripts under `~/.claude/projects/<project>/<session>/subagents/workflows/<runId>/` for `"model":"claude-opus-4-8"`.
+
+Re-invoking with `scriptPath` alone starts a fresh run; adding `resumeFromRunId` replays cached results from the **old** model, which defeats the point of re-running.
+
+#### Codex side
+
+The `review` subcommand of `codex-companion.mjs` passes `--model` but **never passes `--effort`**, so it silently inherits `model_reasoning_effort` from `~/.codex/config.toml` (currently `low`). A low-effort review of a concurrency-heavy diff returns shallow findings and misses the real defects. Do not fix this by editing the user's `~/.codex/config.toml`. Run the review through the `task` subcommand instead: it honors `--effort`, and it sandboxes `read-only` when `--write` is omitted.
+
+```
+node "<plugin-root>/scripts/codex-companion.mjs" task --model gpt-5.5 --effort xhigh \
+  "<read-only review prompt: name the diff range and the invariants to attack>"
+```
+
+Model choice on this machine (`codex-cli 0.144.1`): **`gpt-5.5` is the strongest usable model.** It is verified real rather than a silent fallback — an invented name such as `gpt-5-9-totally-fake` is rejected with HTTP 400, while `gpt-5.5` runs clean with no fallback-metadata warning. `gpt-5.6-sol`, the config default, is rejected by the server as requiring a newer CLI than the latest published `@openai/codex`. `gpt-5.3-codex-spark` (the `spark` alias) works but is weaker. Re-check all three when the CLI is upgraded.
+
+For a plain `review`-subcommand pass, pin the model explicitly — accepting the config default fails outright:
+
+```
+node "<plugin-root>/scripts/codex-companion.mjs" review "--scope branch --base main --model gpt-5.5"
+```
 
 ## How to work in this repo
 
 These bias toward caution over speed. For trivial changes, use judgment.
 
 **Think before coding.** State assumptions explicitly rather than picking silently. This codebase has a specific failure mode: *guessing at the wire schema*. When an exact JSON shape isn't in the public docs, do not invent it — read the reference checkouts (SDK types first), and record a real `ant` CLI stream when only behavior can answer. Likewise, if a requirement admits two readings (e.g. whether a field is session-local or agent-level), surface both and ask. If something is confusing, stop and name what's confusing. If a simpler approach exists, say so — push back when warranted.
+
+**Assessment is a deliverable too.** When the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment: report the findings and stop. Don't apply a fix until they ask for one. The same evidence discipline applies to actions: before running a command that changes system state (restarts, deletes, config edits — here typically: killing a server, dropping a test database, rewriting `.claude/` or workflow config), check that the evidence actually supports *that specific* action — a signal that pattern-matches a known failure may have a different cause.
+
+**Pause only when the work genuinely requires the user.** That means: a destructive or irreversible action, a real scope change, or input only they can provide (credentials, account approvals, a product decision). Hitting one of these, ask and end the turn. Everything else — retries, missing information you can gather, long verification loops — is yours to push through; never end the turn on a promise of work not yet done.
 
 **Simplicity first.** Write the minimum code that solves the problem; nothing speculative. The plan deliberately *reserves seams* for vaults, deployments, memory, multi-agent threads, and skills — reserving a seam means a column or an interface boundary, **not** an implementation. Do not build ahead of the current slice. No abstractions for single-use code, no configurability nobody asked for, no error handling for impossible states. If 200 lines could be 50, rewrite it. The test: would a senior engineer call this overcomplicated?
 
@@ -121,7 +159,11 @@ These bias toward caution over speed. For trivial changes, use judgment.
 
 Concretely here: "add validation" → write the failing test for invalid input first; "fix the bug" → write the reproducing test first; "refactor X" → tests green before and after. Strong success criteria let you loop to done without check-ins; weak ones ("make it work") don't.
 
-**Independent verification (definition of done).** The implementer never certifies their own work. Before a slice or any nontrivial change is declared done — before STATE.md flips a status, before a commit that claims working behavior — dispatch the **`verifier` subagent** (`.claude/agents/verifier.md`) with what changed and the success criteria. It re-derives expectations from the docs, reruns every check itself (`go test -count=1`, no cached results), exercises runtime behavior where a surface exists, diffs wire-compat claims field-by-field against the reference checkouts, and checks that the project docs (STATE.md, README.md, CHANGELOG.md) correctly describe the change. A FAIL or unresolved blocker finding means the work is **not done**: fix, then re-verify. The verifier's verdict and evidence belong in the final report to the user.
+**Independent verification (definition of done).** The implementer never certifies their own work. Before a slice or any nontrivial change is declared done — before STATE.md flips a status, before a commit that claims working behavior — dispatch the **`verifier` subagent** (`.claude/agents/verifier.md`) with what changed and the success criteria. It re-derives expectations from the docs, reruns every check itself (`go test -count=1`, no cached results), exercises runtime behavior where a surface exists, diffs wire-compat claims field-by-field against the reference checkouts, and checks that the project docs (STATE.md, README.md, CHANGELOG.md) correctly describe the change. A FAIL or unresolved blocker finding means the work is **not done**: fix, then re-verify. Pin its model (see "Reviewer settings") — an unpinned verifier inherits the session's, and a weak verifier certifies anything. The verifier's verdict and evidence belong in the final report to the user.
+
+**Report only what you can evidence.** Before reporting progress, audit each claim against a tool result from this session — a test run, a diff, a CLI transcript. Only report work you can point to evidence for; if something is not yet verified, say so explicitly. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.
+
+**Write the final report for a reader who wasn't there.** Terse shorthand between tool calls is fine — that's thinking out loud, and brevity there is good. The final summary is different: after a long stretch of unattended work, it is the user's first look at any of it, so write it as a re-grounding, not a continuation of the working thread. Open with the outcome — one sentence on what happened or what was found — then the supporting detail, then the one or two things needed from the user, each explained as if new. Drop the working vocabulary: complete sentences, terms spelled out, no arrow chains, no hyphen-stacked compounds, no labels invented mid-session unless re-introduced. When mentioning files, commits, or flags, give each its own plain-language clause. If short and clear conflict, choose clear.
 
 **Testing conventions.**
 - **TDD** for anything with behavior: contract test first, then implement. This matters most for provider adapters, event/JSON round-trips against the wire schema, sandbox providers, and the work-queue lease state machine.

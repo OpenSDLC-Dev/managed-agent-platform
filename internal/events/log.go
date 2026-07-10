@@ -49,12 +49,61 @@ type Log struct {
 
 func NewLog(pool *pgxpool.Pool) *Log { return &Log{pool: pool} }
 
+// AppendOptions are same-transaction side effects of an append: the session
+// state machine's invariant is that the sessions row (status, usage) and the
+// event log can never disagree, so both change under the one session row lock
+// the append already holds.
+type AppendOptions struct {
+	// SetStatus flips sessions.status alongside the append. The batch should
+	// carry the matching session.status_* event; this option only moves the
+	// resource column.
+	SetStatus *domain.SessionStatus
+	// AddUsage folds one model turn's usage into sessions.usage.
+	AddUsage *domain.ModelUsage
+	// MarkProcessedThrough stamps processed_at on still-unprocessed events
+	// at seq <= the watermark — the brain recording which inbound events its
+	// turn consumed. Zero means no stamping.
+	MarkProcessedThrough int64
+	// Then runs inside the same transaction after the insert (work enqueue,
+	// counters). An error aborts the whole append.
+	Then func(ctx context.Context, tx pgx.Tx) error
+}
+
 // Append durably appends events to one session's log in order, allocating
 // the per-session seq under the session row lock (concurrent appends to the
 // same session serialize; different sessions don't contend), and notifies
 // stream subscribers on commit.
 func (l *Log) Append(ctx context.Context, sessionID domain.ID, evs []NewEvent) ([]domain.Event, error) {
-	if len(evs) == 0 {
+	return l.AppendWith(ctx, sessionID, evs, AppendOptions{})
+}
+
+// AppendWith is Append plus atomic session-state side effects.
+func (l *Log) AppendWith(ctx context.Context, sessionID domain.ID, evs []NewEvent, opts AppendOptions) ([]domain.Event, error) {
+	tx, err := l.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	out, err := l.AppendInTx(ctx, tx, sessionID, evs, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AppendInTx is AppendWith inside a caller-owned transaction, for callers
+// that must decide the batch under the session row lock (the API's state
+// machine reads the current status FOR UPDATE, builds the batch, and appends
+// — all one commit). The NOTIFY still fires only on the caller's commit.
+func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, evs []NewEvent, opts AppendOptions) ([]domain.Event, error) {
+	// An empty batch is allowed when the options carry side effects (a turn
+	// that suspends on tool use changes state without saying anything new).
+	if len(evs) == 0 && opts.SetStatus == nil && opts.AddUsage == nil &&
+		opts.MarkProcessedThrough == 0 && opts.Then == nil {
 		return nil, errors.New("append requires at least one event")
 	}
 	for _, ev := range evs {
@@ -63,14 +112,8 @@ func (l *Log) Append(ctx context.Context, sessionID domain.ID, evs []NewEvent) (
 		}
 	}
 
-	tx, err := l.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	var archivedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT archived_at FROM sessions WHERE id = $1 FOR UPDATE`, sessionID.String()).Scan(&archivedAt)
+	err := tx.QueryRow(ctx, `SELECT archived_at FROM sessions WHERE id = $1 FOR UPDATE`, sessionID.String()).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrSessionNotFound
 	}
@@ -130,31 +173,72 @@ func (l *Log) Append(ctx context.Context, sessionID domain.ID, evs []NewEvent) (
 			ProcessedAt: utcOrNil(ev.ProcessedAt),
 		})
 	}
-	sb.WriteString(` RETURNING created_at`)
-	rows, err := tx.Query(ctx, sb.String(), args...)
-	if err != nil {
-		return nil, err
-	}
-	for i := 0; rows.Next(); i++ {
-		var createdAt time.Time
-		if err := rows.Scan(&createdAt); err != nil {
-			rows.Close()
+	if len(evs) > 0 {
+		sb.WriteString(` RETURNING created_at`)
+		rows, err := tx.Query(ctx, sb.String(), args...)
+		if err != nil {
 			return nil, err
 		}
-		out[i].CreatedAt = createdAt.UTC()
+		for i := 0; rows.Next(); i++ {
+			var createdAt time.Time
+			if err := rows.Scan(&createdAt); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[i].CreatedAt = createdAt.UTC()
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+
+	if opts.SetStatus != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET status = $2, updated_at = now() WHERE id = $1`,
+			sessionID.String(), string(*opts.SetStatus)); err != nil {
+			return nil, err
+		}
+	}
+	if opts.AddUsage != nil {
+		// Read-modify-write is race-free here: the session row lock is held.
+		var raw []byte
+		if err := tx.QueryRow(ctx,
+			`SELECT usage FROM sessions WHERE id = $1`, sessionID.String()).Scan(&raw); err != nil {
+			return nil, err
+		}
+		var usage domain.Usage
+		if err := json.Unmarshal(raw, &usage); err != nil {
+			return nil, fmt.Errorf("decode stored session usage: %w", err)
+		}
+		usage.Add(*opts.AddUsage)
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET usage = $2, updated_at = now() WHERE id = $1`,
+			sessionID.String(), usage); err != nil {
+			return nil, err
+		}
+	}
+	if opts.MarkProcessedThrough > 0 {
+		if _, err := tx.Exec(ctx,
+			`UPDATE events SET processed_at = clock_timestamp()
+			 WHERE session_id = $1 AND seq <= $2 AND processed_at IS NULL`,
+			sessionID.String(), opts.MarkProcessedThrough); err != nil {
+			return nil, err
+		}
+	}
+	if opts.Then != nil {
+		if err := opts.Then(ctx, tx); err != nil {
+			return nil, err
+		}
 	}
 
 	// NOTIFY fires on commit, so subscribers only ever wake for committed
 	// rows. The payload is just a pointer — subscribers re-read the log.
-	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`,
-		channelEvents, `{"session_id":"`+sessionID.String()+`"}`); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
+	// An events-free append changed only session state, nothing to re-read.
+	if len(evs) > 0 {
+		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`,
+			channelEvents, `{"session_id":"`+sessionID.String()+`"}`); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

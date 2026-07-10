@@ -1,50 +1,31 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // sessionAgentJSON is the resolved-agent snapshot embedded in a session
-// (BetaManagedAgentsSessionAgent). It is stored verbatim in
-// sessions.resolved_agent, so rendering is a passthrough.
-type sessionAgentJSON struct {
-	Type        string            `json:"type"` // "agent"
-	ID          string            `json:"id"`
-	Version     int64             `json:"version"`
-	Name        string            `json:"name"`
-	Model       domain.Model      `json:"model"`
-	System      string            `json:"system"`
-	Description string            `json:"description"`
-	Tools       []json.RawMessage `json:"tools"`
-	MCPServers  []json.RawMessage `json:"mcp_servers"`
-	Skills      []json.RawMessage `json:"skills"`
-	Multiagent  json.RawMessage   `json:"multiagent"` // reserved seam: always null in v1
-}
+// (BetaManagedAgentsSessionAgent) — the domain wire shape, stored verbatim
+// in sessions.resolved_agent, so rendering is a passthrough.
+type sessionAgentJSON = domain.ResolvedAgent
 
-type cacheCreationJSON struct {
-	Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
-	Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
-}
-
-// usageJSON is the session-level usage wire shape (note: nested
-// cache_creation, unlike the event-level usage in internal/domain).
-type usageJSON struct {
-	InputTokens          int64             `json:"input_tokens"`
-	OutputTokens         int64             `json:"output_tokens"`
-	CacheReadInputTokens int64             `json:"cache_read_input_tokens"`
-	CacheCreation        cacheCreationJSON `json:"cache_creation"`
-}
+// usageJSON is the session-level usage wire shape — the domain type (nested
+// cache_creation, unlike the event-level usage on span.model_request_end).
+type usageJSON = domain.Usage
 
 type statsJSON struct {
 	ActiveSeconds   float64 `json:"active_seconds"`
@@ -278,12 +259,11 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		}
 		spec.Skills = items
 	}
-	spec.normalize()
+	spec.Normalize()
 
 	return sessionAgentJSON{
-		Type: "agent", ID: agentID, Version: version, Name: name,
-		Model: spec.Model, System: spec.System, Description: spec.Description,
-		Tools: spec.Tools, MCPServers: spec.MCPServers, Skills: spec.Skills,
+		Type: "agent", ID: domain.ID(agentID), Version: version, Name: name,
+		AgentSpec: spec,
 	}, nil
 }
 
@@ -412,6 +392,76 @@ func mustJSON(v any) []byte {
 	return raw
 }
 
+// jsonEqual compares two JSON documents by value: stored jsonb comes back
+// with Postgres's own spacing, key order, and number formatting, so neither a
+// byte comparison nor a literal one can tell a no-op update from a change.
+// Numbers are compared as exact rationals — `1e2` equals `100` (Postgres
+// rewrites one as the other), while two integers past 2^53 stay distinct
+// (float64 would collapse them).
+func jsonEqual(a, b []byte) bool {
+	x, err := decodeJSONValue(a)
+	if err != nil {
+		return false
+	}
+	y, err := decodeJSONValue(b)
+	if err != nil {
+		return false
+	}
+	return sameJSON(x, y)
+}
+
+func decodeJSONValue(raw []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func sameJSON(a, b any) bool {
+	switch x := a.(type) {
+	case map[string]any:
+		y, ok := b.(map[string]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for k, v := range x {
+			w, ok := y[k]
+			if !ok || !sameJSON(v, w) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		y, ok := b.([]any)
+		if !ok || len(x) != len(y) {
+			return false
+		}
+		for i := range x {
+			if !sameJSON(x[i], y[i]) {
+				return false
+			}
+		}
+		return true
+	case json.Number:
+		y, ok := b.(json.Number)
+		return ok && numberEqual(x, y)
+	default:
+		return a == b // string, bool, null
+	}
+}
+
+func numberEqual(a, b json.Number) bool {
+	if a == b {
+		return true
+	}
+	x, xok := new(big.Rat).SetString(a.String())
+	y, yok := new(big.Rat).SetString(b.String())
+	return xok && yok && x.Cmp(y) == 0
+}
+
 func (s *server) getSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
@@ -462,6 +512,8 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
 		return nil, err
 	}
+
+	prevTitle, prevMetaJSON, prevAgentJSON := row.title, row.metaJSON, row.agentJSON
 
 	if title, set, null, err := stringField(obj, "title"); err != nil {
 		return nil, err
@@ -517,6 +569,35 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		id, row.agentJSON, row.title, row.metaJSON).Scan(&row.updatedAt); err != nil {
 		return nil, err
 	}
+
+	// session.updated is emitted only when the update changed at least one
+	// field, and carries only the changed fields (metadata additionally only
+	// when the new value is non-empty) — the SDK-documented shape. Appended
+	// in the same transaction as the update itself. Change detection is
+	// semantic, not byte-wise: the previous values come back jsonb-normalized
+	// (Postgres's spacing and key order), which never byte-matches a fresh Go
+	// marshal even for identical content.
+	metaChanged := !jsonEqual(row.metaJSON, prevMetaJSON)
+	agentChanged := !jsonEqual(row.agentJSON, prevAgentJSON)
+	payload := map[string]any{}
+	if row.title != prevTitle {
+		payload["title"] = row.title
+	}
+	if metaChanged && len(metadata) > 0 {
+		payload["metadata"] = metadata
+	}
+	if agentChanged {
+		payload["agent"] = json.RawMessage(row.agentJSON)
+	}
+	changed := row.title != prevTitle || metaChanged || agentChanged
+	if changed {
+		if _, err := s.log.AppendInTx(ctx, tx, domain.ID(id), []events.NewEvent{
+			{Type: domain.EventSessionUpdated, Payload: mustJSON(payload)},
+		}, events.AppendOptions{}); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}

@@ -101,14 +101,16 @@ func TestSendUserMessageEchoShape(t *testing.T) {
 func TestSendEchoShapesPerType(t *testing.T) {
 	s := newTestServer(t)
 	sid := selfHostedSession(t, s)
+	customID := appendToolUse(t, s, sid, domain.EventAgentCustomToolUse)
+	toolID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
 
 	echo := sendEvents(t, s, sid,
 		map[string]any{"type": "user.interrupt"},
 		map[string]any{"type": "user.tool_confirmation", "result": "deny",
 			"tool_use_id": "sevt_tu1", "deny_message": "too risky"},
-		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": "sevt_ct1",
+		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": customID,
 			"content": []any{map[string]any{"type": "text", "text": "ok"}}, "is_error": false},
-		map[string]any{"type": "user.tool_result", "tool_use_id": "sevt_tu2"},
+		map[string]any{"type": "user.tool_result", "tool_use_id": toolID},
 		map[string]any{"type": "user.message", "content": []any{map[string]any{"type": "text", "text": "hi"}}},
 		map[string]any{"type": "system.message", "content": []any{map[string]any{"type": "text", "text": "note"}}},
 	)
@@ -130,7 +132,7 @@ func TestSendEchoShapesPerType(t *testing.T) {
 
 	custom := echo[2]
 	wantExactKeys(t, custom, "id", "type", "custom_tool_use_id", "content", "is_error", "processed_at", "session_thread_id")
-	if custom["is_error"] != false || custom["custom_tool_use_id"] != "sevt_ct1" {
+	if custom["is_error"] != false || custom["custom_tool_use_id"] != customID {
 		t.Errorf("custom_tool_result echo = %v", custom)
 	}
 
@@ -177,7 +179,7 @@ func TestSendContentBlockKinds(t *testing.T) {
 	// search_result is a tool-result-only block; its source is a plain URL
 	// string, and citations.enabled is required on the wire.
 	echo = sendEvents(t, s, sid, map[string]any{
-		"type": "user.custom_tool_result", "custom_tool_use_id": "sevt_x",
+		"type": "user.custom_tool_result", "custom_tool_use_id": appendToolUse(t, s, sid, domain.EventAgentCustomToolUse),
 		"content": []any{map[string]any{
 			"type": "search_result", "source": "https://example.com", "title": "hit",
 			"citations": map[string]any{"enabled": false},
@@ -284,7 +286,7 @@ func TestSendToolResultOnSelfHosted(t *testing.T) {
 	s := newTestServer(t)
 	sid := selfHostedSession(t, s)
 	echo := sendEvents(t, s, sid, map[string]any{
-		"type": "user.tool_result", "tool_use_id": "sevt_t1", "is_error": true,
+		"type": "user.tool_result", "tool_use_id": appendToolUse(t, s, sid, domain.EventAgentToolUse), "is_error": true,
 		"content": []any{map[string]any{"type": "text", "text": "exit 1"}},
 	})
 	if echo[0]["is_error"] != true {
@@ -329,6 +331,9 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		sendEvents(t, s, sid, userMessage(fmt.Sprintf("m%d", i)))
 	}
 	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+	// The first user.message also woke the idle session, so the log carries
+	// one platform event on top of the six posted ones:
+	// m0, session.status_running, m1..m4, user.interrupt.
 
 	// Default: chronological asc, everything, next_page null.
 	status, res := s.do(http.MethodGet, path, nil)
@@ -336,8 +341,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Fatalf("list: %d %v", status, res)
 	}
 	all := listData(t, res)
-	if len(all) != 6 {
-		t.Fatalf("listed %d, want 6", len(all))
+	if len(all) != 7 {
+		t.Fatalf("listed %d, want 7", len(all))
 	}
 	if all[0]["content"].([]any)[0].(map[string]any)["text"] != "m0" {
 		t.Errorf("default order is not chronological: first = %v", all[0])
@@ -368,8 +373,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 			t.Fatal("cursor walk did not terminate")
 		}
 	}
-	if len(walked) != 6 {
-		t.Errorf("cursor walk saw %d events, want 6", len(walked))
+	if len(walked) != 7 {
+		t.Errorf("cursor walk saw %d events, want 7", len(walked))
 	}
 	for i, ev := range all {
 		if walked[i] != ev["id"].(string) {
@@ -380,8 +385,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	// desc reverses.
 	_, res = s.do(http.MethodGet, path+"?order=desc", nil)
 	desc := listData(t, res)
-	if desc[0]["id"] != all[5]["id"] {
-		t.Errorf("desc first = %v, want %v", desc[0]["id"], all[5]["id"])
+	if desc[0]["id"] != all[6]["id"] {
+		t.Errorf("desc first = %v, want %v", desc[0]["id"], all[6]["id"])
 	}
 
 	// types filter, both spellings.
@@ -407,8 +412,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, res = s.do(http.MethodGet, path+"?created_at[gt]="+midCreated, nil)
-	if got := listData(t, res); len(got) != 3 {
-		t.Errorf("created_at[gt] mid returned %d, want 3", len(got))
+	if got := listData(t, res); len(got) != 4 {
+		t.Errorf("created_at[gt] mid returned %d, want 4", len(got))
 	}
 	_, res = s.do(http.MethodGet, path+"?created_at[lte]="+midCreated, nil)
 	if got := listData(t, res); len(got) != 3 {
