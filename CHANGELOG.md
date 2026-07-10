@@ -12,6 +12,32 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The sandbox layer (slice 6, first part): `internal/sandbox` defines the
+  "hands" boundary — `Provider.Provision` returns a session's disposable
+  container, and `Sandbox` exposes `Exec` plus `ReadFile`/`WriteFile`
+  over its filesystem. `internal/sandbox/docker` implements it against
+  the Docker Engine API over the daemon socket, hand-rolled in one file
+  rather than depending on the moby module tree. Provision is idempotent
+  per session, so two executors handling two tool calls of one session
+  converge on one container instead of racing to create two. `Exec` runs
+  the command through `/bin/bash -c` in the session's workdir under an
+  in-container watchdog, because Docker offers no way to kill a running
+  exec from outside: a command past its deadline comes back with
+  `TimedOut` set, the sandbox survives it, and a command that merely
+  exits with `timeout(1)`'s own code is never mistaken for one. Output
+  is capped at 1 MiB per stream, drained rather than buffered so a noisy
+  command still finishes; a read above 4 MiB is refused rather than
+  silently truncated. `limited` networking fails closed — the container
+  gets no route out at all until the egress proxy lands, never silently
+  unrestricted egress. `internal/sandbox/sandboxtest` is the one
+  contract suite every backend must pass (CLAUDE.md's rule for
+  provider-, sandbox-, and queue-backend variability); the Docker
+  provider passes it against a real daemon, and a scripted fake daemon
+  covers the failure and race paths a real one will not reproduce on
+  demand. Nothing consumes the sandbox yet — the executor, the built-in
+  `agent_toolset_20260401` expansion, and the `tool_exec` queue consumer
+  follow.
+
 - The brain orchestration loop (slice 5): sessions now converse
   end-to-end. `internal/brain` claims leased `model_turn` work, replays
   the event log into one provider request (the log IS the conversation;
@@ -167,5 +193,13 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Changed
 
+- The CI coverage gate's denominator now covers logic packages only.
+  `internal/pgtest` and `internal/sandbox/sandboxtest` are test support —
+  packages at all only because a test in another package must import
+  them — and their uncovered statements are the assertion branches that
+  execute exactly when a suite fails. Counting them measured nothing and
+  diluted the gate, the same reason `cmd/` main glue was always outside
+  it. Over the logic packages alone the number is higher, not lower:
+  91.46% against the unchanged ≥ 90% bar.
 - Module path set to the canonical GitHub owner,
   `github.com/OpenSDLC-Dev/managed-agent-platform`.

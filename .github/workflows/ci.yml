@@ -43,7 +43,14 @@ jobs:
         with:
           go-version-file: go.mod
       - name: test (-count=1) with coverage profile
-        run: go test -count=1 -coverpkg=./internal/... -coverprofile=coverage.out ./...
+        run: |
+          # Logic packages only. internal/pgtest and internal/sandbox/sandboxtest
+          # are test support — packages solely because a test in another package
+          # must import them. Their uncovered statements are the assertion
+          # branches that run only when a suite fails, so counting them measures
+          # nothing and dilutes the gate, exactly as cmd/ main glue would.
+          coverpkg="$(go list ./internal/... | grep -vE '/(pgtest|sandboxtest)$' | paste -sd, -)"
+          go test -count=1 -coverpkg="$coverpkg" -coverprofile=coverage.out ./...
       - name: coverage gate (>= 90%)
         run: |
           # Exact total from the profile: `go tool cover -func` rounds to 0.1%,
