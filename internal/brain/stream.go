@@ -147,14 +147,20 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 }
 
 // normalizeToolInput accepts an absent or null input as the empty object and
-// rejects anything that is not a JSON object.
+// rejects anything that is not a JSON object. The null case is decided by the
+// decode, not by comparing bytes: unmarshalling any JSON null — padded with
+// whitespace or not — into a map leaves it nil and reports no error, so a
+// byte comparison would wave ` null ` through as a valid object.
 func normalizeToolInput(raw json.RawMessage) (json.RawMessage, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if len(raw) == 0 {
 		return json.RawMessage("{}"), nil
 	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, fmt.Errorf("input must be a JSON object: %w", err)
+	}
+	if obj == nil {
+		return json.RawMessage("{}"), nil
 	}
 	return raw, nil
 }

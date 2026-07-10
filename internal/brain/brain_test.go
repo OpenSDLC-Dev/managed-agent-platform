@@ -836,29 +836,38 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 
 func TestNullToolInputBecomesEmptyObject(t *testing.T) {
 	// An absent or null input is legal and means "no arguments"; it lands
-	// as {} so the emitted event carries a JSON object.
-	h := newHarness(t, [][]provider.Chunk{
-		{
-			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
-				ID: "toolu_x", Name: "noop", Input: nil}},
-			done("tool_use", 1),
-		},
-	}, nil)
-	h.wake(t, "call it")
-	h.runOnce(t)
+	// as {} so the emitted event carries a JSON object. Whitespace-padded
+	// null counts: unmarshalling any JSON null into a map reports no error,
+	// so a byte comparison against "null" would let ` null ` through and
+	// emit a null input.
+	for _, in := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage("null"), json.RawMessage(" null ")} {
+		t.Run(fmt.Sprintf("%q", string(in)), func(t *testing.T) {
+			h := newHarness(t, [][]provider.Chunk{
+				{
+					provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+						ID: "toolu_x", Name: "noop", Input: in}},
+					done("tool_use", 1),
+				},
+			}, nil)
+			h.wake(t, "call it")
+			h.runOnce(t)
 
-	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.custom_tool_use"}})
-	if len(evs) != 1 {
-		t.Fatalf("tool intents = %d, want 1", len(evs))
-	}
-	var p struct {
-		Input map[string]any `json:"input"`
-	}
-	if err := json.Unmarshal(evs[0].Body, &p); err != nil {
-		t.Fatalf("input is not an object: %v (%s)", err, evs[0].Body)
-	}
-	if p.Input == nil || len(p.Input) != 0 {
-		t.Errorf("input = %v, want {}", p.Input)
+			evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.custom_tool_use"}})
+			if len(evs) != 1 {
+				t.Fatalf("tool intents = %d, want 1", len(evs))
+			}
+			// The stored input must be a JSON object, never null: the wire
+			// type requires an object, and replay feeds it back verbatim.
+			var p struct {
+				Input map[string]any `json:"input"`
+			}
+			if err := json.Unmarshal(evs[0].Body, &p); err != nil {
+				t.Fatalf("input is not an object: %v (%s)", err, evs[0].Body)
+			}
+			if p.Input == nil || len(p.Input) != 0 {
+				t.Errorf("input = %v, want {} (payload %s)", p.Input, evs[0].Body)
+			}
+		})
 	}
 }
 
