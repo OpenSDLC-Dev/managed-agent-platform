@@ -9,8 +9,8 @@ Running record of where this project actually stands, so work can resume cleanly
 ## Snapshot
 
 - **Last updated:** 2026-07-10
-- **Phase:** Foundation — cross-cutting bases (domain + telemetry) and the Postgres schema exist; nothing runs end-to-end yet.
-- **Current slice:** 1 complete; next up is slice 2 (control plane CRUD).
+- **Phase:** Control plane — the wire-compatible CRUD surface is live (the real `ant` CLI drives it); the event log, brain, and executor do not exist yet, so nothing runs end-to-end.
+- **Current slice:** 2 complete; next up is slice 3 (event log + SSE).
 - **Build status:** `go build ./...`, `go vet ./...`, `go test ./...` all green.
 
 ## Reference documents
@@ -35,7 +35,7 @@ The model backend must be pointable at either an Anthropic-protocol endpoint or 
 |---|---|---|
 | 0 | `internal/domain` (Anthropic-native types) + `internal/telemetry` (OTel/OTLP, context propagation) | ✅ Done |
 | 1 | Postgres schema + migrations (`internal/store`), reserved multi-tenant columns | ✅ Done |
-| 2 | Control plane CRUD (agents / environments / sessions) + optimistic versioning + ID prefixes + `x-api-key` auth | ⬜ Not started |
+| 2 | Control plane CRUD (agents / environments / sessions) + optimistic versioning + ID prefixes + `x-api-key` auth | ✅ Done |
 | 3 | Append-only event log (seq allocation) + `POST /events` + SSE stream (`event_start` / `event_delta` reconciliation) + `span.*` emitted from the same point as OTel spans | ⬜ Not started |
 | 4 | `ModelProvider` (config-driven: protocol / model / base_url / api_key) + `model_providers` routing; first provider passing a single model turn; verify a custom `base_url` works | ⬜ Not started |
 | 5 | Brain orchestration loop (replay → assemble provider request → write Anthropic-native events). No adk runtime. | ⬜ Not started |
@@ -94,14 +94,35 @@ Uses `github.com/jackc/pgx/v5` (pool + wire protocol). No ORM, no migration libr
 
 **Test coverage:** contract tests run against a real Postgres started in Docker by `TestMain` (`postgres:16-alpine`, random port, fresh database per test): fresh-migrate creates every table, idempotent re-run, 4 concurrent `Open`s don't conflict, `(session_id, seq)` uniqueness (and same seq OK across sessions), enum CHECKs reject invalid values and accept **every** valid value (all 4 session statuses, all 5 work states, both kinds/environment kinds), kind/config disagreement rejected, config required, dangling `agent_version` rejected, `title`/`description` scan into plain strings, `work_items(session_id)` index present, tenancy defaults, migration failures roll back atomically (conflicting object, broken/variant `schema_migrations`), unreachable/malformed DSN.
 
-**Wire-drift note (recorded 2026-07-10):** the SDK checkout's current `BetaEnvironment` has no `state` field (lifecycle = `archived_at` only) and also carries post-plan surface we deliberately did not add (`scope`, session `stats`/`outcome_evaluations`/`deployment_id`, session `archived_at`). The `environments.state` column follows the approved plan and `internal/domain`; revisit these (incl. whether sessions need `archived_at`) in slice 2's CRUD and when the SDK dependency is pinned in slice 4.
+**Wire-drift note (recorded 2026-07-10, resolved by slice 2):** the SDK checkout's `BetaEnvironment` has no `state` field — the API layer never renders the `state` column (it stays internal). Session `archived_at` is real wire surface → added by migration `0002_session_archive.sql`. Session `stats` / `outcome_evaluations` / `deployment_id` are rendered as their empty/null wire shapes (no storage yet). Environment `scope` is accepted only as `"organization"`; `"account"` is rejected (single-tenant v1).
+
+### `internal/api` + `cmd/controlplane` — wire-compatible control-plane CRUD
+
+Slice 2. The real `ant` CLI (built from the local checkout, v1.16.0) drives every endpoint against `cmd/controlplane` unchanged — verified live: agents create/update/optimistic-409/versions, environment defaults, session snapshot resolution.
+
+| File | Contents |
+|---|---|
+| `server.go` | Route table (Go 1.22 method patterns) + `NewHandler`. **Updates are `POST /v1/{resource}/{id}`, not PATCH** (SDK is authoritative; the plan doc predates this). Envelope-shaped 404/405 fallbacks. `?beta=true` and `anthropic-*` headers accepted and ignored. Per-request OTel server span continuing the caller's `traceparent` (CLAUDE.md principle 3). |
+| `auth.go` | `x-api-key` middleware against `api_keys` (SHA-256 hash only); `EnsureAPIKey` gives **rotation-by-restart** semantics: ensuring a new key under a name revokes the previous ones, so a leaked `CONTROLPLANE_API_KEY` dies on rotation. Authenticated key ID becomes the audit-only `sessions.created_by`. |
+| `errors.go` | Wire error envelope `{"type":"error","request_id":…,"error":{type,message}}` + `request-id` header on every response. Version conflicts are `invalid_request_error` with HTTP 409 (the reference SDK has no dedicated conflict type); oversize bodies (>4 MiB) are 413 `request_too_large`. |
+| `page.go` | Cursor pagination: `{"data":[…],"next_page":…}` (+ `prev_page` on sessions), opaque **keyset** cursors via `?page=` — positions on `(created_at, id)` (version number for agent versions), so concurrent writes never duplicate or skip rows — `limit` default 20 / max 100. |
+| `wire.go` | Body parsing with omitted/null/value distinction (reference updates are patches), **strict unknown-field rejection** (typos error instead of silently vanishing, matching the reference's extra-inputs behavior), tools/mcp_servers union validation (raw bodies preserved so configs round-trip byte-for-byte; skills are re-normalized to `{type, skill_id, version}`), UTC-normalized timestamps (`Z`, never a local offset). |
+| `agents.go` | CRUD + optimistic `version` in the update body (mismatch → 409), immutable `agent_versions` snapshots, `GET ?version=N` pinned reads, versions list, archive (idempotent; **archived resources are read-only** — updates 400). No DELETE — the wire has none. |
+| `environments.go` | CRUD incl. update (exists in the SDK though the plan omitted it) + delete (`environment_deleted`; refused while sessions reference it) + archive; config union normalized strictly (cloud → full networking/packages surface, self_hosted → type only; unknown networking fields rejected); **config updates merge**: omitted cloud sub-fields preserve their stored values per the reference's update semantics — a packages-only patch cannot reset `limited` networking to `unrestricted`; `scope` rendered as the constant `"organization"`; metadata updates delete on empty string as well as null (an environments-only rule in the reference). |
+| `sessions.go` | Create is one transaction (environment `FOR SHARE` + agent resolution + insert, FK-violation backstop) resolving the agent union (id string / `{type:"agent"}` / `agent_with_overrides`, `system:null` clears the prompt, explicit `version` must be ≥ 1) into a full `resolved_agent` snapshot; `session_` accepted for `sesn_`; update limited to title/metadata/`agent.tools`+`agent.mcp_servers` (vault_ids update rejected, matching the reference); list filters (agent_id/agent_version — ignored without agent_id per the reference — statuses[]/order/created_at ranges) + bidirectional keyset cursors; archive/delete (`session_deleted`). |
+
+**Deliberate v1 rejections (documented divergences, clear errors):** `multiagent` config, session `resources`, non-empty `vault_ids` on create, `scope:"account"`. `deployment_id`/`memory_store_id` list filters return empty sets (nothing can match). Reference-side validations not enforced yet: numeric caps (max 128 tools, metadata limits) and the mcp_servers cross-checks (max 20, unique names, each referenced by an `mcp_toolset`). A skill without a `version` is normalized to the literal `"latest"` (the reference resolves it to a concrete version; nothing resolves skill versions here yet).
+
+**Test coverage:** contract tests over real HTTP + Dockerized Postgres: full-surface response-shape assertions (every `api:"required"` field, `[]`/`{}`/null defaults, UTC `Z` timestamps), optimistic-version 409 + no-op on conflict, patch semantics (null clears, metadata upsert/delete), snapshot pinning + overrides, keyset pagination walks both directions incl. a concurrent-insert walk and prev-cursor round-trip, config-merge preservation, archived-immutability, bootstrap-key rotation, 413 oversize bodies, strict unknown-field rejection, OTel remote-parent span continuation, auth (missing/wrong/revoked key), error envelope on 404/405/500, corrupt-row and dropped-table defensive paths.
+
+**Known debt (recorded, slice 3):** `internal/api` declares its own wire structs (`agentSpec`, `agentJSON`, `sessionAgentJSON`) instead of reusing `internal/domain`'s `AgentSpec`/`ResolvedAgent`, because `domain.Tool` keeps tool bodies in a non-serializable `Raw` field and the domain tags use `omitempty` where the wire requires always-present fields. Reconcile the two when slice 3 aligns the event types with the wire (domain stays the single source of truth per CLAUDE.md rule 1).
 
 ---
 
 ## Next up
 
-1. **Slice 2:** Control plane CRUD (agents / environments / sessions) + optimistic versioning + ID prefixes + `x-api-key` auth.
-2. **Slice 3:** Append-only event log (seq allocation) + `POST /events` + SSE stream + `span.*` events emitted from the same instrumentation point as OTel spans.
+1. **Slice 3:** Append-only event log (seq allocation) + `POST /events` + SSE stream + `span.*` events emitted from the same instrumentation point as OTel spans.
+2. **Slice 4:** `ModelProvider` (config-driven) + `model_providers` routing + first provider passing a single model turn (pin the SDK dependency; re-check wire-drift then).
 
 ---
 
@@ -136,7 +157,8 @@ Full rationale lives in the plan and `CLAUDE.md`; these are the ones most likely
 ## Environment notes
 
 - **Go 1.26.5** (installed via Homebrew).
-- **Docker** available. **`psql` is not installed** — use the Postgres container for database work. The `internal/store` tests start their own `postgres:16-alpine` container automatically (and fail loudly, not skip, without Docker — skipping would hollow out the coverage gate).
+- **Docker** available. **`psql` is not installed** — use the Postgres container for database work. The `internal/store` and `internal/api` tests start their own `postgres:16-alpine` container automatically (and fail loudly, not skip, without Docker — skipping would hollow out the coverage gate).
+- **`ant` CLI:** no binary installed; build it from the read-only checkout for smoke tests: `cd ~/Projects/anthropic-cli && go build -o <scratch>/ant ./cmd/ant`. It ignores `ANTHROPIC_BASE_URL` — pass `--base-url http://127.0.0.1:<port>` explicitly.
 - **Repository:** <https://github.com/OpenSDLC-Dev/managed-agent-platform> (public).
 - **Module path:** `github.com/OpenSDLC-Dev/managed-agent-platform` — note the owner's mixed case is intentional and must match the GitHub owner exactly; Go escapes the uppercase letters in the module cache.
 

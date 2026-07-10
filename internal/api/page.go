@@ -1,0 +1,212 @@
+package api
+
+import (
+	"encoding/base64"
+	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// The managed-agents lists paginate with an opaque cursor: the response
+// carries {"data":[…],"next_page":<cursor|null>} (sessions additionally carry
+// "prev_page"), and clients pass the cursor back as ?page=…. Cursors are
+// keyset positions — (created_at, id) for resource lists, the version number
+// for agent-version lists — so concurrent inserts and deletes never duplicate
+// or skip rows the way row offsets would.
+
+const (
+	defaultLimit = 20
+	maxLimit     = 100
+)
+
+// cursor directions: fetch rows after the position (next) or before it (prev).
+const (
+	dirNext = "n"
+	dirPrev = "p"
+)
+
+type cursor struct {
+	dir string
+	// time-keyed position (agents, environments, sessions)
+	t  time.Time
+	id string
+	// version-keyed position (agent versions); used when versioned is true
+	versioned bool
+	version   int64
+}
+
+type pageParams struct {
+	limit int
+	cur   *cursor
+}
+
+func parsePage(q url.Values) (pageParams, error) {
+	p := pageParams{limit: defaultLimit}
+	if s := q.Get("limit"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 || n > maxLimit {
+			return p, errInvalid("limit must be an integer between 1 and %d", maxLimit)
+		}
+		p.limit = n
+	}
+	if s := q.Get("page"); s != "" {
+		c, err := decodeCursor(s)
+		if err != nil {
+			return p, err
+		}
+		p.cur = c
+	}
+	return p, nil
+}
+
+func encodeTimeCursor(dir string, t time.Time, id string) string {
+	raw := fmt.Sprintf("k1|%s|t|%d|%s", dir, t.UnixNano(), id)
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+func encodeVersionCursor(version int64) string {
+	raw := fmt.Sprintf("k1|%s|v|%d", dirNext, version)
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodeCursor(s string) (*cursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return nil, errInvalid("invalid page cursor")
+	}
+	parts := strings.Split(string(raw), "|")
+	if len(parts) < 4 || parts[0] != "k1" || (parts[1] != dirNext && parts[1] != dirPrev) {
+		return nil, errInvalid("invalid page cursor")
+	}
+	switch parts[2] {
+	case "t":
+		if len(parts) != 5 {
+			return nil, errInvalid("invalid page cursor")
+		}
+		nanos, err := strconv.ParseInt(parts[3], 10, 64)
+		if err != nil || parts[4] == "" {
+			return nil, errInvalid("invalid page cursor")
+		}
+		return &cursor{dir: parts[1], t: time.Unix(0, nanos).UTC(), id: parts[4]}, nil
+	case "v":
+		if len(parts) != 4 {
+			return nil, errInvalid("invalid page cursor")
+		}
+		version, err := strconv.ParseInt(parts[3], 10, 64)
+		if err != nil || version < 1 {
+			return nil, errInvalid("invalid page cursor")
+		}
+		return &cursor{dir: parts[1], versioned: true, version: version}, nil
+	default:
+		return nil, errInvalid("invalid page cursor")
+	}
+}
+
+// keysetClause returns the SQL comparison and ORDER BY direction for a
+// time-keyed page fetch, given the list's sort direction ("ASC"/"DESC") and
+// the cursor. fetchReversed reports that rows come back opposite to the sort
+// order and must be reversed before rendering (prev-page fetches).
+//
+// The returned clause references two placeholders for (created_at, id) that
+// the caller appends to its args as argOffset+1 and argOffset+2.
+func keysetClause(sortDir string, cur *cursor, argOffset int) (clause, orderDir string, fetchReversed bool) {
+	if cur == nil {
+		return "", sortDir, false
+	}
+	forward := cur.dir == dirNext
+	// Moving forward through a DESC list means strictly-smaller keys;
+	// backward means strictly-greater. ASC flips both.
+	cmp := "<"
+	if (sortDir == "ASC") == forward {
+		cmp = ">"
+	}
+	orderDir = sortDir
+	if !forward {
+		if sortDir == "ASC" {
+			orderDir = "DESC"
+		} else {
+			orderDir = "ASC"
+		}
+	}
+	clause = fmt.Sprintf(" AND (created_at, id) %s ($%d, $%d)", cmp, argOffset+1, argOffset+2)
+	return clause, orderDir, !forward
+}
+
+// pageEdges computes next_page/prev_page for a time-keyed page.
+//
+//	rows       — the page rows in render order (already un-reversed)
+//	more       — whether the fetch found a row beyond the page in fetch direction
+//	hadCursor  — whether the request carried a cursor
+//	reversed   — whether this was a prev-page fetch
+//
+// key returns the keyset position of a rendered row.
+func pageEdges(n int, more, hadCursor, reversed bool, key func(i int) (time.Time, string)) (next, prev *string) {
+	if n == 0 {
+		return nil, nil
+	}
+	lastT, lastID := key(n - 1)
+	firstT, firstID := key(0)
+	if reversed {
+		// Walking backwards: something newer (the page we came from) always
+		// exists after this page; more-before is what the probe row answered.
+		c := encodeTimeCursor(dirNext, lastT, lastID)
+		next = &c
+		if more {
+			p := encodeTimeCursor(dirPrev, firstT, firstID)
+			prev = &p
+		}
+		return next, prev
+	}
+	if more {
+		c := encodeTimeCursor(dirNext, lastT, lastID)
+		next = &c
+	}
+	if hadCursor {
+		p := encodeTimeCursor(dirPrev, firstT, firstID)
+		prev = &p
+	}
+	return next, prev
+}
+
+// parseBoolParam parses an optional boolean query parameter.
+func parseBoolParam(q url.Values, key string) (bool, error) {
+	s := q.Get(key)
+	if s == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		return false, errInvalid("%s must be true or false", key)
+	}
+	return v, nil
+}
+
+// parseTimeParam parses an optional RFC3339 query parameter such as
+// created_at[gte].
+func parseTimeParam(q url.Values, key string) (*time.Time, error) {
+	s := q.Get(key)
+	if s == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return nil, errInvalid("%s must be an RFC 3339 timestamp", key)
+	}
+	return &t, nil
+}
+
+// pageJSON is the unidirectional list envelope (agents, environments,
+// agent versions).
+type pageJSON struct {
+	Data     []any   `json:"data"`
+	NextPage *string `json:"next_page"`
+}
+
+// biPageJSON is the bidirectional list envelope (sessions).
+type biPageJSON struct {
+	Data     []any   `json:"data"`
+	NextPage *string `json:"next_page"`
+	PrevPage *string `json:"prev_page"`
+}

@@ -22,6 +22,10 @@ const (
 	pgNotNullViolation    = "23502"
 )
 
+// wantMigrations tracks the number of embedded migration files; bump it when
+// a migration is added.
+const wantMigrations = 2
+
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
 	pool, err := store.Open(context.Background(), dsn)
@@ -80,8 +84,8 @@ func TestOpenMigratesFreshDatabase(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&applied); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if applied != 1 {
-		t.Errorf("schema_migrations rows = %d, want 1", applied)
+	if applied != wantMigrations {
+		t.Errorf("schema_migrations rows = %d, want %d", applied, wantMigrations)
 	}
 }
 
@@ -96,8 +100,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&applied); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if applied != 1 {
-		t.Errorf("schema_migrations rows after re-run = %d, want 1", applied)
+	if applied != wantMigrations {
+		t.Errorf("schema_migrations rows after re-run = %d, want %d", applied, wantMigrations)
 	}
 }
 
