@@ -1,0 +1,38 @@
+# CodeRabbit configuration — https://docs.coderabbit.ai/reference/configuration
+# The CodeRabbit GitHub App must be installed on the repository for reviews to
+# run; this file only configures how it reviews.
+
+reviews:
+  profile: assertive
+  high_level_summary: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_instructions:
+    - path: "internal/**"
+      instructions: |
+        This codebase keeps its REST API wire-compatible with Anthropic Claude
+        Managed Agents. Wire shapes (JSON field names, enum values, URL paths,
+        ID prefixes, pagination and error envelopes) are never guessed: they
+        come from the reference SDK (anthropic-sdk-go), and deliberate
+        divergences are documented in STATE.md. Flag any change that adds,
+        drops, renames, or re-types a wire-visible field without a matching
+        STATE.md note, and any silently-accepted-but-ignored request input.
+    - path: "internal/domain/**"
+      instructions: |
+        internal/domain must stay stdlib-only and Anthropic-native. Any import
+        of adk-go, genai, or a provider SDK here is a defect.
+    - path: "internal/store/migrations/**"
+      instructions: |
+        Migration files are immutable once merged: editing an existing
+        migration is a defect. New DDL belongs in a new numbered file applied
+        by the single-transaction migrator.
+    - path: "**/*_test.go"
+      instructions: |
+        Tests are contract tests against real infrastructure (Dockerized
+        Postgres, real HTTP). A test that cannot fail, mirrors the
+        implementation, or replaces a behavioral assertion with a mock is a
+        finding. The CI coverage gate is >= 90% over ./internal/....
+chat:
+  auto_reply: true

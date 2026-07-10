@@ -9,6 +9,7 @@ permissions:
   contents: read
 
 jobs:
+  # Build + lint: fast checks with no database dependency.
   ci:
     name: ci
     runs-on: ubuntu-latest
@@ -30,9 +31,21 @@ jobs:
             echo "$unformatted" >&2
             exit 1
           fi
-      - name: test + coverage gate (>= 90%)
+
+  # Tests + the coverage gate as a distinct named check, so PRs show
+  # "coverage" pass/fail on its own and the summary carries the numbers.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: test (-count=1) with coverage profile
+        run: go test -count=1 -coverpkg=./internal/... -coverprofile=coverage.out ./...
+      - name: coverage gate (>= 90%)
         run: |
-          go test -count=1 -coverpkg=./internal/... -coverprofile=coverage.out ./...
           # Exact total from the profile: `go tool cover -func` rounds to 0.1%,
           # which would let ~89.95% pass as "90.0". Duplicate blocks (same
           # package covered by several test binaries) merge with OR semantics;
@@ -45,3 +58,27 @@ jobs:
                  printf "total statement coverage: %.2f%%\n", pct
                  exit !(pct >= 90.0)
                }' coverage.out
+      - name: coverage summary
+        if: always()
+        run: |
+          [ -f coverage.out ] || exit 0
+          {
+            echo "### Statement coverage over \`./internal/...\` (gate: ≥ 90%)"
+            echo ""
+            echo "| Package | Coverage |"
+            echo "|---|---|"
+            awk 'NR>1 { stmts[$1]=$2; if ($3>0) covered[$1]=1 }
+                 END { for (b in stmts) { pkg=b; sub(/\/[^\/]*$/,"",pkg)
+                         t[pkg]+=stmts[b]; if (b in covered) c[pkg]+=stmts[b] }
+                       for (p in t) printf "| %s | %.1f%% |\n", p, 100*c[p]/t[p] }' coverage.out | sort
+            awk 'NR>1 { stmts[$1]=$2; if ($3>0) covered[$1]=1 }
+                 END { for (b in stmts) { T+=stmts[b]; if (b in covered) C+=stmts[b] }
+                       printf "| **total** | **%.2f%%** |\n", 100*C/T }' coverage.out
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-profile
+          path: coverage.out
+          if-no-files-found: ignore

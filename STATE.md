@@ -55,7 +55,8 @@ The model backend must be pointable at either an Anthropic-protocol endpoint or 
 - `README.md` — public-facing, states "early development" honestly.
 - `CLAUDE.md` — architecture, 5 non-negotiable design principles, wire-compat rules, working conventions.
 - `.claude/agents/verifier.md` — independent verifier subagent; every slice must pass it before being marked done. Local reference checkouts (SDK / `ant` CLI / Claude Code source) documented in CLAUDE.md as wire-schema ground truth.
-- CI (`.github/workflows/ci.yml`: build / 32-bit cross-compile / vet / gofmt / `test -count=1` / total statement coverage ≥90% over `./internal/...`) + branch→review→PR→CI→squash-merge iteration workflow with dual code review (`/codex:review` + `/code-review`) (CLAUDE.md → "Iteration workflow").
+- CI (`.github/workflows/ci.yml`: `ci` job = build / 32-bit cross-compile / vet / gofmt; `coverage` job = `test -count=1` + total statement coverage ≥90% over `./internal/...` as its own named GitHub check, with a per-package job summary and the profile as an artifact) + branch→review→PR→CI→squash-merge iteration workflow with dual code review (`/codex:review` + `/code-review`) (CLAUDE.md → "Iteration workflow").
+- Automated PR reviewers: `.coderabbit.yaml` (CodeRabbit config — wire-compat, migration-immutability, and test-quality instructions) and `AGENTS.md` (ground rules for Codex and other AI agents, pointing at CLAUDE.md). The CodeRabbit and Codex GitHub Apps themselves are installed at the GitHub-account level, not in-repo.
 - Docs-consistency rule: STATE.md, README.md, and CHANGELOG.md move with code in the same PR; the verifier checks them as rung 6 of its ladder. CHANGELOG.md follows Keep-a-Changelog, everything under Unreleased until a first release.
 
 ### `internal/domain` — Anthropic-native core types
