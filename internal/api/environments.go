@@ -20,6 +20,7 @@ type environmentJSON struct {
 	Name        string            `json:"name"`
 	Description string            `json:"description"`
 	Config      json.RawMessage   `json:"config"`
+	Scope       string            `json:"scope"` // single-tenant v1: always "organization"
 	Metadata    map[string]string `json:"metadata"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
@@ -184,7 +185,7 @@ func renderEnvironment(id, name, description string, config []byte, metadata map
 	}
 	return environmentJSON{
 		ID: id, Type: "environment", Name: name, Description: description,
-		Config: config, Metadata: metadata,
+		Config: config, Scope: "organization", Metadata: metadata,
 		CreatedAt: createdAt.UTC(), UpdatedAt: updatedAt.UTC(), ArchivedAt: utcPtr(archivedAt),
 	}
 }
@@ -316,8 +317,10 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 			return nil, err
 		}
 	}
+	// Environments alone treat an empty-string value as a delete (the SDK's
+	// map[string]string params cannot express null).
 	if raw, ok := obj["metadata"]; ok {
-		metadata, err = patchMetadata(metadata, raw)
+		metadata, err = patchMetadata(metadata, raw, true)
 		if err != nil {
 			return nil, err
 		}

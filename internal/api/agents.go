@@ -290,7 +290,7 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	}
 	spec.normalize()
 	if raw, ok := obj["metadata"]; ok {
-		metadata, err = patchMetadata(metadata, raw)
+		metadata, err = patchMetadata(metadata, raw, false)
 		if err != nil {
 			return nil, err
 		}

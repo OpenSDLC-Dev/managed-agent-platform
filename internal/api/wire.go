@@ -85,8 +85,10 @@ func parseMetadata(obj map[string]json.RawMessage) (map[string]string, error) {
 }
 
 // patchMetadata applies update semantics onto existing metadata: a string
-// value upserts the key, an explicit null deletes it.
-func patchMetadata(existing map[string]string, raw json.RawMessage) (map[string]string, error) {
+// value upserts the key, an explicit null deletes it. emptyDeletes matches
+// the environment-update rule, where an empty string also deletes (the
+// reference documents this for environments only).
+func patchMetadata(existing map[string]string, raw json.RawMessage, emptyDeletes bool) (map[string]string, error) {
 	if isNull(raw) {
 		return existing, nil
 	}
@@ -99,7 +101,7 @@ func patchMetadata(existing map[string]string, raw json.RawMessage) (map[string]
 		out[k] = v
 	}
 	for k, v := range patch {
-		if v == nil {
+		if v == nil || (emptyDeletes && *v == "") {
 			delete(out, k)
 		} else {
 			out[k] = *v
@@ -198,16 +200,20 @@ func parseMCPServers(raw json.RawMessage) ([]json.RawMessage, error) {
 	return items, nil
 }
 
-// parseSkills validates skills[]: {type:"anthropic"|"custom", skill_id, version?}.
+// parseSkills validates skills[]: {type:"anthropic"|"custom", skill_id,
+// version?}. The response-side skill carries a required version, and the
+// reference defaults an omitted one to the latest — we normalize to the
+// literal "latest" (nothing resolves skill versions yet).
 func parseSkills(raw json.RawMessage) ([]json.RawMessage, error) {
 	items, err := rawList(raw, "skills")
 	if err != nil {
 		return nil, err
 	}
-	for _, item := range items {
+	for i, item := range items {
 		var probe struct {
 			Type    string `json:"type"`
 			SkillID string `json:"skill_id"`
+			Version string `json:"version"`
 		}
 		if err := json.Unmarshal(item, &probe); err != nil {
 			return nil, errInvalid("skills entries must be objects")
@@ -215,6 +221,16 @@ func parseSkills(raw json.RawMessage) ([]json.RawMessage, error) {
 		if (probe.Type != "anthropic" && probe.Type != "custom") || probe.SkillID == "" {
 			return nil, errInvalid(`skills entries require type "anthropic" or "custom" and skill_id`)
 		}
+		if probe.Version == "" {
+			probe.Version = "latest"
+		}
+		normalized, err := json.Marshal(map[string]string{
+			"type": probe.Type, "skill_id": probe.SkillID, "version": probe.Version,
+		})
+		if err != nil {
+			return nil, err
+		}
+		items[i] = normalized
 	}
 	return items, nil
 }

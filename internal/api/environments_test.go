@@ -44,6 +44,9 @@ func TestEnvironmentCreateMinimalDefaultsToCloud(t *testing.T) {
 	if _, hasState := res["state"]; hasState {
 		t.Errorf(`response leaks non-wire "state" field: %v`, res)
 	}
+	if res["scope"] != "organization" {
+		t.Errorf(`scope = %v, want "organization" (single-tenant v1)`, res["scope"])
+	}
 	cfg, _ := res["config"].(map[string]any)
 	if cfg["type"] != "cloud" {
 		t.Fatalf("default config = %v, want cloud", res["config"])
@@ -168,6 +171,18 @@ func TestEnvironmentGetUpdate(t *testing.T) {
 	}
 	if md, _ := updated["metadata"].(map[string]any); !reflect.DeepEqual(md, map[string]any{"keep": "1", "new": "3"}) {
 		t.Errorf("metadata = %v", updated["metadata"])
+	}
+
+	// Environments alone also delete on empty string (the SDK's
+	// map[string]string metadata cannot express null).
+	status, updated = s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
+		"metadata": map[string]any{"keep": ""},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("empty-string delete: %d", status)
+	}
+	if md, _ := updated["metadata"].(map[string]any); !reflect.DeepEqual(md, map[string]any{"new": "3"}) {
+		t.Errorf(`metadata after empty-string delete = %v, want {"new":"3"}`, updated["metadata"])
 	}
 
 	status, body = s.do(http.MethodPost, "/v1/environments/env_missing", map[string]any{"name": "x"})

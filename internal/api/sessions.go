@@ -428,7 +428,7 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		row.title = title
 	}
 	if raw, ok := obj["metadata"]; ok {
-		metadata, err = patchMetadata(metadata, raw)
+		metadata, err = patchMetadata(metadata, raw, false)
 		if err != nil {
 			return nil, err
 		}

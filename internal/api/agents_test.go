@@ -133,6 +133,18 @@ func TestAgentCreateModelObjectAndFullConfig(t *testing.T) {
 		t.Errorf("metadata = %v", res["metadata"])
 	}
 
+	// An omitted skill version is normalized to "latest": the response-side
+	// skill carries a required version on the wire.
+	bare := createAgent(t, s, map[string]any{
+		"name": "bare-skill", "model": "m",
+		"skills": []any{map[string]any{"type": "anthropic", "skill_id": "pdf"}},
+	})
+	if sk, _ := bare["skills"].([]any); len(sk) != 1 {
+		t.Fatalf("skills = %v", bare["skills"])
+	} else if entry, _ := sk[0].(map[string]any); entry["version"] != "latest" {
+		t.Errorf(`omitted skill version = %v, want "latest"`, entry["version"])
+	}
+
 	// The stored resource survives a GET unchanged.
 	status, got := s.do(http.MethodGet, "/v1/agents/"+res["id"].(string), nil)
 	if status != http.StatusOK {
