@@ -186,6 +186,80 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		t.Errorf("%d process(es) outlived %d commands that exited at once", after-before, runs)
 	})
 
+	// A command is timed by its own life, not by the life of what it leaves
+	// behind. `server & echo started` returns at once; the backgrounded process
+	// inherits the command's stdout and holds it open. A backend that times the
+	// output stream instead of the command charges that straggler's lifetime to
+	// a command that already exited cleanly, and calls it a timeout.
+	t.Run("ExecTimesTheCommandNotItsStragglers", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		start := time.Now()
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: `sleep 987123 & echo started`, Timeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if res.TimedOut {
+			t.Errorf("a command that exited at once was reported as timed out: %+v", res)
+		}
+		if res.ExitCode != 0 {
+			t.Errorf("exit = %d, want the command's own 0: %+v", res.ExitCode, res)
+		}
+		if !strings.Contains(res.Stdout, "started") {
+			t.Errorf("stdout = %q, want the command's output", res.Stdout)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("a command that exited at once took %s to report", elapsed)
+		}
+	})
+
+	// The crown-jewel guarantee, and the one a backend is most likely to get
+	// wrong: whatever enforces the deadline lives where the command can reach
+	// it. Kill everything the command's shell was started alongside, then try to
+	// outlive the deadline — loudly, and then quietly.
+	//
+	// A backend whose deadline is enforced only inside the sandbox passes every
+	// other subtest here and fails these two.
+	const killTheGuards = `
+	  for p in $(cat /proc/$PPID/task/$PPID/children 2>/dev/null); do
+	    [ "$p" != "$$" ] && kill -9 -"$p" 2>/dev/null
+	  done
+	`
+	t.Run("ExecDeadlineOutlivesTheCommandKillingItsGuards", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		for _, tc := range []struct{ name, after string }{
+			// Run far past the deadline: the backend must stop waiting.
+			{"and running long", `sleep 300`},
+			// Slip just past it and exit clean: the backend must not believe the
+			// exit code of a command that outlived its deadline.
+			{"and exiting clean", `sleep 2; exit 0`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				start := time.Now()
+				res, err := sb.Exec(ctx, sandbox.ExecRequest{
+					Command: killTheGuards + tc.after, Timeout: time.Second,
+				})
+				elapsed := time.Since(start)
+				if err != nil {
+					t.Fatalf("exec: %v", err)
+				}
+				if !res.TimedOut {
+					t.Errorf("a command that disarmed the deadline and outran it hid the timeout: %+v", res)
+				}
+				if elapsed > 20*time.Second {
+					t.Errorf("the call outran its 1s deadline by %s", elapsed)
+				}
+			})
+		}
+	})
+
 	// SIGKILL is how a deadline is enforced, so a command that dies of SIGKILL
 	// on its own could be mistaken for one. It must not be: the kill has to
 	// have arrived at the deadline, not before it. (And a command that finishes

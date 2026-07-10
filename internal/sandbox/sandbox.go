@@ -61,16 +61,21 @@ type ExecRequest struct {
 	Timeout time.Duration
 }
 
-// ExecResult is a finished command. TimedOut means the command outlived its
-// deadline: the sandbox stopped it, or stopped waiting for it, or caught it
-// running past the deadline and exiting on its own terms. TimedOut is the
-// authoritative field — ExitCode may be the kill's code, or the code a command
-// that dodged the kill chose for itself — and the output is whatever arrived.
-// Truncated means output exceeded MaxOutputBytes and the tail was discarded.
+// ExecResult is a finished command. TimedOut means the command itself outlived
+// its deadline: the sandbox stopped it, or stopped waiting for it, or caught it
+// still running past the deadline and exiting later on its own terms. TimedOut
+// is the authoritative field — ExitCode may be the kill's code, or the code a
+// command that dodged the kill chose for itself — and the output is whatever
+// arrived. Truncated means output exceeded MaxOutputBytes and the tail was
+// discarded.
 //
 // A backend must decide TimedOut where the sandboxed command cannot reach the
 // decision. Anything inside the sandbox is the agent's to tamper with, so a
 // deadline enforced only in there is a deadline the command can lift.
+//
+// The command's own life is what a deadline is measured against, not the life
+// of what it leaves behind: a process the command backgrounds inherits its
+// output stream and can hold it open long after the command has exited.
 type ExecResult struct {
 	Stdout    string
 	Stderr    string

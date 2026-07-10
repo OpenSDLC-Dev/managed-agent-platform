@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -265,15 +267,47 @@ func (c *apiClient) execStart(ctx context.Context, execID string) (io.ReadCloser
 	return resp.Body, nil
 }
 
+// execInfo is the daemon's view of an exec. Running is not what it sounds like:
+// it stays true until the exec's output stream closes, which a process the
+// command backgrounded can defer long past the command's own death. Pid — the
+// exec's process as the daemon's host numbers it — is the honest signal, and
+// processAlive is how it is read.
 type execInfo struct {
 	Running  bool `json:"Running"`
 	ExitCode int  `json:"ExitCode"`
+	Pid      int  `json:"Pid"`
 }
 
 func (c *apiClient) execInspect(ctx context.Context, execID string) (execInfo, error) {
 	var info execInfo
 	err := c.getJSON(ctx, "/exec/"+execID+"/json", &info)
 	return info, err
+}
+
+// processAlive asks the daemon to list the container's live processes and looks
+// for pid among them. `ps` runs on the daemon's host, not in the container, so
+// this needs nothing of the image and — the point — nothing the sandboxed
+// command can reach, edit, or forge.
+func (c *apiClient) processAlive(ctx context.Context, containerID string, pid int) (bool, error) {
+	var top struct {
+		Titles    []string   `json:"Titles"`
+		Processes [][]string `json:"Processes"`
+	}
+	err := c.getJSON(ctx, "/containers/"+containerID+"/top?ps_args=-eo+pid%2Cargs", &top)
+	if err != nil {
+		return false, err
+	}
+	column := slices.Index(top.Titles, "PID")
+	if column < 0 {
+		return false, fmt.Errorf("docker: top reported no PID column: %v", top.Titles)
+	}
+	want := strconv.Itoa(pid)
+	for _, process := range top.Processes {
+		if column < len(process) && process[column] == want {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c *apiClient) getArchive(ctx context.Context, id, path string) (io.ReadCloser, error) {
@@ -314,11 +348,16 @@ func demux(r io.Reader, limit int) (stdout, stderr []byte, truncated bool, err e
 			if room > n {
 				room = n
 			}
-			buf := make([]byte, room)
-			if _, err := io.ReadFull(r, buf); err != nil {
+			// Grow once and read straight into the tail: a build log arrives as
+			// thousands of small frames, and this is the executor's hot path. A
+			// frame that does not arrive whole leaves nothing behind — the grown
+			// tail is zeroes, not output.
+			had := len(*dst)
+			*dst = append(*dst, make([]byte, room)...)
+			if _, err := io.ReadFull(r, (*dst)[had:]); err != nil {
+				*dst = (*dst)[:had]
 				return err
 			}
-			*dst = append(*dst, buf...)
 			n -= room
 		}
 		if n > 0 {

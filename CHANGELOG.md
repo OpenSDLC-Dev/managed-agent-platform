@@ -28,21 +28,27 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   command's process group (Docker offers no way to kill a running exec
   from outside), and `Exec` itself stops waiting shortly after the
   deadline regardless. Only the second is a guarantee — the watchdog is a
-  process the sandboxed command can find and kill — so `Exec` decides
-  the verdict outside the container, on its own clock: a command that
-  outlived its deadline timed out whatever exit code it reports, because
-  on the honest path the watchdog would have killed it first. No command
-  can outrun its deadline by more than the grace period, none can hide an
-  overrun of more than the half-second of measurement slop `Exec` charges
-  to itself, and one that merely dies of SIGKILL on its own is never
-  mistaken for a timeout. Output is capped
+  process the sandboxed command can find and kill — so `Exec` decides the
+  verdict outside the container, by asking the daemon twice whether the
+  command's process is still alive: as the deadline arrives, and once the
+  deadline and a half-second of measurement slop have both passed. A
+  command still running at the second instant timed out whatever exit
+  code it later reports, because on the honest path the watchdog would
+  have killed it first. No command can outrun its deadline by more than
+  the grace period, none can hide an overrun larger than the slop, one
+  that merely dies of SIGKILL on its own is never mistaken for a timeout,
+  and one that leaves a background process holding its output open is
+  timed by its own life rather than by its straggler's. Output is capped
   at 1 MiB per stream, drained rather than buffered so a noisy command
   still finishes; a read above 4 MiB is refused rather than silently
   truncated. `limited` networking fails closed — the container gets no
   route out at all until the egress proxy lands, never silently
   unrestricted egress. `internal/sandbox/sandboxtest` is the one
   contract suite every backend must pass (CLAUDE.md's rule for
-  provider-, sandbox-, and queue-backend variability); the Docker
+  provider-, sandbox-, and queue-backend variability), and the deadline
+  the sandbox cannot be talked out of is pinned there rather than in the
+  Docker tests, so a future backend cannot reintroduce a bypass this one
+  closed and still go green; the Docker
   provider passes it against a real daemon, and a scripted fake daemon
   covers the failure and race paths a real one will not reproduce on
   demand. Nothing consumes the sandbox yet — the executor, the built-in
@@ -211,13 +217,13 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   execute exactly when a suite fails. Counting them measured nothing and
   diluted the gate, the same reason `cmd/` main glue was always outside
   it. Stated plainly, because the change is load-bearing rather than
-  cosmetic: under the old denominator this PR reads **89.70%** and CI
-  would be red; under the new one it reads **91.53%** against the
+  cosmetic: under the old denominator this PR reads **89.68%** and CI
+  would be red; under the new one it reads **91.62%** against the
   unchanged ≥ 90% bar. What justifies it is the categorization, not the
-  number — the sandbox implementation itself sits at 95.4%, and the only
+  number — the sandbox implementation itself sits at 95.3%, and the only
   thing dragging the total under the bar is the contract suite's own
   `t.Errorf` branches. Excluding just the new `sandboxtest` would also
-  pass (91.10%); `pgtest` goes with it because it is the same kind of
+  pass (91.19%); `pgtest` goes with it because it is the same kind of
   package and singling it out would leave the rule incoherent.
 - Module path set to the canonical GitHub owner,
   `github.com/OpenSDLC-Dev/managed-agent-platform`.
