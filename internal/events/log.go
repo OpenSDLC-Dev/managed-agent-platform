@@ -49,11 +49,36 @@ type Log struct {
 
 func NewLog(pool *pgxpool.Pool) *Log { return &Log{pool: pool} }
 
+// AppendOptions are same-transaction side effects of an append: the session
+// state machine's invariant is that the sessions row (status, usage) and the
+// event log can never disagree, so both change under the one session row lock
+// the append already holds.
+type AppendOptions struct {
+	// SetStatus flips sessions.status alongside the append. The batch should
+	// carry the matching session.status_* event; this option only moves the
+	// resource column.
+	SetStatus *domain.SessionStatus
+	// AddUsage folds one model turn's usage into sessions.usage.
+	AddUsage *domain.ModelUsage
+	// MarkProcessedThrough stamps processed_at on still-unprocessed events
+	// at seq <= the watermark — the brain recording which inbound events its
+	// turn consumed. Zero means no stamping.
+	MarkProcessedThrough int64
+	// Then runs inside the same transaction after the insert (work enqueue,
+	// counters). An error aborts the whole append.
+	Then func(ctx context.Context, tx pgx.Tx) error
+}
+
 // Append durably appends events to one session's log in order, allocating
 // the per-session seq under the session row lock (concurrent appends to the
 // same session serialize; different sessions don't contend), and notifies
 // stream subscribers on commit.
 func (l *Log) Append(ctx context.Context, sessionID domain.ID, evs []NewEvent) ([]domain.Event, error) {
+	return l.AppendWith(ctx, sessionID, evs, AppendOptions{})
+}
+
+// AppendWith is Append plus atomic session-state side effects.
+func (l *Log) AppendWith(ctx context.Context, sessionID domain.ID, evs []NewEvent, opts AppendOptions) ([]domain.Event, error) {
 	if len(evs) == 0 {
 		return nil, errors.New("append requires at least one event")
 	}
@@ -145,6 +170,45 @@ func (l *Log) Append(ctx context.Context, sessionID domain.ID, evs []NewEvent) (
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	if opts.SetStatus != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET status = $2, updated_at = now() WHERE id = $1`,
+			sessionID.String(), string(*opts.SetStatus)); err != nil {
+			return nil, err
+		}
+	}
+	if opts.AddUsage != nil {
+		// Read-modify-write is race-free here: the session row lock is held.
+		var raw []byte
+		if err := tx.QueryRow(ctx,
+			`SELECT usage FROM sessions WHERE id = $1`, sessionID.String()).Scan(&raw); err != nil {
+			return nil, err
+		}
+		var usage domain.Usage
+		if err := json.Unmarshal(raw, &usage); err != nil {
+			return nil, fmt.Errorf("decode stored session usage: %w", err)
+		}
+		usage.Add(*opts.AddUsage)
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET usage = $2, updated_at = now() WHERE id = $1`,
+			sessionID.String(), usage); err != nil {
+			return nil, err
+		}
+	}
+	if opts.MarkProcessedThrough > 0 {
+		if _, err := tx.Exec(ctx,
+			`UPDATE events SET processed_at = clock_timestamp()
+			 WHERE session_id = $1 AND seq <= $2 AND processed_at IS NULL`,
+			sessionID.String(), opts.MarkProcessedThrough); err != nil {
+			return nil, err
+		}
+	}
+	if opts.Then != nil {
+		if err := opts.Then(ctx, tx); err != nil {
+			return nil, err
+		}
 	}
 
 	// NOTIFY fires on commit, so subscribers only ever wake for committed

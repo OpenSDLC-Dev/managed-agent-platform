@@ -20,19 +20,9 @@ import (
 // in sessions.resolved_agent, so rendering is a passthrough.
 type sessionAgentJSON = domain.ResolvedAgent
 
-type cacheCreationJSON struct {
-	Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
-	Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
-}
-
-// usageJSON is the session-level usage wire shape (note: nested
-// cache_creation, unlike the event-level usage in internal/domain).
-type usageJSON struct {
-	InputTokens          int64             `json:"input_tokens"`
-	OutputTokens         int64             `json:"output_tokens"`
-	CacheReadInputTokens int64             `json:"cache_read_input_tokens"`
-	CacheCreation        cacheCreationJSON `json:"cache_creation"`
-}
+// usageJSON is the session-level usage wire shape — the domain type (nested
+// cache_creation, unlike the event-level usage on span.model_request_end).
+type usageJSON = domain.Usage
 
 type statsJSON struct {
 	ActiveSeconds   float64 `json:"active_seconds"`
