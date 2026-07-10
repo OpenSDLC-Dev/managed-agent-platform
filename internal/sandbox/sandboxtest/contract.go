@@ -175,9 +175,12 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 				t.Errorf("tearing down the deadline leaked %q into the tool result", res.Stderr)
 			}
 		}
-		// SIGKILL is delivered asynchronously; give the kernel a moment.
+		// The watchdog is self-cleaning but not instant: it learns the command
+		// finished on its next `kill -0` poll, up to one poll interval (~1s)
+		// after the command exits. Give the last run's watchdog well past that
+		// to drain rather than racing the poll.
 		var after int
-		for range 10 {
+		for range 30 {
 			if after = countProcesses(t, sb, "sleep "); after <= before {
 				return
 			}
@@ -254,6 +257,14 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}{
 			{"killing its watchdog", killWatchdog, "sleep 987321", true},
 			{"killing the process a prober would watch", killWrapper, "sleep 987322", false},
+			// The mirror of the forever-markers: overrun the deadline and then
+			// exit clean, leaving nothing behind to count. The marker invariant
+			// cannot see this — the process is gone — so the backend must call it
+			// a timeout from the overrun alone. This is the case a backend that
+			// judges the deadline only while the command is still visible would
+			// miss, and it exercises the command-exits path rather than the
+			// give-up path the forever-markers take.
+			{"overrunning its deadline then exiting clean", killWatchdog, "sleep 2", true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				start := time.Now()

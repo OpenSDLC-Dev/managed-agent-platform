@@ -36,7 +36,7 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // what lets Exec judge the deadline from outside by watching one pid: there is
 // no separate wrapper pid for the command to kill in order to look finished
 // while it keeps running (it cannot kill itself and continue). `set -m` makes
-// the command a process-group leader, so the watchdog's `kill -9 -"$PPID"`
+// the command a process-group leader, so the watchdog's `kill -9 -"$self"`
 // takes its children with it — a process group, not a tree, so a child that
 // calls setsid still escapes and outlives the deadline (Exec's own bound, and
 // the container's eventual teardown, are what bound that).
@@ -54,9 +54,12 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // poll, so no stray `sleep` piles up across a session's thousands of quick
 // commands. ($$ is captured into a variable because bash freezes both $$ and
 // $PPID at the parent's values inside a subshell, and $PPID there is the
-// wrapper's parent, not the wrapper.) The watchdog's own output is discarded;
-// the command's stderr is the exec's, untouched, so a SIGKILL leaves no shell
-// "Killed" line in the tool result to begin with.
+// wrapper's parent, not the wrapper.) The final kill re-checks `kill -0
+// "$self"` first: the command may have exited during the last `sleep`, and a
+// blind `kill -9 -"$self"` would then signal whatever group has since been
+// assigned that pid. The watchdog's own output is discarded; the command's
+// stderr is the exec's, untouched, so a SIGKILL leaves no shell "Killed" line
+// in the tool result to begin with.
 const execWrapper = `
 set -m
 self=$$
@@ -68,7 +71,7 @@ if [ "$2" != "0" ]; then
       sleep 1
       n=$((n + 1))
     done
-    kill -9 -"$self" 2>/dev/null
+    kill -0 "$self" 2>/dev/null && kill -9 -"$self" 2>/dev/null
   ) >/dev/null 2>&1 &
 fi
 exec /bin/bash -c "$1"
@@ -270,23 +273,32 @@ type verdict struct {
 // container's process list — `ps` on the daemon's host, which the sandboxed
 // command can neither reach nor forge.
 //
-// A probe that never runs answers false, and correctly: the caller only stops
-// probing once the output stream has closed, and the stream cannot close while
-// the process that owns it is alive.
-func (c *container) probeDeadline(ctx context.Context, pid int, deadline time.Duration, start time.Time) <-chan verdict {
+// It runs on two contexts. sleepCtx times the waits and is cancelled the moment
+// the output stream closes: a probe still sleeping then never mattered, and the
+// close is what unblocks it. confirmCtx times only the overrun `top` — a probe
+// that has already reached the overrun instant and is mid-request. That request
+// must not be cancelled by the stream closing: a command that overran and then
+// exited during its own confirming probe would otherwise have the cancellation
+// read as "process gone" and its overrun erased. confirmCtx outlives the stream
+// close and dies only on Exec's own bound or the caller giving up.
+//
+// A pre-overrun probe that never runs answers false, and correctly: the stream
+// cannot close while the process that owns it is alive, so a close before the
+// deadline is a command that finished early.
+func (c *container) probeDeadline(sleepCtx, confirmCtx context.Context, pid int, deadline time.Duration, start time.Time) <-chan verdict {
 	answer := make(chan verdict, 1)
 	go func() {
 		var v verdict
 		defer func() { answer <- v }()
 
-		if !sleepUntil(ctx, start.Add(deadline-c.probeLead)) {
+		if !sleepUntil(sleepCtx, start.Add(deadline-c.probeLead)) {
 			return
 		}
-		v.aliveAtDeadline = c.alive(ctx, pid)
-		if !sleepUntil(ctx, start.Add(deadline+c.overrunSlop)) {
+		v.aliveAtDeadline = c.alive(sleepCtx, pid)
+		if !sleepUntil(sleepCtx, start.Add(deadline+c.overrunSlop)) {
 			return
 		}
-		v.overran = c.alive(ctx, pid)
+		v.overran = c.aliveOrTimedOut(confirmCtx, pid)
 	}()
 	return answer
 }
@@ -303,6 +315,10 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 	}
 }
 
+// alive answers the pre-deadline probe. Its context is the one the stream close
+// cancels, and it reads that cancellation as "process gone": the stream cannot
+// close while the process holding it is alive, so a close before the deadline
+// is a command that finished early, not one still running.
 func (c *container) alive(ctx context.Context, pid int) bool {
 	for range 2 {
 		alive, err := c.api.processAlive(ctx, c.id, pid)
@@ -318,6 +334,25 @@ func (c *container) alive(ctx context.Context, pid int) bool {
 	// The daemon would not say. Assume the command is still running: hiding an
 	// overrun breaks the deadline's guarantee, while mislabelling one costs a
 	// tool call.
+	return true
+}
+
+// aliveOrTimedOut answers the overrun probe, which has already reached the
+// overrun instant and only needs the daemon to confirm what it saw. Its context
+// is not the one the stream close cancels, so — unlike alive — a cancellation
+// here is Exec running out of its own bound, not the process finishing; that,
+// and a daemon that will not answer, both read as still running. Erasing an
+// overrun would break the guarantee; over-reporting one costs a tool call.
+func (c *container) aliveOrTimedOut(ctx context.Context, pid int) bool {
+	for range 2 {
+		alive, err := c.api.processAlive(ctx, c.id, pid)
+		if err == nil {
+			return alive
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
 	return true
 }
 
@@ -381,7 +416,10 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 		if err != nil {
 			return sandbox.ExecResult{}, c.wrap(err)
 		}
-		probed = c.probeDeadline(probeCtx, pid, deadline, start)
+		// probeCtx times the sleeps and dies when the stream closes; runCtx
+		// carries the overrun confirmation, which the stream close must not
+		// cancel, and which runCtx's own Timeout+killGrace still bounds.
+		probed = c.probeDeadline(probeCtx, runCtx, pid, deadline, start)
 	}
 
 	// Drain in the background: a command blocks on a full pipe, so nothing may
@@ -456,51 +494,52 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	}, nil
 }
 
-// execPid is the exec's process as the daemon's host numbers it. A zero pid
-// would silently disarm the deadline probes — every later question about the
-// command's life would answer "gone" — so it is retried, and then it is fatal.
-func (c *container) execPid(ctx context.Context, execID string) (int, error) {
+// pollExec inspects the exec until ready is satisfied, giving up after
+// exitBudget so a daemon that never reaches the state fails loudly rather than
+// hanging; stuck is that give-up error. The daemon round trips here are bounded
+// by exitBudget rather than by a command's deadline.
+func (c *container) pollExec(ctx context.Context, execID string, ready func(execInfo) bool, stuck string) (execInfo, error) {
 	giveUp := time.Now().Add(c.exitBudget)
 	for {
 		info, err := c.api.execInspect(ctx, execID)
 		if err != nil {
-			return 0, err
+			return execInfo{}, err
 		}
-		if info.Pid != 0 {
-			return info.Pid, nil
+		if ready(info) {
+			return info, nil
 		}
 		if time.Now().After(giveUp) {
-			return 0, fmt.Errorf("docker: exec %s never reported a pid", execID)
+			return execInfo{}, errors.New(stuck)
 		}
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return execInfo{}, ctx.Err()
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }
 
+// execPid is the exec's process as the daemon's host numbers it. A zero pid
+// would silently disarm the deadline probes — every later question about the
+// command's life would answer "gone" — so it is retried, and then it is fatal.
+func (c *container) execPid(ctx context.Context, execID string) (int, error) {
+	info, err := c.pollExec(ctx, execID, func(i execInfo) bool { return i.Pid != 0 },
+		fmt.Sprintf("docker: exec %s never reported a pid", execID))
+	if err != nil {
+		return 0, err
+	}
+	return info.Pid, nil
+}
+
 // exitCode polls the finished exec. The stream closes when the process exits,
 // but the daemon publishes the code a moment later.
 func (c *container) exitCode(ctx context.Context, execID string) (int, error) {
-	giveUp := time.Now().Add(c.exitBudget)
-	for {
-		info, err := c.api.execInspect(ctx, execID)
-		if err != nil {
-			return 0, c.wrap(err)
-		}
-		if !info.Running {
-			return info.ExitCode, nil
-		}
-		if time.Now().After(giveUp) {
-			return 0, fmt.Errorf("docker: exec %s still running after its output closed", execID)
-		}
-		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		case <-time.After(10 * time.Millisecond):
-		}
+	info, err := c.pollExec(ctx, execID, func(i execInfo) bool { return !i.Running },
+		fmt.Sprintf("docker: exec %s still running after its output closed", execID))
+	if err != nil {
+		return 0, c.wrap(err)
 	}
+	return info.ExitCode, nil
 }
 
 func (c *container) ReadFile(ctx context.Context, path string) ([]byte, error) {

@@ -1053,8 +1053,82 @@ func TestExecRefusesToInventAnExitCode(t *testing.T) {
 
 // The real-daemon proof that a command cannot kill the watchdog guarding it and
 // outrun or hide its deadline now lives in the shared contract suite, as
-// ExecDeadlineOutlivesTheCommandKillingItsGuards. It binds every backend there,
-// and this provider runs it in TestDockerProviderContract.
+// ExecCannotOutliveItsDeadlineUnreported. It binds every backend there, and this
+// provider runs it in TestDockerProviderContract.
+
+// One overrun the contract suite cannot stage against a real daemon: the
+// command exits during its own overrun probe, so the probe's `top` request and
+// the stream close race. Exec stops probing the instant the stream closes; if
+// the overrun confirmation rode that cancellation, the daemon's answer would be
+// read as "process gone" and a real overrun erased into a clean exit. Only a
+// fake daemon can hold a `top` request open across the stream close on demand.
+func TestOverrunSurvivesTheStreamClosingDuringItsProbe(t *testing.T) {
+	closeStream := make(chan struct{})
+	var closeOnce sync.Once
+	releaseStream := func() { closeOnce.Do(func() { close(closeStream) }) }
+
+	var mu sync.Mutex
+	var topCalls int
+	var streamClosed bool
+
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			io.WriteString(w, `{"Id":"e1"}`)
+
+		case r.URL.Path == "/exec/e1/start":
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-closeStream // hold the command's stream open until the probe fires
+			mu.Lock()
+			streamClosed = true
+			mu.Unlock()
+
+		case r.URL.Path == "/exec/e1/json":
+			// A pid while the stream is open (execPid), then the clean code the
+			// command chose once it has closed (exitCode).
+			mu.Lock()
+			done := streamClosed
+			mu.Unlock()
+			fmt.Fprintf(w, `{"Running":%t,"ExitCode":0,"Pid":%d}`, !done, fakeExecPid)
+
+		case strings.HasSuffix(r.URL.Path, "/top"):
+			mu.Lock()
+			topCalls++
+			n := topCalls
+			mu.Unlock()
+			if n >= 2 {
+				// The overrun probe. Close the command's stream so Exec stops
+				// probing, then block so that stop races this very request. The
+				// command was alive at this instant — it overran — so the honest
+				// answer below is "alive"; a backend that lets the stream close
+				// cancel this request never reaches it.
+				releaseStream()
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(300 * time.Millisecond):
+				}
+			}
+			fmt.Fprintf(w, `{"Titles":["PID"],"Processes":[["1"],["%d"]]}`, fakeExecPid)
+
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	// Registered after fakeDaemon's cleanup so it runs first (LIFO): the server
+	// will not shut down while the start handler is still holding the stream.
+	t.Cleanup(releaseStream)
+	c := p.attach("abc", "/workspace")
+
+	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "x", Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !res.TimedOut {
+		t.Errorf("a command that overran, then exited during its overrun probe, was reported finished: %+v", res)
+	}
+}
 
 func tarball(t *testing.T, header *tar.Header, body string) []byte {
 	t.Helper()

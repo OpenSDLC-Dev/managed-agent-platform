@@ -18,7 +18,7 @@ import (
 )
 
 // A hand-rolled slice of the Docker Engine API. The official client pulls in
-// the whole moby module tree for the nine endpoints below; this is the same
+// the whole moby module tree for the ten endpoints below; this is the same
 // HTTP, over the same socket, in one file.
 type apiClient struct {
 	http *http.Client
@@ -293,7 +293,7 @@ func (c *apiClient) processAlive(ctx context.Context, containerID string, pid in
 		Titles    []string   `json:"Titles"`
 		Processes [][]string `json:"Processes"`
 	}
-	err := c.getJSON(ctx, "/containers/"+containerID+"/top?ps_args=-eo+pid%2Cargs", &top)
+	err := c.getJSON(ctx, "/containers/"+containerID+"/top?ps_args=-eo+pid", &top)
 	if err != nil {
 		return false, err
 	}
