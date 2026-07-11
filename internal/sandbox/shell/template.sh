@@ -36,20 +36,27 @@ mkdir -p "$__map_snap" >/dev/null 2>&1
 # from temp-file renames: the marker is created only if every write succeeded, and
 # a snapshot without it is never committed, so a half-written one is never read.
 __map_save() {
-  local code=${1:-$?}
+  local code=${1:-$?} __map_opts_ok=0 __map_body_ok=0
 
   # Options are captured first, and in THIS shell. Two traps, both of which cost
   # `set -e` its persistence: capturing after the `set +e` below records
   # `set +o errexit` every time, and capturing through a command substitution
   # records it too — a subshell does not inherit errexit unless inherit_errexit
-  # is set, which by default it is not. `|| true` keeps a failed write from
-  # aborting the save while errexit is still on.
-  { shopt -p; set +o; } >"$__map_snap/opts" 2>/dev/null || true
+  # is set, which by default it is not. The `||` keeps a failed write from
+  # aborting the save while errexit is still on — but it RECORDS that failure
+  # rather than swallowing it, because a snapshot missing its options is an
+  # incomplete snapshot and must not be committed.
+  { shopt -p; set +o; } >"$__map_snap/opts" 2>/dev/null || __map_opts_ok=1
 
   set +e
-  # errexit inside the subshell is what gates the marker: any failing write aborts
-  # it, the subshell's status is non-zero, and `done` is never created. The
-  # subshell is a fork, so pwd/exports/functions/aliases are the parent's.
+  # errexit inside the subshell is what makes a failing write abort the rest, and
+  # the subshell's exit status is what gates the marker. The subshell has to be a
+  # command in its own right, its status read from `$?`: bash IGNORES errexit
+  # inside a compound command that is the left-hand side of `&&` or `||` — even an
+  # explicit `set -e` within it — so writing this as `( set -e; ... ) && : >done`
+  # would let a middle write fail, let the writes after it succeed, and create the
+  # marker anyway. The subshell is a fork, so pwd/exports/functions/aliases are
+  # the parent's.
   (
     set -e
     pwd >"$__map_snap/cwd"
@@ -78,7 +85,15 @@ __map_save() {
     done < <(compgen -A function)
 
     alias -p >"$__map_snap/aliases"
-  ) >/dev/null 2>&1 && : >"$__map_snap/done" 2>/dev/null
+  ) >/dev/null 2>&1
+  __map_body_ok=$?
+
+  # The marker, last and only if every write above succeeded — the options in this
+  # shell and the body in the subshell. It is what the caller checks before it
+  # commits, so an incomplete snapshot is simply never pointed at.
+  if [ "$__map_opts_ok" -eq 0 ] && [ "$__map_body_ok" -eq 0 ]; then
+    : >"$__map_snap/done" 2>/dev/null
+  fi
 
   return $code
 }

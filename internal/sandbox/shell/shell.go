@@ -24,10 +24,13 @@
 //   - Plain (non-exported) variables do not carry; exported ones do. Nothing in
 //     `declare` separates a user's plain variables from bash's own internals, so
 //     the snapshot draws the line at `export`.
-//   - Traps do not carry, and a command's EXIT trap fires at the end of that call
-//     rather than at session end (there is no session-long shell to end). A
-//     command that BOTH installs its own EXIT trap AND exits through it skips
-//     that call's snapshot.
+//   - Traps do not carry, and an EXIT trap fires at most once, within the call
+//     that installed it. It fires only if the command exits THROUGH it; a command
+//     that installs one and then returns normally has it discarded unfired,
+//     because the template clears the trap to run its own save. There is no
+//     session-long shell for a trap to fire at the end of either way. A command
+//     that both installs its own EXIT trap and exits through it also skips that
+//     call's snapshot — see the next divergence for what that costs.
 //   - A call whose shell never finishes its snapshot keeps the PREVIOUS call's
 //     state. Replacing the shell (`exec`), having it killed outright (`kill -9
 //     $$`, an OOM kill), and exiting through an EXIT trap of one's own all skip

@@ -150,10 +150,15 @@ func TestShell(t *testing.T) {
 
 	// A command that installs its own EXIT trap takes the only trap slot there is.
 	// The snapshot has to survive that, or one `trap ... EXIT` silently discards
-	// the whole call's state.
+	// the whole call's state. The trap itself is discarded UNFIRED when the command
+	// returns normally — the template clears it to run its own save — so an EXIT
+	// trap only ever fires for a command that exits through it.
 	t.Run("CommandsOwnExitTrapDoesNotLoseTheSnapshot", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
-		sh(`cd /tmp; export T=1; trap 'echo BYE' EXIT`, 0)
+		installed := sh(`cd /tmp; export T=1; trap 'echo BYE' EXIT`, 0)
+		if strings.Contains(installed.Stdout, "BYE") {
+			t.Errorf("stdout = %q — a normally-returning command's EXIT trap fired; the template clears it", installed.Stdout)
+		}
 		got := sh(`echo "[$(pwd)][${T:-unset}]"`, 0)
 		if strings.TrimSpace(got.Stdout) != "[/tmp][1]" {
 			t.Errorf("stdout = %q, want [/tmp][1] — a command's EXIT trap ate the snapshot", got.Stdout)
@@ -257,6 +262,13 @@ func TestShell(t *testing.T) {
 			{"ShellKilledOutright", `kill -9 $$`},
 			{"CommandExitsThroughItsOwnExitTrap", `trap 'echo bye' EXIT; exit 0`},
 			{"CommandSendsTheSaveNowhere", `export __map_snap=/nonexistent/pwned`},
+			// The save fails on ONE file and can still write the rest, including the
+			// marker — which is what a mid-save ENOSPC or EIO looks like. The marker
+			// must be gated on every write, not just on the last one: bash ignores
+			// errexit inside a compound command on the left of `&&`, so the obvious
+			// `( set -e; ... ) && : >done` creates the marker anyway.
+			{"SaveCannotWriteOneOfItsFiles", `mkdir "$__map_snap/env"`},
+			{"SaveCannotWriteTheOptions", `mkdir "$__map_snap/opts"`},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				sh, _ := newShell(t, sb)
