@@ -14,6 +14,12 @@ import (
 // again, so a worker that dies between poll and ack never strands its item.
 const defaultReclaimMs = 5000
 
+// maxReclaimMs caps reclaim_older_than_ms. Beyond a sane bound the value is
+// meaningless (no worker waits ten minutes to ack), and a caller-supplied
+// int large enough to overflow time.Duration would wrap negative — a past
+// reservation that defeats the soft handout. Clamping closes both.
+const maxReclaimMs = 600_000 // 10 minutes
+
 // workData is a work item's payload. For every self-hosted work item it is a
 // reference to the session the worker attaches to — the tool_use events the
 // worker runs live on that session's event log, and it posts results back
@@ -86,15 +92,20 @@ func (s *server) pollWork(r *http.Request) (any, error) {
 	return toWire(w), nil
 }
 
-// reclaimWindow reads reclaim_older_than_ms (default 5000). A non-positive or
-// unparseable value falls back to the default rather than erroring — the wire
-// treats it as an optional tuning knob, not a validated field.
+// reclaimWindow reads reclaim_older_than_ms (default 5000, clamped to
+// maxReclaimMs). A non-positive or unparseable value falls back to the default
+// rather than erroring — the wire treats it as an optional tuning knob, not a
+// validated field — and an over-large value is clamped so it can never overflow
+// time.Duration into a past (negative) reservation.
 func reclaimWindow(r *http.Request) time.Duration {
 	ms := defaultReclaimMs
 	if v := r.URL.Query().Get("reclaim_older_than_ms"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			ms = n
 		}
+	}
+	if ms > maxReclaimMs {
+		ms = maxReclaimMs
 	}
 	return time.Duration(ms) * time.Millisecond
 }

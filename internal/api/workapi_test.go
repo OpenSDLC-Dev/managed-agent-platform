@@ -166,3 +166,61 @@ func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 	_ = json.Unmarshal(raw, &body)
 	wantErr(t, res.StatusCode, body, http.StatusNotFound, "not_found_error")
 }
+
+// TestWorkPollClampsHugeReclaim pins that an over-large reclaim_older_than_ms is
+// clamped rather than overflowing time.Duration into a past reservation: after
+// a poll hands out the item, an immediate second poll must still see it reserved
+// (null), not re-hand it out.
+func TestWorkPollClampsHugeReclaim(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-clamp"
+	envID, sessionID := selfHostedWorker(t, s, key)
+	q := queue.New(s.pool)
+	if _, err := q.Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	auth := map[string]string{"Authorization": "Bearer " + key}
+	path := "/v1/environments/" + envID + "/work/poll?reclaim_older_than_ms=9223372036854775807"
+	res := s.doRaw(http.MethodGet, path, nil, auth)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("first poll status = %d, want 200", res.StatusCode)
+	}
+	// If the huge value had overflowed into a negative lease, the reservation
+	// would already be in the past and this poll would re-hand-out the item.
+	res2, raw2 := s.poll(t, envID, auth)
+	if res2.StatusCode != http.StatusOK {
+		t.Fatalf("second poll status = %d, want 200", res2.StatusCode)
+	}
+	if strings.TrimSpace(raw2) != "null" {
+		t.Fatalf("second poll re-handed-out a reserved item (reclaim overflow not clamped): %q", raw2)
+	}
+}
+
+// TestUnauthenticatedRequestsAreNotRedirectedBeforeAuth pins that auth runs
+// before any ServeMux redirect: an unauthenticated request to a subtree-root or
+// a path-cleanable URL gets the 401 wire envelope, never a bare 3xx redirect.
+func TestUnauthenticatedRequestsAreNotRedirectedBeforeAuth(t *testing.T) {
+	s := newTestServer(t)
+	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	for _, path := range []string{
+		"/v1/environments/env_x/work", // work subtree root, no trailing slash
+		"/v1//agents",                 // path-cleaning redirect candidate
+	} {
+		req, err := http.NewRequest(http.MethodGet, s.url+path, nil)
+		if err != nil {
+			t.Fatalf("new request %s: %v", path, err)
+		}
+		res, err := noFollow.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("unauthenticated %s: status %d, want 401 (auth must precede any redirect)", path, res.StatusCode)
+		}
+	}
+}

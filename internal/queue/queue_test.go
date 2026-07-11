@@ -415,3 +415,55 @@ func TestPollIsEnvironmentScoped(t *testing.T) {
 		t.Errorf("work environment = %s, want %s", w.EnvironmentID, envA)
 	}
 }
+
+// TestClaimAndPollAreExclusiveByEnvironmentKind pins the cloud/self_hosted
+// split at the queue: the executor's Claim(tool_exec) serves only cloud
+// environments and Poll serves only self_hosted, so a self_hosted item a worker
+// polls is never also run by the executor. model_turn is claimed for every
+// environment — the brain runs on the platform regardless of sandbox location.
+func TestClaimAndPollAreExclusiveByEnvironmentKind(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	cloudSess, cloudEnv := pgtest.NewSession(t, pool, "cloud")
+	selfSess, selfEnv := pgtest.NewSession(t, pool, "self_hosted")
+	q := queue.New(pool)
+
+	// A self_hosted tool_exec item: Poll serves it, Claim never does.
+	if _, err := q.Enqueue(ctx, pool, selfEnv, selfSess, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	if it, err := q.Claim(ctx, queue.ToolExec, time.Minute); err != nil || it != nil {
+		t.Fatalf("executor claimed a self_hosted tool_exec item: %+v %v", it, err)
+	}
+	if w, err := q.Poll(ctx, selfEnv, time.Minute); err != nil || w == nil {
+		t.Fatalf("poll did not serve the self_hosted item: %+v %v", w, err)
+	}
+
+	// A cloud tool_exec item: Claim serves it, Poll never does.
+	if _, err := q.Enqueue(ctx, pool, cloudEnv, cloudSess, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := q.Poll(ctx, cloudEnv, time.Minute); err != nil || w != nil {
+		t.Fatalf("poll served a cloud tool_exec item: %+v %v", w, err)
+	}
+	it, err := q.Claim(ctx, queue.ToolExec, time.Minute)
+	if err != nil || it == nil {
+		t.Fatalf("executor did not claim the cloud item: %+v %v", it, err)
+	}
+	if it.EnvironmentID != cloudEnv {
+		t.Errorf("claimed item environment = %s, want the cloud env %s", it.EnvironmentID, cloudEnv)
+	}
+
+	// model_turn is claimed regardless of environment kind (the brain is not
+	// split): a self_hosted session's model turn still runs on the platform.
+	if _, err := q.Enqueue(ctx, pool, selfEnv, selfSess, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	mt, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || mt == nil {
+		t.Fatalf("brain did not claim a self_hosted model_turn: %+v %v", mt, err)
+	}
+	if mt.EnvironmentID != selfEnv {
+		t.Errorf("model_turn env = %s, want %s", mt.EnvironmentID, selfEnv)
+	}
+}

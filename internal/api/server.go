@@ -8,6 +8,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -72,25 +73,55 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 		})
 	}
 
-	// The work API is a separate auth domain: BYOC workers authenticate with an
-	// Authorization: Bearer environment key, not the management x-api-key. It
-	// lives on its own mux so the two auth middlewares never overlap, and the
-	// top router hands the /work subtree to it and everything else to the
-	// management mux.
-	work := http.NewServeMux()
-	work.HandleFunc("GET /v1/environments/{id}/work/poll", s.handle(s.pollWork))
-	work.HandleFunc("/v1/environments/{id}/work/poll", func(w http.ResponseWriter, r *http.Request) {
+	// The work API is a separate auth domain — BYOC workers authenticate with an
+	// Authorization: Bearer environment key, not the management x-api-key — but
+	// it shares this one mux with the management routes so that auth (dispatched
+	// per path below) runs before any ServeMux path-cleaning or subtree-slash
+	// redirect. Splitting the routes across nested muxes let those redirects
+	// answer an unauthenticated request before auth ran.
+	mux.HandleFunc("GET /v1/environments/{id}/work/poll", s.handle(s.pollWork))
+	mux.HandleFunc("/v1/environments/{id}/work/poll", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, methodNotAllowed(r))
 	})
-	work.HandleFunc("/v1/environments/{id}/work/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/environments/{id}/work/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errNotFound("no such endpoint: %s", r.URL.Path))
 	})
 
-	top := http.NewServeMux()
-	top.Handle("/v1/environments/{id}/work/", requireEnvironmentKey(pool, work))
-	top.Handle("/", requireAPIKey(pool, mux))
+	return withRequestID(withTracing(dispatchAuth(pool, mux)))
+}
 
-	return withRequestID(withTracing(top))
+// dispatchAuth picks the auth scheme by path and runs it before the router, so
+// no request reaches a handler — or a ServeMux redirect — unauthenticated. Work
+// API paths take the Authorization: Bearer environment key; everything else
+// takes the management x-api-key.
+func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
+	work := requireEnvironmentKey(pool, next)
+	mgmt := requireAPIKey(pool, next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isWorkPath(r.URL.Path) {
+			work.ServeHTTP(w, r)
+			return
+		}
+		mgmt.ServeHTTP(w, r)
+	})
+}
+
+// isWorkPath reports whether p is under a work API route:
+// /v1/environments/{id}/work or /v1/environments/{id}/work/... . It matches the
+// raw request path (before any redirect) so the auth choice never depends on
+// the router. /v1/environments/{id} and .../{id}/archive are management paths.
+func isWorkPath(p string) bool {
+	const prefix = "/v1/environments/"
+	if !strings.HasPrefix(p, prefix) {
+		return false
+	}
+	rest := p[len(prefix):] // "{id}/work..."
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		return false // no segment after the environment id
+	}
+	rest = rest[slash+1:] // "work..."
+	return rest == "work" || strings.HasPrefix(rest, "work/")
 }
 
 // methodNotAllowed is the wire 405 for a known path reached with an

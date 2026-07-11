@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -28,11 +29,20 @@ func EnsureEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, environmentID
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx,
+	// Insert or un-revoke this value. A key value is bound to one environment
+	// for life: on conflict we never re-point it (rebinding environment_id would
+	// silently move a live worker credential to a different environment). If the
+	// value already belongs to another environment, reject rather than escalate.
+	var boundEnv string
+	if err := tx.QueryRow(ctx,
 		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)
-		 ON CONFLICT (key_hash) DO UPDATE SET revoked_at = NULL, environment_id = EXCLUDED.environment_id`,
-		domain.NewID("envkey").String(), environmentID, hash); err != nil {
+		 ON CONFLICT (key_hash) DO UPDATE SET revoked_at = NULL
+		 RETURNING environment_id`,
+		domain.NewID("envkey").String(), environmentID, hash).Scan(&boundEnv); err != nil {
 		return err
+	}
+	if boundEnv != environmentID {
+		return fmt.Errorf("api: environment key value is already bound to a different environment")
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE environment_keys SET revoked_at = now()

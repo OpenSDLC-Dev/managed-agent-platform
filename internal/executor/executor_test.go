@@ -140,7 +140,9 @@ func newHarness(t *testing.T, sb *fakeSandbox) *harness {
 func newHarnessWith(t *testing.T, provider sandbox.Provider, cfg Config) *harness {
 	t.Helper()
 	pool := pgtest.NewPool(t)
-	sid, envID := pgtest.NewSession(t, pool, "self_hosted")
+	// The executor is the cloud hands: it only claims tool_exec work for cloud
+	// environments (self_hosted work is served by a BYOC worker via Poll).
+	sid, envID := pgtest.NewSession(t, pool, "cloud")
 	if _, err := pool.Exec(context.Background(),
 		`UPDATE sessions SET status = 'running' WHERE id = $1`, sid.String()); err != nil {
 		t.Fatal(err)
@@ -607,9 +609,11 @@ func TestStaleSessionDrainsWithoutRunning(t *testing.T) {
 }
 
 func TestUserToolResultCountsAsAnswered(t *testing.T) {
-	// A self_hosted BYOC worker answers an agent.tool_use with user.tool_result.
-	// If the platform executor then claims the item, it must recognize the tool
-	// as answered and not re-run it or append a duplicate result.
+	// A tool_use already carries a result (here a user.tool_result) when the
+	// executor claims its item — e.g. after a reclaim following a crash. The
+	// executor must recognize the tool as answered and not re-run it or append a
+	// duplicate result. (Cloud and self_hosted queues no longer overlap, so this
+	// is the residual crash-recovery defense, not a cross-path race.)
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
 	uses := h.suspend(t, writeUse("out.txt", "hi"))

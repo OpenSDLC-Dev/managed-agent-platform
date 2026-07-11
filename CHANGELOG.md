@@ -27,6 +27,23 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   PR's `ack` transitions it), with `reclaim_older_than_ms` re-offering work a dead
   worker never acknowledged. An empty queue is `200` with a `null` body.
 
+  This PR also lands the cloud/self_hosted split **at the queue** (its worker-consuming
+  half is a later PR): the executor's `Claim(tool_exec)` now serves only `cloud`
+  environments and `Poll` only `self_hosted`, so a work item a BYOC worker has polled
+  can never also be run by the platform executor. `Claim(model_turn)` stays unscoped —
+  the brain runs the model on the platform for every environment. This resolves the
+  slice-6 deferral where the executor claimed every environment's `tool_exec` work.
+
+  Review hardening: a key value is bound to one environment for life (re-minting it for
+  a different environment is rejected, never a silent re-point); `reclaim_older_than_ms`
+  is clamped so an over-large value can't overflow `time.Duration` into a past
+  reservation; and the work and management routes share one mux behind a path-dispatched
+  auth layer, so authentication always runs before any `ServeMux` redirect (an
+  unauthenticated request gets the `401` wire envelope, never a bare `3xx`). Known
+  limitation, unchanged from `EnsureAPIKey`: concurrent key mints for the *same*
+  environment can briefly leave two live keys (same-environment only); a partial unique
+  index hardening both tables is deferred.
+
   Deliberate divergences/assumptions, each flagged for a recording against a real
   managed-agents endpoint: environment-key **issuance** has no public wire endpoint
   (the reference mints keys in its console), so `EnsureEnvironmentKey` is the

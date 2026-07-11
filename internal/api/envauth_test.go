@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
@@ -69,5 +70,35 @@ func TestEnsureEnvironmentKeyRotatesPerEnvironment(t *testing.T) {
 	}
 	if liveForA != 1 {
 		t.Fatalf("env B key disturbed by env A rotation: live = %d, want 1", liveForA)
+	}
+}
+
+// TestEnsureEnvironmentKeyRejectsCrossEnvironmentReuse pins that a key value is
+// bound to one environment for life: re-minting the same value for a different
+// environment is rejected, and — critically — does not silently move the live
+// credential, so the value keeps authenticating only its original environment.
+func TestEnsureEnvironmentKeyRejectsCrossEnvironmentReuse(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	envA := createEnvironment(t, s, map[string]any{"name": "a", "config": map[string]any{"type": "self_hosted"}})
+	envB := createEnvironment(t, s, map[string]any{"name": "b", "config": map[string]any{"type": "self_hosted"}})
+	idA, _ := envA["id"].(string)
+	idB, _ := envB["id"].(string)
+
+	if err := api.EnsureEnvironmentKey(ctx, s.pool, idA, "shared-value"); err != nil {
+		t.Fatalf("mint for A: %v", err)
+	}
+	if err := api.EnsureEnvironmentKey(ctx, s.pool, idB, "shared-value"); err == nil {
+		t.Fatal("re-minting env A's key value for env B was accepted — a key must bind to one environment")
+	}
+
+	// The value still authenticates env A, and does NOT authenticate env B.
+	auth := map[string]string{"Authorization": "Bearer shared-value"}
+	if res, _ := s.poll(t, idA, auth); res.StatusCode != http.StatusOK {
+		t.Errorf("shared-value no longer authenticates its original env A: status %d", res.StatusCode)
+	}
+	res, raw := s.poll(t, idB, auth)
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("shared-value authenticated env B (escalation): status %d, body %q", res.StatusCode, raw)
 	}
 }

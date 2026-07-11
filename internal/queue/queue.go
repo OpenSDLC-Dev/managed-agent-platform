@@ -101,16 +101,25 @@ func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, 
 // Claim leases the oldest available item of the kind: queued items first-come
 // first-served, plus active items whose lease expired (their claimant died).
 // It returns nil with no error when there is nothing to do.
+//
+// tool_exec claims are scoped to cloud environments — the platform-managed
+// executor is the cloud hands. A self_hosted environment's tool_exec work is
+// served only by Poll (a BYOC worker), never Claim, so an item a worker has
+// polled can never also be run by the executor. model_turn work is claimed for
+// every environment: the brain (model calls) runs on the platform regardless of
+// where a session's sandbox lives.
 func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item, error) {
 	var it Item
 	var prevState string
 	err := q.pool.QueryRow(ctx,
 		`WITH picked AS (
-		    SELECT id, state FROM work_items
-		    WHERE kind = $1
-		      AND (state = 'queued' OR (state = 'active' AND lease_expires_at < now()))
-		    ORDER BY created_at
-		    FOR UPDATE SKIP LOCKED
+		    SELECT w.id, w.state FROM work_items w
+		    JOIN environments e ON e.id = w.environment_id
+		    WHERE w.kind = $1
+		      AND (w.kind = 'model_turn' OR e.kind = 'cloud')
+		      AND (w.state = 'queued' OR (w.state = 'active' AND w.lease_expires_at < now()))
+		    ORDER BY w.created_at
+		    FOR UPDATE OF w SKIP LOCKED
 		    LIMIT 1
 		 )
 		 UPDATE work_items w
@@ -140,15 +149,22 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // reclaim_older_than_ms). It returns nil with no error when the environment's
 // tool_exec queue is empty. model_turn work drives the platform's own brain and
 // is never offered to a worker.
+//
+// Poll serves only self_hosted environments — the mirror of Claim scoping
+// tool_exec to cloud. The two are therefore mutually exclusive by environment
+// kind, so an item a worker has polled is never also run by the executor even
+// if an environment key were misconfigured against a cloud environment.
 func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration) (*Work, error) {
 	var w Work
 	err := q.pool.QueryRow(ctx,
 		`WITH picked AS (
-		    SELECT id FROM work_items
-		    WHERE environment_id = $1 AND kind = 'tool_exec' AND state = 'queued'
-		      AND (lease_expires_at IS NULL OR lease_expires_at < now())
-		    ORDER BY created_at
-		    FOR UPDATE SKIP LOCKED
+		    SELECT w.id FROM work_items w
+		    JOIN environments e ON e.id = w.environment_id
+		    WHERE w.environment_id = $1 AND e.kind = 'self_hosted'
+		      AND w.kind = 'tool_exec' AND w.state = 'queued'
+		      AND (w.lease_expires_at IS NULL OR w.lease_expires_at < now())
+		    ORDER BY w.created_at
+		    FOR UPDATE OF w SKIP LOCKED
 		    LIMIT 1
 		 )
 		 UPDATE work_items t
