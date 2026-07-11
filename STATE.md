@@ -10,7 +10,7 @@ Running record of where this project actually stands, so work can resume cleanly
 
 - **Last updated:** 2026-07-12
 - **Phase:** The platform runs tools end-to-end **with a human-in-the-loop gate**. A `user.message` sent by the real `ant` CLI flips the session to running; the brain claims the turn, replays the log against the configured model endpoint, and offers the model the built-in `agent_toolset` alongside custom tools. When the model calls a built-in tool the brain resolves its permission policy: an `always_allow` tool is enqueued as a `tool_exec` item immediately (executor runs it in the session's Docker sandbox, appends `agent.tool_result`, wakes the brain), while an `always_ask` tool suspends the turn `idle` with a `requires_action` stop_reason and runs **nothing** until a `user.tool_confirmation` arrives — allow resumes and runs it, deny answers it with an error result. Custom (client-executed) tools still round-trip as `agent.custom_tool_use` / `user.custom_tool_result`. The wire work API (BYOC workers) is what remains before v1.
-- **Current slice:** 7 done — permission policies and the `requires_action` / `user.tool_confirmation` approval round-trip landed, closing the human-approval half of the v1 goal loop. Slice 8 (the wire work API + distributable BYOC worker) is next.
+- **Current slice:** 8 in progress. PR A landed — the work API's auth foundation and its first endpoint: BYOC workers authenticate with an `Authorization: Bearer` environment key (scoped to one environment), and `GET /v1/environments/{id}/work/poll` hands out the oldest queued `tool_exec` item as a wire `BetaSelfHostedWork` referencing the session to attach to. PR B (ack/heartbeat/stop + get/list/stats) and PR C (distributable BYOC worker + cloud/self_hosted claim split + `traceparent` propagation) remain. Slice 7 (permission policies + the `user.tool_confirmation` round-trip) is done.
 - **Build status:** `go build ./...`, `go vet ./...`, `go test ./...` all green.
 
 ## Reference documents
@@ -41,7 +41,7 @@ The model backend must be pointable at either an Anthropic-protocol endpoint or 
 | 5 | Brain orchestration loop (replay → assemble provider request → write Anthropic-native events). No adk runtime. | ✅ Done |
 | 6 | tool-exec queue (Postgres `FOR UPDATE SKIP LOCKED`) + executor + Docker sandbox provider + built-in toolset really executing inside the sandbox | ✅ Done |
 | 7 | Permission policies + `requires_action` / `user.tool_confirmation` approval round-trip | ✅ Done |
-| 8 | Wire-compatible work API (`/work/poll`, `/ack`, `/heartbeat`, `/stop`) + distributable BYOC worker + `traceparent` propagated through work items | ⬜ Not started |
+| 8 | Wire-compatible work API (`/work/poll`, `/ack`, `/heartbeat`, `/stop`) + distributable BYOC worker + `traceparent` propagated through work items | 🚧 In progress — PR A landed (environment-key auth + `/work/poll`); PR B (ack/heartbeat/stop + get/list/stats) and PR C (BYOC worker + cloud/self_hosted split + traceparent) remain |
 | 9 | Kubernetes sandbox provider + Helm chart (with OTLP endpoint values) | ⬜ Not started |
 
 ---
@@ -369,6 +369,18 @@ An `always_ask` built-in tool now suspends the turn for one human approval befor
 The verifier's remaining notes were non-blocking: the new `events/toolflow.go` validators are covered through the `internal/api` confirmation tests (the same convention as the slice-5/6 tool-flow helpers in that file), and an end-to-end `ant`-CLI smoke of the confirmation path needs a live model to non-deterministically call a gated tool — the DB-backed integration tests exercise the same handler and a real `brain.RunOnce`.
 
 **Slice-6 seam closed:** `toolset/definitions.go`'s comment that "`permission_policy` is read by nobody yet; policies … are slice 7" is now false and updated — `Policies` reads it.
+
+### work API — environment-key auth + `/work/poll` (slice 8, first part)
+
+BYOC workers speak a **second auth domain**: `Authorization: Bearer <environment key>`, not the management `x-api-key`. `EnsureEnvironmentKey` registers one live worker credential per environment (hash-only, revoke-others-on-re-mint — the `EnsureAPIKey` shape, scoped by `environment_id` instead of a logical name); `requireEnvironmentKey` resolves a Bearer token to its environment and the poll handler asserts that environment matches the path's `{id}`. The two auth middlewares never overlap because the work routes live on their own mux and the top router hands the `/v1/environments/{id}/work/` subtree to it, everything else to the management mux. `GET …/work/poll` returns the oldest queued `tool_exec` item for the environment as a `BetaSelfHostedWork` whose `data` is a reference to the **session** the worker attaches to (`{id:"session_…",type:"session"}`) — the work item wraps a session, not a tool_use, and results go back to the session events API (`user.tool_result`), never to the work API. `queue.Poll` is a **soft reservation**: unlike the executor's `Claim` (`queued→active` lease), the polled item stays `queued` and a later `ack` transitions it; the reservation is a lease pushed out by `reclaim_older_than_ms`, so a worker that dies between poll and ack strands nothing.
+
+**Slice-8 part-1 decisions (documented divergences/assumptions, each to confirm against a real managed-agents recording):**
+- **Environment-key issuance is the platform's own primitive.** The reference mints environment keys in its console; neither the SDK nor the `ant` CLI exposes a wire endpoint that creates one (the CLI worker only *consumes* `--environment-key`). A self-hostable platform must provision them, so `EnsureEnvironmentKey` owns that shape. The *consuming* side (Bearer → environment) stays wire-locked by the real `ant beta:worker`.
+- **Empty poll is `200` + `null`.** The reference client reads "no work" from either a nil body or an empty id; `204` is equally plausible server-side. Both are client-compatible; `null` keeps the endpoint's success status uniform at `200`.
+- **`block_ms` is accepted but the poll is non-blocking** — it returns immediately, and the reference client already spaces empty polls with a client-side jitter sleep, so the protocol is unchanged (only chattier). True long-poll (hold the request open on a `work_items` NOTIFY) is deferred.
+- **Unreached lifecycle timestamps render as `null`.** A queued item has not been acknowledged/started/stopped and has no heartbeat, so `acknowledged_at`/`started_at`/`stop_requested_at`/`stopped_at`/`latest_heartbeat_at` are `null` (the SDK's string-typed, `api:"required"` fields tolerate null). Columns for these arrive with PR B, where transitions populate them.
+- **A Bearer key for the wrong environment is `401`**, not `403`/`404` — the credential simply does not authenticate for this environment (no `permission_error` type exists in the envelope; the poller treats any 4xx as a permanent stop regardless).
+- **`traceparent` propagation is deferred to PR C.** The plan requires it to reach the BYOC worker through the work item, but the SDK work schema has no such field; the resolution (a `/work/poll` response header the real worker ignores and ours reads) lands with the worker.
 
 ---
 

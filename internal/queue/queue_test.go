@@ -338,3 +338,80 @@ func TestRequeueHandsTheItemBack(t *testing.T) {
 		t.Errorf("Complete with the fresh lease: %v", err)
 	}
 }
+
+// TestPollReservesWithoutTransition pins the wire work API's poll: it hands out
+// the oldest queued tool_exec item for one environment as a soft reservation —
+// the item stays queued (ack transitions it) and a second poll inside the
+// reclaim window will not re-hand it out, but once the reservation lapses a
+// later poll reclaims it. Poll is environment-scoped and tool_exec-only.
+func TestPollReservesWithoutTransition(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "self_hosted")
+	q := queue.New(pool)
+
+	// A model_turn item on the same environment is never handed to a worker.
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	// Empty of tool_exec work: poll returns nothing.
+	if w, err := q.Poll(ctx, envID, time.Minute); err != nil || w != nil {
+		t.Fatalf("poll with only model_turn work: %+v %v", w, err)
+	}
+
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	w, err := q.Poll(ctx, envID, 50*time.Millisecond)
+	if err != nil || w == nil {
+		t.Fatalf("poll: %+v %v", w, err)
+	}
+	if w.SessionID != sessionID || w.EnvironmentID != envID {
+		t.Errorf("work = %+v", w)
+	}
+	if w.State != "queued" {
+		t.Errorf("polled work state = %q, want queued (ack transitions it)", w.State)
+	}
+	if !domain.ID(w.ID).HasPrefix("work") {
+		t.Errorf("work id %q not work_-prefixed", w.ID)
+	}
+
+	// Reserved: a second poll inside the window hands out nothing.
+	if got, err := q.Poll(ctx, envID, time.Minute); err != nil || got != nil {
+		t.Fatalf("poll inside reclaim window: %+v %v", got, err)
+	}
+	// Reservation lapses: a later poll reclaims the same still-queued item.
+	time.Sleep(60 * time.Millisecond)
+	re, err := q.Poll(ctx, envID, time.Minute)
+	if err != nil || re == nil {
+		t.Fatalf("poll after reclaim window: %+v %v", re, err)
+	}
+	if re.ID != w.ID {
+		t.Errorf("reclaimed a different item: %s vs %s", re.ID, w.ID)
+	}
+}
+
+// TestPollIsEnvironmentScoped pins that a poll only ever hands out its own
+// environment's work — the Bearer key is environment-scoped, so one
+// environment's worker must never see another's queue.
+func TestPollIsEnvironmentScoped(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessA, envA := pgtest.NewSession(t, pool, "self_hosted")
+	_, envB := pgtest.NewSession(t, pool, "self_hosted")
+	q := queue.New(pool)
+
+	if _, err := q.Enqueue(ctx, pool, envA, sessA, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := q.Poll(ctx, envB, time.Minute); err != nil || w != nil {
+		t.Fatalf("poll env B saw env A's work: %+v %v", w, err)
+	}
+	w, err := q.Poll(ctx, envA, time.Minute)
+	if err != nil || w == nil {
+		t.Fatalf("poll env A: %+v %v", w, err)
+	}
+	if w.EnvironmentID != envA {
+		t.Errorf("work environment = %s, want %s", w.EnvironmentID, envA)
+	}
+}

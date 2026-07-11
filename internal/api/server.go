@@ -68,12 +68,36 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 		"/v1/sessions/{id}/events", "/v1/sessions/{id}/events/stream",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, r, &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest,
-				"method " + r.Method + " is not allowed on " + r.URL.Path})
+			writeError(w, r, methodNotAllowed(r))
 		})
 	}
 
-	return withRequestID(withTracing(requireAPIKey(pool, mux)))
+	// The work API is a separate auth domain: BYOC workers authenticate with an
+	// Authorization: Bearer environment key, not the management x-api-key. It
+	// lives on its own mux so the two auth middlewares never overlap, and the
+	// top router hands the /work subtree to it and everything else to the
+	// management mux.
+	work := http.NewServeMux()
+	work.HandleFunc("GET /v1/environments/{id}/work/poll", s.handle(s.pollWork))
+	work.HandleFunc("/v1/environments/{id}/work/poll", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, r, methodNotAllowed(r))
+	})
+	work.HandleFunc("/v1/environments/{id}/work/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, r, errNotFound("no such endpoint: %s", r.URL.Path))
+	})
+
+	top := http.NewServeMux()
+	top.Handle("/v1/environments/{id}/work/", requireEnvironmentKey(pool, work))
+	top.Handle("/", requireAPIKey(pool, mux))
+
+	return withRequestID(withTracing(top))
+}
+
+// methodNotAllowed is the wire 405 for a known path reached with an
+// unsupported method.
+func methodNotAllowed(r *http.Request) *apiError {
+	return &apiError{http.StatusMethodNotAllowed, errTypeInvalidRequest,
+		"method " + r.Method + " is not allowed on " + r.URL.Path}
 }
 
 // handle adapts a typed handler to http.HandlerFunc: JSON out, error envelope
