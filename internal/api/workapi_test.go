@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -195,6 +196,205 @@ func TestWorkPollClampsHugeReclaim(t *testing.T) {
 	}
 	if strings.TrimSpace(raw2) != "null" {
 		t.Fatalf("second poll re-handed-out a reserved item (reclaim overflow not clamped): %q", raw2)
+	}
+}
+
+// enqueueAndPoll enqueues a tool_exec item for the session and polls it out over
+// HTTP as the worker would, returning its work id.
+func (s *tserver) enqueueAndPoll(t *testing.T, envID, sessionID, key string) string {
+	t.Helper()
+	q := queue.New(s.pool)
+	if _, err := q.Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	res, raw := s.poll(t, envID, map[string]string{"Authorization": "Bearer " + key})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("poll status = %d (body %q)", res.StatusCode, raw)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		t.Fatalf("decode poll: %v (body %q)", err, raw)
+	}
+	id, _ := body["id"].(string)
+	if id == "" {
+		t.Fatalf("poll returned no work id: %q", raw)
+	}
+	return id
+}
+
+// workReq issues an authenticated work-API request and returns the response, the
+// decoded JSON object (nil when the body is not a JSON object, e.g. a 204), and
+// the raw body.
+func (s *tserver) workReq(t *testing.T, method, path, key string, body any) (*http.Response, map[string]any, string) {
+	t.Helper()
+	res := s.doRaw(method, path, body, map[string]string{"Authorization": "Bearer " + key})
+	raw, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	var obj map[string]any
+	_ = json.Unmarshal(raw, &obj)
+	return res, obj, string(raw)
+}
+
+// TestWorkGetReturnsItem pins GET .../work/{work_id}: it returns the full
+// BetaSelfHostedWork wire shape for a polled (still-queued) item, and 404 for an
+// unknown id.
+func TestWorkGetReturnsItem(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-get"
+	envID, sessionID := selfHostedWorker(t, s, key)
+	workID := s.enqueueAndPoll(t, envID, sessionID, key)
+
+	res, body, raw := s.workReq(t, http.MethodGet, "/v1/environments/"+envID+"/work/"+workID, key, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("get status = %d, want 200 (body %q)", res.StatusCode, raw)
+	}
+	wantFields(t, body,
+		"id", "acknowledged_at", "created_at", "data", "environment_id",
+		"latest_heartbeat_at", "metadata", "started_at", "state", "stop_requested_at",
+		"stopped_at", "type")
+	if body["id"] != workID || body["state"] != "queued" || body["type"] != "work" {
+		t.Errorf("get = %v, want id %s / queued / work", body, workID)
+	}
+
+	res, body, _ = s.workReq(t, http.MethodGet, "/v1/environments/"+envID+"/work/"+domain.NewID("work").String(), key, nil)
+	wantErr(t, res.StatusCode, body, http.StatusNotFound, "not_found_error")
+}
+
+// TestWorkAckTransitionsToStarting pins POST .../work/{work_id}/ack: it advances
+// a polled item queued → starting, stamps acknowledged_at, and echoes the wire
+// item.
+func TestWorkAckTransitionsToStarting(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-ack"
+	envID, sessionID := selfHostedWorker(t, s, key)
+	workID := s.enqueueAndPoll(t, envID, sessionID, key)
+
+	res, body, raw := s.workReq(t, http.MethodPost, "/v1/environments/"+envID+"/work/"+workID+"/ack", key, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("ack status = %d, want 200 (body %q)", res.StatusCode, raw)
+	}
+	if body["state"] != "starting" {
+		t.Errorf("state after ack = %v, want starting", body["state"])
+	}
+	if body["acknowledged_at"] == nil {
+		t.Error("acknowledged_at not set after ack")
+	}
+	if body["type"] != "work" {
+		t.Errorf("type = %v, want work", body["type"])
+	}
+}
+
+// TestWorkHeartbeatClaimsLeaseAndExtends pins POST .../work/{work_id}/heartbeat:
+// the wire heartbeat response shape, the NO_HEARTBEAT claim (→ active), the
+// echo-to-extend round trip with desired_ttl_seconds clamping, a missing
+// precondition (400), and a mismatch (412).
+func TestWorkHeartbeatClaimsLeaseAndExtends(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-hb"
+	envID, sessionID := selfHostedWorker(t, s, key)
+	workID := s.enqueueAndPoll(t, envID, sessionID, key)
+	base := "/v1/environments/" + envID + "/work/" + workID + "/heartbeat"
+	if _, _, raw := s.workReq(t, http.MethodPost, "/v1/environments/"+envID+"/work/"+workID+"/ack", key, nil); raw == "" {
+		t.Fatal("ack returned empty body")
+	}
+
+	// First heartbeat claims the lease: starting → active, full wire shape.
+	res, body, raw := s.workReq(t, http.MethodPost, base+"?expected_last_heartbeat=NO_HEARTBEAT", key, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("claim heartbeat status = %d, want 200 (body %q)", res.StatusCode, raw)
+	}
+	wantFields(t, body, "last_heartbeat", "lease_extended", "state", "ttl_seconds", "type")
+	if body["state"] != "active" || body["lease_extended"] != true || body["type"] != "work_heartbeat" {
+		t.Errorf("claim heartbeat = %v, want active/extended/work_heartbeat", body)
+	}
+	if body["ttl_seconds"].(float64) != 30 {
+		t.Errorf("ttl_seconds = %v, want 30 (default)", body["ttl_seconds"])
+	}
+	prev, _ := body["last_heartbeat"].(string)
+	if prev == "" {
+		t.Fatal("claim heartbeat returned no last_heartbeat to echo")
+	}
+
+	// Echo the server's value to extend; an over-large TTL is clamped to the max.
+	res, body, raw = s.workReq(t, http.MethodPost, base+"?expected_last_heartbeat="+url.QueryEscape(prev)+"&desired_ttl_seconds=100000", key, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("extend heartbeat status = %d, want 200 (body %q)", res.StatusCode, raw)
+	}
+	if body["lease_extended"] != true || body["ttl_seconds"].(float64) != 300 {
+		t.Errorf("extend heartbeat = %v, want extended with ttl clamped to 300", body)
+	}
+
+	// A missing precondition is a 400; the superseded value is now a 412.
+	res, body, _ = s.workReq(t, http.MethodPost, base, key, nil)
+	wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
+	res, body, _ = s.workReq(t, http.MethodPost, base+"?expected_last_heartbeat="+url.QueryEscape(prev), key, nil)
+	wantErr(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error")
+}
+
+// TestWorkStopGracefulThenForce pins POST .../work/{work_id}/stop: it returns
+// 200 + the updated BetaSelfHostedWork (not an empty 204 — that breaks the SDK's
+// typed decoder), a graceful stop moves the item to stopping, re-stopping a
+// stopping item is 409, and force escalates it to stopped.
+func TestWorkStopGracefulThenForce(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-stop"
+	envID, sessionID := selfHostedWorker(t, s, key)
+	workID := s.enqueueAndPoll(t, envID, sessionID, key)
+	stop := "/v1/environments/" + envID + "/work/" + workID + "/stop"
+
+	res, body, raw := s.workReq(t, http.MethodPost, stop, key, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("graceful stop status = %d, want 200 (body %q)", res.StatusCode, raw)
+	}
+	if body["type"] != "work" || body["state"] != "stopping" || body["stop_requested_at"] == nil {
+		t.Errorf("graceful stop returned %v, want a work object in state stopping", body)
+	}
+
+	// Re-graceful-stopping a stopping item is a conflict.
+	res, body, _ = s.workReq(t, http.MethodPost, stop, key, nil)
+	wantErr(t, res.StatusCode, body, http.StatusConflict, "invalid_request_error")
+
+	// force escalates stopping → stopped, returning the updated work object.
+	res, body, raw = s.workReq(t, http.MethodPost, stop, key, map[string]any{"force": true})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("force stop status = %d, want 200 (body %q)", res.StatusCode, raw)
+	}
+	if body["state"] != "stopped" || body["stopped_at"] == nil {
+		t.Errorf("force stop returned %v, want stopped with stopped_at", body)
+	}
+}
+
+// TestWorkLifecycleRoutesScopeAndMethod pins that the new lifecycle routes share
+// the work-API auth boundary — a key scoped to another environment is rejected
+// (401) — and that a known route reached with the wrong method is the wire 405.
+func TestWorkLifecycleRoutesScopeAndMethod(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-scope"
+	envID, sessionID := selfHostedWorker(t, s, key)
+	selfHostedWorker(t, s, "ek-scope-other") // a second env whose key must not reach envID
+	workID := s.enqueueAndPoll(t, envID, sessionID, key)
+	base := "/v1/environments/" + envID + "/work/" + workID
+
+	// A key valid only for the other environment cannot act on envID's work item.
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, base},
+		{http.MethodPost, base + "/ack"},
+		{http.MethodPost, base + "/heartbeat?expected_last_heartbeat=NO_HEARTBEAT"},
+		{http.MethodPost, base + "/stop"},
+	} {
+		res, body, _ := s.workReq(t, tc.method, tc.path, "ek-scope-other", nil)
+		wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
+	}
+
+	// Wrong method on a known lifecycle route is the wire 405, not a 404.
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodDelete, base},
+		{http.MethodGet, base + "/ack"},
+		{http.MethodGet, base + "/heartbeat"},
+		{http.MethodGet, base + "/stop"},
+	} {
+		res, body, _ := s.workReq(t, tc.method, tc.path, key, nil)
+		wantErr(t, res.StatusCode, body, http.StatusMethodNotAllowed, "invalid_request_error")
 	}
 }
 

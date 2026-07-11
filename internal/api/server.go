@@ -80,9 +80,24 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 	// redirect. Splitting the routes across nested muxes let those redirects
 	// answer an unauthenticated request before auth ran.
 	mux.HandleFunc("GET /v1/environments/{id}/work/poll", s.handle(s.pollWork))
-	mux.HandleFunc("/v1/environments/{id}/work/poll", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, r, methodNotAllowed(r))
-	})
+	mux.HandleFunc("GET /v1/environments/{id}/work/{work_id}", s.handle(s.getWork))
+	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/ack", s.handle(s.ackWork))
+	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/heartbeat", s.handle(s.heartbeatWork))
+	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/stop", s.handle(s.stopWork))
+	// Method-less 405 fallbacks. No explicit ".../work/poll" entry: it would be
+	// ambiguous against "GET .../work/{work_id}" (more specific in path, less in
+	// method — neither dominates, so the mux panics). The ".../work/{work_id}"
+	// fallback already answers a non-GET ".../work/poll" with a 405 (work_id="poll").
+	for _, pattern := range []string{
+		"/v1/environments/{id}/work/{work_id}",
+		"/v1/environments/{id}/work/{work_id}/ack",
+		"/v1/environments/{id}/work/{work_id}/heartbeat",
+		"/v1/environments/{id}/work/{work_id}/stop",
+	} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, r, methodNotAllowed(r))
+		})
+	}
 	mux.HandleFunc("/v1/environments/{id}/work/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errNotFound("no such endpoint: %s", r.URL.Path))
 	})

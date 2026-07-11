@@ -1,6 +1,9 @@
 package api
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -48,9 +51,8 @@ type workWire struct {
 	Type              string            `json:"type"` // always "work"
 }
 
-// toWire maps a queue row onto the wire work item. The lifecycle timestamps a
-// queued item has not reached are left nil (null); the state-transition
-// endpoints populate them.
+// toWire maps a queue row onto the wire work item. Lifecycle timestamps a work
+// item has not reached are null; the state-transition endpoints populate them.
 func toWire(w *queue.Work) workWire {
 	meta := w.Metadata
 	if meta == nil {
@@ -58,12 +60,16 @@ func toWire(w *queue.Work) workWire {
 	}
 	return workWire{
 		ID:                w.ID.String(),
+		AcknowledgedAt:    utcPtr(w.AcknowledgedAt),
 		CreatedAt:         w.CreatedAt.UTC(),
 		Data:              workData{ID: w.SessionID.String(), Type: "session"},
 		EnvironmentID:     w.EnvironmentID.String(),
 		LatestHeartbeatAt: utcPtr(w.LastHeartbeat),
 		Metadata:          meta,
+		StartedAt:         utcPtr(w.StartedAt),
 		State:             w.State,
+		StopRequestedAt:   utcPtr(w.StopRequestedAt),
+		StoppedAt:         utcPtr(w.StoppedAt),
 		Type:              "work",
 	}
 }
@@ -78,11 +84,11 @@ func toWire(w *queue.Work) workWire {
 // True long-poll (hold the request open on a work_items NOTIFY) is a later
 // enhancement.
 func (s *server) pollWork(r *http.Request) (any, error) {
-	envID := r.PathValue("id")
-	if environmentFrom(r.Context()) != envID {
-		return nil, errAuth("environment key is not valid for this environment")
+	envID, _, err := s.workScope(r) // poll has no work_id path value; ignore it
+	if err != nil {
+		return nil, err
 	}
-	w, err := s.queue.Poll(r.Context(), domain.ID(envID), reclaimWindow(r))
+	w, err := s.queue.Poll(r.Context(), envID, reclaimWindow(r))
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +96,147 @@ func (s *server) pollWork(r *http.Request) (any, error) {
 		return nil, nil // empty queue → 200 with a null body
 	}
 	return toWire(w), nil
+}
+
+// heartbeatWire is the BetaSelfHostedWorkHeartbeatResponse shape.
+type heartbeatWire struct {
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+	LeaseExtended bool      `json:"lease_extended"`
+	State         string    `json:"state"`
+	TTLSeconds    int64     `json:"ttl_seconds"`
+	Type          string    `json:"type"` // always "work_heartbeat"
+}
+
+const (
+	defaultHeartbeatTTLSeconds = 30
+	maxHeartbeatTTLSeconds     = 300
+)
+
+// workScope resolves the path environment, asserts the Bearer key authorises it
+// (a key is scoped to one environment), and returns the environment and work ids.
+func (s *server) workScope(r *http.Request) (envID, workID domain.ID, err error) {
+	e := r.PathValue("id")
+	if environmentFrom(r.Context()) != e {
+		return "", "", errAuth("environment key is not valid for this environment")
+	}
+	return domain.ID(e), domain.ID(r.PathValue("work_id")), nil
+}
+
+// mapWorkErr maps a queue state-machine error onto its wire status: a missing
+// item is 404, a conflicting-state stop is 409, a heartbeat precondition failure
+// is 412. Anything else is an internal fault.
+func mapWorkErr(err error) error {
+	switch {
+	case errors.Is(err, queue.ErrWorkNotFound):
+		return errNotFound("work item not found")
+	case errors.Is(err, queue.ErrWorkConflict):
+		return errConflict("work item is already stopping or stopped")
+	case errors.Is(err, queue.ErrHeartbeatMismatch):
+		return &apiError{http.StatusPreconditionFailed, errTypeInvalidRequest,
+			"expected_last_heartbeat does not match the current lease"}
+	default:
+		return err
+	}
+}
+
+// getWork returns one work item (GET .../work/{work_id}).
+func (s *server) getWork(r *http.Request) (any, error) {
+	envID, workID, err := s.workScope(r)
+	if err != nil {
+		return nil, err
+	}
+	w, err := s.queue.GetWork(r.Context(), envID, workID)
+	if err != nil {
+		return nil, mapWorkErr(err)
+	}
+	return toWire(w), nil
+}
+
+// ackWork acknowledges a polled item (POST .../work/{work_id}/ack), moving it
+// queued → starting.
+func (s *server) ackWork(r *http.Request) (any, error) {
+	envID, workID, err := s.workScope(r)
+	if err != nil {
+		return nil, err
+	}
+	w, err := s.queue.Ack(r.Context(), envID, workID)
+	if err != nil {
+		return nil, mapWorkErr(err)
+	}
+	return toWire(w), nil
+}
+
+// heartbeatWork applies the optimistic-concurrency heartbeat (POST
+// .../work/{work_id}/heartbeat).
+func (s *server) heartbeatWork(r *http.Request) (any, error) {
+	envID, workID, err := s.workScope(r)
+	if err != nil {
+		return nil, err
+	}
+	expected := r.URL.Query().Get("expected_last_heartbeat")
+	if expected == "" {
+		return nil, errInvalid("expected_last_heartbeat is required")
+	}
+	res, err := s.queue.Heartbeat(r.Context(), envID, workID, expected, heartbeatTTL(r))
+	if err != nil {
+		return nil, mapWorkErr(err)
+	}
+	return heartbeatWire{
+		LastHeartbeat: res.LastHeartbeat.UTC(),
+		LeaseExtended: res.LeaseExtended,
+		State:         res.State,
+		TTLSeconds:    res.TTLSeconds,
+		Type:          "work_heartbeat",
+	}, nil
+}
+
+// stopWork stops a work item (POST .../work/{work_id}/stop) and returns the
+// updated item. The wire Stop responds with the BetaSelfHostedWork (the SDK
+// types it `*BetaSelfHostedWork`), not an empty 204 — a 204 breaks the SDK's
+// typed decoder. An already-stopped item is 409, which the reference worker
+// ignores.
+func (s *server) stopWork(r *http.Request) (any, error) {
+	envID, workID, err := s.workScope(r)
+	if err != nil {
+		return nil, err
+	}
+	force, err := parseStopForce(r)
+	if err != nil {
+		return nil, err
+	}
+	w, err := s.queue.Stop(r.Context(), envID, workID, force)
+	if err != nil {
+		return nil, mapWorkErr(err)
+	}
+	return toWire(w), nil
+}
+
+// heartbeatTTL reads desired_ttl_seconds (default 30, clamped to
+// maxHeartbeatTTLSeconds). A non-positive or unparseable value falls back to the
+// default.
+func heartbeatTTL(r *http.Request) int64 {
+	ttl := int64(defaultHeartbeatTTLSeconds)
+	if v := r.URL.Query().Get("desired_ttl_seconds"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			ttl = n
+		}
+	}
+	if ttl > maxHeartbeatTTLSeconds {
+		ttl = maxHeartbeatTTLSeconds
+	}
+	return ttl
+}
+
+// parseStopForce reads the optional {force?:bool} stop body; an empty body means
+// a graceful stop (force false).
+func parseStopForce(r *http.Request) (bool, error) {
+	var req struct {
+		Force bool `json:"force"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		return false, errInvalid("invalid stop request body: %v", err)
+	}
+	return req.Force, nil
 }
 
 // reclaimWindow reads reclaim_older_than_ms (default 5000, clamped to
