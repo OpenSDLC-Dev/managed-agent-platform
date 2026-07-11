@@ -12,6 +12,38 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Permission policies and the human-in-the-loop confirmation round-trip (slice 7):
+  an `always_ask` built-in tool now suspends the turn for one human approval before
+  it runs. `toolset.Policies` resolves each enabled tool's `permission_policy`
+  (per-tool config > `default_config` > the plan's `always_allow` default), backed
+  by a shared `resolveToolset` so enable and policy resolution cannot disagree about
+  which tools exist; an unknown policy type is a hard error, never a silent
+  auto-run. The brain (`classify`) stamps `evaluated_permission`
+  (`allow`/`ask`) on every platform `agent.tool_use` and, when any intent is
+  `always_ask`, gates the **whole** turn: it emits `session.status_idle` with a
+  `stop_reason:{type:"requires_action", event_ids:[…]}` naming the ask intents, idles
+  the session, and enqueues **no** `tool_exec`. A `user.tool_confirmation` POSTed to
+  `/events` resolves the gate: `ValidateToolConfirmations` rejects a reference that
+  does not name an ask-gated, unconfirmed tool use; a denial is answered with an
+  `agent.tool_result{is_error:true}` carrying the `deny_message`; and once the last
+  ask is resolved (`UnconfirmedAskEvents` empty) the session flips `running` and
+  enqueues the work that finishes the turn — a `tool_exec` for any allowed tool
+  still to run, or a `model_turn` directly when every gated tool was denied. A
+  partial confirmation re-emits `session.status_idle` with the shrunken blocking
+  set. This closes the human-approval half of the v1 goal loop: `agent.tool_use`
+  (`always_ask`) → one human confirmation → the tool runs (or is refused).
+
+  Two wire-schema calls rest on the plan and inference, both flagged for a
+  recording against a real managed-agents endpoint: the agent-toolset default policy
+  is `always_allow` (the plan's value; a single constant to flip), and a denial's
+  result shape (`agent.tool_result` + `is_error` + `deny_message`) is inferred from
+  the protocol's "every tool_use must be answered" rule. A mixed turn deliberately
+  gates its `always_allow` tools too, not just the ask ones — simpler and safer, at
+  the cost of latency on the uncommon mixed turn. Covered by toolset resolver tests,
+  brain suspend tests, API state-machine tests (allow/deny/partial/mixed/validation),
+  and two brain-to-API integration tests that prove the confirmation resolves the
+  exact event id the brain minted into `requires_action`.
+
 - The executor and the closed tool loop (slice 6, fourth part): `internal/executor`
   plus `cmd/executor`, and the brain change that finally offers the model the
   built-in toolset. When the model calls a built-in tool the brain expands the

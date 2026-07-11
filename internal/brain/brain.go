@@ -193,17 +193,19 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 		return b.failTurn(ctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
 	}
 
-	// Only a turn that actually called a tool needs the name→type map; a
-	// text-only end_turn would otherwise re-expand the whole toolset for nothing.
+	// Only a turn that actually called a tool needs the name→type and
+	// name→policy maps; a text-only end_turn would otherwise re-expand the
+	// whole toolset for nothing.
 	var toolKind map[string]domain.EventType
+	var policy map[string]domain.PermissionPolicyType
 	if len(turn.toolUses) > 0 {
-		kinds, err := classifyTools(agent)
+		kinds, pols, err := classify(agent)
 		if err != nil {
 			return b.failTurn(ctx, sid, item, span, watermark, fmt.Sprintf("classify tools: %v", err))
 		}
-		toolKind = kinds
+		toolKind, policy = kinds, pols
 	}
-	return b.settleTurn(ctx, sid, item, span, turn, toolKind, watermark)
+	return b.settleTurn(ctx, sid, item, span, turn, toolKind, policy, watermark)
 }
 
 // claimLiveSession loads the session under its row lock and settles stale
@@ -319,24 +321,27 @@ func pendingInput(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64
 // agent.message under the preview-reserved id, then one intent event per
 // tool call. turn.text holds no empty blocks — the stream never opens one —
 // so a "text" block always carries its required text field.
-func turnEvents(turn *turnResult, toolKind map[string]domain.EventType) ([]events.NewEvent, bool, error) {
-	var batch []events.NewEvent
+//
+// Each platform tool_use is stamped with its evaluated_permission (the resolved
+// policy: allow for always_allow, ask for always_ask); custom tools are
+// client-executed and carry none. It reports whether any intent is a
+// platform-executed tool (platform) and the pre-minted ids of the tool_use
+// events whose policy is always_ask (askIDs) — the events a requires_action
+// suspension blocks on. An ask intent's id is minted here rather than left to
+// the store so the same id can name it in the status_idle stop_reason.
+func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType) (batch []events.NewEvent, platform bool, askIDs []domain.ID, err error) {
 	if len(turn.text) > 0 {
 		content, err := json.Marshal(map[string]any{"content": turn.text})
 		if err != nil {
-			return nil, false, err
+			return nil, false, nil, err
 		}
 		batch = append(batch, events.NewEvent{
 			ID: turn.messageEventID, Type: domain.EventAgentMessage, Payload: content,
 		})
 	}
-	platform := false
 	for _, tu := range turn.toolUses {
-		payload, err := json.Marshal(map[string]any{
+		fields := map[string]any{
 			"name": tu.Name, "input": tu.Input, "session_thread_id": nil,
-		})
-		if err != nil {
-			return nil, false, err
 		}
 		typ := toolKind[tu.Name]
 		if typ == "" {
@@ -344,12 +349,24 @@ func turnEvents(turn *turnResult, toolKind map[string]domain.EventType) ([]event
 			// the platform never runs a tool it does not recognise as its own.
 			typ = domain.EventAgentCustomToolUse
 		}
+		var id domain.ID
 		if typ == domain.EventAgentToolUse {
 			platform = true
+			perm := domain.EvalPermAllow
+			if policy[tu.Name] == domain.PolicyAlwaysAsk {
+				perm = domain.EvalPermAsk
+				id = domain.NewID("sevt")
+				askIDs = append(askIDs, id)
+			}
+			fields["evaluated_permission"] = perm
 		}
-		batch = append(batch, events.NewEvent{Type: typ, Payload: payload})
+		payload, err := json.Marshal(fields)
+		if err != nil {
+			return nil, false, nil, err
+		}
+		batch = append(batch, events.NewEvent{ID: id, Type: typ, Payload: payload})
 	}
-	return batch, platform, nil
+	return batch, platform, askIDs, nil
 }
 
 // settleTurn commits the turn: the emitted events (message, tool intents),
@@ -362,8 +379,8 @@ func turnEvents(turn *turnResult, toolKind map[string]domain.EventType) ([]event
 // sides stand down) and the integrity guarantee (a brain that lost its claim
 // rolls the whole turn back; the log never carries a loser's half-turn,
 // whose duplicate tool intents would poison every future replay).
-func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, watermark int64) error {
-	err := b.commitTurn(ctx, sid, item, span, turn, toolKind, watermark)
+func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType, watermark int64) error {
+	err := b.commitTurn(ctx, sid, item, span, turn, toolKind, policy, watermark)
 	span.Finish(false, err)
 	if err != nil {
 		return fmt.Errorf("settle: %w", err)
@@ -371,8 +388,8 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	return nil
 }
 
-func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, watermark int64) error {
-	head, platform, err := turnEvents(turn, toolKind)
+func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType, watermark int64) error {
+	head, platform, askIDs, err := turnEvents(turn, toolKind, policy)
 	if err != nil {
 		return err
 	}
@@ -387,6 +404,35 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	}
 
 	if turn.stopReason == "tool_use" {
+		if len(askIDs) > 0 {
+			// A confirmation gate: at least one intent's policy is always_ask.
+			// The whole turn suspends — the session idles with a
+			// requires_action stop_reason naming the ask events, and NO
+			// tool_exec is enqueued, so even the allow-policy tools wait. The
+			// session resumes when a user.tool_confirmation resolves the last
+			// ask (the API flips idle→running and enqueues the tool_exec that
+			// runs the allowed tools plus the confirmed ones; a denial is
+			// pre-answered with an error result). Resolving fewer than all
+			// re-emits status_idle with the remainder — that is the API's job,
+			// on the confirmation POST. Like the running-suspend below, this
+			// commits under the lock with no chain-or-idle decision: the
+			// session is genuinely blocked on human input, and any mid-turn
+			// message stays unprocessed and replays when the gate clears.
+			stop, err := json.Marshal(map[string]any{"stop_reason": map[string]any{
+				"type": "requires_action", "event_ids": askIDs,
+			}})
+			if err != nil {
+				return err
+			}
+			head = append(head, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: stop})
+			idle := domain.SessionIdle
+			opts.SetStatus = &idle
+			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+				return b.queue.Complete(ctx, tx, item)
+			}
+			return b.commitUnderLock(ctx, sid, head, opts)
+		}
+
 		// Suspend: the session stays running (awaiting a tool is still
 		// working, not awaiting input) and the turn resumes when the full
 		// result set is in — the control plane's trigger fires on the

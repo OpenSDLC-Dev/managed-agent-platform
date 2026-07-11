@@ -3,7 +3,16 @@ package toolset
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
+
+// DefaultAgentToolsetPolicy is the permission policy a built-in tool resolves to
+// when its agent_toolset entry sets none. The plan states the reference resolves
+// the agent toolset to always_allow; the wire types carry no resolved default to
+// corroborate that, so this is the plan's value, not a recorded one — flip this
+// one constant once a real managed-agents endpoint can be recorded.
+const DefaultAgentToolsetPolicy = domain.PolicyAlwaysAllow
 
 // definitions are the six built-in tools in the order the reference lists them,
 // each already in the Messages-API tool shape the provider request carries
@@ -97,59 +106,162 @@ func (d toolDef) marshal() (json.RawMessage, error) {
 }
 
 // entry is an agent's agent_toolset_20260401 tool, as stored on the resolved
-// agent. Both config fields are optional here though the reference renders them
-// on every resolved agent: this platform stores the client's tools verbatim, so
-// a bare entry is what a bare entry arrives as. Omitted means the reference's
-// resolved default — the toolset is on. permission_policy is read by nobody
-// yet; policies and the confirmation round-trip are slice 7.
+// agent. Every field is optional here though the reference renders them on every
+// resolved agent: this platform stores the client's tools verbatim, so a bare
+// entry is what a bare entry arrives as. Omitted enabled means the reference's
+// resolved default — the toolset is on; omitted permission_policy means
+// DefaultAgentToolsetPolicy.
 type entry struct {
 	DefaultConfig *struct {
-		Enabled *bool `json:"enabled"`
+		Enabled          *bool         `json:"enabled"`
+		PermissionPolicy *policyConfig `json:"permission_policy"`
 	} `json:"default_config"`
 	Configs []struct {
-		Name    string `json:"name"`
-		Enabled *bool  `json:"enabled"`
+		Name             string        `json:"name"`
+		Enabled          *bool         `json:"enabled"`
+		PermissionPolicy *policyConfig `json:"permission_policy"`
 	} `json:"configs"`
 }
 
-// Tools returns the model-facing definitions of the built-in tools an
-// agent_toolset_20260401 entry enables, in the wire's order.
+// policyConfig is the wire's {"type":…} permission_policy object.
+type policyConfig struct {
+	Type string `json:"type"`
+}
+
+// resolved pairs an enabled built-in tool's definition with its resolved
+// permission policy.
+type resolved struct {
+	def    toolDef
+	policy domain.PermissionPolicyType
+}
+
+// resolveToolset applies an agent_toolset_20260401 entry's default_config and
+// per-tool configs onto the built-in definitions, returning the enabled tools in
+// the wire's order with each tool's resolved enable state dropped and its policy
+// kept. Enable and policy resolve independently: a per-tool config overrides
+// default_config, which overrides the toolset default (on / DefaultAgentToolsetPolicy).
 //
-// web_fetch and web_search are in the wire's tool-config enum but carry no
-// input schema there and run executor-side against an egress policy this
-// platform has not built; enabling one offers the model nothing, and calling it
-// is an error result rather than a tool call that hangs.
-func Tools(raw json.RawMessage) ([]json.RawMessage, error) {
+// web_fetch and web_search are in the wire's tool-config enum but carry no input
+// schema there and run executor-side against an egress policy this platform has
+// not built; they are absent from definitions, so enabling one resolves to
+// nothing and a config that only names one contributes no tool.
+func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 	var e entry
 	if err := json.Unmarshal(raw, &e); err != nil {
 		return nil, fmt.Errorf("agent_toolset_20260401: %w", err)
 	}
 
 	enabled := true
-	if e.DefaultConfig != nil && e.DefaultConfig.Enabled != nil {
-		enabled = *e.DefaultConfig.Enabled
-	}
-	override := make(map[string]bool, len(e.Configs))
-	for _, c := range e.Configs {
-		if c.Enabled != nil {
-			override[c.Name] = *c.Enabled
+	var defaultPolicy *policyConfig
+	if e.DefaultConfig != nil {
+		if e.DefaultConfig.Enabled != nil {
+			enabled = *e.DefaultConfig.Enabled
 		}
+		defaultPolicy = e.DefaultConfig.PermissionPolicy
 	}
 
-	var out []json.RawMessage
+	type override struct {
+		enabled *bool
+		policy  *policyConfig
+	}
+	overrides := make(map[string]override, len(e.Configs))
+	for _, c := range e.Configs {
+		o := overrides[c.Name]
+		if c.Enabled != nil {
+			o.enabled = c.Enabled
+		}
+		if c.PermissionPolicy != nil {
+			o.policy = c.PermissionPolicy
+		}
+		overrides[c.Name] = o
+	}
+
+	var out []resolved
 	for _, d := range definitions {
-		on, ok := override[d.name]
-		if !ok {
-			on = enabled
+		o := overrides[d.name]
+		on := enabled
+		if o.enabled != nil {
+			on = *o.enabled
 		}
 		if !on {
 			continue
 		}
-		def, err := d.marshal()
+		// Resolve and validate the policy only for tools that are actually
+		// enabled: a per-tool config's policy overrides default_config's, which
+		// overrides DefaultAgentToolsetPolicy. An unevaluable policy is a hard
+		// error, but only when a live tool would carry it — a malformed policy
+		// on a disabled or overridden-away tool has no effect and is ignored.
+		pc := defaultPolicy
+		if o.policy != nil {
+			pc = o.policy
+		}
+		policy := DefaultAgentToolsetPolicy
+		if pc != nil {
+			p, err := policyType(pc.Type)
+			if err != nil {
+				return nil, err
+			}
+			policy = p
+		}
+		out = append(out, resolved{def: d, policy: policy})
+	}
+	return out, nil
+}
+
+// policyType validates a permission_policy's type against the wire enum. An
+// unknown value (including empty) is a rejection, never a silent default: a
+// policy this platform cannot evaluate must not resolve to "run it anyway".
+func policyType(s string) (domain.PermissionPolicyType, error) {
+	switch p := domain.PermissionPolicyType(s); p {
+	case domain.PolicyAlwaysAllow, domain.PolicyAlwaysAsk:
+		return p, nil
+	default:
+		return "", fmt.Errorf("agent_toolset_20260401: unknown permission_policy type %q", s)
+	}
+}
+
+// Validate checks that an agent_toolset_20260401 entry resolves — its enable
+// flags and the permission policies of its enabled tools are well-formed. It is
+// the create-time counterpart to Tools/Policies: an entry that fails here would
+// otherwise be stored on the agent and wedge every turn when the brain resolves
+// it, so the API validates at agent creation to make a malformed toolset a 400
+// instead.
+func Validate(raw json.RawMessage) error {
+	_, err := resolveToolset(raw)
+	return err
+}
+
+// Tools returns the model-facing definitions of the built-in tools an
+// agent_toolset_20260401 entry enables, in the wire's order.
+func Tools(raw json.RawMessage) ([]json.RawMessage, error) {
+	rs, err := resolveToolset(raw)
+	if err != nil {
+		return nil, err
+	}
+	var out []json.RawMessage
+	for _, r := range rs {
+		def, err := r.def.marshal()
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, def)
+	}
+	return out, nil
+}
+
+// Policies resolves the permission policy of every built-in tool an
+// agent_toolset_20260401 entry enables, keyed by tool name. It mirrors Tools'
+// enable resolution, so disabled tools are absent; the brain reads it to stamp
+// evaluated_permission on each tool_use and to decide whether a turn's calls
+// suspend for human confirmation.
+func Policies(raw json.RawMessage) (map[string]domain.PermissionPolicyType, error) {
+	rs, err := resolveToolset(raw)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]domain.PermissionPolicyType, len(rs))
+	for _, r := range rs {
+		out[r.def.name] = r.policy
 	}
 	return out, nil
 }

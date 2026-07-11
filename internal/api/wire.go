@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // maxBodyBytes bounds request bodies; agent specs are small configuration
@@ -182,7 +183,12 @@ func parseTools(raw json.RawMessage) ([]json.RawMessage, error) {
 		}
 		switch probe.Type {
 		case "agent_toolset_20260401":
-			// configs/default_config are optional.
+			// configs/default_config are optional, but a malformed enable flag
+			// or permission_policy must be a 400 here rather than a toolset that
+			// wedges every turn when the brain resolves it.
+			if err := toolset.Validate(item); err != nil {
+				return nil, errInvalid("%s", err)
+			}
 		case "custom":
 			if probe.Name == "" || probe.Description == "" || len(probe.InputSchema) == 0 || isNull(probe.InputSchema) {
 				return nil, errInvalid("custom tools require name, description, and input_schema")
