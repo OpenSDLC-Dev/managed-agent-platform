@@ -201,7 +201,10 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 
 // shellSingleQuote wraps s so bash treats it as a single literal word. Session
 // and tool ids carry no metacharacters, but quoting keeps the substitution
-// unforgeable regardless of what an id ever becomes.
+// unforgeable regardless of what an id ever becomes. This is the canonical POSIX
+// single-quote escape, deliberately mirroring docker.shellQuote rather than
+// sharing a symbol across the two sandbox packages; there is one correct
+// implementation, so the copies cannot meaningfully drift.
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
