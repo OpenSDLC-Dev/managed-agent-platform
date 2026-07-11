@@ -465,6 +465,20 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// A read of a non-regular file (a FIFO here) is the reader asking for a path
+	// that is not a file, not the sandbox failing — every backend reports it as
+	// ErrNotRegularFile so the toolset can hand the model a recoverable error.
+	t.Run("ReadFileNonRegular", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "mkfifo fifo"}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("mkfifo: %+v, %v", res, err)
+		}
+		if _, err := sb.ReadFile(ctx, workdir+"/fifo"); !errors.Is(err, sandbox.ErrNotRegularFile) {
+			t.Errorf("err = %v, want ErrNotRegularFile", err)
+		}
+	})
+
 	// Two executors handling two tool calls of the same session must land in
 	// the same sandbox, not race to create two.
 	t.Run("ProvisionIsIdempotentPerSession", func(t *testing.T) {

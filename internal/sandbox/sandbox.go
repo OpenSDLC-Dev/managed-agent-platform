@@ -45,6 +45,11 @@ var (
 	ErrFileNotExist = errors.New("sandbox: no such file")
 	// ErrIsDirectory reports a file read of a directory.
 	ErrIsDirectory = errors.New("sandbox: path is a directory")
+	// ErrNotRegularFile reports a file read of a device, FIFO, socket, or other
+	// non-regular file. Like ErrIsDirectory it describes the path the caller
+	// asked for, not the sandbox failing, so a tool surfaces it to the model
+	// rather than to the executor.
+	ErrNotRegularFile = errors.New("sandbox: not a regular file")
 	// ErrFileTooLarge reports a read of a file above MaxFileBytes.
 	ErrFileTooLarge = errors.New("sandbox: file too large")
 )

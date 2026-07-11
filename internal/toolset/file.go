@@ -35,6 +35,9 @@ func (r Runner) read(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if in.FilePath == "" {
 		return failf("read: file_path is required")
 	}
+	if res, bad := badField("read", "file_path", in.FilePath); bad {
+		return res, nil
+	}
 	data, err := r.Sandbox.ReadFile(ctx, r.resolve(in.FilePath))
 	if err != nil {
 		return fileFault("read", in.FilePath, err)
@@ -71,6 +74,9 @@ func (r Runner) write(ctx context.Context, raw json.RawMessage) (Result, error) 
 	if in.FilePath == "" {
 		return failf("write: file_path is required")
 	}
+	if res, bad := badField("write", "file_path", in.FilePath); bad {
+		return res, nil
+	}
 	if err := r.Sandbox.WriteFile(ctx, r.resolve(in.FilePath), []byte(in.Content)); err != nil {
 		return fileFault("write", in.FilePath, err)
 	}
@@ -87,6 +93,9 @@ func (r Runner) edit(ctx context.Context, raw json.RawMessage) (Result, error) {
 	}
 	if in.OldString == "" {
 		return failf("edit: old_string is required")
+	}
+	if res, bad := badField("edit", "file_path", in.FilePath); bad {
+		return res, nil
 	}
 	p := r.resolve(in.FilePath)
 	data, err := r.Sandbox.ReadFile(ctx, p)
@@ -118,7 +127,7 @@ func fileFault(verb, display string, err error) (Result, error) {
 	switch {
 	case errors.Is(err, sandbox.ErrFileNotExist):
 		return failf("%s %s: no such file or directory", verb, display)
-	case errors.Is(err, sandbox.ErrIsDirectory):
+	case errors.Is(err, sandbox.ErrIsDirectory), errors.Is(err, sandbox.ErrNotRegularFile):
 		return failf("%s: %s is not a regular file", verb, display)
 	case errors.Is(err, sandbox.ErrFileTooLarge):
 		return failf("%s: %s exceeds the %d-byte limit. Use bash (head/tail/sed) to work on a slice.",

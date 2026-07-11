@@ -202,6 +202,14 @@ func TestReadWriteEdit(t *testing.T) {
 		fails(t, r, "read", `{"file_path":"rw/deep"}`, "not a regular file")
 	})
 
+	// A non-regular file (a FIFO) is the model's path mistake, not the sandbox
+	// failing — it is a tool error it can recover from, never a backend fault.
+	t.Run("a non-regular file is an error result", func(t *testing.T) {
+		ok(t, r, "bash", `{"command":"mkfifo /workspace/rw/fifo"}`)
+		fails(t, r, "read", `{"file_path":"rw/fifo"}`, "not a regular file")
+		fails(t, r, "edit", `{"file_path":"rw/fifo","old_string":"a","new_string":"b"}`, "not a regular file")
+	})
+
 	t.Run("file_path is required", func(t *testing.T) {
 		fails(t, r, "read", `{}`, "file_path is required")
 		fails(t, r, "write", `{"content":"x"}`, "file_path is required")
@@ -290,6 +298,28 @@ func TestGlob(t *testing.T) {
 		got := ok(t, r, "glob", `{"pattern":"**/*.go","path":"g/sub"}`)
 		if got != "/workspace/g/sub/mid.go" {
 			t.Fatalf("content = %q", got)
+		}
+	})
+
+	// An absolute pattern names its own root, so a path argument — even one that
+	// does not exist — is irrelevant to it (the reference sets root to "/").
+	t.Run("an absolute pattern ignores the path root", func(t *testing.T) {
+		got := ok(t, r, "glob", `{"pattern":"/workspace/g/*.go","path":"does-not-exist"}`)
+		if !strings.Contains(got, "/workspace/g/new.go") {
+			t.Fatalf("content = %q, want the absolute pattern's matches", got)
+		}
+	})
+
+	// stat's %n echoes a filename raw, newlines included; the whole pipeline is
+	// NUL-delimited so a name carrying a fake stat record stays one record. The
+	// matched file comes back with its newline intact, and the second line that
+	// looks like a stat record ("<mtime> FAKE") is never split off into its own
+	// path — the mark of the bug this pins.
+	t.Run("a newline in a matched name cannot fabricate a path", func(t *testing.T) {
+		ok(t, r, "bash", `{"command":"mkdir -p g4 && touch $'g4/real\n9999999999 FAKE'"}`)
+		got := ok(t, r, "glob", `{"pattern":"g4/*"}`)
+		if got != "/workspace/g4/real\n9999999999 FAKE" {
+			t.Fatalf("content = %q, want the one real path with its newline intact", got)
 		}
 	})
 

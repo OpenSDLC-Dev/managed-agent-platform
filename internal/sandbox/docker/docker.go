@@ -579,7 +579,7 @@ func (c *container) ReadFile(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
 	case tar.TypeReg:
 	default:
-		return nil, fmt.Errorf("docker: %s is not a regular file", path)
+		return nil, fmt.Errorf("%s is not a regular file: %w", path, sandbox.ErrNotRegularFile)
 	}
 	if header.Size > sandbox.MaxFileBytes {
 		return nil, fmt.Errorf("%s is %d bytes: %w", path, header.Size, sandbox.ErrFileTooLarge)

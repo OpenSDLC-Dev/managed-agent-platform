@@ -124,6 +124,7 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 	}{
 		{"missing", sandbox.ErrFileNotExist, "no such file"},
 		{"directory", sandbox.ErrIsDirectory, "not a regular file"},
+		{"non-regular", sandbox.ErrNotRegularFile, "not a regular file"},
 		{"too large", sandbox.ErrFileTooLarge, "limit"},
 	}
 	for _, tc := range cases {
@@ -201,6 +202,82 @@ func TestEveryCallIsDeadlined(t *testing.T) {
 	}
 }
 
+// A NUL byte in a model-supplied path or pattern is the model's malformed
+// input, not the sandbox failing: it is a tool error, and it never reaches the
+// sandbox (where a tar header or a truncated command would misclassify it as a
+// backend fault). Pinned with a fake sandbox that would return a Go error if
+// the byte got through.
+func TestNULInAPathIsAToolError(t *testing.T) {
+	boom := errors.New("archive/tar: header field contains a NUL byte")
+	// json.Marshal escapes the NUL properly, so the JSON is valid and the tool's
+	// own Unmarshal succeeds — the byte reaches badField, not the JSON decoder.
+	bad := "a\x00b"
+	mk := func(m map[string]any) string {
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	cases := []struct {
+		tool, field, input string
+	}{
+		{"read", "file_path", mk(map[string]any{"file_path": bad})},
+		{"write", "file_path", mk(map[string]any{"file_path": bad, "content": "x"})},
+		{"edit", "file_path", mk(map[string]any{"file_path": bad, "old_string": "a", "new_string": "b"})},
+		{"glob", "pattern", mk(map[string]any{"pattern": bad})},
+		{"glob", "path", mk(map[string]any{"pattern": "*", "path": bad})},
+		{"grep", "pattern", mk(map[string]any{"pattern": bad})},
+		{"grep", "path", mk(map[string]any{"pattern": "x", "path": bad})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.tool+" "+tc.field, func(t *testing.T) {
+			sb := &fakeSandbox{execErr: boom, writeErr: boom, readErr: boom}
+			res, err := run(t, sb, tc.tool, tc.input)
+			if err != nil {
+				t.Fatalf("err = %v, want a tool result — the NUL must be caught before the sandbox", err)
+			}
+			if !res.IsError || !strings.Contains(res.Content, tc.field+" must not contain a NUL byte") {
+				t.Fatalf("result = %+v, want a NUL tool error on %s", res, tc.field)
+			}
+			if len(sb.commands)+len(sb.writes)+len(sb.reads) != 0 {
+				t.Fatalf("the bad input reached the sandbox: commands=%v writes=%v reads=%v",
+					sb.commands, sb.writes, sb.reads)
+			}
+		})
+	}
+}
+
+// An absolute glob pattern is rooted at "/", so a non-existent path argument is
+// not turned into its search root (which would make it fail the directory
+// check). Pinned against the rendered script rather than a container.
+func TestAbsoluteGlobPatternIgnoresPath(t *testing.T) {
+	sb := &fakeSandbox{}
+	if _, err := run(t, sb, "glob", `{"pattern":"/etc/*.conf","path":"does-not-exist"}`); err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	script := sb.commands[0]
+	if !strings.Contains(script, "root='/'") {
+		t.Fatalf("script does not root an absolute pattern at /:\n%s", script)
+	}
+	if strings.Contains(script, "does-not-exist") {
+		t.Fatalf("the path argument leaked into an absolute pattern's script:\n%s", script)
+	}
+}
+
+// A grep regex that happens to start with "/" is a regex, not an absolute root:
+// it must still search the workdir, never the whole filesystem.
+func TestGrepPatternStartingWithSlashSearchesTheWorkdir(t *testing.T) {
+	sb := &fakeSandbox{}
+	if _, err := run(t, sb, "grep", `{"pattern":"/usr/local"}`); err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	script := sb.commands[0]
+	if !strings.Contains(script, "root='"+sandbox.DefaultWorkdir+"'") {
+		t.Fatalf("grep did not root at the workdir:\n%s", script)
+	}
+}
+
 // A search that outran its deadline is an error result, not an empty one: "no
 // matches" from a command that never finished would be a lie.
 func TestSearchTimeoutIsAnErrorResult(t *testing.T) {
@@ -240,7 +317,7 @@ func TestSearchFailure(t *testing.T) {
 func TestGlobLimit(t *testing.T) {
 	var stdout strings.Builder
 	for i := 0; i < 250; i++ {
-		fmt.Fprintf(&stdout, "1700000000.%09d /workspace/f%d.go\n", i, i)
+		fmt.Fprintf(&stdout, "1700000000.%09d /workspace/f%d.go\x00", i, i)
 	}
 	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: stdout.String()}}
 	res, err := run(t, sb, "glob", `{"pattern":"**/*.go"}`)
@@ -286,6 +363,50 @@ func TestOutputIsCapped(t *testing.T) {
 	if !utf8.ValidString(body) {
 		t.Fatal("the cut split a rune")
 	}
+}
+
+// bash's status trailer is the load-bearing signal — did the command fail — and
+// must survive truncation of a huge output, not be lopped off the end of it.
+func TestBashStatusTrailerSurvivesTruncation(t *testing.T) {
+	huge := strings.Repeat("x", toolset.MaxOutputBytes+50_000)
+
+	t.Run("exit code", func(t *testing.T) {
+		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: huge, ExitCode: 7}}
+		res, err := run(t, sb, "bash", `{"command":"big; exit 7"}`)
+		if err != nil {
+			t.Fatalf("bash: %v", err)
+		}
+		if !res.IsError || !strings.HasSuffix(res.Content, "\nexit code: 7") {
+			t.Fatalf("content tail = %q, want the exit code to survive", tail(res.Content))
+		}
+		if len(res.Content) > toolset.MaxOutputBytes {
+			t.Fatalf("content is %d bytes, want it within the cap", len(res.Content))
+		}
+		if !strings.Contains(res.Content, "[output truncated]") {
+			t.Fatal("content does not report the truncation")
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: huge, TimedOut: true}}
+		res, err := run(t, sb, "bash", `{"command":"big","timeout_ms":500}`)
+		if err != nil {
+			t.Fatalf("bash: %v", err)
+		}
+		if !res.IsError || !strings.HasSuffix(res.Content, "state changes were dropped") {
+			t.Fatalf("content tail = %q, want the timeout notice to survive", tail(res.Content))
+		}
+		if len(res.Content) > toolset.MaxOutputBytes {
+			t.Fatalf("content is %d bytes, want it within the cap", len(res.Content))
+		}
+	})
+}
+
+func tail(s string) string {
+	if len(s) > 60 {
+		return "…" + s[len(s)-60:]
+	}
+	return s
 }
 
 // A sandbox-level truncation says so, and stderr follows stdout whole rather

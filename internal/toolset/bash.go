@@ -3,6 +3,7 @@ package toolset
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -52,6 +53,9 @@ func (r Runner) bash(ctx context.Context, id domain.ID, raw json.RawMessage) (Re
 	out := combine(sandbox.ExecResult{
 		Stdout: res.Stdout, Stderr: res.Stderr, Truncated: res.Truncated,
 	})
+	// The status trailer is capped WITH the output rather than after it, so a
+	// command whose output overruns MaxOutputBytes does not lose the one line
+	// that says whether it failed.
 	switch {
 	case res.TimedOut:
 		// No exit code: on a timeout the sandbox's TimedOut is the authoritative
@@ -59,9 +63,10 @@ func (r Runner) bash(ctx context.Context, id domain.ID, raw json.RawMessage) (Re
 		// kill picked for itself. The dropped state is worth saying — the next
 		// call resumes from the last completed one, not from this command's
 		// mutations.
-		return failf("%s\ncommand timed out after %s; this call's shell state changes were dropped", out, timeout)
+		trailer := fmt.Sprintf("\ncommand timed out after %s; this call's shell state changes were dropped", timeout)
+		return Result{Content: capWithTrailer(out, trailer), IsError: true}, nil
 	case res.ExitCode != 0:
-		return failf("%s\nexit code: %d", out, res.ExitCode)
+		return Result{Content: capWithTrailer(out, fmt.Sprintf("\nexit code: %d", res.ExitCode)), IsError: true}, nil
 	}
 	return succeed(out)
 }

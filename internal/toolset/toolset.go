@@ -136,14 +136,28 @@ func failf(format string, a ...any) (Result, error) {
 	return Result{Content: fmt.Sprintf(format, a...), IsError: true}, nil
 }
 
-// capOutput trims content to MaxOutputBytes, backing off to a rune boundary so
-// a split multi-byte character does not reach the event log as a replacement
-// character.
-func capOutput(s string) string {
-	if len(s) <= MaxOutputBytes {
+// badField reports a model-supplied path or pattern that carries a NUL byte,
+// as a tool error. NUL is invalid in every Unix path and json.Unmarshal accepts
+// it; left unchecked it reaches the sandbox as a tar header (which archive/tar
+// rejects) or a truncated command — surfacing as a backend fault for what is
+// really the model's own malformed input, and so misrouting the two failure
+// kinds Run is careful to keep apart. It returns the error result and true when
+// the field is bad.
+func badField(tool, field, value string) (Result, bool) {
+	if strings.IndexByte(value, 0) >= 0 {
+		return Result{Content: fmt.Sprintf("%s: %s must not contain a NUL byte", tool, field), IsError: true}, true
+	}
+	return Result{}, false
+}
+
+// truncateRunes returns s cut to at most n bytes, backing off to a rune
+// boundary so a split multi-byte character never reaches the event log as a
+// replacement character.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n {
 		return s
 	}
-	cut := s[:MaxOutputBytes]
+	cut := s[:n]
 	for i := 0; i < utf8.UTFMax && len(cut) > 0; i++ {
 		if r, size := utf8.DecodeLastRuneInString(cut); r == utf8.RuneError && size <= 1 {
 			cut = cut[:len(cut)-1]
@@ -151,7 +165,33 @@ func capOutput(s string) string {
 		}
 		break
 	}
-	return cut + "\n" + truncationNotice
+	return cut
+}
+
+// capOutput trims content to MaxOutputBytes, marking the truncation.
+func capOutput(s string) string {
+	if len(s) <= MaxOutputBytes {
+		return s
+	}
+	return truncateRunes(s, MaxOutputBytes) + "\n" + truncationNotice
+}
+
+// capWithTrailer caps body so that body + trailer still fits MaxOutputBytes with
+// the trailer whole. bash's exit-code and timeout lines are the load-bearing
+// signal — whether the command failed — and must survive truncation of a huge
+// output, which they would not if the trailer were appended and the join then
+// capped from the end. The result is already within the cap, so Run's own
+// capOutput leaves it untouched.
+func capWithTrailer(body, trailer string) string {
+	if len(body)+len(trailer) <= MaxOutputBytes {
+		return body + trailer
+	}
+	notice := "\n" + truncationNotice
+	budget := MaxOutputBytes - len(trailer) - len(notice)
+	if budget < 0 {
+		budget = 0
+	}
+	return truncateRunes(body, budget) + notice + trailer
 }
 
 // combine folds a command's two streams into the one text block a tool result

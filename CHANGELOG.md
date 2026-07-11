@@ -43,6 +43,18 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   there, stay deferred — enabling one offers the model nothing and calling it is
   an error result rather than a tool call that hangs.
 
+  Hardened over a dual (Codex + Claude) review before merge: a non-regular-file
+  read/edit (a FIFO, device, or socket) is now the tool error the reference
+  returns rather than a backend fault (new `sandbox.ErrNotRegularFile` sentinel,
+  bound into the shared sandbox contract suite); a NUL byte in any path or pattern
+  is caught as a tool error before it reaches the sandbox as a broken tar header;
+  the glob pipeline is NUL-delimited end to end so a matched filename containing a
+  newline can no longer inject a fabricated path, and it names a missing tool up
+  front while keeping `pipefail` so a broken pipeline is a reported error rather
+  than a silent "no matches"; an absolute glob pattern ignores a `path` argument, as the reference
+  does; and bash's exit-code / timeout line is capped together with its output so
+  the "did it fail" signal survives truncation of a huge result.
+
 - The persistent bash shell (slice 6, second part): `internal/sandbox/shell`
   turns the reference's stateful `bash` tool — where `cd`, exported
   variables, functions, and shell options carry from one call to the next —
