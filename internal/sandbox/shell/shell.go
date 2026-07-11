@@ -55,6 +55,8 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -88,8 +90,8 @@ type Result struct {
 }
 
 // Run executes one bash tool call against sb, carrying the shell's state in the
-// container between calls. session scopes the state; id names this call's
-// snapshot and its command file.
+// container between calls. session scopes the state; id names this call's command
+// file.
 func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Request) (Result, error) {
 	state := stateRoot + "/" + session.String()
 	var res Result
@@ -98,9 +100,15 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 		// Clearing the head pointer is the whole reset: the next call finds no
 		// committed snapshot and starts from a fresh shell in the workdir. The
 		// container's files are untouched, as the reference's restart leaves them.
+		// A reset that did not run is not a reset — the shell would carry on with
+		// the state the caller asked to be rid of — so its exit code is checked,
+		// not just the backend error.
 		reset := "rm -f " + shellSingleQuote(state+"/head")
-		if _, err := sb.Exec(ctx, sandbox.ExecRequest{Command: reset}); err != nil {
+		switch er, err := sb.Exec(ctx, sandbox.ExecRequest{Command: reset}); {
+		case err != nil:
 			return Result{}, err
+		case er.ExitCode != 0:
+			return Result{}, fmt.Errorf("shell: restart: exit %d: %s", er.ExitCode, strings.TrimSpace(er.Stderr))
 		}
 		res.Restarted = true
 		if req.Command == "" {
@@ -108,12 +116,20 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 		}
 	}
 
+	// The snapshot gets a directory of its own, minted here rather than named
+	// after the tool id: the executor may retry a tool call under the id it
+	// already used, and a retry must not find the previous attempt's files — least
+	// of all its `done` marker, which would let a re-save that failed part-way be
+	// committed over the top of them.
+	snap := state + "/snap/" + domain.NewID("snap").String()
+
 	if err := sb.WriteFile(ctx, state+"/cmd/"+id.String(), []byte(req.Command)); err != nil {
 		return Result{}, err
 	}
 	script := strings.NewReplacer(
 		"__STATE__", shellSingleQuote(state),
 		"__ID__", shellSingleQuote(id.String()),
+		"__SNAP__", shellSingleQuote(snap),
 	).Replace(templateScript)
 
 	er, err := sb.Exec(ctx, sandbox.ExecRequest{Command: script, Timeout: req.Timeout})
@@ -130,7 +146,7 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 	// SIGKILL landed or the command dodged the kill, overran, and exited on its
 	// own terms — where the EXIT trap does run. It also means a command the
 	// sandbox abandoned cannot reach a later call by writing its snapshot long
-	// after Exec stopped waiting: that write lands in an id-scoped directory
+	// after Exec stopped waiting: that write lands in a directory of its own that
 	// nothing will ever point at.
 	//
 	// The `done` marker — written by the template last, and only if every write
@@ -145,13 +161,13 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 	if res.TimedOut {
 		return res, nil
 	}
-	if _, err := sb.ReadFile(ctx, state+"/snap/"+id.String()+"/done"); err != nil {
+	if _, err := sb.ReadFile(ctx, snap+"/done"); err != nil {
 		if errors.Is(err, sandbox.ErrFileNotExist) {
 			return res, nil
 		}
 		return Result{}, err
 	}
-	if err := sb.WriteFile(ctx, state+"/head", []byte(id.String())); err != nil {
+	if err := sb.WriteFile(ctx, state+"/head", []byte(path.Base(snap))); err != nil {
 		return Result{}, err
 	}
 	return res, nil

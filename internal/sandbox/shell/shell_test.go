@@ -239,6 +239,67 @@ func TestShell(t *testing.T) {
 		}
 	})
 
+	// The template's trailing lines are parsed AFTER the restore has sourced the
+	// snapshot's aliases, so a carried alias is expanded over them. `alias
+	// trap=true` alone turned `trap '__map_save' EXIT` into a no-op, and every
+	// later call that ended by calling `exit` lost its state, silently, for the
+	// rest of the session. Aliases on `exit` and `.` reach the same lines.
+	t.Run("AnAliasCannotHijackTheTemplatesOwnLines", func(t *testing.T) {
+		for _, tc := range []struct{ name, alias string }{
+			{"OnTrap", "trap=true"},
+			{"OnExit", "exit=true"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sh, _ := newShell(t, sb)
+				sh("shopt -s expand_aliases; alias "+tc.alias, 0)
+				// A command that ends by calling exit: only the EXIT trap can save it.
+				sh("export MUST_PERSIST=1; cd /tmp; exit 0", 0)
+				got := sh(`echo "[${MUST_PERSIST:-LOST}][$(pwd)]"`, 0)
+				if strings.TrimSpace(got.Stdout) != "[1][/tmp]" {
+					t.Errorf("stdout = %q, want [1][/tmp] — an alias on %q hijacked the template's own lines",
+						got.Stdout, tc.alias)
+				}
+			})
+		}
+	})
+
+	// The save runs in the command's shell, so every name it declares can collide
+	// with one the command exported. They are all __map_*; `code` was not, and an
+	// exported `code` came back as the previous call's exit status.
+	t.Run("ATemplateLocalDoesNotClobberACommandsVariable", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh("export code=mysecret", 0)
+		got := sh(`echo "code=[${code:-LOST}]"`, 0)
+		if strings.TrimSpace(got.Stdout) != "code=[mysecret]" {
+			t.Errorf("stdout = %q, want code=[mysecret] — a template local clobbered the command's variable", got.Stdout)
+		}
+	})
+
+	// The executor may retry a tool call under the id it already used. The
+	// snapshot must not be that id's directory, or the retry inherits the previous
+	// attempt's files — above all its `done` marker, which would let a re-save that
+	// failed part-way be committed on top of them.
+	t.Run("ARetryUnderTheSameToolIDGetsAFreshSnapshot", func(t *testing.T) {
+		session := domain.NewID("sesn")
+		id := domain.NewID("sevt")
+		run := func(cmd string) shell.Result {
+			t.Helper()
+			res, err := shell.Run(context.Background(), sb, session, id, shell.Request{Command: cmd})
+			if err != nil {
+				t.Fatalf("Run(%q): %v", cmd, err)
+			}
+			return res
+		}
+		run("export KEEP=yes; cd /var") // first attempt: commits under this id
+		// The retry reuses the id and its save fails part-way. With a per-id
+		// snapshot it would find the first attempt's marker and commit a torn mix.
+		run(`cd /tmp; export EVIL=1; mkdir "$__map_snap/env"`)
+		after := run(`echo "[${KEEP:-LOST}][${EVIL:-unset}][$(pwd)]"`)
+		if strings.TrimSpace(after.Stdout) != "[yes][unset][/var]" {
+			t.Errorf("stdout = %q, want [yes][unset][/var] — a retry reused the first attempt's snapshot", after.Stdout)
+		}
+	})
+
 	// The template's own names must never be snapshotted, or a command that
 	// defines one reaches across into the next call's machinery. (__map_save
 	// itself is a poor probe: the template defines it on every call. A command

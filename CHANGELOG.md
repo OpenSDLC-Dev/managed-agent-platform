@@ -57,7 +57,17 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   next call restoring a shell with no `PATH`. The restore's unset-diff reads names
   a line at a time rather than word-splitting `$(compgen -e)`, since an exported
   `IFS=` would otherwise disable the diff and let a scrubbed secret come back from
-  the container environment. Divergences from a resident shell are enumerated rather than
+  the container environment. Everything the template runs after the restore lives
+  in a function *defined before* it, because bash expands aliases when a line is
+  parsed and the restore sources the snapshot's alias table: a carried
+  `alias trap=true` turned the EXIT trap into a no-op and silently dropped the
+  state of every later call that ended by calling `exit`. The alias table is
+  namespace-filtered like the exports and functions already were, the save's own
+  locals are `__map_*` (an exported variable named `code` used to come back as the
+  previous call's exit status), and the snapshot directory is minted per call
+  rather than named after the tool id, so an executor retrying a call under an
+  id it already used cannot inherit the previous attempt's marker. Divergences
+  from a resident shell are enumerated rather than
   glossed: the `jobs` table does not carry, plain (non-exported) variables do not
   carry, traps do not carry and a command's EXIT trap fires at the end of that
   call, a timed-out call's mutations are dropped, and a call whose shell never
