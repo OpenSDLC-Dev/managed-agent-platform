@@ -49,6 +49,16 @@ mkdir -p "$__map_snap" >/dev/null 2>&1
 __map_save() {
   builtin local __map_code=${1:-$?} __map_opts_ok=0 __map_body_ok=0
 
+  # The command's traps go first, before this function does anything else. Traps
+  # do not carry (see the divergences), so dropping them costs nothing — and
+  # keeping them costs the whole snapshot. Under `set -E` or `set -T` an ERR or
+  # DEBUG trap is inherited into the process substitutions below, and a trap that
+  # prints to STDOUT writes straight into the pipe the `while read` loop is
+  # consuming: its text is read as if it were a variable name, `declare -p` on
+  # that garbage fails, errexit aborts the save, and the call loses everything it
+  # did. `set -E; trap 'echo ...' ERR` is an ordinary script idiom, not sabotage.
+  builtin trap - DEBUG ERR RETURN
+
   # Options are captured first, and in THIS shell. Two traps, both of which cost
   # `set -e` its persistence: capturing after the `set +e` below records
   # `set +o errexit` every time, and capturing through a command substitution
@@ -59,9 +69,11 @@ __map_save() {
   # incomplete snapshot and must not be committed.
   { builtin shopt -p; builtin set +o; } >"$__map_snap/opts" 2>/dev/null || __map_opts_ok=1
 
-  # xtrace goes off with errexit, and only after the options are captured: a
-  # command that ran under `set -x` still carries it, but the save's own thirty
-  # lines do not spill into the tool result's stderr.
+  # xtrace goes off with errexit, and only after the options are captured, so a
+  # command that ran under `set -x` still carries it. This trims the trace the
+  # save would otherwise spill into the tool result's stderr; it does not remove
+  # it. A handful of lines — __map_main's own, and the two above — are traced
+  # before this runs, and a command that asked for `set -x` gets them.
   builtin set +ex
   # errexit inside the subshell is what makes a failing write abort the rest, and
   # the subshell's exit status is what gates the marker. The subshell has to be a
@@ -140,9 +152,9 @@ __map_save() {
 # lose more than their own call: an uncommitted snapshot leaves `head` alone.
 __map_main() {
   builtin trap '__map_save' EXIT
-  . "$__map_state/cmd/$__map_id"
+  builtin . "$__map_state/cmd/$__map_id"
   __map_status=$?
-  builtin trap - EXIT
+  builtin trap - DEBUG ERR RETURN EXIT
   __map_save "$__map_status"
   builtin exit "$__map_status"
 }

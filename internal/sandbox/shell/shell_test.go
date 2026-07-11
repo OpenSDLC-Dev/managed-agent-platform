@@ -263,6 +263,73 @@ func TestShell(t *testing.T) {
 		}
 	})
 
+	// Every word `__map_main` runs is a builtin a command can shadow with a
+	// function of the same name — `.` above all, which is a legal function name,
+	// is snapshotted like any other, and once restored makes the template source
+	// nothing: every later call returns exit 0 with no output, forever. `trap` is
+	// the same shape and costs the next call its snapshot.
+	t.Run("AFunctionCannotHijackTheTemplatesOwnWords", func(t *testing.T) {
+		for _, tc := range []struct{ name, fn string }{
+			{"Dot", `.() { echo HIJACKED_DOT; }`},
+			{"Trap", `trap() { echo HIJACKED_TRAP; }`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sh, _ := newShell(t, sb)
+				sh("export KEEP=yes; cd /var; "+tc.fn, 0)
+				got := sh(`export SECOND=2; echo "[${KEEP:-LOST}][$(pwd)]"`, 0)
+				if strings.TrimSpace(got.Stdout) != "[yes][/var]" {
+					t.Fatalf("stdout = %q, want [yes][/var] — %s hijacked the template", got.Stdout, tc.fn)
+				}
+				after := sh(`echo "[${SECOND:-LOST}]"`, 0)
+				if strings.TrimSpace(after.Stdout) != "[2]" {
+					t.Errorf("stdout = %q, want [2] — %s cost the next call its snapshot", after.Stdout, tc.fn)
+				}
+			})
+		}
+	})
+
+	// A carried alias on the template's own names must not survive either: the
+	// alias table is namespace-filtered exactly as the exports and functions are.
+	// Without that, `alias __map_main=...` replaces the whole call.
+	t.Run("AnAliasOnTheTemplatesOwnNamesIsNotSnapshotted", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh(`shopt -s expand_aliases; alias __map_main='echo HIJACKED_MAIN'; export KEEP=yes`, 0)
+		got := sh(`echo "[${KEEP:-LOST}]"`, 0)
+		if strings.Contains(got.Stdout, "HIJACKED_MAIN") {
+			t.Errorf("stdout = %q — an alias on __map_main was carried and ran instead of the command", got.Stdout)
+		}
+		if strings.TrimSpace(got.Stdout) != "[yes]" {
+			t.Errorf("stdout = %q, want [yes]", got.Stdout)
+		}
+	})
+
+	// An ERR or DEBUG trap under errtrace/functrace is inherited into the save's
+	// process substitutions, and a trap that PRINTS writes into the very pipe the
+	// name-reading loop consumes — its text is read as a variable name, the save
+	// aborts, and the call silently loses everything it did. `set -E; trap … ERR`
+	// is an ordinary script idiom.
+	// The `exit` variants matter on their own: the command exits THROUGH the EXIT
+	// trap, so __map_main's post-command trap clearing never runs and __map_save
+	// has to drop the traps itself.
+	t.Run("AnErrOrDebugTrapThatPrintsDoesNotCostTheCallItsSnapshot", func(t *testing.T) {
+		for _, tc := range []struct{ name, setup, ending string }{
+			{"ErrTrap", `set -E; trap 'echo boom' ERR`, ""},
+			{"DebugTrap", `set -T; trap 'echo boom' DEBUG`, ""},
+			{"ErrTrapAndExits", `set -E; trap 'echo boom' ERR`, "; exit 0"},
+			{"DebugTrapAndExits", `set -T; trap 'echo boom' DEBUG`, "; exit 0"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sh, _ := newShell(t, sb)
+				sh(tc.setup+`; export MARK=1; cd /tmp`+tc.ending, 0)
+				got := sh(`set +ET; trap - DEBUG ERR; echo "[${MARK:-LOST}][$(pwd)]"`, 0)
+				if !strings.Contains(got.Stdout, "[1][/tmp]") {
+					t.Errorf("stdout = %q, want [1][/tmp] — a printing %s trap ate the call's snapshot",
+						got.Stdout, tc.name)
+				}
+			})
+		}
+	})
+
 	// The save runs in the command's shell, so every name it declares can collide
 	// with one the command exported. They are all __map_*; `code` was not, and an
 	// exported `code` came back as the previous call's exit status.
