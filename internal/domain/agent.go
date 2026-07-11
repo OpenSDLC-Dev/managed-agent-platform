@@ -39,6 +39,18 @@ type PermissionPolicy struct {
 	Type PermissionPolicyType `json:"type"`
 }
 
+// EvaluatedPermission is the resolved permission the brain stamps on an
+// agent.tool_use / agent.mcp_tool_use event: the platform ran the tool
+// automatically (allow), paused it for human confirmation (ask), or blocked it
+// (deny — reserved; no configurable permission_policy produces it yet).
+type EvaluatedPermission string
+
+const (
+	EvalPermAllow EvaluatedPermission = "allow"
+	EvalPermAsk   EvaluatedPermission = "ask"
+	EvalPermDeny  EvaluatedPermission = "deny"
+)
+
 // AgentSpec is the mutable configuration of an agent, shared by the stored
 // Agent resource and the per-session ResolvedAgent snapshot. This is the wire
 // shape: every field is always present (the surface is api:"required"), and

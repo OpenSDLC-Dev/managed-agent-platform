@@ -78,6 +78,11 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents); err != nil {
 		return nil, errInvalid("%s", err)
 	}
+	// A confirmation must name a tool use still awaiting one; like a tool
+	// result, a bad reference on the append-only log would wedge the resume.
+	if err := events.ValidateToolConfirmations(ctx, tx, domain.ID(id), newEvents); err != nil {
+		return nil, errInvalid("%s", err)
+	}
 
 	// State-machine triggers (the session's turn scheduler, per the plan's
 	// "enqueue model-turn" arrow): a user.message wakes an idle session —
@@ -85,16 +90,19 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// running resumes the suspended turn — but only when it completes the
 	// set: the model protocol requires every tool_use answered in the next
 	// turn, so partial results of a parallel tool call keep waiting. The
-	// session never left running, so no new status event. Everything else
-	// only appends (a user.message mid-turn is picked up by the brain's
+	// session never left running, so no new status event. A tool confirmation
+	// resolves a requires_action suspension (see the case below). Everything
+	// else only appends (a user.message mid-turn is picked up by the brain's
 	// end-of-turn watermark check).
-	var hasUserMessage, hasToolResult bool
+	var hasUserMessage, hasToolResult, hasConfirmation bool
 	for _, ev := range newEvents {
 		switch ev.Type {
 		case domain.EventUserMessage:
 			hasUserMessage = true
 		case domain.EventUserToolResult, domain.EventUserCustomToolRes:
 			hasToolResult = true
+		case domain.EventUserToolConfirm:
+			hasConfirmation = true
 		}
 	}
 	batch := newEvents
@@ -116,6 +124,49 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		}
 		if !unanswered {
 			opts.Then = enqueueTurn
+		}
+	case hasConfirmation && status == string(domain.SessionIdle):
+		// A requires_action suspension resolves. Each denial is answered with
+		// an error result (the model protocol requires every tool_use answered
+		// before the turn resumes; the denial shape is an inference — see
+		// STATE.md). If confirmations remain outstanding, the session re-idles
+		// with the shrunken blocking set; once the last ask is resolved it
+		// resumes — running an executor for any still-unanswered allowed tool,
+		// or the brain directly when every gated tool was denied.
+		denyResults, deniedIDs, err := denyToolResults(newEvents)
+		if err != nil {
+			return nil, err
+		}
+		batch = append(batch, denyResults...)
+
+		remaining, err := events.UnconfirmedAskEvents(ctx, tx, domain.ID(id), events.ToolConfirmationRefs(newEvents))
+		if err != nil {
+			return nil, err
+		}
+		if len(remaining) > 0 {
+			stop, err := json.Marshal(map[string]any{"stop_reason": map[string]any{
+				"type": "requires_action", "event_ids": remaining,
+			}})
+			if err != nil {
+				return nil, err
+			}
+			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: stop})
+			break
+		}
+		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
+		running := domain.SessionRunning
+		opts.SetStatus = &running
+		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), deniedIDs)
+		if err != nil {
+			return nil, err
+		}
+		kind := queue.ModelTurn
+		if unanswered {
+			kind = queue.ToolExec
+		}
+		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+			_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), kind)
+			return err
 		}
 	}
 
@@ -143,6 +194,53 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		data = append(data, wire)
 	}
 	return map[string]any{"data": data}, nil
+}
+
+// denyToolResults turns each denied user.tool_confirmation in a batch into the
+// agent.tool_result that answers its gated tool use: an error result carrying
+// the client's deny_message (or a default). The model protocol requires every
+// tool_use answered before the turn resumes, so a denied tool must have a
+// result, or the next replay is a request the model rejects. It also returns
+// the answered (denied) tool-use ids.
+//
+// The denial's result shape is an inference: the reference documents the
+// confirmation event, not the result a denial produces (see STATE.md).
+func denyToolResults(evs []events.NewEvent) ([]events.NewEvent, []string, error) {
+	var results []events.NewEvent
+	var deniedIDs []string
+	for _, ev := range evs {
+		if ev.Type != domain.EventUserToolConfirm {
+			continue
+		}
+		var c struct {
+			Result      string `json:"result"`
+			ToolUseID   string `json:"tool_use_id"`
+			DenyMessage string `json:"deny_message"`
+		}
+		if err := json.Unmarshal(ev.Payload, &c); err != nil {
+			return nil, nil, err
+		}
+		if c.Result != "deny" {
+			continue
+		}
+		msg := c.DenyMessage
+		if msg == "" {
+			// Never an empty text block: a Messages endpoint rejects one, and
+			// that request is what the brain replays on resume.
+			msg = "The user declined this tool call."
+		}
+		payload, err := json.Marshal(map[string]any{
+			"tool_use_id": c.ToolUseID,
+			"content":     []map[string]any{{"type": "text", "text": msg}},
+			"is_error":    true,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		results = append(results, events.NewEvent{Type: domain.EventAgentToolResult, Payload: payload})
+		deniedIDs = append(deniedIDs, c.ToolUseID)
+	}
+	return results, deniedIDs, nil
 }
 
 // listSessionEvents implements GET /v1/sessions/{id}/events with the

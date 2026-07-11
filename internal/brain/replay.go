@@ -230,6 +230,35 @@ func classifyTools(agent domain.ResolvedAgent) (map[string]domain.EventType, err
 	return kind, nil
 }
 
+// classifyPolicies maps each platform-executed built-in tool the agent offers
+// to its resolved permission policy (always_allow / always_ask), the brain's
+// input for stamping evaluated_permission and deciding whether a turn suspends
+// for confirmation. Only agent_toolset tools carry a policy: custom tools are
+// client-executed (permission is the client's concern) and mcp_toolset waits
+// for the MCP client, so neither appears here.
+func classifyPolicies(agent domain.ResolvedAgent) (map[string]domain.PermissionPolicyType, error) {
+	policy := make(map[string]domain.PermissionPolicyType)
+	for _, raw := range agent.Tools {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			return nil, fmt.Errorf("agent tool: %w", err)
+		}
+		if probe.Type != "agent_toolset_20260401" {
+			continue
+		}
+		pols, err := toolset.Policies(raw)
+		if err != nil {
+			return nil, fmt.Errorf("agent tool: %w", err)
+		}
+		for name, p := range pols {
+			policy[name] = p
+		}
+	}
+	return policy, nil
+}
+
 // contentBlocks normalizes wire message content (a bare string or an array
 // of blocks) into individual raw blocks, preserved verbatim.
 func contentBlocks(raw json.RawMessage) ([]json.RawMessage, error) {

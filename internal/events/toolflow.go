@@ -27,6 +27,7 @@ import (
 // checks can run inside a caller's transaction.
 type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 var (
@@ -40,6 +41,14 @@ var (
 		string(domain.EventUserCustomToolRes),
 		string(domain.EventAgentToolResult),
 		string(domain.EventAgentMCPToolResult),
+	}
+	// confirmableToolUseTypes are the tool-use events that can carry an
+	// evaluated_permission of "ask" and so be gated on user.tool_confirmation:
+	// platform built-ins and MCP tools. Custom tools are client-executed and
+	// never gated by the platform.
+	confirmableToolUseTypes = []string{
+		string(domain.EventAgentToolUse),
+		string(domain.EventAgentMCPToolUse),
 	}
 )
 
@@ -139,6 +148,112 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		}
 	}
 	return nil
+}
+
+// ToolConfirmationRefs collects the tool-use ids a batch's
+// user.tool_confirmation events resolve, in batch order.
+func ToolConfirmationRefs(evs []NewEvent) []string {
+	var refs []string
+	for _, ev := range evs {
+		if ev.Type != domain.EventUserToolConfirm {
+			continue
+		}
+		if ref, err := payloadString(ev.Payload, "tool_use_id"); err == nil {
+			refs = append(refs, ref)
+		}
+	}
+	return refs
+}
+
+// ValidateToolConfirmations rejects an inbound user.tool_confirmation that does
+// not name a tool use still awaiting confirmation: the id must reference an
+// ask-gated tool-use event (evaluated_permission "ask") in this session that no
+// prior confirmation has resolved, and not appear twice in one request. Like a
+// tool result, an accepted bad confirmation cannot be taken back from the
+// append-only log, so a wrong reference is the client's 400.
+func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent) error {
+	seen := map[string]bool{}
+	for i, ev := range evs {
+		if ev.Type != domain.EventUserToolConfirm {
+			continue
+		}
+		ref, err := payloadString(ev.Payload, "tool_use_id")
+		if err != nil {
+			return fmt.Errorf("events[%d]: %w", i, err)
+		}
+		if seen[ref] {
+			return fmt.Errorf("events[%d]: duplicate confirmation for tool_use_id %q in one request", i, ref)
+		}
+		seen[ref] = true
+
+		var perm string
+		var confirmed bool
+		err = q.QueryRow(ctx,
+			`SELECT COALESCE(tu.payload->>'evaluated_permission', ''),
+			        EXISTS (
+			          SELECT 1 FROM events c
+			          WHERE c.session_id = $1 AND c.type = $4
+			            AND c.payload->>'tool_use_id' = tu.id
+			        )
+			 FROM events tu
+			 WHERE tu.session_id = $1 AND tu.id = $2 AND tu.type = ANY($3)`,
+			sessionID.String(), ref, confirmableToolUseTypes, string(domain.EventUserToolConfirm)).Scan(&perm, &confirmed)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("events[%d]: tool_use_id %q does not name a tool use in this session", i, ref)
+		}
+		if err != nil {
+			return fmt.Errorf("validate tool confirmation: %w", err)
+		}
+		if perm != string(domain.EvalPermAsk) {
+			return fmt.Errorf("events[%d]: tool use %q was not gated for confirmation", i, ref)
+		}
+		if confirmed {
+			return fmt.Errorf("events[%d]: tool use %q is already confirmed", i, ref)
+		}
+	}
+	return nil
+}
+
+// UnconfirmedAskEvents returns, in log order, the ids of the session's ask-gated
+// tool-use events that no user.tool_confirmation has resolved yet — the set a
+// requires_action suspension is still blocked on. extraConfirmed are the ids a
+// validated-but-not-yet-inserted confirmation batch resolves, so the API can
+// decide its resume before appending: an empty result means every ask is
+// answered and the session may run; a non-empty result is the remainder to
+// re-emit on session.status_idle.
+func UnconfirmedAskEvents(ctx context.Context, q Querier, sessionID domain.ID, extraConfirmed []string) ([]string, error) {
+	if extraConfirmed == nil {
+		extraConfirmed = []string{}
+	}
+	rows, err := q.Query(ctx,
+		`SELECT tu.id FROM events tu
+		 WHERE tu.session_id = $1 AND tu.type = ANY($2)
+		   AND tu.payload->>'evaluated_permission' = $3
+		   AND tu.id != ALL($4)
+		   AND NOT EXISTS (
+		     SELECT 1 FROM events c
+		     WHERE c.session_id = $1 AND c.type = $5
+		       AND c.payload->>'tool_use_id' = tu.id
+		   )
+		 ORDER BY tu.seq`,
+		sessionID.String(), confirmableToolUseTypes, string(domain.EvalPermAsk),
+		extraConfirmed, string(domain.EventUserToolConfirm))
+	if err != nil {
+		return nil, fmt.Errorf("unconfirmed ask events: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("unconfirmed ask events: %w", err)
+	}
+	return ids, nil
 }
 
 func resultRefKey(typ domain.EventType) string {

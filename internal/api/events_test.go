@@ -103,11 +103,12 @@ func TestSendEchoShapesPerType(t *testing.T) {
 	sid := selfHostedSession(t, s)
 	customID := appendToolUse(t, s, sid, domain.EventAgentCustomToolUse)
 	toolID := appendToolUse(t, s, sid, domain.EventAgentToolUse)
+	riskyID := appendToolUseWithPerm(t, s, sid, "risky", "ask")
 
 	echo := sendEvents(t, s, sid,
 		map[string]any{"type": "user.interrupt"},
 		map[string]any{"type": "user.tool_confirmation", "result": "deny",
-			"tool_use_id": "sevt_tu1", "deny_message": "too risky"},
+			"tool_use_id": riskyID, "deny_message": "too risky"},
 		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": customID,
 			"content": []any{map[string]any{"type": "text", "text": "ok"}}, "is_error": false},
 		map[string]any{"type": "user.tool_result", "tool_use_id": toolID},
@@ -126,7 +127,7 @@ func TestSendEchoShapesPerType(t *testing.T) {
 
 	confirm := echo[1]
 	wantExactKeys(t, confirm, "id", "type", "result", "tool_use_id", "deny_message", "processed_at", "session_thread_id")
-	if confirm["result"] != "deny" || confirm["deny_message"] != "too risky" || confirm["tool_use_id"] != "sevt_tu1" {
+	if confirm["result"] != "deny" || confirm["deny_message"] != "too risky" || confirm["tool_use_id"] != riskyID {
 		t.Errorf("tool_confirmation echo = %v", confirm)
 	}
 

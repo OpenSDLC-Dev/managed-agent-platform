@@ -502,6 +502,157 @@ func TestBuiltinToolUseEnqueuesToolExec(t *testing.T) {
 	}
 }
 
+// An always_ask built-in tool suspends the turn for human confirmation: the
+// session idles with a requires_action stop_reason naming the tool_use event,
+// the intent carries evaluated_permission "ask", and NO tool_exec is enqueued —
+// every tool waits until a user.tool_confirmation resumes the session.
+func TestAlwaysAskToolSuspendsWithRequiresAction(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_side", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+			done("tool_use", 3),
+		},
+	}, nil)
+
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+		"model":{"id":"fixture-model"},"system":"do the task","description":"",
+		"tools":[{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"always_ask"}}}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wake(t, "list the files")
+	h.runOnce(t)
+
+	want := []string{
+		"user.message", "session.status_running",
+		"span.model_request_start", "agent.tool_use", "span.model_request_end",
+		"session.status_idle",
+	}
+	if got := h.types(t); !typesEqual(got, want) {
+		t.Fatalf("after ask turn:\n got %v\nwant %v", got, want)
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status awaiting confirmation = %q, want idle", got)
+	}
+
+	// No tool ran or was queued: everything waits on confirmation.
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec items = %d, want 0 (gated on confirmation)", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn live = %d, want 0 (completed on suspend)", got)
+	}
+
+	// The intent records that it paused for confirmation.
+	useEvs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.tool_use"}})
+	if len(useEvs) != 1 {
+		t.Fatalf("agent.tool_use events = %d, want 1", len(useEvs))
+	}
+	var use struct {
+		EvaluatedPermission string `json:"evaluated_permission"`
+	}
+	_ = json.Unmarshal(useEvs[0].Body, &use)
+	if use.EvaluatedPermission != "ask" {
+		t.Errorf("evaluated_permission = %q, want ask", use.EvaluatedPermission)
+	}
+
+	// The idle event blocks on exactly that tool_use event.
+	idleEvs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"session.status_idle"}})
+	if len(idleEvs) != 1 {
+		t.Fatalf("session.status_idle events = %d, want 1", len(idleEvs))
+	}
+	var idle struct {
+		StopReason struct {
+			Type     string   `json:"type"`
+			EventIDs []string `json:"event_ids"`
+		} `json:"stop_reason"`
+	}
+	_ = json.Unmarshal(idleEvs[0].Body, &idle)
+	if idle.StopReason.Type != "requires_action" {
+		t.Errorf("stop_reason type = %q, want requires_action", idle.StopReason.Type)
+	}
+	if len(idle.StopReason.EventIDs) != 1 || idle.StopReason.EventIDs[0] != useEvs[0].ID.String() {
+		t.Errorf("event_ids = %v, want [%s]", idle.StopReason.EventIDs, useEvs[0].ID)
+	}
+}
+
+// A turn mixing an always_ask tool with an always_allow tool gates the whole
+// turn: requires_action names only the ask tool, nothing runs (no tool_exec)
+// until confirmation, and each intent records its own evaluated_permission.
+func TestMixedPolicyTurnGatesEverythingButNamesOnlyAsk(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_a", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_b", Name: "read", Input: json.RawMessage(`{"file_path":"x"}`)}},
+			done("tool_use", 3),
+		},
+	}, nil)
+
+	// Default always_allow, bash overridden to always_ask.
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+		"model":{"id":"fixture-model"},"system":"s","description":"",
+		"tools":[{"type":"agent_toolset_20260401","configs":[{"name":"bash","permission_policy":{"type":"always_ask"}}]}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wake(t, "go")
+	h.runOnce(t)
+
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec = %d, want 0 (whole turn gated)", got)
+	}
+
+	useEvs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.tool_use"}})
+	if len(useEvs) != 2 {
+		t.Fatalf("agent.tool_use events = %d, want 2", len(useEvs))
+	}
+	perm := map[string]string{}
+	askID := ""
+	for _, e := range useEvs {
+		var b struct {
+			Name                string `json:"name"`
+			EvaluatedPermission string `json:"evaluated_permission"`
+		}
+		_ = json.Unmarshal(e.Body, &b)
+		perm[b.Name] = b.EvaluatedPermission
+		if b.Name == "bash" {
+			askID = e.ID.String()
+		}
+	}
+	if perm["bash"] != "ask" || perm["read"] != "allow" {
+		t.Errorf("permissions = %v, want bash=ask read=allow", perm)
+	}
+
+	// requires_action names only the ask tool.
+	idleEvs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"session.status_idle"}})
+	if len(idleEvs) != 1 {
+		t.Fatalf("session.status_idle events = %d, want 1", len(idleEvs))
+	}
+	var idle struct {
+		StopReason struct {
+			Type     string   `json:"type"`
+			EventIDs []string `json:"event_ids"`
+		} `json:"stop_reason"`
+	}
+	_ = json.Unmarshal(idleEvs[0].Body, &idle)
+	if idle.StopReason.Type != "requires_action" ||
+		len(idle.StopReason.EventIDs) != 1 || idle.StopReason.EventIDs[0] != askID {
+		t.Errorf("stop_reason = %+v, want requires_action naming %s", idle.StopReason, askID)
+	}
+}
+
 func TestMidTurnMessageChainsIntoNextTurn(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		{textChunk(0, "first answer"), done("end_turn", 2)},
