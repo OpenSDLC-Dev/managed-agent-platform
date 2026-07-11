@@ -12,6 +12,22 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Environment-key auth on the session events subtree (slice 8, PR C1) — the BYOC
+  worker's server-side prerequisite. `GET`/`POST /v1/sessions/{id}/events` and
+  `GET …/events/stream` are now **dual-auth**: a request carrying an
+  `Authorization: Bearer <environment key>` is authenticated as that environment's
+  worker credential (the same key it polls work with) and scoped to the
+  environment's own sessions; any other request takes the management `x-api-key`
+  exactly as before. The scheme is chosen by the header the caller sent, in the same
+  top-level `dispatchAuth` that already splits work vs management paths, so auth runs
+  before any `ServeMux` redirect. A middleware enforces the scope: a session in
+  another environment and a session that does not exist both return the identical
+  `404`, so a worker can neither read nor write another environment's sessions and
+  cross-environment existence never leaks. Session CRUD (`GET`/`POST`/`DELETE
+  /v1/sessions/{id}`, `…/archive`, and the collection routes) stays management-only —
+  a `Bearer`-only request to a non-events session route falls through to management
+  auth and is rejected for the missing `x-api-key`.
+
 - The wire work API's work-item lifecycle — `get` / `ack` / `heartbeat` / `stop`
   (slice 8, second part): a polled item now runs its full state machine through to
   `stopped`. Migration `0004` adds the four lifecycle-timestamp columns

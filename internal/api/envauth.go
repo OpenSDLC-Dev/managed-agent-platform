@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -66,6 +67,37 @@ func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key str
 	return envID, err
 }
 
+// bearerToken extracts a non-empty Authorization: Bearer token. ok reports
+// whether the header used the Bearer scheme at all — the dual-auth dispatcher
+// keys the scheme off this, so a request with no Bearer header falls through to
+// management auth rather than being rejected.
+func bearerToken(r *http.Request) (token string, ok bool) {
+	return strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+}
+
+// resolveEnvironmentKey authenticates a request's Authorization: Bearer
+// environment key, returning the environment it is scoped to. On a missing/empty
+// header or an unknown/revoked key it writes the wire auth error and returns
+// ok=false. Both worker-auth middlewares share it so the Bearer-resolution rules
+// live in one place.
+func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) (envID string, ok bool) {
+	token, hasBearer := bearerToken(r)
+	if !hasBearer || token == "" {
+		writeError(w, r, errAuth("missing Authorization: Bearer environment key"))
+		return "", false
+	}
+	envID, err := authenticateEnvironmentKey(r.Context(), pool, token)
+	if err != nil {
+		writeError(w, r, err)
+		return "", false
+	}
+	if envID == "" {
+		writeError(w, r, errAuth("invalid environment key"))
+		return "", false
+	}
+	return envID, true
+}
+
 // requireEnvironmentKey is the worker-auth middleware guarding the work API:
 // every /work route needs a valid Authorization: Bearer environment key. The
 // resolved environment is stored in the request context; handlers assert it
@@ -73,19 +105,38 @@ func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key str
 // another's queue.
 func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		token, ok := strings.CutPrefix(auth, "Bearer ")
-		if !ok || token == "" {
-			writeError(w, r, errAuth("missing Authorization: Bearer environment key"))
+		envID, ok := resolveEnvironmentKey(w, r, pool)
+		if !ok {
 			return
 		}
-		envID, err := authenticateEnvironmentKey(r.Context(), pool, token)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyEnvironment, envID)))
+	})
+}
+
+// requireEnvironmentKeyForSession is the worker-auth middleware for the session
+// events subtree (GET/POST .../events and GET .../events/stream): a BYOC worker
+// drives its own session over the same Authorization: Bearer environment key it
+// polls the work queue with. The key must be valid AND the target session must
+// belong to its environment — a session in another environment (or one that does
+// not exist) is not-found, so a worker can neither read nor write another
+// environment's sessions and cross-environment existence never leaks. Session
+// CRUD stays management-only; only these event routes are dual-auth.
+func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		envID, ok := resolveEnvironmentKey(w, r, pool)
+		if !ok {
+			return
+		}
+		sid := normalizeSessionID(sessionIDFromEventsPath(r.URL.Path))
+		var sessEnv string
+		err := pool.QueryRow(r.Context(),
+			`SELECT environment_id FROM sessions WHERE id = $1`, sid).Scan(&sessEnv)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && sessEnv != envID) {
+			writeError(w, r, errNotFound("session %s not found", sid))
+			return
+		}
 		if err != nil {
 			writeError(w, r, err)
-			return
-		}
-		if envID == "" {
-			writeError(w, r, errAuth("invalid environment key"))
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyEnvironment, envID)))

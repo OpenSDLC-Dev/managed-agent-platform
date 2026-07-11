@@ -107,14 +107,38 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 
 // dispatchAuth picks the auth scheme by path and runs it before the router, so
 // no request reaches a handler — or a ServeMux redirect — unauthenticated. Work
-// API paths take the Authorization: Bearer environment key; everything else
-// takes the management x-api-key.
+// API paths take the Authorization: Bearer environment key; the session events
+// subtree is dual-auth (a worker's Bearer key or the management x-api-key);
+// everything else takes the management x-api-key.
 func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	work := requireEnvironmentKey(pool, next)
 	mgmt := requireAPIKey(pool, next)
+	sessionEvents := dispatchSessionEventsAuth(pool, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isWorkPath(r.URL.Path) {
+		switch {
+		case isWorkPath(r.URL.Path):
 			work.ServeHTTP(w, r)
+		case isSessionEventsPath(r.URL.Path):
+			sessionEvents.ServeHTTP(w, r)
+		default:
+			mgmt.ServeHTTP(w, r)
+		}
+	})
+}
+
+// dispatchSessionEventsAuth dual-auths the session events subtree. A BYOC worker
+// drives its session with the same Authorization: Bearer environment key it
+// polls work with; an application uses the management x-api-key. The scheme is
+// chosen by the header the caller sent — a Bearer header takes the environment
+// path (scoped to the environment's own sessions), anything else takes the
+// management path. Session CRUD is not routed here, so the environment key never
+// reaches it.
+func dispatchSessionEventsAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
+	env := requireEnvironmentKeyForSession(pool, next)
+	mgmt := requireAPIKey(pool, next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := bearerToken(r); ok {
+			env.ServeHTTP(w, r)
 			return
 		}
 		mgmt.ServeHTTP(w, r)
@@ -137,6 +161,47 @@ func isWorkPath(p string) bool {
 	}
 	rest = rest[slash+1:] // "work..."
 	return rest == "work" || strings.HasPrefix(rest, "work/")
+}
+
+// isSessionEventsPath reports whether p is a session events route:
+// /v1/sessions/{id}/events or /v1/sessions/{id}/events/stream. It matches the
+// raw request path (before any redirect) so the auth choice never depends on the
+// router. /v1/sessions/{id} and .../{id}/archive are management-only CRUD paths,
+// not events paths.
+func isSessionEventsPath(p string) bool {
+	rest, ok := sessionSubpath(p)
+	return ok && (rest == "events" || rest == "events/stream")
+}
+
+// sessionIDFromEventsPath returns the {id} segment of a session events path (see
+// isSessionEventsPath), or "" if p is not one. Callers normalize it (session_ →
+// sesn_) before use.
+func sessionIDFromEventsPath(p string) string {
+	const prefix = "/v1/sessions/"
+	if !strings.HasPrefix(p, prefix) {
+		return ""
+	}
+	rest := p[len(prefix):] // "{id}/events..."
+	if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+		return rest[:slash]
+	}
+	return ""
+}
+
+// sessionSubpath splits a /v1/sessions/{id}/<subpath> path, returning the
+// <subpath> and whether p had that shape (an {id} plus at least one more
+// segment).
+func sessionSubpath(p string) (string, bool) {
+	const prefix = "/v1/sessions/"
+	if !strings.HasPrefix(p, prefix) {
+		return "", false
+	}
+	rest := p[len(prefix):] // "{id}/subpath..."
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		return "", false // just "{id}", no subpath
+	}
+	return rest[slash+1:], true
 }
 
 // methodNotAllowed is the wire 405 for a known path reached with an
