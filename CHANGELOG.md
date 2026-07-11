@@ -50,7 +50,14 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   before `set +e`, or `set -e` could never persist — is gated alongside it. The
   save itself is written with bash builtins only, no `mv`, so a command that
   breaks `PATH` is still snapshotted — the hardening the restore already had, now
-  held to on the way out too. Divergences from a resident shell are enumerated rather than
+  held to on the way out too — and it reaches those builtins through `builtin`,
+  because the save runs in the same shell as the command and a bash function
+  overrides a builtin of the same name: a command that merely wraps `printf` would
+  otherwise have the save write an empty name list, earn its marker, and leave the
+  next call restoring a shell with no `PATH`. The restore's unset-diff reads names
+  a line at a time rather than word-splitting `$(compgen -e)`, since an exported
+  `IFS=` would otherwise disable the diff and let a scrubbed secret come back from
+  the container environment. Divergences from a resident shell are enumerated rather than
   glossed: the `jobs` table does not carry, plain (non-exported) variables do not
   carry, traps do not carry and a command's EXIT trap fires at the end of that
   call, a timed-out call's mutations are dropped, and a call whose shell never

@@ -188,6 +188,57 @@ func TestShell(t *testing.T) {
 		}
 	})
 
+	// The save runs in the SAME shell as the command, and a bash function overrides
+	// a builtin of the same name. A command that wraps `printf` — a wrapper, not an
+	// attack — would otherwise have the save write an empty `names` file and still
+	// earn its marker; the next call would restore `env` and then unset every name
+	// `names` does not list, i.e. all of them, leaving the shell without a PATH.
+	t.Run("AFunctionShadowingABuiltinCannotCorruptTheSnapshot", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh(`export KEEP=yes; cd /var; printf() { return 0; }`, 0)
+		got := sh(`echo "[${KEEP:-LOST}][$(pwd)][${PATH:+PATH_OK}]"; declare -F printf >/dev/null && echo FN_KEPT`, 0)
+		if !strings.Contains(got.Stdout, "[yes][/var][PATH_OK]") {
+			t.Errorf("stdout = %q, want [yes][/var][PATH_OK] — a shadowed builtin corrupted the snapshot", got.Stdout)
+		}
+		if !strings.Contains(got.Stdout, "FN_KEPT") {
+			t.Errorf("stdout = %q — the command's own function did not carry", got.Stdout)
+		}
+	})
+
+	// The restore's unset-diff reads names a line at a time under `IFS=`. Splitting
+	// `$(compgen -e)` instead would collapse to one nonsense word under an exported
+	// `IFS=`, unset nothing, and let a scrubbed secret come back from the container
+	// environment — the exact guarantee UnsetOfAnInheritedVariablePersists pins.
+	t.Run("AnExportedIFSDoesNotBreakTheUnsetDiff", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh("export IFS=; unset HOME", 0)
+		got := sh(`echo "[${HOME:-UNSET}]"`, 0)
+		if strings.TrimSpace(got.Stdout) != "[UNSET]" {
+			t.Errorf("stdout = %q, want [UNSET] — an exported IFS disabled the unset-diff and HOME came back", got.Stdout)
+		}
+	})
+
+	// The marker is a completeness check, not a trust boundary — it is on a
+	// filesystem the command owns. Forging it and then skipping the save commits an
+	// empty snapshot, which resets THIS session's shell. That is the documented
+	// self-sabotage boundary, and this pins its blast radius: the command can lose
+	// its own shell state, which it could already do by deleting the state
+	// directory, and it reaches nothing else. The sandbox is per-session, so there
+	// is no other session's state in this container to reach.
+	t.Run("ForgingTheMarkerOnlyResetsTheCommandsOwnSession", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		other, _ := newShell(t, sb)
+		other("export OTHER=intact; cd /var", 0)
+		sh("export KEEP=yes; cd /var", 0)
+		sh(`: >"$__map_snap/done"; exec echo forged`, 0)
+		if got := sh(`echo "[${KEEP:-LOST}][$(pwd)]"`, 0); strings.TrimSpace(got.Stdout) != "[LOST][/workspace]" {
+			t.Errorf("stdout = %q, want [LOST][/workspace] — forging the marker is documented to reset the session", got.Stdout)
+		}
+		if got := other(`echo "[${OTHER:-LOST}][$(pwd)]"`, 0); strings.TrimSpace(got.Stdout) != "[intact][/var]" {
+			t.Errorf("stdout = %q, want [intact][/var] — self-sabotage reached beyond its own session", got.Stdout)
+		}
+	})
+
 	// The template's own names must never be snapshotted, or a command that
 	// defines one reaches across into the next call's machinery. (__map_save
 	// itself is a poor probe: the template defines it on every call. A command

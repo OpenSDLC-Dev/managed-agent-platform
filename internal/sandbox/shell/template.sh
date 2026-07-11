@@ -35,8 +35,17 @@ mkdir -p "$__map_snap" >/dev/null 2>&1
 # restore below already does. Atomicity comes from the `done` marker rather than
 # from temp-file renames: the marker is created only if every write succeeded, and
 # a snapshot without it is never committed, so a half-written one is never read.
+#
+# Every one of those builtins is invoked through `builtin`, because the save runs
+# in the SAME shell as the command and a bash function overrides a builtin of the
+# same name. A command that defines `printf() { return 0; }` — a wrapper, not an
+# attack — would otherwise have the save write an empty `names` file, report
+# success, and earn a marker; the next call would then restore `env` and unset
+# every name not listed in `names`, i.e. all of them, leaving the shell without so
+# much as a PATH. `case`, `while` and `[[` are keywords and cannot be overridden,
+# so the control flow needs no such guard.
 __map_save() {
-  local code=${1:-$?} __map_opts_ok=0 __map_body_ok=0
+  builtin local code=${1:-$?} __map_opts_ok=0 __map_body_ok=0
 
   # Options are captured first, and in THIS shell. Two traps, both of which cost
   # `set -e` its persistence: capturing after the `set +e` below records
@@ -46,9 +55,9 @@ __map_save() {
   # aborting the save while errexit is still on — but it RECORDS that failure
   # rather than swallowing it, because a snapshot missing its options is an
   # incomplete snapshot and must not be committed.
-  { shopt -p; set +o; } >"$__map_snap/opts" 2>/dev/null || __map_opts_ok=1
+  { builtin shopt -p; builtin set +o; } >"$__map_snap/opts" 2>/dev/null || __map_opts_ok=1
 
-  set +e
+  builtin set +e
   # errexit inside the subshell is what makes a failing write abort the rest, and
   # the subshell's exit status is what gates the marker. The subshell has to be a
   # command in its own right, its status read from `$?`: bash IGNORES errexit
@@ -58,8 +67,8 @@ __map_save() {
   # marker anyway. The subshell is a fork, so pwd/exports/functions/aliases are
   # the parent's.
   (
-    set -e
-    pwd >"$__map_snap/cwd"
+    builtin set -e
+    builtin pwd >"$__map_snap/cwd"
 
     # One `declare -p` per exported name, never a line filter over `declare -px`:
     # a line-oriented filter cuts the interior lines of a multi-line value in half
@@ -68,34 +77,34 @@ __map_save() {
     # dropped — every other readonly export is carried as one. `names` records
     # what the snapshot carries, so the restore can tell a variable the command
     # unset from one that was never there.
-    : >"$__map_snap/env"
-    : >"$__map_snap/names"
-    while IFS= read -r __map_n; do
+    builtin : >"$__map_snap/env"
+    builtin : >"$__map_snap/names"
+    while IFS= builtin read -r __map_n; do
       case "$__map_n" in SHELLOPTS | BASHOPTS | __map_*) continue ;; esac
-      printf '%s\n' "$__map_n" >>"$__map_snap/names"
-      declare -p "$__map_n" >>"$__map_snap/env"
-    done < <(compgen -e)
+      builtin printf '%s\n' "$__map_n" >>"$__map_snap/names"
+      builtin declare -p "$__map_n" >>"$__map_snap/env"
+    done < <(builtin compgen -e)
 
     # Functions, one at a time and minus our own: a command that defines
     # __map_save would otherwise have it restored over ours on the next call.
-    : >"$__map_snap/funcs"
-    while IFS= read -r __map_n; do
+    builtin : >"$__map_snap/funcs"
+    while IFS= builtin read -r __map_n; do
       case "$__map_n" in __map_*) continue ;; esac
-      declare -f "$__map_n" >>"$__map_snap/funcs"
-    done < <(compgen -A function)
+      builtin declare -f "$__map_n" >>"$__map_snap/funcs"
+    done < <(builtin compgen -A function)
 
-    alias -p >"$__map_snap/aliases"
+    builtin alias -p >"$__map_snap/aliases"
   ) >/dev/null 2>&1
   __map_body_ok=$?
 
   # The marker, last and only if every write above succeeded — the options in this
   # shell and the body in the subshell. It is what the caller checks before it
   # commits, so an incomplete snapshot is simply never pointed at.
-  if [ "$__map_opts_ok" -eq 0 ] && [ "$__map_body_ok" -eq 0 ]; then
-    : >"$__map_snap/done" 2>/dev/null
+  if [[ $__map_opts_ok -eq 0 && $__map_body_ok -eq 0 ]]; then
+    builtin : >"$__map_snap/done" 2>/dev/null
   fi
 
-  return $code
+  builtin return $code
 }
 
 # Restore the committed snapshot (the first call, and the first call after a
@@ -115,14 +124,18 @@ set +e
     # This exec is a fresh bash, so it re-inherits the container's own environment:
     # a variable the shell UNSET would silently reappear unless it is removed
     # again. Every word below is a builtin, because the diff has to survive a
-    # snapshot in which the shell unset PATH itself.
+    # snapshot in which the shell unset PATH itself. The names are read a line at
+    # a time under `IFS=`, never split out of `$(compgen -e)`: the env restored
+    # just above may carry an IFS of the command's own, and an exported `IFS=`
+    # stops that splitting entirely — the whole diff then collapses to one
+    # nonsense word, nothing is unset, and an unset secret quietly comes back.
     if [ -f "$__map_prev/names" ]; then
       declare -A __map_keep=()
       while IFS= read -r __map_n; do __map_keep["$__map_n"]=1; done <"$__map_prev/names"
-      for __map_n in $(compgen -e); do
+      while IFS= read -r __map_n; do
         case "$__map_n" in __map_*) continue ;; esac
         [ -n "${__map_keep[$__map_n]+x}" ] || unset "$__map_n"
-      done
+      done < <(compgen -e)
       unset __map_keep __map_n
     fi
 
