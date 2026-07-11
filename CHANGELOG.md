@@ -39,10 +39,18 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   its shell without reaching the save — `exec` replaces it, `kill -9 $$` and the
   OOM killer end it, an EXIT trap of the command's own can exit through itself —
   and none of those is a timeout, so on the deadline alone `head` moved off the
-  last good snapshot and took every earlier call's state with it. The save itself
-  is written with bash builtins only, no `mv`, so a command that breaks `PATH` is
-  still snapshotted — the hardening the restore already had, now held to on the
-  way out too. Divergences from a resident shell are enumerated rather than
+  last good snapshot and took every earlier call's state with it. The marker is
+  created only if *every* write succeeded, which is subtler than it reads: bash
+  ignores `errexit` inside a compound command on the left-hand side of `&&`, even
+  an explicit `set -e` within it, so the natural
+  `( set -e; …writes… ) && : >done` would let a write fail in the middle, let the
+  writes after it run, and create the marker over a torn snapshot anyway. The
+  save's subshell is therefore a command in its own right whose status is read
+  from `$?`, and the options file — which has to be captured in the current shell
+  before `set +e`, or `set -e` could never persist — is gated alongside it. The
+  save itself is written with bash builtins only, no `mv`, so a command that
+  breaks `PATH` is still snapshotted — the hardening the restore already had, now
+  held to on the way out too. Divergences from a resident shell are enumerated rather than
   glossed: the `jobs` table does not carry, plain (non-exported) variables do not
   carry, traps do not carry and a command's EXIT trap fires at the end of that
   call, a timed-out call's mutations are dropped, and a call whose shell never

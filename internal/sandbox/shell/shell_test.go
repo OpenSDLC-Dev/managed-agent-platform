@@ -98,6 +98,29 @@ func TestShell(t *testing.T) {
 		}
 	})
 
+	// Only exported variables carry. Nothing in `declare` separates a user's plain
+	// variables from bash's own internals, so the snapshot draws the line at
+	// `export` — and the line has to hold in both directions.
+	t.Run("PlainVariablesDoNotCarryButExportedOnesDo", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh("PLAIN=here; export EXPORTED=here", 0)
+		got := sh(`echo "[${PLAIN:-gone}][${EXPORTED:-gone}]"`, 0)
+		if strings.TrimSpace(got.Stdout) != "[gone][here]" {
+			t.Errorf("stdout = %q, want [gone][here] — the snapshot draws the line at export", got.Stdout)
+		}
+	})
+
+	// Traps do not carry. The next call is a fresh bash whose only EXIT trap is
+	// the template's own save; a trap the command installed is not in it.
+	t.Run("TrapsDoNotCarryAcrossCalls", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh(`trap 'echo BYE' EXIT; trap 'echo HUP' HUP`, 0)
+		got := sh("trap -p", 0)
+		if strings.Contains(got.Stdout, "BYE") || strings.Contains(got.Stdout, "HUP") {
+			t.Errorf("trap -p = %q — a command's traps carried into the next call", got.Stdout)
+		}
+	})
+
 	t.Run("AliasesPersistAcrossCalls", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		sh("shopt -s expand_aliases; alias greet='echo aliased'", 0)
