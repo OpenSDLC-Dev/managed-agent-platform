@@ -18,7 +18,7 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   (per-tool config > `default_config` > the plan's `always_allow` default), backed
   by a shared `resolveToolset` so enable and policy resolution cannot disagree about
   which tools exist; an unknown policy type is a hard error, never a silent
-  auto-run. The brain (`classifyPolicies`) stamps `evaluated_permission`
+  auto-run. The brain (`classify`) stamps `evaluated_permission`
   (`allow`/`ask`) on every platform `agent.tool_use` and, when any intent is
   `always_ask`, gates the **whole** turn: it emits `session.status_idle` with a
   `stop_reason:{type:"requires_action", event_ids:[…]}` naming the ask intents, idles
