@@ -93,8 +93,18 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   own call only), written to break one builtin while delegating the rest it can
   commit an empty snapshot and reset its own session. It is documented as deliberate
   self-sabotage, bounded to that one session and contained by the sandbox, because
-  it is not fixable inside a shell whose every builtin the command may shadow.
-  Divergences
+  it is not fixable inside a shell whose every builtin the command may shadow. Two
+  more the reviewers caught: the restore read `head`/`cwd` with `cat` — the last
+  external in a restore that claims to be all-builtins — so a program named `cat`
+  dropped into the container PATH (a trojan, or an innocent `bat` symlink, and it
+  outlives the shell on disk) made the read return garbage, the restore silently
+  skip, and the next call commit the stripped shell; it now reads with `$(<file)`,
+  which has no command word to shadow. And xtrace, alone among options, no longer
+  carries: a carried `set -x` had the restore re-enable it and then trace the
+  template's own machinery — the internal state path, the tool-call id — into every
+  later call's stderr; the save now turns it off before it captures the options, so
+  the snapshot records it off and only the call that ran `set -x` sees its own
+  prologue traced. Divergences
   from a resident shell are enumerated rather than
   glossed: the `jobs` table does not carry, plain (non-exported) variables do not
   carry, traps do not carry and a command's EXIT trap fires at the end of that

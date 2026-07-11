@@ -607,6 +607,41 @@ greet
 		}
 	})
 
+	// The restore reads `head` and `cwd` with `$(<file)`, not `cat`. A command can
+	// drop a program named `cat` into the container's PATH — a trojan, or an
+	// innocent `bat` symlink — and it persists on disk across execs; if the restore
+	// read `head` through it, the read would yield garbage, the restore would
+	// silently skip, and the next call would commit the stripped shell over the
+	// last good snapshot. `$(<file)` has no command word to shadow.
+	t.Run("AShadowedCatCannotBreakTheRestore", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh("export SECRET=x; cd /tmp", 0)
+		sh(`printf '#!/bin/sh\necho BOGUS\n' >/usr/local/bin/cat; chmod +x /usr/local/bin/cat`, 0)
+		got := sh(`\builtin echo "[${SECRET:-LOST}][$(\builtin pwd)]"`, 0)
+		sh("command rm -f /usr/local/bin/cat", 0) // don't poison sibling subtests
+		if strings.TrimSpace(got.Stdout) != "[x][/tmp]" {
+			t.Errorf("stdout = %q, want [x][/tmp] — a shadowed `cat` made the restore skip and the session strip", got.Stdout)
+		}
+	})
+
+	// xtrace is the one option that does NOT carry. If it did, the restore would
+	// re-enable it and every later call — one that never asked for it — would trace
+	// the template's own machinery (the state path, the tool-call id) into stderr.
+	// The call that runs `set -x` still traces its own prologue; the next call is
+	// clean.
+	t.Run("XtraceDoesNotCarryIntoLaterCalls", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh("set -x; export A=1", 0)
+		got := sh("echo plain", 0) // never sets -x
+		if strings.Contains(got.Stderr, "map-shell") || strings.Contains(got.Stderr, "__map_") {
+			t.Errorf("a later call leaked the template's machinery into stderr: %q", got.Stderr)
+		}
+		under := sh(`[[ -o xtrace ]] && echo TRACING || echo CLEAN`, 0)
+		if strings.TrimSpace(under.Stdout) != "CLEAN" {
+			t.Errorf("stdout = %q, want CLEAN — xtrace carried across calls", under.Stdout)
+		}
+	})
+
 	t.Run("FastCommandUnderTimeoutIsNotATimeout", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		got := sh("echo quick", time.Second)

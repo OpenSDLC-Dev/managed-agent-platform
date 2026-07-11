@@ -49,6 +49,17 @@ mkdir -p "$__map_snap" >/dev/null 2>&1
 __map_save() {
   builtin local __map_code=${1:-$?} __map_opts_ok=0 __map_body_ok=0
 
+  # xtrace off first — right after the `$?` capture above, which `set +x` would
+  # clobber. Unlike every other option, xtrace does NOT carry (see the divergence),
+  # and turning it off HERE, before the opts capture below, is what records it off
+  # in the snapshot so it cannot. If it carried, the restore would re-enable it and
+  # every LATER call — one that never asked for it — would run this whole function
+  # and __map_main under it, tracing the internal state path and the tool-call id
+  # into the tool result's stderr. The command that itself ran `set -x` still traces
+  # its own call's prologue (it asked for tracing); nothing after it does. errexit
+  # is untouched and still captured on, so it carries as an option should.
+  builtin set +x
+
   # The command's traps go first, before this function does anything else. Traps
   # do not carry (see the divergences), so dropping them costs nothing — and
   # keeping them costs the whole snapshot. Under `set -E` or `set -T` an ERR or
@@ -85,12 +96,11 @@ __map_save() {
   # dropping their expansion costs nothing.
   builtin shopt -u expand_aliases
 
-  # xtrace goes off with errexit, and only after the options are captured, so a
-  # command that ran under `set -x` still carries it. This trims the trace the
-  # save would otherwise spill into the tool result's stderr; it does not remove
-  # it. A handful of lines — __map_main's own, and the two above — are traced
-  # before this runs, and a command that asked for `set -x` gets them.
-  builtin set +ex
+  # errexit off now (xtrace already went off above), so a failing write inside the
+  # subshell aborts the rest rather than pressing on and earning a marker over a
+  # torn snapshot. It has to come after the opts capture, or the snapshot would
+  # record `set +o errexit` every time and `set -e` could never persist.
+  builtin set +e
   # errexit inside the subshell is what makes a failing write abort the rest, and
   # the subshell's exit status is what gates the marker. The subshell has to be a
   # command in its own right, its status read from `$?`: bash IGNORES errexit
@@ -216,10 +226,17 @@ __map_main() {
 # `[[` and `case` are keywords and cannot be shadowed at all.
 set +e
 {
-  __map_head=$(cat "$__map_state/head" 2>/dev/null)
+  # `$(<file)` reads the file with bash's own redirection — no `cat`, no command
+  # word at all, so nothing to shadow. `cat` here would be the one external in the
+  # restore, and it reads from the *container's* PATH (this is a fresh exec, before
+  # any snapshot env is sourced): a prior call that dropped a `cat` earlier in that
+  # PATH — a trojan, or an innocent `bat` symlink — would make this read garbage,
+  # the guard below fail, the whole restore silently skip, and the next call commit
+  # the stripped shell over the last good snapshot. `$(<file)` cannot be intercepted.
+  __map_head=$(<"$__map_state/head")
   __map_prev="$__map_state/snap/$__map_head"
   if [[ -n "$__map_head" && -f "$__map_prev/done" ]]; then
-    builtin cd "$(cat "$__map_prev/cwd" 2>/dev/null)" 2>/dev/null || :
+    builtin cd "$(<"$__map_prev/cwd")" 2>/dev/null || :
     [[ -f "$__map_prev/env" ]] && builtin . "$__map_prev/env"
 
     # This exec is a fresh bash, so it re-inherits the container's own environment:

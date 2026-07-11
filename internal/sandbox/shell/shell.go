@@ -44,6 +44,11 @@
 //   - The timeout bounds the whole call — restore, command, snapshot — not the
 //     command alone. The bracket is milliseconds, but a very short timeout pays
 //     for it.
+//   - xtrace (`set -x`) does not carry, though every other option does. A carried
+//     xtrace would have the restore re-enable it and then trace the template's own
+//     machinery — the internal state path, the tool-call id — into every later
+//     call's stderr, including calls that never asked for it. The call that runs
+//     `set -x` still traces its own prologue; the next call starts clean.
 //   - A command that shadows the template's own machinery costs its own call, not
 //     the session — with one architectural exception, a function named `builtin`.
 //     Every name the template owns is `__map_*` and excluded from the snapshot;
