@@ -193,7 +193,17 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 		return b.failTurn(ctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
 	}
 
-	return b.settleTurn(ctx, sid, item, span, turn, watermark)
+	// Only a turn that actually called a tool needs the name→type map; a
+	// text-only end_turn would otherwise re-expand the whole toolset for nothing.
+	var toolKind map[string]domain.EventType
+	if len(turn.toolUses) > 0 {
+		kinds, err := classifyTools(agent)
+		if err != nil {
+			return b.failTurn(ctx, sid, item, span, watermark, fmt.Sprintf("classify tools: %v", err))
+		}
+		toolKind = kinds
+	}
+	return b.settleTurn(ctx, sid, item, span, turn, toolKind, watermark)
 }
 
 // claimLiveSession loads the session under its row lock and settles stale
@@ -309,27 +319,37 @@ func pendingInput(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64
 // agent.message under the preview-reserved id, then one intent event per
 // tool call. turn.text holds no empty blocks — the stream never opens one —
 // so a "text" block always carries its required text field.
-func turnEvents(turn *turnResult) ([]events.NewEvent, error) {
+func turnEvents(turn *turnResult, toolKind map[string]domain.EventType) ([]events.NewEvent, bool, error) {
 	var batch []events.NewEvent
 	if len(turn.text) > 0 {
 		content, err := json.Marshal(map[string]any{"content": turn.text})
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		batch = append(batch, events.NewEvent{
 			ID: turn.messageEventID, Type: domain.EventAgentMessage, Payload: content,
 		})
 	}
+	platform := false
 	for _, tu := range turn.toolUses {
 		payload, err := json.Marshal(map[string]any{
 			"name": tu.Name, "input": tu.Input, "session_thread_id": nil,
 		})
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		batch = append(batch, events.NewEvent{Type: domain.EventAgentCustomToolUse, Payload: payload})
+		typ := toolKind[tu.Name]
+		if typ == "" {
+			// A name the model was not offered — treat it as client-executed so
+			// the platform never runs a tool it does not recognise as its own.
+			typ = domain.EventAgentCustomToolUse
+		}
+		if typ == domain.EventAgentToolUse {
+			platform = true
+		}
+		batch = append(batch, events.NewEvent{Type: typ, Payload: payload})
 	}
-	return batch, nil
+	return batch, platform, nil
 }
 
 // settleTurn commits the turn: the emitted events (message, tool intents),
@@ -342,8 +362,8 @@ func turnEvents(turn *turnResult) ([]events.NewEvent, error) {
 // sides stand down) and the integrity guarantee (a brain that lost its claim
 // rolls the whole turn back; the log never carries a loser's half-turn,
 // whose duplicate tool intents would poison every future replay).
-func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, watermark int64) error {
-	err := b.commitTurn(ctx, sid, item, span, turn, watermark)
+func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, watermark int64) error {
+	err := b.commitTurn(ctx, sid, item, span, turn, toolKind, watermark)
 	span.Finish(false, err)
 	if err != nil {
 		return fmt.Errorf("settle: %w", err)
@@ -351,8 +371,8 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	return nil
 }
 
-func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, watermark int64) error {
-	head, err := turnEvents(turn)
+func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, watermark int64) error {
+	head, platform, err := turnEvents(turn, toolKind)
 	if err != nil {
 		return err
 	}
@@ -375,8 +395,22 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		// committed tool use, so none of them is answered yet. A result
 		// for an earlier intent that landed mid-turn is not lost either —
 		// it stays unprocessed and the resuming turn replays it.
+		//
+		// If any intent is a platform-executed built-in tool, enqueue the
+		// tool_exec item in the same commit so an executor picks it up. A
+		// turn of only client-executed custom tools enqueues nothing — the
+		// client posts user.custom_tool_result and the control plane's
+		// trigger schedules the resume.
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-			return b.queue.Complete(ctx, tx, item)
+			if err := b.queue.Complete(ctx, tx, item); err != nil {
+				return err
+			}
+			if platform {
+				if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, queue.ToolExec); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
 		return b.commitUnderLock(ctx, sid, head, opts)
 	}

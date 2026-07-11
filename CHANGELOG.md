@@ -12,6 +12,72 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The executor and the closed tool loop (slice 6, fourth part): `internal/executor`
+  plus `cmd/executor`, and the brain change that finally offers the model the
+  built-in toolset. When the model calls a built-in tool the brain expands the
+  agent's `agent_toolset_20260401` entry into real tool definitions
+  (`brain/replay.go` → `toolset.Tools`), emits `agent.tool_use`, and suspends the
+  turn — enqueuing one `tool_exec` work item in the *same* transaction that
+  commits the intents (`classifyTools` routes a custom tool to
+  `agent.custom_tool_use`, still client-executed, and a built-in to
+  `agent.tool_use`, platform-executed). The executor claims that item, provisions
+  the session's Docker sandbox with the environment's egress policy, runs every
+  unanswered tool use inside it, and commits the results, the resume, and the
+  item's fate together under the session row lock: it appends the
+  `agent.tool_result` events and — only when every tool use is answered — enqueues
+  the `model_turn` that wakes the brain to continue. This closes the loop the v1
+  goal names: `agent.tool_use` → an executor runs the tool in a sandbox →
+  `agent.tool_result` → the brain resumes. The platform-managed `cloud` path is
+  the same pull protocol a BYOC worker will speak in slice 8.
+
+  The scheduler trap the toolset PR flagged is closed by the appender carrying its
+  own resume enqueue. The turn scheduler only ever sees *inbound* results, and
+  every platform-emitted event is stamped `processed_at` at insert, so an
+  `agent.tool_result` appended mid-turn would be suppressed by the live work item
+  and missed by the settle's pending check — the executor therefore schedules the
+  `model_turn` itself, in the result append's `Then`, mirroring the control plane's
+  client-result trigger.
+
+  At-most-once lives in the queue's lease, not a marker inside the sandbox (which
+  is agent-writable and disposable). A crash mid-run lets the lease lapse, and the
+  reclaiming executor re-derives its work by diffing `agent.tool_use` against
+  `agent.tool_result` on the log — so it re-runs **only** the still-unanswered
+  tools; a committed result is never re-run. A tool's *result* is exactly-once,
+  though a non-idempotent *command* can run more than once across a crash — an
+  inherent, documented residue of a disposable sandbox with no rollback. A tool
+  that fails at the tool level (missing file, nonzero exit) still yields an
+  `is_error` result the model reads; a backend fault (sandbox gone, daemon
+  unreachable) stops the set, commits nothing new for the resume, and leaves the
+  item live for reclaim. A lease keeper renews the claim at TTL/3 while tools run
+  and aborts the commit if the lease is ever lost; the default lease (15 min)
+  outlives `toolset.MaxTimeout` (10 min), and the queue's per-(session, kind)
+  dedup plus the lease serialize a session's `bash` calls without extra machinery.
+
+  Verified by a real-container closed-loop test (one `bash` tool driven through a
+  live Docker sandbox end to end) alongside fake-sandbox contract tests for the
+  fault, reclaim, and lease-keeper paths. Deferred to slice 7 / follow-ups: nothing
+  destroys a sandbox yet (session termination + orphan reaping), container
+  hardening (`PidsLimit`/`CpuQuota`), and adoption re-validating a container's
+  network mode once a session's networking can change.
+
+  Hardened over a dual (Codex `gpt-5.5`/`xhigh` + Claude multi-agent) review and
+  the verifier before merge: a session archived while suspended on a tool no
+  longer reclaim-loops re-running its tools forever (the executor drains a
+  not-running or archived session's item, mirroring the brain's
+  `claimLiveSession`); a tool answered by a self_hosted worker's `user.tool_result`
+  is not re-run (it counts as an answer, matching `HasUnansweredToolUse`); the
+  backend-fault partial commit asserts its lease like every other state write, so
+  a lost claim cannot duplicate a result; the lease keeper now starts before
+  provisioning so a slow image pull cannot let the lease lapse; the file tools use
+  the executor's configured workdir (not a hardcoded `/workspace`) so relative
+  paths land where bash runs; an empty tool result is an empty content array, not
+  an empty text block a Messages endpoint rejects; and per-item faults are logged
+  rather than silently swallowed. Two malformed-config edges are documented rather
+  than fixed — a custom tool named like a built-in (the provider rejects the
+  duplicate-named request visibly; uniqueness validation belongs at agent
+  creation) and the lease keeper duplicated from the brain (a shared queue-level
+  keeper is a deferred chore).
+
 - The built-in toolset (slice 6, third part): `internal/toolset` is
   `agent_toolset_20260401` — `bash`, `read`, `write`, `edit`, `glob`, `grep` —
   executing inside the session's sandbox. `Tools` turns an agent's toolset entry

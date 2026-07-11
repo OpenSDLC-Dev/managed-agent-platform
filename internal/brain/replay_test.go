@@ -55,9 +55,21 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 	if req.System != "base prompt\n\nmid-run steering" {
 		t.Errorf("system = %q", req.System)
 	}
-	// Only the custom tool reaches the model.
-	if len(req.Tools) != 1 || !strings.Contains(string(req.Tools[0]), `"lookup"`) {
-		t.Errorf("tools = %v", req.Tools)
+	// The custom tool and the six expanded agent_toolset tools reach the model,
+	// in order; mcp_toolset still waits for the MCP client.
+	if len(req.Tools) != 7 || !strings.Contains(string(req.Tools[0]), `"lookup"`) {
+		t.Fatalf("tools = %v", req.Tools)
+	}
+	var names []string
+	for _, raw := range req.Tools[1:] {
+		var d struct {
+			Name string `json:"name"`
+		}
+		_ = json.Unmarshal(raw, &d)
+		names = append(names, d.Name)
+	}
+	if strings.Join(names, ",") != "bash,read,write,edit,glob,grep" {
+		t.Errorf("expanded toolset names = %v", names)
 	}
 
 	roles := make([]string, len(req.Messages))

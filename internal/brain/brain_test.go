@@ -172,6 +172,18 @@ func (h *harness) liveWork(t *testing.T) int {
 	return n
 }
 
+// liveOf counts the session's not-yet-finished items of one kind.
+func (h *harness) liveOf(t *testing.T, kind queue.Kind) int {
+	t.Helper()
+	var n int
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM work_items WHERE session_id=$1 AND kind=$2 AND state != 'stopped'`,
+		h.sessionID.String(), string(kind)).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 // retryStatus reads the retry_status variant of the session's last
 // session.error event.
 func (h *harness) retryStatus(t *testing.T) string {
@@ -351,11 +363,12 @@ func TestToolUseSuspendsAndResumes(t *testing.T) {
 		{textChunk(0, "It is a language."), done("end_turn", 5)},
 	}, nil)
 
-	// The agent has one custom tool; its definition reaches the model.
+	// The agent has one custom tool; its definition reaches the model. A custom
+	// tool is client-executed, so this exercises the user.custom_tool_result
+	// round-trip (no executor, no tool_exec item).
 	agentJSON := fmt.Sprintf(`{"type":"agent","id":"agent_x","version":1,"name":"n",
 		"model":{"id":"fixture-model"},"system":"answer tersely","description":"",
-		"tools":[{"type":"custom","name":"lookup","description":"look things up","input_schema":{"type":"object"}},
-		         {"type":"agent_toolset_20260401"}],
+		"tools":[{"type":"custom","name":"lookup","description":"look things up","input_schema":{"type":"object"}}],
 		"mcp_servers":[],"skills":[],"multiagent":null}`)
 	if _, err := h.pool.Exec(context.Background(),
 		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
@@ -389,6 +402,11 @@ func TestToolUseSuspendsAndResumes(t *testing.T) {
 		t.Errorf("system = %q", req.System)
 	}
 
+	// A custom tool is client-executed: no tool_exec item is scheduled.
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("client-executed custom tool enqueued %d tool_exec items, want 0", got)
+	}
+
 	// The result resumes the turn.
 	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.custom_tool_use"}})
 	toolEventID := evs[0].ID.String()
@@ -417,6 +435,70 @@ func TestToolUseSuspendsAndResumes(t *testing.T) {
 	_ = json.Unmarshal(req.Messages[2].Content, &user)
 	if req.Messages[2].Role != "user" || user[0]["type"] != "tool_result" || user[0]["tool_use_id"] != toolEventID {
 		t.Errorf("tool_result turn = %v", user)
+	}
+}
+
+// A built-in toolset tool is platform-executed: its use is emitted as
+// agent.tool_use (not custom) and a tool_exec item is enqueued in the same
+// commit for an executor to pick up. The session stays running.
+func TestBuiltinToolUseEnqueuesToolExec(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_provider_side", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+			done("tool_use", 3),
+		},
+	}, nil)
+
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+		"model":{"id":"fixture-model"},"system":"do the task","description":"",
+		"tools":[{"type":"agent_toolset_20260401"}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wake(t, "list the files")
+	h.runOnce(t)
+
+	// The intent is a platform tool_use, and the session is still running.
+	want := []string{
+		"user.message", "session.status_running",
+		"span.model_request_start", "agent.tool_use", "span.model_request_end",
+	}
+	if got := h.types(t); !typesEqual(got, want) {
+		t.Fatalf("after tool turn:\n got %v\nwant %v", got, want)
+	}
+	if got := h.status(t); got != "running" {
+		t.Errorf("status while awaiting tool = %q, want running", got)
+	}
+
+	// The model was offered the six built-in tools, no custom.
+	if got := len(h.provider.calls[0].Tools); got != 6 {
+		t.Errorf("model saw %d tools, want 6 built-in", got)
+	}
+
+	// A tool_exec item is queued for an executor; the model_turn item is done.
+	if got := h.liveOf(t, queue.ToolExec); got != 1 {
+		t.Errorf("tool_exec items = %d, want 1", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn items still live = %d, want 0 (completed on suspend)", got)
+	}
+
+	// The intent carries the name and input the executor will run.
+	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.tool_use"}})
+	if len(evs) != 1 {
+		t.Fatalf("agent.tool_use events = %d", len(evs))
+	}
+	var body struct {
+		Name  string         `json:"name"`
+		Input map[string]any `json:"input"`
+	}
+	_ = json.Unmarshal(evs[0].Body, &body)
+	if body.Name != "bash" || body.Input["command"] != "ls" {
+		t.Errorf("intent body = %+v", body)
 	}
 }
 
