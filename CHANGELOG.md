@@ -32,7 +32,11 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   environments and `Poll` only `self_hosted`, so a work item a BYOC worker has polled
   can never also be run by the platform executor. `Claim(model_turn)` stays unscoped —
   the brain runs the model on the platform for every environment. This resolves the
-  slice-6 deferral where the executor claimed every environment's `tool_exec` work.
+  slice-6 deferral where the executor claimed every environment's `tool_exec` work. To
+  keep that exclusivity airtight, an environment's kind is now **immutable after
+  creation** — a config update that flips `cloud`↔`self_hosted` is rejected `400`, so
+  the queue's routing key can't move under a live work item (config updates within a
+  kind are unaffected).
 
   Review hardening: a key value is bound to one environment for life (re-minting it for
   a different environment is rejected, never a silent re-point); `reclaim_older_than_ms`

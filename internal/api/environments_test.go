@@ -154,10 +154,12 @@ func TestEnvironmentGetUpdate(t *testing.T) {
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 
 	// Update: no optimistic version; patch name/description/config/metadata.
+	// The config update stays within the environment's kind (cloud) — kind is
+	// immutable after creation (see TestEnvironmentKindIsImmutable).
 	status, updated := s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
 		"name":        "renamed",
 		"description": "after",
-		"config":      map[string]any{"type": "self_hosted"},
+		"config":      map[string]any{"type": "cloud", "networking": map[string]any{"type": "limited", "allowed_hosts": []any{"internal.corp"}}},
 		"metadata":    map[string]any{"drop": nil, "new": "3"},
 	})
 	if status != http.StatusOK {
@@ -166,8 +168,12 @@ func TestEnvironmentGetUpdate(t *testing.T) {
 	if updated["name"] != "renamed" || updated["description"] != "after" {
 		t.Errorf("name/description = %v/%v", updated["name"], updated["description"])
 	}
-	if cfg, _ := updated["config"].(map[string]any); cfg["type"] != "self_hosted" {
+	cfg, _ := updated["config"].(map[string]any)
+	if cfg["type"] != "cloud" {
 		t.Errorf("config = %v", updated["config"])
+	}
+	if net, _ := cfg["networking"].(map[string]any); net["type"] != "limited" {
+		t.Errorf("config networking not updated: %v", updated["config"])
 	}
 	if md, _ := updated["metadata"].(map[string]any); !reflect.DeepEqual(md, map[string]any{"keep": "1", "new": "3"}) {
 		t.Errorf("metadata = %v", updated["metadata"])
@@ -267,5 +273,30 @@ func TestEnvironmentDeleteBlockedBySessions(t *testing.T) {
 	status, _ = s.do(http.MethodGet, "/v1/environments/"+env["id"].(string), nil)
 	if status != http.StatusOK {
 		t.Fatalf("environment vanished after failed delete: %d", status)
+	}
+}
+
+// TestEnvironmentKindIsImmutable pins that an environment's cloud/self_hosted
+// kind is fixed at creation: a config update that flips the kind is rejected.
+// The queue routes work by kind (the executor claims cloud tool_exec, a BYOC
+// worker polls self_hosted), so a mid-life switch could hand one item to both.
+func TestEnvironmentKindIsImmutable(t *testing.T) {
+	s := newTestServer(t)
+
+	cloud := createEnvironment(t, s, map[string]any{"name": "c", "config": map[string]any{"type": "cloud"}})
+	status, body := s.do(http.MethodPost, "/v1/environments/"+cloud["id"].(string),
+		map[string]any{"config": map[string]any{"type": "self_hosted"}})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
+	self := createEnvironment(t, s, map[string]any{"name": "s", "config": map[string]any{"type": "self_hosted"}})
+	status, body = s.do(http.MethodPost, "/v1/environments/"+self["id"].(string),
+		map[string]any{"config": map[string]any{"type": "cloud"}})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
+	// A same-kind config update still works (kind unchanged).
+	status, _ = s.do(http.MethodPost, "/v1/environments/"+self["id"].(string),
+		map[string]any{"config": map[string]any{"type": "self_hosted"}})
+	if status != http.StatusOK {
+		t.Errorf("same-kind config update rejected: status %d", status)
 	}
 }
