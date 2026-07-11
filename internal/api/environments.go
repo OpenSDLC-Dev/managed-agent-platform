@@ -370,9 +370,18 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 		row.description = desc
 	}
 	if raw, ok := obj["config"]; ok && !isNull(raw) {
-		kind, row.config, err = normalizeEnvConfig(raw, row.config)
+		var newKind string
+		newKind, row.config, err = normalizeEnvConfig(raw, row.config)
 		if err != nil {
 			return nil, err
+		}
+		// An environment's kind is fixed at creation: cloud vs self_hosted is a
+		// deployment-boundary property, not a config field. Changing it would
+		// re-home a session's compute (and re-route its work queue between the
+		// executor and a BYOC worker), so a config update that flips the kind is
+		// rejected rather than silently switching hands mid-flight.
+		if newKind != kind {
+			return nil, errInvalid("environment kind cannot be changed (from %s to %s)", kind, newKind)
 		}
 	}
 	// Environments alone treat an empty-string value as a delete (the SDK's

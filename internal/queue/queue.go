@@ -49,6 +49,24 @@ type Item struct {
 	Reclaimed bool
 }
 
+// Work is a work_items row projected for the wire work API (poll/get/list).
+// Unlike Item (a claimant's lease proof for the internal executor), it carries
+// the fields a BetaSelfHostedWork response renders. The four lifecycle
+// timestamps the wire also requires (acknowledged_at/started_at/…) are null
+// for a queued item, so poll — which only ever returns queued work — needs no
+// column for them yet; the state-transition endpoints add those.
+type Work struct {
+	ID            domain.ID
+	EnvironmentID domain.ID
+	SessionID     domain.ID
+	State         string
+	Metadata      map[string]string
+	CreatedAt     time.Time
+	// LastHeartbeat is the wire's latest_heartbeat_at — null until the worker
+	// heartbeats, which a freshly polled (still-queued) item has not.
+	LastHeartbeat *time.Time
+}
+
 // DB is the slice of pgx shared by pools and transactions, so Enqueue can
 // join the caller's transaction (event append + status flip + enqueue must
 // commit atomically).
@@ -83,16 +101,25 @@ func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, 
 // Claim leases the oldest available item of the kind: queued items first-come
 // first-served, plus active items whose lease expired (their claimant died).
 // It returns nil with no error when there is nothing to do.
+//
+// tool_exec claims are scoped to cloud environments — the platform-managed
+// executor is the cloud hands. A self_hosted environment's tool_exec work is
+// served only by Poll (a BYOC worker), never Claim, so an item a worker has
+// polled can never also be run by the executor. model_turn work is claimed for
+// every environment: the brain (model calls) runs on the platform regardless of
+// where a session's sandbox lives.
 func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item, error) {
 	var it Item
 	var prevState string
 	err := q.pool.QueryRow(ctx,
 		`WITH picked AS (
-		    SELECT id, state FROM work_items
-		    WHERE kind = $1
-		      AND (state = 'queued' OR (state = 'active' AND lease_expires_at < now()))
-		    ORDER BY created_at
-		    FOR UPDATE SKIP LOCKED
+		    SELECT w.id, w.state FROM work_items w
+		    JOIN environments e ON e.id = w.environment_id
+		    WHERE w.kind = $1
+		      AND (w.kind = 'model_turn' OR e.kind = 'cloud')
+		      AND (w.state = 'queued' OR (w.state = 'active' AND w.lease_expires_at < now()))
+		    ORDER BY w.created_at
+		    FOR UPDATE OF w SKIP LOCKED
 		    LIMIT 1
 		 )
 		 UPDATE work_items w
@@ -111,6 +138,49 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 	}
 	it.Reclaimed = prevState == "active"
 	return &it, nil
+}
+
+// Poll reserves the oldest queued tool_exec item for one environment and hands
+// it back to a BYOC worker. This is the wire work API's poll: unlike Claim (the
+// executor's queued→active lease), poll is a soft reservation — the item stays
+// queued, and the separate ack transitions it to starting. The reservation is
+// recorded as a lease pushed out by reclaim, so a concurrent poll won't
+// re-hand-out the same item until the window lapses (the wire's
+// reclaim_older_than_ms). It returns nil with no error when the environment's
+// tool_exec queue is empty. model_turn work drives the platform's own brain and
+// is never offered to a worker.
+//
+// Poll serves only self_hosted environments — the mirror of Claim scoping
+// tool_exec to cloud. The two are therefore mutually exclusive by environment
+// kind, so an item a worker has polled is never also run by the executor even
+// if an environment key were misconfigured against a cloud environment.
+func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration) (*Work, error) {
+	var w Work
+	err := q.pool.QueryRow(ctx,
+		`WITH picked AS (
+		    SELECT w.id FROM work_items w
+		    JOIN environments e ON e.id = w.environment_id
+		    WHERE w.environment_id = $1 AND e.kind = 'self_hosted'
+		      AND w.kind = 'tool_exec' AND w.state = 'queued'
+		      AND (w.lease_expires_at IS NULL OR w.lease_expires_at < now())
+		    ORDER BY w.created_at
+		    FOR UPDATE OF w SKIP LOCKED
+		    LIMIT 1
+		 )
+		 UPDATE work_items t
+		 SET lease_expires_at = now() + make_interval(secs => $2), updated_at = now()
+		 FROM picked p
+		 WHERE t.id = p.id
+		 RETURNING t.id, t.environment_id, t.session_id, t.state, t.metadata, t.created_at, t.last_heartbeat`,
+		envID, reclaim.Seconds()).Scan(
+		&w.ID, &w.EnvironmentID, &w.SessionID, &w.State, &w.Metadata, &w.CreatedAt, &w.LastHeartbeat)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("queue: poll %s: %w", envID, err)
+	}
+	return &w, nil
 }
 
 // Extend renews the claimant's lease mid-work (long provider streams) and

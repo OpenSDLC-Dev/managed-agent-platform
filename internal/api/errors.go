@@ -49,6 +49,7 @@ type ctxKey int
 const (
 	ctxKeyRequestID ctxKey = iota
 	ctxKeyPrincipal
+	ctxKeyEnvironment // the environment a worker's Bearer key is scoped to
 )
 
 func requestIDFrom(ctx context.Context) string {

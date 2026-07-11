@@ -338,3 +338,132 @@ func TestRequeueHandsTheItemBack(t *testing.T) {
 		t.Errorf("Complete with the fresh lease: %v", err)
 	}
 }
+
+// TestPollReservesWithoutTransition pins the wire work API's poll: it hands out
+// the oldest queued tool_exec item for one environment as a soft reservation —
+// the item stays queued (ack transitions it) and a second poll inside the
+// reclaim window will not re-hand it out, but once the reservation lapses a
+// later poll reclaims it. Poll is environment-scoped and tool_exec-only.
+func TestPollReservesWithoutTransition(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "self_hosted")
+	q := queue.New(pool)
+
+	// A model_turn item on the same environment is never handed to a worker.
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	// Empty of tool_exec work: poll returns nothing.
+	if w, err := q.Poll(ctx, envID, time.Minute); err != nil || w != nil {
+		t.Fatalf("poll with only model_turn work: %+v %v", w, err)
+	}
+
+	if _, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	w, err := q.Poll(ctx, envID, 50*time.Millisecond)
+	if err != nil || w == nil {
+		t.Fatalf("poll: %+v %v", w, err)
+	}
+	if w.SessionID != sessionID || w.EnvironmentID != envID {
+		t.Errorf("work = %+v", w)
+	}
+	if w.State != "queued" {
+		t.Errorf("polled work state = %q, want queued (ack transitions it)", w.State)
+	}
+	if !domain.ID(w.ID).HasPrefix("work") {
+		t.Errorf("work id %q not work_-prefixed", w.ID)
+	}
+
+	// Reserved: a second poll inside the window hands out nothing.
+	if got, err := q.Poll(ctx, envID, time.Minute); err != nil || got != nil {
+		t.Fatalf("poll inside reclaim window: %+v %v", got, err)
+	}
+	// Reservation lapses: a later poll reclaims the same still-queued item.
+	time.Sleep(60 * time.Millisecond)
+	re, err := q.Poll(ctx, envID, time.Minute)
+	if err != nil || re == nil {
+		t.Fatalf("poll after reclaim window: %+v %v", re, err)
+	}
+	if re.ID != w.ID {
+		t.Errorf("reclaimed a different item: %s vs %s", re.ID, w.ID)
+	}
+}
+
+// TestPollIsEnvironmentScoped pins that a poll only ever hands out its own
+// environment's work — the Bearer key is environment-scoped, so one
+// environment's worker must never see another's queue.
+func TestPollIsEnvironmentScoped(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessA, envA := pgtest.NewSession(t, pool, "self_hosted")
+	_, envB := pgtest.NewSession(t, pool, "self_hosted")
+	q := queue.New(pool)
+
+	if _, err := q.Enqueue(ctx, pool, envA, sessA, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := q.Poll(ctx, envB, time.Minute); err != nil || w != nil {
+		t.Fatalf("poll env B saw env A's work: %+v %v", w, err)
+	}
+	w, err := q.Poll(ctx, envA, time.Minute)
+	if err != nil || w == nil {
+		t.Fatalf("poll env A: %+v %v", w, err)
+	}
+	if w.EnvironmentID != envA {
+		t.Errorf("work environment = %s, want %s", w.EnvironmentID, envA)
+	}
+}
+
+// TestClaimAndPollAreExclusiveByEnvironmentKind pins the cloud/self_hosted
+// split at the queue: the executor's Claim(tool_exec) serves only cloud
+// environments and Poll serves only self_hosted, so a self_hosted item a worker
+// polls is never also run by the executor. model_turn is claimed for every
+// environment — the brain runs on the platform regardless of sandbox location.
+func TestClaimAndPollAreExclusiveByEnvironmentKind(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	cloudSess, cloudEnv := pgtest.NewSession(t, pool, "cloud")
+	selfSess, selfEnv := pgtest.NewSession(t, pool, "self_hosted")
+	q := queue.New(pool)
+
+	// A self_hosted tool_exec item: Poll serves it, Claim never does.
+	if _, err := q.Enqueue(ctx, pool, selfEnv, selfSess, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	if it, err := q.Claim(ctx, queue.ToolExec, time.Minute); err != nil || it != nil {
+		t.Fatalf("executor claimed a self_hosted tool_exec item: %+v %v", it, err)
+	}
+	if w, err := q.Poll(ctx, selfEnv, time.Minute); err != nil || w == nil {
+		t.Fatalf("poll did not serve the self_hosted item: %+v %v", w, err)
+	}
+
+	// A cloud tool_exec item: Claim serves it, Poll never does.
+	if _, err := q.Enqueue(ctx, pool, cloudEnv, cloudSess, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := q.Poll(ctx, cloudEnv, time.Minute); err != nil || w != nil {
+		t.Fatalf("poll served a cloud tool_exec item: %+v %v", w, err)
+	}
+	it, err := q.Claim(ctx, queue.ToolExec, time.Minute)
+	if err != nil || it == nil {
+		t.Fatalf("executor did not claim the cloud item: %+v %v", it, err)
+	}
+	if it.EnvironmentID != cloudEnv {
+		t.Errorf("claimed item environment = %s, want the cloud env %s", it.EnvironmentID, cloudEnv)
+	}
+
+	// model_turn is claimed regardless of environment kind (the brain is not
+	// split): a self_hosted session's model turn still runs on the platform.
+	if _, err := q.Enqueue(ctx, pool, selfEnv, selfSess, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	mt, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || mt == nil {
+		t.Fatalf("brain did not claim a self_hosted model_turn: %+v %v", mt, err)
+	}
+	if mt.EnvironmentID != selfEnv {
+		t.Errorf("model_turn env = %s, want %s", mt.EnvironmentID, selfEnv)
+	}
+}

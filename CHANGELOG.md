@@ -12,6 +12,50 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The wire work API's foundation — environment-key auth and `/work/poll` (slice 8,
+  first part): BYOC workers now authenticate to the work API with an
+  `Authorization: Bearer` environment key (never the management `x-api-key`), each
+  key scoped to exactly one environment. `EnsureEnvironmentKey` registers one live
+  worker credential per environment (hash-only, rotation-by-re-mint); a
+  `requireEnvironmentKey` middleware guards the `/v1/environments/{id}/work/…`
+  subtree on its own mux, and the handler asserts the key's environment matches the
+  path's. `GET …/work/poll` hands the oldest queued `tool_exec` item for the
+  environment to a worker as a `BetaSelfHostedWork` whose `data` references the
+  session the worker attaches to (`{id:"session_…",type:"session"}`) — there is no
+  result endpoint on the work API; a worker posts results back to the session events
+  API. `queue.Poll` reserves the item as a soft handout (it stays `queued`; a later
+  PR's `ack` transitions it), with `reclaim_older_than_ms` re-offering work a dead
+  worker never acknowledged. An empty queue is `200` with a `null` body.
+
+  This PR also lands the cloud/self_hosted split **at the queue** (its worker-consuming
+  half is a later PR): the executor's `Claim(tool_exec)` now serves only `cloud`
+  environments and `Poll` only `self_hosted`, so a work item a BYOC worker has polled
+  can never also be run by the platform executor. `Claim(model_turn)` stays unscoped —
+  the brain runs the model on the platform for every environment. This resolves the
+  slice-6 deferral where the executor claimed every environment's `tool_exec` work. To
+  keep that exclusivity airtight, an environment's kind is now **immutable after
+  creation** — a config update that flips `cloud`↔`self_hosted` is rejected `400`, so
+  the queue's routing key can't move under a live work item (config updates within a
+  kind are unaffected).
+
+  Review hardening: a key value is bound to one environment for life (re-minting it for
+  a different environment is rejected, never a silent re-point); `reclaim_older_than_ms`
+  is clamped so an over-large value can't overflow `time.Duration` into a past
+  reservation; and the work and management routes share one mux behind a path-dispatched
+  auth layer, so authentication always runs before any `ServeMux` redirect (an
+  unauthenticated request gets the `401` wire envelope, never a bare `3xx`). Known
+  limitation, unchanged from `EnsureAPIKey`: concurrent key mints for the *same*
+  environment can briefly leave two live keys (same-environment only); a partial unique
+  index hardening both tables is deferred.
+
+  Deliberate divergences/assumptions, each flagged for a recording against a real
+  managed-agents endpoint: environment-key **issuance** has no public wire endpoint
+  (the reference mints keys in its console), so `EnsureEnvironmentKey` is the
+  platform's own provisioning primitive; the empty-poll body is `null` (the reference
+  may use `204` — both read as "no work" to the client); `block_ms` is accepted but
+  the poll returns immediately (non-blocking, true long-poll deferred); and the
+  unreached lifecycle timestamps on a queued work item render as `null`.
+
 - Permission policies and the human-in-the-loop confirmation round-trip (slice 7):
   an `always_ask` built-in tool now suspends the turn for one human approval before
   it runs. `toolset.Policies` resolves each enabled tool's `permission_policy`
