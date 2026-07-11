@@ -115,10 +115,20 @@ func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	mgmt := requireAPIKey(pool, next)
 	sessionEvents := dispatchSessionEventsAuth(pool, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Classify on the escaped path — the same representation ServeMux routes
+		// on (it unescapes each path segment individually, so an encoded slash
+		// stays within one segment). Classifying on the decoded r.URL.Path would
+		// let a %2F forge an extra segment for the auth choice that the router
+		// does not see: GET /v1/sessions/{id}%2Fevents decodes to a session-events
+		// path (Bearer-authable) yet the router matches it as /v1/sessions/{id}
+		// CRUD, so an environment key would reach a management-only handler.
+		// Matching ServeMux's view keeps the auth scheme and the routed handler in
+		// lockstep.
+		p := r.URL.EscapedPath()
 		switch {
-		case isWorkPath(r.URL.Path):
+		case isWorkPath(p):
 			work.ServeHTTP(w, r)
-		case isSessionEventsPath(r.URL.Path):
+		case isSessionEventsPath(p), r.Method == http.MethodGet && isBareSessionPath(p):
 			sessionEvents.ServeHTTP(w, r)
 		default:
 			mgmt.ServeHTTP(w, r)
@@ -126,18 +136,22 @@ func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	})
 }
 
-// dispatchSessionEventsAuth dual-auths the session events subtree. A BYOC worker
-// drives its session with the same Authorization: Bearer environment key it
-// polls work with; an application uses the management x-api-key. The scheme is
-// chosen by the header the caller sent — a Bearer header takes the environment
-// path (scoped to the environment's own sessions), anything else takes the
-// management path. Session CRUD is not routed here, so the environment key never
-// reaches it.
+// dispatchSessionEventsAuth dual-auths a session's worker-facing routes (the
+// events subtree and the GET /v1/sessions/{id} read — see dispatchAuth). A BYOC
+// worker drives its session with the same Authorization: Bearer environment key
+// it polls work with; an application uses the management x-api-key. The lane is
+// the environment key only when a Bearer is present AND no x-api-key is — the
+// reference client deletes x-api-key before attaching the environment Bearer
+// (the server rejects both at once), so x-api-key present unambiguously means a
+// management caller. Keying on Bearer presence alone would let a stray Bearer
+// header (a proxy, a client configured with both) knock a valid x-api-key caller
+// off management auth. Mutating session CRUD (create/update/delete/archive/list)
+// is not routed here, so the environment key never reaches it.
 func dispatchSessionEventsAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	env := requireEnvironmentKeyForSession(pool, next)
 	mgmt := requireAPIKey(pool, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := bearerToken(r); ok {
+		if _, ok := bearerToken(r); ok && r.Header.Get("x-api-key") == "" {
 			env.ServeHTTP(w, r)
 			return
 		}
@@ -146,9 +160,10 @@ func dispatchSessionEventsAuth(pool *pgxpool.Pool, next http.Handler) http.Handl
 }
 
 // isWorkPath reports whether p is under a work API route:
-// /v1/environments/{id}/work or /v1/environments/{id}/work/... . It matches the
-// raw request path (before any redirect) so the auth choice never depends on
-// the router. /v1/environments/{id} and .../{id}/archive are management paths.
+// /v1/environments/{id}/work or /v1/environments/{id}/work/... . dispatchAuth
+// feeds it the escaped path (URL.EscapedPath, the representation ServeMux routes
+// on) so the auth choice never depends on the router or on %2F decoding.
+// /v1/environments/{id} and .../{id}/archive are management paths.
 func isWorkPath(p string) bool {
 	const prefix = "/v1/environments/"
 	if !strings.HasPrefix(p, prefix) {
@@ -163,45 +178,47 @@ func isWorkPath(p string) bool {
 	return rest == "work" || strings.HasPrefix(rest, "work/")
 }
 
-// isSessionEventsPath reports whether p is a session events route:
-// /v1/sessions/{id}/events or /v1/sessions/{id}/events/stream. It matches the
-// raw request path (before any redirect) so the auth choice never depends on the
-// router. /v1/sessions/{id} and .../{id}/archive are management-only CRUD paths,
-// not events paths.
-func isSessionEventsPath(p string) bool {
-	rest, ok := sessionSubpath(p)
-	return ok && (rest == "events" || rest == "events/stream")
-}
-
-// sessionIDFromEventsPath returns the {id} segment of a session events path (see
-// isSessionEventsPath), or "" if p is not one. Callers normalize it (session_ →
-// sesn_) before use.
-func sessionIDFromEventsPath(p string) string {
+// splitSession parses /v1/sessions/{id}[/{sub...}]. ok is true when p is under
+// /v1/sessions/ with a non-empty {id}; id is the first segment and sub is the
+// remainder after it ("" for the bare /v1/sessions/{id}). The collection route
+// /v1/sessions is ok=false. One splitter feeds both the auth-lane predicates
+// (on the escaped path) and the middleware's ownership id (on the decoded path),
+// so the routed handler and the environment it checks can never drift apart.
+func splitSession(p string) (id, sub string, ok bool) {
 	const prefix = "/v1/sessions/"
 	if !strings.HasPrefix(p, prefix) {
-		return ""
+		return "", "", false
 	}
-	rest := p[len(prefix):] // "{id}/events..."
+	rest := p[len(prefix):] // "{id}" or "{id}/sub..."
 	if slash := strings.IndexByte(rest, '/'); slash >= 0 {
-		return rest[:slash]
+		id, sub = rest[:slash], rest[slash+1:]
+	} else {
+		id = rest
 	}
-	return ""
+	if id == "" {
+		return "", "", false
+	}
+	return id, sub, true
 }
 
-// sessionSubpath splits a /v1/sessions/{id}/<subpath> path, returning the
-// <subpath> and whether p had that shape (an {id} plus at least one more
-// segment).
-func sessionSubpath(p string) (string, bool) {
-	const prefix = "/v1/sessions/"
-	if !strings.HasPrefix(p, prefix) {
-		return "", false
-	}
-	rest := p[len(prefix):] // "{id}/subpath..."
-	slash := strings.IndexByte(rest, '/')
-	if slash < 0 {
-		return "", false // just "{id}", no subpath
-	}
-	return rest[slash+1:], true
+// isSessionEventsPath reports whether p is a session events route:
+// /v1/sessions/{id}/events or /v1/sessions/{id}/events/stream. dispatchAuth feeds
+// it the escaped path (URL.EscapedPath, the representation ServeMux routes on) so
+// the auth choice never depends on the router or on %2F decoding.
+func isSessionEventsPath(p string) bool {
+	_, sub, ok := splitSession(p)
+	return ok && (sub == "events" || sub == "events/stream")
+}
+
+// isBareSessionPath reports whether p is exactly /v1/sessions/{id} — a single
+// non-empty id segment with no subpath. A GET on it is the session read the
+// reference `ant beta:worker` performs with its environment key (SetupSkills →
+// Beta.Sessions.Get), so it joins the events subtree in the env-key dual-auth
+// set; the collection route /v1/sessions and the subpaths (.../events,
+// .../archive) are not bare.
+func isBareSessionPath(p string) bool {
+	_, sub, ok := splitSession(p)
+	return ok && sub == ""
 }
 
 // methodNotAllowed is the wire 405 for a known path reached with an

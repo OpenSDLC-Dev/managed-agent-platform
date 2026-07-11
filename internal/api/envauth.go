@@ -113,21 +113,27 @@ func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	})
 }
 
-// requireEnvironmentKeyForSession is the worker-auth middleware for the session
-// events subtree (GET/POST .../events and GET .../events/stream): a BYOC worker
-// drives its own session over the same Authorization: Bearer environment key it
-// polls the work queue with. The key must be valid AND the target session must
-// belong to its environment — a session in another environment (or one that does
-// not exist) is not-found, so a worker can neither read nor write another
-// environment's sessions and cross-environment existence never leaks. Session
-// CRUD stays management-only; only these event routes are dual-auth.
+// requireEnvironmentKeyForSession is the worker-auth middleware for a session's
+// worker-facing routes (GET/POST .../events, GET .../events/stream, and the GET
+// /v1/sessions/{id} read): a BYOC worker drives its own session over the same
+// Authorization: Bearer environment key it polls the work queue with. The key
+// must be valid AND the target session must belong to its environment. For a
+// given id, a session in another environment and a session that does not exist
+// take the identical branch and return the same 404 (status, type, message), so
+// a worker probing an id cannot tell "exists elsewhere" from "does not exist" —
+// it can neither reach another environment's sessions nor learn they exist.
+// Mutating session CRUD stays management-only; only these worker routes are
+// dual-auth.
 func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		envID, ok := resolveEnvironmentKey(w, r, pool)
 		if !ok {
 			return
 		}
-		sid := normalizeSessionID(sessionIDFromEventsPath(r.URL.Path))
+		// Extract the id from the decoded path so it matches what the routed
+		// handler reads via PathValue (see splitSession).
+		id, _, _ := splitSession(r.URL.Path)
+		sid := normalizeSessionID(id)
 		var sessEnv string
 		err := pool.QueryRow(r.Context(),
 			`SELECT environment_id FROM sessions WHERE id = $1`, sid).Scan(&sessEnv)

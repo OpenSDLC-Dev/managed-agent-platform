@@ -12,21 +12,28 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
-- Environment-key auth on the session events subtree (slice 8, PR C1) — the BYOC
-  worker's server-side prerequisite. `GET`/`POST /v1/sessions/{id}/events` and
-  `GET …/events/stream` are now **dual-auth**: a request carrying an
-  `Authorization: Bearer <environment key>` is authenticated as that environment's
-  worker credential (the same key it polls work with) and scoped to the
-  environment's own sessions; any other request takes the management `x-api-key`
-  exactly as before. The scheme is chosen by the header the caller sent, in the same
-  top-level `dispatchAuth` that already splits work vs management paths, so auth runs
-  before any `ServeMux` redirect. A middleware enforces the scope: a session in
-  another environment and a session that does not exist both return the identical
-  `404`, so a worker can neither read nor write another environment's sessions and
-  cross-environment existence never leaks. Session CRUD (`GET`/`POST`/`DELETE
-  /v1/sessions/{id}`, `…/archive`, and the collection routes) stays management-only —
-  a `Bearer`-only request to a non-events session route falls through to management
-  auth and is rejected for the missing `x-api-key`.
+- Environment-key auth on a session's worker-facing routes (slice 8, PR C1) — the
+  BYOC worker's server-side prerequisite. `GET`/`POST /v1/sessions/{id}/events`,
+  `GET …/events/stream`, and the `GET /v1/sessions/{id}` read are now **dual-auth**:
+  a request carrying an `Authorization: Bearer <environment key>` is authenticated
+  as that environment's worker credential (the same key it polls work with) and
+  scoped to the environment's own sessions; any other request takes the management
+  `x-api-key` exactly as before. This set is exactly what the reference
+  `ant beta:worker` uses the environment key for — the session-events tool runner
+  and the session read its skill setup performs; only the read verb of the bare
+  session path joins the set. A middleware enforces the scope: for a given id, a
+  session in another environment and a session that does not exist take the identical
+  branch and return the same `404` (status, type, message), so a worker can neither
+  read nor write another environment's sessions and cross-environment existence never
+  leaks. Mutating session CRUD (`POST`/`DELETE /v1/sessions/{id}`, `…/archive`, and
+  the collection routes) stays management-only — a `Bearer`-only request to it falls
+  through to management auth and is rejected for the missing `x-api-key`. Two
+  correctness details: the auth lane is classified on the escaped path
+  (`URL.EscapedPath`), the representation `ServeMux` routes on, so a `%2F` cannot
+  forge a segment that routes a Bearer request past the ownership check into a CRUD
+  handler; and the worker lane is chosen only when a `Bearer` is present **and** no
+  `x-api-key` is, so a stray `Bearer` header cannot knock a valid `x-api-key` caller
+  off management auth.
 
 - The wire work API's work-item lifecycle — `get` / `ack` / `heartbeat` / `stop`
   (slice 8, second part): a polled item now runs its full state machine through to

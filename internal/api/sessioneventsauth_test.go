@@ -19,12 +19,14 @@ func readJSON(t *testing.T, res *http.Response) (int, map[string]any) {
 	return res.StatusCode, obj
 }
 
-// TestEnvironmentKeyAuthorizesSessionEvents pins the dual-auth boundary on the
-// session events subtree: a BYOC worker's Authorization: Bearer environment key
-// authorizes list/send (and stream) for a session in its own environment, is
-// not-found for a session in another environment (or a missing one), and the
-// management x-api-key keeps working. The reference environment key authorizes
-// "both the work-poll calls and the session-level calls".
+// TestEnvironmentKeyAuthorizesSessionEvents pins the dual-auth boundary on a
+// session's worker-facing routes: a BYOC worker's Authorization: Bearer
+// environment key authorizes list/send (and stream) plus the GET
+// /v1/sessions/{id} read for a session in its own environment, is not-found for a
+// session in another environment (or a missing one), and the management x-api-key
+// keeps working. The reference environment key authorizes "both the work-poll
+// calls and the session-level calls" (session Get via SetupSkills + the events
+// tool runner).
 func TestEnvironmentKeyAuthorizesSessionEvents(t *testing.T) {
 	s := newTestServer(t)
 	const keyA, keyB = "ek-sess-a", "ek-sess-b"
@@ -72,25 +74,64 @@ func TestEnvironmentKeyAuthorizesSessionEvents(t *testing.T) {
 	if st, _ := readJSON(t, s.doRaw(http.MethodGet, eventsA, nil, map[string]string{"x-api-key": testKey})); st != http.StatusOK {
 		t.Errorf("management list = %d, want 200", st)
 	}
+
+	// The env key also reads its own session (GET /v1/sessions/{id}) — the
+	// reference worker's SetupSkills call — but not another environment's.
+	if st, body := readJSON(t, s.doRaw(http.MethodGet, "/v1/sessions/"+sessionA, nil, bearerA)); st != http.StatusOK {
+		t.Errorf("env-key session read = %d, want 200 (body %v)", st, body)
+	} else if body["id"] != sessionA {
+		t.Errorf("env-key session read id = %v, want %s", body["id"], sessionA)
+	}
+	st, body = readJSON(t, s.doRaw(http.MethodGet, "/v1/sessions/"+sessionB, nil, bearerA))
+	wantErr(t, st, body, http.StatusNotFound, "not_found_error")
+
+	// A valid management x-api-key is honored even alongside a stray Bearer
+	// header: x-api-key present means a management caller, so the request is not
+	// knocked onto environment-key auth.
+	dual := map[string]string{"x-api-key": testKey, "Authorization": "Bearer " + keyA}
+	if st, _ := readJSON(t, s.doRaw(http.MethodGet, eventsA, nil, dual)); st != http.StatusOK {
+		t.Errorf("management list with stray Bearer = %d, want 200", st)
+	}
 }
 
-// TestEnvironmentKeyDoesNotAuthorizeSessionCRUD pins the scope boundary: the
-// environment key authorizes only the events subtree, never session CRUD — those
-// stay management-only. A Bearer-only request to a non-events session route falls
-// to management auth and is rejected for the missing x-api-key.
-func TestEnvironmentKeyDoesNotAuthorizeSessionCRUD(t *testing.T) {
+// TestEnvironmentKeyDoesNotAuthorizeMutatingSessionCRUD pins the scope boundary:
+// the environment key authorizes a session's worker-facing routes (the events
+// subtree and the GET /v1/sessions/{id} read), never mutating CRUD or the
+// collection — those stay management-only. A Bearer-only request to one falls to
+// management auth and is rejected for the missing x-api-key. The bare GET is
+// covered as authorized in TestEnvironmentKeyAuthorizesSessionEvents.
+func TestEnvironmentKeyDoesNotAuthorizeMutatingSessionCRUD(t *testing.T) {
 	s := newTestServer(t)
 	const key = "ek-crud"
 	_, sessionID := selfHostedWorker(t, s, key)
 	bearer := map[string]string{"Authorization": "Bearer " + key}
 
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/v1/sessions/" + sessionID},               // get session
 		{http.MethodGet, "/v1/sessions"},                            // list sessions
 		{http.MethodPost, "/v1/sessions/" + sessionID},              // update session
+		{http.MethodDelete, "/v1/sessions/" + sessionID},            // delete session
 		{http.MethodPost, "/v1/sessions/" + sessionID + "/archive"}, // archive session
 	} {
 		st, body := readJSON(t, s.doRaw(tc.method, tc.path, nil, bearer))
 		wantErr(t, st, body, http.StatusUnauthorized, "authentication_error")
 	}
+}
+
+// TestEnvironmentKeyEncodedSlashDoesNotForgeEventsPath pins the auth/routing
+// path-confusion boundary. dispatchAuth classifies on the escaped path — the
+// same representation ServeMux routes on — so a %2F cannot forge a session-events
+// segment for the auth choice that the router does not also see. The decoded form
+// of /v1/sessions/{id}%2Fevents looks like an events path (Bearer-authable), but
+// ServeMux matches the single escaped {id} segment as /v1/sessions/{id} CRUD; the
+// environment key must therefore fall to management auth and be rejected, never
+// reach a management-only CRUD handler.
+func TestEnvironmentKeyEncodedSlashDoesNotForgeEventsPath(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-encoded"
+	_, sessionID := selfHostedWorker(t, s, key)
+	bearer := map[string]string{"Authorization": "Bearer " + key}
+
+	path := "/v1/sessions/" + sessionID + "%2Fevents"
+	st, body := readJSON(t, s.doRaw(http.MethodPost, path, nil, bearer))
+	wantErr(t, st, body, http.StatusUnauthorized, "authentication_error")
 }
