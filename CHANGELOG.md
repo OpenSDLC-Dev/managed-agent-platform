@@ -12,6 +12,116 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The persistent bash shell (slice 6, second part): `internal/sandbox/shell`
+  turns the reference's stateful `bash` tool — where `cd`, exported
+  variables, functions, and shell options carry from one call to the next —
+  into a pure function of the sandbox contract, adding no backend surface.
+  Each call is still its own `Exec` process, so the deadline the sandbox
+  cannot be talked out of applies to the command verbatim and cannot be
+  forged from inside; a truly-resident shell would forfeit that, because with
+  the command running *as* the shell, foreground-versus-background becomes
+  shell-internal state the command can rewrite. Continuity comes instead from
+  a snapshot on the container's writable layer: the command is delivered as a
+  file and sourced (no command bytes ride the argument or a sentinel, so a
+  literal `MAPDONE` and NUL bytes survive), and the shell snapshots cwd,
+  exported variables, functions, aliases, and options into a directory named
+  after *that call*, finishing with a `done` marker. The executor commits the
+  snapshot — by pointing `head` at it — only when the call finished inside its
+  deadline *and* left that marker. The deadline half is what makes "timed out ⇒
+  mutations dropped" actually true: a timeout is not always a SIGKILL, and a
+  command that kills the in-container watchdog, overruns, and then exits on its
+  own terms runs its EXIT trap perfectly normally, so a shell that simply
+  overwrote one checkpoint on its way out would hand a timed-out call's state to
+  the next one. Committing from outside also means a command the sandbox
+  *abandoned* cannot land its checkpoint seconds later on top of a call that came
+  after it. The marker half is what keeps a call that finished but never *saved*
+  from committing the empty directory it created on its way in: a command can end
+  its shell without reaching the save — `exec` replaces it, `kill -9 $$` and the
+  OOM killer end it, an EXIT trap of the command's own can exit through itself —
+  and none of those is a timeout, so on the deadline alone `head` moved off the
+  last good snapshot and took every earlier call's state with it. The marker is
+  created only if *every* write succeeded, which is subtler than it reads: bash
+  ignores `errexit` inside a compound command on the left-hand side of `&&`, even
+  an explicit `set -e` within it, so the natural
+  `( set -e; …writes… ) && : >done` would let a write fail in the middle, let the
+  writes after it run, and create the marker over a torn snapshot anyway. The
+  save's subshell is therefore a command in its own right whose status is read
+  from `$?`, and the options file — which has to be captured in the current shell
+  before `set +e`, or `set -e` could never persist — is gated alongside it. The
+  save itself is written with bash builtins only, no `mv`, so a command that
+  breaks `PATH` is still snapshotted — the hardening the restore already had, now
+  held to on the way out too — and it reaches those builtins through `builtin`,
+  because the save runs in the same shell as the command and a bash function
+  overrides a builtin of the same name: a command that merely wraps `printf` would
+  otherwise have the save write an empty name list, earn its marker, and leave the
+  next call restoring a shell with no `PATH`. The restore's unset-diff reads names
+  a line at a time rather than word-splitting `$(compgen -e)`, since an exported
+  `IFS=` would otherwise disable the diff and let a scrubbed secret come back from
+  the container environment. Everything the template runs after the restore lives
+  in a function *defined before* it, because bash expands aliases when a line is
+  parsed and the restore sources the snapshot's alias table: a carried
+  `alias trap=true` turned the EXIT trap into a no-op and silently dropped the
+  state of every later call that ended by calling `exit`. The alias table is
+  namespace-filtered like the exports and functions already were, the save's own
+  locals are `__map_*` (an exported variable named `code` used to come back as the
+  previous call's exit status), and the snapshot directory is minted per call
+  rather than named after the tool id, so an executor retrying a call under an
+  id it already used cannot inherit the previous attempt's marker. The restore is
+  hardened the same way and needed it more, because there the shadowing fails
+  *unsafe* — it strips the state, then commits a snapshot taken of the stripped
+  shell, so the loss is permanent: it sources the snapshot's functions, which puts
+  the command's own definitions live over its remaining words and over the words
+  the alias and option files themselves run, and `set() { :; }` alone cost the
+  session every shell option it had. Its words now go through `builtin` too, and
+  the options are applied one line at a time through `builtin` rather than sourced.
+  Being inside a pre-parsed function body turned out to be no defence against an
+  alias either: bash re-parses the body of a command or process substitution every
+  time it runs, so a carried `alias builtin=true` reached into the save's
+  `< <(builtin compgen …)` loops, wrote every snapshot file empty, earned the
+  marker, and left the next call unsetting every exported variable it had,
+  `PATH` included. The save switches alias expansion off for its own duration
+  (after capturing the options, so the snapshot still records that the command had
+  it on), and the one word the restore must re-parse is quoted, since a quoted word
+  is never alias-expanded. The namespace filter itself is only as good as the tool
+  that reads a name back: a function or alias can be named like an option (`-p`),
+  and `declare -f "-p"` / `alias "-p"` then dump the WHOLE table past the filter —
+  the template's own `__map_main` among it, which the next call restores over the
+  real one — so every snapshotted name is now passed after `--`. The one shadow the
+  template cannot guard is a function named `builtin` itself: it is the word that
+  routes around a shadowing function, so nothing routes around it, and no keyword
+  can enumerate the shell in its place; written to return 0 it spins the save (its
+  own call only), written to break one builtin while delegating the rest it can
+  commit an empty snapshot and reset its own session. It is documented as deliberate
+  self-sabotage, bounded to that one session and contained by the sandbox, because
+  it is not fixable inside a shell whose every builtin the command may shadow. Two
+  more the reviewers caught: the restore read `head`/`cwd` with `cat` — the last
+  external in a restore that claims to be all-builtins — so a program named `cat`
+  dropped into the container PATH (a trojan, or an innocent `bat` symlink, and it
+  outlives the shell on disk) made the read return garbage, the restore silently
+  skip, and the next call commit the stripped shell; it now reads with `$(<file)`,
+  which has no command word to shadow. And xtrace, alone among options, no longer
+  carries: a carried `set -x` had the restore re-enable it and then trace the
+  template's own machinery — the internal state path, the tool-call id — into every
+  later call's stderr; the save now turns it off before it captures the options, so
+  the snapshot records it off and only the call that ran `set -x` sees its own
+  prologue traced. And `restart` empties `head` through the sandbox file API
+  rather than an `rm` in the container: an `rm` resolves against the container
+  PATH, so a prior call that dropped a program named `rm` earlier in it made the
+  reset exit 0 and reset nothing — a restart that reported success and kept the
+  shell. Divergences
+  from a resident shell are enumerated rather than
+  glossed: the `jobs` table does not carry, plain (non-exported) variables do not
+  carry, traps do not carry and a command's EXIT trap fires at the end of that
+  call, a timed-out call's mutations are dropped, and a call whose shell never
+  finishes its snapshot drops its own mutations and leaves the session on the
+  previous call's state. `restart: true` resets the shell while keeping the
+  container's files. At-most-once is deliberately **not** attempted here — a marker inside
+  the sandbox is neither trustworthy (the filesystem is agent-writable) nor
+  durable (the container is cattle a retry may find reaped and
+  re-provisioned) — and belongs to the executor and the work queue, whose
+  store is the event log. Nothing consumes the shell yet; the executor and
+  toolset that call it follow.
+
 - The sandbox layer (slice 6, first part): `internal/sandbox` defines the
   "hands" boundary — `Provider.Provision` returns a session's disposable
   container, and `Sandbox` exposes `Exec` plus `ReadFile`/`WriteFile`
