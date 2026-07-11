@@ -25,13 +25,20 @@ type toolUse struct {
 // committed log (custom tool uses are client-executed and never appear as
 // agent.tool_use; mcp_tool_use waits for the MCP client), diffing the tool-use
 // events against the results already on the log so a reclaim re-runs only what
-// is still outstanding.
+// is still outstanding. An agent.tool_use is answered by either an
+// agent.tool_result (this executor) or a user.tool_result (a self_hosted BYOC
+// worker) — both reference it by tool_use_id — so both count, matching the
+// canonical answered-set the control plane uses (events.HasUnansweredToolUse);
+// counting only agent.tool_result would re-run a tool a worker already answered.
 func (e *Executor) unansweredToolUses(ctx context.Context, sid domain.ID) ([]toolUse, error) {
 	uses, err := e.log.List(ctx, sid, events.ListQuery{Types: []string{string(domain.EventAgentToolUse)}})
 	if err != nil {
 		return nil, fmt.Errorf("list tool uses: %w", err)
 	}
-	results, err := e.log.List(ctx, sid, events.ListQuery{Types: []string{string(domain.EventAgentToolResult)}})
+	results, err := e.log.List(ctx, sid, events.ListQuery{Types: []string{
+		string(domain.EventAgentToolResult),
+		string(domain.EventUserToolResult),
+	}})
 	if err != nil {
 		return nil, fmt.Errorf("list tool results: %w", err)
 	}
@@ -79,9 +86,16 @@ func (e *Executor) keepLease(ctx context.Context, item *queue.Item) (context.Con
 	kctx, cancel := context.WithCancel(ctx)
 	k := &leaseKeeper{cancel: cancel, quit: make(chan struct{}), done: make(chan struct{})}
 	ttl := e.cfg.LeaseTTL
+	// Renew at a third of the lease. Guard the degenerate case: a sub-3ns TTL
+	// (operator misconfiguration — a lease that short is unusable anyway) would
+	// otherwise make the interval zero and panic time.NewTicker.
+	interval := ttl / 3
+	if interval <= 0 {
+		interval = ttl
+	}
 	go func() {
 		defer close(k.done)
-		t := time.NewTicker(ttl / 3)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {

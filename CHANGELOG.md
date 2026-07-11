@@ -60,6 +60,24 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   hardening (`PidsLimit`/`CpuQuota`), and adoption re-validating a container's
   network mode once a session's networking can change.
 
+  Hardened over a dual (Codex `gpt-5.5`/`xhigh` + Claude multi-agent) review and
+  the verifier before merge: a session archived while suspended on a tool no
+  longer reclaim-loops re-running its tools forever (the executor drains a
+  not-running or archived session's item, mirroring the brain's
+  `claimLiveSession`); a tool answered by a self_hosted worker's `user.tool_result`
+  is not re-run (it counts as an answer, matching `HasUnansweredToolUse`); the
+  backend-fault partial commit asserts its lease like every other state write, so
+  a lost claim cannot duplicate a result; the lease keeper now starts before
+  provisioning so a slow image pull cannot let the lease lapse; the file tools use
+  the executor's configured workdir (not a hardcoded `/workspace`) so relative
+  paths land where bash runs; an empty tool result is an empty content array, not
+  an empty text block a Messages endpoint rejects; and per-item faults are logged
+  rather than silently swallowed. Two malformed-config edges are documented rather
+  than fixed — a custom tool named like a built-in (the provider rejects the
+  duplicate-named request visibly; uniqueness validation belongs at agent
+  creation) and the lease keeper duplicated from the brain (a shared queue-level
+  keeper is a deferred chore).
+
 - The built-in toolset (slice 6, third part): `internal/toolset` is
   `agent_toolset_20260401` — `bash`, `read`, `write`, `edit`, `glob`, `grep` —
   executing inside the session's sandbox. `Tools` turns an agent's toolset entry

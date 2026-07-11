@@ -4,7 +4,7 @@ An open-source, self-hostable platform for **long-horizon AI agents**, written i
 
 Run the whole thing on-prem or in your own VPC — **your data and your compute never leave your boundary**.
 
-> **Status: early development.** The platform runs tools end-to-end: the control-plane API, the session event log, the config-driven model-provider layer, the brain orchestration loop, and now the executor and its Docker sandbox are in place — the real `ant` CLI can create an agent, send a `user.message`, and watch the model call a built-in tool (`bash`/`read`/`write`/`edit`/`glob`/`grep`) that an executor runs inside a per-session container, with the result streamed back and the turn resumed, against any Anthropic-protocol endpoint. Permissions (human-in-the-loop approval) and the BYOC work API are still being built slice by slice. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
+> **Status: early development.** The platform runs tools end-to-end: the control-plane API, the session event log, the config-driven model-provider layer, the brain orchestration loop, and now the executor and its Docker sandbox are in place. The real `ant` CLI drives the API and streams a model turn back live (against any Anthropic-protocol endpoint); when the model calls a built-in tool (`bash`/`read`/`write`/`edit`/`glob`/`grep`) the brain suspends, an executor runs it inside a per-session container, appends the result, and the turn resumes — the closed loop verified end to end by a real-container integration test. Permissions (human-in-the-loop approval) and the BYOC work API are still being built slice by slice. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Why
 

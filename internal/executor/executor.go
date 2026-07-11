@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -49,7 +50,6 @@ type Config struct {
 	Workdir      string
 	LeaseTTL     time.Duration
 	PollInterval time.Duration
-	BlockOnEmpty time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -61,9 +61,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.PollInterval <= 0 {
 		c.PollInterval = 500 * time.Millisecond
-	}
-	if c.BlockOnEmpty <= 0 {
-		c.BlockOnEmpty = c.PollInterval
 	}
 	return c
 }
@@ -103,7 +100,7 @@ func (e *Executor) Run(ctx context.Context) error {
 			return err
 		}
 		if !worked {
-			if err := sleep(ctx, e.cfg.BlockOnEmpty); err != nil {
+			if err := sleep(ctx, e.cfg.PollInterval); err != nil {
 				return nil
 			}
 		}
@@ -130,37 +127,35 @@ func (e *Executor) step(ctx context.Context) (bool, error) {
 
 // process runs one tool_exec item to completion.
 func (e *Executor) process(ctx context.Context, item *queue.Item) error {
-	net, err := e.sessionNetworking(ctx, item.SessionID)
-	if err != nil {
-		return fmt.Errorf("session networking: %w", err)
-	}
-
-	sb, err := e.provider.Provision(ctx, sandbox.Spec{
-		SessionID:  item.SessionID,
-		Image:      e.cfg.Image,
-		Workdir:    e.cfg.Workdir,
-		Networking: net,
-	})
-	if err != nil {
-		return fmt.Errorf("provision sandbox: %w", err)
-	}
-
-	uses, err := e.unansweredToolUses(ctx, item.SessionID)
+	// Drain work for a session that is no longer live before doing anything
+	// expensive. Archiving freezes the status and makes every append the run
+	// would commit fail, so without this the item reclaim-loops forever,
+	// re-running its tools each lease period; this mirrors the brain's
+	// claimLiveSession. Loading the egress policy under the same lock keeps it
+	// to one round trip.
+	net, live, err := e.sessionForRun(ctx, item)
 	if err != nil {
 		return err
 	}
+	if !live {
+		return nil
+	}
 
-	// Keep the lease alive while tools run: a single tool can take
-	// toolset.MaxTimeout, and a set of them far longer, so a fixed TTL would
-	// otherwise let a second executor reclaim and double-run the session's
-	// tools mid-flight.
+	// Keep the lease alive from before provisioning through the tool run: an
+	// image pull can be slow, and a fixed TTL would otherwise let the lease
+	// lapse mid-provision and a second executor reclaim and double-run the
+	// session's tools. Provisioning and every tool run happen under kctx, so
+	// losing the lease cancels the work.
 	kctx, keeper := e.keepLease(ctx, item)
-	results, faultErr := e.runTools(kctx, sb, item.SessionID, uses)
+	results, faultErr, runErr := e.provisionAndRun(kctx, item, net)
 	if kerr := keeper.close(); kerr != nil {
 		// The lease is gone — another executor may already own this item.
 		// Nothing of ours may commit; the results we ran are re-derived on the
 		// reclaiming pass (a committed result is never re-run).
 		return fmt.Errorf("lease keeper: %w", kerr)
+	}
+	if runErr != nil {
+		return runErr
 	}
 
 	// Commit the results, the resume, and the item's fate together under the
@@ -170,6 +165,17 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) error {
 	complete := faultErr == nil
 	opts := events.AppendOptions{
 		Then: func(ctx context.Context, tx pgx.Tx) error {
+			// Every state write this claimant makes must prove it still owns the
+			// item. The complete path proves it through Complete; the fault path
+			// commits partial results with nothing else, so it asserts the lease
+			// explicitly — otherwise a claim lost while blocked on the session
+			// lock could still commit a result a reclaiming executor also writes,
+			// duplicating it on the append-only log.
+			if !complete {
+				if err := e.queue.Assert(ctx, tx, item); err != nil {
+					return err
+				}
+			}
 			unanswered, err := events.HasUnansweredToolUse(ctx, tx, item.SessionID, nil)
 			if err != nil {
 				return err
@@ -191,13 +197,39 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) error {
 	return faultErr
 }
 
+// provisionAndRun provisions the session's sandbox and runs its unanswered
+// tools under ctx (the lease-kept context). It returns the result events to
+// append, the first backend fault a tool hit (nil if every tool ran), and a
+// setup error from provisioning or reading the log — which stops the item with
+// nothing committed, distinct from a tool fault, which commits what did run.
+func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, net domain.Networking) ([]events.NewEvent, error, error) {
+	sb, err := e.provider.Provision(ctx, sandbox.Spec{
+		SessionID:  item.SessionID,
+		Image:      e.cfg.Image,
+		Workdir:    e.cfg.Workdir,
+		Networking: net,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("provision sandbox: %w", err)
+	}
+	uses, err := e.unansweredToolUses(ctx, item.SessionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses)
+	return results, faultErr, nil
+}
+
 // runTools runs each unanswered tool use in order, returning the result events
 // to append and the first backend fault encountered (nil if all ran). A tool
 // that fails at the tool level (missing file, nonzero exit) still yields a
 // result event — that is the model's to see; only a backend fault (sandbox
 // gone, daemon unreachable) stops the set and leaves the rest unanswered.
 func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.ID, uses []toolUse) ([]events.NewEvent, error) {
-	runner := toolset.Runner{Sandbox: sb, Session: sid}
+	// Workdir must match the one the sandbox was provisioned with, so the file
+	// tools resolve a relative path against the same directory bash runs in.
+	// Empty resolves to sandbox.DefaultWorkdir on both sides.
+	runner := toolset.Runner{Sandbox: sb, Session: sid, Workdir: e.cfg.Workdir}
 	var results []events.NewEvent
 	for _, u := range uses {
 		res, err := runner.Run(ctx, u.id, u.name, u.input)
@@ -217,12 +249,19 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 }
 
 // toolResultEvent renders a Result as an agent.tool_result event body:
-// tool_use_id + a single text content block + is_error, matching the wire's
-// BetaManagedAgentsAgentToolResultEvent and what replay reads back.
+// tool_use_id + content blocks + is_error, matching the wire's
+// BetaManagedAgentsAgentToolResultEvent and what replay reads back. Empty
+// output (a read of an empty file) becomes an empty content array, never a text
+// block with an empty string — a Messages endpoint rejects an empty text block,
+// and that request is what the brain replays every resume, wedging the session.
 func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, error) {
+	content := []map[string]any{}
+	if res.Content != "" {
+		content = append(content, map[string]any{"type": "text", "text": res.Content})
+	}
 	payload, err := json.Marshal(map[string]any{
 		"tool_use_id": useID.String(),
-		"content":     []map[string]any{{"type": "text", "text": res.Content}},
+		"content":     content,
 		"is_error":    res.IsError,
 	})
 	if err != nil {
@@ -231,26 +270,57 @@ func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, erro
 	return events.NewEvent{Type: domain.EventAgentToolResult, Payload: payload}, nil
 }
 
-// sessionNetworking loads the egress policy the session's environment sets, so
-// the sandbox is provisioned with the same isolation the environment declares.
-func (e *Executor) sessionNetworking(ctx context.Context, sid domain.ID) (domain.Networking, error) {
-	var configJSON []byte
-	err := e.pool.QueryRow(ctx,
-		`SELECT e.config FROM sessions s JOIN environments e ON e.id = s.environment_id WHERE s.id = $1`,
-		sid.String()).Scan(&configJSON)
+// sessionForRun loads the session's egress policy under its row lock and
+// reports whether the session is still live for tool execution. A session that
+// is not running, or has been archived, is stale: its tool_exec item is
+// completed here and false is returned, so a dead session cannot reclaim-loop
+// (every append the run would make is rejected). A session that no longer
+// exists took its cascade-deleted work item with it, so there is nothing to
+// drain. Mirrors the brain's claimLiveSession.
+func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (domain.Networking, bool, error) {
+	tx, err := e.pool.Begin(ctx)
 	if err != nil {
-		return domain.Networking{}, err
+		return domain.Networking{}, false, err
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var status string
+	var archivedAt *time.Time
+	var configJSON []byte
+	err = tx.QueryRow(ctx,
+		`SELECT s.status, s.archived_at, e.config
+		   FROM sessions s JOIN environments e ON e.id = s.environment_id
+		  WHERE s.id = $1 FOR UPDATE OF s`,
+		item.SessionID.String()).Scan(&status, &archivedAt, &configJSON)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Networking{}, false, nil
+	}
+	if err != nil {
+		return domain.Networking{}, false, err
+	}
+
+	if status != string(domain.SessionRunning) || archivedAt != nil {
+		if err := e.queue.Complete(ctx, tx, item); err != nil {
+			return domain.Networking{}, false, err
+		}
+		return domain.Networking{}, false, tx.Commit(ctx)
+	}
+
 	var cfg domain.EnvironmentConfig
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {
-		return domain.Networking{}, err
+		return domain.Networking{}, false, err
 	}
-	return cfg.Networking, nil
+	return cfg.Networking, true, tx.Commit(ctx)
 }
 
-// report is where per-item faults surface. The queue's reclaim, not a log
-// line, is the recovery, so production leaves onFault nil.
+// report is where per-item faults surface. The queue's reclaim is the recovery
+// — the item keeps its lease until it lapses, then another claim retries it —
+// but the fault is logged so an operator debugging "the tools never run" (a
+// Docker daemon down faults every item) sees it rather than a silent stall.
+// onFault is nil in production; tests set it to observe faults.
 func (e *Executor) report(item *queue.Item, err error) {
+	slog.Error("executor: tool_exec item faulted, lease left to expire",
+		"item", item.ID, "session", item.SessionID, "error", err)
 	if e.onFault != nil {
 		e.onFault(item, err)
 	}

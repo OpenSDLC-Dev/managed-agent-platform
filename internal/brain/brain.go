@@ -193,9 +193,15 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 		return b.failTurn(ctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
 	}
 
-	toolKind, err := classifyTools(agent)
-	if err != nil {
-		return b.failTurn(ctx, sid, item, span, watermark, fmt.Sprintf("classify tools: %v", err))
+	// Only a turn that actually called a tool needs the name→type map; a
+	// text-only end_turn would otherwise re-expand the whole toolset for nothing.
+	var toolKind map[string]domain.EventType
+	if len(turn.toolUses) > 0 {
+		kinds, err := classifyTools(agent)
+		if err != nil {
+			return b.failTurn(ctx, sid, item, span, watermark, fmt.Sprintf("classify tools: %v", err))
+		}
+		toolKind = kinds
 	}
 	return b.settleTurn(ctx, sid, item, span, turn, toolKind, watermark)
 }

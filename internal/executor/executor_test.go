@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +30,10 @@ type fakeSandbox struct {
 	files    map[string]string
 	writeErr error
 	readErr  error
+	// failPath, if set, makes WriteFile fail (a backend fault) for a path with
+	// this suffix, so a test can fault one tool of a parallel set while the
+	// others succeed.
+	failPath string
 	// entered (if set) receives one signal the first time WriteFile is entered,
 	// and gate (if set) blocks WriteFile until closed — together they let a test
 	// hold a tool mid-run to observe the lease keeper renew.
@@ -66,6 +72,9 @@ func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) e
 	if f.writeErr != nil {
 		return f.writeErr
 	}
+	if f.failPath != "" && strings.HasSuffix(path, f.failPath) {
+		return fmt.Errorf("backend fault writing %s", path)
+	}
 	if f.files == nil {
 		f.files = map[string]string{}
 	}
@@ -78,10 +87,27 @@ type fakeProvider struct {
 	sb           *fakeSandbox
 	provisionErr error
 	provisions   int
+	// entered/gate mirror fakeSandbox's, for a test that holds provisioning open
+	// (a slow image pull) to observe the lease keeper renew across it.
+	entered chan struct{}
+	gate    chan struct{}
 }
 
-func (p *fakeProvider) Provision(context.Context, sandbox.Spec) (sandbox.Sandbox, error) {
+func (p *fakeProvider) Provision(ctx context.Context, _ sandbox.Spec) (sandbox.Sandbox, error) {
 	p.provisions++
+	if p.entered != nil {
+		select {
+		case p.entered <- struct{}{}:
+		default:
+		}
+	}
+	if p.gate != nil {
+		select {
+		case <-p.gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if p.provisionErr != nil {
 		return nil, p.provisionErr
 	}
@@ -384,7 +410,7 @@ func TestEmptyClaimSleeps(t *testing.T) {
 
 func TestRunProcessesQueuedWorkAndStopsOnCancel(t *testing.T) {
 	sb := &fakeSandbox{}
-	h := newHarnessWith(t, &fakeProvider{sb: sb}, Config{BlockOnEmpty: 10 * time.Millisecond})
+	h := newHarnessWith(t, &fakeProvider{sb: sb}, Config{PollInterval: 10 * time.Millisecond})
 	h.suspend(t, writeUse("out.txt", "hi"))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -468,5 +494,180 @@ func TestLeaseRenewedWhileToolRuns(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.ToolExec); got != 0 {
 		t.Errorf("tool_exec live = %d, want 0 (completed under renewed lease)", got)
+	}
+}
+
+func TestLeaseRenewedDuringSlowProvision(t *testing.T) {
+	// Provisioning can be slow (an image pull); the keeper must renew across it,
+	// or the lease lapses before the first tool runs and a second executor
+	// reclaims. The keeper starts before Provision, so a run held in Provision
+	// past TTL/3 still has its lease advanced.
+	prov := &fakeProvider{sb: &fakeSandbox{}, entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	h := newHarnessWith(t, prov, Config{LeaseTTL: 300 * time.Millisecond})
+	h.suspend(t, writeUse("out.txt", "hi"))
+
+	done := make(chan struct{})
+	go func() { _, _ = h.exec.step(context.Background()); close(done) }()
+
+	<-prov.entered
+	lease0 := h.leaseOf(t)
+	waitFor(t, func() bool { return h.leaseOf(t).After(lease0) }) // renewed mid-provision
+	close(prov.gate)
+	<-done
+
+	if got := len(h.types(t, "agent.tool_result")); got != 1 {
+		t.Errorf("results = %d, want 1 (run completed after a slow provision)", got)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec live = %d, want 0", got)
+	}
+}
+
+func TestPartialFaultCommitsRanResultsLeavesItemLive(t *testing.T) {
+	// Two tools where the first succeeds and the second backend-faults: the
+	// first result commits (so a reclaim skips it) but the set is incomplete, so
+	// no resume is scheduled and the item stays live for reclaim.
+	sb := &fakeSandbox{failPath: "b.txt"}
+	h := newHarnessWith(t, &fakeProvider{sb: sb}, Config{})
+	var faults int
+	h.exec.onFault = func(*queue.Item, error) { faults++ }
+	uses := h.suspend(t, writeUse("a.txt", "one"), writeUse("b.txt", "two"))
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if faults != 1 {
+		t.Errorf("faults = %d, want 1", faults)
+	}
+
+	// Exactly the first tool's result committed, referencing the first use.
+	results := h.types(t, "agent.tool_result")
+	if len(results) != 1 {
+		t.Fatalf("agent.tool_result = %d, want 1 (only the tool that ran)", len(results))
+	}
+	var body struct {
+		ToolUseID string `json:"tool_use_id"`
+	}
+	_ = json.Unmarshal(results[0].Body, &body)
+	if body.ToolUseID != uses[0].ID.String() {
+		t.Errorf("committed result references %q, want the first use %q", body.ToolUseID, uses[0].ID)
+	}
+	if _, wrote := sb.files["/workspace/a.txt"]; !wrote {
+		t.Error("first tool did not run")
+	}
+
+	// The set is incomplete (b unanswered), so no resume and the item is live.
+	if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+		t.Errorf("model_turn = %d, want 0 (set incomplete)", got)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 1 {
+		t.Errorf("tool_exec live = %d, want 1 (left for reclaim)", got)
+	}
+}
+
+func TestStaleSessionDrainsWithoutRunning(t *testing.T) {
+	// A session archived (or moved off running) while suspended on a tool must
+	// not reclaim-loop: the executor drains the item instead of provisioning and
+	// re-running its tools every lease period.
+	for _, tc := range []struct {
+		name   string
+		mutate string
+	}{
+		{"archived", `UPDATE sessions SET archived_at = now() WHERE id = $1`},
+		{"not running", `UPDATE sessions SET status = 'idle' WHERE id = $1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, &fakeSandbox{})
+			h.suspend(t, writeUse("out.txt", "hi"))
+			if _, err := h.pool.Exec(context.Background(), tc.mutate, h.sid.String()); err != nil {
+				t.Fatal(err)
+			}
+
+			worked, err := h.exec.step(context.Background())
+			if err != nil {
+				t.Fatalf("step: %v", err)
+			}
+			if !worked {
+				t.Fatal("step should have claimed the stale item")
+			}
+			if h.prov.provisions != 0 {
+				t.Errorf("provisioned %d sandboxes for a stale session, want 0", h.prov.provisions)
+			}
+			if got := len(h.types(t, "agent.tool_result")); got != 0 {
+				t.Errorf("agent.tool_result = %d, want 0", got)
+			}
+			if got := h.liveOf(t, queue.ToolExec); got != 0 {
+				t.Errorf("tool_exec live = %d, want 0 (drained)", got)
+			}
+			if got := h.liveOf(t, queue.ModelTurn); got != 0 {
+				t.Errorf("model_turn = %d, want 0 (a dead session is not resumed)", got)
+			}
+		})
+	}
+}
+
+func TestUserToolResultCountsAsAnswered(t *testing.T) {
+	// A self_hosted BYOC worker answers an agent.tool_use with user.tool_result.
+	// If the platform executor then claims the item, it must recognize the tool
+	// as answered and not re-run it or append a duplicate result.
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	uses := h.suspend(t, writeUse("out.txt", "hi"))
+
+	ans, _ := json.Marshal(map[string]any{
+		"tool_use_id": uses[0].ID.String(),
+		"content":     []map[string]any{{"type": "text", "text": "worker ran it"}},
+		"is_error":    false,
+	})
+	if _, err := h.log.AppendWith(context.Background(), h.sid,
+		[]events.NewEvent{{Type: domain.EventUserToolResult, Payload: ans}}, events.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if _, wrote := sb.files["/workspace/out.txt"]; wrote {
+		t.Error("executor re-ran a tool already answered by user.tool_result")
+	}
+	if got := len(h.types(t, "agent.tool_result")); got != 0 {
+		t.Errorf("agent.tool_result = %d, want 0 (no duplicate answer)", got)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec live = %d, want 0 (drained)", got)
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn = %d, want 1 (the answered set resumes)", got)
+	}
+}
+
+func TestEmptyToolResultOmitsEmptyTextBlock(t *testing.T) {
+	// A read of an empty file yields empty output. It must be an empty content
+	// array, never a text block with an empty string — a Messages endpoint
+	// rejects an empty text block, which would wedge the session on every resume.
+	sb := &fakeSandbox{files: map[string]string{"/workspace/empty.txt": ""}}
+	h := newHarness(t, sb)
+	read, _ := json.Marshal(map[string]any{"name": "read", "input": map[string]string{"file_path": "empty.txt"}})
+	h.suspend(t, string(read))
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	results := h.types(t, "agent.tool_result")
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	var body struct {
+		IsError bool             `json:"is_error"`
+		Content []map[string]any `json:"content"`
+	}
+	if err := json.Unmarshal(results[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.IsError {
+		t.Errorf("empty read is not an error: %+v", body)
+	}
+	if len(body.Content) != 0 {
+		t.Errorf("content = %v, want an empty array (no empty text block)", body.Content)
 	}
 }
