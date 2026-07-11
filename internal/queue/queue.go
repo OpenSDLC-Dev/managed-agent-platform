@@ -49,22 +49,43 @@ type Item struct {
 	Reclaimed bool
 }
 
-// Work is a work_items row projected for the wire work API (poll/get/list).
-// Unlike Item (a claimant's lease proof for the internal executor), it carries
-// the fields a BetaSelfHostedWork response renders. The four lifecycle
-// timestamps the wire also requires (acknowledged_at/started_at/…) are null
-// for a queued item, so poll — which only ever returns queued work — needs no
-// column for them yet; the state-transition endpoints add those.
+// Work is a work_items row projected for the wire work API (poll/get/list and
+// the state-transition endpoints). Unlike Item (a claimant's lease proof for the
+// internal executor), it carries the fields a BetaSelfHostedWork response
+// renders, including the lifecycle timestamps the state machine populates. Each
+// nullable timestamp is null until its transition is reached (a queued item has
+// none of them).
 type Work struct {
-	ID            domain.ID
-	EnvironmentID domain.ID
-	SessionID     domain.ID
-	State         string
-	Metadata      map[string]string
-	CreatedAt     time.Time
+	ID              domain.ID
+	EnvironmentID   domain.ID
+	SessionID       domain.ID
+	State           string
+	Metadata        map[string]string
+	CreatedAt       time.Time
+	AcknowledgedAt  *time.Time // set by ack (queued → starting)
+	StartedAt       *time.Time // set by the first heartbeat (→ active)
+	StopRequestedAt *time.Time // set by stop
+	StoppedAt       *time.Time // set when the item reaches stopped
 	// LastHeartbeat is the wire's latest_heartbeat_at — null until the worker
 	// heartbeats, which a freshly polled (still-queued) item has not.
 	LastHeartbeat *time.Time
+}
+
+// workColumns is the ordered projection every Work-returning query selects, so
+// scanWork can decode any of them uniformly. Prefix with a table alias where a
+// query joins (e.g. "t.").
+const workColumns = `id, environment_id, session_id, state, metadata, created_at,
+	acknowledged_at, started_at, stop_requested_at, stopped_at, last_heartbeat`
+
+// scanWork decodes a workColumns row into a Work.
+func scanWork(row pgx.Row) (*Work, error) {
+	var w Work
+	if err := row.Scan(&w.ID, &w.EnvironmentID, &w.SessionID, &w.State, &w.Metadata,
+		&w.CreatedAt, &w.AcknowledgedAt, &w.StartedAt, &w.StopRequestedAt, &w.StoppedAt,
+		&w.LastHeartbeat); err != nil {
+		return nil, err
+	}
+	return &w, nil
 }
 
 // DB is the slice of pgx shared by pools and transactions, so Enqueue can
@@ -146,19 +167,27 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // queued, and the separate ack transitions it to starting. The reservation is
 // recorded as a lease pushed out by reclaim, so a concurrent poll won't
 // re-hand-out the same item until the window lapses (the wire's
-// reclaim_older_than_ms). It returns nil with no error when the environment's
-// tool_exec queue is empty. model_turn work drives the platform's own brain and
-// is never offered to a worker.
+// reclaim_older_than_ms — the reference's "reclaim un-ack'd work" knob). It
+// returns nil with no error when the environment's tool_exec queue is empty.
+// model_turn work drives the platform's own brain and is never offered to a
+// worker.
+//
+// Only still-queued (un-acked) reservations are reclaimed here. A dead worker
+// that already acked/heartbeated leaves a starting/active item that no poll
+// recovers yet — reclaiming those safely needs a lease/generation guard on stop
+// (so a stale worker's cleanup force-stop cannot kill the replacement) or a
+// fresh work identity per hand-out, and the exact protocol must be settled
+// against a real ant beta:worker, so it lands with the worker in a later PR.
+// Until then no BYOC worker exists to reach starting/active, so nothing strands.
 //
 // Poll serves only self_hosted environments — the mirror of Claim scoping
 // tool_exec to cloud. The two are therefore mutually exclusive by environment
 // kind, so an item a worker has polled is never also run by the executor even
 // if an environment key were misconfigured against a cloud environment.
 func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration) (*Work, error) {
-	var w Work
-	err := q.pool.QueryRow(ctx,
+	w, err := scanWork(q.pool.QueryRow(ctx,
 		`WITH picked AS (
-		    SELECT w.id FROM work_items w
+		    SELECT w.id AS pid FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id
 		    WHERE w.environment_id = $1 AND e.kind = 'self_hosted'
 		      AND w.kind = 'tool_exec' AND w.state = 'queued'
@@ -170,17 +199,16 @@ func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration
 		 UPDATE work_items t
 		 SET lease_expires_at = now() + make_interval(secs => $2), updated_at = now()
 		 FROM picked p
-		 WHERE t.id = p.id
-		 RETURNING t.id, t.environment_id, t.session_id, t.state, t.metadata, t.created_at, t.last_heartbeat`,
-		envID, reclaim.Seconds()).Scan(
-		&w.ID, &w.EnvironmentID, &w.SessionID, &w.State, &w.Metadata, &w.CreatedAt, &w.LastHeartbeat)
+		 WHERE t.id = p.pid
+		 RETURNING `+workColumns,
+		envID, reclaim.Seconds()))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("queue: poll %s: %w", envID, err)
 	}
-	return &w, nil
+	return w, nil
 }
 
 // Extend renews the claimant's lease mid-work (long provider streams) and

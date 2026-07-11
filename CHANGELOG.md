@@ -12,6 +12,58 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The wire work API's work-item lifecycle — `get` / `ack` / `heartbeat` / `stop`
+  (slice 8, second part): a polled item now runs its full state machine through to
+  `stopped`. Migration `0004` adds the four lifecycle-timestamp columns
+  (`acknowledged_at`/`started_at`/`stop_requested_at`/`stopped_at`) the poll response
+  already rendered as `null`, and four endpoints drive the transitions:
+  - `GET …/work/{work_id}` returns one item (environment-scoped; unknown → `404`).
+  - `POST …/work/{work_id}/ack` advances `queued → starting` and stamps
+    `acknowledged_at`; it is idempotent, so a worker that retries a lost ack response
+    is safe.
+  - `POST …/work/{work_id}/heartbeat` is the optimistic-concurrency lease. The first
+    heartbeat sends `expected_last_heartbeat=NO_HEARTBEAT` to claim a just-acked item
+    (`starting → active`, stamping `started_at`); later heartbeats echo the server's
+    prior `last_heartbeat` to extend the lease. On a present item, a value that isn't the
+    row's current `last_heartbeat` is `412`; a heartbeat on an item that no longer exists
+    is `404`, so a worker can tell "my value is stale" from "this item is gone". A
+    heartbeat on an item the control plane has since moved to `stopping`/`stopped` matches
+    but does not extend, so the worker learns to wind down. `desired_ttl_seconds`
+    (default 30, clamped 300) sets the TTL; the response is
+    `BetaSelfHostedWorkHeartbeatResponse`.
+  - `POST …/work/{work_id}/stop` takes `{force?:bool}`: graceful (`stopping`) lets a
+    worker wind down, `force:true` escalates to `stopped`. It returns `200` + the updated
+    `BetaSelfHostedWork` (like ack/heartbeat — the SDK types `Stop → *BetaSelfHostedWork`,
+    and a `204`/empty body makes its typed decoder error, so `204` is not
+    wire-compatible); an item already past the requested transition is `409` (which the
+    reference worker ignores).
+
+  All four endpoints (and `poll`) scope to a **self_hosted `tool_exec`** item: the
+  `model_turn` rows (the brain's own queue) and a cloud environment's `tool_exec` rows
+  (the platform executor's) share the `work_items` table but must never be reachable
+  through a worker's environment-key endpoints — acking a `model_turn` row would wedge
+  the brain's turn, force-stopping a cloud `tool_exec` row would yank it from the executor
+  mid-run. A work id outside that scope is `404`. `poll` reclaims only a still-`queued`
+  (un-acked) reservation whose window lapsed (the reference's "reclaim un-ack'd work");
+  recovering an item a worker already acked/heartbeated and then died on is deferred to
+  the worker PR — resetting such a row to `queued` races a live-but-slow worker's first
+  heartbeat and lets a stale worker's cleanup force-stop kill the replacement, and the
+  safe fix (a lease-guarded stop or a fresh work identity) must be settled against a real
+  `ant beta:worker`. No worker exists to reach `starting`/`active` until then, so nothing
+  strands.
+
+  The optimistic-concurrency round-trip is instant-based: `last_heartbeat` is stored as
+  `timestamptz`, and the echoed precondition is parsed (`RFC3339Nano`) and matched as a
+  bound `time.Time`, so a timezone-representation change can never spuriously mismatch and
+  a malformed value is a `412` rather than a cast-error `500`. `expected_last_heartbeat`
+  is required (absent → `400`) — the SDK types it optional, but the only real consumer
+  (the automated worker) always sends it and the precondition is what selects
+  claim-vs-extend. The queue layer owns the state machine
+  (`queue.Ack`/`Heartbeat`/`Stop`/`GetWork`); the API layer maps its errors to
+  `404`/`409`/`412`. The work-item metadata update (an unimplemented method on a known
+  path, so `405`) and the `list`/`stats` reporting endpoints are deferred (not on the
+  worker's poll→ack→heartbeat→stop path).
+
 - The wire work API's foundation — environment-key auth and `/work/poll` (slice 8,
   first part): BYOC workers now authenticate to the work API with an
   `Authorization: Bearer` environment key (never the management `x-api-key`), each
