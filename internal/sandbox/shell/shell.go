@@ -1,23 +1,50 @@
 // Package shell runs the built-in bash tool as a persistent per-session shell,
 // on top of the sandbox's stateless Exec + file primitives — no new backend
-// surface. cwd, exported variables, functions, options, and traps survive
-// across calls via a checkpoint on the container's writable layer; the other
-// five built-in tools use Exec/ReadFile/WriteFile directly and share nothing
-// with the shell's state.
+// surface. cwd, exported variables, functions, aliases, and shell options
+// survive across calls via a snapshot on the container's writable layer; the
+// other five built-in tools use Exec/ReadFile/WriteFile directly and share
+// nothing with the shell's state.
 //
 // Each call runs as its own exec process, so the sandbox's outside-the-container
 // deadline applies to the command verbatim and cannot be forged from inside —
-// the property a single always-running shell cannot keep. The one divergence
-// from a resident shell: a backgrounded process survives (reachable by pid) but
-// the jobs table does not carry across calls.
+// the property a single always-running shell cannot keep, because with the
+// command running AS the resident shell, foreground-versus-background is
+// shell-internal state the command can rewrite.
+//
+// What this package does NOT do is decide whether a tool call may run twice. The
+// snapshot lives in the sandbox, and a sandbox is cattle: its filesystem is
+// agent-writable, and it can be reaped and re-provisioned under a retry, so it is
+// neither a trustworthy nor a durable ledger. At-most-once belongs to the
+// executor and the work queue, whose store is the event log.
+//
+// Divergences from a resident shell — all of them, each pinned by a test:
+//   - The `jobs` table does not carry. A backgrounded process survives (it keeps
+//     running, reachable by pid), but the next call is a new shell with an empty
+//     job table.
+//   - Plain (non-exported) variables do not carry; exported ones do. Nothing in
+//     `declare` separates a user's plain variables from bash's own internals, so
+//     the snapshot draws the line at `export`.
+//   - Traps do not carry, and a command's EXIT trap fires at the end of that call
+//     rather than at session end (there is no session-long shell to end). A
+//     command that BOTH installs its own EXIT trap AND exits through it skips
+//     that call's snapshot.
+//   - A timed-out call's mutations are dropped. A resident shell would keep the
+//     ones made before the kill; a SIGKILL leaves no chance to snapshot them, so
+//     dropping them is the only behaviour available consistently on both the
+//     killed path and the dodged-the-kill-and-overran path.
+//   - The timeout bounds the whole call — restore, command, snapshot — not the
+//     command alone. The bracket is milliseconds, but a very short timeout pays
+//     for it.
+//
+// The snapshot is the agent's own shell state, not a security boundary: a command
+// running as root in the container can rewrite or delete it, and only sabotages
+// its own session by doing so. The guarantees that matter — the deadline, and
+// at-most-once — are enforced outside the container, where it cannot reach them.
 package shell
 
 import (
 	"context"
 	_ "embed"
-	"errors"
-	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -28,21 +55,15 @@ import (
 //go:embed template.sh
 var templateScript string
 
-// stateRoot holds every session's checkpoint. It must live on the container's
+// stateRoot holds every session's shell state. It must live on the container's
 // writable layer (not a tmpfs) so cwd/env survive a container restart; Destroy
 // removes it with the container.
 const stateRoot = "/var/lib/map-shell"
 
-// ErrInterrupted reports that a prior attempt at this call started but never
-// recorded a result — the executor running it died mid-command. The command is
-// not retried, because it may not be idempotent; the caller surfaces this as a
-// failed tool result rather than risking a double run.
-var ErrInterrupted = errors.New("shell: command interrupted and not retried")
-
 // Request is one bash tool call.
 type Request struct {
 	Command string        // user command bytes, run verbatim
-	Restart bool          // reset the shell (cwd/env/functions/options) first
+	Restart bool          // reset the shell (cwd/env/functions/aliases/options) first
 	Timeout time.Duration // per-command; 0 means only the context bounds it
 }
 
@@ -56,16 +77,18 @@ type Result struct {
 	Restarted bool
 }
 
-// Run executes one bash tool call against sb, persisting the shell's state in
-// the container between calls. session scopes the checkpoint; id is the stable
-// tool_use id that makes a reclaim after an executor crash at-most-once.
+// Run executes one bash tool call against sb, carrying the shell's state in the
+// container between calls. session scopes the state; id names this call's
+// snapshot and its command file.
 func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Request) (Result, error) {
 	state := stateRoot + "/" + session.String()
 	var res Result
 
 	if req.Restart {
-		reset := fmt.Sprintf("rm -f %s/cwd %s/env %s/funcs %s/opts %s/traps",
-			state, state, state, state, state)
+		// Clearing the head pointer is the whole reset: the next call finds no
+		// committed snapshot and starts from a fresh shell in the workdir. The
+		// container's files are untouched, as the reference's restart leaves them.
+		reset := "rm -f " + shellSingleQuote(state+"/head")
 		if _, err := sb.Exec(ctx, sandbox.ExecRequest{Command: reset}); err != nil {
 			return Result{}, err
 		}
@@ -75,30 +98,7 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 		}
 	}
 
-	resultPath := fmt.Sprintf("%s/result/%s", state, id)
-	cmdPath := fmt.Sprintf("%s/cmd/%s", state, id)
-
-	// Reclaim discipline, keyed to the stable id: a completed call returns its
-	// recorded code without re-running (at-most-once); a started-but-unfinished
-	// call is not retried.
-	if b, err := sb.ReadFile(ctx, resultPath); err == nil {
-		code, convErr := strconv.Atoi(strings.TrimSpace(string(b)))
-		if convErr != nil {
-			return Result{}, fmt.Errorf("shell: corrupt result marker %q: %w", string(b), convErr)
-		}
-		res.ExitCode = code
-		return res, nil
-	} else if !errors.Is(err, sandbox.ErrFileNotExist) {
-		return Result{}, err
-	}
-	if _, err := sb.ReadFile(ctx, cmdPath); err == nil {
-		return Result{}, ErrInterrupted
-	} else if !errors.Is(err, sandbox.ErrFileNotExist) {
-		return Result{}, err
-	}
-
-	// Fresh run: deliver the command as a file, then exec the template.
-	if err := sb.WriteFile(ctx, cmdPath, []byte(req.Command)); err != nil {
+	if err := sb.WriteFile(ctx, state+"/cmd/"+id.String(), []byte(req.Command)); err != nil {
 		return Result{}, err
 	}
 	script := strings.NewReplacer(
@@ -110,11 +110,21 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 	if err != nil {
 		return Result{}, err
 	}
-	res.Stdout = er.Stdout
-	res.Stderr = er.Stderr
-	res.ExitCode = er.ExitCode
-	res.TimedOut = er.TimedOut
-	res.Truncated = er.Truncated
+	res.Stdout, res.Stderr = er.Stdout, er.Stderr
+	res.ExitCode, res.TimedOut, res.Truncated = er.ExitCode, er.TimedOut, er.Truncated
+
+	// Commit this call's snapshot only if the call finished inside its deadline.
+	// A timed-out call leaves its snapshot uncommitted, so its mutations are
+	// dropped whether the watchdog's SIGKILL landed or the command dodged the
+	// kill, overran, and exited on its own terms — where the EXIT trap does run.
+	// It also means a command the sandbox abandoned cannot reach a later call by
+	// writing its snapshot long after Exec stopped waiting: that write lands in an
+	// id-scoped directory nothing will ever point at.
+	if !res.TimedOut {
+		if err := sb.WriteFile(ctx, state+"/head", []byte(id.String())); err != nil {
+			return Result{}, err
+		}
+	}
 	return res, nil
 }
 

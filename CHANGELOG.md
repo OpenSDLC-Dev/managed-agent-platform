@@ -18,22 +18,32 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   into a pure function of the sandbox contract, adding no backend surface.
   Each call is still its own `Exec` process, so the deadline the sandbox
   cannot be talked out of applies to the command verbatim and cannot be
-  forged from inside; a truly-resident shell would forfeit that, because a
-  single always-running process makes foreground-versus-background
-  shell-internal state the command could rewrite. State persists instead
-  through a checkpoint on the container's writable layer: the command is
-  delivered as a file and sourced (no command bytes ride the argument or a
-  sentinel, so a literal `MAPDONE` and NUL bytes survive), and an EXIT trap
-  atomically writes cwd, environment, functions, options, and traps for the
-  next call to restore — skipped by a SIGKILL, so a timed-out call's
-  mutations are dropped. The one divergence from a resident shell: a
-  backgrounded *process* survives across calls (reachable by pid), but the
-  `jobs` table does not carry. A reclaim discipline keyed to the tool-use id
-  makes an executor crash-and-retry at-most-once — a recorded result is
-  returned without re-running, and a call that started but never recorded a
-  result is surfaced as interrupted rather than run twice. `restart: true`
-  resets the shell while keeping the container's files. Nothing consumes the
-  shell yet — the executor and toolset that call it follow.
+  forged from inside; a truly-resident shell would forfeit that, because with
+  the command running *as* the shell, foreground-versus-background becomes
+  shell-internal state the command can rewrite. Continuity comes instead from
+  a snapshot on the container's writable layer: the command is delivered as a
+  file and sourced (no command bytes ride the argument or a sentinel, so a
+  literal `MAPDONE` and NUL bytes survive), and the shell snapshots cwd,
+  exported variables, functions, aliases, and options into a directory named
+  after *that call*. The executor commits the snapshot — by pointing `head` at
+  it — only when the call finished inside its deadline. That is what makes
+  "timed out ⇒ mutations dropped" actually true: a timeout is not always a
+  SIGKILL, and a command that kills the in-container watchdog, overruns, and
+  then exits on its own terms runs its EXIT trap perfectly normally, so a
+  shell that simply overwrote one checkpoint on its way out would hand a
+  timed-out call's state to the next one. Committing from outside also means a
+  command the sandbox *abandoned* cannot land its checkpoint seconds later on
+  top of a call that came after it. Divergences from a resident shell are
+  enumerated rather than glossed: the `jobs` table does not carry, plain
+  (non-exported) variables do not carry, traps do not carry and a command's
+  EXIT trap fires at the end of that call, and a timed-out call's mutations
+  are dropped. `restart: true` resets the shell while keeping the container's
+  files. At-most-once is deliberately **not** attempted here — a marker inside
+  the sandbox is neither trustworthy (the filesystem is agent-writable) nor
+  durable (the container is cattle a retry may find reaped and
+  re-provisioned) — and belongs to the executor and the work queue, whose
+  store is the event log. Nothing consumes the shell yet; the executor and
+  toolset that call it follow.
 
 - The sandbox layer (slice 6, first part): `internal/sandbox` defines the
   "hands" boundary — `Provider.Provision` returns a session's disposable

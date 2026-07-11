@@ -15,9 +15,9 @@ import (
 
 const testImage = "debian:stable-slim"
 
-// provision gives the whole test one real container; each subtest scopes its
-// own checkpoint with a fresh session id, so they share the container but not
-// shell state. A missing daemon is a hard failure, as with the other suites.
+// provision gives the whole test one real container; each subtest scopes its own
+// shell with a fresh session id, so they share the container but not its state.
+// A missing daemon is a hard failure, as with the other suites.
 func provision(t *testing.T) sandbox.Sandbox {
 	t.Helper()
 	provider, err := docker.New(docker.Config{})
@@ -42,8 +42,8 @@ func provision(t *testing.T) sandbox.Sandbox {
 }
 
 // newShell is a subtest's shell, scoped to a fresh session; each call gets a
-// fresh tool id (the reclaim key). It also returns the session so a test can
-// issue a restart on the same shell.
+// fresh tool id. It also returns the session, so a test can issue a restart
+// against the same shell.
 func newShell(t *testing.T, sb sandbox.Sandbox) (func(cmd string, timeout time.Duration) shell.Result, domain.ID) {
 	t.Helper()
 	session := domain.NewID("sesn")
@@ -86,6 +86,102 @@ func TestShell(t *testing.T) {
 		}
 	})
 
+	// errexit is the option the snapshot is most likely to lose, because the save
+	// has to turn it off before it can safely write: the option state must be
+	// captured before that happens, or `set -e` can never carry.
+	t.Run("ErrexitPersistsAcrossCalls", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh("set -o errexit", 0)
+		got := sh(`[[ -o errexit ]] && echo ERREXIT_ON || echo ERREXIT_OFF`, 0)
+		if !strings.Contains(got.Stdout, "ERREXIT_ON") {
+			t.Errorf("set -e did not persist; stdout=%q", got.Stdout)
+		}
+	})
+
+	t.Run("AliasesPersistAcrossCalls", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh("shopt -s expand_aliases; alias greet='echo aliased'", 0)
+		got := sh("greet", 0)
+		if strings.TrimSpace(got.Stdout) != "aliased" {
+			t.Errorf("stdout = %q, want aliased (alias did not persist)", got.Stdout)
+		}
+	})
+
+	// A readonly export must be carried as a readonly export, not dropped. The
+	// snapshot may only skip the names a fresh bash makes readonly for itself.
+	t.Run("ReadonlyExportPersists", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh("declare -rx TOKEN=secret", 0)
+		got := sh(`echo "[${TOKEN:-unset}]"`, 0)
+		if strings.TrimSpace(got.Stdout) != "[secret]" {
+			t.Errorf("stdout = %q, want [secret] — a readonly export was dropped", got.Stdout)
+		}
+	})
+
+	// A line-oriented filter over `declare -px` would cut a multi-line value in
+	// half and leave the env snapshot with an unterminated quote, taking every
+	// variable declared after it down with it.
+	t.Run("MultilineExportSurvivesAndDoesNotCorruptTheRest", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh(`export V=$'x\ndeclare -ar Y'; export AFTER=ok`, 0)
+		got := sh(`[ "$V" = $'x\ndeclare -ar Y' ] && echo V_OK; echo "[${AFTER:-lost}]"`, 0)
+		if !strings.Contains(got.Stdout, "V_OK") {
+			t.Errorf("multi-line exported value did not survive; stdout=%q", got.Stdout)
+		}
+		if !strings.Contains(got.Stdout, "[ok]") {
+			t.Errorf("a variable exported after the multi-line one was lost; stdout=%q", got.Stdout)
+		}
+	})
+
+	// Each call is a fresh bash that re-inherits the container's environment, so a
+	// variable the shell unset has to be unset again on restore or it silently
+	// reappears — which is exactly what an agent scrubbing a secret must not see.
+	t.Run("UnsetOfAnInheritedVariablePersists", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		if probe := sh(`echo "[${HOME:-unset}]"`, 0); strings.TrimSpace(probe.Stdout) == "[unset]" {
+			t.Fatalf("test needs HOME inherited from the container, got %q", probe.Stdout)
+		}
+		sh("unset HOME", 0)
+		got := sh(`echo "[${HOME:-UNSET}]"`, 0)
+		if strings.TrimSpace(got.Stdout) != "[UNSET]" {
+			t.Errorf("stdout = %q, want [UNSET] — an unset variable came back from the container env", got.Stdout)
+		}
+	})
+
+	// A command that installs its own EXIT trap takes the only trap slot there is.
+	// The snapshot has to survive that, or one `trap ... EXIT` silently discards
+	// the whole call's state.
+	t.Run("CommandsOwnExitTrapDoesNotLoseTheSnapshot", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh(`cd /tmp; export T=1; trap 'echo BYE' EXIT`, 0)
+		got := sh(`echo "[$(pwd)][${T:-unset}]"`, 0)
+		if strings.TrimSpace(got.Stdout) != "[/tmp][1]" {
+			t.Errorf("stdout = %q, want [/tmp][1] — a command's EXIT trap ate the snapshot", got.Stdout)
+		}
+	})
+
+	// The template's own names must never be snapshotted, or a command that
+	// defines one reaches across into the next call's machinery. (__map_save
+	// itself is a poor probe: the template defines it on every call. A command
+	// that redefines __map_save sabotages only its own call's snapshot, which is
+	// the documented self-inflicted case.)
+	t.Run("TemplateMachineryIsNotSnapshotted", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh(`__map_helper() { echo bad; }; export __map_state=hijacked; helper() { echo kept; }; cd /var`, 0)
+		got := sh(`declare -F __map_helper >/dev/null && echo FN_LEAKED || echo FN_CLEAN
+			[ "${__map_state:-}" = hijacked ] && echo VAR_LEAKED || echo VAR_CLEAN
+			helper; pwd`, 0)
+		if strings.Contains(got.Stdout, "FN_LEAKED") {
+			t.Error("a command's __map_* function was carried into the next call")
+		}
+		if strings.Contains(got.Stdout, "VAR_LEAKED") {
+			t.Error("a command's exported __map_* variable was carried into the next call")
+		}
+		if !strings.Contains(got.Stdout, "kept") || !strings.Contains(got.Stdout, "/var") {
+			t.Errorf("ordinary state was lost alongside it; stdout=%q", got.Stdout)
+		}
+	})
+
 	t.Run("ExitCodeFidelityThroughTheTrap", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		for _, tc := range []struct {
@@ -117,16 +213,34 @@ func TestShell(t *testing.T) {
 		}
 	})
 
+	// The killed path: the SIGKILL skips the save outright.
 	t.Run("TimeoutDropsTheTimedOutCallsMutations", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		sh("cd /workspace", 0)
-		to := sh("cd /tmp; sleep 300", time.Second)
+		to := sh("cd /tmp; export EVIL=1; sleep 300", time.Second)
 		if !to.TimedOut {
 			t.Fatalf("expected TimedOut, got %+v", to)
 		}
-		after := sh("pwd", 0)
-		if strings.TrimSpace(after.Stdout) == "/tmp" {
-			t.Error("a timed-out command's cd persisted; the EXIT trap must be skipped by SIGKILL")
+		after := sh(`echo "[$(pwd)][${EVIL:-unset}]"`, 0)
+		if strings.TrimSpace(after.Stdout) != "[/workspace][unset]" {
+			t.Errorf("stdout = %q, want [/workspace][unset] — a timed-out call's mutations persisted", after.Stdout)
+		}
+	})
+
+	// The path a SIGKILL never reaches: the command kills the in-container
+	// watchdog, overruns its deadline, and then exits on its own terms — so its
+	// EXIT trap DOES run and its snapshot IS written. The call still reports a
+	// timeout, so that snapshot is never committed, and the mutations still drop.
+	t.Run("OverrunThatDodgedTheKillAlsoDropsItsMutations", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh("cd /workspace", 0)
+		to := sh(killWatchdog+"cd /tmp; export EVIL=1; sleep 2", time.Second)
+		if !to.TimedOut {
+			t.Fatalf("a command that killed its watchdog and overran was not a timeout: %+v", to)
+		}
+		after := sh(`echo "[$(pwd)][${EVIL:-unset}]"`, 0)
+		if strings.TrimSpace(after.Stdout) != "[/workspace][unset]" {
+			t.Errorf("stdout = %q, want [/workspace][unset] — an overrun that ran its EXIT trap committed its state", after.Stdout)
 		}
 	})
 
@@ -134,15 +248,15 @@ func TestShell(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		got := sh("echo quick", time.Second)
 		if got.TimedOut {
-			t.Error("a fast command read as a timeout — the checkpoint bracket must fit inside the deadline")
+			t.Error("a fast command read as a timeout — the snapshot bracket must fit inside the deadline")
 		}
 		if strings.TrimSpace(got.Stdout) != "quick" {
 			t.Errorf("stdout=%q", got.Stdout)
 		}
 	})
 
-	// The documented fidelity boundary: a backgrounded PROCESS survives across
-	// calls (reachable by pid), but the shell's jobs table does not carry.
+	// A backgrounded PROCESS survives across calls (reachable by pid), but the
+	// shell's jobs table does not carry.
 	t.Run("BackgroundProcessSurvivesButJobsTableDoesNot", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		sh("sleep 987654 >/dev/null 2>&1 &", 0)
@@ -206,8 +320,8 @@ func TestShell(t *testing.T) {
 }
 
 // killWatchdog tears down the in-container watchdog a command can see, so only
-// the outside-the-sandbox probe can still catch the overrun (mirrors the
-// sandbox contract suite).
+// the outside-the-sandbox probe can still catch the overrun (mirrors the sandbox
+// contract suite).
 const killWatchdog = `
   for parent in $$ $PPID; do
     for p in $(cat /proc/$parent/task/$parent/children 2>/dev/null); do
