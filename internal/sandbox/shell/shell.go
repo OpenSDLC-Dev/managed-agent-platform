@@ -44,7 +44,14 @@
 //   - The timeout bounds the whole call — restore, command, snapshot — not the
 //     command alone. The bracket is milliseconds, but a very short timeout pays
 //     for it.
+//   - A command that shadows the template's own machinery costs its own call, not
+//     the session. Every name the template owns is `__map_*` and excluded from the
+//     snapshot; every builtin it depends on — in the save AND in the restore — is
+//     reached through `builtin`, and where an alias could still reach the word
+//     (anything re-parsed at runtime) it is quoted as well. The exception is a
+//     function named `builtin` itself, which spins until the deadline kills it.
 //
+
 // The snapshot is the agent's own shell state, not a security boundary: a command
 // running as root in the container can rewrite or delete it, and only sabotages
 // its own session by doing so. The guarantees that matter — the deadline, and
@@ -71,6 +78,12 @@ var templateScript string
 // writable layer (not a tmpfs) so cwd/env survive a container restart; Destroy
 // removes it with the container.
 const stateRoot = "/var/lib/map-shell"
+
+// snapPrefix names a snapshot directory. It is deliberately not one of domain's
+// Prefix* constants: those mirror Anthropic's wire-facing resource ids, and this
+// one never leaves the container — it is a directory name, and the value written
+// to `head`.
+const snapPrefix = "snap"
 
 // Request is one bash tool call.
 type Request struct {
@@ -121,7 +134,7 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 	// already used, and a retry must not find the previous attempt's files — least
 	// of all its `done` marker, which would let a re-save that failed part-way be
 	// committed over the top of them.
-	snap := state + "/snap/" + domain.NewID("snap").String()
+	snap := state + "/snap/" + domain.NewID(snapPrefix).String()
 
 	if err := sb.WriteFile(ctx, state+"/cmd/"+id.String(), []byte(req.Command)); err != nil {
 		return Result{}, err

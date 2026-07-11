@@ -66,7 +66,23 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   locals are `__map_*` (an exported variable named `code` used to come back as the
   previous call's exit status), and the snapshot directory is minted per call
   rather than named after the tool id, so an executor retrying a call under an
-  id it already used cannot inherit the previous attempt's marker. Divergences
+  id it already used cannot inherit the previous attempt's marker. The restore is
+  hardened the same way and needed it more, because there the shadowing fails
+  *unsafe* — it strips the state, then commits a snapshot taken of the stripped
+  shell, so the loss is permanent: it sources the snapshot's functions, which puts
+  the command's own definitions live over its remaining words and over the words
+  the alias and option files themselves run, and `set() { :; }` alone cost the
+  session every shell option it had. Its words now go through `builtin` too, and
+  the options are applied one line at a time through `builtin` rather than sourced.
+  Being inside a pre-parsed function body turned out to be no defence against an
+  alias either: bash re-parses the body of a command or process substitution every
+  time it runs, so a carried `alias builtin=true` reached into the save's
+  `< <(builtin compgen …)` loops, wrote every snapshot file empty, earned the
+  marker, and left the next call unsetting every exported variable it had,
+  `PATH` included. The save switches alias expansion off for its own duration
+  (after capturing the options, so the snapshot still records that the command had
+  it on), and the one word the restore must re-parse is quoted, since a quoted word
+  is never alias-expanded. Divergences
   from a resident shell are enumerated rather than
   glossed: the `jobs` table does not carry, plain (non-exported) variables do not
   carry, traps do not carry and a command's EXIT trap fires at the end of that

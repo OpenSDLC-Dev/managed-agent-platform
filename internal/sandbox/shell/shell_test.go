@@ -288,6 +288,63 @@ func TestShell(t *testing.T) {
 		}
 	})
 
+	// The restore is the other half of the same problem, and the harder half: it
+	// SOURCES the snapshot's functions and aliases, so from that line on the
+	// command's own definitions are live — over the restore's remaining words, and
+	// over the words the `aliases` and `opts` files themselves run. A command that
+	// defines `set() { … }` or `.() { … }` would otherwise silently and PERMANENTLY
+	// lose the session its options and aliases: the restore drops them, the save
+	// then snapshots a shell that no longer has them, and every later call carries
+	// the loss forward. Unlike every other shadowing path here, that one fails
+	// unsafe — it still earns its marker and still commits.
+	t.Run("AFunctionOrAliasCannotHijackTheRestore", func(t *testing.T) {
+		// Everything a snapshot can carry, so a hijack anywhere in the restore shows
+		// up: two option families, an alias (which needs expand_aliases, itself an
+		// option), an exported variable and a cwd.
+		const setup = `shopt -s expand_aliases; shopt -s nullglob; set -o pipefail
+alias greet='echo aliased'; export KEEP=yes; cd /var`
+		// The probe has to survive the poison too — it runs in a call where the
+		// poison is restored and live — so it reaches its own words as `\builtin`:
+		// routed past a shadowing function, and quoted, because a quoted word is
+		// never alias-expanded. A probe the poison can silence proves nothing, and
+		// an unquoted `builtin echo` under `alias builtin=true` prints nothing at
+		// all — which is correct bash, and the command's own doing, not the
+		// template's. `[[` and `case` need no guard: they are keywords.
+		const probe = `[[ -o pipefail ]] && \builtin echo P_ON || \builtin echo P_OFF
+\builtin shopt -q nullglob && \builtin echo NG_ON || \builtin echo NG_OFF
+\builtin shopt -q expand_aliases && \builtin echo XA_ON || \builtin echo XA_OFF
+greet
+\builtin echo "[${KEEP:-LOST}][$(pwd)]"`
+
+		for _, tc := range []struct{ name, poison string }{
+			// Functions, live from the moment the restore sources `funcs`.
+			{"FuncOnDot", `.() { builtin return 0; }`},       // the restore's own `.`
+			{"FuncOnBracket", `[() { builtin return 1; }`},   // the restore's own tests
+			{"FuncOnEval", `eval() { builtin return 0; }`},   // the restore's own `eval`
+			{"FuncOnSet", `set() { builtin return 0; }`},     // a word the `opts` file runs
+			{"FuncOnShopt", `shopt() { builtin return 0; }`}, // ditto
+			{"FuncOnAlias", `alias() { builtin return 0; }`}, // a word the `aliases` file runs
+			// Aliases, live from the moment the restore sources `aliases` — and
+			// expanded over whatever is parsed after that, `opts` included.
+			{"AliasOnSet", `builtin alias set=true`},
+			{"AliasOnShopt", `builtin alias shopt=true`},
+			{"AliasOnBuiltin", `builtin alias builtin=true`}, // the guard's own word
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sh, _ := newShell(t, sb)
+				sh(setup, 0)
+				sh(tc.poison, 0)
+				got := sh(probe, 0)
+				for _, want := range []string{"P_ON", "NG_ON", "XA_ON", "aliased", "[yes][/var]"} {
+					if !strings.Contains(got.Stdout, want) {
+						t.Errorf("stdout = %q, want it to contain %q — %s hijacked the restore",
+							got.Stdout, want, tc.poison)
+					}
+				}
+			})
+		}
+	})
+
 	// A carried alias on the template's own names must not survive either: the
 	// alias table is namespace-filtered exactly as the exports and functions are.
 	// Without that, `alias __map_main=...` replaces the whole call.
@@ -333,6 +390,25 @@ func TestShell(t *testing.T) {
 	// The save runs in the command's shell, so every name it declares can collide
 	// with one the command exported. They are all __map_*; `code` was not, and an
 	// exported `code` came back as the previous call's exit status.
+	// __map_main drops the command's DEBUG/ERR/RETURN traps as soon as the command
+	// is done. __map_save clears them again on entry, and THAT is what protects the
+	// snapshot (a command exiting through the EXIT trap never reaches __map_main's
+	// line) — this earlier clear protects the tool RESULT: without it the template's
+	// own remaining commands each fire the command's trap, and the model reads six
+	// lines of `TICK` it did not print.
+	t.Run("TheTemplatesOwnLinesDoNotFireTheCommandsDebugTrap", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		got := sh(`set -T; trap 'echo TICK' DEBUG; echo HELLO`, 0)
+		if !strings.Contains(got.Stdout, "HELLO") {
+			t.Fatalf("stdout = %q, want the command's own output in it", got.Stdout)
+		}
+		// The trap unavoidably fires on the very lines that clear it; what must not
+		// happen is the whole save running under it.
+		if n := strings.Count(got.Stdout, "TICK"); n > 4 {
+			t.Errorf("stdout = %q — %d DEBUG-trap ticks: the template ran its save under the command's trap", got.Stdout, n)
+		}
+	})
+
 	t.Run("ATemplateLocalDoesNotClobberACommandsVariable", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		sh("export code=mysecret", 0)

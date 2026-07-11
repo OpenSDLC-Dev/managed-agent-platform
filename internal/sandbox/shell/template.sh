@@ -69,6 +69,22 @@ __map_save() {
   # incomplete snapshot and must not be committed.
   { builtin shopt -p; builtin set +o; } >"$__map_snap/opts" 2>/dev/null || __map_opts_ok=1
 
+  # Alias expansion is switched off for the rest of the save — AFTER the options
+  # are captured, so the snapshot still records whether the command had it on.
+  # `builtin` guards this function's own words against a shadowing function, but
+  # it cannot guard them against an alias, because a function body is parsed once
+  # at definition time while a COMMAND OR PROCESS SUBSTITUTION INSIDE IT IS
+  # RE-PARSED EVERY TIME IT RUNS. So `alias builtin=true` — carried, since
+  # `expand_aliases` is an option and options carry — reaches into the already-
+  # parsed body below and turns every `< <(builtin compgen …)` into
+  # `< <(true compgen …)`: the loops read nothing, `names`, `env`, `funcs` and
+  # `aliases` are all written empty, every write "succeeds", the marker is earned,
+  # and the snapshot commits. The next call then restores that empty `env` and
+  # unsets every name the empty `names` does not list — which is all of them,
+  # PATH included. Aliases are already captured and do not carry out of here, so
+  # dropping their expansion costs nothing.
+  builtin shopt -u expand_aliases
+
   # xtrace goes off with errexit, and only after the options are captured, so a
   # command that ran under `set -x` still carries it. This trims the trace the
   # save would otherwise spill into the tool result's stderr; it does not remove
@@ -117,9 +133,18 @@ __map_save() {
     # and silently dropped the state of every call that ended by calling `exit`,
     # for the rest of the session. __map_main below closes that from the other
     # side; the filter keeps a command from aliasing the template's own names.
+    #
+    # Each record is written as `\builtin alias name='value'`, because the restore
+    # sources this file with the command's own FUNCTIONS already live: a command
+    # that defines `alias() { :; }` would otherwise have every line of it read as
+    # a call to that function, and the session would lose its alias table for
+    # good. The leading backslash is not decoration — a quoted word is never
+    # alias-expanded — and the prefix rides in front of the whole record rather
+    # than each line, so an alias whose value spans lines stays one command.
     builtin : >"$__map_snap/aliases"
     while IFS= builtin read -r __map_n; do
       case "$__map_n" in __map_*) continue ;; esac
+      builtin printf '\\builtin ' >>"$__map_snap/aliases"
       builtin alias "$__map_n" >>"$__map_snap/aliases"
     done < <(builtin compgen -a)
   ) >/dev/null 2>&1
@@ -137,15 +162,24 @@ __map_save() {
 
 # Everything that runs AFTER the restore lives in this function, and that is the
 # point: a function body is parsed when it is DEFINED — here, before the restore
-# has sourced a single alias — so the words below cannot be alias-expanded. Left
-# at the top level they are parsed after the restore, where `alias trap=true`
+# has sourced a single alias — so the plain words below cannot be alias-expanded.
+# Left at the top level they are parsed after the restore, where `alias trap=true`
 # turns the EXIT trap into a no-op and `alias exit=true` costs the call its exit
 # code. `builtin` guards the same words against a snapshotted *function* of the
-# same name, which the restore has already installed by then.
+# same name, which the restore has already installed by then. (Being inside a
+# function body is no protection for a command or process substitution: those are
+# re-parsed every time they run, which is what __map_save must switch alias
+# expansion off for. There are none here.)
 #
 # The EXIT trap catches a command that calls `exit`; the explicit save after it
 # catches a command that returns normally having replaced the EXIT trap with one
-# of its own. Clearing the trap first keeps an untouched one from saving twice.
+# of its own. Clearing the EXIT trap first keeps an untouched one from saving
+# twice. Clearing DEBUG/ERR/RETURN here does not protect the snapshot — __map_save
+# clears them again on entry, and that is the clear that matters, because a command
+# exiting THROUGH the EXIT trap never reaches this line. This one protects the tool
+# RESULT: without it, each line of the template below fires the command's own DEBUG
+# or ERR trap, and the model reads output its command never printed.
+#
 # What is left is narrow and documented: a command that BOTH installs its own EXIT
 # trap AND exits through it skips this call's snapshot — and so, therefore, does
 # one that replaces this shell with `exec` or has it killed outright. None of them
@@ -168,14 +202,18 @@ __map_main() {
 # put it — the sandbox's own workdir — rather than assuming a path.
 #
 # This whole group is parsed as one compound command before any of it runs, so the
-# aliases it sources cannot be expanded over its own later lines.
+# aliases it sources cannot be expanded over its own later lines. Its words still
+# go through `builtin`, because parsing is no defence against a shadowing
+# FUNCTION: the moment the group sources `funcs`, the command's own definitions
+# are live, over the rest of the group and over the files it has yet to source.
+# `[[` and `case` are keywords and cannot be shadowed at all.
 set +e
 {
   __map_head=$(cat "$__map_state/head" 2>/dev/null)
   __map_prev="$__map_state/snap/$__map_head"
-  if [ -n "$__map_head" ] && [ -f "$__map_prev/done" ]; then
-    cd "$(cat "$__map_prev/cwd" 2>/dev/null)" 2>/dev/null || :
-    [ -f "$__map_prev/env" ] && . "$__map_prev/env"
+  if [[ -n "$__map_head" && -f "$__map_prev/done" ]]; then
+    builtin cd "$(cat "$__map_prev/cwd" 2>/dev/null)" 2>/dev/null || :
+    [[ -f "$__map_prev/env" ]] && builtin . "$__map_prev/env"
 
     # This exec is a fresh bash, so it re-inherits the container's own environment:
     # a variable the shell UNSET would silently reappear unless it is removed
@@ -185,21 +223,50 @@ set +e
     # just above may carry an IFS of the command's own, and an exported `IFS=`
     # stops that splitting entirely — the whole diff then collapses to one
     # nonsense word, nothing is unset, and an unset secret quietly comes back.
-    if [ -f "$__map_prev/names" ]; then
-      declare -A __map_keep=()
-      while IFS= read -r __map_n; do __map_keep["$__map_n"]=1; done <"$__map_prev/names"
-      while IFS= read -r __map_n; do
+    if [[ -f "$__map_prev/names" ]]; then
+      # No `=()` initializer: bash parses a compound assignment only when
+      # `declare` is the literal command word, so `builtin declare -A x=()` is a
+      # syntax error. The exec is a fresh shell and `__map_*` is never restored,
+      # so there is nothing here to clear anyway.
+      builtin declare -A __map_keep
+      while IFS= builtin read -r __map_n; do __map_keep["$__map_n"]=1; done <"$__map_prev/names"
+      while IFS= builtin read -r __map_n; do
         case "$__map_n" in __map_*) continue ;; esac
-        [ -n "${__map_keep[$__map_n]+x}" ] || unset "$__map_n"
-      done < <(compgen -e)
-      unset __map_keep __map_n
+        [[ -n "${__map_keep[$__map_n]+x}" ]] || builtin unset "$__map_n"
+      done < <(builtin compgen -e)
+      builtin unset __map_keep __map_n
     fi
 
-    [ -f "$__map_prev/funcs" ] && . "$__map_prev/funcs"
-    [ -f "$__map_prev/aliases" ] && . "$__map_prev/aliases"
-    [ -f "$__map_prev/opts" ] && . "$__map_prev/opts"
+    # From here the command's own functions are live — `funcs` puts them there —
+    # so the words this group runs, and the words the files it sources run, are
+    # all reachable by a function of the same name. `.` and `[` above all: both
+    # are legal function names, both are snapshotted like any other, and a
+    # `[() { return 1; }` alone made every line below it a no-op.
+    [[ -f "$__map_prev/funcs" ]] && builtin . "$__map_prev/funcs"
+    [[ -f "$__map_prev/aliases" ]] && builtin . "$__map_prev/aliases"
+
+    # Options are applied a line at a time through `builtin` rather than sourced,
+    # because sourcing runs the file's OWN words — `set -o pipefail`, `shopt -s
+    # nullglob` — in a shell where `set` and `shopt` may now be a function or an
+    # alias of the command's own. `set() { :; }` cost the session every option it
+    # had, silently and permanently: the restore dropped them, the save then
+    # snapshotted a shell that no longer had them, and every later call carried
+    # the loss forward. Unlike the rest of the shadowing family, that one fails
+    # UNSAFE — it earns its marker and commits.
+    #
+    # The eval'd text is bash's own `shopt -p` / `set +o` output, one option per
+    # line, which sourcing already executed verbatim; the eval adds no input the
+    # file did not already have, only the `\builtin` in front of it. The
+    # backslash is what an alias cannot get past: `eval` re-parses, and by this
+    # point an `alias builtin=true` of the command's own may be live — but a
+    # quoted word is never alias-expanded.
+    if [[ -f "$__map_prev/opts" ]]; then
+      while IFS= builtin read -r __map_l; do
+        builtin eval "\\builtin $__map_l"
+      done <"$__map_prev/opts"
+    fi
   fi
-  unset __map_head __map_prev
+  builtin unset __map_head __map_prev __map_l
 } >/dev/null 2>&1
 
 __map_main
