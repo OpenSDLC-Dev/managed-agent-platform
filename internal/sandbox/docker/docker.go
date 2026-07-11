@@ -21,9 +21,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
-// defaultWorkdir is where tools run and relative paths resolve.
-const defaultWorkdir = "/workspace"
-
 // sessionLabel tags every container we own, so an operator can find and reap
 // sandboxes this platform created without guessing from names.
 const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
@@ -142,7 +139,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	}
 	workdir := spec.Workdir
 	if workdir == "" {
-		workdir = defaultWorkdir
+		workdir = sandbox.DefaultWorkdir
 	}
 	name := containerName(spec.SessionID)
 

@@ -12,6 +12,37 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The built-in toolset (slice 6, third part): `internal/toolset` is
+  `agent_toolset_20260401` — `bash`, `read`, `write`, `edit`, `glob`, `grep` —
+  executing inside the session's sandbox. `Tools` turns an agent's toolset entry
+  into the definitions the model is handed (the schemas are the wire's, field for
+  field, from the SDK's `BetaManagedAgentsAgentToolset20260401*Input` types);
+  `Runner.Run` executes one call. `bash` is the shell package's persistent
+  session; `read`/`write`/`edit` go through the sandbox's file primitives; `glob`
+  and `grep` are bash scripts in the container — glob expands the pattern with
+  bash's own `globstar` (which is where doublestar semantics already live) and
+  sorts by mtime, grep uses the image's GNU grep with PCRE where it has it.
+  Nothing consumes the package yet: the executor and the brain's toolset
+  expansion are the rest of slice 6, and until they land the brain still emits
+  only client-executed `agent.custom_tool_use`.
+
+  The line the package draws is between a **tool** failure and a **backend**
+  failure. A missing file, a bad regex, a nonzero exit are results the model
+  reads and recovers from; a sandbox that is gone or a daemon that will not
+  answer is an error the executor handles, and never a result the model would try
+  to reason about. Model-supplied patterns and paths reach the container as
+  single-quoted words — data, never code — and every call carries a deadline into
+  the sandbox: the model's own, clamped so a timeout cannot outlive the work
+  item's lease, or the package default.
+
+  Divergences from the SDK's `tools/agenttoolset` reference, all deliberate: no
+  workdir confinement (the container *is* the boundary, and a lexical check that
+  `bash` ignores is theatre, so absolute paths and patterns are simply allowed);
+  one grep implementation rather than ripgrep-or-a-Go-walker; and `web_fetch` /
+  `web_search`, which are in the wire's tool-config enum but carry no input schema
+  there, stay deferred — enabling one offers the model nothing and calling it is
+  an error result rather than a tool call that hangs.
+
 - The persistent bash shell (slice 6, second part): `internal/sandbox/shell`
   turns the reference's stateful `bash` tool — where `cd`, exported
   variables, functions, and shell options carry from one call to the next —

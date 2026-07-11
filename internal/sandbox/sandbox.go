@@ -21,6 +21,11 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
+// DefaultWorkdir is where a sandbox runs commands and where the toolset's
+// relative paths resolve when Spec.Workdir is empty. It is one constant so
+// those two can never disagree.
+const DefaultWorkdir = "/workspace"
+
 // MaxOutputBytes caps what Exec keeps from each of stdout and stderr. It is a
 // memory guard on the executor, not the tool-result limit: a command that
 // writes a gigabyte must not be able to kill the process that ran it. The
