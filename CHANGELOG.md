@@ -25,20 +25,30 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   file and sourced (no command bytes ride the argument or a sentinel, so a
   literal `MAPDONE` and NUL bytes survive), and the shell snapshots cwd,
   exported variables, functions, aliases, and options into a directory named
-  after *that call*. The executor commits the snapshot — by pointing `head` at
-  it — only when the call finished inside its deadline. That is what makes
-  "timed out ⇒ mutations dropped" actually true: a timeout is not always a
-  SIGKILL, and a command that kills the in-container watchdog, overruns, and
-  then exits on its own terms runs its EXIT trap perfectly normally, so a
-  shell that simply overwrote one checkpoint on its way out would hand a
-  timed-out call's state to the next one. Committing from outside also means a
-  command the sandbox *abandoned* cannot land its checkpoint seconds later on
-  top of a call that came after it. Divergences from a resident shell are
-  enumerated rather than glossed: the `jobs` table does not carry, plain
-  (non-exported) variables do not carry, traps do not carry and a command's
-  EXIT trap fires at the end of that call, and a timed-out call's mutations
-  are dropped. `restart: true` resets the shell while keeping the container's
-  files. At-most-once is deliberately **not** attempted here — a marker inside
+  after *that call*, finishing with a `done` marker. The executor commits the
+  snapshot — by pointing `head` at it — only when the call finished inside its
+  deadline *and* left that marker. The deadline half is what makes "timed out ⇒
+  mutations dropped" actually true: a timeout is not always a SIGKILL, and a
+  command that kills the in-container watchdog, overruns, and then exits on its
+  own terms runs its EXIT trap perfectly normally, so a shell that simply
+  overwrote one checkpoint on its way out would hand a timed-out call's state to
+  the next one. Committing from outside also means a command the sandbox
+  *abandoned* cannot land its checkpoint seconds later on top of a call that came
+  after it. The marker half is what keeps a call that finished but never *saved*
+  from committing the empty directory it created on its way in: a command can end
+  its shell without reaching the save — `exec` replaces it, `kill -9 $$` and the
+  OOM killer end it, an EXIT trap of the command's own can exit through itself —
+  and none of those is a timeout, so on the deadline alone `head` moved off the
+  last good snapshot and took every earlier call's state with it. The save itself
+  is written with bash builtins only, no `mv`, so a command that breaks `PATH` is
+  still snapshotted — the hardening the restore already had, now held to on the
+  way out too. Divergences from a resident shell are enumerated rather than
+  glossed: the `jobs` table does not carry, plain (non-exported) variables do not
+  carry, traps do not carry and a command's EXIT trap fires at the end of that
+  call, a timed-out call's mutations are dropped, and a call whose shell never
+  finishes its snapshot drops its own mutations and leaves the session on the
+  previous call's state. `restart: true` resets the shell while keeping the
+  container's files. At-most-once is deliberately **not** attempted here — a marker inside
   the sandbox is neither trustworthy (the filesystem is agent-writable) nor
   durable (the container is cattle a retry may find reaped and
   re-provisioned) — and belongs to the executor and the work queue, whose

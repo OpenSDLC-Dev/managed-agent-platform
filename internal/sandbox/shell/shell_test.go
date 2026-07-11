@@ -244,6 +244,49 @@ func TestShell(t *testing.T) {
 		}
 	})
 
+	// A call can finish well inside its deadline and still never reach its save:
+	// it replaced the shell with `exec`, the shell was killed outright, it exited
+	// through an EXIT trap of its own, or it sent the save somewhere it could not
+	// write. None of those is a timeout, so the deadline does not gate them — the
+	// snapshot's own `done` marker does. Without that gate every one of them
+	// points `head` at the empty directory the call created on its way in, which
+	// loses not just that call's mutations but every earlier call's with them.
+	t.Run("CallThatNeverFinishesItsSnapshotKeepsThePreviousState", func(t *testing.T) {
+		for _, tc := range []struct{ name, ending string }{
+			{"ExecReplacesTheShell", `exec echo replaced`},
+			{"ShellKilledOutright", `kill -9 $$`},
+			{"CommandExitsThroughItsOwnExitTrap", `trap 'echo bye' EXIT; exit 0`},
+			{"CommandSendsTheSaveNowhere", `export __map_snap=/nonexistent/pwned`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sh, _ := newShell(t, sb)
+				sh("export KEEP=yes; cd /var", 0)
+				got := sh("cd /tmp; export EVIL=1; "+tc.ending, 0)
+				if got.TimedOut {
+					t.Fatalf("%q reported a timeout — not the path under test", tc.ending)
+				}
+				after := sh(`echo "[${KEEP:-LOST}][${EVIL:-unset}][$(pwd)]"`, 0)
+				if strings.TrimSpace(after.Stdout) != "[yes][unset][/var]" {
+					t.Errorf("stdout = %q, want [yes][unset][/var] — a call that never saved must drop its own "+
+						"mutations and leave the session's earlier state standing", after.Stdout)
+				}
+			})
+		}
+	})
+
+	// The save writes the snapshot with builtins alone — no `mv`, no external
+	// anything — so a command that breaks PATH is still snapshotted. This is the
+	// hardening the restore already had, held to on the way out as well.
+	t.Run("BrokenPATHDoesNotCostTheSnapshot", func(t *testing.T) {
+		sh, _ := newShell(t, sb)
+		sh("export KEEP=yes; cd /var", 0)
+		sh("export PATH=/nonexistent", 0)
+		got := sh(`echo "[${KEEP:-LOST}][$(pwd)][$PATH]"`, 0)
+		if strings.TrimSpace(got.Stdout) != "[yes][/var][/nonexistent]" {
+			t.Errorf("stdout = %q, want [yes][/var][/nonexistent] — a broken PATH cost the snapshot", got.Stdout)
+		}
+	})
+
 	t.Run("FastCommandUnderTimeoutIsNotATimeout", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		got := sh("echo quick", time.Second)

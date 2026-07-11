@@ -28,6 +28,12 @@
 //     rather than at session end (there is no session-long shell to end). A
 //     command that BOTH installs its own EXIT trap AND exits through it skips
 //     that call's snapshot.
+//   - A call whose shell never finishes its snapshot keeps the PREVIOUS call's
+//     state. Replacing the shell (`exec`), having it killed outright (`kill -9
+//     $$`, an OOM kill), and exiting through an EXIT trap of one's own all skip
+//     the save. Such a call drops its own mutations and the session carries on
+//     from the last complete snapshot; a resident shell would have died with the
+//     process instead.
 //   - A timed-out call's mutations are dropped. A resident shell would keep the
 //     ones made before the kill; a SIGKILL leaves no chance to snapshot them, so
 //     dropping them is the only behaviour available consistently on both the
@@ -45,6 +51,7 @@ package shell
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"strings"
 	"time"
 
@@ -113,17 +120,36 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 	res.Stdout, res.Stderr = er.Stdout, er.Stderr
 	res.ExitCode, res.TimedOut, res.Truncated = er.ExitCode, er.TimedOut, er.Truncated
 
-	// Commit this call's snapshot only if the call finished inside its deadline.
-	// A timed-out call leaves its snapshot uncommitted, so its mutations are
-	// dropped whether the watchdog's SIGKILL landed or the command dodged the
-	// kill, overran, and exited on its own terms — where the EXIT trap does run.
-	// It also means a command the sandbox abandoned cannot reach a later call by
-	// writing its snapshot long after Exec stopped waiting: that write lands in an
-	// id-scoped directory nothing will ever point at.
-	if !res.TimedOut {
-		if err := sb.WriteFile(ctx, state+"/head", []byte(id.String())); err != nil {
-			return Result{}, err
+	// Commit this call's snapshot only if the call finished inside its deadline
+	// AND the snapshot is complete. Both halves are load-bearing.
+	//
+	// The deadline drops a timed-out call's mutations whether the watchdog's
+	// SIGKILL landed or the command dodged the kill, overran, and exited on its
+	// own terms — where the EXIT trap does run. It also means a command the
+	// sandbox abandoned cannot reach a later call by writing its snapshot long
+	// after Exec stopped waiting: that write lands in an id-scoped directory
+	// nothing will ever point at.
+	//
+	// The `done` marker — written by the template last, and only if every write
+	// succeeded — is what stops a call that finished but never saved from
+	// committing an empty or half-written snapshot. A command can end its shell
+	// without ever reaching the save (`exec`, `kill -9 $$`, an OOM kill, an EXIT
+	// trap of its own), and none of those is a timeout. Pointing `head` at what
+	// such a call left behind would not merely drop that call's mutations: it
+	// would move `head` off the last good snapshot and take every earlier call's
+	// state with it. Leaving `head` alone costs the call its own mutations and
+	// nothing more.
+	if res.TimedOut {
+		return res, nil
+	}
+	if _, err := sb.ReadFile(ctx, state+"/snap/"+id.String()+"/done"); err != nil {
+		if errors.Is(err, sandbox.ErrFileNotExist) {
+			return res, nil
 		}
+		return Result{}, err
+	}
+	if err := sb.WriteFile(ctx, state+"/head", []byte(id.String())); err != nil {
+		return Result{}, err
 	}
 	return res, nil
 }
