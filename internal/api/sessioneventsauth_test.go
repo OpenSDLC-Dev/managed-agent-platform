@@ -135,3 +135,22 @@ func TestEnvironmentKeyEncodedSlashDoesNotForgeEventsPath(t *testing.T) {
 	st, body := readJSON(t, s.doRaw(http.MethodPost, path, nil, bearer))
 	wantErr(t, st, body, http.StatusUnauthorized, "authentication_error")
 }
+
+// TestEnvironmentKeyEncodedLiteralSegmentFailsClosed documents the safe side of
+// the same boundary: because the worker lanes recognize a route only when its
+// literal segments appear unencoded, a request that percent-encodes a literal
+// segment (%65vents == "events") is NOT taken as a worker route — it falls to
+// management auth and is denied (401), never over-authorized. Real clients always
+// send the literal segments unencoded, so this fail-closed case has no driver;
+// the test pins it as intended, guarding against a regression that would instead
+// over-authorize the environment key onto an encoded path.
+func TestEnvironmentKeyEncodedLiteralSegmentFailsClosed(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-enc-literal"
+	_, sessionID := selfHostedWorker(t, s, key)
+	bearer := map[string]string{"Authorization": "Bearer " + key}
+
+	path := "/v1/sessions/" + sessionID + "/%65vents" // %65 == 'e'
+	st, body := readJSON(t, s.doRaw(http.MethodGet, path, nil, bearer))
+	wantErr(t, st, body, http.StatusUnauthorized, "authentication_error")
+}

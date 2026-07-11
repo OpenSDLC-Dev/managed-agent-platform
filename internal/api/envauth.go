@@ -130,8 +130,10 @@ func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http
 		if !ok {
 			return
 		}
-		// Extract the id from the decoded path so it matches what the routed
-		// handler reads via PathValue (see splitSession).
+		// Extract the id from the decoded path so that, for a real (slashless)
+		// session id, it matches what the routed handler reads via PathValue. The
+		// two diverge only for an id that encodes a %2F, which is never a real
+		// session, so the handler 404s either way (see splitSession).
 		id, _, _ := splitSession(r.URL.Path)
 		sid := normalizeSessionID(id)
 		var sessEnv string

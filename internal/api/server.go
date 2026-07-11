@@ -115,15 +115,20 @@ func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	mgmt := requireAPIKey(pool, next)
 	sessionEvents := dispatchSessionEventsAuth(pool, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Classify on the escaped path — the same representation ServeMux routes
-		// on (it unescapes each path segment individually, so an encoded slash
-		// stays within one segment). Classifying on the decoded r.URL.Path would
-		// let a %2F forge an extra segment for the auth choice that the router
-		// does not see: GET /v1/sessions/{id}%2Fevents decodes to a session-events
-		// path (Bearer-authable) yet the router matches it as /v1/sessions/{id}
-		// CRUD, so an environment key would reach a management-only handler.
-		// Matching ServeMux's view keeps the auth scheme and the routed handler in
-		// lockstep.
+		// Classify on the escaped path, splitting only on real '/' — the segment
+		// structure ServeMux routes on (an encoded %2F stays within one segment).
+		// This makes the worker lanes strictly no broader than the router: a
+		// worker route is recognized only when its literal segments (events /
+		// stream / work / poll) appear unencoded, exactly as every real client
+		// sends them. The security-critical consequence is that a %2F can never
+		// forge a worker segment the router does not also see — GET
+		// /v1/sessions/{id}%2Fevents stays a bare /v1/sessions/{id} (CRUD →
+		// management auth), so an environment key never reaches a management-only
+		// handler. (Classifying on the decoded r.URL.Path instead would let that
+		// %2F reach the CRUD handler under env-key auth.) The reverse case is
+		// fail-closed and driverless: a request that percent-encodes a literal
+		// route segment (e.g. /%65vents) is not recognized as a worker route and
+		// falls to management auth — a 401, never an over-authorization.
 		p := r.URL.EscapedPath()
 		switch {
 		case isWorkPath(p):
@@ -140,13 +145,16 @@ func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 // events subtree and the GET /v1/sessions/{id} read — see dispatchAuth). A BYOC
 // worker drives its session with the same Authorization: Bearer environment key
 // it polls work with; an application uses the management x-api-key. The lane is
-// the environment key only when a Bearer is present AND no x-api-key is — the
-// reference client deletes x-api-key before attaching the environment Bearer
-// (the server rejects both at once), so x-api-key present unambiguously means a
-// management caller. Keying on Bearer presence alone would let a stray Bearer
-// header (a proxy, a client configured with both) knock a valid x-api-key caller
-// off management auth. Mutating session CRUD (create/update/delete/archive/list)
-// is not routed here, so the environment key never reaches it.
+// the environment key only when a Bearer is present AND no non-empty x-api-key is
+// — the reference client deletes x-api-key before attaching the environment
+// Bearer (the server rejects both at once), so a real x-api-key present
+// unambiguously means a management caller. Keying on Bearer presence alone would
+// let a stray Bearer header (a proxy, a client configured with both) knock a
+// valid x-api-key caller off management auth. An empty x-api-key value is treated
+// as absent (it is not a usable credential); this only ever keeps a Bearer caller
+// on the environment lane, which still validates the key and scopes it to its own
+// environment. Mutating session CRUD (create/update/delete/archive/list) is not
+// routed here, so the environment key never reaches it.
 func dispatchSessionEventsAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	env := requireEnvironmentKeyForSession(pool, next)
 	mgmt := requireAPIKey(pool, next)
