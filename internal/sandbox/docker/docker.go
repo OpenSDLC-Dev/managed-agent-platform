@@ -21,9 +21,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
-// defaultWorkdir is where tools run and relative paths resolve.
-const defaultWorkdir = "/workspace"
-
 // sessionLabel tags every container we own, so an operator can find and reap
 // sandboxes this platform created without guessing from names.
 const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
@@ -142,7 +139,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	}
 	workdir := spec.Workdir
 	if workdir == "" {
-		workdir = defaultWorkdir
+		workdir = sandbox.DefaultWorkdir
 	}
 	name := containerName(spec.SessionID)
 
@@ -582,7 +579,7 @@ func (c *container) ReadFile(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
 	case tar.TypeReg:
 	default:
-		return nil, fmt.Errorf("docker: %s is not a regular file", path)
+		return nil, fmt.Errorf("%s is not a regular file: %w", path, sandbox.ErrNotRegularFile)
 	}
 	if header.Size > sandbox.MaxFileBytes {
 		return nil, fmt.Errorf("%s is %d bytes: %w", path, header.Size, sandbox.ErrFileTooLarge)

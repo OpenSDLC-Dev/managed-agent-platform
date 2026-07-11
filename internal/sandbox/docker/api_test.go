@@ -917,8 +917,8 @@ func TestProvisionDefaultsTheWorkdir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if got := sb.(*container).workdir; got != defaultWorkdir {
-		t.Errorf("workdir = %q, want %q", got, defaultWorkdir)
+	if got := sb.(*container).workdir; got != sandbox.DefaultWorkdir {
+		t.Errorf("workdir = %q, want %q", got, sandbox.DefaultWorkdir)
 	}
 }
 

@@ -53,9 +53,9 @@ Deferred past v1 (seams reserved, not implemented): secret vaults and egress cre
 ## Development
 
 Requires **Go 1.25+** and Docker (the storage and API contract tests start
-their own disposable Postgres containers, and the sandbox contract tests start
-a disposable `debian:stable-slim` container). A missing daemon is a hard test
-failure, not a skip, so the coverage gate cannot be hollowed out.
+their own disposable Postgres containers, and the sandbox, shell, and toolset
+tests start a disposable `debian:stable-slim` container). A missing daemon is a
+hard test failure, not a skip, so the coverage gate cannot be hollowed out.
 
 ```bash
 go build ./...             # build
