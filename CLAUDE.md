@@ -89,7 +89,7 @@ go vet ./... && gofmt -l . # lint
 docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres(+Jaeger)
 ```
 
-CI (`.github/workflows/ci.yml`) runs the build/vet/gofmt/test commands above and additionally enforces a **total statement coverage gate ≥ 90%**, computed exactly from the coverage profile over `./internal/...` (logic packages; `cmd/` main glue is deliberately outside the denominator).
+CI (`.github/workflows/ci.yml`) runs the build/vet/gofmt/test commands above and additionally enforces a **total statement coverage gate ≥ 90%**, computed exactly from the coverage profile over the **logic packages** under `./internal/...`. Deliberately outside the denominator: `cmd/` main glue, and the test-support packages (`internal/pgtest`, `internal/sandbox/sandboxtest`) whose only uncovered statements are the assertion branches that fire when a suite fails.
 
 `.env` (gitignored) holds the model endpoint for real end-to-end integration verification: `MODEL_PROTOCOL` (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID`. Nothing consumes it yet — the provider slice's integration tests will read these variables. Never commit real credentials.
 
