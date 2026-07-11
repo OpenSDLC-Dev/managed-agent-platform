@@ -75,7 +75,6 @@ import (
 	"context"
 	_ "embed"
 	"errors"
-	"fmt"
 	"path"
 	"strings"
 	"time"
@@ -123,18 +122,17 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 	var res Result
 
 	if req.Restart {
-		// Clearing the head pointer is the whole reset: the next call finds no
-		// committed snapshot and starts from a fresh shell in the workdir. The
-		// container's files are untouched, as the reference's restart leaves them.
-		// A reset that did not run is not a reset — the shell would carry on with
-		// the state the caller asked to be rid of — so its exit code is checked,
-		// not just the backend error.
-		reset := "rm -f " + shellSingleQuote(state+"/head")
-		switch er, err := sb.Exec(ctx, sandbox.ExecRequest{Command: reset}); {
-		case err != nil:
+		// Emptying the head pointer is the whole reset: the restore reads head with
+		// `$(<head)`, so an empty file is no committed snapshot and the next call
+		// starts from a fresh shell in the workdir. The container's other files are
+		// untouched, as the reference's restart leaves them. This goes through the
+		// sandbox's file API rather than a `rm` in the container: a `rm` resolves
+		// against the container's PATH, and a prior call that dropped a program
+		// named `rm` earlier in it would make the reset exit 0 without removing
+		// anything — a restart that reports success and resets nothing. WriteFile
+		// has no shell and no PATH; its error, not a command's exit code, gates it.
+		if err := sb.WriteFile(ctx, state+"/head", nil); err != nil {
 			return Result{}, err
-		case er.ExitCode != 0:
-			return Result{}, fmt.Errorf("shell: restart: exit %d: %s", er.ExitCode, strings.TrimSpace(er.Stderr))
 		}
 		res.Restarted = true
 		if req.Command == "" {

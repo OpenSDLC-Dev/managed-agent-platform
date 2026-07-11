@@ -180,11 +180,13 @@ func TestCommit(t *testing.T) {
 		}
 	})
 
-	// Restart clears the head pointer, which is the whole reset.
+	// Restart empties the head pointer, which is the whole reset — and it goes
+	// through the file API, not a container `rm` a shadowed binary could no-op. With
+	// no command, that is the whole call: nothing is exec'd.
 	t.Run("RestartClearsTheHeadPointer", func(t *testing.T) {
 		id := domain.NewID("sevt")
 		headPath, _ := statePaths(session, id)
-		sb := &fakeSandbox{}
+		sb := &fakeSandbox{files: map[string]string{headPath: "snap_old"}}
 		res, err := shell.Run(context.Background(), sb, session, id, shell.Request{Restart: true})
 		if err != nil {
 			t.Fatalf("Run: %v", err)
@@ -192,32 +194,35 @@ func TestCommit(t *testing.T) {
 		if !res.Restarted {
 			t.Error("Restarted not reported")
 		}
-		if len(sb.execs) != 1 {
-			t.Fatalf("execs = %v, want exactly the reset", sb.execs)
+		if len(sb.execs) != 0 {
+			t.Fatalf("execs = %v, want nothing exec'd for a bare restart", sb.execs)
 		}
-		if !strings.Contains(sb.execs[0], "rm -f '"+headPath+"'") {
-			t.Errorf("reset = %q, want it to remove the quoted head path", sb.execs[0])
+		if got := sb.committed(session); got != "" {
+			t.Errorf("head = %q, want it emptied by the restart", got)
 		}
 	})
 
-	// A reset that did not run is not a reset: the shell would carry on with the
-	// state the caller asked to be rid of, while the tool reported it gone.
+	// A reset that could not be written is not a reset: the call fails rather than
+	// reporting a shell reset that did not happen.
 	t.Run("RestartThatFailedInTheContainerFailsTheCall", func(t *testing.T) {
-		sb := &fakeSandbox{execResult: sandbox.ExecResult{ExitCode: 1, Stderr: "read-only file system"}}
+		sb := &fakeSandbox{writeErr: errors.New("read-only file system")}
 		_, err := shell.Run(context.Background(), sb, session, domain.NewID("sevt"),
 			shell.Request{Restart: true, Command: "echo hi"})
 		if err == nil || !strings.Contains(err.Error(), "read-only file system") {
 			t.Fatalf("err = %v, want the reset's own failure surfaced", err)
 		}
-		if len(sb.execs) != 1 {
+		if len(sb.execs) != 0 {
 			t.Errorf("execs = %d, want the command not to have run after a failed reset", len(sb.execs))
 		}
 	})
 
-	// Restart with a command resets, then runs the command in the same call.
+	// Restart with a command resets, then runs the command in the same call: the
+	// reset is a file write (no exec), so the only exec is the template, and the
+	// committed head is the restarted call's own snapshot, not the seeded one.
 	t.Run("RestartWithCommandResetsThenRuns", func(t *testing.T) {
 		id := domain.NewID("sevt")
-		sb := &fakeSandbox{saves: true}
+		headPath, _ := statePaths(session, id)
+		sb := &fakeSandbox{saves: true, files: map[string]string{headPath: "snap_old"}}
 		res, err := shell.Run(context.Background(), sb, session, id, shell.Request{Restart: true, Command: "echo hi"})
 		if err != nil {
 			t.Fatalf("Run: %v", err)
@@ -225,14 +230,11 @@ func TestCommit(t *testing.T) {
 		if !res.Restarted {
 			t.Error("Restarted not reported")
 		}
-		if len(sb.execs) != 2 {
-			t.Fatalf("execs = %d, want reset then template", len(sb.execs))
-		}
-		if !strings.Contains(sb.execs[0], "rm -f") {
-			t.Errorf("first exec = %q, want the reset", sb.execs[0])
+		if len(sb.execs) != 1 {
+			t.Fatalf("execs = %d, want just the template (the reset is a file write, not an exec)", len(sb.execs))
 		}
 		if got := sb.committed(session); got != path.Base(sb.snap) {
-			t.Error("the restarted call's own snapshot was not committed")
+			t.Errorf("head = %q, want the restarted call's own snapshot %q", got, path.Base(sb.snap))
 		}
 	})
 
@@ -241,14 +243,14 @@ func TestCommit(t *testing.T) {
 		boom := errors.New("backend down")
 
 		t.Run("Reset", func(t *testing.T) {
-			sb := &fakeSandbox{execErr: boom}
+			sb := &fakeSandbox{writeErr: boom}
 			_, err := shell.Run(context.Background(), sb, session, domain.NewID("sevt"),
 				shell.Request{Restart: true, Command: "x"})
 			if !errors.Is(err, boom) {
 				t.Fatalf("err = %v, want the reset fault", err)
 			}
-			if len(sb.execs) != 1 {
-				t.Errorf("execs = %d, want only the failed reset", len(sb.execs))
+			if len(sb.execs) != 0 {
+				t.Errorf("execs = %d, want nothing exec'd after the failed reset", len(sb.execs))
 			}
 		})
 

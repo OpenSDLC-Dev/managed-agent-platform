@@ -684,6 +684,29 @@ greet
 		}
 	})
 
+	// Restart empties `head` through the sandbox file API, not a container `rm`.
+	// A prior call that drops a program named `rm` into the PATH would make an
+	// `rm`-based reset exit 0 without removing anything — a restart that reports
+	// success and resets nothing.
+	t.Run("AShadowedRmDoesNotFakeARestart", func(t *testing.T) {
+		sh, session := newShell(t, sb)
+		sh("export SECRET=kept; cd /tmp", 0)
+		sh(`printf '#!/bin/sh\nexit 0\n' >/usr/local/bin/rm; chmod +x /usr/local/bin/rm`, 0)
+		res, err := shell.Run(context.Background(), sb, session, domain.NewID("sevt"),
+			shell.Request{Restart: true})
+		if err != nil {
+			t.Fatalf("restart: %v", err)
+		}
+		if !res.Restarted {
+			t.Error("Restarted not reported")
+		}
+		got := sh(`\builtin echo "[${SECRET:-unset}][$(\builtin pwd)]"`, 0)
+		sh("command rm -f /usr/local/bin/rm", 0) // don't poison sibling subtests
+		if strings.TrimSpace(got.Stdout) != "[unset][/workspace]" {
+			t.Errorf("stdout = %q, want [unset][/workspace] — a shadowed `rm` faked the restart", got.Stdout)
+		}
+	})
+
 	t.Run("OutputIsSeparatedAndCapped", func(t *testing.T) {
 		sh, _ := newShell(t, sb)
 		// NUL bytes and the literal MAPDONE must survive — there is no sentinel.

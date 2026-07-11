@@ -104,7 +104,11 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   template's own machinery — the internal state path, the tool-call id — into every
   later call's stderr; the save now turns it off before it captures the options, so
   the snapshot records it off and only the call that ran `set -x` sees its own
-  prologue traced. Divergences
+  prologue traced. And `restart` empties `head` through the sandbox file API
+  rather than an `rm` in the container: an `rm` resolves against the container
+  PATH, so a prior call that dropped a program named `rm` earlier in it made the
+  reset exit 0 and reset nothing — a restart that reported success and kept the
+  shell. Divergences
   from a resident shell are enumerated rather than
   glossed: the `jobs` table does not carry, plain (non-exported) variables do not
   carry, traps do not carry and a command's EXIT trap fires at the end of that
