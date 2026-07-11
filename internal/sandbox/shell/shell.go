@@ -60,7 +60,6 @@
 //     back on. It is deliberate self-sabotage, contained like `rm -rf` of the
 //     state dir by the sandbox boundary, not by the template.
 //
-
 // The snapshot is the agent's own shell state, not a security boundary: a command
 // running as root in the container can rewrite or delete it, and only sabotages
 // its own session by doing so. The guarantees that matter — the deadline, and
