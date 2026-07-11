@@ -191,72 +191,44 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event) (provider.
 	return req, watermark, nil
 }
 
-// classifyTools maps each tool the agent offers to the event type its use is
-// emitted as: a custom tool is client-executed (agent.custom_tool_use), an
-// expanded agent_toolset tool is platform-executed in the sandbox
-// (agent.tool_use). mcp_toolset waits for the MCP client, so its tools are not
-// offered and never appear here. A name the model calls that is in no set falls
-// back to custom at emission — the client can reject it — since the platform
-// only runs names it recognises as its own.
-func classifyTools(agent domain.ResolvedAgent) (map[string]domain.EventType, error) {
+// classify resolves, in one pass over the agent's tools, both the event type
+// each tool's use commits under and — for platform built-ins — its permission
+// policy. A custom tool is client-executed (agent.custom_tool_use) and carries
+// no policy; an agent_toolset tool is platform-executed (agent.tool_use) and
+// carries a policy; mcp_toolset waits for the MCP client, so its tools are not
+// offered and never appear here. A name the model calls that is in neither map
+// falls back to custom at emission — the client can reject it — since the
+// platform only runs names it recognises as its own.
+//
+// The built-in names come from toolset.Policies' keys (every enabled tool,
+// which is exactly what Tools offers), so classify resolves each entry once and
+// needs no second pass to recover names.
+func classify(agent domain.ResolvedAgent) (map[string]domain.EventType, map[string]domain.PermissionPolicyType, error) {
 	kind := make(map[string]domain.EventType)
+	policy := make(map[string]domain.PermissionPolicyType)
 	for _, raw := range agent.Tools {
 		var probe struct {
 			Type string `json:"type"`
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(raw, &probe); err != nil {
-			return nil, fmt.Errorf("agent tool: %w", err)
+			return nil, nil, fmt.Errorf("agent tool: %w", err)
 		}
 		switch probe.Type {
 		case "custom":
 			kind[probe.Name] = domain.EventAgentCustomToolUse
 		case "agent_toolset_20260401":
-			defs, err := toolset.Tools(raw)
+			pols, err := toolset.Policies(raw)
 			if err != nil {
-				return nil, fmt.Errorf("agent tool: %w", err)
+				return nil, nil, fmt.Errorf("agent tool: %w", err)
 			}
-			for _, def := range defs {
-				var d struct {
-					Name string `json:"name"`
-				}
-				if err := json.Unmarshal(def, &d); err != nil {
-					return nil, err
-				}
-				kind[d.Name] = domain.EventAgentToolUse
+			for name, p := range pols {
+				kind[name] = domain.EventAgentToolUse
+				policy[name] = p
 			}
 		}
 	}
-	return kind, nil
-}
-
-// classifyPolicies maps each platform-executed built-in tool the agent offers
-// to its resolved permission policy (always_allow / always_ask), the brain's
-// input for stamping evaluated_permission and deciding whether a turn suspends
-// for confirmation. Only agent_toolset tools carry a policy: custom tools are
-// client-executed (permission is the client's concern) and mcp_toolset waits
-// for the MCP client, so neither appears here.
-func classifyPolicies(agent domain.ResolvedAgent) (map[string]domain.PermissionPolicyType, error) {
-	policy := make(map[string]domain.PermissionPolicyType)
-	for _, raw := range agent.Tools {
-		var probe struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(raw, &probe); err != nil {
-			return nil, fmt.Errorf("agent tool: %w", err)
-		}
-		if probe.Type != "agent_toolset_20260401" {
-			continue
-		}
-		pols, err := toolset.Policies(raw)
-		if err != nil {
-			return nil, fmt.Errorf("agent tool: %w", err)
-		}
-		for name, p := range pols {
-			policy[name] = p
-		}
-	}
-	return policy, nil
+	return kind, policy, nil
 }
 
 // contentBlocks normalizes wire message content (a bare string or an array

@@ -199,16 +199,11 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 	var toolKind map[string]domain.EventType
 	var policy map[string]domain.PermissionPolicyType
 	if len(turn.toolUses) > 0 {
-		kinds, err := classifyTools(agent)
+		kinds, pols, err := classify(agent)
 		if err != nil {
 			return b.failTurn(ctx, sid, item, span, watermark, fmt.Sprintf("classify tools: %v", err))
 		}
-		toolKind = kinds
-		pols, err := classifyPolicies(agent)
-		if err != nil {
-			return b.failTurn(ctx, sid, item, span, watermark, fmt.Sprintf("classify policies: %v", err))
-		}
-		policy = pols
+		toolKind, policy = kinds, pols
 	}
 	return b.settleTurn(ctx, sid, item, span, turn, toolKind, policy, watermark)
 }

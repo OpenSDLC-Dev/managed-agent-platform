@@ -152,18 +152,12 @@ func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 	}
 
 	enabled := true
-	defaultPolicy := DefaultAgentToolsetPolicy
+	var defaultPolicy *policyConfig
 	if e.DefaultConfig != nil {
 		if e.DefaultConfig.Enabled != nil {
 			enabled = *e.DefaultConfig.Enabled
 		}
-		if pc := e.DefaultConfig.PermissionPolicy; pc != nil {
-			p, err := policyType(pc.Type)
-			if err != nil {
-				return nil, err
-			}
-			defaultPolicy = p
-		}
+		defaultPolicy = e.DefaultConfig.PermissionPolicy
 	}
 
 	type override struct {
@@ -192,9 +186,18 @@ func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 		if !on {
 			continue
 		}
-		policy := defaultPolicy
+		// Resolve and validate the policy only for tools that are actually
+		// enabled: a per-tool config's policy overrides default_config's, which
+		// overrides DefaultAgentToolsetPolicy. An unevaluable policy is a hard
+		// error, but only when a live tool would carry it — a malformed policy
+		// on a disabled or overridden-away tool has no effect and is ignored.
+		pc := defaultPolicy
 		if o.policy != nil {
-			p, err := policyType(o.policy.Type)
+			pc = o.policy
+		}
+		policy := DefaultAgentToolsetPolicy
+		if pc != nil {
+			p, err := policyType(pc.Type)
 			if err != nil {
 				return nil, err
 			}
@@ -215,6 +218,17 @@ func policyType(s string) (domain.PermissionPolicyType, error) {
 	default:
 		return "", fmt.Errorf("agent_toolset_20260401: unknown permission_policy type %q", s)
 	}
+}
+
+// Validate checks that an agent_toolset_20260401 entry resolves — its enable
+// flags and the permission policies of its enabled tools are well-formed. It is
+// the create-time counterpart to Tools/Policies: an entry that fails here would
+// otherwise be stored on the agent and wedge every turn when the brain resolves
+// it, so the API validates at agent creation to make a malformed toolset a 400
+// instead.
+func Validate(raw json.RawMessage) error {
+	_, err := resolveToolset(raw)
+	return err
 }
 
 // Tools returns the model-facing definitions of the built-in tools an

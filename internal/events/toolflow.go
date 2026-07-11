@@ -43,12 +43,15 @@ var (
 		string(domain.EventAgentMCPToolResult),
 	}
 	// confirmableToolUseTypes are the tool-use events that can carry an
-	// evaluated_permission of "ask" and so be gated on user.tool_confirmation:
-	// platform built-ins and MCP tools. Custom tools are client-executed and
-	// never gated by the platform.
+	// evaluated_permission of "ask" and so be gated on user.tool_confirmation.
+	// v1 gates only platform built-ins (agent.tool_use): the brain stamps a
+	// policy on nothing else, and a denial's result is emitted as an
+	// agent.tool_result (the wrong shape for an MCP tool, whose result is
+	// agent.mcp_tool_result / mcp_tool_use_id). MCP gating is slice-8+ work and
+	// must extend the denial synthesis with it. Custom tools are
+	// client-executed and never gated by the platform.
 	confirmableToolUseTypes = []string{
 		string(domain.EventAgentToolUse),
-		string(domain.EventAgentMCPToolUse),
 	}
 )
 
@@ -57,6 +60,20 @@ var (
 // referenced by results that are validated but not yet inserted, so the API
 // trigger can decide its batch before appending it.
 func HasUnansweredToolUse(ctx context.Context, q Querier, sessionID domain.ID, extraRefs []string) (bool, error) {
+	return hasUnansweredToolUse(ctx, q, sessionID, toolUseTypes, extraRefs)
+}
+
+// HasUnansweredPlatformToolUse reports whether any platform-executed built-in
+// tool use (agent.tool_use) still lacks a result. The executor runs only these,
+// so a confirmation resume enqueues a tool_exec only when one is outstanding: a
+// turn whose remaining unanswered tools are all client-executed (custom) has no
+// platform work and waits on the client's result instead — enqueuing a tool_exec
+// there would provision a sandbox for nothing.
+func HasUnansweredPlatformToolUse(ctx context.Context, q Querier, sessionID domain.ID, extraRefs []string) (bool, error) {
+	return hasUnansweredToolUse(ctx, q, sessionID, []string{string(domain.EventAgentToolUse)}, extraRefs)
+}
+
+func hasUnansweredToolUse(ctx context.Context, q Querier, sessionID domain.ID, useTypes, extraRefs []string) (bool, error) {
 	if extraRefs == nil {
 		extraRefs = []string{}
 	}
@@ -74,7 +91,7 @@ func HasUnansweredToolUse(ctx context.Context, q Querier, sessionID domain.ID, e
 		                      r.payload->>'mcp_tool_use_id') = tu.id
 		     )
 		 )`,
-		sessionID.String(), toolUseTypes, toolResultTypes, extraRefs).Scan(&unanswered)
+		sessionID.String(), useTypes, toolResultTypes, extraRefs).Scan(&unanswered)
 	if err != nil {
 		return false, fmt.Errorf("unanswered tool_use check: %w", err)
 	}
@@ -121,19 +138,25 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		}
 		seen[ref] = true
 
-		var useType string
-		var answered bool
+		var useType, perm string
+		var answered, confirmed bool
 		err = q.QueryRow(ctx,
 			`SELECT tu.type,
+			        COALESCE(tu.payload->>'evaluated_permission', ''),
 			        EXISTS (
 			          SELECT 1 FROM events r
 			          WHERE r.session_id = $1 AND r.type = ANY($3)
 			            AND COALESCE(r.payload->>'tool_use_id',
 			                         r.payload->>'custom_tool_use_id',
 			                         r.payload->>'mcp_tool_use_id') = tu.id
+			        ),
+			        EXISTS (
+			          SELECT 1 FROM events c
+			          WHERE c.session_id = $1 AND c.type = $4
+			            AND c.payload->>'tool_use_id' = tu.id
 			        )
 			 FROM events tu WHERE tu.session_id = $1 AND tu.id = $2`,
-			sessionID.String(), ref, toolResultTypes).Scan(&useType, &answered)
+			sessionID.String(), ref, toolResultTypes, string(domain.EventUserToolConfirm)).Scan(&useType, &perm, &answered, &confirmed)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
 		}
@@ -145,6 +168,12 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		}
 		if answered {
 			return fmt.Errorf("events[%d]: tool use %q already has a result", i, ref)
+		}
+		// An ask-gated tool must be confirmed before any result answers it: a
+		// premature result would bypass the human approval and, on a later
+		// denial, leave the tool use double-answered on the append-only log.
+		if perm == string(domain.EvalPermAsk) && !confirmed {
+			return fmt.Errorf("events[%d]: tool use %q is awaiting confirmation and cannot be answered yet", i, ref)
 		}
 	}
 	return nil

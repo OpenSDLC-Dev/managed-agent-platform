@@ -184,6 +184,113 @@ func TestConfirmationMixedAllowDenyInOneBatch(t *testing.T) {
 	}
 }
 
+// A user.message posted while the session is gated on confirmation must not
+// wake the turn: replaying past the unresolved tool_use is a request the model
+// rejects, and requires_action resolves only by confirmation. The message is
+// appended and rides the next replay once the gate clears.
+func TestConfirmationUserMessageDoesNotBypassGate(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	askID := appendAskToolUse(t, s, sessionID, "bash")
+
+	sendEvents(t, s, sessionID, userMessage("actually, do something else"))
+
+	if got := s.sessionStatus(sessionID); got != "idle" {
+		t.Errorf("status after user.message while gated = %q, want idle", got)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("model_turn enqueued while gated = %d, want 0", n)
+	}
+	if n := countEventType(t, s, sessionID, "session.status_running"); n != 0 {
+		t.Errorf("session.status_running while gated = %d, want 0", n)
+	}
+
+	// The confirmation still resolves the gate, and the message is on the log
+	// to be replayed.
+	sendEvents(t, s, sessionID, confirm(askID, "allow", nil))
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status after confirmation = %q, want running", got)
+	}
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 1 {
+		t.Errorf("tool_exec after confirmation = %d, want 1", n)
+	}
+	if countEventType(t, s, sessionID, "user.message") != 1 {
+		t.Errorf("user.message was not retained on the log")
+	}
+}
+
+// A batch that mixes a confirmation clearing the gate with a user.message must
+// resolve as a confirmation (run the confirmed tool), not wake on the message.
+func TestConfirmationWithUserMessageInOneBatchResolvesGate(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	askID := appendAskToolUse(t, s, sessionID, "bash")
+
+	sendEvents(t, s, sessionID,
+		confirm(askID, "allow", nil),
+		userMessage("and also this"))
+
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status = %q, want running", got)
+	}
+	// The confirmed tool must run — an executor, not a bare model_turn that
+	// would replay the unanswered tool_use.
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 1 {
+		t.Errorf("tool_exec = %d, want 1 (confirmation ran, not the message)", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("model_turn = %d, want 0", n)
+	}
+}
+
+// A tool result cannot answer an ask-gated tool before the human confirms it:
+// that would bypass the approval and, on a later denial, double-answer the tool
+// use on the append-only log.
+func TestConfirmationToolResultForUnconfirmedAskRejected(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := selfHostedSession(t, s) // user.tool_result is self_hosted-only
+	askID := appendAskToolUse(t, s, sessionID, "bash")
+
+	status, body := s.do(http.MethodPost, "/v1/sessions/"+sessionID+"/events",
+		map[string]any{"events": []any{map[string]any{
+			"type": "user.tool_result", "tool_use_id": askID,
+			"content": []any{map[string]any{"type": "text", "text": "sneaky"}}}}})
+	if status != http.StatusBadRequest {
+		t.Errorf("tool_result for unconfirmed ask: status %d, want 400 (body %v)", status, body)
+	}
+}
+
+// Denying the only platform tool while a client-executed custom tool is still
+// unanswered must not enqueue a tool_exec: the executor runs only built-ins, so
+// it would provision a sandbox for nothing. The session resumes on the client's
+// custom result instead.
+func TestConfirmationDenyWithPendingCustomToolWaitsForClient(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	askID := appendAskToolUse(t, s, sessionID, "bash")
+	customID := appendToolUse(t, s, sessionID, domain.EventAgentCustomToolUse)
+
+	sendEvents(t, s, sessionID, confirm(askID, "deny", map[string]any{"deny_message": "no"}))
+
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status = %q, want running", got)
+	}
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 0 {
+		t.Errorf("tool_exec = %d, want 0 (no platform work; custom tool is client-executed)", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("model_turn = %d, want 0 (waiting on the client's custom result)", n)
+	}
+
+	// The client's custom result completes the set and resumes the turn.
+	sendEvents(t, s, sessionID, map[string]any{
+		"type": "user.custom_tool_result", "custom_tool_use_id": customID,
+		"content": []any{map[string]any{"type": "text", "text": "done"}}})
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("model_turn after custom result = %d, want 1", n)
+	}
+}
+
 func TestConfirmationValidation(t *testing.T) {
 	s := newTestServer(t)
 	sessionID := eventsFixture(t, s)

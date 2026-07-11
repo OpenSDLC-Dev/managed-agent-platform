@@ -27,6 +27,31 @@ func createAgent(t *testing.T, s *tserver, body map[string]any) map[string]any {
 	return res
 }
 
+// An agent_toolset entry is validated at create time: a malformed enable flag
+// or permission_policy is a 400 here, not an agent that wedges every turn when
+// the brain resolves the toolset.
+func TestAgentToolsetValidatedAtCreate(t *testing.T) {
+	s := newTestServer(t)
+	toolset := func(cfg map[string]any) map[string]any {
+		return map[string]any{"name": "a", "model": "claude-opus-4-8",
+			"tools": []any{map[string]any{"type": "agent_toolset_20260401", "default_config": cfg}}}
+	}
+	for _, bad := range []map[string]any{
+		{"permission_policy": map[string]any{"type": "allways_ask"}}, // typo
+		{"permission_policy": map[string]any{"type": ""}},
+		{"enabled": "yes"}, // wrong type
+	} {
+		if status, body := s.do(http.MethodPost, "/v1/agents", toolset(bad)); status != http.StatusBadRequest {
+			t.Errorf("malformed toolset %v: status %d, want 400 (body %v)", bad, status, body)
+		}
+	}
+	// A valid policy is accepted.
+	if status, body := s.do(http.MethodPost, "/v1/agents",
+		toolset(map[string]any{"permission_policy": map[string]any{"type": "always_ask"}})); status != http.StatusOK {
+		t.Errorf("valid permission_policy: status %d, want 200 (body %v)", status, body)
+	}
+}
+
 func TestAgentCreateMinimal(t *testing.T) {
 	s := newTestServer(t)
 	res := createAgent(t, s, map[string]any{"name": "helper", "model": "claude-opus-4-8"})

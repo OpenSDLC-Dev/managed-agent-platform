@@ -111,20 +111,25 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), queue.ModelTurn)
 		return err
 	}
+
+	// The confirmation gate: the ask-gated tool uses this session is still
+	// blocked on after applying this batch's confirmations. While it is
+	// non-empty the session stays idle on requires_action — only a confirmation
+	// that clears the LAST ask resumes it. A user.message (or any other input)
+	// posted meanwhile appends and waits for the next replay: waking the turn
+	// past an unresolved tool_use would replay a request the model protocol
+	// rejects, and requires_action resolves only by confirmation
+	// (BetaManagedAgentsSessionRequiresAction). Empty for a session with no
+	// gated tools, so it costs the common path only one indexed query.
+	askBlocking, err := events.UnconfirmedAskEvents(ctx, tx, domain.ID(id), events.ToolConfirmationRefs(newEvents))
+	if err != nil {
+		return nil, err
+	}
+
+	// Confirmation handling is checked first: a batch that mixes a confirmation
+	// with a user.message must resolve the gate (and run the confirmed tools),
+	// not wake the turn on the message past a tool the confirmation just cleared.
 	switch {
-	case hasUserMessage && status == string(domain.SessionIdle):
-		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
-		running := domain.SessionRunning
-		opts.SetStatus = &running
-		opts.Then = enqueueTurn
-	case hasToolResult && status == string(domain.SessionRunning):
-		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
-		if err != nil {
-			return nil, err
-		}
-		if !unanswered {
-			opts.Then = enqueueTurn
-		}
 	case hasConfirmation && status == string(domain.SessionIdle):
 		// A requires_action suspension resolves. Each denial is answered with
 		// an error result (the model protocol requires every tool_use answered
@@ -139,13 +144,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		}
 		batch = append(batch, denyResults...)
 
-		remaining, err := events.UnconfirmedAskEvents(ctx, tx, domain.ID(id), events.ToolConfirmationRefs(newEvents))
-		if err != nil {
-			return nil, err
-		}
-		if len(remaining) > 0 {
+		if len(askBlocking) > 0 {
 			stop, err := json.Marshal(map[string]any{"stop_reason": map[string]any{
-				"type": "requires_action", "event_ids": remaining,
+				"type": "requires_action", "event_ids": askBlocking,
 			}})
 			if err != nil {
 				return nil, err
@@ -156,17 +157,43 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
 		running := domain.SessionRunning
 		opts.SetStatus = &running
-		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), deniedIDs)
+		// Resume the right work. The executor runs only platform built-ins, so a
+		// tool_exec is enqueued only when an allowed one is still unanswered
+		// (denials are already answered). If the only remaining unanswered tools
+		// are client-executed custom tools, enqueue nothing — the client's
+		// user.custom_tool_result resumes the turn (mirroring the non-ask suspend,
+		// which never runs an executor for a custom-only turn). If every tool is
+		// answered (all gated tools denied), resume the brain directly.
+		platformPending, err := events.HasUnansweredPlatformToolUse(ctx, tx, domain.ID(id), deniedIDs)
 		if err != nil {
 			return nil, err
 		}
-		kind := queue.ModelTurn
-		if unanswered {
-			kind = queue.ToolExec
+		if platformPending {
+			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+				_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), queue.ToolExec)
+				return err
+			}
+			break
 		}
-		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-			_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), kind)
-			return err
+		anyPending, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), deniedIDs)
+		if err != nil {
+			return nil, err
+		}
+		if !anyPending {
+			opts.Then = enqueueTurn
+		}
+	case hasUserMessage && status == string(domain.SessionIdle) && len(askBlocking) == 0:
+		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
+		running := domain.SessionRunning
+		opts.SetStatus = &running
+		opts.Then = enqueueTurn
+	case hasToolResult && status == string(domain.SessionRunning):
+		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
+		if err != nil {
+			return nil, err
+		}
+		if !unanswered {
+			opts.Then = enqueueTurn
 		}
 	}
 

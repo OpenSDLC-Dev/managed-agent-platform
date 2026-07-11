@@ -103,3 +103,22 @@ func TestPoliciesRejectsUnknownPolicy(t *testing.T) {
 		}
 	}
 }
+
+// TestPoliciesValidatesLazily pins that only a live tool's policy is validated:
+// a malformed policy on a tool that does not resolve into the enabled set is
+// ignored, not rejected, so enable and policy resolution stay consistent.
+func TestPoliciesValidatesLazily(t *testing.T) {
+	for _, entry := range []string{
+		// default off → no tool carries the bogus default policy.
+		`{"type":"agent_toolset_20260401","default_config":{"enabled":false,"permission_policy":{"type":"bogus"}}}`,
+		// bash overrides the bogus default with a valid policy; nothing else is on.
+		`{"type":"agent_toolset_20260401","default_config":{"enabled":false,"permission_policy":{"type":"bogus"}},
+		  "configs":[{"name":"bash","enabled":true,"permission_policy":{"type":"always_ask"}}]}`,
+		// a bogus policy on a disabled tool is never resolved.
+		`{"type":"agent_toolset_20260401","configs":[{"name":"bash","enabled":false,"permission_policy":{"type":"bogus"}}]}`,
+	} {
+		if _, err := toolset.Policies(json.RawMessage(entry)); err != nil {
+			t.Errorf("Policies(%s) = %v, want nil (a non-live tool's policy is not validated)", entry, err)
+		}
+	}
+}
