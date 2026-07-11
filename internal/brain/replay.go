@@ -6,6 +6,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // buildRequest replays the event log into one provider request: the log IS
@@ -33,8 +34,9 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event) (provider.
 	var watermark int64
 
 	// Custom tools are real Messages-API tool definitions minus the union
-	// discriminator. agent_toolset expansion arrives with the executor
-	// (slice 6); mcp_toolset with the MCP client — both documented.
+	// discriminator; an agent_toolset entry expands to the built-in tools it
+	// enables (bash/read/write/edit/glob/grep), which the executor runs in the
+	// sandbox. mcp_toolset still waits for the MCP client — documented.
 	for _, raw := range agent.Tools {
 		var probe struct {
 			Type        string          `json:"type"`
@@ -45,16 +47,22 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event) (provider.
 		if err := json.Unmarshal(raw, &probe); err != nil {
 			return req, 0, fmt.Errorf("agent tool: %w", err)
 		}
-		if probe.Type != "custom" {
-			continue
+		switch probe.Type {
+		case "custom":
+			def, err := json.Marshal(map[string]any{
+				"name": probe.Name, "description": probe.Description, "input_schema": probe.InputSchema,
+			})
+			if err != nil {
+				return req, 0, err
+			}
+			req.Tools = append(req.Tools, def)
+		case "agent_toolset_20260401":
+			defs, err := toolset.Tools(raw)
+			if err != nil {
+				return req, 0, fmt.Errorf("agent tool: %w", err)
+			}
+			req.Tools = append(req.Tools, defs...)
 		}
-		def, err := json.Marshal(map[string]any{
-			"name": probe.Name, "description": probe.Description, "input_schema": probe.InputSchema,
-		})
-		if err != nil {
-			return req, 0, err
-		}
-		req.Tools = append(req.Tools, def)
 	}
 
 	// Merge runs of same-role events into single messages; within a user
@@ -181,6 +189,45 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event) (provider.
 	}
 	req.System += systemTail
 	return req, watermark, nil
+}
+
+// classifyTools maps each tool the agent offers to the event type its use is
+// emitted as: a custom tool is client-executed (agent.custom_tool_use), an
+// expanded agent_toolset tool is platform-executed in the sandbox
+// (agent.tool_use). mcp_toolset waits for the MCP client, so its tools are not
+// offered and never appear here. A name the model calls that is in no set falls
+// back to custom at emission — the client can reject it — since the platform
+// only runs names it recognises as its own.
+func classifyTools(agent domain.ResolvedAgent) (map[string]domain.EventType, error) {
+	kind := make(map[string]domain.EventType)
+	for _, raw := range agent.Tools {
+		var probe struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			return nil, fmt.Errorf("agent tool: %w", err)
+		}
+		switch probe.Type {
+		case "custom":
+			kind[probe.Name] = domain.EventAgentCustomToolUse
+		case "agent_toolset_20260401":
+			defs, err := toolset.Tools(raw)
+			if err != nil {
+				return nil, fmt.Errorf("agent tool: %w", err)
+			}
+			for _, def := range defs {
+				var d struct {
+					Name string `json:"name"`
+				}
+				if err := json.Unmarshal(def, &d); err != nil {
+					return nil, err
+				}
+				kind[d.Name] = domain.EventAgentToolUse
+			}
+		}
+	}
+	return kind, nil
 }
 
 // contentBlocks normalizes wire message content (a bare string or an array
