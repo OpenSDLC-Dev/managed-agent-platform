@@ -12,6 +12,29 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The persistent bash shell (slice 6, second part): `internal/sandbox/shell`
+  turns the reference's stateful `bash` tool — where `cd`, exported
+  variables, functions, and shell options carry from one call to the next —
+  into a pure function of the sandbox contract, adding no backend surface.
+  Each call is still its own `Exec` process, so the deadline the sandbox
+  cannot be talked out of applies to the command verbatim and cannot be
+  forged from inside; a truly-resident shell would forfeit that, because a
+  single always-running process makes foreground-versus-background
+  shell-internal state the command could rewrite. State persists instead
+  through a checkpoint on the container's writable layer: the command is
+  delivered as a file and sourced (no command bytes ride the argument or a
+  sentinel, so a literal `MAPDONE` and NUL bytes survive), and an EXIT trap
+  atomically writes cwd, environment, functions, options, and traps for the
+  next call to restore — skipped by a SIGKILL, so a timed-out call's
+  mutations are dropped. The one divergence from a resident shell: a
+  backgrounded *process* survives across calls (reachable by pid), but the
+  `jobs` table does not carry. A reclaim discipline keyed to the tool-use id
+  makes an executor crash-and-retry at-most-once — a recorded result is
+  returned without re-running, and a call that started but never recorded a
+  result is surfaced as interrupted rather than run twice. `restart: true`
+  resets the shell while keeping the container's files. Nothing consumes the
+  shell yet — the executor and toolset that call it follow.
+
 - The sandbox layer (slice 6, first part): `internal/sandbox` defines the
   "hands" boundary — `Provider.Provision` returns a session's disposable
   container, and `Sandbox` exposes `Exec` plus `ReadFile`/`WriteFile`
