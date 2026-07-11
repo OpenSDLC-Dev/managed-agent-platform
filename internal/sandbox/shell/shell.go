@@ -45,11 +45,20 @@
 //     command alone. The bracket is milliseconds, but a very short timeout pays
 //     for it.
 //   - A command that shadows the template's own machinery costs its own call, not
-//     the session. Every name the template owns is `__map_*` and excluded from the
-//     snapshot; every builtin it depends on — in the save AND in the restore — is
-//     reached through `builtin`, and where an alias could still reach the word
-//     (anything re-parsed at runtime) it is quoted as well. The exception is a
-//     function named `builtin` itself, which spins until the deadline kills it.
+//     the session — with one architectural exception, a function named `builtin`.
+//     Every name the template owns is `__map_*` and excluded from the snapshot;
+//     every builtin it depends on — in the save AND in the restore — is reached
+//     through `builtin`, which a shadowing function cannot intercept, and where an
+//     alias could still reach the word (anything re-parsed at runtime) it is quoted
+//     as well, which a shadowing alias cannot survive. But `builtin` is the one
+//     word that routes around a function, so a function NAMED `builtin` is
+//     unguardable: written to return 0 it spins the save until the deadline (its
+//     own call only); written to break one builtin while delegating the rest it
+//     can make the save write an empty snapshot, earn the marker, and reset the
+//     command's OWN session (never another — head is per-session). No keyword can
+//     enumerate and serialize the shell, so there is no builtin-free path to fall
+//     back on. It is deliberate self-sabotage, contained like `rm -rf` of the
+//     state dir by the sandbox boundary, not by the template.
 //
 
 // The snapshot is the agent's own shell state, not a security boundary: a command

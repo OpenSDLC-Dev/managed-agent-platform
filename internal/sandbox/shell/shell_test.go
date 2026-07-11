@@ -345,6 +345,36 @@ greet
 		}
 	})
 
+	// The namespace filter is `case $name in __map_*) continue`, and it is only as
+	// good as the tool that reads the name back. A function or alias CAN be named
+	// like an option — `-p`, `--` — and `declare -f "-p"` / `alias "-p"` then read
+	// the name as the print-everything flag and dump the WHOLE table, the template's
+	// own `__map_main` among it, straight past the filter; the next call restores
+	// that `__map_main` over the template's and runs it, stripping the session. The
+	// save passes every snapshotted name after `--` so a name is only ever a name.
+	t.Run("AnOptionLikeNameCannotDumpTheWholeTablePastTheFilter", func(t *testing.T) {
+		t.Run("Function", func(t *testing.T) {
+			sh, _ := newShell(t, sb)
+			sh(`export KEEP=yes; f(){ echo fn; }; cd /var`, 0)
+			// `-p` as a function name; a user __map_main that would strip the session
+			// if `declare -f -p` dumped it into the snapshot.
+			sh("function -p { :; }\n__map_main() { set +e; unset KEEP; cd /workspace; __map_save 0; builtin exit 0; }", 0)
+			got := sh(`\builtin echo "[${KEEP:-LOST}][$(pwd)]"`, 0)
+			if strings.TrimSpace(got.Stdout) != "[yes][/var]" {
+				t.Errorf("stdout = %q, want [yes][/var] — a `-p` function dumped the table past the filter", got.Stdout)
+			}
+		})
+		t.Run("Alias", func(t *testing.T) {
+			sh, _ := newShell(t, sb)
+			sh(`export KEEP=yes; shopt -s expand_aliases; alias saved='echo a'; cd /var`, 0)
+			sh("alias -- -p=':'\nalias __map_main='unset KEEP; __map_save 0; exit 0'", 0)
+			got := sh(`\builtin echo "[${KEEP:-LOST}][$(pwd)]"`, 0)
+			if strings.TrimSpace(got.Stdout) != "[yes][/var]" {
+				t.Errorf("stdout = %q, want [yes][/var] — a `-p` alias dumped the table past the filter", got.Stdout)
+			}
+		})
+	})
+
 	// A carried alias on the template's own names must not survive either: the
 	// alias table is namespace-filtered exactly as the exports and functions are.
 	// Without that, `alias __map_main=...` replaces the whole call.

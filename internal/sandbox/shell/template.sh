@@ -110,12 +110,19 @@ __map_save() {
     # dropped — every other readonly export is carried as one. `names` records
     # what the snapshot carries, so the restore can tell a variable the command
     # unset from one that was never there.
+    #
+    # Every `declare`/`alias` on a snapshotted name passes the name after `--`. A
+    # variable cannot be named like an option, but a FUNCTION or ALIAS can: bash
+    # accepts `-p` and `--` as names, and `declare -f "-p"` or `alias "-p"` then
+    # reads `-p` as the *print-everything* option and dumps the WHOLE table past
+    # the `__map_*` filter — a snapshotted `__map_main` among it, which the next
+    # call restores over the template's own and runs. `--` makes the name a name.
     builtin : >"$__map_snap/env"
     builtin : >"$__map_snap/names"
     while IFS= builtin read -r __map_n; do
       case "$__map_n" in SHELLOPTS | BASHOPTS | __map_*) continue ;; esac
       builtin printf '%s\n' "$__map_n" >>"$__map_snap/names"
-      builtin declare -p "$__map_n" >>"$__map_snap/env"
+      builtin declare -p -- "$__map_n" >>"$__map_snap/env"
     done < <(builtin compgen -e)
 
     # Functions, one at a time and minus our own: a command that defines
@@ -123,7 +130,7 @@ __map_save() {
     builtin : >"$__map_snap/funcs"
     while IFS= builtin read -r __map_n; do
       case "$__map_n" in __map_*) continue ;; esac
-      builtin declare -f "$__map_n" >>"$__map_snap/funcs"
+      builtin declare -f -- "$__map_n" >>"$__map_snap/funcs"
     done < <(builtin compgen -A function)
 
     # Aliases, one at a time and filtered the same way — NOT a bare `alias -p`.
@@ -145,7 +152,7 @@ __map_save() {
     while IFS= builtin read -r __map_n; do
       case "$__map_n" in __map_*) continue ;; esac
       builtin printf '\\builtin ' >>"$__map_snap/aliases"
-      builtin alias "$__map_n" >>"$__map_snap/aliases"
+      builtin alias -- "$__map_n" >>"$__map_snap/aliases"
     done < <(builtin compgen -a)
   ) >/dev/null 2>&1
   __map_body_ok=$?
@@ -232,7 +239,7 @@ set +e
       while IFS= builtin read -r __map_n; do __map_keep["$__map_n"]=1; done <"$__map_prev/names"
       while IFS= builtin read -r __map_n; do
         case "$__map_n" in __map_*) continue ;; esac
-        [[ -n "${__map_keep[$__map_n]+x}" ]] || builtin unset "$__map_n"
+        [[ -n "${__map_keep[$__map_n]+x}" ]] || builtin unset -- "$__map_n"
       done < <(builtin compgen -e)
       builtin unset __map_keep __map_n
     fi

@@ -82,7 +82,19 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   `PATH` included. The save switches alias expansion off for its own duration
   (after capturing the options, so the snapshot still records that the command had
   it on), and the one word the restore must re-parse is quoted, since a quoted word
-  is never alias-expanded. Divergences
+  is never alias-expanded. The namespace filter itself is only as good as the tool
+  that reads a name back: a function or alias can be named like an option (`-p`),
+  and `declare -f "-p"` / `alias "-p"` then dump the WHOLE table past the filter —
+  the template's own `__map_main` among it, which the next call restores over the
+  real one — so every snapshotted name is now passed after `--`. The one shadow the
+  template cannot guard is a function named `builtin` itself: it is the word that
+  routes around a shadowing function, so nothing routes around it, and no keyword
+  can enumerate the shell in its place; written to return 0 it spins the save (its
+  own call only), written to break one builtin while delegating the rest it can
+  commit an empty snapshot and reset its own session. It is documented as deliberate
+  self-sabotage, bounded to that one session and contained by the sandbox, because
+  it is not fixable inside a shell whose every builtin the command may shadow.
+  Divergences
   from a resident shell are enumerated rather than
   glossed: the `jobs` table does not carry, plain (non-exported) variables do not
   carry, traps do not carry and a command's EXIT trap fires at the end of that
