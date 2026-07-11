@@ -58,6 +58,41 @@ func (q *Queue) GetWork(ctx context.Context, envID, workID domain.ID) (*Work, er
 	return w, nil
 }
 
+// ListWork returns a page of work items visible to the work API (see
+// workAPIScope) for the environment, newest first by (created_at, id). It fetches
+// up to `fetch` rows so the caller can pass limit+1 and detect a further page.
+// When after is true, the (afterT, afterID) keyset position excludes rows at or
+// newer than it, continuing a previous page.
+func (q *Queue) ListWork(ctx context.Context, envID domain.ID, after bool, afterT time.Time, afterID string, fetch int) ([]*Work, error) {
+	query := `SELECT ` + workColumns + ` FROM work_items
+	          WHERE environment_id = $1` + workAPIScope
+	args := []any{envID}
+	if after {
+		args = append(args, afterT, afterID)
+		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
+	}
+	args = append(args, fetch)
+	query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
+
+	rows, err := q.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list work: %w", err)
+	}
+	defer rows.Close()
+	var out []*Work
+	for rows.Next() {
+		w, err := scanWork(rows)
+		if err != nil {
+			return nil, fmt.Errorf("queue: list work: %w", err)
+		}
+		out = append(out, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list work: %w", err)
+	}
+	return out, nil
+}
+
 // Ack acknowledges a polled work item, transitioning queued → starting. It is
 // idempotent: only the queued→starting edge stamps acknowledged_at, so a re-ack
 // of an already-advanced item returns it unchanged. An item not visible to the
