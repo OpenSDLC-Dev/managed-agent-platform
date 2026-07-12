@@ -12,6 +12,24 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The BYOC worker's tool-exec driver (slice 8, PR C2a) — `internal/worker`, the first
+  half of the distributable worker and the self_hosted twin of the platform executor.
+  `RunSessionTools` takes a session whose turn has suspended for built-in tool calls,
+  reads its outstanding `agent.tool_use` events over the wire, runs each in a local
+  sandbox via the shared `toolset.Runner`, and posts a `user.tool_result` for each back
+  through the session events API. Unlike the executor it has no database: it reaches the
+  control plane only through the session API, authenticating with the environment key as
+  `Authorization: Bearer` (`worker.NewClient`), and it posts `user.tool_result` rather
+  than `agent.tool_result` — so the control plane's own send-side state machine schedules
+  the resume when a result completes the outstanding set, and the worker never enqueues a
+  turn itself. It mirrors the executor's semantics: it re-runs nothing already answered
+  (by either result type), posts per tool so a mid-set backend fault leaves the rest for a
+  reclaim, answers a tool-level failure with an `is_error` result, and posts empty output
+  as no content blocks (never an empty text block). Event shapes are read from raw wire
+  JSON so an SDK event-union drift can't break the worker; writes use the SDK's typed
+  `Send`. The lease loop (poll→ack→heartbeat→stop), the `cmd/worker` binary, and
+  `traceparent` propagation follow in PR C2b.
+
 - The work-items list endpoint (slice 8, PR C-list) — `GET /v1/environments/{id}/work`,
   the read-only reporting list deferred in PR B. It returns the environment's work
   items as `BetaSelfHostedWork` objects in the standard `{data, next_page}` envelope
