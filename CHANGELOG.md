@@ -15,11 +15,12 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 - The work-items list endpoint (slice 8, PR C-list) — `GET /v1/environments/{id}/work`,
   the read-only reporting list deferred in PR B. It returns the environment's work
   items as `BetaSelfHostedWork` objects in the standard `{data, next_page}` envelope
-  (opaque forward cursor keyed on `(created_at, id)` newest-first, `?limit` clamped
-  1–100), scoped exactly like the rest of the work API — self_hosted `tool_exec`
-  items only, so a worker's list never shows the brain's `model_turn` rows or another
-  environment's work. Environment-key auth (a wrong-environment key or the management
-  `x-api-key` is `401`); a non-GET method is `405`. The queue stats endpoint
+  (opaque forward cursor keyed on `(created_at, id)` newest-first, `?limit` validated
+  to 1–100 — a value outside the range is a `400`), scoped exactly like the rest of
+  the work API — self_hosted `tool_exec` items only, so a worker's list never shows
+  the brain's `model_turn` rows or another environment's work. Environment-key auth (a
+  wrong-environment key or the management `x-api-key` is `401`); a write method such as
+  `POST` is `405`. The queue stats endpoint
   (`GET …/work/stats`) stays deferred: its `workers_polling` field needs poll-time
   `Anthropic-Worker-ID` tracking that lands with the BYOC worker.
 

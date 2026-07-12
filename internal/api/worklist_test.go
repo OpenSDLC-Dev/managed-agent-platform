@@ -178,4 +178,8 @@ func TestWorkListRejectsBadRequest(t *testing.T) {
 
 	st, body = readJSON(t, s.doRaw(http.MethodGet, list+"?page=not-a-cursor", nil, bearer))
 	wantErr(t, st, body, http.StatusBadRequest, "invalid_request_error")
+
+	// limit is validated to 1–100, not clamped: out of range is a 400.
+	st, body = readJSON(t, s.doRaw(http.MethodGet, list+"?limit=101", nil, bearer))
+	wantErr(t, st, body, http.StatusBadRequest, "invalid_request_error")
 }
