@@ -205,7 +205,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 		}
 		toolKind, policy = kinds, pols
 	}
-	return b.settleTurn(ctx, sid, item, span, turn, toolKind, policy, watermark)
+	// Settle under sctx (the span-carrying context), not ctx: a tool_use turn
+	// enqueues the tool_exec item in commitTurn's Then, and the enqueue captures
+	// the active span's trace context into the work item so the executor or BYOC
+	// worker that runs it parents its tool spans on this turn — one trace across
+	// the process boundary.
+	return b.settleTurn(sctx, sid, item, span, turn, toolKind, policy, watermark)
 }
 
 // claimLiveSession loads the session under its row lock and settles stale

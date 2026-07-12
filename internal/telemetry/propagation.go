@@ -9,17 +9,17 @@ import (
 )
 
 // propagator is fixed to W3C trace context: traceparent/tracestate is this
-// platform's cross-process contract (HTTP headers and work-item metadata
-// alike), so Inject/Extract behave identically whether or not Init has run
-// and regardless of any richer propagator an embedding process installs for
-// its own outbound calls.
+// platform's cross-process contract (HTTP request/response headers and a work
+// item's stored trace context alike), so Inject/Extract behave identically
+// whether or not Init has run and regardless of any richer propagator an
+// embedding process installs for its own outbound calls.
 var propagator = propagation.TraceContext{}
 
 // Inject writes the trace context from ctx into carrier as W3C
 // traceparent / tracestate entries, replacing existing entries in any key
-// casing. carrier is any string map — HTTP headers and work-item metadata
-// both flatten to this shape. A nil carrier, or a ctx without a span
-// context, leaves everything untouched.
+// casing. carrier is any string map — HTTP headers and a work item's stored
+// trace context both flatten to this shape. A nil carrier, or a ctx without a
+// span context, leaves everything untouched.
 func Inject(ctx context.Context, carrier map[string]string) {
 	if carrier == nil || !trace.SpanContextFromContext(ctx).IsValid() {
 		return

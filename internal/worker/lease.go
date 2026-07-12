@@ -8,14 +8,22 @@ import (
 	"fmt"
 	"log/slog"
 	mrand "math/rand/v2"
+	"net/http"
 	"os"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracerName is the worker's OTel instrumentation scope.
+const tracerName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/worker"
 
 // noHeartbeat is the wire sentinel a worker's first heartbeat sends as
 // expected_last_heartbeat to claim an unclaimed lease; every later heartbeat
@@ -108,7 +116,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		work, err := w.pollAck(ctx)
+		work, parent, err := w.pollAck(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -135,7 +143,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		w.handleItem(ctx, work)
+		w.handleItem(ctx, work, parent)
 	}
 }
 
@@ -151,23 +159,43 @@ func (w *Worker) Run(ctx context.Context) error {
 // state that no reclaim recovers, permanently stranding the session's
 // outstanding tool work over a single hiccup. Run's backoff keeps a genuinely
 // un-ackable item from hot-looping.
-func (w *Worker) pollAck(ctx context.Context) (*sdk.BetaSelfHostedWork, error) {
+func (w *Worker) pollAck(ctx context.Context) (*sdk.BetaSelfHostedWork, map[string]string, error) {
+	var resp *http.Response
 	work, err := w.client.Beta.Environments.Work.Poll(ctx, w.cfg.EnvironmentID, sdk.BetaEnvironmentWorkPollParams{
 		BlockMs:           sdk.Int(pollBlockMs),
 		AnthropicWorkerID: sdk.String(w.cfg.WorkerID),
-	})
+	}, option.WithResponseInto(&resp))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if work == nil || work.ID == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if _, err := w.client.Beta.Environments.Work.Ack(ctx, work.ID, sdk.BetaEnvironmentWorkAckParams{
 		EnvironmentID: w.cfg.EnvironmentID,
 	}); err != nil {
-		return nil, fmt.Errorf("ack %s: %w", work.ID, err)
+		return nil, nil, fmt.Errorf("ack %s: %w", work.ID, err)
 	}
-	return work, nil
+	return work, pollTraceContext(resp), nil
+}
+
+// pollTraceContext lifts the enqueue-time W3C trace context the control plane
+// stamped on the poll response headers (see the API's pollWork) into a carrier
+// the worker parents its tool-exec span on, so the session's model turns and
+// this worker's tool runs join one OTel trace across the process boundary. It is
+// empty when the item was enqueued with no active span (no header) or on the
+// unreachable nil response.
+func pollTraceContext(resp *http.Response) map[string]string {
+	if resp == nil {
+		return nil
+	}
+	carrier := map[string]string{}
+	for _, k := range []string{"traceparent", "tracestate"} {
+		if v := resp.Header.Get(k); v != "" {
+			carrier[k] = v
+		}
+	}
+	return carrier
 }
 
 // itemOutcome is what runItem decided to do with a work item.
@@ -211,7 +239,7 @@ const (
 //     closing it needs a fresh work identity per reclaim (a later hardening).
 //   - reclaim: leave the item live (mirrors the executor completing only when
 //     faultErr is nil).
-func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork) {
+func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, parent map[string]string) {
 	sessCtx, cancel := context.WithCancel(ctx)
 	hbDone := make(chan struct{})
 	var hb hbResult
@@ -220,7 +248,19 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork) {
 		hb = w.heartbeat(sessCtx, cancel, work.ID)
 	}()
 
-	outcome := w.runItem(sessCtx, work)
+	// Parent the tool-exec span on the turn that enqueued the work (its trace
+	// context rode the poll response), so a session's model turns and this
+	// worker's tool runs join one OTel trace across the process boundary. Only
+	// the tool run is spanned — the heartbeat is lease bookkeeping, not tool work.
+	runCtx, span := otel.GetTracerProvider().Tracer(tracerName).Start(
+		telemetry.Extract(sessCtx, parent), "tool_exec",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("session.id", work.Data.ID),
+			attribute.String("work.id", work.ID),
+		))
+	outcome := w.runItem(runCtx, work)
+	span.End()
 
 	cancel()
 	<-hbDone
