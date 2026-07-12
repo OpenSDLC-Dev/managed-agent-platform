@@ -8,11 +8,13 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -69,20 +71,27 @@ type Work struct {
 	// LastHeartbeat is the wire's latest_heartbeat_at — null until the worker
 	// heartbeats, which a freshly polled (still-queued) item has not.
 	LastHeartbeat *time.Time
+	// TraceContext is the W3C trace context (traceparent/tracestate) captured at
+	// enqueue from the active span, so the executor or worker that runs the item
+	// can parent its tool-execution spans on the turn that produced the work. It
+	// is control-plane-internal (nil when enqueued with no active span) and never
+	// rendered into the wire work object's metadata — a poll carries it in a
+	// response header instead (see the API layer).
+	TraceContext map[string]string
 }
 
 // workColumns is the ordered projection every Work-returning query selects, so
 // scanWork can decode any of them uniformly. Prefix with a table alias where a
 // query joins (e.g. "t.").
 const workColumns = `id, environment_id, session_id, state, metadata, created_at,
-	acknowledged_at, started_at, stop_requested_at, stopped_at, last_heartbeat`
+	acknowledged_at, started_at, stop_requested_at, stopped_at, last_heartbeat, trace_context`
 
 // scanWork decodes a workColumns row into a Work.
 func scanWork(row pgx.Row) (*Work, error) {
 	var w Work
 	if err := row.Scan(&w.ID, &w.EnvironmentID, &w.SessionID, &w.State, &w.Metadata,
 		&w.CreatedAt, &w.AcknowledgedAt, &w.StartedAt, &w.StopRequestedAt, &w.StoppedAt,
-		&w.LastHeartbeat); err != nil {
+		&w.LastHeartbeat, &w.TraceContext); err != nil {
 		return nil, err
 	}
 	return &w, nil
@@ -107,16 +116,44 @@ func New(pool *pgxpool.Pool) *Queue { return &Queue{pool: pool} }
 // for the same session and kind exists. It reports whether a new item was
 // created; false means an existing live item already covers the work.
 func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, kind Kind) (bool, error) {
+	// Only tool_exec work is ever run as a tool execution, so only it carries a
+	// trace context — consumed by the BYOC worker's poll (and, later, the cloud
+	// executor). A model_turn drives the brain, which opens its own model_request
+	// span per turn and never reads this back, so capturing it there would only
+	// persist an unread payload; leave it NULL.
+	var traceCtx any
+	if kind == ToolExec {
+		traceCtx = traceContextArg(ctx)
+	}
 	tag, err := db.Exec(ctx,
-		`INSERT INTO work_items (id, environment_id, session_id, kind)
-		 VALUES ($1, $2, $3, $4)
+		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context)
+		 VALUES ($1, $2, $3, $4, $5::jsonb)
 		 ON CONFLICT (session_id, kind) WHERE state IN ('queued', 'starting', 'active')
 		 DO NOTHING`,
-		domain.NewID("work"), envID, sessionID, kind)
+		domain.NewID("work"), envID, sessionID, kind, traceCtx)
 	if err != nil {
 		return false, fmt.Errorf("queue: enqueue %s for %s: %w", kind, sessionID, err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// traceContextArg captures the active span's W3C trace context (traceparent/
+// tracestate) as a JSON string for the work item's trace_context column, so an
+// executor or worker that later runs the item can parent its tool-execution
+// spans on the enqueuing turn. It returns nil — SQL NULL — when no span is
+// active, and degrades to nil on the (practically impossible) marshal failure,
+// since trace context is best-effort observability, never correctness.
+func traceContextArg(ctx context.Context) any {
+	carrier := map[string]string{}
+	telemetry.Inject(ctx, carrier)
+	if len(carrier) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(carrier)
+	if err != nil {
+		return nil
+	}
+	return string(b)
 }
 
 // Claim leases the oldest available item of the kind: queued items first-come

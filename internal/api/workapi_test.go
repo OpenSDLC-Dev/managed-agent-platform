@@ -3,11 +3,14 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
+
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -141,6 +144,49 @@ func TestWorkPollReturnsWireShape(t *testing.T) {
 	}
 	if data["type"] != "session" {
 		t.Errorf("data.type = %v, want session", data["type"])
+	}
+}
+
+// TestWorkPollEmitsTraceContextHeader pins the enqueue→poll→worker tracing leg:
+// an item enqueued under an active span is handed out with that span's W3C trace
+// context in the response headers, so the worker can parent its tool-execution
+// spans on the enqueuing turn. The wire body stays clean — the trace context
+// rides a header and never leaks into the client-facing metadata namespace.
+func TestWorkPollEmitsTraceContextHeader(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-trace"
+	envID, sessionID := selfHostedWorker(t, s, key)
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19},
+		SpanID:     trace.SpanID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		TraceFlags: trace.FlagsSampled,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+	q := queue.New(s.pool)
+	if _, err := q.Enqueue(ctx, s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
+		t.Fatalf("enqueue under span: %v", err)
+	}
+
+	res, raw := s.poll(t, envID, map[string]string{"Authorization": "Bearer " + key})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("poll status = %d, want 200 (body %q)", res.StatusCode, raw)
+	}
+	want := fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID())
+	if got := res.Header.Get("traceparent"); got != want {
+		t.Errorf("poll response traceparent = %q, want %q", got, want)
+	}
+	// The trace context must not surface in the wire body: neither a leaked
+	// trace_context field nor a polluted metadata namespace.
+	var body map[string]any
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		t.Fatalf("decode work: %v (body %q)", err, raw)
+	}
+	if _, ok := body["trace_context"]; ok {
+		t.Error("trace_context leaked into the wire work body")
+	}
+	if meta, _ := body["metadata"].(map[string]any); len(meta) != 0 {
+		t.Errorf("metadata = %v, want empty (trace context must not pollute it)", meta)
 	}
 }
 

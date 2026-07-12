@@ -80,7 +80,7 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 	// redirect. Splitting the routes across nested muxes let those redirects
 	// answer an unauthenticated request before auth ran.
 	mux.HandleFunc("GET /v1/environments/{id}/work", s.handle(s.listWork))
-	mux.HandleFunc("GET /v1/environments/{id}/work/poll", s.handle(s.pollWork))
+	mux.HandleFunc("GET /v1/environments/{id}/work/poll", s.pollWork) // emits trace headers; not a typed handler
 	mux.HandleFunc("GET /v1/environments/{id}/work/{work_id}", s.handle(s.getWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/ack", s.handle(s.ackWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/heartbeat", s.handle(s.heartbeatWork))

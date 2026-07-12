@@ -78,24 +78,41 @@ func toWire(w *queue.Work) workWire {
 // oldest queued tool_exec item for this environment to a BYOC worker, or 200 +
 // null when the queue is empty.
 //
+// Unlike the other work endpoints it is a full http.HandlerFunc rather than a
+// typed handler: on a hit it emits the item's enqueue-time W3C trace context as
+// response headers (traceparent/tracestate) so the worker can parent its
+// tool-execution spans on the turn that produced the work — one trace across the
+// control-plane→worker boundary. The trace context rides a header, never the
+// wire body: toWire deliberately omits it (it lives in a dedicated column, out
+// of the client-facing metadata namespace).
+//
 // block_ms is accepted but not yet honoured: this is a non-blocking poll that
 // returns immediately, and the reference client already spaces empty polls with
 // a client-side jitter sleep, so the protocol is unchanged — only chattier.
 // True long-poll (hold the request open on a work_items NOTIFY) is a later
 // enhancement.
-func (s *server) pollWork(r *http.Request) (any, error) {
+func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 	envID, _, err := s.workScope(r) // poll has no work_id path value; ignore it
 	if err != nil {
-		return nil, err
+		writeError(w, r, err)
+		return
 	}
-	w, err := s.queue.Poll(r.Context(), envID, reclaimWindow(r))
+	item, err := s.queue.Poll(r.Context(), envID, reclaimWindow(r))
 	if err != nil {
-		return nil, err
+		writeError(w, r, err)
+		return
 	}
-	if w == nil {
-		return nil, nil // empty queue → 200 with a null body
+	if item == nil {
+		writeJSON(w, http.StatusOK, nil) // empty queue → 200 with a null body
+		return
 	}
-	return toWire(w), nil
+	// TraceContext holds only the W3C keys telemetry.Inject wrote (traceparent,
+	// optional tracestate); Set canonicalises them, and the worker's Header.Get
+	// canonicalises to match.
+	for k, v := range item.TraceContext {
+		w.Header().Set(k, v)
+	}
+	writeJSON(w, http.StatusOK, toWire(item))
 }
 
 // listWork lists the environment's work items (GET .../work), newest first, in

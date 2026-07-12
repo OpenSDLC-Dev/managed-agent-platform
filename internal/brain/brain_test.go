@@ -16,8 +16,13 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestMain(m *testing.M) {
@@ -499,6 +504,69 @@ func TestBuiltinToolUseEnqueuesToolExec(t *testing.T) {
 	_ = json.Unmarshal(evs[0].Body, &body)
 	if body.Name != "bash" || body.Input["command"] != "ls" {
 		t.Errorf("intent body = %+v", body)
+	}
+}
+
+// TestToolExecEnqueueCapturesTurnTrace pins the brain half of cross-process
+// tracing: when a turn suspends on a platform tool, the tool_exec item it
+// enqueues carries the turn's model_request span as its trace context, so the
+// executor or BYOC worker that runs it parents its tool spans on this turn.
+func TestToolExecEnqueueCapturesTurnTrace(t *testing.T) {
+	// A real (sampled) provider so StartModelRequest's span has a valid context
+	// the enqueue can capture; the brain resolves it via the global provider.
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_provider_side", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+			done("tool_use", 3),
+		},
+	}, nil)
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+		"model":{"id":"fixture-model"},"system":"do the task","description":"",
+		"tools":[{"type":"agent_toolset_20260401"}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wake(t, "list the files")
+	h.runOnce(t)
+
+	if got := h.liveOf(t, queue.ToolExec); got != 1 {
+		t.Fatalf("tool_exec items = %d, want 1", got)
+	}
+
+	// The turn's model_request span is the trace the enqueue must have captured.
+	var turnSpan sdktrace.ReadOnlySpan
+	for _, s := range recorder.Ended() {
+		if s.Name() == "model_request" {
+			turnSpan = s
+			break
+		}
+	}
+	if turnSpan == nil {
+		t.Fatal("no model_request span recorded")
+	}
+
+	var tp2 string
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT trace_context->>'traceparent' FROM work_items WHERE session_id=$1 AND kind='tool_exec'`,
+		h.sessionID.String()).Scan(&tp2); err != nil {
+		t.Fatalf("read tool_exec trace_context: %v", err)
+	}
+	sc := trace.SpanContextFromContext(telemetry.Extract(context.Background(), map[string]string{"traceparent": tp2}))
+	if sc.TraceID() != turnSpan.SpanContext().TraceID() {
+		t.Errorf("enqueued trace id = %s, want the turn's %s", sc.TraceID(), turnSpan.SpanContext().TraceID())
+	}
+	if sc.SpanID() != turnSpan.SpanContext().SpanID() {
+		t.Errorf("enqueued parent span id = %s, want the turn span %s", sc.SpanID(), turnSpan.SpanContext().SpanID())
 	}
 }
 

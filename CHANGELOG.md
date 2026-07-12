@@ -12,6 +12,20 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- `traceparent` propagation to the BYOC worker (slice 8, PR C2b-2) — a session's model turns and
+  the tool runs a worker executes for it now live in one OTel trace across the process boundary.
+  When a turn suspends on a platform tool, `queue.Enqueue` injects the turn's active W3C trace
+  context (`telemetry.Inject`) into a dedicated `trace_context` `jsonb` column on `work_items`
+  (migration `0005`; `NULL` when no span is active) — the brain's `settleTurn` now runs under the
+  span-carrying context so the enqueue in `commitTurn`'s `Then` sees the turn's span.
+  `GET …/work/poll` reads that column and emits it as `traceparent`/`tracestate` **response
+  headers** (the wire work body never carries it), so `pollWork` becomes a full `http.HandlerFunc`
+  to reach the `ResponseWriter`. The worker reads the poll response via `option.WithResponseInto`,
+  extracts the headers (`telemetry.Extract`), and starts its `tool_exec` span parented on the
+  enqueuing turn. **Divergence from the plan's sketch:** the trace context is stored in a dedicated
+  column rather than the work item's `metadata` (which is slated to become client-updatable), so an
+  internal `traceparent` never pollutes the client-facing surface; the transport (a response header
+  the reference worker ignores) stays wire-compatible.
 - Dead-worker reclaim for BYOC work items (slice 8, PR C3) — `queue.Poll` now recovers a
   worker's in-flight item, not just an un-acked reservation. An item a worker acked
   (`starting`) or heartbeated (`active`) and then died on — its heartbeat lease

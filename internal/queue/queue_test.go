@@ -3,14 +3,18 @@ package queue_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
 
 func TestMain(m *testing.M) {
@@ -388,6 +392,68 @@ func TestPollReservesWithoutTransition(t *testing.T) {
 	}
 	if re.ID != w.ID {
 		t.Errorf("reclaimed a different item: %s vs %s", re.ID, w.ID)
+	}
+}
+
+// TestEnqueueCapturesTraceContext pins the enqueue→poll leg of cross-process
+// tracing: an item enqueued under an active span carries that span's W3C trace
+// context, so a worker that later polls it can parent its tool-execution spans
+// on the enqueuing turn — one trace across the control-plane→worker boundary. An
+// item enqueued with no active span carries no trace context at all.
+func TestEnqueueCapturesTraceContext(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19},
+		SpanID:     trace.SpanID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		TraceFlags: trace.FlagsSampled,
+	})
+	tracedSess, tracedEnv := pgtest.NewSession(t, pool, "self_hosted")
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+	if _, err := q.Enqueue(ctx, pool, tracedEnv, tracedSess, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	w, err := q.Poll(context.Background(), tracedEnv, time.Minute)
+	if err != nil || w == nil {
+		t.Fatalf("poll: %+v %v", w, err)
+	}
+	want := fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID())
+	if got := w.TraceContext["traceparent"]; got != want {
+		t.Errorf("polled trace_context[traceparent] = %q, want %q", got, want)
+	}
+	// The stored form re-extracts to the same trace — exactly what the worker does.
+	if got := trace.SpanContextFromContext(telemetry.Extract(context.Background(), w.TraceContext)); got.TraceID() != sc.TraceID() {
+		t.Errorf("extracted trace id = %s, want %s", got.TraceID(), sc.TraceID())
+	}
+
+	// No active span → no trace context (SQL NULL → nil map), not an empty object.
+	plainSess, plainEnv := pgtest.NewSession(t, pool, "self_hosted")
+	if _, err := q.Enqueue(context.Background(), pool, plainEnv, plainSess, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	pw, err := q.Poll(context.Background(), plainEnv, time.Minute)
+	if err != nil || pw == nil {
+		t.Fatalf("poll plain: %+v %v", pw, err)
+	}
+	if len(pw.TraceContext) != 0 {
+		t.Errorf("untraced enqueue carried trace context: %v", pw.TraceContext)
+	}
+
+	// A model_turn enqueued under the same span carries NO trace context: the
+	// brain opens its own model_request span per turn and never reads this back,
+	// so only tool_exec (the worker/executor's tool run) captures it.
+	if _, err := q.Enqueue(ctx, pool, tracedEnv, tracedSess, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	var mtTrace *string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT trace_context->>'traceparent' FROM work_items WHERE session_id=$1 AND kind='model_turn'`,
+		tracedSess.String()).Scan(&mtTrace); err != nil {
+		t.Fatalf("read model_turn trace_context: %v", err)
+	}
+	if mtTrace != nil {
+		t.Errorf("model_turn carried trace context %q, want none", *mtTrace)
 	}
 }
 

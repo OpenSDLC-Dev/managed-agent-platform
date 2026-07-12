@@ -13,6 +13,10 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // enqueueWork enqueues a tool_exec work item for the harness session — the item
@@ -127,6 +131,58 @@ func TestWorkerPollsRunsAndStops(t *testing.T) {
 		t.Errorf("work item state = %q, want stopped", got)
 	}
 	waitExit(t, cancel, errc)
+}
+
+// TestWorkerToolSpanParentsOnEnqueueTrace pins cross-process tracing end to end:
+// an item enqueued under the brain turn's span is polled, and the worker's
+// tool-exec span parents on that turn — same trace, so a session's model turns
+// and its BYOC tool runs live in one OTel trace across the process boundary.
+func TestWorkerToolSpanParentsOnEnqueueTrace(t *testing.T) {
+	// Record spans through the global provider both the control plane and the
+	// worker resolve, so the worker's tool-exec span is captured with its parent.
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.suspend(t, writeUse("out.txt", "hello"))
+
+	// Enqueue the tool_exec item under a known span, as the brain does mid-turn:
+	// the control plane captures its trace context and hands it back on poll.
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19},
+		SpanID:     trace.SpanID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		TraceFlags: trace.FlagsSampled,
+	})
+	turnCtx := trace.ContextWithSpanContext(context.Background(), sc)
+	if _, err := queue.New(h.pool).Enqueue(turnCtx, h.pool, h.envID, h.sid, queue.ToolExec); err != nil {
+		t.Fatalf("enqueue under span: %v", err)
+	}
+
+	w, done := h.newWorker(Config{})
+	cancel, errc := runWorker(w)
+	waitDone(t, done)
+	waitExit(t, cancel, errc)
+
+	var toolSpan sdktrace.ReadOnlySpan
+	for _, s := range recorder.Ended() {
+		if s.Name() == "tool_exec" {
+			toolSpan = s
+			break
+		}
+	}
+	if toolSpan == nil {
+		t.Fatal("no tool_exec span recorded")
+	}
+	if got := toolSpan.SpanContext().TraceID(); got != sc.TraceID() {
+		t.Errorf("tool_exec trace id = %s, want the enqueue trace %s", got, sc.TraceID())
+	}
+	if got := toolSpan.Parent().SpanID(); got != sc.SpanID() {
+		t.Errorf("tool_exec parent span id = %s, want the enqueue span %s", got, sc.SpanID())
+	}
 }
 
 // TestWorkerLivenessGateDrainsStaleSession: a session archived before the worker
