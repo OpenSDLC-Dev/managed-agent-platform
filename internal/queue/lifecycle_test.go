@@ -209,15 +209,13 @@ func TestGetWorkScopingAndFields(t *testing.T) {
 	}
 }
 
-// TestPollReclaimsOnlyQueuedReservations pins the reclaim scope: a still-queued
-// (un-acked) reservation whose window lapsed is re-offered on the next poll, but
-// an acked (`starting`) or heartbeating (`active`) item is deliberately NOT
-// reclaimed even with a lapsed lease. Safely recovering a dead worker's in-flight
-// item needs a stop lease/generation guard (so a stale worker's cleanup
-// force-stop cannot kill the replacement) or a fresh work identity per hand-out,
-// whose exact protocol must be settled against a real `ant beta:worker`; it is
-// deferred to the worker PR, and nothing reaches `starting`/`active` until then.
-func TestPollReclaimsOnlyQueuedReservations(t *testing.T) {
+// TestPollReclaimsExpiredLeases pins the reclaim scope: a still-queued (un-acked)
+// reservation whose window lapsed is re-offered, AND an acked (`starting`) or
+// heartbeating (`active`) item whose lease has lapsed (a dead worker) is
+// reclaimed — reset to a fresh queued reservation so the next worker can re-poll,
+// re-ack, and re-claim it (NO_HEARTBEAT needs last_heartbeat cleared). An item
+// whose lease is still LIVE is never reclaimed: its worker still owns it.
+func TestPollReclaimsExpiredLeases(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
 	q := queue.New(pool)
@@ -244,22 +242,54 @@ func TestPollReclaimsOnlyQueuedReservations(t *testing.T) {
 		}
 	}
 
-	// Once acked (starting), an item with a lapsed lease is NOT reclaimed.
+	// Ack it (queued→starting) and give it a live lease via a first heartbeat
+	// (starting→active). While the lease is LIVE, poll must not reclaim it.
 	if _, err := q.Ack(ctx, env, first.ID); err != nil {
 		t.Fatal(err)
 	}
-	expireLease(first.ID)
-	if w, err := q.Poll(ctx, env, time.Minute); err != nil || w != nil {
-		t.Errorf("poll reclaimed a starting item = %+v %v, want nil (reclaim deferred to the worker PR)", w, err)
-	}
-
-	// Same for an active (heartbeating) item with a lapsed lease.
 	if _, err := q.Heartbeat(ctx, env, first.ID, queue.NoHeartbeat, 30); err != nil {
 		t.Fatal(err)
 	}
-	expireLease(first.ID)
 	if w, err := q.Poll(ctx, env, time.Minute); err != nil || w != nil {
-		t.Errorf("poll reclaimed an active item = %+v %v, want nil (reclaim deferred to the worker PR)", w, err)
+		t.Errorf("poll reclaimed a live-leased active item = %+v %v, want nil (still owned)", w, err)
+	}
+
+	// The worker dies: its lease lapses. Poll now reclaims the active item,
+	// resetting it so it re-enters the poll→ack→NO_HEARTBEAT-claim flow.
+	expireLease(first.ID)
+	reclaimed, err := q.Poll(ctx, env, time.Minute)
+	if err != nil || reclaimed == nil || reclaimed.ID != first.ID {
+		t.Fatalf("expired active item not reclaimed: %+v %v", reclaimed, err)
+	}
+	if _, err := q.Ack(ctx, env, reclaimed.ID); err != nil {
+		t.Fatalf("reclaimed item cannot be re-acked: %v", err)
+	}
+	if _, err := q.Heartbeat(ctx, env, reclaimed.ID, queue.NoHeartbeat, 30); err != nil {
+		t.Fatalf("reclaimed item cannot be re-claimed with NO_HEARTBEAT: %v", err)
+	}
+
+	// A freshly-acked `starting` item (a worker that has not sent its first
+	// heartbeat yet) must NOT be reclaimed just because its un-acked poll
+	// reservation lapsed: Ack installs a startup lease, so a slow-but-live worker
+	// keeps its item. Poll it with an already-expired reservation, ack, and
+	// confirm the next poll does not steal it.
+	sid2, env2 := pgtest.NewSession(t, pool, "self_hosted")
+	if _, err := q.Enqueue(ctx, pool, env2, sid2, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	w2, _ := q.Poll(ctx, env2, -time.Second) // reservation already expired
+	if _, err := q.Ack(ctx, env2, w2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := q.Poll(ctx, env2, time.Minute); err != nil || got != nil {
+		t.Errorf("poll reclaimed a freshly-acked starting item = %+v %v, want nil (startup lease protects it)", got, err)
+	}
+
+	// Once that startup lease lapses — a worker that died between ack and its
+	// first heartbeat — the starting item is reclaimed.
+	expireLease(w2.ID)
+	if got, err := q.Poll(ctx, env2, time.Minute); err != nil || got == nil || got.ID != w2.ID {
+		t.Fatalf("expired starting item not reclaimed: %+v %v", got, err)
 	}
 }
 
