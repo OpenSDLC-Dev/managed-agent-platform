@@ -51,6 +51,18 @@ type toolUse struct {
 // The sandbox is provisioned only when there is unanswered work, so a call
 // against an already-answered session (a redundant reclaim) is a cheap couple of
 // reads with nothing to run.
+//
+// Session liveness is the caller's gate, not this driver's. The platform
+// executor refuses to run a stale session's tools by loading its status under
+// the session row lock (executor.sessionForRun) before provisioning — but it
+// does so in its per-item orchestration, not in its runTools core, which this
+// driver is the analog of. The BYOC caller (the lease loop, PR C2b) owns the
+// same session load: it must read the session (for the same reason it must load
+// the egress policy this cfg.Networking carries) and skip a session that is not
+// running or is archived, mirroring sessionForRun. The control plane is only a
+// partial backstop here — a post to an archived session is refused (400), but a
+// post to a merely not-running one appends without resuming — so the complete
+// gate belongs in the caller, not in a reliance on the append being rejected.
 func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Provider, sessionID string, cfg ToolExecConfig) error {
 	uses, err := unansweredToolUses(ctx, client, sessionID)
 	if err != nil {
@@ -88,12 +100,24 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 // call must run. It mirrors the executor's diff exactly: an agent.tool_use is
 // answered by either an agent.tool_result (a platform executor) or a
 // user.tool_result (this worker), both referencing it by tool_use_id, so both
-// count — matching the canonical answered-set the control plane resumes on.
+// count. This is the third expression of one rule — the canonical answered-set
+// is events.HasUnansweredToolUse (the SQL the control plane resumes on) and
+// executor.unansweredToolUses (the executor's DB-backed copy); the result types
+// that answer are the shared domain constants below, so a new answering type
+// must be added in all three. A drift here re-runs an answered tool every
+// reclaim, re-posting a result the control plane's ValidateToolResults rejects.
 //
 // Events are parsed from each event's raw wire JSON into a minimal local shape
 // rather than the SDK's typed event union: the union tracks the live API's tip
 // and carries post-slice surface the worker has no need for, so decoding only
 // the three fields this diff needs keeps a schema drift from breaking it.
+//
+// Cost: with no unanswered-only wire endpoint, this pages the session's full
+// agent.tool_use and result history on every call to find the outstanding few —
+// O(history) per tool batch, where the executor's DB does it in one EXISTS. The
+// outstanding set is always the last suspended turn's, so a future optimization
+// could read newest-first and stop early; the simple full scan is correct and is
+// what this first cut ships.
 func unansweredToolUses(ctx context.Context, client sdk.Client, sessionID string) ([]toolUse, error) {
 	uses, err := listRawEvents(ctx, client, sessionID, string(domain.EventAgentToolUse))
 	if err != nil {

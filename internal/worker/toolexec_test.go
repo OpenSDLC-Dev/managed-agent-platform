@@ -352,32 +352,24 @@ func TestProvisionFaultSurfaces(t *testing.T) {
 	}
 }
 
-// askGatedWrite is a write tool_use the brain marked as requiring confirmation
-// (evaluated_permission "ask") — a tool the control plane will not let any result
-// answer until a user.tool_confirmation clears it.
-func askGatedWrite(path, content string) string {
-	b, _ := json.Marshal(map[string]any{
-		"name":                 "write",
-		"input":                map[string]string{"file_path": path, "content": content},
-		"evaluated_permission": "ask",
-	})
-	return string(b)
-}
-
-// TestControlPlaneRejectsUnclearedAnswerSurfaces: the control plane is the
-// authoritative backstop. If the worker posts a result for a tool that is not
-// cleared to be answered — here one still awaiting confirmation — the append is
-// refused and the driver surfaces the error rather than wedging the log with a
-// forged answer. No resume is scheduled.
-func TestControlPlaneRejectsUnclearedAnswerSurfaces(t *testing.T) {
+// TestArchivedSessionPostIsRefusedAndSurfaces: the control plane refuses a
+// result posted to an archived (read-only) session with a 400, and the driver
+// surfaces that error rather than wedging the log — the safety net behind a
+// caller that has not yet gated on session liveness (see RunSessionTools). No
+// result lands and nothing resumes.
+func TestArchivedSessionPostIsRefusedAndSurfaces(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
-	h.suspend(t, askGatedWrite("out.txt", "hi"))
+	h.suspend(t, writeUse("out.txt", "hi"))
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET archived_at = now() WHERE id = $1`, h.sid.String()); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := h.run(); err == nil {
-		t.Fatal("RunSessionTools returned nil, want the control plane's rejection")
+		t.Fatal("RunSessionTools returned nil, want the archived-session rejection")
 	}
 	if got := len(h.results(t)); got != 0 {
-		t.Errorf("user.tool_result = %d, want 0 (the answer was refused)", got)
+		t.Errorf("user.tool_result = %d, want 0 (the append was refused)", got)
 	}
 	if got := h.liveModelTurns(t); got != 0 {
 		t.Errorf("model_turn = %d, want 0 (nothing resumed)", got)
