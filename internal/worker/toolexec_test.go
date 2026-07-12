@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,9 +25,14 @@ func TestMain(m *testing.M) { os.Exit(pgtest.Main(m)) }
 // read tools, which use the file primitives directly (no shell), so a minimal
 // file store is enough. failPath, if set, faults WriteFile for a path with that
 // suffix, letting a test fault one tool of a set while the others succeed.
+// entered/gate (if set) let a test hold a tool mid-run: WriteFile signals
+// entered once and blocks on gate, so the lease loop can be observed while a
+// tool is in flight.
 type fakeSandbox struct {
 	files    map[string]string
 	failPath string
+	entered  chan struct{}
+	gate     chan struct{}
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
@@ -39,7 +46,20 @@ func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
 	}
 	return []byte(data), nil
 }
-func (f *fakeSandbox) WriteFile(_ context.Context, path string, data []byte) error {
+func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) error {
+	if f.entered != nil {
+		select {
+		case f.entered <- struct{}{}:
+		default:
+		}
+	}
+	if f.gate != nil {
+		select {
+		case <-f.gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if f.failPath != "" && strings.HasSuffix(path, f.failPath) {
 		return fmt.Errorf("backend fault writing %s", path)
 	}
@@ -69,6 +89,7 @@ type harness struct {
 	pool      *pgxpool.Pool
 	log       *events.Log
 	prov      *fakeProvider
+	client    sdk.Client
 	run       func() error
 	serverURL string
 	sid       domain.ID
@@ -82,6 +103,13 @@ const workerKey = "ek-worker-test"
 // BYOC worker takes. The session is a self_hosted one flipped to running, as the
 // brain leaves it when a turn suspends for a tool.
 func newHarness(t *testing.T, sb *fakeSandbox) *harness {
+	return newHarnessWrapped(t, sb, nil)
+}
+
+// newHarnessWrapped is newHarness with an optional handler wrapper, letting a
+// test intercept the wire (e.g. fault heartbeat requests) between the worker
+// client and the real control plane. wrap == nil is the plain control plane.
+func newHarnessWrapped(t *testing.T, sb *fakeSandbox, wrap func(http.Handler) http.Handler) *harness {
 	t.Helper()
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -92,13 +120,17 @@ func newHarness(t *testing.T, sb *fakeSandbox) *harness {
 	if err := api.EnsureEnvironmentKey(ctx, pool, envID.String(), workerKey); err != nil {
 		t.Fatalf("ensure env key: %v", err)
 	}
-	srv := httptest.NewServer(api.NewHandler(pool))
+	var handler http.Handler = api.NewHandler(pool)
+	if wrap != nil {
+		handler = wrap(handler)
+	}
+	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
 	prov := &fakeProvider{sb: sb}
 	client := NewClient(srv.URL, workerKey)
 	return &harness{
-		pool: pool, log: events.NewLog(pool), prov: prov, serverURL: srv.URL, sid: sid, envID: envID,
+		pool: pool, log: events.NewLog(pool), prov: prov, client: client, serverURL: srv.URL, sid: sid, envID: envID,
 		run: func() error {
 			return RunSessionTools(ctx, client, prov, sid.String(), ToolExecConfig{})
 		},

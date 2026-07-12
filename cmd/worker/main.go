@@ -1,0 +1,94 @@
+// Command worker runs the BYOC (bring-your-own-compute) sandbox worker: it
+// polls the control plane's self_hosted work queue over HTTP, runs the built-in
+// toolset inside per-session Docker containers on the customer's own compute,
+// and posts the user.tool_result events back over the session API. It is the
+// customer-hosted twin of the executor — no inbound network access into the
+// customer's environment is required, and it reaches the control plane only
+// through the wire, authenticating with an environment key. One session at a
+// time; run as many worker processes as needed.
+//
+// Configuration is environment-driven:
+//
+//	ANTHROPIC_BASE_URL           control-plane URL (required) — never
+//	                             api.anthropic.com; the platform this worker serves
+//	ANTHROPIC_ENVIRONMENT_ID     the environment whose work queue to poll (required)
+//	ANTHROPIC_ENVIRONMENT_KEY    the environment key, sent as Authorization: Bearer
+//	                             (required)
+//	ANTHROPIC_WORKER_ID          worker identity for the control plane's poll
+//	                             metrics (default "<hostname>-<random>")
+//	WORKER_IMAGE                 sandbox base image (default "debian:stable-slim")
+//	WORKER_WORKDIR               working directory inside the sandbox (default
+//	                             "/workspace")
+//	DOCKER_HOST                  Docker daemon address (falls back to the
+//	                             well-known socket)
+//	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
+//	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worker"
+)
+
+func main() {
+	if err := run(); err != nil && !errors.Is(err, context.Canceled) {
+		slog.Error("worker exiting", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	baseURL := os.Getenv("ANTHROPIC_BASE_URL")
+	envID := os.Getenv("ANTHROPIC_ENVIRONMENT_ID")
+	envKey := os.Getenv("ANTHROPIC_ENVIRONMENT_KEY")
+	switch {
+	case baseURL == "":
+		return errors.New("ANTHROPIC_BASE_URL is required")
+	case envID == "":
+		return errors.New("ANTHROPIC_ENVIRONMENT_ID is required")
+	case envKey == "":
+		return errors.New("ANTHROPIC_ENVIRONMENT_KEY is required")
+	}
+
+	provider, err := docker.New(docker.Config{Host: os.Getenv("DOCKER_HOST")})
+	if err != nil {
+		return err
+	}
+
+	shutdownTelemetry, err := telemetry.Init(ctx, telemetry.Config{
+		ServiceName: "worker",
+		Endpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		Insecure:    os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(flushCtx)
+	}()
+
+	cfg := worker.Config{
+		EnvironmentID: envID,
+		WorkerID:      os.Getenv("ANTHROPIC_WORKER_ID"),
+		Image:         os.Getenv("WORKER_IMAGE"),
+		Workdir:       os.Getenv("WORKER_WORKDIR"),
+	}
+	client := worker.NewClient(baseURL, envKey)
+
+	slog.Info("worker running", "environment", envID)
+	return worker.NewWorker(client, provider, cfg).Run(ctx)
+}

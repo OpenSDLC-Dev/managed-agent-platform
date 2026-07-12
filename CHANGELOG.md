@@ -12,6 +12,37 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- The BYOC worker's lease loop and `cmd/worker` binary (slice 8, PR C2b) — the runnable
+  worker, the self_hosted twin of the platform executor. `internal/worker.Worker.Run`
+  polls the control plane's self_hosted work queue over HTTP (long-poll `block_ms=999`,
+  an `Anthropic-Worker-ID` header, and a client-side sleep between empty polls), and for
+  each item: acknowledges it, keeps a heartbeat alive (first beat `NO_HEARTBEAT` to claim
+  the lease, then echoing the server's `last_heartbeat` to extend it), and runs the
+  session's tools in a local Docker sandbox via the C2a driver — one session at a time,
+  mirroring the reference `ant beta:worker`. When the control plane moves the item to
+  stopping/stopped, declines to extend, or another worker reclaims it (412), the heartbeat
+  winds the in-flight run down; if no successful beat lands within the lease TTL, a
+  staleness ceiling releases the run rather than executing against a lapsed lease. It also
+  carries the **session-liveness gate** deferred from C2a: after ack it fetches the session
+  and drains (force-stops, runs nothing) a session that is not running or is archived, so a
+  dead session's tools never fire on customer compute. The worker owns its sandbox shape
+  (`Image`/`Workdir`/`Networking`) since the wire exposes it no per-session egress policy.
+  A poll rejected for a bad environment key (401/403) is fatal; other poll and ack errors
+  use jittered exponential backoff (1s→60s). `cmd/worker` is configured entirely from the
+  environment (`ANTHROPIC_BASE_URL`/`ANTHROPIC_ENVIRONMENT_ID`/`ANTHROPIC_ENVIRONMENT_KEY`
+  required) with SIGINT/SIGTERM graceful shutdown and no database — it reaches the control
+  plane only over the wire. `traceparent` propagation to the worker follows in PR C2b-2.
+- Force-stop discipline mirrors the executor's leave-live-for-reclaim rule: the worker
+  force-stops (clears) a work item only on a genuine finish — a drained dead session, or
+  every tool answered while it still holds the lease. An uncertain outcome (an unresolved
+  liveness check, a tool backend-fault leaving work unanswered, or a run the heartbeat
+  cancelled) leaves the item live rather than terminally discarding a still-recoverable
+  session's work; likewise a transient ack failure leaves the item queued (so `poll`
+  re-offers it) instead of force-stopping it. **Recovering such a left-live item is PR C3
+  (dead-worker reclaim), not yet built** — `poll` today re-offers only `queued` items, so a
+  self_hosted session interrupted by a fault waits until C3 reclaims its acked/heartbeating
+  item. The happy path (tools succeed) runs end to end now; fault recovery lands with C3.
+
 - The BYOC worker's tool-exec driver (slice 8, PR C2a) — `internal/worker`, the first
   half of the distributable worker and the self_hosted twin of the platform executor.
   `RunSessionTools` takes a session whose turn has suspended for built-in tool calls,
