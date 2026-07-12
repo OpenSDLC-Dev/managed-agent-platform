@@ -12,6 +12,26 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Dead-worker reclaim for BYOC work items (slice 8, PR C3) — `queue.Poll` now recovers a
+  worker's in-flight item, not just an un-acked reservation. An item a worker acked
+  (`starting`) or heartbeated (`active`) and then died on — its heartbeat lease
+  (`lease_expires_at`) has lapsed — is reset to a fresh `queued` reservation (`last_heartbeat`,
+  `acknowledged_at`, `started_at` cleared, so it is indistinguishable on the wire from a
+  never-run queued item) so the next worker re-polls, re-acks, and re-claims it with a fresh
+  `NO_HEARTBEAT`, then re-runs only the still-unanswered tools (the C2a driver diffs against the
+  answered set). `Ack` now installs a startup lease on the queued→starting edge, so a `starting`
+  item is reclaimed on a real lease, not the short un-acked poll reservation it was polled with —
+  otherwise a slow-but-live worker's item could be stolen in the ack → first-heartbeat gap.
+  This mirrors `Claim`'s expired-active reclaim for cloud; the active-item reclaim keys on the
+  lapsed lease, not on `reclaim_older_than_ms` (which stays the un-acked-reservation window, per
+  the wire). A revived stale worker learns it lost the item on its next heartbeat (`412`). The
+  approach was settled against the reference: the work item carries no generation/version field
+  and the wire `stop` carries no ownership proof (`{force}` only), so recovery is a server-internal
+  requeue-in-place invisible to the client, and the `412`-on-heartbeat is the reclaim signal.
+  Known residual (documented, not a v1 blocker): a hung-then-revived worker could, in the tightest
+  race, complete and `stop(force)` the replacement's reclaimed item; a truly dead worker never
+  revives, so the kill-worker resilience case is fully covered, and fully closing the race needs a
+  fresh work identity per hand-out (a later hardening).
 - The BYOC worker's lease loop and `cmd/worker` binary (slice 8, PR C2b) — the runnable
   worker, the self_hosted twin of the platform executor. `internal/worker.Worker.Run`
   polls the control plane's self_hosted work queue over HTTP (long-poll `block_ms=999`,
@@ -38,10 +58,9 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   liveness check, a tool backend-fault leaving work unanswered, or a run the heartbeat
   cancelled) leaves the item live rather than terminally discarding a still-recoverable
   session's work; likewise a transient ack failure leaves the item queued (so `poll`
-  re-offers it) instead of force-stopping it. **Recovering such a left-live item is PR C3
-  (dead-worker reclaim), not yet built** — `poll` today re-offers only `queued` items, so a
-  self_hosted session interrupted by a fault waits until C3 reclaims its acked/heartbeating
-  item. The happy path (tools succeed) runs end to end now; fault recovery lands with C3.
+  re-offers it) instead of force-stopping it. Recovering such a left-live item is
+  dead-worker reclaim, landed in PR C3 (see the entry above): once its lease lapses, `poll`
+  reclaims the acked/heartbeating item and a worker re-runs the still-unanswered tools.
 
 - The BYOC worker's tool-exec driver (slice 8, PR C2a) — `internal/worker`, the first
   half of the distributable worker and the self_hosted twin of the platform executor.

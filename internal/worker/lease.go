@@ -143,13 +143,14 @@ func (w *Worker) Run(ctx context.Context) error {
 // starting), returning the acked item or nil when the queue is empty. Both a
 // poll error and an ack error are returned to Run to back off on.
 //
-// An ack failure must NOT force-stop the item. A transient ack error (a
-// control-plane blip, or a lost response for an ack that actually applied)
-// leaves the item queued server-side; force-stopping it moves it to the
-// terminal stopped state that no path reclaims (Poll reclaims only queued
-// items), so a single hiccup would permanently strand the session's outstanding
-// tool work. Leaving it queued lets Poll re-offer it once the lease window
-// lapses, and Run's backoff keeps a genuinely un-ackable item from hot-looping.
+// An ack failure must NOT force-stop the item. A transient ack error leaves the
+// item either queued (the ack never applied) or starting (it applied but the
+// response was lost); Poll re-offers a queued item once its reservation lapses
+// and reclaims a starting item once its startup lease lapses, so either way it
+// recovers. Force-stopping it would instead move it to the terminal stopped
+// state that no reclaim recovers, permanently stranding the session's
+// outstanding tool work over a single hiccup. Run's backoff keeps a genuinely
+// un-ackable item from hot-looping.
 func (w *Worker) pollAck(ctx context.Context) (*sdk.BetaSelfHostedWork, error) {
 	work, err := w.client.Beta.Environments.Work.Poll(ctx, w.cfg.EnvironmentID, sdk.BetaEnvironmentWorkPollParams{
 		BlockMs:           sdk.Int(pollBlockMs),
@@ -174,12 +175,11 @@ type itemOutcome int
 
 const (
 	// outcomeReclaim: an uncertain result (liveness unknown, tools faulted with
-	// work unanswered, or the run was cancelled) — leave the item live so a
-	// future reclaim can re-run it. NOTE: reclaim of an already-acked self_hosted
-	// item is the C3 dead-worker-reclaim protocol (not yet built); until then a
-	// left-live item stays stranded and the session waits. Leaving it live is
-	// still correct — it is the state C3 reclaims; force-stopping would make it
-	// terminal and unrecoverable.
+	// work unanswered, or the run was cancelled) — leave the item live so it can
+	// be reclaimed. Once its heartbeat lease lapses, queue.Poll reclaims the
+	// stranded starting/active item (resets it to a fresh queued reservation) and
+	// a worker re-runs its still-unanswered tools. Force-stopping instead would
+	// move it to the terminal stopped state that no reclaim recovers.
 	outcomeReclaim itemOutcome = iota
 	// outcomeDrain: the session is definitively dead (archived/terminated) — run
 	// nothing and force-stop the item. Safe regardless of lease ownership: a dead
@@ -203,10 +203,12 @@ const (
 //   - complete: every tool was answered — force-stop to clear the item (which
 //     otherwise lingers active and blocks the session's next tool turn), UNLESS
 //     the heartbeat observed losing the lease, in which case another worker may
-//     now own the item and stopping it could terminate that worker's run. The
-//     tightest ownership race (a worker whose delayed ack let a second worker
-//     reclaim, then completes before its own claim-beat 412s) is only fully
-//     closed by server-side lease generation on stop — the C3 reclaim protocol.
+//     now own the item and stopping it could terminate that worker's run. This
+//     !lostLease guard covers the common case; the tightest residual race (a
+//     worker whose delayed ack let a second worker reclaim, then completes before
+//     its own claim-beat 412s) is NOT closed by it and cannot be closed by the
+//     reclaim alone — the wire's stop carries no ownership proof, so fully
+//     closing it needs a fresh work identity per reclaim (a later hardening).
 //   - reclaim: leave the item live (mirrors the executor completing only when
 //     faultErr is nil).
 func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork) {

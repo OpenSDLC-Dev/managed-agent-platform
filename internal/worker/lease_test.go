@@ -265,6 +265,53 @@ func TestWorkerAckFailureLeavesItemQueued(t *testing.T) {
 	waitExit(t, cancel, errc)
 }
 
+// TestWorkerReclaimsStrandedItem is the C3 headline: a dead worker's item, left
+// acked+heartbeating (active) with a lapsed lease, is reclaimed by a fresh worker
+// on the next poll — it re-acks, re-claims, runs the session's still-unanswered
+// tool, posts the result, and force-stops the item. This is what makes C2b's
+// leave-live-for-reclaim actually recover.
+func TestWorkerReclaimsStrandedItem(t *testing.T) {
+	ctx := context.Background()
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+
+	// Simulate a worker that acked and claimed the item, then died: drive the
+	// queue to active, then expire its lease.
+	q := queue.New(h.pool)
+	dead, err := q.Poll(ctx, h.envID, time.Minute)
+	if err != nil || dead == nil {
+		t.Fatalf("seed poll: %+v %v", dead, err)
+	}
+	if _, err := q.Ack(ctx, h.envID, dead.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Heartbeat(ctx, h.envID, dead.ID, queue.NoHeartbeat, 30); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, dead.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh worker reclaims the stranded item and finishes it.
+	w, done := h.newWorker(Config{})
+	cancel, errc := runWorker(w)
+	waitDone(t, done)
+
+	if got := len(h.results(t)); got != 1 {
+		t.Errorf("user.tool_result = %d, want 1 (reclaimed and finished)", got)
+	}
+	if sb.files["/workspace/out.txt"] != "hi" {
+		t.Errorf("sandbox file = %q, want the reclaimed tool to have run", sb.files["/workspace/out.txt"])
+	}
+	if got := h.workState(t); got != "stopped" {
+		t.Errorf("work item state = %q, want stopped (reclaimed run completed)", got)
+	}
+	waitExit(t, cancel, errc)
+}
+
 // TestWorkerEmptyQueueIdlesUntilCancel: with no work, the worker polls, finds
 // nothing, and idles — returning nil promptly once cancelled, having provisioned
 // nothing.

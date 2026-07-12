@@ -23,6 +23,16 @@ var (
 // concurrency: subsequent heartbeats echo the server's prior value).
 const NoHeartbeat = "NO_HEARTBEAT"
 
+// ackStartupLeaseSeconds is the grace a just-acked (starting) item gets to send
+// its first heartbeat before Poll may reclaim it as a dead worker. Ack sets it
+// as the item's lease so a starting item is governed by a real lease, not the
+// short un-acked poll reservation (reclaim_older_than_ms) it was polled with —
+// otherwise a slow-but-live worker's item could be reclaimed in the ack →
+// first-heartbeat gap. It matches the default heartbeat TTL (api's
+// defaultHeartbeatTTLSeconds), so a starting item's window equals an active
+// one's; the queue cannot import api, so the value is mirrored here.
+const ackStartupLeaseSeconds = 30
+
 // workAPIScope restricts a work-API query to the wire's notion of a work item —
 // a tool_exec item in a self_hosted environment. Two other row kinds share the
 // work_items table and must never be reachable through a worker's
@@ -94,19 +104,25 @@ func (q *Queue) ListWork(ctx context.Context, envID domain.ID, after bool, after
 }
 
 // Ack acknowledges a polled work item, transitioning queued → starting. It is
-// idempotent: only the queued→starting edge stamps acknowledged_at, so a re-ack
-// of an already-advanced item returns it unchanged. An item not visible to the
-// work API (missing, wrong environment, or not a self_hosted tool_exec item) is
-// ErrWorkNotFound.
+// idempotent: only the queued→starting edge stamps acknowledged_at and installs
+// the startup lease, so a re-ack of an already-advanced item returns it
+// unchanged. The startup lease (ackStartupLeaseSeconds) governs a starting item
+// until its first heartbeat replaces it, so Poll reclaims a dead worker's
+// starting item on a real lease, not the short un-acked poll reservation. An
+// item not visible to the work API (missing, wrong environment, or not a
+// self_hosted tool_exec item) is ErrWorkNotFound.
 func (q *Queue) Ack(ctx context.Context, envID, workID domain.ID) (*Work, error) {
 	w, err := scanWork(q.pool.QueryRow(ctx,
 		`UPDATE work_items
-		 SET state           = CASE WHEN state = 'queued' THEN 'starting' ELSE state END,
-		     acknowledged_at = CASE WHEN state = 'queued' THEN now() ELSE acknowledged_at END,
-		     updated_at      = now()
+		 SET state            = CASE WHEN state = 'queued' THEN 'starting' ELSE state END,
+		     acknowledged_at  = CASE WHEN state = 'queued' THEN now() ELSE acknowledged_at END,
+		     lease_expires_at = CASE WHEN state = 'queued'
+		                             THEN now() + make_interval(secs => ($3)::double precision)
+		                             ELSE lease_expires_at END,
+		     updated_at       = now()
 		 WHERE id = $1 AND environment_id = $2`+workAPIScope+`
 		 RETURNING `+workColumns,
-		workID, envID))
+		workID, envID, ackStartupLeaseSeconds))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrWorkNotFound
 	}

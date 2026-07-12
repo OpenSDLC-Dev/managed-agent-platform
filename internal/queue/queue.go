@@ -172,13 +172,23 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // model_turn work drives the platform's own brain and is never offered to a
 // worker.
 //
-// Only still-queued (un-acked) reservations are reclaimed here. A dead worker
-// that already acked/heartbeated leaves a starting/active item that no poll
-// recovers yet — reclaiming those safely needs a lease/generation guard on stop
-// (so a stale worker's cleanup force-stop cannot kill the replacement) or a
-// fresh work identity per hand-out, and the exact protocol must be settled
-// against a real ant beta:worker, so it lands with the worker in a later PR.
-// Until then no BYOC worker exists to reach starting/active, so nothing strands.
+// Poll reclaims two kinds of stranded item. A still-queued (un-acked)
+// reservation whose window lapsed is re-offered — the wire's reclaim_older_than_ms
+// knob, carried in the reclaim argument. AND a dead worker's already-acked
+// (starting) or heartbeating (active) item whose lease has lapsed
+// (lease_expires_at < now(), i.e. the worker stopped heartbeating) is reclaimed:
+// it is reset to a fresh queued reservation (state → queued; last_heartbeat,
+// acknowledged_at, started_at cleared, so it is indistinguishable on the wire
+// from a never-run queued item) so the next worker can re-poll, re-ack, and
+// re-claim it with a fresh NO_HEARTBEAT — the mirror of Claim's expired-active
+// reclaim for cloud. Note the lease a starting/active item is reclaimed on is a
+// real lease (Ack installs a startup lease, heartbeats extend it), not the
+// un-acked poll reservation. A
+// revived stale worker learns it lost the item on its next heartbeat (the echoed
+// last_heartbeat no longer matches → 412). The active-item reclaim keys on the
+// lapsed lease, NOT on reclaim_older_than_ms (which stays the un-acked-reservation
+// window, per the wire). The C2a driver re-derives work from the still-unanswered
+// tool uses, so a reclaimed run re-executes only unanswered tools.
 //
 // Poll serves only self_hosted environments — the mirror of Claim scoping
 // tool_exec to cloud. The two are therefore mutually exclusive by environment
@@ -190,14 +200,22 @@ func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration
 		    SELECT w.id AS pid FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id
 		    WHERE w.environment_id = $1 AND e.kind = 'self_hosted'
-		      AND w.kind = 'tool_exec' AND w.state = 'queued'
-		      AND (w.lease_expires_at IS NULL OR w.lease_expires_at < now())
+		      AND w.kind = 'tool_exec'
+		      AND (
+		            (w.state = 'queued' AND (w.lease_expires_at IS NULL OR w.lease_expires_at < now()))
+		         OR (w.state IN ('starting', 'active') AND w.lease_expires_at < now())
+		      )
 		    ORDER BY w.created_at
 		    FOR UPDATE OF w SKIP LOCKED
 		    LIMIT 1
 		 )
 		 UPDATE work_items t
-		 SET lease_expires_at = now() + make_interval(secs => $2), updated_at = now()
+		 SET state            = 'queued',
+		     last_heartbeat   = NULL,
+		     acknowledged_at  = NULL,
+		     started_at       = NULL,
+		     lease_expires_at = now() + make_interval(secs => $2),
+		     updated_at       = now()
 		 FROM picked p
 		 WHERE t.id = p.pid
 		 RETURNING `+workColumns,
