@@ -330,6 +330,10 @@ func TestLifecycleEndpointsRejectCloudToolExec(t *testing.T) {
 	if w, err := q.Poll(ctx, cloudEnv, time.Minute); err != nil || w != nil {
 		t.Errorf("Poll(cloud env) = %+v %v, want nil (cloud is the executor's)", w, err)
 	}
+	// ListWork is scoped the same way: a cloud env's tool_exec never lists.
+	if items, err := q.ListWork(ctx, cloudEnv, false, time.Time{}, "", 10); err != nil || len(items) != 0 {
+		t.Errorf("ListWork(cloud env) = %d items %v, want 0 (cloud is the executor's)", len(items), err)
+	}
 	// The executor can still claim it — it was never disturbed.
 	if it, err := q.Claim(ctx, queue.ToolExec, time.Minute); err != nil || it == nil || it.ID != id {
 		t.Fatalf("cloud tool_exec disturbed by the work API: claim=%+v err=%v", it, err)

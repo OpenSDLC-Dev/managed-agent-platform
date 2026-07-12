@@ -98,6 +98,49 @@ func (s *server) pollWork(r *http.Request) (any, error) {
 	return toWire(w), nil
 }
 
+// listWork lists the environment's work items (GET .../work), newest first, in
+// the {data, next_page} envelope. It is scoped like the rest of the work API to
+// self_hosted tool_exec items, so a worker sees only the queue it can act on —
+// never the brain's model_turn rows or another environment's work.
+func (s *server) listWork(r *http.Request) (any, error) {
+	envID, _, err := s.workScope(r) // list has no work_id path value; ignore it
+	if err != nil {
+		return nil, err
+	}
+	page, err := parsePage(r.URL.Query())
+	if err != nil {
+		return nil, err
+	}
+	after := false
+	var afterT time.Time
+	var afterID string
+	if page.cur != nil {
+		// Unidirectional list: only a forward time cursor is valid here.
+		if page.cur.versioned || page.cur.seqKeyed || page.cur.dir != dirNext {
+			return nil, errInvalid("invalid page cursor")
+		}
+		after, afterT, afterID = true, page.cur.t, page.cur.id
+	}
+
+	items, err := s.queue.ListWork(r.Context(), envID, after, afterT, afterID, page.limit+1)
+	if err != nil {
+		return nil, err
+	}
+	out := pageJSON{Data: []any{}}
+	for i, w := range items {
+		if i >= page.limit {
+			break
+		}
+		out.Data = append(out.Data, toWire(w))
+	}
+	if len(items) > page.limit {
+		last := items[page.limit-1]
+		c := encodeTimeCursor(dirNext, last.CreatedAt, last.ID.String())
+		out.NextPage = &c
+	}
+	return out, nil
+}
+
 // heartbeatWire is the BetaSelfHostedWorkHeartbeatResponse shape.
 type heartbeatWire struct {
 	LastHeartbeat time.Time `json:"last_heartbeat"`
