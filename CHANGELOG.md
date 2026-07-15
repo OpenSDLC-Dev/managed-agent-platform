@@ -12,6 +12,20 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Kubernetes sandbox provider (slice 9) — `internal/sandbox/k8s`, a `sandbox.Provider` that runs each
+  session's tools in a disposable per-session Pod over the Kubernetes API (`client-go`). It passes the
+  **same** `sandboxtest` contract suite as the Docker backend — the plan requires both to behave
+  identically — including the crown-jewel deadline invariants. Because Kubernetes couples an exec's
+  exit code to its (straggler-holdable) stream and exposes no `exec-inspect`, the in-Pod wrapper runs
+  the command as a background child under `setsid` and records its pid and, once finished, its exit
+  code to files; Exec keeps the Docker backend's two-instant liveness discipline but answers it with a
+  second `exec` (read the pid, `kill -0`) and reads the exit code from the file, so a straggler holding
+  the stream open can delay neither. `limited` networking fails closed like Docker's `NetworkMode:
+  none`: an init container flushes the Pod netns's routing table, leaving no egress route. The contract
+  test runs against a **kind** cluster (a missing cluster is a hard failure, not a skip, mirroring the
+  Docker daemon rule); CI provisions kind before the coverage run, and fake-clientset unit tests cover
+  the error branches a live cluster cannot easily stage. Adds `k8s.io/client-go`. **Not yet wired into
+  `cmd/`**: config-driven backend selection and a Helm chart are the remaining slice-9 work.
 - Work-queue statistics (slice 8, PR C-stats) — `GET /v1/environments/{id}/work/stats` returning
   `BetaSelfHostedWorkQueueStats`, the last worker-facing work endpoint; it **completes slice 8**. The
   four required fields are a **derived view over Postgres** (the queue's source of truth), not a

@@ -42,6 +42,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # The Kubernetes sandbox backend's contract test runs against a real
+      # cluster (a missing cluster is a hard failure, not a skip, like the Docker
+      # daemon). kind-action installs kind and sets the current kubeconfig
+      # context, which the test picks up by default; its pods pull their images
+      # from the runner's network.
+      - name: create kind cluster (k8s sandbox contract test)
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: map-ci
       - name: test (-count=1) with coverage profile
         run: |
           # Logic packages only. internal/pgtest and internal/sandbox/sandboxtest
