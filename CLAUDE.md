@@ -122,19 +122,21 @@ Re-invoking with `scriptPath` alone starts a fresh run; adding `resumeFromRunId`
 
 #### Codex side
 
-The `review` subcommand of `codex-companion.mjs` passes `--model` but **never passes `--effort`**, so it silently inherits `model_reasoning_effort` from `~/.codex/config.toml` (currently `low`). A low-effort review of a concurrency-heavy diff returns shallow findings and misses the real defects. Do not fix this by editing the user's `~/.codex/config.toml`. Run the review through the `task` subcommand instead: it honors `--effort`, and it sandboxes `read-only` when `--write` is omitted.
+The `review` subcommand of `codex-companion.mjs` passes `--model` but **never passes `--effort`**, so it silently inherits `model_reasoning_effort` from `~/.codex/config.toml` (currently `ultra`). That default is now strong, but it is the user's setting and can change back, and a low-effort review of a concurrency-heavy diff returns shallow findings and misses the real defects. Do not edit the user's `~/.codex/config.toml`. To pin effort yourself regardless of the config, run the review through the `task` subcommand: it honors `--effort`, and it sandboxes `read-only` when `--write` is omitted.
 
 ```
-node "<plugin-root>/scripts/codex-companion.mjs" task --model gpt-5.5 --effort xhigh \
+node "<plugin-root>/scripts/codex-companion.mjs" task --model gpt-5.6-sol --effort ultra \
   "<read-only review prompt: name the diff range and the invariants to attack>"
 ```
 
-Model choice on this machine (`codex-cli 0.144.1`): **`gpt-5.5` is the strongest usable model.** It is verified real rather than a silent fallback — an invented name such as `gpt-5-9-totally-fake` is rejected with HTTP 400, while `gpt-5.5` runs clean with no fallback-metadata warning. `gpt-5.6-sol`, the config default, is rejected by the server as requiring a newer CLI than the latest published `@openai/codex`. `gpt-5.3-codex-spark` (the `spark` alias) works but is weaker. Re-check all three when the CLI is upgraded.
+Dropping both flags now inherits these same defaults (`gpt-5.6-sol` + `ultra`) from the config, so a bare `task "<prompt>"` runs the strongest review — but pin them when you want a review that can't drift with a config change.
 
-For a plain `review`-subcommand pass, pin the model explicitly — accepting the config default fails outright:
+Model choice on this machine (`codex-cli 0.144.4`): **`gpt-5.6-sol` is the strongest usable model, and it is the config default.** It is verified real rather than a silent fallback — an invented name such as `gpt-5-9-totally-fake` is rejected with HTTP 400, while `gpt-5.6-sol` runs clean with no fallback-metadata warning (it returned a substantive `ultra` review and a clean trivial-task probe). Under the older `codex-cli 0.144.1` it was rejected as requiring a newer CLI than the then-published `@openai/codex`; the `0.144.4` upgrade lifted that. `gpt-5.5` still runs clean and is the fallback if `gpt-5.6-sol` ever regresses; `gpt-5.3-codex-spark` (the `spark` alias) works but is weaker. Re-check all three when the CLI is upgraded.
+
+For a plain `review`-subcommand pass, pin the model explicitly. The old note that accepting the config default "fails outright" held only while the default `gpt-5.6-sol` was rejected by the older CLI; that rejection is gone, but pinning still guarantees the review's model can't silently follow a config change:
 
 ```
-node "<plugin-root>/scripts/codex-companion.mjs" review "--scope branch --base main --model gpt-5.5"
+node "<plugin-root>/scripts/codex-companion.mjs" review "--scope branch --base main --model gpt-5.6-sol"
 ```
 
 ## How to work in this repo
