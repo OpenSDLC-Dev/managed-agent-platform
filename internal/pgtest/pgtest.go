@@ -124,9 +124,24 @@ func NewPool(t *testing.T) *pgxpool.Pool {
 // environment ids.
 func NewSession(t *testing.T, pool *pgxpool.Pool, envKind string) (sessionID, envID domain.ID) {
 	t.Helper()
+	envID = domain.NewID("env")
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO environments (id, name, kind, config) VALUES ($1, 'fixture', $2, $3)`,
+		envID, envKind, `{"type":"`+envKind+`"}`); err != nil {
+		t.Fatalf("fixture insert: %v", err)
+	}
+	return NewSessionInEnv(t, pool, envID), envID
+}
+
+// NewSessionInEnv inserts an additional idle session (with its own throwaway
+// agent + version) into an existing environment and returns the session id. Use
+// it to place several sessions — and thus several work items — under one
+// environment, since Enqueue dedupes per (session, kind) while a live item
+// exists.
+func NewSessionInEnv(t *testing.T, pool *pgxpool.Pool, envID domain.ID) (sessionID domain.ID) {
+	t.Helper()
 	ctx := context.Background()
 	agentID := domain.NewID("agent")
-	envID = domain.NewID("env")
 	sessionID = domain.NewID("sesn")
 	resolved := fmt.Sprintf(`{"type":"agent","id":%q,"version":1,"name":"fixture",`+
 		`"model":{"id":"fixture-model"},"system":"","description":"",`+
@@ -139,8 +154,6 @@ func NewSession(t *testing.T, pool *pgxpool.Pool, envKind string) (sessionID, en
 			[]any{agentID}},
 		{`INSERT INTO agent_versions (agent_id, version, name, spec) VALUES ($1, 1, 'fixture', '{"model":{"id":"fixture-model"}}')`,
 			[]any{agentID}},
-		{`INSERT INTO environments (id, name, kind, config) VALUES ($1, 'fixture', $2, $3)`,
-			[]any{envID, envKind, `{"type":"` + envKind + `"}`}},
 		{`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id, status)
 		  VALUES ($1, $2, 1, $3, $4, 'idle')`, []any{sessionID, agentID, resolved, envID}},
 	} {
@@ -148,5 +161,5 @@ func NewSession(t *testing.T, pool *pgxpool.Pool, envKind string) (sessionID, en
 			t.Fatalf("fixture insert: %v", err)
 		}
 	}
-	return sessionID, envID
+	return sessionID
 }

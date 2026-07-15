@@ -80,20 +80,21 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 	// redirect. Splitting the routes across nested muxes let those redirects
 	// answer an unauthenticated request before auth ran.
 	mux.HandleFunc("GET /v1/environments/{id}/work", s.handle(s.listWork))
-	mux.HandleFunc("GET /v1/environments/{id}/work/poll", s.pollWork) // emits trace headers; not a typed handler
+	mux.HandleFunc("GET /v1/environments/{id}/work/poll", s.pollWork)             // emits trace headers; not a typed handler
+	mux.HandleFunc("GET /v1/environments/{id}/work/stats", s.handle(s.statsWork)) // literal segment beats {work_id}
 	mux.HandleFunc("GET /v1/environments/{id}/work/{work_id}", s.handle(s.getWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}", s.handle(s.updateWork)) // metadata patch
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/ack", s.handle(s.ackWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/heartbeat", s.handle(s.heartbeatWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/stop", s.handle(s.stopWork))
-	// Method-less 405 fallbacks. No explicit ".../work/poll" entry: it would be
-	// ambiguous against "GET .../work/{work_id}" (more specific in path, less in
-	// method — neither dominates, so the mux panics). The ".../work/{work_id}"
-	// fallback answers other non-GET ".../work/poll" methods (PUT/DELETE) with a
-	// 405 (work_id="poll"); a POST there routes to the metadata update, which —
-	// given a valid patch body — 404s on the nonexistent "poll" item, as the
-	// reference's own POST route does (an empty or malformed body is a 400, since
-	// body validation precedes the item lookup).
+	// Method-less 405 fallbacks. No explicit ".../work/poll" or ".../work/stats"
+	// entry: it would be ambiguous against "GET .../work/{work_id}" (more specific
+	// in path, less in method — neither dominates, so the mux panics). The
+	// ".../work/{work_id}" fallback answers other non-GET methods on those literal
+	// paths (PUT/DELETE) with a 405 (work_id="poll"/"stats"); a POST there routes
+	// to the metadata update, which — given a valid patch body — 404s on the
+	// nonexistent item, as the reference's own POST route does (an empty or
+	// malformed body is a 400, since body validation precedes the item lookup).
 	for _, pattern := range []string{
 		"/v1/environments/{id}/work",
 		"/v1/environments/{id}/work/{work_id}",
