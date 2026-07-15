@@ -113,9 +113,9 @@ Every change lands through a PR; **never commit directly to `main`**.
 
 #### Claude side (verifier subagent, `/code-review`)
 
-Subagents **inherit the main loop's model** unless told otherwise, so a session running a weaker or rate-limited model silently hands that model to its reviewers. Pin it:
+Subagents **inherit the main loop's model** unless told otherwise, so a session running a weaker or rate-limited model silently hands that model to its reviewers. Pin it deliberately:
 
-- Verifier: `Agent({subagent_type: "verifier", model: "opus", …})`.
+- Verifier: its model is pinned in the definition file — `.claude/agents/verifier.md` sets `model: claude-fable-5`. Dispatch it with **no** `model` override (`Agent({subagent_type: "verifier", …})`) so it runs on that pinned model instead of inheriting the session's. Do **not** override to `model: "opus"`: that was a temporary workaround while fable-5's quota was exhausted, and it has been lifted.
 - Review workflow: the `code-review` script's `agent()` calls omit `model`. When it matters, edit the persisted script (its path is returned by the `Workflow` tool) to pass `model: "opus"` in every `agent()` opts object, then re-invoke with `scriptPath`. Confirm afterwards by grepping the run's agent transcripts under `~/.claude/projects/<project>/<session>/subagents/workflows/<runId>/` for `"model":"claude-opus-4-8"`.
 
 Re-invoking with `scriptPath` alone starts a fresh run; adding `resumeFromRunId` replays cached results from the **old** model, which defeats the point of re-running.
