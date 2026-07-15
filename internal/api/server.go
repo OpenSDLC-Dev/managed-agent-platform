@@ -82,13 +82,18 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("GET /v1/environments/{id}/work", s.handle(s.listWork))
 	mux.HandleFunc("GET /v1/environments/{id}/work/poll", s.pollWork) // emits trace headers; not a typed handler
 	mux.HandleFunc("GET /v1/environments/{id}/work/{work_id}", s.handle(s.getWork))
+	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}", s.handle(s.updateWork)) // metadata patch
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/ack", s.handle(s.ackWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/heartbeat", s.handle(s.heartbeatWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/stop", s.handle(s.stopWork))
 	// Method-less 405 fallbacks. No explicit ".../work/poll" entry: it would be
 	// ambiguous against "GET .../work/{work_id}" (more specific in path, less in
 	// method — neither dominates, so the mux panics). The ".../work/{work_id}"
-	// fallback already answers a non-GET ".../work/poll" with a 405 (work_id="poll").
+	// fallback answers other non-GET ".../work/poll" methods (PUT/DELETE) with a
+	// 405 (work_id="poll"); a POST there routes to the metadata update, which —
+	// given a valid patch body — 404s on the nonexistent "poll" item, as the
+	// reference's own POST route does (an empty or malformed body is a 400, since
+	// body validation precedes the item lookup).
 	for _, pattern := range []string{
 		"/v1/environments/{id}/work",
 		"/v1/environments/{id}/work/{work_id}",

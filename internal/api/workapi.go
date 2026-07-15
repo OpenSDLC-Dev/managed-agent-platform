@@ -212,6 +212,40 @@ func (s *server) getWork(r *http.Request) (any, error) {
 	return toWire(w), nil
 }
 
+// updateWork applies a metadata patch to a work item (POST .../work/{work_id})
+// and returns the updated BetaSelfHostedWork. The body is {"metadata": {...}}: a
+// string value upserts a key, an explicit null deletes it, and omitted keys are
+// preserved — the same patch semantics as session/agent metadata. The patch is
+// orthogonal to lifecycle state; any item the work API can see is patchable.
+func (s *server) updateWork(r *http.Request) (any, error) {
+	envID, workID, err := s.workScope(r)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := decodeObject(r)
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectUnknownKeys(obj, "metadata"); err != nil {
+		return nil, err
+	}
+	raw, ok := obj["metadata"]
+	if !ok || isNull(raw) {
+		return nil, errInvalid("metadata is required")
+	}
+	// The work wire deletes only on an explicit null; an empty string is a
+	// literal value (unlike the environment rule), hence emptyDeletes=false.
+	upserts, deletes, err := splitMetadataPatch(raw, false)
+	if err != nil {
+		return nil, err
+	}
+	w, err := s.queue.UpdateMetadata(r.Context(), envID, workID, upserts, deletes)
+	if err != nil {
+		return nil, mapWorkErr(err)
+	}
+	return toWire(w), nil
+}
+
 // ackWork acknowledges a polled item (POST .../work/{work_id}/ack), moving it
 // queued → starting.
 func (s *server) ackWork(r *http.Request) (any, error) {

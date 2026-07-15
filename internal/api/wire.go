@@ -105,6 +105,28 @@ func parseMetadata(obj map[string]json.RawMessage) (map[string]string, error) {
 	return md, nil
 }
 
+// splitMetadataPatch partitions a metadata patch object into per-key upserts and
+// deletes: a string value upserts the key, an explicit null deletes it, and when
+// emptyDeletes is set an empty string also deletes (the reference's environment
+// rule). It is the shared string-or-null parse behind both patchMetadata (the
+// Go-side merge for agents/environments/sessions) and the work endpoint's
+// SQL-side merge, so the two can never drift.
+func splitMetadataPatch(raw json.RawMessage, emptyDeletes bool) (upserts map[string]string, deletes []string, err error) {
+	var patch map[string]*string
+	if err := json.Unmarshal(raw, &patch); err != nil {
+		return nil, nil, errInvalid("metadata must be an object of string-or-null values")
+	}
+	upserts = map[string]string{}
+	for k, v := range patch {
+		if v == nil || (emptyDeletes && *v == "") {
+			deletes = append(deletes, k)
+		} else {
+			upserts[k] = *v
+		}
+	}
+	return upserts, deletes, nil
+}
+
 // patchMetadata applies update semantics onto existing metadata: a string
 // value upserts the key, an explicit null deletes it. emptyDeletes matches
 // the environment-update rule, where an empty string also deletes (the
@@ -113,20 +135,19 @@ func patchMetadata(existing map[string]string, raw json.RawMessage, emptyDeletes
 	if isNull(raw) {
 		return existing, nil
 	}
-	var patch map[string]*string
-	if err := json.Unmarshal(raw, &patch); err != nil {
-		return nil, errInvalid("metadata must be an object of string-or-null values")
+	upserts, deletes, err := splitMetadataPatch(raw, emptyDeletes)
+	if err != nil {
+		return nil, err
 	}
 	out := map[string]string{}
 	for k, v := range existing {
 		out[k] = v
 	}
-	for k, v := range patch {
-		if v == nil || (emptyDeletes && *v == "") {
-			delete(out, k)
-		} else {
-			out[k] = *v
-		}
+	for _, k := range deletes {
+		delete(out, k)
+	}
+	for k, v := range upserts {
+		out[k] = v
 	}
 	return out, nil
 }

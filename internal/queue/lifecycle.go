@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -241,6 +242,43 @@ func (q *Queue) Stop(ctx context.Context, envID, workID domain.ID, force bool) (
 		return nil, ErrWorkNotFound
 	}
 	return nil, ErrWorkConflict
+}
+
+// UpdateMetadata applies a metadata patch to a work item and returns the updated
+// item (the wire Update responds with the BetaSelfHostedWork). upserts sets or
+// overwrites keys; deletes removes keys; both are applied in one atomic UPDATE
+// (metadata || upserts, then minus deletes), so a concurrent worker state
+// transition on the same row cannot be lost to a read-modify-write and two
+// overlapping patches cannot drop each other's writes — work items carry no
+// optimistic version to guard a read-modify-write with, unlike the versioned
+// resources. The patch is orthogonal to lifecycle: any item visible to the work
+// API (see workAPIScope) is patchable in any state. An item not visible is
+// ErrWorkNotFound.
+func (q *Queue) UpdateMetadata(ctx context.Context, envID, workID domain.ID, upserts map[string]string, deletes []string) (*Work, error) {
+	if upserts == nil {
+		upserts = map[string]string{} // marshal to {} not null, so `metadata || $` is a merge
+	}
+	if deletes == nil {
+		deletes = []string{} // an empty text[] removes nothing; a nil slice encodes as SQL NULL and would null the column
+	}
+	patch, err := json.Marshal(upserts)
+	if err != nil {
+		return nil, fmt.Errorf("queue: update metadata %s: %w", workID, err)
+	}
+	w, err := scanWork(q.pool.QueryRow(ctx,
+		`UPDATE work_items
+		 SET metadata   = (metadata || $3::jsonb) - $4::text[],
+		     updated_at = now()
+		 WHERE id = $1 AND environment_id = $2`+workAPIScope+`
+		 RETURNING `+workColumns,
+		workID, envID, string(patch), deletes))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrWorkNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("queue: update metadata %s: %w", workID, err)
+	}
+	return w, nil
 }
 
 // visible reports whether a work item is visible to the wire work API (see

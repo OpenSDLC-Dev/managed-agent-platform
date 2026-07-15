@@ -12,6 +12,23 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Work-item metadata update (slice 8, PR C-meta) — `POST /v1/environments/{id}/work/{work_id}`,
+  the last worker-facing work endpoint besides `stats`. The body is `{"metadata": {…}}`: a string
+  value upserts a key, an explicit null deletes it, and an omitted key is preserved — the patch
+  semantics the wire documents (and that session/agent metadata already use; an empty string here
+  is a literal value, not a delete). It returns the updated `BetaSelfHostedWork`, and it is what
+  makes the `metadata` namespace client-updatable — the reason PR C2b-2 kept `traceparent` in its
+  own column, out of `metadata`. `queue.UpdateMetadata` persists the patch in one atomic statement
+  (`metadata = (metadata || upserts) − deletes`) rather than a read-modify-write: a work item
+  carries no optimistic version to guard a read-modify-write with (the versioned resources do), so
+  the atomic merge is the correct primitive — a concurrent worker state transition on the same row
+  cannot be clobbered and two overlapping patches cannot drop each other's writes. Scoped like the
+  rest of the work API (self_hosted `tool_exec`, the caller's environment): a `model_turn`, a cloud
+  `tool_exec`, or an unknown id is `404`; a missing or non-string/non-null `metadata` is `400`. The
+  new `POST .../work/{work_id}` route means `POST .../work/poll` now resolves as `work_id="poll"`:
+  with a valid patch body it `404`s on the nonexistent item (as the reference's own route does)
+  rather than the old method-less `405`; an empty or malformed body is a `400`, since body
+  validation precedes the item lookup.
 - `traceparent` propagation to the BYOC worker (slice 8, PR C2b-2) — a session's model turns and
   the tool runs a worker executes for it now live in one OTel trace across the process boundary.
   When a turn suspends on a platform tool, `queue.Enqueue` injects the turn's active W3C trace
@@ -178,8 +195,9 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   claim-vs-extend. The queue layer owns the state machine
   (`queue.Ack`/`Heartbeat`/`Stop`/`GetWork`); the API layer maps its errors to
   `404`/`409`/`412`. The work-item metadata update (an unimplemented method on a known
-  path, so `405`) and the `list`/`stats` reporting endpoints are deferred (not on the
-  worker's poll→ack→heartbeat→stop path).
+  path, so `405`) and the `list`/`stats` reporting endpoints were deferred (not on the
+  worker's poll→ack→heartbeat→stop path; `list` and the metadata update have since landed
+  in PR C-list and PR C-meta, only `stats` remains).
 
 - The wire work API's foundation — environment-key auth and `/work/poll` (slice 8,
   first part): BYOC workers now authenticate to the work API with an
