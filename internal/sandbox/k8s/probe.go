@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -70,17 +71,23 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 // close while the process holding it is alive, so a close before the deadline is
 // a command that finished early.
 func (pd *pod) alive(ctx context.Context, state string) bool {
-	live, err := pd.probeAlive(ctx, state)
-	if err != nil {
+	// Retry once, as the docker backend does: a single exec that fails for a
+	// transient reason should not decide a deadline.
+	for range 2 {
+		live, err := pd.probeAlive(ctx, state)
+		if err == nil {
+			return live
+		}
 		// The stream closed (ctx cancelled), so the process it was holding is
-		// gone; or the daemon would not answer, and hiding an overrun is worse
-		// than mislabelling one, so assume still running.
+		// gone, and nobody is waiting on this answer any more.
 		if ctx.Err() != nil {
 			return false
 		}
-		return true
 	}
-	return live
+	// The probe would not answer (the daemon, or the probe process itself killed
+	// out from under us). Hiding an overrun is worse than mislabelling one, so
+	// assume still running.
+	return true
 }
 
 // aliveOrTimedOut answers the overrun probe, which has already reached the
@@ -90,20 +97,31 @@ func (pd *pod) alive(ctx context.Context, state string) bool {
 // running — erasing an overrun breaks the guarantee, over-reporting one costs a
 // tool call.
 func (pd *pod) aliveOrTimedOut(ctx context.Context, state string) bool {
-	live, err := pd.probeAlive(ctx, state)
-	if err != nil {
-		return true
+	for range 2 {
+		live, err := pd.probeAlive(ctx, state)
+		if err == nil {
+			return live
+		}
+		if ctx.Err() != nil {
+			break
+		}
 	}
-	return live
+	return true
 }
 
 // probeAlive runs one liveness check in the pod: read the recorded command pid
-// and signal it with kill -0. A pod that has vanished answers gone.
+// and signal it with kill -0. A pod that has vanished answers gone. aliveScript
+// always exits 0 with its verdict, so a non-zero exit is the probe itself killed
+// or unable to run — an error, never a "dead" reading a command could arrange by
+// killing the probe process before it prints its answer.
 func (pd *pod) probeAlive(ctx context.Context, state string) (bool, error) {
-	out, _, err := pd.client.execOutput(ctx, pd.name, containerName,
+	out, code, err := pd.client.execOutput(ctx, pd.name, containerName,
 		[]string{"/bin/bash", "-c", aliveScript, "map-alive", state})
 	if err != nil {
 		return false, err
+	}
+	if code != 0 {
+		return false, fmt.Errorf("k8s: liveness probe exited %d", code)
 	}
 	return strings.TrimSpace(out) == "A", nil
 }

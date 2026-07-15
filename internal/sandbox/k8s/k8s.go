@@ -34,6 +34,11 @@ const containerName = "sandbox"
 // schedule and start. A pull of a cold image is the slow case.
 const readyTimeout = 2 * time.Minute
 
+// execErrProbeTimeout bounds the existence check execErr does to reclassify a
+// vanished pod, so a diagnostic Get cannot hang a call whose context has no
+// deadline of its own.
+const execErrProbeTimeout = 10 * time.Second
+
 // defaultNetSetupImage carries an `ip` command for the limited-networking init
 // container; the sandbox image is only guaranteed /bin/bash.
 const defaultNetSetupImage = "busybox"
@@ -95,8 +100,8 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		return nil, fmt.Errorf("k8s: get pod %s: %w", name, err)
 	}
 
-	_, err = pods.Create(ctx, p.podSpec(name, workdir, spec), metav1.CreateOptions{})
-	if apierrors.IsAlreadyExists(err) { // another executor created it first
+	_, createErr := pods.Create(ctx, p.podSpec(name, workdir, spec), metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(createErr) { // another executor created it first
 		existing, gerr := pods.Get(ctx, name, metav1.GetOptions{})
 		if gerr != nil {
 			return nil, fmt.Errorf("k8s: get pod %s: %w", name, gerr)
@@ -104,13 +109,29 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		if aerr := ours(existing, spec.SessionID); aerr != nil {
 			return nil, aerr
 		}
-	} else if err != nil {
-		return nil, fmt.Errorf("k8s: create pod %s: %w", name, err)
+	} else if createErr != nil {
+		return nil, fmt.Errorf("k8s: create pod %s: %w", name, createErr)
 	}
 	if err := p.waitReady(ctx, name); err != nil {
+		if createErr == nil {
+			// We created this pod and it never came up — a bad image wedges it in
+			// ImagePullBackOff, and RestartPolicyNever never retries. Delete it so
+			// a later attempt on this session starts clean instead of re-adopting
+			// the wedged pod and failing the same way. Best effort: the readiness
+			// failure is the error worth returning.
+			p.destroyByName(ctx, name)
+		}
 		return nil, err
 	}
 	return p.attach(name, workdir), nil
+}
+
+// destroyByName deletes a pod by name, best effort and with a zero grace period,
+// to reclaim one this call created but could not bring to readiness.
+func (p *Provider) destroyByName(ctx context.Context, name string) {
+	zero := int64(0)
+	_ = p.client.cs.CoreV1().Pods(p.client.namespace).Delete(ctx, name,
+		metav1.DeleteOptions{GracePeriodSeconds: &zero})
 }
 
 // ours refuses a pod that merely wears this session's derived name — one left by
@@ -127,19 +148,30 @@ func ours(pod *corev1.Pod, sessionID domain.ID) error {
 }
 
 func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec) *corev1.Pod {
+	// The sandbox runs untrusted tool commands and never calls the Kubernetes
+	// API, so it must not receive the namespace default ServiceAccount's token:
+	// were that account granted any RBAC, the agent's commands would inherit it.
+	// The provider drives the cluster with its own credentials, not the pod's.
+	noAutomount := false
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
 			Labels: map[string]string{sessionLabel: string(spec.SessionID)},
 		},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			RestartPolicy:                corev1.RestartPolicyNever,
+			AutomountServiceAccountToken: &noAutomount,
 			Containers: []corev1.Container{{
 				Name:            containerName,
 				Image:           spec.Image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				// Hold the pod open and guarantee the workdir exists. Nothing else
-				// runs here: every tool call is its own exec.
+				// runs here: every tool call is its own exec. Unlike the docker
+				// backend, which sets HostConfig.Init to reap orphaned tool
+				// subprocesses, a pod has no runtime-level init to inject and the
+				// arbitrary sandbox image cannot be assumed to bundle one; PID 1 is
+				// this bash. Orphans it does not reap linger as zombies until the
+				// pod is destroyed — cheap, but a divergence noted for a later fix.
 				Command: []string{"/bin/bash", "-c",
 					"mkdir -p " + shellQuote(workdir) + " && while :; do sleep 3600; done"},
 				WorkingDir: workdir,
@@ -158,13 +190,35 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec) *corev1.Pod 
 // flushes the pod netns's routing table (the containers share it), so the
 // sandbox is left with no route out — enforced before the sandbox container
 // starts, and independent of a NetworkPolicy-capable CNI.
+//
+// The flush is not assumed to have worked: an `ip` that silently no-ops, a CNI
+// that keeps routes out of the main table, or a NET_ADMIN cap that is granted
+// but ineffective would otherwise leave the default route intact while the init
+// container still exited 0 (the old trailing `; true`), starting a "limited"
+// sandbox with full egress. So the container re-reads the routing table it just
+// flushed and exits non-zero if any IPv4 route survives — with RestartPolicy
+// Never that fails the pod, and Provision surfaces the failure rather than
+// handing the agent a route out. This is not equivalent to `NetworkMode: none`
+// for every cluster: it does not remove the interface, so raw (AF_PACKET)
+// sockets can still reach the segment, and it only inspects the main IPv4 table,
+// so a policy-routing CNI or dual-stack IPv6 egress needs the reserved egress
+// proxy for a complete cutoff. It closes the common, and previously silent,
+// fail-open path.
 func (p *Provider) netSetup() corev1.Container {
+	const cutEgress = `
+ip route flush table main 2>/dev/null
+ip -6 route flush 2>/dev/null
+routes=$(grep -c -v '^Iface' /proc/net/route)
+if [ "$routes" != "0" ]; then
+  echo "netsetup: $routes IPv4 route(s) survived the flush; refusing egress" >&2
+  exit 1
+fi
+`
 	return corev1.Container{
 		Name:            "netsetup",
 		Image:           p.netSetupImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		Command: []string{"sh", "-c",
-			"ip route flush table main; ip -6 route flush 2>/dev/null; true"},
+		Command:         []string{"sh", "-c", cutEgress},
 		SecurityContext: &corev1.SecurityContext{
 			Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN"}},
 		},
@@ -207,6 +261,12 @@ func (p *Provider) attach(name, workdir string) *pod {
 	}
 }
 
+// pod is a handle to one session's sandbox, keyed by the derived pod name rather
+// than an immutable UID. A stale handle whose pod was destroyed and whose name a
+// later provision reused would therefore act on the new pod — a known limitation
+// versus the docker backend's immutable container id. In v1 a handle is dropped
+// at Destroy and never outlives its pod, so this stays theoretical; a UID
+// precondition is the fix for when that no longer holds.
 type pod struct {
 	client      *client
 	name        string
@@ -221,8 +281,12 @@ func (pd *pod) ID() string { return pd.name }
 // Destroy deletes the pod. A NotFound is success: removal has one way to miss,
 // and the pod's absence is the outcome asked for. It deletes with a zero grace
 // period so the pod object is gone at once rather than lingering in Terminating
-// for the default grace window — the contract is that the sandbox is final and
-// unusable the moment Destroy returns.
+// for the default grace window. The finality is at the API-object level: the pod
+// is gone from the API and its derived name is free to reuse the moment Destroy
+// returns. On a healthy node the kubelet tears the container down promptly; a
+// force delete does not block on the kubelet's confirmation, so a partitioned
+// node could in principle keep the old processes a while longer — they are
+// unreachable through this handle either way, and reaped when the node recovers.
 func (pd *pod) Destroy(ctx context.Context) error {
 	zero := int64(0)
 	err := pd.client.cs.CoreV1().Pods(pd.client.namespace).Delete(ctx, pd.name,
@@ -243,7 +307,9 @@ func (pd *pod) gone() error { return fmt.Errorf("%s: %w", pd.name, sandbox.ErrNo
 // its own message. remotecommand wraps a missing-pod 404 in a
 // connection-upgrade error that IsNotFound cannot see, so when the error is not
 // already a structured NotFound this confirms the pod's absence with a cheap
-// existence check before deciding.
+// existence check before deciding. That check is bounded on its own timeout so a
+// diagnostic Get cannot hang Exec/ReadFile/WriteFile when the caller's context
+// carries no deadline: past the bound, the original error is what surfaces.
 func (pd *pod) execErr(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
@@ -251,7 +317,9 @@ func (pd *pod) execErr(ctx context.Context, err error) error {
 	if apierrors.IsNotFound(err) {
 		return pd.gone()
 	}
-	if _, gerr := pd.client.cs.CoreV1().Pods(pd.client.namespace).Get(ctx, pd.name, metav1.GetOptions{}); apierrors.IsNotFound(gerr) {
+	gctx, cancel := context.WithTimeout(ctx, execErrProbeTimeout)
+	defer cancel()
+	if _, gerr := pd.client.cs.CoreV1().Pods(pd.client.namespace).Get(gctx, pd.name, metav1.GetOptions{}); apierrors.IsNotFound(gerr) {
 		return pd.gone()
 	}
 	return err
@@ -262,8 +330,16 @@ func (pd *pod) execErr(ctx context.Context, err error) error {
 // The watchdog inside the pod does the killing, but it is a process the command
 // can find and kill; Exec therefore watches the command's pid from outside and
 // treats any command that outlived its deadline as timed out no matter what exit
-// code it chose. What a command buys by killing its watchdog is overrunSlop of
-// unnoticed overrun.
+// code it chose.
+//
+// One axis is weaker than the docker backend. The pid Exec watches is recorded
+// in a file inside the sandbox — Kubernetes exposes no out-of-band handle on a
+// running exec the way Docker's exec-inspect does — so a command that both kills
+// its watchdog and overwrites that file to look dead can hide an overrun. That is
+// a deliberately malicious command, the same case the derived-name adoption
+// check (`ours`) does not defend. The honest runaway the deadline exists for
+// forges nothing: its real pid stays in the file, and killing its watchdog alone
+// buys only overrunSlop of unnoticed overrun before the probe catches it.
 //
 // The command runs in a background goroutine because it may block: a straggler
 // the command backgrounds inherits the exec's stdout and holds the stream open
@@ -412,6 +488,12 @@ func (pd *pod) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	}
 	switch res.code {
 	case 0:
+		if len(out.Bytes()) > sandbox.MaxFileBytes {
+			// readScript's size gate was evaded — a file that grew between the stat
+			// and the cat, say. The one-past-the-cap buffer makes the overrun
+			// visible here so oversize bytes never reach the caller as a success.
+			return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
+		}
 		return out.Bytes(), nil
 	case readNotExist:
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
@@ -431,9 +513,16 @@ func (pd *pod) ReadFile(ctx context.Context, path string) ([]byte, error) {
 func (pd *pod) WriteFile(ctx context.Context, path string, data []byte) error {
 	dir := gopath.Dir(path)
 	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir}
-	_, err := pd.client.exec(ctx, pd.name, containerName, argv, bytes.NewReader(data), io.Discard, io.Discard)
+	res, err := pd.client.exec(ctx, pd.name, containerName, argv, bytes.NewReader(data), io.Discard, io.Discard)
 	if err != nil {
 		return pd.execErr(ctx, err)
+	}
+	if res.code != 0 {
+		// The write failed in the pod — a directory where a file was meant to go, a
+		// read-only path, a full disk. A clean exec that exited non-zero wrote
+		// nothing; the docker backend surfaces the daemon's error here, so this
+		// must not read as a successful write.
+		return fmt.Errorf("k8s: write %s: exit %d", path, res.code)
 	}
 	return nil
 }
@@ -450,8 +539,16 @@ const (
 
 // readScript classifies $1 and cats it on success. $2 is the byte cap. ($0 is
 // the "map-read" label, so the real args start at $1 — bash -c's convention.)
+//
+// A symlink is rejected up front, as the docker backend rejects a non-regular
+// tar entry: `stat -c %s` on a link reports the link's own tiny size while `cat`
+// would follow it to a target of any size, so following one here would let a
+// short link past the size gate and read its large target. The `-h` test is
+// lstat, so it catches the link before the size and regular-file checks (which
+// follow it) ever run.
 const readScript = `
 f="$1"
+if [ -h "$f" ]; then exit 12; fi
 if [ ! -e "$f" ]; then exit 10; fi
 if [ -d "$f" ]; then exit 11; fi
 if [ ! -f "$f" ]; then exit 12; fi

@@ -183,6 +183,26 @@ func TestProvisionSurfacesCreateError(t *testing.T) {
 	}
 }
 
+func TestProvisionReclaimsUnreadyPodItCreated(t *testing.T) {
+	sid := domain.ID("sesn_reclaim")
+	cs := fake.NewClientset() // no pod yet: the existence Get 404s and Provision creates
+	cs.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		// The pod comes up Failed, so waitReady fails closed at once instead of
+		// polling until the two-minute readiness timeout.
+		a.(k8stesting.CreateAction).GetObject().(*corev1.Pod).Status.Phase = corev1.PodFailed
+		return false, nil, nil // fall through to the tracker, which stores the mutated pod
+	})
+	p := &Provider{client: &client{cs: cs, namespace: "default"}, netSetupImage: "busybox"}
+	if _, err := p.Provision(context.Background(), sandbox.Spec{SessionID: sid, Image: "img"}); err == nil {
+		t.Fatal("provision of a pod that never became ready: want an error")
+	}
+	// The pod it created must be gone, so a retry of this session starts clean
+	// rather than re-adopting a wedged pod and failing the same way.
+	if _, err := cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("Provision left its unready pod behind: get err = %v, want NotFound", err)
+	}
+}
+
 func TestDestroySurfacesError(t *testing.T) {
 	sid := domain.ID("sesn_derr")
 	cs := fake.NewClientset(readyPod(sid))

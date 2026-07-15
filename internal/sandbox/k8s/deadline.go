@@ -31,7 +31,11 @@ import "time"
 // The command's stderr is handed fd 3 (the exec's real stderr, saved first), and
 // the wrapper's own stderr is sent to /dev/null — so bash's "Killed" job
 // notification, printed to the wrapper's stderr when it reaps a SIGKILLed job,
-// never reaches the tool result. The command's stdout stays the exec's.
+// never reaches the tool result. The command's stdout stays the exec's. The
+// watchdog subshell closes its inherited fd 3 (`3>&-`): only the command and the
+// short-lived wrapper should hold the exec's stderr open, so the stream EOFs the
+// moment the command finishes — a watchdog still asleep in `sleep 1` must not
+// pin it open and delay every timed command's return by up to a poll interval.
 const execWrapper = `
 exec 3>&2 2>/dev/null
 setsid /bin/bash -c "$1" 2>&3 &
@@ -46,7 +50,7 @@ if [ "$2" != "0" ]; then
       n=$((n + 1))
     done
     kill -0 "$cmd" 2>/dev/null && kill -9 -"$cmd" 2>/dev/null
-  ) >/dev/null 2>&1 &
+  ) >/dev/null 2>&1 3>&- &
 fi
 wait "$cmd"
 echo "$?" > "$3.exit"
@@ -55,14 +59,28 @@ echo "$?" > "$3.exit"
 // aliveScript answers whether the command pid recorded in $1.pid is still alive.
 // A missing pid file (the command has not recorded itself yet) reads as alive so
 // a probe can never hide an overrun by racing the wrapper's first write.
+//
+// The pid lives in a file in the sandbox's own filesystem, unlike the docker
+// backend, whose probe reads the exec's pid from the daemon out of band where the
+// command can neither reach nor forge it. Kubernetes exposes no such out-of-band
+// handle, so this probe is best effort against a command that deliberately
+// overwrites its own pid file to look dead — the same malicious-tenant case the
+// derived-name adoption check (`ours`) does not defend either. Against an honest
+// runaway or an accident — the deadline machinery's actual job — it is faithful:
+// the honest command leaves its real pid, and the watchdog kills off that same
+// pid regardless of the file. The script always exits 0 with A or D, so a caller
+// treats any non-zero exit as the probe itself failing, not as a verdict.
 const aliveScript = `
 p=$(cat "$1.pid" 2>/dev/null)
 if [ -z "$p" ] || kill -0 "$p" 2>/dev/null; then echo A; else echo D; fi
 `
 
 // exitScript prints the recorded exit code, or nothing if the command has not
-// finished (the file is absent).
-const exitScript = `cat "$1.exit" 2>/dev/null`
+// finished (the file is absent), then removes the exec's state files. The read
+// happens once the probes are done (Exec has the verdict before it calls this),
+// so the cleanup cannot race a probe, and it keeps /tmp from accumulating two
+// files per command over a session's thousands of execs.
+const exitScript = `cat "$1.exit" 2>/dev/null; rm -f "$1.pid" "$1.exit" 2>/dev/null`
 
 // sigkillExit is what bash reports for a job killed by SIGKILL (128 + 9).
 const sigkillExit = 137
