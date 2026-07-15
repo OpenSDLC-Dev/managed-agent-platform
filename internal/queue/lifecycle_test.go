@@ -209,6 +209,71 @@ func TestGetWorkScopingAndFields(t *testing.T) {
 	}
 }
 
+// TestUpdateMetadataPatches pins the work-item metadata patch: a string value
+// upserts a key, an explicit delete removes it, absent keys are preserved, and
+// the merge is atomic (a single UPDATE, no read-modify-write). It is scoped like
+// the rest of the work API and leaves lifecycle state and timestamps untouched.
+func TestUpdateMetadataPatches(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
+	if _, err := q.Enqueue(ctx, pool, env, sessionID, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := q.Poll(ctx, env, time.Minute)
+
+	// Upsert two keys onto the default-empty metadata.
+	got, err := q.UpdateMetadata(ctx, env, w.ID, map[string]string{"a": "1", "b": "2"}, nil)
+	if err != nil {
+		t.Fatalf("update upsert: %v", err)
+	}
+	if len(got.Metadata) != 2 || got.Metadata["a"] != "1" || got.Metadata["b"] != "2" {
+		t.Errorf("after upsert metadata = %v, want a=1 b=2", got.Metadata)
+	}
+	// The patch must not transition the item: still queued after a poll.
+	if got.State != "queued" || got.AcknowledgedAt != nil || got.StartedAt != nil {
+		t.Errorf("metadata update disturbed lifecycle: %+v", got)
+	}
+
+	// A mixed patch: upsert a, delete b, add c.
+	got, err = q.UpdateMetadata(ctx, env, w.ID, map[string]string{"a": "9", "c": "3"}, []string{"b"})
+	if err != nil {
+		t.Fatalf("update mixed: %v", err)
+	}
+	if len(got.Metadata) != 2 || got.Metadata["a"] != "9" || got.Metadata["c"] != "3" {
+		t.Errorf("after mixed patch metadata = %v, want a=9 c=3 (b deleted)", got.Metadata)
+	}
+
+	// An empty patch is a no-op that still returns the item.
+	got, err = q.UpdateMetadata(ctx, env, w.ID, map[string]string{}, nil)
+	if err != nil || len(got.Metadata) != 2 {
+		t.Errorf("empty patch = %+v %v, want unchanged", got.Metadata, err)
+	}
+
+	// A nil patch (nil upserts AND nil deletes) is also a no-op, not corruption:
+	// the guards turn nil upserts into {} (else `metadata || 'null'` coerces the
+	// object into a JSON array) and nil deletes into an empty text[] (else
+	// `metadata - NULL` nulls the NOT NULL column). This exercises those guards,
+	// which no other caller reaches.
+	got, err = q.UpdateMetadata(ctx, env, w.ID, nil, nil)
+	if err != nil {
+		t.Fatalf("nil patch: %v", err)
+	}
+	if len(got.Metadata) != 2 || got.Metadata["a"] != "9" || got.Metadata["c"] != "3" {
+		t.Errorf("nil patch corrupted metadata = %v, want a=9 c=3 unchanged", got.Metadata)
+	}
+
+	// Scoping: an unknown id and a wrong-env id are both ErrWorkNotFound.
+	if _, err := q.UpdateMetadata(ctx, env, domain.NewID("work"), map[string]string{"x": "1"}, nil); !errors.Is(err, queue.ErrWorkNotFound) {
+		t.Errorf("update unknown = %v, want ErrWorkNotFound", err)
+	}
+	_, otherEnv := pgtest.NewSession(t, pool, "self_hosted")
+	if _, err := q.UpdateMetadata(ctx, otherEnv, w.ID, map[string]string{"x": "1"}, nil); !errors.Is(err, queue.ErrWorkNotFound) {
+		t.Errorf("update wrong env = %v, want ErrWorkNotFound", err)
+	}
+}
+
 // TestPollReclaimsExpiredLeases pins the reclaim scope: a still-queued (un-acked)
 // reservation whose window lapsed is re-offered, AND an acked (`starting`) or
 // heartbeating (`active`) item whose lease has lapsed (a dead worker) is
@@ -322,6 +387,9 @@ func TestLifecycleEndpointsRejectModelTurn(t *testing.T) {
 	if _, err := q.Stop(ctx, env, mtID, true); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("Stop(model_turn) = %v, want ErrWorkNotFound", err)
 	}
+	if _, err := q.UpdateMetadata(ctx, env, mtID, map[string]string{"x": "1"}, nil); !errors.Is(err, queue.ErrWorkNotFound) {
+		t.Errorf("UpdateMetadata(model_turn) = %v, want ErrWorkNotFound", err)
+	}
 	// The brain's item is untouched: still queued and claimable by the brain.
 	it, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
 	if err != nil || it == nil || it.ID != mtID {
@@ -355,6 +423,9 @@ func TestLifecycleEndpointsRejectCloudToolExec(t *testing.T) {
 	}
 	if _, err := q.Stop(ctx, cloudEnv, id, true); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("Stop(cloud tool_exec) = %v, want ErrWorkNotFound", err)
+	}
+	if _, err := q.UpdateMetadata(ctx, cloudEnv, id, map[string]string{"x": "1"}, nil); !errors.Is(err, queue.ErrWorkNotFound) {
+		t.Errorf("UpdateMetadata(cloud tool_exec) = %v, want ErrWorkNotFound", err)
 	}
 	// Poll serves only self_hosted, so a cloud environment yields nothing.
 	if w, err := q.Poll(ctx, cloudEnv, time.Minute); err != nil || w != nil {

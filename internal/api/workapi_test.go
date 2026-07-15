@@ -191,15 +191,20 @@ func TestWorkPollEmitsTraceContextHeader(t *testing.T) {
 }
 
 // TestWorkPollRejectsWrongMethodAndPath pins the wire error envelope on the
-// work subtree: a known route with the wrong method is 405, an unknown work
-// path is 404 — both authenticated first.
+// work subtree: a known route with a truly unhandled method is 405, an unknown
+// work path is 404 — both authenticated first. A POST to .../work/poll is NOT a
+// 405: it routes to the metadata update as work_id="poll". With a valid patch
+// body it 404s on the nonexistent "poll" item (as the reference's own POST
+// .../work/{work_id} does); with an empty body it is a 400, because body
+// validation (metadata is required) precedes the item lookup — so the not-found
+// contract holds only for a valid patch.
 func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 	s := newTestServer(t)
 	const key = "ek-route"
 	envID, _ := selfHostedWorker(t, s, key)
 	auth := map[string]string{"Authorization": "Bearer " + key}
 
-	res := s.doRaw(http.MethodPost, "/v1/environments/"+envID+"/work/poll", nil, auth)
+	res := s.doRaw(http.MethodPut, "/v1/environments/"+envID+"/work/poll", nil, auth)
 	raw, _ := io.ReadAll(res.Body)
 	res.Body.Close()
 	var body map[string]any
@@ -212,6 +217,106 @@ func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 	body = nil
 	_ = json.Unmarshal(raw, &body)
 	wantErr(t, res.StatusCode, body, http.StatusNotFound, "not_found_error")
+
+	// POST .../work/poll with a valid metadata body 404s on the nonexistent
+	// "poll" item — the documented routing-collision outcome.
+	res = s.doRaw(http.MethodPost, "/v1/environments/"+envID+"/work/poll",
+		map[string]any{"metadata": map[string]any{"a": "1"}}, auth)
+	raw, _ = io.ReadAll(res.Body)
+	res.Body.Close()
+	body = nil
+	_ = json.Unmarshal(raw, &body)
+	wantErr(t, res.StatusCode, body, http.StatusNotFound, "not_found_error")
+
+	// POST .../work/poll with an empty body is a 400 (metadata required), not a
+	// 404: validation runs before the item lookup.
+	res = s.doRaw(http.MethodPost, "/v1/environments/"+envID+"/work/poll", nil, auth)
+	raw, _ = io.ReadAll(res.Body)
+	res.Body.Close()
+	body = nil
+	_ = json.Unmarshal(raw, &body)
+	wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
+}
+
+// TestWorkUpdateMetadata pins the metadata patch endpoint (POST .../work/{work_id}):
+// a string value upserts, an explicit null deletes, the response is the updated
+// BetaSelfHostedWork, and the endpoint is scoped, authed, and validated like the
+// rest of the work API.
+func TestWorkUpdateMetadata(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-meta"
+	envID, sessionID := selfHostedWorker(t, s, key)
+	workID := s.enqueueAndPoll(t, envID, sessionID, key)
+	path := "/v1/environments/" + envID + "/work/" + workID
+
+	// Upsert two keys; the response is the updated work object with the metadata.
+	res, body, raw := s.workReq(t, http.MethodPost, path, key, map[string]any{
+		"metadata": map[string]any{"a": "1", "b": "2"},
+	})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("update status = %d, want 200 (body %q)", res.StatusCode, raw)
+	}
+	if body["type"] != "work" || body["id"] != workID {
+		t.Errorf("update returned %v, want the work object", body)
+	}
+	md, _ := body["metadata"].(map[string]any)
+	if md["a"] != "1" || md["b"] != "2" {
+		t.Errorf("metadata after upsert = %v, want a=1 b=2", md)
+	}
+
+	// A mixed patch: upsert a, delete b (explicit null), add c.
+	_, body, _ = s.workReq(t, http.MethodPost, path, key, map[string]any{
+		"metadata": map[string]any{"a": "9", "b": nil, "c": "3"},
+	})
+	md, _ = body["metadata"].(map[string]any)
+	if len(md) != 2 || md["a"] != "9" || md["c"] != "3" {
+		t.Errorf("metadata after mixed patch = %v, want a=9 c=3 (b deleted)", md)
+	}
+
+	// An empty-string value is a LITERAL upsert, NOT a delete — the work rule is
+	// emptyDeletes=false (unlike the environment rule, where "" also deletes). This
+	// pins the semantic so a future flip of the flag can't silently start dropping
+	// keys whose value is "".
+	_, body, _ = s.workReq(t, http.MethodPost, path, key, map[string]any{
+		"metadata": map[string]any{"c": ""},
+	})
+	md, _ = body["metadata"].(map[string]any)
+	if len(md) != 2 || md["a"] != "9" {
+		t.Errorf("metadata after empty-string patch = %v, want a=9 kept", md)
+	}
+	if v, ok := md["c"]; !ok || v != "" {
+		t.Errorf("empty-string value: c = %v (present=%v), want stored as \"\" (literal, not deleted)", v, ok)
+	}
+
+	// Validation: a body with no metadata field is 400 (the wire marks it required).
+	res, body, _ = s.workReq(t, http.MethodPost, path, key, map[string]any{})
+	wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
+
+	// An unknown top-level field is rejected, matching the reference's strict
+	// parameter validation and every other update endpoint here — a typo'd field
+	// must not vanish into accepted-but-ignored input.
+	res, body, _ = s.workReq(t, http.MethodPost, path, key, map[string]any{
+		"metadata": map[string]any{"a": "1"}, "metadate": map[string]any{"b": "2"},
+	})
+	wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
+
+	// A non-string, non-null metadata value is 400.
+	res, body, _ = s.workReq(t, http.MethodPost, path, key, map[string]any{"metadata": map[string]any{"a": 5}})
+	wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
+
+	// Scoping: an unknown work id is 404 (as POST .../work/poll also is).
+	res, body, _ = s.workReq(t, http.MethodPost, "/v1/environments/"+envID+"/work/work_nope", key, map[string]any{
+		"metadata": map[string]any{"a": "1"},
+	})
+	wantErr(t, res.StatusCode, body, http.StatusNotFound, "not_found_error")
+
+	// Auth: the management key (no Bearer) is rejected on the work API.
+	res2 := s.doRaw(http.MethodPost, path, map[string]any{"metadata": map[string]any{"a": "1"}},
+		map[string]string{"x-api-key": testKey})
+	res2.Body.Close()
+	if res2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("management key on work update = %d, want 401", res2.StatusCode)
+	}
 }
 
 // TestWorkPollClampsHugeReclaim pins that an over-large reclaim_older_than_ms is
