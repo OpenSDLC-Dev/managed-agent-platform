@@ -575,3 +575,94 @@ func TestUnauthenticatedRequestsAreNotRedirectedBeforeAuth(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkStats pins the work-queue stats endpoint (GET .../work/stats): the wire
+// shape (BetaSelfHostedWorkQueueStats), the depth→pending transition a reserving
+// poll drives, and the workers_polling integration — a poll carrying an
+// Anthropic-Worker-ID is counted, a header-less poll is not. Scoped and authed
+// like the rest of the work API.
+func TestWorkStats(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-stats"
+	envID, sessionID := selfHostedWorker(t, s, key)
+	auth := map[string]string{"Authorization": "Bearer " + key}
+	statsPath := "/v1/environments/" + envID + "/work/stats"
+
+	getStats := func() map[string]any {
+		t.Helper()
+		res := s.doRaw(http.MethodGet, statsPath, nil, auth)
+		raw, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("stats status = %d (body %q)", res.StatusCode, raw)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatalf("decode stats: %v (body %q)", err, raw)
+		}
+		return body
+	}
+
+	// Empty queue: full wire shape, all counts zero, oldest null.
+	body := getStats()
+	wantFields(t, body, "depth", "oldest_queued_at", "pending", "type", "workers_polling")
+	if body["type"] != "work_queue_stats" {
+		t.Errorf("type = %v, want work_queue_stats", body["type"])
+	}
+	if body["depth"] != float64(0) || body["pending"] != float64(0) || body["workers_polling"] != float64(0) {
+		t.Errorf("empty stats = %v, want zeros", body)
+	}
+	if body["oldest_queued_at"] != nil {
+		t.Errorf("oldest_queued_at = %v, want null on an empty queue", body["oldest_queued_at"])
+	}
+
+	// Enqueue a tool_exec item → depth 1, oldest set.
+	q := queue.New(s.pool)
+	if _, err := q.Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	body = getStats()
+	if body["depth"] != float64(1) || body["pending"] != float64(0) {
+		t.Errorf("after enqueue = depth %v pending %v, want 1/0", body["depth"], body["pending"])
+	}
+	if body["oldest_queued_at"] == nil {
+		t.Error("oldest_queued_at is null, want the queued item's timestamp")
+	}
+
+	// Poll carrying a worker id → the item is reserved (depth→pending) and the
+	// worker is counted.
+	res, _ := s.poll(t, envID, map[string]string{"Authorization": "Bearer " + key, "Anthropic-Worker-ID": "worker-1"})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("poll status = %d", res.StatusCode)
+	}
+	body = getStats()
+	if body["depth"] != float64(0) || body["pending"] != float64(1) {
+		t.Errorf("after reserving poll = depth %v pending %v, want 0/1", body["depth"], body["pending"])
+	}
+	if body["workers_polling"] != float64(1) {
+		t.Errorf("workers_polling = %v, want 1 (worker-1 polled)", body["workers_polling"])
+	}
+
+	// A poll without the Anthropic-Worker-ID header is not attributed to a worker.
+	if r, _ := s.poll(t, envID, auth); r.StatusCode != http.StatusOK {
+		t.Fatalf("header-less poll status = %d", r.StatusCode)
+	}
+	if body := getStats(); body["workers_polling"] != float64(1) {
+		t.Errorf("workers_polling after a header-less poll = %v, want still 1", body["workers_polling"])
+	}
+
+	// Auth: the management key is rejected on the work API.
+	res = s.doRaw(http.MethodGet, statsPath, nil, map[string]string{"x-api-key": testKey})
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("management key on stats = %d, want 401", res.StatusCode)
+	}
+
+	// Scoping: a key for another environment cannot read this one's stats.
+	otherEnv, _ := selfHostedWorker(t, s, "ek-stats-other")
+	res = s.doRaw(http.MethodGet, "/v1/environments/"+otherEnv+"/work/stats", nil, auth)
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("cross-env key on stats = %d, want 401", res.StatusCode)
+	}
+}

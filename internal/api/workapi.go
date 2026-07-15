@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -97,6 +98,15 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
+	// Record the worker's poll for the workers_polling stat before handing out
+	// work. It is a second round-trip on the poll path, but a single cheap upsert;
+	// a poll without the Anthropic-Worker-ID header is simply not attributed to a
+	// worker, and a tracking failure is best-effort — it must not fail the poll.
+	if wid := r.Header.Get("Anthropic-Worker-ID"); wid != "" {
+		if err := s.queue.RecordPoll(r.Context(), envID, wid); err != nil {
+			slog.WarnContext(r.Context(), "record worker poll", "environment", envID, "error", err)
+		}
+	}
 	item, err := s.queue.Poll(r.Context(), envID, reclaimWindow(r))
 	if err != nil {
 		writeError(w, r, err)
@@ -156,6 +166,40 @@ func (s *server) listWork(r *http.Request) (any, error) {
 		out.NextPage = &c
 	}
 	return out, nil
+}
+
+// workStatsWire is the BetaSelfHostedWorkQueueStats response shape. oldest_queued_at
+// is an RFC3339 timestamp or null (an empty queue); the other counts are always
+// present.
+type workStatsWire struct {
+	Depth          int64      `json:"depth"`
+	OldestQueuedAt *time.Time `json:"oldest_queued_at"`
+	Pending        int64      `json:"pending"`
+	Type           string     `json:"type"` // always "work_queue_stats"
+	WorkersPolling int64      `json:"workers_polling"`
+}
+
+// statsWork reports work-queue statistics (GET .../work/stats): the queue depth
+// (items waiting to be picked up), the pending count (polled but not acked), the
+// oldest queued item's timestamp, and the number of workers that have polled in
+// the last 30s. Scoped and authed like the rest of the work API — a worker sees
+// only its own environment's self_hosted queue.
+func (s *server) statsWork(r *http.Request) (any, error) {
+	envID, _, err := s.workScope(r) // stats has no work_id path value; ignore it
+	if err != nil {
+		return nil, err
+	}
+	st, err := s.queue.Stats(r.Context(), envID)
+	if err != nil {
+		return nil, err
+	}
+	return workStatsWire{
+		Depth:          st.Depth,
+		OldestQueuedAt: utcPtr(st.OldestQueuedAt),
+		Pending:        st.Pending,
+		Type:           "work_queue_stats",
+		WorkersPolling: st.WorkersPolling,
+	}, nil
 }
 
 // heartbeatWire is the BetaSelfHostedWorkHeartbeatResponse shape.

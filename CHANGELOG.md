@@ -12,6 +12,26 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Work-queue statistics (slice 8, PR C-stats) — `GET /v1/environments/{id}/work/stats` returning
+  `BetaSelfHostedWorkQueueStats`, the last worker-facing work endpoint; it **completes slice 8**. The
+  four required fields are a **derived view over Postgres** (the queue's source of truth), not a
+  second store: `depth` (queued items available to pick up — no reservation, or a lapsed one),
+  `pending` (queued items polled but not acked — a live reservation), `oldest_queued_at` (the oldest
+  queued item's timestamp, `null` on an empty queue), and `workers_polling` (distinct workers that
+  polled in the last 30s). `depth`/`pending` partition the queued state by whether a poll reservation
+  is live, on the same `lease_expires_at < now()` boundary `Poll` re-offers on; an acked (`starting`+)
+  item has left the queue and counts toward neither, since the wire's "acknowledged" is our `Ack`.
+  `workers_polling` needs poll-time tracking: migration `0006` adds
+  `worker_polls (environment_id, worker_id, last_polled_at)`, and `pollWork` reads the
+  `Anthropic-Worker-ID` header and upserts the row best-effort (a tracking failure never fails the
+  poll; a header-less poll is not attributed). The same upsert reaps rows aged past the 30s window
+  so the table stays bounded by recently-active workers — default worker ids are minted fresh per
+  process, so a bare upsert would leak one permanent row per restart. Scoped and authed like the
+  rest of the work API (self_hosted `tool_exec`, the caller's environment), and `workers_polling`
+  carries the same self_hosted gate as the other three fields, so all four report on one queue. The SDK's field docs are Redis-consumer-group-
+  native, which all but confirms the reference queue is Redis Streams; we keep Postgres as the source
+  of truth (the plan's `redis optional later`) and compute the same numbers from it — divergence
+  noted in STATE.md.
 - Work-item metadata update (slice 8, PR C-meta) — `POST /v1/environments/{id}/work/{work_id}`,
   the last worker-facing work endpoint besides `stats`. The body is `{"metadata": {…}}`: a string
   value upserts a key, an explicit null deletes it, and an omitted key is preserved — the patch
