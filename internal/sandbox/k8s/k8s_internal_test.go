@@ -187,9 +187,12 @@ func TestProvisionReclaimsUnreadyPodItCreated(t *testing.T) {
 	sid := domain.ID("sesn_reclaim")
 	cs := fake.NewClientset() // no pod yet: the existence Get 404s and Provision creates
 	cs.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
-		// The pod comes up Failed, so waitReady fails closed at once instead of
-		// polling until the two-minute readiness timeout.
-		a.(k8stesting.CreateAction).GetObject().(*corev1.Pod).Status.Phase = corev1.PodFailed
+		// The pod comes up Failed (so waitReady fails closed at once instead of
+		// polling to the readiness timeout) and carries a UID (so reclaimUnready's
+		// UID-guarded delete has an identity to match).
+		pod := a.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.Status.Phase = corev1.PodFailed
+		pod.UID = "uid-reclaim-test"
 		return false, nil, nil // fall through to the tracker, which stores the mutated pod
 	})
 	p := &Provider{client: &client{cs: cs, namespace: "default"}, netSetupImage: "busybox"}

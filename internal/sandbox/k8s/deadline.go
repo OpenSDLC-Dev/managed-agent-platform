@@ -28,17 +28,21 @@ import "time"
 // process inside the pod that the command can find and kill — so whether a call
 // actually timed out is decided outside the pod, by Exec, from the pid it guards
 // here.
-// The command's stderr is handed fd 3 (the exec's real stderr, saved first), and
-// the wrapper's own stderr is sent to /dev/null — so bash's "Killed" job
-// notification, printed to the wrapper's stderr when it reaps a SIGKILLed job,
-// never reaches the tool result. The command's stdout stays the exec's. The
-// watchdog subshell closes its inherited fd 3 (`3>&-`): only the command and the
-// short-lived wrapper should hold the exec's stderr open, so the stream EOFs the
-// moment the command finishes — a watchdog still asleep in `sleep 1` must not
-// pin it open and delay every timed command's return by up to a poll interval.
+// The command's stderr is handed fd 3 (the exec's real stderr, saved first) and
+// then fd 3 is closed in the command (`2>&3 3>&-`): its stderr still reaches the
+// exec, but the extra descriptor does not linger for a straggler to inherit and
+// hold the stream open long after the command exited (the docker backend, whose
+// command's stderr *is* the exec's, has no such spare fd). The wrapper's own
+// stderr is sent to /dev/null — so bash's "Killed" job notification, printed
+// when it reaps a SIGKILLed job, never reaches the tool result. The command's
+// stdout stays the exec's. The watchdog subshell likewise closes its inherited
+// fd 3 (`3>&-`): only the command and the short-lived wrapper should hold the
+// exec's stderr open, so the stream EOFs the moment the command finishes — a
+// watchdog still asleep in `sleep 1` must not pin it open and delay every timed
+// command's return by up to a poll interval.
 const execWrapper = `
 exec 3>&2 2>/dev/null
-setsid /bin/bash -c "$1" 2>&3 &
+setsid /bin/bash -c "$1" 2>&3 3>&- &
 cmd=$!
 echo "$cmd" > "$3.pid"
 if [ "$2" != "0" ]; then

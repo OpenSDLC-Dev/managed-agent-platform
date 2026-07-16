@@ -71,23 +71,25 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 // close while the process holding it is alive, so a close before the deadline is
 // a command that finished early.
 func (pd *pod) alive(ctx context.Context, state string) bool {
-	// Retry once, as the docker backend does: a single exec that fails for a
-	// transient reason should not decide a deadline.
-	for range 2 {
-		live, err := pd.probeAlive(ctx, state)
-		if err == nil {
-			return live
-		}
+	live, err := pd.probeAlive(ctx, state)
+	if err != nil {
 		// The stream closed (ctx cancelled), so the process it was holding is
-		// gone, and nobody is waiting on this answer any more.
+		// gone; or the probe would not answer (the daemon, or the probe process
+		// killed out from under us), and hiding an overrun is worse than
+		// mislabelling one, so assume still running.
+		//
+		// Unlike the docker backend this does NOT retry. Docker's probe is an
+		// unkillable daemon call, so a second look only recovers from a transient
+		// glitch; the k8s probe is a killable in-pod exec, so a retry could read a
+		// command that exited between the two looks as "dead" — and on the overrun
+		// path (aliveOrTimedOut) that would erase an overrun it must never erase.
+		// The safe default is sticky.
 		if ctx.Err() != nil {
 			return false
 		}
+		return true
 	}
-	// The probe would not answer (the daemon, or the probe process itself killed
-	// out from under us). Hiding an overrun is worse than mislabelling one, so
-	// assume still running.
-	return true
+	return live
 }
 
 // aliveOrTimedOut answers the overrun probe, which has already reached the
@@ -97,16 +99,16 @@ func (pd *pod) alive(ctx context.Context, state string) bool {
 // running — erasing an overrun breaks the guarantee, over-reporting one costs a
 // tool call.
 func (pd *pod) aliveOrTimedOut(ctx context.Context, state string) bool {
-	for range 2 {
-		live, err := pd.probeAlive(ctx, state)
-		if err == nil {
-			return live
-		}
-		if ctx.Err() != nil {
-			break
-		}
+	// Sticky by construction: this instant is the guarantee. Once the overrun
+	// instant is reached, any answer other than a clean "the command is gone"
+	// must read as still-running — an errored or killed probe, or a command that
+	// exits a moment later, cannot be allowed to revise an overrun away. So no
+	// retry: a second look that caught the command already exited would erase it.
+	live, err := pd.probeAlive(ctx, state)
+	if err != nil {
+		return true
 	}
-	return true
+	return live
 }
 
 // probeAlive runs one liveness check in the pod: read the recorded command pid

@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -38,6 +39,10 @@ const readyTimeout = 2 * time.Minute
 // vanished pod, so a diagnostic Get cannot hang a call whose context has no
 // deadline of its own.
 const execErrProbeTimeout = 10 * time.Second
+
+// reclaimTimeout bounds the detached cleanup of a pod that never became ready,
+// which runs off the caller's context so a cancelled caller still triggers it.
+const reclaimTimeout = 15 * time.Second
 
 // defaultNetSetupImage carries an `ip` command for the limited-networking init
 // container; the sandbox image is only guaranteed /bin/bash.
@@ -100,7 +105,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		return nil, fmt.Errorf("k8s: get pod %s: %w", name, err)
 	}
 
-	_, createErr := pods.Create(ctx, p.podSpec(name, workdir, spec), metav1.CreateOptions{})
+	created, createErr := pods.Create(ctx, p.podSpec(name, workdir, spec), metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(createErr) { // another executor created it first
 		existing, gerr := pods.Get(ctx, name, metav1.GetOptions{})
 		if gerr != nil {
@@ -115,23 +120,53 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	if err := p.waitReady(ctx, name); err != nil {
 		if createErr == nil {
 			// We created this pod and it never came up — a bad image wedges it in
-			// ImagePullBackOff, and RestartPolicyNever never retries. Delete it so
+			// ImagePullBackOff, and RestartPolicyNever never retries. Reclaim it so
 			// a later attempt on this session starts clean instead of re-adopting
-			// the wedged pod and failing the same way. Best effort: the readiness
-			// failure is the error worth returning.
-			p.destroyByName(ctx, name)
+			// the wedged pod. reclaimUnready deletes only the exact pod we created
+			// and only while it is still not ready, so it cannot delete a
+			// same-named replacement or one another executor has since adopted.
+			p.reclaimUnready(name, created.UID)
 		}
 		return nil, err
 	}
 	return p.attach(name, workdir), nil
 }
 
-// destroyByName deletes a pod by name, best effort and with a zero grace period,
-// to reclaim one this call created but could not bring to readiness.
-func (p *Provider) destroyByName(ctx context.Context, name string) {
+// reclaimUnready deletes a pod this call created but could not bring to
+// readiness, so a retry of the session is not poisoned by re-adopting a wedged
+// pod. It guards three ways against deleting the wrong thing:
+//   - its own short, detached context, so a cancelled caller still triggers the
+//     cleanup rather than stranding the wedged pod;
+//   - a re-Get that skips a name now holding a different pod (UID mismatch) or
+//     one that has since become ready (another executor may be using it);
+//   - a UID precondition on the delete, so an ABA between the Get and the Delete
+//     still cannot remove a replacement.
+func (p *Provider) reclaimUnready(name string, uid types.UID) {
+	if uid == "" {
+		return // no identity to guard the delete with; leave it for an operator
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), reclaimTimeout)
+	defer cancel()
+	pods := p.client.cs.CoreV1().Pods(p.client.namespace)
+	pod, err := pods.Get(ctx, name, metav1.GetOptions{})
+	if err != nil || pod.UID != uid || podReady(pod) {
+		return
+	}
 	zero := int64(0)
-	_ = p.client.cs.CoreV1().Pods(p.client.namespace).Delete(ctx, name,
-		metav1.DeleteOptions{GracePeriodSeconds: &zero})
+	_ = pods.Delete(ctx, name, metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+		Preconditions:      &metav1.Preconditions{UID: &uid},
+	})
+}
+
+// podReady reports whether the sandbox container is running and ready.
+func podReady(pod *corev1.Pod) bool {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == containerName && cs.Ready {
+			return true
+		}
+	}
+	return false
 }
 
 // ours refuses a pod that merely wears this session's derived name — one left by
@@ -241,10 +276,8 @@ func (p *Provider) waitReady(ctx context.Context, name string) error {
 		if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 			return fmt.Errorf("k8s: pod %s is %s before it became ready", name, pod.Status.Phase)
 		}
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.Name == containerName && cs.Ready {
-				return nil
-			}
+		if podReady(pod) {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -412,7 +445,9 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 		// The command outlived the watchdog that should have killed it — it can
 		// kill that watchdog — so the timeout is called here. Its exit code is
 		// not ours to collect: it has not exited. Whatever is still running dies
-		// with the pod.
+		// with the pod. This path skips readExit, so this exec's state files are
+		// not cleaned — but only an overrunning command reaches it, and its pod is
+		// being abandoned, so the residue dies with the pod rather than accruing.
 		return sandbox.ExecResult{
 			Stdout: stdout.String(), Stderr: stderr.String(),
 			ExitCode: sigkillExit, TimedOut: true, Truncated: stdout.truncated || stderr.truncated,

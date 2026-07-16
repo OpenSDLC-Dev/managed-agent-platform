@@ -31,10 +31,13 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   tool commands must not inherit the namespace account's cluster credentials); `ReadFile` rejects
   symlinks and re-checks the size cap on the bytes actually read (a short symlink cannot smuggle a
   large target past the gate); `WriteFile` surfaces a failed write instead of reporting success; the
-  liveness probe retries and reads a killed probe as unknown rather than "dead"; `Provision` deletes a
-  Pod it created but could not bring to readiness so a retry starts clean; and the deadline watchdog no
-  longer pins the exec's stderr open, so a quick timed command returns at once rather than a poll
-  interval late. The in-Pod pid the deadline verdict reads is forgeable by a *malicious* command
+  liveness probe reads a killed probe as unknown (assume-alive) rather than "dead", and the overrun
+  verdict stays sticky — never retried — so a probe killed at the deadline cannot erase an overrun;
+  `Provision` reclaims a Pod it created but could not bring to readiness (guarded by the created UID and
+  a detached context, so it never deletes a same-named replacement or an in-use adopted Pod) so a retry
+  starts clean; and the deadline wrapper closes its spare stderr fd in both the command and the watchdog
+  so neither a straggler nor a sleeping watchdog pins the stream, and a quick timed command returns at
+  once rather than a poll interval late. The in-Pod pid the deadline verdict reads is forgeable by a *malicious* command
   (Kubernetes exposes no out-of-band handle to replace it) — which, like the derived-name adoption
   check, the single-tenant model leaves out of scope; an honest runaway forges nothing. Adds
   `k8s.io/client-go`. **Not yet wired into `cmd/`**: config-driven backend selection and a Helm chart
