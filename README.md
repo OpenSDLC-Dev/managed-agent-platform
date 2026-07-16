@@ -68,6 +68,23 @@ make vet fmt-check         # lint
 make verify                # the whole Go gate (CI additionally runs its helm/compose jobs)
 ```
 
+Tests come in tiers. The first two run on every PR and call no model; the rest drive a
+real endpoint, so they cost money and are **opt-in by an environment variable** — a
+configured `.env` supplies the endpoint, never the consent to spend it on. Once opted in,
+missing configuration **fails** rather than skipping: a safety net that quietly skips
+itself when its credentials rot is not a safety net.
+
+| Tier | Opt-in | What it proves |
+|---|---|---|
+| Unit & contract | — | logic, wire shapes, scripted provider streams |
+| Dependency integration | — | real Postgres, Docker, and Kubernetes (hard-fail without them) |
+| Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn per provider adapter against your endpoint |
+| Live-system evals | `RUN_EVALS=1` | whole sessions: API → brain → real model → sandbox → SSE ([plan](./docs/EVALS_PLAN.md)) |
+
+Configure the endpoint once in a gitignored repo-root `.env` — `MODEL_PROTOCOL`
+(`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID` — and the live tiers
+read it (the environment wins over the file). Never commit real credentials.
+
 **Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres (and an optional Jaeger):
 
 ```bash
