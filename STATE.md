@@ -8,7 +8,7 @@ never here. The verifier enforces both on its docs-consistency rung.
 
 ## Snapshot
 
-- **Last updated:** 2026-07-16
+- **Last updated:** 2026-07-17
 - **v1 is complete.** All delivery slices (0–9) landed and verified: wire-compatible
   control-plane CRUD, append-only event log + SSE streaming, config-driven model providers
   (Anthropic-protocol and OpenAI-compatible), the brain orchestration loop, executor +
@@ -21,7 +21,9 @@ never here. The verifier enforces both on its docs-consistency rung.
   ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)) — the first of
   the two gaps before a self-hosted deploy is turn-key (the other: published container
   images + a real helm-install acceptance, [#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75)).
-- **Release:** none cut yet; everything is under CHANGELOG's `[Unreleased]`.
+- **Release:** **v0.1.0** (2026-07-17) — the complete v1 loop; the `v0.1.0` tag is created
+  on main at the release PR's squash-merge. New work accumulates under CHANGELOG's
+  `[Unreleased]`.
 
 ## Where things live
 
