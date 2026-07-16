@@ -4,7 +4,7 @@ An open-source, self-hostable platform for **long-horizon AI agents**, written i
 
 Run the whole thing on-prem or in your own VPC — **your data and your compute never leave your boundary**.
 
-> **Status: early development.** The platform runs tools end-to-end with a human-in-the-loop gate: the control-plane API, the session event log, the config-driven model-provider layer, the brain orchestration loop, the executor and its Docker sandbox, and permission policies are in place. The real `ant` CLI drives the API and streams a model turn back live (against any Anthropic-protocol endpoint); when the model calls a built-in tool (`bash`/`read`/`write`/`edit`/`glob`/`grep`) the brain checks its permission policy — an `always_allow` tool runs immediately in a per-session container and the turn resumes, while an `always_ask` tool suspends the session with a `requires_action` stop_reason and waits for a `user.tool_confirmation` (allow runs it, deny answers it with an error). The **BYOC worker now runs end to end, including recovery** — a `cmd/worker` process in your own network polls the wire-compatible work API, runs a self-hosted session's tools in a local Docker sandbox, and posts the results back, so tool execution can happen entirely on your compute. If a worker dies mid-run, its stranded work is reclaimed once its lease lapses and another worker re-runs the still-unanswered tools, so an interrupted session recovers rather than hanging. Tracing now spans the process boundary: a session's model turns and the tool runs a BYOC worker executes for it share one OTel trace, so a distributed run reads as a single trace end to end. Work items also take a client-managed metadata patch, and a queue-stats endpoint reports queue depth, pending count, oldest-queued time, and workers-polling — completing the wire-compatible work API and the BYOC worker slice. A Kubernetes sandbox provider and Helm chart are next. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
+> **Status: early development.** The platform runs tools end-to-end with a human-in-the-loop gate: the control-plane API, the session event log, the config-driven model-provider layer, the brain orchestration loop, the executor and its Docker sandbox, and permission policies are in place. The real `ant` CLI drives the API and streams a model turn back live (against any Anthropic-protocol endpoint); when the model calls a built-in tool (`bash`/`read`/`write`/`edit`/`glob`/`grep`) the brain checks its permission policy — an `always_allow` tool runs immediately in a per-session container and the turn resumes, while an `always_ask` tool suspends the session with a `requires_action` stop_reason and waits for a `user.tool_confirmation` (allow runs it, deny answers it with an error). The **BYOC worker now runs end to end, including recovery** — a `cmd/worker` process in your own network polls the wire-compatible work API, runs a self-hosted session's tools in a local Docker sandbox, and posts the results back, so tool execution can happen entirely on your compute. If a worker dies mid-run, its stranded work is reclaimed once its lease lapses and another worker re-runs the still-unanswered tools, so an interrupted session recovers rather than hanging. Tracing now spans the process boundary: a session's model turns and the tool runs a BYOC worker executes for it share one OTel trace, so a distributed run reads as a single trace end to end. Work items also take a client-managed metadata patch, and a queue-stats endpoint reports queue depth, pending count, oldest-queued time, and workers-polling — completing the wire-compatible work API and the BYOC worker slice. A **Kubernetes sandbox provider** now runs a session's tools in a disposable per-session Pod and passes the same contract suite as the Docker backend, so tools can execute on either backend identically; wiring the executor to select it and a Helm chart are next. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
 
 ## Why
 
@@ -52,10 +52,13 @@ Deferred past v1 (seams reserved, not implemented): secret vaults and egress cre
 
 ## Development
 
-Requires **Go 1.25+** and Docker (the storage and API contract tests start
+Requires **Go 1.26+** and Docker (the storage and API contract tests start
 their own disposable Postgres containers, and the sandbox, shell, toolset, and
-executor tests start a disposable `debian:stable-slim` container). A missing daemon is a
-hard test failure, not a skip, so the coverage gate cannot be hollowed out.
+executor tests start a disposable `debian:stable-slim` container). The Kubernetes
+sandbox provider's contract test additionally needs a cluster — a local
+[kind](https://kind.sigs.k8s.io) cluster works, and CI provisions one. A missing
+daemon or cluster is a hard test failure, not a skip, so the coverage gate cannot
+be hollowed out.
 
 ```bash
 go build ./...             # build

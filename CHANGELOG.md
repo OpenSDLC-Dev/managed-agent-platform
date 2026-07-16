@@ -12,6 +12,36 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Kubernetes sandbox provider (slice 9) — `internal/sandbox/k8s`, a `sandbox.Provider` that runs each
+  session's tools in a disposable per-session Pod over the Kubernetes API (`client-go`). It passes the
+  **same** `sandboxtest` contract suite as the Docker backend — the plan requires both to behave
+  identically — including the crown-jewel deadline invariants. Because Kubernetes couples an exec's
+  exit code to its (straggler-holdable) stream and exposes no `exec-inspect`, the in-Pod wrapper runs
+  the command as a background child under `setsid` and records its pid and, once finished, its exit
+  code to files; Exec keeps the Docker backend's two-instant liveness discipline but answers it with a
+  second `exec` (read the pid, `kill -0`) and reads the exit code from the file, so a straggler holding
+  the stream open can delay neither. `limited` networking fails closed like Docker's `NetworkMode:
+  none`: an init container flushes the Pod netns's routing table and then re-reads it, refusing to
+  start the sandbox if any IPv4 route survived — so a flush that silently no-ops cannot leave a
+  "limited" sandbox with a route out (a policy-routing CNI or dual-stack IPv6 still needs the reserved
+  egress proxy for a complete cutoff). The contract test runs against a **kind** cluster (a missing
+  cluster is a hard failure, not a skip, mirroring the Docker daemon rule); CI provisions kind before
+  the coverage run, and fake-clientset unit tests cover the error branches a live cluster cannot easily
+  stage. Hardened after the dual review: the sandbox Pod mounts **no ServiceAccount token** (untrusted
+  tool commands must not inherit the namespace account's cluster credentials); `ReadFile` rejects
+  symlinks and re-checks the size cap on the bytes actually read (a short symlink cannot smuggle a
+  large target past the gate); `WriteFile` surfaces a failed write instead of reporting success; the
+  liveness probe reads a killed probe as unknown (assume-alive) rather than "dead", and the overrun
+  verdict stays sticky — never retried — so a probe killed at the deadline cannot erase an overrun;
+  `Provision` reclaims a Pod it created but could not bring to readiness (guarded by the created UID and
+  a detached context, so it never deletes a same-named replacement or an in-use adopted Pod) so a retry
+  starts clean; and the deadline wrapper closes its spare stderr fd in both the command and the watchdog
+  so neither a straggler nor a sleeping watchdog pins the stream, and a quick timed command returns at
+  once rather than a poll interval late. The in-Pod pid the deadline verdict reads is forgeable by a *malicious* command
+  (Kubernetes exposes no out-of-band handle to replace it) — which, like the derived-name adoption
+  check, the single-tenant model leaves out of scope; an honest runaway forges nothing. Adds
+  `k8s.io/client-go`. **Not yet wired into `cmd/`**: config-driven backend selection and a Helm chart
+  are the remaining slice-9 work.
 - Work-queue statistics (slice 8, PR C-stats) — `GET /v1/environments/{id}/work/stats` returning
   `BetaSelfHostedWorkQueueStats`, the last worker-facing work endpoint; it **completes slice 8**. The
   four required fields are a **derived view over Postgres** (the queue's source of truth), not a
