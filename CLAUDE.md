@@ -122,14 +122,14 @@ Re-invoking with `scriptPath` alone starts a fresh run; adding `resumeFromRunId`
 
 #### Codex side
 
-The `review` subcommand of `codex-companion.mjs` passes `--model` but **never passes `--effort`**, so it silently inherits `model_reasoning_effort` from `~/.codex/config.toml` (currently `ultra`). That default is now strong, but it is the user's setting and can change back, and a low-effort review of a concurrency-heavy diff returns shallow findings and misses the real defects. Do not edit the user's `~/.codex/config.toml`. To pin effort yourself regardless of the config, run the review through the `task` subcommand: it honors `--effort`, and it sandboxes `read-only` when `--write` is omitted.
+The `review` subcommand of `codex-companion.mjs` passes `--model` but **never passes `--effort`**, so it silently inherits `model_reasoning_effort` from `~/.codex/config.toml` (currently `ultra`). That default is now strong, but it is the user's setting and can change back, and a low-effort review of a concurrency-heavy diff returns shallow findings and misses the real defects. Do not edit the user's `~/.codex/config.toml`. Run the review through the `task` subcommand instead (it sandboxes `read-only` when `--write` is omitted). Note that `ultra` is **not** a `--effort` value: the CLI's `--effort` accepts only `none`/`minimal`/`low`/`medium`/`high`/`xhigh` and rejects `--effort ultra` outright — `ultra` exists only as the config's `model_reasoning_effort`. So for the strongest review, **omit** `--effort` so the run inherits the config's `ultra`:
 
 ```
-node "<plugin-root>/scripts/codex-companion.mjs" task --model gpt-5.6-sol --effort ultra \
+node "<plugin-root>/scripts/codex-companion.mjs" task --model gpt-5.6-sol \
   "<read-only review prompt: name the diff range and the invariants to attack>"
 ```
 
-Dropping both flags now inherits these same defaults (`gpt-5.6-sol` + `ultra`) from the config, so a bare `task "<prompt>"` runs the strongest review — but pin them when you want a review that can't drift with a config change.
+Omitting `--effort` inherits the config defaults (`gpt-5.6-sol` + `ultra`), the strongest review. When you need an effort that can't drift with the user's config, pin `--effort xhigh` — the strongest value the CLI accepts, one notch below `ultra` but guaranteed regardless of config. Do **not** pass `--effort ultra`; the CLI rejects it.
 
 Model choice on this machine (`codex-cli 0.144.4`): **`gpt-5.6-sol` is the strongest usable model, and it is the config default.** It is verified real rather than a silent fallback — an invented name such as `gpt-5-9-totally-fake` is rejected with HTTP 400, while `gpt-5.6-sol` runs clean with no fallback-metadata warning (it returned a substantive `ultra` review and a clean trivial-task probe). Under the older `codex-cli 0.144.1` it was rejected as requiring a newer CLI than the then-published `@openai/codex`; the `0.144.4` upgrade lifted that. `gpt-5.5` still runs clean and is the fallback if `gpt-5.6-sol` ever regresses; `gpt-5.3-codex-spark` (the `spark` alias) works but is weaker. Re-check all three when the CLI is upgraded.
 
