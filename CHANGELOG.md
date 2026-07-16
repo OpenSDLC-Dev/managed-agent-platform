@@ -820,6 +820,23 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Changed
 
+- Docs restructure: STATE.md became a slim session-resumption file (~60-line size budget) —
+  its completed-work narrative (slices 0–9 and the slice-8 acceptance record) moved
+  **verbatim** to the new `docs/HISTORY.md` (append-only archive), and the backlog moved
+  entirely to GitHub issues (21 backfilled from flags that were buried in the old archive,
+  #58–#78; the rest were already tracked). Two new registries: `docs/DIVERGENCES.md` — the
+  single record of deliberate wire divergences and unconfirmed inferences (the verifier's
+  wire-compat allowlist; 37 confirmed + 20 inferred entries consolidated from the old
+  STATE.md sections) — and `docs/REFERENCE_PROJECTS.md` — the read-only reference checkouts
+  as `<github-url>, <relative-local-path>` lines with the authority order (no absolute
+  paths remain in the repo). CLAUDE.md, AGENTS.md, README.md, and the verifier agent
+  definition now point at the registries; the verifier's docs rung enforces the STATE.md
+  size budget. README's status paragraph cut to a summary, and the `ant` CLI invocation
+  docs corrected repo-wide: management commands ignore `ANTHROPIC_BASE_URL` (the CLI builds
+  its client with `WithoutEnvironmentDefaults` and the global `--base-url` flag has no env
+  source — verified in the `anthropic-cli` checkout), so examples now pass `--base-url`
+  explicitly; only the worker/auth subcommands honor the env var.
+
 - The CI coverage gate's denominator now covers logic packages only.
   `internal/pgtest` and `internal/sandbox/sandboxtest` are test support —
   packages at all only because a test in another package must import

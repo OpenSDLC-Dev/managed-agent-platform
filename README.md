@@ -4,7 +4,7 @@ An open-source, self-hostable platform for **long-horizon AI agents**, written i
 
 Run the whole thing on-prem or in your own VPC — **your data and your compute never leave your boundary**.
 
-> **Status: early development.** The platform runs tools end-to-end with a human-in-the-loop gate: the control-plane API, the session event log, the config-driven model-provider layer, the brain orchestration loop, the executor and its Docker sandbox, and permission policies are in place. The real `ant` CLI drives the API and streams a model turn back live against any Anthropic-protocol endpoint (an OpenAI-compatible provider adapter also ships — contract-tested, with the same env-gated real-endpoint integration test as the Anthropic adapter — so the model backend can equally point at OpenAI, vLLM, or an internal gateway); when the model calls a built-in tool (`bash`/`read`/`write`/`edit`/`glob`/`grep`) the brain checks its permission policy — an `always_allow` tool runs immediately in a per-session container and the turn resumes, while an `always_ask` tool suspends the session with a `requires_action` stop_reason and waits for a `user.tool_confirmation` (allow runs it, deny answers it with an error). The **BYOC worker now runs end to end, including recovery** — a `cmd/worker` process in your own network polls the wire-compatible work API, runs a self-hosted session's tools in a local Docker sandbox, and posts the results back, so tool execution can happen entirely on your compute. If a worker dies mid-run, its stranded work is reclaimed once its lease lapses and another worker re-runs the still-unanswered tools, so an interrupted session recovers rather than hanging. Tracing now spans the process boundary: a session's model turns and the tool runs a BYOC worker executes for it share one OTel trace, so a distributed run reads as a single trace end to end. Work items also take a client-managed metadata patch, and a queue-stats endpoint reports queue depth, pending count, oldest-queued time, and workers-polling — completing the wire-compatible work API and the BYOC worker slice. The **real `ant beta:worker` CLI** has now driven this path end to end against the local stack — polling a self-hosted session's work, running its `bash` tool, and posting the result back so the session resumes to idle (an acceptance that also surfaced and fixed a session-events pagination-limit mismatch with the reference). A **Kubernetes sandbox provider** now runs a session's tools in a disposable per-session Pod and passes the same contract suite as the Docker backend, so tools can execute on either backend identically; the executor and worker select the backend from config (`SANDBOX_BACKEND`), and a **Helm chart** (`deploy/helm/managed-agent-platform`) deploys the control plane, brain, and executor — the executor on the Kubernetes backend — alongside an optional in-cluster Postgres. See [Roadmap](#roadmap) and [CHANGELOG.md](./CHANGELOG.md).
+> **Status: the v1 loop is complete.** The wire-compatible control-plane API, the append-only session event log with SSE streaming, config-driven model providers (Anthropic-protocol and OpenAI-compatible), the brain orchestration loop, tool execution in per-session Docker or Kubernetes sandboxes, and permission policies with human-in-the-loop approval all work end to end. A BYOC worker runs a self-hosted session's tools on your own compute over the wire-compatible work API, with dead-worker recovery and one OTel trace across the process boundary. The real `ant` CLI — including `ant beta:worker` — drives all of it unchanged. Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm); see [CHANGELOG.md](./CHANGELOG.md) for what has landed and the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) for what's next.
 
 ## Why
 
@@ -41,14 +41,15 @@ Two security invariants, adopted from the reference design:
 
 ## Roadmap
 
-v1 targets the core loop: `create agent → create environment → create session → send a message → the model calls a tool → an executor runs it in a sandbox → results stream back over SSE → a human approves a gated tool → the session goes idle`.
+v1 delivered the core loop: `create agent → create environment → create session → send a message → the model calls a tool → an executor runs it in a sandbox → results stream back over SSE → a human approves a gated tool → the session goes idle`.
 
-Progress is tracked in two places, updated in the same PR as every change:
+Progress is tracked in:
 
 - **[CHANGELOG.md](./CHANGELOG.md)** — what has landed, newest first.
-- **[STATE.md](./STATE.md)** — live slice-by-slice delivery status and what's next.
+- **[GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues)** — the backlog and open questions.
+- **[STATE.md](./STATE.md)** — the current snapshot; the full delivery history lives in [docs/HISTORY.md](./docs/HISTORY.md).
 
-Deferred past v1 (seams reserved, not implemented): secret vaults and egress credential injection, scheduled deployments, memory stores, multi-agent threads, skills, and multi-tenant RBAC/SSO.
+Deferred past v1 (seams reserved, not implemented — each tracked as an issue): secret vaults and egress credential injection, scheduled deployments, memory stores, multi-agent threads, skills, and multi-tenant RBAC/SSO.
 
 ## Development
 
@@ -74,7 +75,7 @@ cp .env.example .env          # set CONTROLPLANE_API_KEY
 docker compose up --build     # control plane on http://localhost:8080 (loopback)
 ```
 
-Then drive it with the real CLI: `ANTHROPIC_BASE_URL=http://localhost:8080 ANTHROPIC_API_KEY=<key> ant beta:agents list`. The stack idles until you point the brain at your model endpoint (copy `model-providers.example.json` and set `MODEL_PROVIDERS_FILE`). See [`deploy/compose/README.md`](./deploy/compose/README.md) for details; production deploys use the [Helm chart](./deploy/helm).
+Then drive it with the real CLI: `ANTHROPIC_API_KEY=<key> ant --base-url http://localhost:8080 beta:agents list` (management commands take `--base-url` explicitly; they ignore `ANTHROPIC_BASE_URL`, which only the worker/auth subcommands honor). The stack idles until you point the brain at your model endpoint (copy `model-providers.example.json` and set `MODEL_PROVIDERS_FILE`). See [`deploy/compose/README.md`](./deploy/compose/README.md) for details; production deploys use the [Helm chart](./deploy/helm).
 
 Contributions are welcome. Please read [CLAUDE.md](./CLAUDE.md) first — it documents the architecture, the non-negotiable design principles, and the working conventions (notably: **never guess at the wire schema**; verify against the real `ant` CLI).
 

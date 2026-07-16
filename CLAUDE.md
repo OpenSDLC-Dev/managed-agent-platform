@@ -11,7 +11,7 @@ We take Anthropic's **Claude Managed Agents** as our **reference implementation*
 
 Full design doc: `~/.claude/plans/agent-managed-agent-encapsulated-moonbeam.md` (approved plan; read it before large changes).
 
-**Current progress: [STATE.md](./STATE.md)** — which delivery slice is done, what's next, and the open questions. Read it at the start of a session; update it whenever a slice changes status.
+**Current state: [STATE.md](./STATE.md)** — a slim resumption file: snapshot, where everything lives, environment gotchas. Read it at the start of a session. It has a hard size budget: completed-work narrative goes to [docs/HISTORY.md](./docs/HISTORY.md) (same PR), the backlog lives in GitHub issues — never grow STATE.md with either.
 
 ## Core architecture — decouple brain / hands / session
 
@@ -33,27 +33,20 @@ Processes (each a `cmd/` binary): `controlplane` (REST + event log + queue + sta
 4. **Model providers are config-driven.** A provider is constructed from config: `protocol` (`anthropic`|`openai`) · `model` · `base_url` · `api_key` (+ optional headers). The Anthropic-protocol provider must work against **any** endpoint speaking Anthropic Messages (gateway, proxy, self-hosted model) — never hard-code `api.anthropic.com`. `model` string → provider is resolved via the `model_providers` config/table.
 5. **Sessions are NOT bound to an end-user.** Scoping keys are `org`/`workspace`/`project` (reserved now, single-tenant defaults in v1). There is no `user_id` on a session (this is a deliberate divergence from adk's `AppName`+`UserID`). End-user ↔ session ownership is an **application-layer** concern; the platform stays user-agnostic. Apps use session `metadata` and the audit-only `created_by` as hooks.
 
+Two standing product decisions travel with these principles: **v1's first-class scenario is a general task agent** (bash + file + web toolset — git/repo mounting is *not* a first-class v1 concern), and the project is **Apache-2.0, pure open source — no open-core edition gating**.
+
 ## Wire-compatibility rules
 
 - Mirror Anthropic's resource model, paths, JSON fields, and **ID prefixes**: `agent_` `env_` `sesn_` (accept `session_`) `sevt_` `work_` `vlt_` `sesrsc_` `depl_` `drun_` `file_` `skill_`.
 - Accept and ignore `anthropic-version` / `anthropic-beta` headers; honor `?beta=true` where the reference does.
 - Auth: management via `x-api-key`; workers via environment key (`Authorization: Bearer`, scoped to one environment's work queue).
 - Event taxonomy is `{domain}.{action}` — see the plan's Component 2 for the full list. SSE deltas use `content_delta` (NOT Messages API's `content_block_delta`).
-- Never guess at a wire shape. Resolution order: public docs → the local reference checkouts below (the Go SDK's typed schema first, then the `ant` CLI source) → recording a real `ant` CLI stream for behavior the types can't capture (ordering, SSE framing, defaults).
+- Never guess at a wire shape. Resolution order: public docs → the local reference checkouts (the Go SDK's typed schema first, then the `ant` CLI source; see [docs/REFERENCE_PROJECTS.md](./docs/REFERENCE_PROJECTS.md)) → recording a real `ant` CLI stream for behavior the types can't capture (ordering, SSE framing, defaults).
+- Deliberate divergences from the reference, and inferences about reference behavior not yet confirmed, are recorded in **[docs/DIVERGENCES.md](./docs/DIVERGENCES.md)** — the single registry. The verifier's wire-compat rung and external reviewers resolve intentional mismatches against it; a divergence not in the registry is a finding.
 
 ## Reference source checkouts (local)
 
-Three read-only local checkouts serve as ground truth where the public docs are silent. In a new session, `/add-dir` them when needed.
-
-- `/Users/hele/Projects/anthropic-sdk-go` — official Go SDK (also our primary dependency). The **typed wire schema** for everything managed-agents: `betasessionevent.go` (full event taxonomy, both directions), `betaagent.go` / `betaenvironment.go` / `betasession.go` (resources), `betaenvironmentwork.go` (work API).
-- `/Users/hele/Projects/anthropic-cli` — the real `ant` CLI source. `pkg/cmd/beta*.go` and `pkg/cmd/worker.go` show **client-side behavior**: polling, SSE/stream handling, defaults, headers.
-- `/Users/hele/Projects/claude-code-source` — Claude Code source. **Design reference only** for harness concerns (agent loop, tool orchestration, permission flow). Not a wire-schema source; never copy code from it.
-
-A fourth checkout exists for ideas only — it is NOT ground truth for anything:
-
-- `/Users/hele/Projects/adk-go` — google adk-go source. Governed entirely by design principle 2 above: a source of ideas, never a foundation. Consult it for *how they solved a problem* (e.g. loop structure, session service patterns), then implement Anthropic-native. Never copy its abstractions, its genai types, or its wire shapes; where it conflicts with the Anthropic model, it loses by rule.
-
-Caveats: these checkouts track the API's tip and already contain post-plan surface (`agent.thread_*` events, memory-store betas). Wire-compat is judged against the SDK version pinned in `go.mod` (once that dependency lands — today `go.mod` has none); new surface in the checkouts is not an invitation to build ahead of the current slice.
+Four read-only local checkouts serve as ground truth and design reference. Their GitHub URLs, repo-relative local paths, per-project roles, authority order, and caveats live in **[docs/REFERENCE_PROJECTS.md](./docs/REFERENCE_PROJECTS.md)**. In short: `anthropic-sdk-go` is the typed wire schema, `anthropic-cli` is client-side behavior, `claude-code-source` is harness design reference only (never a wire-schema source, never copy code from it), and `adk-go` is ideas only per design principle 2. In a new session, `/add-dir` them when needed.
 
 ## Repo layout
 
@@ -93,14 +86,14 @@ CI (`.github/workflows/ci.yml`) runs the build/vet/gofmt/test commands above and
 
 `.env` (gitignored) holds the model endpoint for real end-to-end integration verification: `MODEL_PROTOCOL` (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID`. Nothing consumes it yet — the provider slice's integration tests will read these variables. Never commit real credentials.
 
-Verify wire-compat end-to-end by pointing the real `ant` CLI at the local server (`ANTHROPIC_BASE_URL=http://localhost:PORT`) and running `ant beta:agents/environments/sessions ...` and `ant beta:worker poll`.
+Verify wire-compat end-to-end by pointing the real `ant` CLI at the local server with `--base-url http://localhost:PORT` and running `ant beta:agents/environments/sessions ...` and `ant beta:worker poll`. (Management commands ignore `ANTHROPIC_BASE_URL` — the CLI builds its client with `WithoutEnvironmentDefaults` and its global `--base-url` flag has no env source; only the worker/auth subcommands honor the env var.)
 
 ## Iteration workflow (branch → review → PR → CI → squash merge)
 
 Every change lands through a PR; **never commit directly to `main`**.
 
 1. Branch off a fresh `main`: `git checkout main && git pull && git checkout -b <type>/<short-name>` (e.g. `feat/telemetry`, `fix/event-seq`, `chore/ci`).
-2. Develop on the branch (TDD as below). **Docs move with code, in the same PR:** a slice's STATE.md status flip; a CHANGELOG.md entry for every notable change; README.md (status line, development notes) whenever the change alters what it describes — README's roadmap section deliberately defers to STATE.md and CHANGELOG.md instead of tracking slices itself. A doc that overclaims or lags the code is a defect, not a nice-to-have — the verifier checks docs consistency as a dedicated rung.
+2. Develop on the branch (TDD as below). **Docs move with code, in the same PR:** STATE.md's snapshot updated (within its size budget) with the work's narrative appended to docs/HISTORY.md; a CHANGELOG.md entry for every notable change; a docs/DIVERGENCES.md entry for any new wire divergence or inference; README.md (status line, development notes) whenever the change alters what it describes — README's roadmap section deliberately defers to CHANGELOG.md and the issue tracker instead of tracking work itself. A doc that overclaims or lags the code is a defect, not a nice-to-have — the verifier checks docs consistency as a dedicated rung.
 3. Run the **verifier subagent** (see "Independent verification"); fix findings before review.
 4. **Dual code review**, one pass each: `/codex:review --background` (Codex reviewer) and `/code-review` (Claude reviewer). `/codex:review` is user-invocable only (`disable-model-invocation`); from a session, run the underlying reviewer as a background Bash task (backgrounding comes from the Bash task, not a flag), where `<plugin-root>` is the newest directory under `~/.claude/plugins/cache/openai-codex/codex/`. **Model and reasoning effort are not defaults you may accept — a weak reviewer finds nothing and its silence reads like a clean bill of health.** See "Reviewer settings" below; it governs both reviewers and the verifier. Branch scope reviews the **committed** diff against `main` — commit before launching it, or uncommitted fixes escape the review. Read the task's output file when it completes. Address findings from both reviewers; if a fix changes behavior, re-run the verifier. **Verify every finding against the source before acting on it** — both reviewers have produced confidently-argued findings that were false (see the `dec.More()` note in `internal/provider/config.go`); refute with evidence rather than "fixing" working code.
 5. Push and open the PR (`gh pr create`); include the verifier verdict and both review outcomes in the description.
@@ -161,7 +154,7 @@ These bias toward caution over speed. For trivial changes, use judgment.
 
 Concretely here: "add validation" → write the failing test for invalid input first; "fix the bug" → write the reproducing test first; "refactor X" → tests green before and after. Strong success criteria let you loop to done without check-ins; weak ones ("make it work") don't.
 
-**Independent verification (definition of done).** The implementer never certifies their own work. Before a slice or any nontrivial change is declared done — before STATE.md flips a status, before a commit that claims working behavior — dispatch the **`verifier` subagent** (`.claude/agents/verifier.md`) with what changed and the success criteria. It re-derives expectations from the docs, reruns every check itself (`go test -count=1`, no cached results), exercises runtime behavior where a surface exists, diffs wire-compat claims field-by-field against the reference checkouts, and checks that the project docs (STATE.md, README.md, CHANGELOG.md) correctly describe the change. A FAIL or unresolved blocker finding means the work is **not done**: fix, then re-verify. Pin its model (see "Reviewer settings") — an unpinned verifier inherits the session's, and a weak verifier certifies anything. The verifier's verdict and evidence belong in the final report to the user.
+**Independent verification (definition of done).** The implementer never certifies their own work. Before any nontrivial change is declared done — before STATE.md's snapshot claims new behavior, before a commit that claims working behavior — dispatch the **`verifier` subagent** (`.claude/agents/verifier.md`) with what changed and the success criteria. It re-derives expectations from the docs, reruns every check itself (`go test -count=1`, no cached results), exercises runtime behavior where a surface exists, diffs wire-compat claims field-by-field against the reference checkouts, and checks that the project docs (STATE.md, README.md, CHANGELOG.md, docs/HISTORY.md) correctly describe the change. A FAIL or unresolved blocker finding means the work is **not done**: fix, then re-verify. Pin its model (see "Reviewer settings") — an unpinned verifier inherits the session's, and a weak verifier certifies anything. The verifier's verdict and evidence belong in the final report to the user.
 
 **Report only what you can evidence.** Before reporting progress, audit each claim against a tool result from this session — a test run, a diff, a CLI transcript. Only report work you can point to evidence for; if something is not yet verified, say so explicitly. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.
 

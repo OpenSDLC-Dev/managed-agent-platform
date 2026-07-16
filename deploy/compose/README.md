@@ -20,7 +20,7 @@ docker compose up --build
 ```
 
 - Control plane API: `http://localhost:8080` (bound to loopback by default; see below).
-- Drive it with the real CLI: `ANTHROPIC_BASE_URL=http://localhost:8080 ANTHROPIC_API_KEY=<CONTROLPLANE_API_KEY> ant beta:agents list`.
+- Drive it with the real CLI: `ANTHROPIC_API_KEY=<CONTROLPLANE_API_KEY> ant --base-url http://localhost:8080 beta:agents list` (management commands ignore `ANTHROPIC_BASE_URL`; only the worker/auth subcommands honor it).
 
 The stack comes up out of the box — the brain loads the committed
 `model-providers.example.json` and idles (its placeholder endpoint isn't real, so
