@@ -1,0 +1,37 @@
+{
+  "enabledPlugins": {
+    "gopls-lsp@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(go vet:*)",
+      "Bash(go test:*)",
+      "Bash(go list:*)",
+      "Bash(gofmt -l:*)",
+      "Bash(make build:*)",
+      "Bash(make crossbuild:*)",
+      "Bash(make vet:*)",
+      "Bash(make fmt-check:*)",
+      "Bash(make test:*)",
+      "Bash(make cover-gate:*)",
+      "Bash(make verify:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(gh pr checks:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh issue list:*)",
+      "Bash(gh issue view:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)",
+      "Read(./model-providers.json)",
+      "Read(./**/model-providers.json)"
+    ]
+  }
+}
