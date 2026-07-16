@@ -26,7 +26,7 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   secrets (`CONTROLPLANE_API_KEY`, Postgres password) come from gitignored files with committed `.example`
   templates. Verified end to end: the image builds, all services start clean, migrations apply, and the
   control plane serves the API (authenticated list `200`, missing key `401`, wire-shaped validation `400`
-  with a `request_id`). This is the local stack the slice-8 `ant beta:worker` acceptance will run against.
+  with a `request_id`). This is the local stack the slice-8 `ant beta:worker` acceptance ran against — now passed.
 - OpenAI-compatible provider adapter — `internal/provider/openai`, the second model-backend protocol
   (deferred from slice 4), now registered in `cmd/brain`'s provider registry under `"openai"` alongside
   `"anthropic"`. A `model_providers` route with `protocol: openai` points the brain at OpenAI, a vLLM
@@ -840,6 +840,20 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Fixed
 
+- Session-events list now accepts `limit` up to **1000** (was capped at 100).
+  The real `ant beta:worker` reconciles a session by listing its events with
+  `limit=1000` (anthropic-sdk-go `betasessiontoolrunner.go`), and the SDK's
+  event-list param documents no 100 cap the way the agents list does, so our
+  shared cap `400`ed the worker's reconcile (event-list) request — it could
+  never read the outstanding `agent.tool_use`, and no self-hosted tool ever ran.
+  1000 is the value the worker requests and the reference's general list
+  convention ("1 to 1000" on most SDK list params); it is our compatible bound,
+  not a proven reference cap. The other lists (agents/sessions/environments/work)
+  keep the 100 cap — agents documents "maximum 100" explicitly. **Found by the
+  slice-8 `ant beta:worker` end-to-end acceptance** (see STATE.md): with the fix,
+  a real `ant beta:worker` polls a self-hosted session's work, runs `bash`
+  locally (its in-process runner), posts the `user.tool_result`, and the session
+  resumes to idle.
 - Helm chart example `base_url` no longer carries a trailing `/v1`. The provider
   adapter appends the protocol path itself (`/v1/messages` for anthropic,
   `/v1/chat/completions` for openai), so an operator copying the old example

@@ -277,7 +277,7 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 	id := normalizeSessionID(r.PathValue("id"))
 	q := r.URL.Query()
 
-	page, err := parsePage(q)
+	page, err := parsePageMax(q, maxEventLimit)
 	if err != nil {
 		return nil, err
 	}
