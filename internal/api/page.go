@@ -19,6 +19,15 @@ import (
 const (
 	defaultLimit = 20
 	maxLimit     = 100
+	// The session-events list accepts limit up to 1000, not maxLimit: the
+	// reference worker's SessionToolRunner reconciles a session by listing its
+	// events with limit=1000 (anthropic-sdk-go betasessiontoolrunner.go), which a
+	// 100 cap 400s before it can run a tool. 1000 is the value the worker requests
+	// and the reference's general list convention (documented "1 to 1000" on most
+	// SDK list params); the event-list param itself documents no explicit maximum,
+	// so this is our compatible upper bound (some cap is needed — an unbounded
+	// limit is a query-cost risk), not a proven reference cap.
+	maxEventLimit = 1000
 )
 
 // cursor directions: fetch rows after the position (next) or before it (prev).
@@ -48,11 +57,17 @@ type pageParams struct {
 }
 
 func parsePage(q url.Values) (pageParams, error) {
+	return parsePageMax(q, maxLimit)
+}
+
+// parsePageMax is parsePage with an explicit maximum limit, for the one list
+// (session events) whose reference cap differs from maxLimit.
+func parsePageMax(q url.Values, max int) (pageParams, error) {
 	p := pageParams{limit: defaultLimit}
 	if s := q.Get("limit"); s != "" {
 		n, err := strconv.Atoi(s)
-		if err != nil || n < 1 || n > maxLimit {
-			return p, errInvalid("limit must be an integer between 1 and %d", maxLimit)
+		if err != nil || n < 1 || n > max {
+			return p, errInvalid("limit must be an integer between 1 and %d", max)
 		}
 		p.limit = n
 	}
