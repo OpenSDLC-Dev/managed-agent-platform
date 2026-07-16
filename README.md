@@ -66,6 +66,16 @@ go test ./...              # unit + contract tests
 go vet ./... && gofmt -l . # lint
 ```
 
+**Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres (and an optional Jaeger):
+
+```bash
+cd deploy/compose
+cp .env.example .env          # set CONTROLPLANE_API_KEY
+docker compose up --build     # control plane on http://localhost:8080 (loopback)
+```
+
+Then drive it with the real CLI: `ANTHROPIC_BASE_URL=http://localhost:8080 ANTHROPIC_API_KEY=<key> ant beta:agents list`. The stack idles until you point the brain at your model endpoint (copy `model-providers.example.json` and set `MODEL_PROVIDERS_FILE`). See [`deploy/compose/README.md`](./deploy/compose/README.md) for details; production deploys use the [Helm chart](./deploy/helm).
+
 Contributions are welcome. Please read [CLAUDE.md](./CLAUDE.md) first — it documents the architecture, the non-negotiable design principles, and the working conventions (notably: **never guess at the wire schema**; verify against the real `ant` CLI).
 
 ## License

@@ -12,6 +12,21 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Local development stack (docker compose) — a repo-root multi-stage `Dockerfile` builds all four binaries
+  into one image (at the filesystem root, `/controlplane` …, so the same image also satisfies the Helm
+  chart's `command: ["/controlplane"]` — one image for both deploy paths), and
+  `deploy/compose/docker-compose.yml` runs the three server processes (controlplane, brain, executor)
+  against a bundled Postgres, with an optional Jaeger behind an `observability` profile. It is the compose
+  companion to the Helm chart (same binaries, wired for a laptop); the BYOC worker is excluded (it runs on
+  customer compute). App services wait on Postgres's `pg_isready` healthcheck and auto-apply migrations on
+  connect (advisory-locked, so concurrent startup is safe). The executor uses the docker sandbox backend
+  over the mounted host Docker socket. The control-plane port binds loopback by default (the committed key
+  is a placeholder); the brain's model-routing mount defaults to the committed example, so a bare
+  `docker compose up` starts cleanly, and `MODEL_PROVIDERS_FILE` points it at a real endpoint. Routing and
+  secrets (`CONTROLPLANE_API_KEY`, Postgres password) come from gitignored files with committed `.example`
+  templates. Verified end to end: the image builds, all services start clean, migrations apply, and the
+  control plane serves the API (authenticated list `200`, missing key `401`, wire-shaped validation `400`
+  with a `request_id`). This is the local stack the slice-8 `ant beta:worker` acceptance will run against.
 - OpenAI-compatible provider adapter — `internal/provider/openai`, the second model-backend protocol
   (deferred from slice 4), now registered in `cmd/brain`'s provider registry under `"openai"` alongside
   `"anthropic"`. A `model_providers` route with `protocol: openai` points the brain at OpenAI, a vLLM

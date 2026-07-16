@@ -1,0 +1,8 @@
+[
+  {
+    "model": "*",
+    "protocol": "anthropic",
+    "base_url": "https://your-gateway.example",
+    "api_key": "sk-replace-me"
+  }
+]
