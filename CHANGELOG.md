@@ -926,3 +926,6 @@ entry below landed pre-release and ships here.
   and the chart README — and both operator-facing spots now state the convention
   (base_url is the API root) so it cannot silently regress. Matches what the compose
   stack's `model-providers.example.json` and README already document.
+
+[Unreleased]: https://github.com/OpenSDLC-Dev/managed-agent-platform/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/OpenSDLC-Dev/managed-agent-platform/releases/tag/v0.1.0

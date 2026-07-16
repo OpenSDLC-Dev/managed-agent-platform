@@ -21,8 +21,9 @@ never here. The verifier enforces both on its docs-consistency rung.
   ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)) — the first of
   the two gaps before a self-hosted deploy is turn-key (the other: published container
   images + a real helm-install acceptance, [#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75)).
-- **Release:** **v0.1.0** (2026-07-17), tagged on main — the complete v1 loop. New work
-  accumulates under CHANGELOG's `[Unreleased]`.
+- **Release:** **v0.1.0** (2026-07-17) — the complete v1 loop; the `v0.1.0` tag is created
+  on main at the release PR's squash-merge. New work accumulates under CHANGELOG's
+  `[Unreleased]`.
 
 ## Where things live
 
