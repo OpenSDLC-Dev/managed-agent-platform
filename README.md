@@ -65,7 +65,7 @@ be hollowed out.
 make build                 # build (go build ./...)
 make test                  # unit + contract tests (go test -count=1, with coverage profile)
 make vet fmt-check         # lint
-make verify                # everything CI gates on, in one target
+make verify                # the whole Go gate (CI additionally runs its helm/compose jobs)
 ```
 
 **Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres (and an optional Jaeger):

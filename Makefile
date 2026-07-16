@@ -3,6 +3,20 @@
 # names targets instead of duplicating commands. Mirrors
 # .github/workflows/ci.yml — a new check lands in both, in the same PR.
 
+# Multi-command recipes open with `set -euo pipefail`, matching (and slightly
+# hardening) the `bash -e` GitHub Actions ran the old inline steps with: a
+# failing `gofmt -l` or `go list` aborts the step instead of passing an empty
+# result downstream. Deliberately NOT via .SHELLFLAGS — macOS ships GNU Make
+# 3.81, which silently ignores it (introduced in 3.82); the inline `set` works
+# on every make. bash (not sh) is required for pipefail.
+SHELL := /usr/bin/env bash
+
+# Serial always: cover-gate consumes the coverage.out that test writes, and
+# that ordering lives in the `verify` prerequisite list — which only serial
+# make honors. Nothing here benefits from -j (go build/test parallelize
+# internally), so refuse it rather than gate on a stale profile.
+.NOTPARALLEL:
+
 .PHONY: build crossbuild vet fmt-check test cover-gate verify
 
 build:
@@ -17,7 +31,8 @@ vet:
 	go vet ./...
 
 fmt-check:
-	@unformatted="$$(gofmt -l .)"; \
+	@set -euo pipefail; \
+	unformatted="$$(gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:" >&2; \
 		echo "$$unformatted" >&2; \
@@ -30,10 +45,16 @@ fmt-check:
 # assertion branches that run only when a suite fails, so counting them
 # measures nothing and dilutes the gate, exactly as cmd/ main glue would.
 test:
-	go test -count=1 \
-		-coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|sandboxtest)$$' | paste -sd, -)" \
-		-coverprofile=coverage.out ./...
+	@set -euo pipefail; \
+	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|sandboxtest)$$' | paste -sd, -)"; \
+	set -x; \
+	go test -count=1 -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
 
+# Gates the coverage.out that `make test` (or the CI test step) just wrote —
+# it deliberately does NOT depend on `test`, so CI can run the two as separate
+# named checks without re-running the suite. Standalone `make cover-gate`
+# therefore judges whatever profile is on disk: run it via `make verify` or
+# right after `make test`.
 # Exact total from the profile: `go tool cover -func` rounds to 0.1%, which
 # would let ~89.95% pass as "90.0". Duplicate blocks (same package covered by
 # several test binaries) merge with OR semantics; an empty profile fails closed.

@@ -18,11 +18,12 @@ points below are the ones most often violated by tools that skip it:
 - **Never commit to `main`.** Every change goes branch → PR → CI green →
   squash merge.
 - **Checks that must pass:** `make verify` — the root Makefile is the single
-  executable source of the gate (build, linux/arm cross-compile of
+  executable source of the Go gate (build, linux/arm cross-compile of
   `./internal/...`, vet, gofmt, `go test -count=1`, and total statement
   coverage **≥ 90%** over the logic packages of `./internal/...`). CI invokes
-  the same targets. The store and API tests start their own Postgres in
-  Docker and hard-fail without it; the K8s sandbox test needs a cluster.
+  the same targets, and additionally gates its `helm` and `compose` jobs.
+  The store and API tests start their own Postgres in Docker and hard-fail
+  without it; the K8s sandbox test needs a cluster.
 - **Docs move with code, in the same PR:** STATE.md's snapshot updated
   (within its size budget — completed-work narrative goes to
   docs/HISTORY.md, the backlog to GitHub issues), a CHANGELOG.md entry for

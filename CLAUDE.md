@@ -73,10 +73,10 @@ Primary deps: `github.com/anthropics/anthropic-sdk-go`, `github.com/modelcontext
 
 > Go 1.26 is installed (via Homebrew). Docker is available; `psql` is **not** — use the Postgres container.
 
-The merge gate has one executable source — the root **`Makefile`**; prose and CI name its targets instead of duplicating commands:
+The Go merge gate has one executable source — the root **`Makefile`**; prose and CI name its targets instead of duplicating commands (CI additionally runs its `helm` and `compose` jobs — chart lint/render and a compose smoke test — which stay in ci.yml, and a PR needs the whole workflow green):
 
 ```
-make verify               # the whole gate: build + crossbuild + vet + fmt-check + test + cover-gate
+make verify               # the whole Go gate: build + crossbuild + vet + fmt-check + test + cover-gate
 make build crossbuild     # host build + linux/arm cross-compile of ./internal/... (worker portability)
 make vet fmt-check        # lint
 make test cover-gate      # go test -count=1 with the coverage profile, then the ≥90% gate

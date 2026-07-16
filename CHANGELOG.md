@@ -820,9 +820,16 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Changed
 
-- The merge gate has one executable source: a root `Makefile` (`build` / `crossbuild` /
-  `vet` / `fmt-check` / `test` / `cover-gate`, umbrella `make verify`) mirroring what CI ran,
-  byte-identically — the `ci` and `coverage` CI jobs now invoke the make targets, and
+- The Go merge gate has one executable source: a root `Makefile` (`build` / `crossbuild` /
+  `vet` / `fmt-check` / `test` / `cover-gate`, umbrella `make verify`; CI's `helm` and
+  `compose` jobs stay CI-only and remain required) carrying the same
+  checks CI ran, semantically identical (recipe formatting adapted to make — `$$` escaping,
+  line continuations — and slightly hardened: multi-command recipes open with
+  `set -euo pipefail`, so a failing `gofmt -l` or `go list` aborts instead of passing an
+  empty result downstream — done inline rather than via `.SHELLFLAGS`, which macOS's GNU
+  Make 3.81 silently ignores; `.NOTPARALLEL` keeps `make verify` from gating a stale
+  coverage profile under `-j`) —
+  the `ci` and `coverage` CI jobs now invoke the make targets, and
   CLAUDE.md / AGENTS.md / README.md name targets instead of duplicating raw commands (the
   prose copies had already drifted: `go test` without `-count=1`, no arm cross-compile).
   The verifier agent's ladder collapses its static+tests rungs into one `make verify` rung —
