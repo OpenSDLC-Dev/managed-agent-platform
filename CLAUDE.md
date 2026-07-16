@@ -73,16 +73,17 @@ Primary deps: `github.com/anthropics/anthropic-sdk-go`, `github.com/modelcontext
 
 > Go 1.26 is installed (via Homebrew). Docker is available; `psql` is **not** — use the Postgres container.
 
-Intended commands (wire up in a `Makefile` as the code lands):
+The Go merge gate has one executable source — the root **`Makefile`**; prose and CI name its targets instead of duplicating commands (CI additionally runs its `helm` and `compose` jobs — chart lint/render and a compose smoke test — which stay in ci.yml, and a PR needs the whole workflow green):
 
 ```
-go build ./...            # build all binaries
-go test ./...             # unit + contract tests
-go vet ./... && gofmt -l . # lint
+make verify               # the whole Go gate: build + crossbuild + vet + fmt-check + test + cover-gate
+make build crossbuild     # host build + linux/arm cross-compile of ./internal/... (worker portability)
+make vet fmt-check        # lint
+make test cover-gate      # go test -count=1 with the coverage profile, then the ≥90% gate
 docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres(+Jaeger)
 ```
 
-CI (`.github/workflows/ci.yml`) runs the build/vet/gofmt/test commands above and additionally enforces a **total statement coverage gate ≥ 90%**, computed exactly from the coverage profile over the **logic packages** under `./internal/...`. Deliberately outside the denominator: `cmd/` main glue, and the test-support packages (`internal/pgtest`, `internal/sandbox/sandboxtest`) whose only uncovered statements are the assertion branches that fire when a suite fails.
+CI (`.github/workflows/ci.yml`) invokes the same targets, so the gate cannot drift between the docs, the verifier, and the merge check. The coverage gate is **total statement coverage ≥ 90%** over the **logic packages** under `./internal/...` — deliberately outside the denominator: `cmd/` main glue and the test-support packages (`internal/pgtest`, `internal/sandbox/sandboxtest`), whose only uncovered statements are assertion branches that fire when a suite fails. `make test` needs Docker (store/API/sandbox suites) and a Kubernetes cluster (the K8s sandbox contract test; a local kind cluster works) — a missing daemon or cluster is a hard failure, not a skip.
 
 `.env` (gitignored) holds the model endpoint for real end-to-end integration verification: `MODEL_PROTOCOL` (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID`. Nothing consumes it yet — the provider slice's integration tests will read these variables. Never commit real credentials.
 

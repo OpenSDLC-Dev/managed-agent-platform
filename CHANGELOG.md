@@ -820,6 +820,25 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Changed
 
+- The Go merge gate has one executable source: a root `Makefile` (`build` / `crossbuild` /
+  `vet` / `fmt-check` / `test` / `cover-gate`, umbrella `make verify`; CI's `helm` and
+  `compose` jobs stay CI-only and remain required) carrying the same
+  checks CI ran, semantically identical (recipe formatting adapted to make — `$$` escaping,
+  line continuations — and slightly hardened: multi-command recipes open with
+  `set -euo pipefail`, so a failing `gofmt -l` or `go list` aborts instead of passing an
+  empty result downstream — done inline rather than via `.SHELLFLAGS`, which macOS's GNU
+  Make 3.81 silently ignores; `.NOTPARALLEL` keeps `make verify` from gating a stale
+  coverage profile under `-j`) —
+  the `ci` and `coverage` CI jobs now invoke the make targets, and
+  CLAUDE.md / AGENTS.md / README.md name targets instead of duplicating raw commands (the
+  prose copies had already drifted: `go test` without `-count=1`, no arm cross-compile).
+  The verifier agent's ladder collapses its static+tests rungs into one `make verify` rung —
+  closing the hole where the checker ran *less* than the merge gate (no cross-compile, no
+  coverage gate) — and gains two ground-rule upgrades: it derives the change scope itself
+  (`git diff main...HEAD`) instead of trusting the handed description, and it may prove a
+  doubted test can fail by breaking the behavior in a throwaway scratchpad copy (never the
+  checkout) and running that single test there. Wire-compat is judged against the
+  `go.mod`-pinned SDK (v1.56.0), stated explicitly on the ladder.
 - Docs restructure: STATE.md became a slim session-resumption file (~60-line size budget) —
   its completed-work narrative (slices 0–9 and the slice-8 acceptance record) moved
   **verbatim** to the new `docs/HISTORY.md` (append-only archive), and the backlog moved
