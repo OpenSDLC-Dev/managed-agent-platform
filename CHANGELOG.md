@@ -820,6 +820,20 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Changed
 
+- CLAUDE.md went on a diet (168 → 138 lines) so the always-loaded context carries policy,
+  not procedure: the ~30-line "Reviewer settings" section (model/effort pinning, codex CLI
+  lore) moved to the new on-demand **`.claude/skills/run-reviews/SKILL.md`** — which also
+  absorbs the `/code-review`-on-Opus-4.8 rule and the codex wait-stall workaround — and
+  three working-convention paragraphs were compressed to their load-bearing rules. Two
+  workflow rules were added: **review tiering** (a docs-only diff, judged by
+  `git diff --name-only` being exclusively `*.md`, may take a single code reviewer, always
+  keeping the verifier + its docs-consistency rung) and **merge discipline** (squash-merge
+  requires CI green *and* zero unresolved review threads, each settled by a fix or an
+  evidence-backed refutation). `.claude/settings.json` is now committed: the gopls plugin,
+  a permissions allowlist covering only read-only/gate commands (go/gofmt/make targets,
+  read-only git, `gh pr checks|view`, `gh issue list|view` — nothing mutating; re-audit the
+  list whenever it grows), and a deny rule for reading `./.env` (real model credentials).
+  Personal `.claude/settings.local.json` is gitignored.
 - The Go merge gate has one executable source: a root `Makefile` (`build` / `crossbuild` /
   `vet` / `fmt-check` / `test` / `cover-gate`, umbrella `make verify`; CI's `helm` and
   `compose` jobs stay CI-only and remain required) carrying the same
