@@ -552,7 +552,7 @@ func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID, batch []even
 // failTurn records a model-side or deterministic failure on the log. If no
 // input is pending past the watermark, the session idles with
 // retries_exhausted (v1 has no automatic retry budget — documented in
-// STATE.md); input that arrived mid-turn instead chains a fresh turn, so a
+// docs/DIVERGENCES.md); input that arrived mid-turn instead chains a fresh turn, so a
 // failed request cannot strand an accepted message on an idle session. Span
 // end, error, status, and item fate commit atomically under the session
 // lock, with the lease proof, exactly like a successful settle.

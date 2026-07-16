@@ -1,6 +1,6 @@
 # Reference projects
 
-Read-only local checkouts used as ground truth and design reference. One line per
+Read-only local reference sources used as ground truth and design reference. One line per
 project — `<github-url>, <relative-local-path>` (paths relative to this repo's root):
 
 ```
@@ -26,11 +26,15 @@ For wire-schema questions, resolve in this order — never guess a wire shape:
 
 `claude-code-source` is a **harness design reference only** (agent loop, tool
 orchestration, permission flow) — never a wire-schema source; never copy code from it.
+Provenance caveat: unlike the others it is not a git checkout — it is a local source
+snapshot with no git remote; the URL above is the upstream project it corresponds to, not
+where the snapshot was cloned from.
 `adk-go` is a source of **ideas only**, governed by CLAUDE.md design principle 2 — never a
 foundation; where it conflicts with the Anthropic model, it loses by rule.
 
 ## Caveats
 
-The checkouts track the API's tip and contain post-plan surface (`agent.thread_*` events,
-memory-store betas). Wire-compat is judged against the SDK version pinned in `go.mod`
-(v1.56.0); new surface in a checkout is not an invitation to build ahead of the backlog.
+The SDK and CLI checkouts track the API's tip and contain post-plan surface
+(`agent.thread_*` events, memory-store betas). Wire-compat is judged against the SDK
+version pinned in `go.mod` (v1.56.0); new surface in a checkout is not an invitation to
+build ahead of the backlog.

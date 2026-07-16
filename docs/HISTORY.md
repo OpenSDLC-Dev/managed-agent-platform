@@ -4,7 +4,8 @@ The verbatim completed-work record moved out of [STATE.md](../STATE.md) on 2026-
 when STATE.md became a slim resumption file. **Append-only:** when a change lands, its
 narrative (the detail that used to grow STATE.md) is appended here in the same PR.
 Documents that previously cited "STATE.md L…" line numbers for this material now cite this
-file's section headings instead.
+file's section headings instead. Internal cross-references inside the archive (e.g. "see
+'Next up'") refer to the original file's sections; the live equivalents are GitHub issues.
 
 ---
 
@@ -502,9 +503,9 @@ The hard part is the deadline, and it diverges from Docker by necessity. Docker 
 
 Reviewed against the loop-engineering playbook (state file / objective gate / skills /
 automations) with all v1 slices done. Rejected: a gofmt PostToolUse hook (near-zero value
-over `make verify` + CI), a fifth code reviewer (four checkers + CI already run per PR;
-the marginal yield is unmeasured), and a standing LESSONS.md ledger (CHANGELOG, this
-archive, CLAUDE.md, and the review skill already cover its content). `/loop` and git
-worktrees were **not** rejected — they are planned future practice; this restructure
-deliberately put their prerequisites in place (single executable gate, slim state file,
-on-demand skills).
+over CI's gate), a fifth code reviewer (four checkers + CI already run per PR; the
+marginal yield is unmeasured), and a standing LESSONS.md ledger (CHANGELOG, this archive,
+and CLAUDE.md already cover its content). `/loop` and git worktrees were **not**
+rejected — they are planned future practice. This restructure put the first prerequisite
+in place (the slim state file); a single executable gate (`make verify`) and an on-demand
+review skill land in follow-up PRs.

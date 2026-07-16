@@ -14,7 +14,7 @@ import (
 // kept as the client's raw bytes after validation, so they round-trip
 // byte-for-byte.
 //
-// v1 divergences (documented in STATE.md): user.define_outcome is rejected
+// v1 divergences (documented in docs/DIVERGENCES.md): user.define_outcome is rejected
 // (outcome surface is deferred) and session_thread_id must be null/absent
 // (threads are deferred). Tool-result references are cross-checked against
 // the log by ValidateToolResults (toolflow.go) — that needs a database, so

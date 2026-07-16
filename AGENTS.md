@@ -26,7 +26,7 @@ points below are the ones most often violated by tools that skip it:
   (within its size budget — completed-work narrative goes to
   docs/HISTORY.md, the backlog to GitHub issues), a CHANGELOG.md entry for
   every notable change, a docs/DIVERGENCES.md entry for any new wire
-  divergence, README.md when affected.
+  divergence or inference, README.md when affected.
 - **Migrations are immutable once merged**; new DDL goes in a new numbered
   file under `internal/store/migrations/`.
 - **`internal/domain` stays stdlib-only** and Anthropic-native — no adk-go,
