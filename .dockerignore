@@ -1,0 +1,15 @@
+# Keep the build context small and secrets out of the image. The Dockerfile uses
+# COPY . ., so secret-file patterns are depth-matched (**/) to keep any .gitignored
+# local secret — at any level — out of the build context and its cache.
+.git
+.github
+**/.env
+**/.env.*
+**/*.local.yaml
+**/*.local.yml
+**/model-providers.json
+deploy/helm
+deploy/compose
+*.md
+coverage.out
+*.cov

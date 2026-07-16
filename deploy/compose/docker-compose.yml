@@ -1,0 +1,94 @@
+# Local development stack: the three server processes (controlplane + brain +
+# executor) against a Postgres, with an optional Jaeger for traces. This is the
+# compose companion to deploy/helm — the same binaries, wired for a laptop.
+# Quick start and configuration: see deploy/compose/README.md.
+#
+# The BYOC worker is intentionally excluded — it runs on your own compute, not here.
+
+name: managed-agent-platform
+
+# Shared build + wiring for the three app services; each overrides `command`.
+x-app: &app
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  image: managed-agent-platform:local
+  environment: &app-env
+    # POSTGRES_PASSWORD is embedded in this DSN, so keep it URL-safe (no @ : / ? # % or spaces).
+    DATABASE_URL: postgres://map:${POSTGRES_PASSWORD:-map}@postgres:5432/managed_agent_platform?sslmode=disable
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    OTEL_EXPORTER_OTLP_INSECURE: ${OTEL_EXPORTER_OTLP_INSECURE:-false}
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: map
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-map}
+      POSTGRES_DB: managed_agent_platform
+    # Every binary auto-applies migrations on connect (advisory-locked), so no
+    # separate migrate step; the app services just wait for Postgres to be ready.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U map -d managed_agent_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  controlplane:
+    <<: *app
+    command: /controlplane
+    environment:
+      <<: *app-env
+      CONTROLPLANE_API_KEY: ${CONTROLPLANE_API_KEY:?set CONTROLPLANE_API_KEY in .env}
+      CONTROLPLANE_ADDR: ":8080"
+    ports:
+      # Bound to loopback by default: the committed CONTROLPLANE_API_KEY is a
+      # well-known placeholder, so the API must not be reachable from the LAN.
+      # Set CONTROLPLANE_BIND=0.0.0.0 (with a real key) to expose it deliberately.
+      - "${CONTROLPLANE_BIND:-127.0.0.1}:${CONTROLPLANE_PORT:-8080}:8080"
+
+  brain:
+    <<: *app
+    command: /brain
+    environment:
+      <<: *app-env
+      MODEL_PROVIDERS_PATH: /etc/map/model-providers.json
+    volumes:
+      # The brain's model routing (a JSON array — see internal/provider LoadRoutes).
+      # Defaults to the committed example so the stack comes up out of the box;
+      # set MODEL_PROVIDERS_FILE=model-providers.json (after copying + editing it)
+      # to point at a real endpoint. Referencing an always-present file avoids
+      # Docker silently creating a directory when the source is missing.
+      - ./${MODEL_PROVIDERS_FILE:-model-providers.example.json}:/etc/map/model-providers.json:ro
+
+  executor:
+    <<: *app
+    command: /executor
+    environment:
+      <<: *app-env
+      SANDBOX_BACKEND: docker
+      DOCKER_HOST: unix:///var/run/docker.sock
+      # Base image for the per-session sandbox containers the executor launches.
+      EXECUTOR_IMAGE: ${EXECUTOR_IMAGE:-debian:stable-slim}
+    volumes:
+      # The docker sandbox backend drives the host daemon to run sibling sandbox
+      # containers. Local-dev convenience; the production path uses the k8s backend.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4317:4317"   # OTLP/gRPC (point OTEL_EXPORTER_OTLP_ENDPOINT at jaeger:4317)
+
+volumes:
+  pgdata:

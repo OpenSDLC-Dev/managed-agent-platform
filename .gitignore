@@ -17,6 +17,10 @@ go.work.sum
 .env.*
 *.local.yaml
 *.local.yml
+# ...but keep the committed templates, and ignore any real model-providers.json
+# (a filled-in copy carries a live api_key) wherever it is created.
+!.env.example
+model-providers.json
 
 # Tooling caches
 .impeccable/

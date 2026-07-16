@@ -74,6 +74,53 @@ jobs:
           fi
           echo "ok: guard fired"
 
+  # Local dev stack: validate the compose file, build the image, and smoke-test
+  # that the control plane comes up and serves (migrations + auth) and the brain
+  # loads its model-providers config. The executor is left out — it wants the host
+  # Docker socket, which a CI runner should not hand a build.
+  compose:
+    name: compose
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/compose
+    steps:
+      - uses: actions/checkout@v4
+      - name: seed local env from the committed example
+        # model-providers.json is intentionally NOT created: the brain mount
+        # defaults to the committed example, so this also exercises that default.
+        run: cp .env.example .env
+      - name: docker compose config is valid
+        run: docker compose config --quiet
+      - name: build the image
+        run: docker compose build controlplane
+      - name: control plane serves and the brain loads its config
+        run: |
+          docker compose up -d postgres controlplane brain
+          key="$(grep '^CONTROLPLANE_API_KEY=' .env | cut -d= -f2-)"
+          for i in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" http://localhost:8080/v1/agents || true)"
+            [ "$code" = "200" ] && { echo "control plane serving (200)"; break; }
+            sleep 2
+          done
+          [ "$code" = "200" ] || { echo "control plane never served 200 (last: $code)" >&2; docker compose logs >&2; exit 1; }
+          noauth="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/agents || true)"
+          [ "$noauth" = "401" ] || { echo "expected 401 without a key, got $noauth" >&2; exit 1; }
+          # The brain logs "brain running" only after LoadRoutes parses the mounted
+          # model-providers.json, so this catches a config-shape or image regression.
+          # It boots independently of the control plane, so poll rather than grep once —
+          # a slow brain would otherwise fail this spuriously right after the 200.
+          brain_ok=""
+          for i in $(seq 1 15); do
+            docker compose logs brain 2>/dev/null | grep -q "brain running" && { brain_ok=1; break; }
+            sleep 2
+          done
+          [ -n "$brain_ok" ] || { echo "brain did not start cleanly" >&2; docker compose logs brain >&2; exit 1; }
+          echo "ok: authed 200, unauthed 401, brain loaded its config"
+      - name: tear down
+        if: always()
+        run: docker compose down -v
+
   # Tests + the coverage gate as a distinct named check, so PRs show
   # "coverage" pass/fail on its own and the summary carries the numbers.
   coverage:
