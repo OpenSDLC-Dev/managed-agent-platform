@@ -62,9 +62,10 @@ daemon or cluster is a hard test failure, not a skip, so the coverage gate canno
 be hollowed out.
 
 ```bash
-go build ./...             # build
-go test ./...              # unit + contract tests
-go vet ./... && gofmt -l . # lint
+make build                 # build (go build ./...)
+make test                  # unit + contract tests (go test -count=1, with coverage profile)
+make vet fmt-check         # lint
+make verify                # everything CI gates on, in one target
 ```
 
 **Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres (and an optional Jaeger):

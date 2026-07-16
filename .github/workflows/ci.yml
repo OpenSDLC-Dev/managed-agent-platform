@@ -18,19 +18,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go build ./...
-      # The BYOC worker is meant to cross-compile; 32-bit-only breakage
-      # (e.g. an untyped 64-bit const) is invisible to the host build.
-      - run: GOOS=linux GOARCH=arm go build ./internal/...
-      - run: go vet ./...
+      # The gate commands live in the Makefile — the single executable source
+      # (the verifier runs the same targets via `make verify`).
+      - run: make build
+      - run: make crossbuild
+      - run: make vet
       - name: gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "gofmt needed on:" >&2
-            echo "$unformatted" >&2
-            exit 1
-          fi
+        run: make fmt-check
 
   # Helm chart: lint + render, and assert the rendered brain config is the exact
   # shape its consumer requires. The brain's LoadRoutes wants a JSON array of route
@@ -140,29 +134,13 @@ jobs:
         uses: helm/kind-action@v1
         with:
           cluster_name: map-ci
+      # Both steps live in the Makefile — the single executable source of the
+      # gate (denominator exclusions and the exact-percentage awk documented
+      # there); the verifier runs the same targets via `make verify`.
       - name: test (-count=1) with coverage profile
-        run: |
-          # Logic packages only. internal/pgtest and internal/sandbox/sandboxtest
-          # are test support — packages solely because a test in another package
-          # must import them. Their uncovered statements are the assertion
-          # branches that run only when a suite fails, so counting them measures
-          # nothing and dilutes the gate, exactly as cmd/ main glue would.
-          coverpkg="$(go list ./internal/... | grep -vE '/(pgtest|sandboxtest)$' | paste -sd, -)"
-          go test -count=1 -coverpkg="$coverpkg" -coverprofile=coverage.out ./...
+        run: make test
       - name: coverage gate (>= 90%)
-        run: |
-          # Exact total from the profile: `go tool cover -func` rounds to 0.1%,
-          # which would let ~89.95% pass as "90.0". Duplicate blocks (same
-          # package covered by several test binaries) merge with OR semantics;
-          # an empty profile fails closed.
-          awk 'NR>1 { stmts[$1]=$2; if ($3>0) covered[$1]=1 }
-               END {
-                 for (k in stmts) { t+=stmts[k]; if (k in covered) c+=stmts[k] }
-                 if (t==0) { print "no statements in coverage profile"; exit 1 }
-                 pct=100*c/t
-                 printf "total statement coverage: %.2f%%\n", pct
-                 exit !(pct >= 90.0)
-               }' coverage.out
+        run: make cover-gate
       - name: coverage summary
         if: always()
         run: |
