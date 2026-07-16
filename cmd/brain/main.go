@@ -26,6 +26,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/anthropic"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/openai"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
@@ -68,6 +69,7 @@ func run() error {
 	}
 	registry, err := provider.NewRegistry(routes, map[string]provider.Factory{
 		"anthropic": anthropic.New,
+		"openai":    openai.New,
 	})
 	if err != nil {
 		return err
