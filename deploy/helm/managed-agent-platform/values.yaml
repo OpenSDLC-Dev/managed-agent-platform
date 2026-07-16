@@ -50,11 +50,13 @@ brain:
   # api_key, plus optional upstream_model / headers. (The loader also accepts api_key_env,
   # but this chart injects no extra env into the brain, so supply api_key here instead.)
   # No other keys — the loader rejects unknown fields. Contains api_key, so it is stored
-  # in a Secret. REQUIRED (at least one route). Example:
+  # in a Secret. REQUIRED (at least one route). base_url is the API ROOT — the adapter
+  # appends the protocol path (/v1/messages or /v1/chat/completions), so omit a trailing
+  # /v1. Example:
   #   modelProviders:
   #     - model: "*"
   #       protocol: anthropic
-  #       base_url: https://gateway.internal/v1
+  #       base_url: https://gateway.internal
   #       api_key: sk-...
   modelProviders: []
 
