@@ -869,7 +869,7 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   convention ("1 to 1000" on most SDK list params); it is our compatible bound,
   not a proven reference cap. The other lists (agents/sessions/environments/work)
   keep the 100 cap — agents documents "maximum 100" explicitly. **Found by the
-  slice-8 `ant beta:worker` end-to-end acceptance** (see STATE.md): with the fix,
+  slice-8 `ant beta:worker` end-to-end acceptance** (see docs/HISTORY.md): with the fix,
   a real `ant beta:worker` polls a self-hosted session's work, runs `bash`
   locally (its in-process runner), posts the `user.tool_result`, and the session
   resumes to idle.

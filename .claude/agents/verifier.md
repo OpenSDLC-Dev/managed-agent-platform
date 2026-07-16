@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: Independent verification agent for this repo. MUST be dispatched before any slice or nontrivial change is declared done, before STATE.md flips a status, and before any commit that claims working behavior. Give it what changed and the claimed success criteria; it re-derives expectations from the docs, reruns every check itself, and returns an evidence-backed PASS/FAIL verdict. It never edits files.
+description: Independent verification agent for this repo. MUST be dispatched before any nontrivial change is declared done, before STATE.md's snapshot claims new behavior, and before any commit that claims working behavior. Give it what changed and the claimed success criteria; it re-derives expectations from the docs, reruns every check itself, and returns an evidence-backed PASS/FAIL verdict. It never edits files.
 tools: Bash, Read, Grep, Glob
 model: claude-fable-5
 ---
