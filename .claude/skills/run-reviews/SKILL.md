@@ -1,6 +1,6 @@
 ---
 name: run-reviews
-description: Run this repo's dual code review (Codex + Claude) and the verifier with deliberately pinned models and effort. Use when executing step 4 of CLAUDE.md's iteration workflow, or whenever launching the verifier, /code-review, or the Codex reviewer.
+description: Run this repo's dual code review (Codex + Claude) and the verifier with deliberately chosen models and effort — pinned, or intentionally inherited from config. Use when executing step 4 of CLAUDE.md's iteration workflow, or whenever launching the verifier, /code-review, or the Codex reviewer.
 ---
 
 # Running the reviewers — pinned models, deliberate effort
@@ -49,12 +49,14 @@ node "<plugin-root>/scripts/codex-companion.mjs" task --model gpt-5.6-sol \
 ```
 
 `<plugin-root>` is the newest directory under `~/.claude/plugins/cache/openai-codex/codex/`.
-Run it as a background Bash task (backgrounding comes from the Bash task, not a flag);
-`/codex:review` itself is user-invocable only (`disable-model-invocation`).
+Run it as a background Bash task (backgrounding comes from the Bash task, not a flag) and
+read the task's output log for the verdict when it completes; `/codex:review` itself is
+user-invocable only (`disable-model-invocation`).
 
 - **Effort:** omitting `--effort` inherits `model_reasoning_effort` from
   `~/.codex/config.toml` (currently `ultra`, the strongest — it exists only as a config
-  value; `--effort ultra` is rejected, the flag accepts `none`…`xhigh`). Pin
+  value; `--effort ultra` is rejected — the flag accepts only
+  `none`/`minimal`/`low`/`medium`/`high`/`xhigh`). Pin
   `--effort xhigh` when the effort must not drift with the user's config. Never edit
   `~/.codex/config.toml`.
 - **Model:** `gpt-5.6-sol` is the strongest usable model on `codex-cli 0.144.4` and the

@@ -8,7 +8,7 @@
       "Bash(go vet:*)",
       "Bash(go test:*)",
       "Bash(go list:*)",
-      "Bash(gofmt:*)",
+      "Bash(gofmt -l:*)",
       "Bash(make build:*)",
       "Bash(make crossbuild:*)",
       "Bash(make vet:*)",
@@ -26,7 +26,12 @@
       "Bash(gh issue view:*)"
     ],
     "deny": [
-      "Read(./.env)"
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)",
+      "Read(./model-providers.json)",
+      "Read(./**/model-providers.json)"
     ]
   }
 }
