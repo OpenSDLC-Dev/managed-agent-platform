@@ -12,14 +12,32 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Helm chart (slice 9) — `deploy/helm/managed-agent-platform` deploys the platform's three server
+  processes as independently-scalable Deployments: the **controlplane** (with a Service), the **brain**,
+  and the **executor** wired to the `k8s` sandbox backend. The executor runs sandbox Pods in its own
+  namespace via in-cluster config, and the chart grants its ServiceAccount a namespaced Role with exactly
+  the pod-lifecycle and `pods/exec` verbs the provider calls. An optional in-cluster Postgres (StatefulSet)
+  is bundled for a batteries-included install; disable it and set `externalDatabase.url` for a managed
+  database. Credentials (bootstrap API key, the model-providers JSON the brain reads, the database DSN)
+  live in one chart-built Secret — the Postgres password and the DSN computed once so they always agree —
+  or a pre-created `existingSecret`. `otlp.endpoint` wires OTLP export into all three processes. The BYOC
+  worker is deliberately excluded (it runs on customer compute). Container images are operator-supplied
+  (the repo publishes none yet); the chart is validated by `helm lint`, `helm template` across the
+  internal-Postgres / external-database / existing-Secret paths, and a server-side `kubectl apply
+  --dry-run` against a kind cluster. A new `helm` CI job lints and renders the chart and asserts the
+  rendered brain model-providers file is the JSON array its loader (`internal/provider` — `LoadRoutes`)
+  requires — a shape mismatch there would crash-loop the brain at deploy time, invisible to unit tests.
+  It also renders the external-database and existing-Secret paths and asserts a required-value guard fails.
+  Deliberate divergences from the plan sketch: Postgres ships inline
+  rather than as a subchart (air-gap self-hosting), and the optional gVisor `RuntimeClass` is deferred
+  until the K8s provider sets `runtimeClassName` on sandbox Pods. **Completes slice 9.**
 - Config-driven sandbox backend selection (slice 9) — `cmd/executor` and `cmd/worker` now build their
   sandbox provider through the new `internal/sandbox/backend` selector instead of hard-coding Docker.
   `SANDBOX_BACKEND` picks `docker` (default, so an existing deployment is unchanged) or `k8s`; the chosen
   backend reads its own settings from the environment (`DOCKER_HOST` for Docker, or
   `SANDBOX_K8S_KUBECONFIG` / `_CONTEXT` / `_NAMESPACE` / `_NETSETUP_IMAGE` for Kubernetes — all empty is
   in-cluster config, for the executor running as a Deployment). The selector is a small tested seam that
-  both binaries share; an unknown backend name is a startup error naming the accepted set. The Helm
-  chart that deploys the executor with the K8s backend is the remaining slice-9 work.
+  both binaries share; an unknown backend name is a startup error naming the accepted set.
 - Kubernetes sandbox provider (slice 9) — `internal/sandbox/k8s`, a `sandbox.Provider` that runs each
   session's tools in a disposable per-session Pod over the Kubernetes API (`client-go`). It passes the
   **same** `sandboxtest` contract suite as the Docker backend — the plan requires both to behave

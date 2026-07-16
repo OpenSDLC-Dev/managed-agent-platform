@@ -1,0 +1,107 @@
+# Default values for managed-agent-platform.
+# The chart deploys the three platform processes — controlplane, brain, executor —
+# plus an optional in-cluster Postgres. The BYOC worker is NOT part of this chart:
+# it runs on the customer's own compute, outside the platform's cluster.
+
+# -- Container images. Each process is pulled as a separate image at
+# {registry}/{repository}/{component}:{tag} (component is controlplane|brain|executor).
+# No images are published by this repository yet; build and push your own, then set
+# registry/repository/tag.
+image:
+  registry: ghcr.io
+  repository: opensdlc-dev/managed-agent-platform
+  # tag defaults to the chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+# -- imagePullSecrets referenced by every pod (list of {name: ...}).
+imagePullSecrets: []
+
+# -- OTLP/gRPC collector for traces, metrics, logs. Empty disables export.
+# Wired into all three processes as OTEL_EXPORTER_OTLP_ENDPOINT / _INSECURE.
+otlp:
+  endpoint: ""
+  insecure: false
+
+# -- Bootstrap management API key (x-api-key). REQUIRED: set via --set or a values
+# file, or point existingSecret at a Secret holding key `controlplane-api-key`.
+# Stored in the chart's Secret when apiKey is set inline.
+controlplane:
+  apiKey: ""
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8080
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+brain:
+  replicas: 1
+  leaseTTL: ""       # e.g. "2m"; empty uses the binary default
+  pollInterval: ""   # e.g. "250ms"; empty uses the binary default
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # -- Model routes, written verbatim as a JSON array to the file the brain reads
+  # (MODEL_PROVIDERS_PATH). The loader (internal/provider — LoadRoutes) requires a JSON
+  # ARRAY: each entry is model (route key, "*" = default), protocol, base_url, and
+  # api_key, plus optional upstream_model / headers. (The loader also accepts api_key_env,
+  # but this chart injects no extra env into the brain, so supply api_key here instead.)
+  # No other keys — the loader rejects unknown fields. Contains api_key, so it is stored
+  # in a Secret. REQUIRED (at least one route). Example:
+  #   modelProviders:
+  #     - model: "*"
+  #       protocol: anthropic
+  #       base_url: https://gateway.internal/v1
+  #       api_key: sk-...
+  modelProviders: []
+
+executor:
+  replicas: 1
+  leaseTTL: ""       # EXECUTOR_LEASE_TTL, e.g. "15m"; empty uses the binary default
+  pollInterval: ""   # EXECUTOR_POLL_INTERVAL, e.g. "500ms"; empty uses the binary default
+  # -- Base image for the per-session sandbox pods the executor launches.
+  sandboxImage: "debian:stable-slim"
+  sandboxWorkdir: "/workspace"
+  # -- Image carrying `ip` for the limited-networking init container.
+  netSetupImage: "busybox"
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # The executor runs sandbox pods in the release namespace via in-cluster config;
+  # the chart grants it the pods / pods/exec RBAC it needs there.
+
+# -- In-cluster Postgres. For production, disable this and point externalDatabase
+# at your own managed Postgres. This is a deliberate divergence from a Postgres
+# subchart: a self-hostable, air-gap-friendly platform should not require pulling
+# an external chart from a repo.
+postgresql:
+  enabled: true
+  image: postgres:16-alpine
+  database: managed_agent_platform
+  username: map
+  # -- REQUIRED when postgresql.enabled. The chart does NOT auto-generate it: a
+  # generated password is unstable under `helm template`/GitOps (each render differs),
+  # which drifts from the initdb'd password and crash-loops the apps. It is embedded
+  # in DATABASE_URL, so it must be URL-safe (no @ : / ? # % or spaces).
+  password: ""
+  storage: 8Gi
+  storageClassName: ""  # empty uses the cluster default StorageClass
+  resources: {}
+  # Postgres listens on the standard 5432; not configurable for the bundled instance.
+
+# -- External database, used when postgresql.enabled is false. Provide the full DSN
+# inline; the chart stores it in its Secret. To manage the DSN yourself, use
+# existingSecret below instead.
+externalDatabase:
+  url: ""
+
+# -- Reference a pre-created Secret instead of letting the chart create one. When
+# set, the chart creates NO Secret and every process reads credentials from this
+# one, which must carry keys: controlplane-api-key, model-providers.json,
+# database-url. Incompatible with postgresql.enabled (bring your own DB in this
+# mode) — the chart fails the render if both are set.
+existingSecret: ""

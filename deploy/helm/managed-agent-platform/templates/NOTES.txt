@@ -1,0 +1,20 @@
+{{ include "map.fullname" . }} is installed.
+
+Processes:
+  - controlplane  ({{ .Values.controlplane.replicas }} replica{{ if ne (int .Values.controlplane.replicas) 1 }}s{{ end }}) — REST API on service {{ include "map.fullname" . }}-controlplane:{{ .Values.controlplane.service.port }}
+  - brain         ({{ .Values.brain.replicas }} replica{{ if ne (int .Values.brain.replicas) 1 }}s{{ end }}) — model-turn pool
+  - executor      ({{ .Values.executor.replicas }} replica{{ if ne (int .Values.executor.replicas) 1 }}s{{ end }}) — Kubernetes sandbox backend, runs tools in per-session Pods in namespace {{ .Release.Namespace }}
+{{- if .Values.postgresql.enabled }}
+  - postgres      (in-cluster; disable and use externalDatabase.url in production)
+{{- end }}
+
+Reach the API from your shell:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "map.fullname" . }}-controlplane {{ .Values.controlplane.service.port }}:{{ .Values.controlplane.service.port }}
+  export ANTHROPIC_BASE_URL=http://localhost:{{ .Values.controlplane.service.port }}
+  # x-api-key is the controlplane.apiKey you configured.
+
+{{- if not .Values.otlp.endpoint }}
+
+Note: OTLP export is off (otlp.endpoint is empty). Set otlp.endpoint to ship traces/metrics/logs.
+{{- end }}

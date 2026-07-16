@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "map.fullname" . }}-executor
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor
+spec:
+  replicas: {{ .Values.executor.replicas }}
+  selector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "executor") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods when the chart-managed Secret (DSN) changes on upgrade.
+        # Inert when existingSecret is set (no Secret is rendered).
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
+      labels:
+        {{- include "map.labels" . | nindent 8 }}
+        app.kubernetes.io/component: executor
+    spec:
+      serviceAccountName: {{ include "map.fullname" . }}-executor
+      {{- include "map.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: executor
+          image: {{ include "map.image" (dict "ctx" . "component" "executor") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/executor"]
+          env:
+            # SANDBOX_K8S_KUBECONFIG and _CONTEXT are intentionally unset so the
+            # provider uses in-cluster config with the ServiceAccount above.
+            - name: SANDBOX_BACKEND
+              value: "k8s"
+            - name: SANDBOX_K8S_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: SANDBOX_K8S_NETSETUP_IMAGE
+              value: {{ .Values.executor.netSetupImage | quote }}
+            - name: EXECUTOR_IMAGE
+              value: {{ .Values.executor.sandboxImage | quote }}
+            - name: EXECUTOR_WORKDIR
+              value: {{ .Values.executor.sandboxWorkdir | quote }}
+            {{- with .Values.executor.leaseTTL }}
+            - name: EXECUTOR_LEASE_TTL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.executor.pollInterval }}
+            - name: EXECUTOR_POLL_INTERVAL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- include "map.commonEnv" . | nindent 12 }}
+          {{- with .Values.executor.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.executor.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.executor.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.executor.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
