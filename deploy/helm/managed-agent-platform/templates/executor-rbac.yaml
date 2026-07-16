@@ -1,0 +1,46 @@
+{{/*
+The executor launches, execs into, and tears down one sandbox Pod per session in
+its own namespace via in-cluster config, so its ServiceAccount needs exactly the
+pod lifecycle + exec verbs the Kubernetes sandbox provider calls — nothing cluster
+-wide. A namespaced Role keeps the blast radius to this release's namespace.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "map.fullname" . }}-executor
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "map.fullname" . }}-executor
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor
+rules:
+  # The provider polls pod readiness with repeated Get (not List/Watch), so the
+  # verbs are exactly create / get / delete on pods and create on pods/exec.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "map.fullname" . }}-executor
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "map.fullname" . }}-executor
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "map.fullname" . }}-executor
+    namespace: {{ .Release.Namespace }}

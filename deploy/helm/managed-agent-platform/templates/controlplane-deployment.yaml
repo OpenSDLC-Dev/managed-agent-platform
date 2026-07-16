@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "map.fullname" . }}-controlplane
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controlplane
+spec:
+  replicas: {{ .Values.controlplane.replicas }}
+  selector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "controlplane") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods when the chart-managed Secret (API key, DSN, providers)
+        # changes on upgrade. Inert when existingSecret is set (no Secret is rendered).
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
+      labels:
+        {{- include "map.labels" . | nindent 8 }}
+        app.kubernetes.io/component: controlplane
+    spec:
+      {{- include "map.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: controlplane
+          image: {{ include "map.image" (dict "ctx" . "component" "controlplane") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/controlplane"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.controlplane.service.port }}
+          env:
+            - name: CONTROLPLANE_ADDR
+              value: ":{{ .Values.controlplane.service.port }}"
+            - name: CONTROLPLANE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "map.secretName" . }}
+                  key: controlplane-api-key
+            {{- include "map.commonEnv" . | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          {{- with .Values.controlplane.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.controlplane.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlplane.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlplane.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

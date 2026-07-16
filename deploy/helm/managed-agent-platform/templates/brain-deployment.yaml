@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "map.fullname" . }}-brain
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: brain
+spec:
+  replicas: {{ .Values.brain.replicas }}
+  selector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "brain") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods when the chart-managed Secret (DSN, model providers) changes
+        # on upgrade. Inert when existingSecret is set (no Secret is rendered).
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
+      labels:
+        {{- include "map.labels" . | nindent 8 }}
+        app.kubernetes.io/component: brain
+    spec:
+      {{- include "map.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: brain
+          image: {{ include "map.image" (dict "ctx" . "component" "brain") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/brain"]
+          env:
+            - name: MODEL_PROVIDERS_PATH
+              value: /etc/managed-agent-platform/model-providers.json
+            {{- with .Values.brain.leaseTTL }}
+            - name: BRAIN_LEASE_TTL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.brain.pollInterval }}
+            - name: BRAIN_POLL_INTERVAL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- include "map.commonEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: model-providers
+              mountPath: /etc/managed-agent-platform
+              readOnly: true
+          {{- with .Values.brain.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: model-providers
+          secret:
+            secretName: {{ include "map.secretName" . }}
+            # optional so a missing key surfaces as a clear brain error ("model
+            # providers config: no such file") instead of the pod wedging in
+            # ContainerCreating — relevant only in the existingSecret path.
+            optional: true
+            items:
+              - key: model-providers.json
+                path: model-providers.json
+      {{- with .Values.brain.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.brain.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.brain.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

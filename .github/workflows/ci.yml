@@ -32,6 +32,48 @@ jobs:
             exit 1
           fi
 
+  # Helm chart: lint + render, and assert the rendered brain config is the exact
+  # shape its consumer requires. The brain's LoadRoutes wants a JSON array of route
+  # objects; a chart that renders the wrong shape crash-loops the brain at deploy
+  # time, which unit tests can't see — so this check renders and validates it.
+  helm:
+    name: helm
+    runs-on: ubuntu-latest
+    env:
+      CHART: deploy/helm/managed-agent-platform
+      VALUES: deploy/helm/managed-agent-platform/ci/example-values.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: helm lint
+        run: helm lint "$CHART" -f "$VALUES"
+      - name: helm template renders (smoke)
+        run: helm template t "$CHART" -f "$VALUES" > /dev/null
+      - name: brain model-providers file is the JSON array the loader requires
+        run: |
+          mp="$(helm template t "$CHART" -f "$VALUES" --show-only templates/secret.yaml \
+            | grep 'model-providers.json:' | awk '{print $2}' | tr -d '"' | base64 -d)"
+          echo "$mp" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list) and d and all("model" in e for e in d), "model-providers.json must be a non-empty JSON array of route objects"; print("ok:", len(d), "route(s)")'
+      - name: external-database path renders
+        run: |
+          helm template t "$CHART" -f "$VALUES" \
+            --set postgresql.enabled=false \
+            --set externalDatabase.url='postgres://u:p@db.example:5432/x?sslmode=require' > /dev/null
+      - name: existingSecret path renders (chart creates no Secret)
+        run: |
+          out="$(helm template t "$CHART" -f "$VALUES" \
+            --set postgresql.enabled=false --set existingSecret=my-preexisting)"
+          echo "$out" | grep -q 'name: my-preexisting' || { echo "expected Deployments to reference existingSecret" >&2; exit 1; }
+          echo "$out" | grep -q '^kind: Secret' && { echo "chart must not create a Secret when existingSecret is set" >&2; exit 1; }
+          echo "ok: existingSecret path"
+      - name: required-value guard fires (missing controlplane.apiKey)
+        run: |
+          if helm template t "$CHART" --set image.tag=x \
+               --set-json 'brain.modelProviders=[{"model":"*"}]' > /dev/null 2>&1; then
+            echo "expected the missing-apiKey guard to fail the render" >&2; exit 1
+          fi
+          echo "ok: guard fired"
+
   # Tests + the coverage gate as a distinct named check, so PRs show
   # "coverage" pass/fail on its own and the summary carries the numbers.
   coverage:

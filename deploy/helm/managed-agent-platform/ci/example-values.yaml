@@ -1,0 +1,20 @@
+# Minimal values that satisfy the chart's required-value guards, used by CI to
+# lint and render the chart. Not a real deployment: the image coordinates and
+# credentials are placeholders.
+image:
+  registry: registry.example.com
+  repository: example-org/managed-agent-platform
+  tag: "0.1.0"
+controlplane:
+  apiKey: "ci-placeholder-key"
+brain:
+  modelProviders:
+    - model: "*"
+      protocol: anthropic
+      base_url: https://gateway.example.internal/v1
+      api_key: ci-placeholder-secret
+postgresql:
+  password: "ciPlaceholderPgPass"
+otlp:
+  endpoint: "otel-collector.observability:4317"
+  insecure: true
