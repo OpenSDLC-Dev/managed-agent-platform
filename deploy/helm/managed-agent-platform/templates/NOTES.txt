@@ -12,7 +12,9 @@ Reach the API from your shell:
 
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "map.fullname" . }}-controlplane {{ .Values.controlplane.service.port }}:{{ .Values.controlplane.service.port }}
   export ANTHROPIC_BASE_URL=http://localhost:{{ .Values.controlplane.service.port }}
-  # x-api-key is the controlplane.apiKey you configured.
+  # x-api-key is the controlplane.apiKey you configured. SDK clients honor
+  # ANTHROPIC_BASE_URL; the ant CLI's management commands ignore it — pass
+  # --base-url instead.
 
 {{- if not .Values.otlp.endpoint }}
 

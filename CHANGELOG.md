@@ -130,7 +130,7 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   carries the same self_hosted gate as the other three fields, so all four report on one queue. The SDK's field docs are Redis-consumer-group-
   native, which all but confirms the reference queue is Redis Streams; we keep Postgres as the source
   of truth (the plan's `redis optional later`) and compute the same numbers from it — divergence
-  noted in STATE.md.
+  recorded in docs/DIVERGENCES.md.
 - Work-item metadata update (slice 8, PR C-meta) — `POST /v1/environments/{id}/work/{work_id}`,
   the last worker-facing work endpoint besides `stats`. The body is `{"metadata": {…}}`: a string
   value upserts a key, an explicit null deletes it, and an omitted key is preserved — the patch
@@ -820,6 +820,26 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Changed
 
+- Docs restructure: STATE.md became a slim session-resumption file (~60-line size budget) —
+  its completed-work narrative (slices 0–9 and the slice-8 acceptance record) moved
+  **verbatim** to the new `docs/HISTORY.md` (append-only archive), and the backlog moved
+  entirely to GitHub issues (21 backfilled from flags that were buried in the old archive,
+  #58–#78; the rest were already tracked). Two new registries: `docs/DIVERGENCES.md` — the
+  single record of deliberate wire divergences and unconfirmed inferences (the verifier's
+  wire-compat allowlist; 56 entries consolidated from the old STATE.md sections: 33
+  confirmed divergences, 21 inferences each cross-linked to its tracking issue, and 2
+  architecture/compatibility notes — tracked bugs stay out of the allowlist, in the issue
+  tracker) — and `docs/REFERENCE_PROJECTS.md` — the read-only
+  reference sources as `<github-url>, <relative-local-path>` lines with the authority
+  order (no absolute paths remain in the repo). CLAUDE.md, AGENTS.md, README.md,
+  `.coderabbit.yaml`, five Go comments, and the verifier agent definition now point at the
+  registries; the verifier's docs rung enforces the STATE.md size budget. README's status
+  paragraph cut to a summary, and the `ant` CLI invocation docs corrected wherever they
+  name the CLI: management commands ignore `ANTHROPIC_BASE_URL` (the CLI builds
+  its client with `WithoutEnvironmentDefaults` and the global `--base-url` flag has no env
+  source — verified in the `anthropic-cli` checkout), so examples now pass `--base-url`
+  explicitly; only the worker/auth subcommands honor the env var.
+
 - The CI coverage gate's denominator now covers logic packages only.
   `internal/pgtest` and `internal/sandbox/sandboxtest` are test support —
   packages at all only because a test in another package must import
@@ -850,7 +870,7 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   convention ("1 to 1000" on most SDK list params); it is our compatible bound,
   not a proven reference cap. The other lists (agents/sessions/environments/work)
   keep the 100 cap — agents documents "maximum 100" explicitly. **Found by the
-  slice-8 `ant beta:worker` end-to-end acceptance** (see STATE.md): with the fix,
+  slice-8 `ant beta:worker` end-to-end acceptance** (see docs/HISTORY.md): with the fix,
   a real `ant beta:worker` polls a self-hosted session's work, runs `bash`
   locally (its in-process runner), posts the `user.tool_result`, and the session
   resumes to idle.

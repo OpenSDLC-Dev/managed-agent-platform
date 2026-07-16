@@ -18,7 +18,7 @@ import (
 
 // Session events: POST (send, batch), GET (list, cursor-paged), and the SSE
 // stream. Wire shapes follow the reference SDK exactly — see the events
-// package for the inbound contract and STATE.md for the documented v1
+// package for the inbound contract and docs/DIVERGENCES.md for the documented v1
 // divergences.
 
 // sendSessionEvents implements POST /v1/sessions/{id}/events. The body is
@@ -134,7 +134,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// A requires_action suspension resolves. Each denial is answered with
 		// an error result (the model protocol requires every tool_use answered
 		// before the turn resumes; the denial shape is an inference — see
-		// STATE.md). If confirmations remain outstanding, the session re-idles
+		// docs/DIVERGENCES.md). If confirmations remain outstanding, the session re-idles
 		// with the shrunken blocking set; once the last ask is resolved it
 		// resumes — running an executor for any still-unanswered allowed tool,
 		// or the brain directly when every gated tool was denied.
@@ -231,7 +231,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 // the answered (denied) tool-use ids.
 //
 // The denial's result shape is an inference: the reference documents the
-// confirmation event, not the result a denial produces (see STATE.md).
+// confirmation event, not the result a denial produces (see docs/DIVERGENCES.md).
 func denyToolResults(evs []events.NewEvent) ([]events.NewEvent, []string, error) {
 	var results []events.NewEvent
 	var deniedIDs []string

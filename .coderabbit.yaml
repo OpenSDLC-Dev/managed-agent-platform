@@ -16,9 +16,10 @@ reviews:
         Managed Agents. Wire shapes (JSON field names, enum values, URL paths,
         ID prefixes, pagination and error envelopes) are never guessed: they
         come from the reference SDK (anthropic-sdk-go), and deliberate
-        divergences are documented in STATE.md. Flag any change that adds,
-        drops, renames, or re-types a wire-visible field without a matching
-        STATE.md note, and any silently-accepted-but-ignored request input.
+        divergences are documented in docs/DIVERGENCES.md. Flag any change that
+        adds, drops, renames, or re-types a wire-visible field without a
+        matching docs/DIVERGENCES.md entry, and any
+        silently-accepted-but-ignored request input.
     - path: "internal/domain/**"
       instructions: |
         internal/domain must stay stdlib-only and Anthropic-native. Any import
