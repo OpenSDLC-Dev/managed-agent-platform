@@ -12,6 +12,34 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- OpenAI-compatible provider adapter — `internal/provider/openai`, the second model-backend protocol
+  (deferred from slice 4), now registered in `cmd/brain`'s provider registry under `"openai"` alongside
+  `"anthropic"`. A `model_providers` route with `protocol: openai` points the brain at OpenAI, a vLLM
+  server, or an internal OpenAI-compatible gateway — **completing the v1 requirement** that the model
+  backend point at either an Anthropic-protocol endpoint or an OpenAI-compatible one. This is the
+  platform's lossy conversion boundary, confined to one package: Anthropic-native turns translate to Chat
+  Completions on the way out (system prepended; assistant `tool_use`→`tool_calls` with object input→
+  JSON-string arguments; user `tool_result`→`tool` role messages; tool defs→function tools;
+  `stream_options.include_usage`) and the SSE stream back on the way in (`delta.content`→`text_delta`,
+  accumulated `tool_calls`→`tool_use`, usage→`ModelUsage`). `stop_reason` is `tool_use` whenever the
+  stream carried any tool call — driven by tool presence, not `finish_reason`, since some
+  OpenAI-compatible servers end a tool turn with `finish_reason: stop`/`length` and honoring that
+  verbatim would strand the tool the brain never runs (and, for `length`, poison session replay). A
+  `[DONE]` terminator completes a turn; a body ending with neither a `finish_reason` nor `[DONE]`, or a
+  mid-stream error frame under HTTP 200, fails loudly rather than passing as a silent success. A safety
+  `delta.refusal` is surfaced as assistant text (not dropped into an empty turn),
+  `prompt_tokens_details.cached_tokens` splits out of `InputTokens` into `CacheReadInputTokens` (matching
+  the Anthropic usage shape), and the deprecated single-`function_call` streaming format is rejected loudly
+  rather than silently losing the call; `stream.Close()` drains only a normally-completed body so a hung
+  endpoint can't block the brain's lease-holding defer. `base_url`
+  is the API root (the adapter appends `/v1/chat/completions`, matching the anthropic adapter's
+  convention). Documented lossy gaps: thinking blocks are dropped, image blocks (top-level or inside a
+  `tool_result`) fail loudly, and a `tool_result`'s `is_error` boolean is dropped (the error text in the
+  content is still forwarded). Covered by a contract-test suite against a fake Chat Completions server
+  (full text+tool round-trip, the tool_use-forcing invariant, finish-reason mapping,
+  refusal/cached-token/legacy-format handling, lossy-path and error cases) plus the same env-gated
+  real-endpoint integration test as the anthropic adapter, gated on
+  `MODEL_PROTOCOL=openai`.
 - Helm chart (slice 9) — `deploy/helm/managed-agent-platform` deploys the platform's three server
   processes as independently-scalable Deployments: the **controlplane** (with a Service), the **brain**,
   and the **executor** wired to the `k8s` sandbox backend. The executor runs sandbox Pods in its own

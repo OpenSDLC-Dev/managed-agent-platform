@@ -27,8 +27,8 @@ type Config struct {
 
 // Request is one model turn in Anthropic Messages semantics. Content and
 // tool definitions stay as raw Anthropic wire JSON so the anthropic-protocol
-// adapter is near-zero-conversion; lossy mappings are confined to future
-// non-Anthropic adapters.
+// adapter is near-zero-conversion; lossy mappings are confined to the
+// non-Anthropic adapters (see provider/openai).
 type Request struct {
 	System    string
 	Messages  []Message
