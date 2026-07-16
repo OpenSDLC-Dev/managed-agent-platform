@@ -826,9 +826,10 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   entirely to GitHub issues (21 backfilled from flags that were buried in the old archive,
   #58–#78; the rest were already tracked). Two new registries: `docs/DIVERGENCES.md` — the
   single record of deliberate wire divergences and unconfirmed inferences (the verifier's
-  wire-compat allowlist; 57 entries consolidated from the old STATE.md sections: 34
+  wire-compat allowlist; 56 entries consolidated from the old STATE.md sections: 33
   confirmed divergences, 21 inferences each cross-linked to its tracking issue, and 2
-  architecture/compatibility notes) — and `docs/REFERENCE_PROJECTS.md` — the read-only
+  architecture/compatibility notes — tracked bugs stay out of the allowlist, in the issue
+  tracker) — and `docs/REFERENCE_PROJECTS.md` — the read-only
   reference sources as `<github-url>, <relative-local-path>` lines with the authority
   order (no absolute paths remain in the repo). CLAUDE.md, AGENTS.md, README.md,
   `.coderabbit.yaml`, five Go comments, and the verifier agent definition now point at the
