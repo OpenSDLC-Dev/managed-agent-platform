@@ -12,6 +12,14 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Config-driven sandbox backend selection (slice 9) — `cmd/executor` and `cmd/worker` now build their
+  sandbox provider through the new `internal/sandbox/backend` selector instead of hard-coding Docker.
+  `SANDBOX_BACKEND` picks `docker` (default, so an existing deployment is unchanged) or `k8s`; the chosen
+  backend reads its own settings from the environment (`DOCKER_HOST` for Docker, or
+  `SANDBOX_K8S_KUBECONFIG` / `_CONTEXT` / `_NAMESPACE` / `_NETSETUP_IMAGE` for Kubernetes — all empty is
+  in-cluster config, for the executor running as a Deployment). The selector is a small tested seam that
+  both binaries share; an unknown backend name is a startup error naming the accepted set. The Helm
+  chart that deploys the executor with the K8s backend is the remaining slice-9 work.
 - Kubernetes sandbox provider (slice 9) — `internal/sandbox/k8s`, a `sandbox.Provider` that runs each
   session's tools in a disposable per-session Pod over the Kubernetes API (`client-go`). It passes the
   **same** `sandboxtest` contract suite as the Docker backend — the plan requires both to behave

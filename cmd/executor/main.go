@@ -13,8 +13,16 @@
 //	EXECUTOR_LEASE_TTL       work-item lease, Go duration (default "15m") —
 //	                         must comfortably exceed a single tool's timeout
 //	EXECUTOR_POLL_INTERVAL   idle queue poll, Go duration (default "500ms")
-//	DOCKER_HOST              Docker daemon address (falls back to the
-//	                         well-known socket)
+//	SANDBOX_BACKEND          "docker" (default) or "k8s"
+//	DOCKER_HOST              Docker daemon address for the docker backend
+//	                         (falls back to the well-known socket)
+//	SANDBOX_K8S_KUBECONFIG   kubeconfig path for the k8s backend; empty, together
+//	                         with an empty SANDBOX_K8S_CONTEXT, uses in-cluster
+//	                         config, then the default loading rules
+//	SANDBOX_K8S_CONTEXT      kubeconfig context for the k8s backend
+//	SANDBOX_K8S_NAMESPACE    namespace for sandbox pods (default "default")
+//	SANDBOX_K8S_NETSETUP_IMAGE   image carrying `ip` for the limited-networking
+//	                         init container (default "busybox")
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
 //	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
 package main
@@ -31,7 +39,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/executor"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
@@ -68,7 +76,14 @@ func run() error {
 		}
 	}
 
-	provider, err := docker.New(docker.Config{Host: os.Getenv("DOCKER_HOST")})
+	provider, err := backend.New(backend.Config{
+		Backend:          os.Getenv("SANDBOX_BACKEND"),
+		DockerHost:       os.Getenv("DOCKER_HOST"),
+		K8sKubeconfig:    os.Getenv("SANDBOX_K8S_KUBECONFIG"),
+		K8sContext:       os.Getenv("SANDBOX_K8S_CONTEXT"),
+		K8sNamespace:     os.Getenv("SANDBOX_K8S_NAMESPACE"),
+		K8sNetSetupImage: os.Getenv("SANDBOX_K8S_NETSETUP_IMAGE"),
+	})
 	if err != nil {
 		return err
 	}
