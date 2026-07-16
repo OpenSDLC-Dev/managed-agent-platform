@@ -837,3 +837,14 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   package and singling it out would leave the rule incoherent.
 - Module path set to the canonical GitHub owner,
   `github.com/OpenSDLC-Dev/managed-agent-platform`.
+
+### Fixed
+
+- Helm chart example `base_url` no longer carries a trailing `/v1`. The provider
+  adapter appends the protocol path itself (`/v1/messages` for anthropic,
+  `/v1/chat/completions` for openai), so an operator copying the old example
+  (`https://gateway.internal/v1`) would have produced a doubled `/v1/v1/messages`.
+  Corrected in the three chart examples — `values.yaml`, `ci/example-values.yaml`,
+  and the chart README — and both operator-facing spots now state the convention
+  (base_url is the API root) so it cannot silently regress. Matches what the compose
+  stack's `model-providers.example.json` and README already document.

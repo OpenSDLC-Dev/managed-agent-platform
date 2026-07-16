@@ -11,7 +11,7 @@ brain:
   modelProviders:
     - model: "*"
       protocol: anthropic
-      base_url: https://gateway.example.internal/v1
+      base_url: https://gateway.example.internal
       api_key: ci-placeholder-secret
 postgresql:
   password: "ciPlaceholderPgPass"
