@@ -1,14 +1,22 @@
 # Changelog
 
 All notable changes to this project are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). No versions have
-been released yet, so everything sits under **Unreleased**; entries are
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); entries are
 grouped newest-first by the PR that landed them.
 
 A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 "Iteration workflow".
 
 ## [Unreleased]
+
+Nothing yet.
+
+## [0.1.0] - 2026-07-17
+
+The first release: the complete v1 loop — wire-compatible control plane, event-log
+sessions with SSE, config-driven providers, brain, sandboxed execution, permission
+policies with HITL, the BYOC work API + worker, Helm chart, and compose stack. Every
+entry below landed pre-release and ships here.
 
 ### Added
 
