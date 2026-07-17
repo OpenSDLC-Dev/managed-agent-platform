@@ -79,7 +79,7 @@ itself when its credentials rot is not a safety net.
 | Unit & contract | — | logic, wire shapes, scripted provider streams |
 | Dependency integration | — | real Postgres, Docker, and Kubernetes (hard-fail without them) |
 | Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn per provider adapter against your endpoint |
-| Live-system evals | `RUN_EVALS=1` | whole sessions: API → brain → real model → sandbox → SSE ([plan](./docs/EVALS_PLAN.md)) |
+| Live-system evals *(being built)* | `RUN_EVALS=1` | whole sessions: API → brain → real model → sandbox → SSE — the suite and its `make eval` entry point are [in progress](./docs/EVALS_PLAN.md); the variable already gates it |
 
 Configure the endpoint once in a gitignored repo-root `.env` — `MODEL_PROTOCOL`
 (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID` — and the live tiers

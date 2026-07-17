@@ -121,15 +121,17 @@ Only task 1 needs Python.
 
 ## Deliberately not in phase 1
 
-Each is filed, not forgotten:
-
+- **`tool_choice` / `disable_parallel_tool_use`** — #30's case 1, tracked there. The ten
+  tasks steer with prompts and grade structurally, so they do not need it; forcing a strict
+  single tool call is the right way to prove the *provider* contract, and it changes
+  `provider.Request` plus both adapters. Phase 1.5, alongside #48's shared provider contract
+  suite.
+- **Production sandbox reaping** — already filed as
+  [#64](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/64):
+  `Sandbox.Destroy` has no production call site, so a session leaks its container. The
+  harness reaps its own and does not wait for #64.
 - **A daily scheduled CI run.** Phase 1 is `make eval` on a developer's machine. The
   scheduled workflow needs repo `MODEL_*` secrets and a hard-fail guard so the net cannot
-  vanish silently — its own PR, once someone configures the secrets.
-- **`tool_choice` / `disable_parallel_tool_use`** (#30's case 1). The ten tasks steer with
-  prompts and grade structurally, so they do not need it; forcing a strict single tool call
-  is the right way to prove the provider contract, and it changes `provider.Request` plus
-  both adapters. Phase 1.5, alongside #48's shared provider contract suite.
-- **Black-box mode against the compose stack.** Mostly redundant with CI's compose job.
-- **Production sandbox reaping.** `Sandbox.Destroy` has no production call site, so every
-  session leaks its container (found while planning this; the harness reaps its own).
+  vanish silently — its own PR once someone configures the secrets. **PR 4 files the issue.**
+- **Black-box mode against the compose stack.** Mostly redundant with CI's compose job; no
+  issue filed, and none intended unless the in-process stack proves to be hiding something.

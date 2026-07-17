@@ -31,7 +31,8 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   skip with no opt-in, a real turn with it, and a hard failure when opted in with no configuration.
 - `make test`'s coverage denominator now also excludes `internal/modeltest`, joining `internal/pgtest` and
   `internal/sandbox/sandboxtest`: test-support packages whose uncovered statements are the branches that
-  fire only when a suite fails or a tier is misconfigured. Their own suites still run.
+  fire only when a suite fails or a tier is misconfigured. `modeltest`'s own suite still runs under
+  `go test ./...` — the exclusion drops it from the denominator, not from the run.
 
 ## [0.1.0] - 2026-07-17
 
