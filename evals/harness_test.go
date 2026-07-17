@@ -19,6 +19,14 @@ import (
 // exists to stop a hung run, not to measure the agent.
 const turnTimeout = 5 * time.Minute
 
+// maxConfirmRounds caps how many requires_action pauses one turn may raise before
+// the harness gives up. Our permission tasks gate a single call, so one round is
+// the norm and a partial re-idle adds a few more at most; a turn that keeps
+// re-pausing past this — a model retrying a denied tool forever — would otherwise
+// loop until the whole-suite timeout, turning a model misbehaviour into an opaque
+// hang. The cap fails it fast, with a message that names the cause.
+const maxConfirmRounds = 8
+
 // Task is one eval: a prompt (or several) and what must be true afterwards.
 // Fields left zero mean "the default agent" — no system prompt, the bare
 // toolset, no seeds.
@@ -146,6 +154,14 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 // are evidence the permission graders read back from the transcript.
 func (s *stack) driveToIdle(t *testing.T, stream *sseStream, sessionID string, turn Turn, nonce string, turnIdx, turns int) map[string]any {
 	t.Helper()
+	// Every gated call answered so far this turn. The API re-idles after a
+	// partial confirmation with only the *remaining* ids, so a requires_action
+	// idle can list ids already confirmed — and confirming one twice is a 400.
+	// Tracking them, and confirming each id exactly once, makes the loop correct
+	// whether a turn gates one call or several (and however the intermediate
+	// re-idles interleave on the stream).
+	answered := map[string]bool{}
+	rounds := 0
 	for {
 		idle, err := stream.awaitIdle(turnTimeout)
 		if err != nil {
@@ -158,17 +174,32 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, sessionID string, t
 			t.Fatalf("turn %d of %d: session paused for confirmation but the turn set no OnAsk (session %s)",
 				turnIdx+1, turns, sessionID)
 		}
+		if rounds++; rounds > maxConfirmRounds {
+			t.Fatalf("turn %d of %d: still pausing for confirmation after %d rounds — model likely "+
+				"re-calling a gated tool without settling (session %s)",
+				turnIdx+1, turns, maxConfirmRounds, sessionID)
+		}
 		stop, _ := idle["stop_reason"].(map[string]any)
 		ids, _ := stop["event_ids"].([]any)
 		if len(ids) == 0 {
 			t.Fatalf("turn %d of %d: requires_action carried no event_ids (session %s)",
 				turnIdx+1, turns, sessionID)
 		}
-		// One confirmation per pending gated call, referencing it by the event id
-		// requires_action named — the id the API's blocking-set query recognizes.
+		// Confirm each not-yet-answered id, in one POST, referencing it by the
+		// event id requires_action named (the id the API's blocking-set query
+		// recognizes). A re-idle listing only already-answered ids adds nothing to
+		// send, so the loop simply waits for the turn to resume.
+		var confirmations []map[string]any
 		for _, raw := range ids {
 			eid, _ := raw.(string)
-			s.sendEvents(t, sessionID, toolConfirmation(eid, turn.OnAsk, nonce))
+			if eid == "" || answered[eid] {
+				continue
+			}
+			answered[eid] = true
+			confirmations = append(confirmations, toolConfirmation(eid, turn.OnAsk, nonce))
+		}
+		if len(confirmations) > 0 {
+			s.sendEvents(t, sessionID, confirmations...)
 		}
 	}
 }

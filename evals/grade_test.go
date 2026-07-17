@@ -481,94 +481,74 @@ func ToolNotUsed(name string, class Class) Grader {
 	}
 }
 
-// ToolUseInputContains asserts some call to the named tool carried sub in its
-// input (the whole input object, JSON-encoded, {{NONCE}} substituted). It guards
-// the brain's reassembly of a streamed tool call: a task puts the nonce in the
-// path it tells the model to use, and a mis-joined input JSON would not carry the
-// token into the event.
-func ToolUseInputContains(name, sub string, class Class) Grader {
+// ToolCallResult correlates a tool call to its own result. It finds a call to
+// the named tool whose input carries inputSub (nonce substituted), then checks
+// that call's joined result: its is_error against wantErr, and its content
+// against contentSub (a plain substring, nonce substituted; "" skips it). Tying
+// the input to the result is what keeps a task honest — an independent "some bash
+// ran the path" plus "some error result said exit 1" can be two unrelated calls,
+// which this cannot: it grades the result of the call it found.
+//
+// Class Either: no matching call is the model not doing as asked, a matching call
+// with the wrong result is the platform's tool misbehaving, and the transcript
+// cannot separate them.
+func ToolCallResult(name, inputSub string, wantErr bool, contentSub string, class Class) Grader {
 	return Grader{
-		Name:  "tool-input-contains:" + name + ":" + sub,
+		Name:  fmt.Sprintf("tool-call-result:%s:%s", name, inputSub),
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
-			want := subst(sub, tr.Nonce)
-			for _, ev := range eventsOfType(tr, "agent.tool_use") {
-				if name != "" && ev["name"] != name {
+			wantIn := subst(inputSub, tr.Nonce)
+			wantContent := subst(contentSub, tr.Nonce)
+			for _, use := range eventsOfType(tr, "agent.tool_use") {
+				if use["name"] != name || !strings.Contains(inputJSON(use), wantIn) {
 					continue
 				}
-				if strings.Contains(inputJSON(ev), want) {
-					return nil
+				id, _ := use["id"].(string)
+				res := resultFor(tr, id)
+				if res == nil {
+					return fmt.Errorf("%s call with %q has no tool_result", name, wantIn)
 				}
+				if isErrorResult(res) != wantErr {
+					return fmt.Errorf("%s call with %q: result is_error=%v, want %v (%q)",
+						name, wantIn, isErrorResult(res), wantErr, textOf(res))
+				}
+				if wantContent != "" && !strings.Contains(textOf(res), wantContent) {
+					return fmt.Errorf("%s call with %q: result %q lacks %q",
+						name, wantIn, textOf(res), wantContent)
+				}
+				return nil
 			}
-			return fmt.Errorf("no %s tool_use input contains %q", name, want)
+			return fmt.Errorf("no %s call whose input contains %q", name, wantIn)
 		},
 	}
 }
 
-// ToolResultEquals asserts some non-error tool_result is byte-exactly sub (nonce
-// substituted) — the byte-equal counterpart to ToolResultContains, for a task
-// that pins a slice of a file (a read view_range whose result must be the
-// requested line and not its neighbour).
-func ToolResultEquals(sub string, class Class) Grader {
+// EventAfterUserMessage asserts an event of evType appears after the nth
+// user.message on the log — proof that a later turn actually did something, not
+// that turn one did all the work. journal-multiturn uses it to require the second
+// turn to touch the sandbox, which a span-count over the whole transcript (turn
+// one alone emits two model-request spans) cannot.
+func EventAfterUserMessage(evType string, nth int, class Class) Grader {
 	return Grader{
-		Name:  "tool-result-equals:" + sub,
+		Name:  fmt.Sprintf("event-after-user-message:%s:%d", evType, nth),
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
-			want := subst(sub, tr.Nonce)
-			for _, ev := range eventsOfType(tr, "agent.tool_result") {
-				if isErrorResult(ev) {
+			seen := 0
+			for i, ev := range tr.Events {
+				if ev["type"] != "user.message" {
 					continue
 				}
-				if textOf(ev) == want {
-					return nil
-				}
-			}
-			return fmt.Errorf("no successful tool_result equals %q", want)
-		},
-	}
-}
-
-// ToolResultMatches asserts some non-error tool_result matches a regexp (nonce
-// substituted before compile). It pins an output contract a plain contains-check
-// cannot — grep's path:line:text line shape, anchored so a reshaped format fails.
-func ToolResultMatches(pattern string, class Class) Grader {
-	return Grader{
-		Name:  "tool-result-matches:" + pattern,
-		Class: class,
-		Check: func(_ *testing.T, tr *Trial) error {
-			re, err := regexp.Compile(subst(pattern, tr.Nonce))
-			if err != nil {
-				return fmt.Errorf("bad pattern %q: %w", pattern, err)
-			}
-			for _, ev := range eventsOfType(tr, "agent.tool_result") {
-				if isErrorResult(ev) {
+				if seen++; seen < nth {
 					continue
 				}
-				if re.MatchString(textOf(ev)) {
-					return nil
+				for _, later := range tr.Events[i+1:] {
+					if later["type"] == evType {
+						return nil
+					}
 				}
+				return fmt.Errorf("no %s after user.message #%d", evType, nth)
 			}
-			return fmt.Errorf("no successful tool_result matches %q", re)
-		},
-	}
-}
-
-// ToolErrorResultContains asserts some error tool_result carries sub (nonce
-// substituted). Its two uses — a failed command's exit-code trailer and a
-// denial's synthesized message — live only on an is_error result, which a
-// contains-check that skips errors (ToolResultContains) would never see.
-func ToolErrorResultContains(sub string, class Class) Grader {
-	return Grader{
-		Name:  "tool-error-result-contains:" + sub,
-		Class: class,
-		Check: func(_ *testing.T, tr *Trial) error {
-			want := subst(sub, tr.Nonce)
-			for _, ev := range eventsOfType(tr, "agent.tool_result") {
-				if isErrorResult(ev) && strings.Contains(textOf(ev), want) {
-					return nil
-				}
-			}
-			return fmt.Errorf("no error tool_result contains %q", want)
+			return fmt.Errorf("fewer than %d user.message events", nth)
 		},
 	}
 }
@@ -590,15 +570,23 @@ func EventCountAtLeast(evType string, n int, class Class) Grader {
 	}
 }
 
-// RequiresActionRaised asserts the session paused for confirmation at least once
-// — a session.status_idle whose stop_reason is requires_action and names the
-// events awaiting a decision. It is the platform half of the permission bridge:
-// the gate stopped a tool before it ran.
+// RequiresActionRaised asserts the session paused for confirmation — a
+// session.status_idle whose stop_reason is requires_action and names the events
+// awaiting a decision. It is the platform half of the permission bridge: the gate
+// stopped a tool before it ran.
+//
+// It fires only once a gated tool was actually called. A turn with no tool_use
+// had nothing to gate, and a Model-class grader (the task's ToolUseAtLeast) owns
+// "the model never called the tool" — so a Platform failure here means one thing:
+// a gated call the bridge failed to suspend.
 func RequiresActionRaised(class Class) Grader {
 	return Grader{
 		Name:  "requires-action-raised",
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
+			if len(eventsOfType(tr, "agent.tool_use")) == 0 {
+				return nil
+			}
 			for _, ev := range eventsOfType(tr, "session.status_idle") {
 				stop, _ := ev["stop_reason"].(map[string]any)
 				if stop["type"] != "requires_action" {
@@ -616,7 +604,11 @@ func RequiresActionRaised(class Class) Grader {
 
 // EvaluatedPermissionAsk asserts a call to the named tool was recorded as gated —
 // evaluated_permission "ask" on the agent.tool_use. It pins that the tool the
-// task gated is the one the platform stopped, not that some other tool paused.
+// task gated is the one the platform stopped.
+//
+// Like RequiresActionRaised it fires only when the tool was actually called: no
+// call means nothing to check (a Model grader owns the skip), and a Platform
+// failure means the tool ran without the "ask" the gate should have stamped.
 func EvaluatedPermissionAsk(name string, class Class) Grader {
 	return Grader{
 		Name:  "evaluated-permission-ask:" + name,
@@ -632,83 +624,123 @@ func EvaluatedPermissionAsk(name string, class Class) Grader {
 				return fmt.Errorf("%s tool_use evaluated_permission = %v, want ask",
 					name, ev["evaluated_permission"])
 			}
-			return fmt.Errorf("no %s tool_use to check evaluated_permission", name)
+			return nil
 		},
 	}
 }
 
-// ResultAfterConfirmation asserts a tool_result is sequenced after the
-// confirmation that released it — the property that makes the bridge meaningful:
-// the tool did not run until the decision landed. It reads position in the log,
-// which the list endpoint returns in commit order.
-func ResultAfterConfirmation(class Class) Grader {
+// ConfirmedResult asserts that the call a confirmation released produced the
+// expected result, sequenced after the confirmation. It correlates by
+// tool_use_id — the confirmation names the gated call, and only that call's
+// result counts, so a result for some other call cannot satisfy it — and checks
+// the result's is_error against wantErr and its content against contentSub (nonce
+// substituted; "" skips the content check). Reading position in the log is sound:
+// the list endpoint returns events in commit order.
+//
+// It passes when no confirmation is on the log: a turn that gated nothing has no
+// bridge outcome to grade, and a Model grader owns "the model never called the
+// gated tool". So a Platform failure here means one thing — a confirmation
+// happened and the platform's result for it was wrong, mis-sequenced, or missing.
+func ConfirmedResult(wantErr bool, contentSub string, class Class) Grader {
 	return Grader{
-		Name:  "result-after-confirmation",
+		Name:  "confirmed-result",
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
-			confirmed := -1
+			wantContent := subst(contentSub, tr.Nonce)
 			for i, ev := range tr.Events {
-				if ev["type"] == "user.tool_confirmation" {
-					confirmed = i
-					break
+				if ev["type"] != "user.tool_confirmation" {
+					continue
 				}
-			}
-			if confirmed < 0 {
-				return fmt.Errorf("no user.tool_confirmation on the log")
-			}
-			for _, ev := range tr.Events[confirmed+1:] {
-				if ev["type"] == "agent.tool_result" {
+				tid, _ := ev["tool_use_id"].(string)
+				if tid == "" {
+					return fmt.Errorf("user.tool_confirmation carries no tool_use_id")
+				}
+				for _, later := range tr.Events[i+1:] {
+					if later["type"] != "agent.tool_result" || later["tool_use_id"] != tid {
+						continue
+					}
+					if isErrorResult(later) != wantErr {
+						return fmt.Errorf("result for confirmed %s: is_error=%v, want %v (content %q)",
+							tid, isErrorResult(later), wantErr, textOf(later))
+					}
+					if wantContent != "" && !strings.Contains(textOf(later), wantContent) {
+						return fmt.Errorf("result for confirmed %s does not contain %q (got %q)",
+							tid, wantContent, textOf(later))
+					}
 					return nil
 				}
+				return fmt.Errorf("no agent.tool_result for confirmed %s after its confirmation", tid)
 			}
-			return fmt.Errorf("no agent.tool_result after the confirmation at index %d", confirmed)
+			return nil
 		},
 	}
 }
 
-// ReadRangeLine asserts a read of exactly line..line from path returned that
-// line's bytes verbatim — the off-by-one guard for view_range slicing. It finds
-// the read whose input requested that single-line range and checks its joined
-// result byte-for-byte, so a slicer that returned the neighbouring line or added
-// a stray newline fails. A wrong result is the platform's slicing; no matching
-// read at all is the model not reading as asked — the transcript cannot separate
-// them, which is why callers class this Either.
-func ReadRangeLine(path string, line int, want string, class Class) Grader {
+// ReadRangeRequested asserts the model asked to read exactly line..line of path
+// via view_range — the model half of the view-range task, reading the line the
+// prompt named. A miss is the model not following the instruction, so it is Model.
+func ReadRangeRequested(path string, line int, class Class) Grader {
 	return Grader{
-		Name:  fmt.Sprintf("read-range-line:%s:%d", path, line),
+		Name:  fmt.Sprintf("read-range-requested:%s:%d", path, line),
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
-			wantText := subst(want, tr.Nonce)
-			for _, use := range eventsOfType(tr, "agent.tool_use") {
-				if use["name"] != "read" {
-					continue
-				}
-				input, _ := use["input"].(map[string]any)
-				// Match on a path-component boundary so a sibling like
-				// "my-poem.txt" cannot satisfy a grader for "poem.txt".
-				if p, _ := input["file_path"].(string); p != path && !strings.HasSuffix(p, "/"+path) {
-					continue
-				}
-				if !viewRangeIs(input["view_range"], line) {
-					continue
-				}
-				id, _ := use["id"].(string)
-				res := resultFor(tr, id)
-				if res == nil {
-					return fmt.Errorf("read of %s line %d has no tool_result", path, line)
-				}
-				if isErrorResult(res) {
-					return fmt.Errorf("read of %s line %d errored: %q", path, line, textOf(res))
-				}
-				if got := textOf(res); got != wantText {
-					return fmt.Errorf("read %s view_range [%d,%d] returned %q, want %q",
-						path, line, line, got, wantText)
-				}
+			if readRangeUse(tr, path, line) != nil {
 				return nil
 			}
 			return fmt.Errorf("no read requested %s view_range [%d,%d]", path, line, line)
 		},
 	}
+}
+
+// ReadRangeBytes asserts that IF such a read was made, it returned the line's
+// bytes verbatim — the off-by-one guard for view_range slicing. A matching read
+// that returns the neighbouring line or a stray newline is unambiguously the
+// platform's slicer, which is why this is Platform. The "no such read" case is
+// the model's and belongs to ReadRangeRequested, so this passes when no matching
+// read exists rather than blaming the platform for a line the model never read.
+func ReadRangeBytes(path string, line int, want string, class Class) Grader {
+	return Grader{
+		Name:  fmt.Sprintf("read-range-bytes:%s:%d", path, line),
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			use := readRangeUse(tr, path, line)
+			if use == nil {
+				return nil
+			}
+			id, _ := use["id"].(string)
+			res := resultFor(tr, id)
+			if res == nil {
+				return fmt.Errorf("read of %s line %d has no tool_result", path, line)
+			}
+			if !okResult(res) {
+				return fmt.Errorf("read of %s line %d errored or malformed: %q", path, line, textOf(res))
+			}
+			if got, wantText := textOf(res), subst(want, tr.Nonce); got != wantText {
+				return fmt.Errorf("read %s view_range [%d,%d] returned %q, want %q",
+					path, line, line, got, wantText)
+			}
+			return nil
+		},
+	}
+}
+
+// readRangeUse returns the first read tool_use requesting exactly [line, line] of
+// path, or nil. The path matches on a component boundary so a sibling like
+// "my-poem.txt" cannot satisfy a grader for "poem.txt".
+func readRangeUse(tr *Trial, path string, line int) map[string]any {
+	for _, use := range eventsOfType(tr, "agent.tool_use") {
+		if use["name"] != "read" {
+			continue
+		}
+		input, _ := use["input"].(map[string]any)
+		if p, _ := input["file_path"].(string); p != path && !strings.HasSuffix(p, "/"+path) {
+			continue
+		}
+		if viewRangeIs(input["view_range"], line) {
+			return use
+		}
+	}
+	return nil
 }
 
 // --- transcript accessors -------------------------------------------------
@@ -762,6 +794,15 @@ func textOf(ev map[string]any) string {
 func isErrorResult(ev map[string]any) bool {
 	b, _ := ev["is_error"].(bool)
 	return b
+}
+
+// okResult reports whether a tool_result is an explicit success — is_error
+// present and false. A missing or non-boolean is_error is not a success: the
+// platform always stamps the flag, so its absence is a malformed result a
+// success-requiring grader must reject rather than read as a zero-value false.
+func okResult(ev map[string]any) bool {
+	b, ok := ev["is_error"].(bool)
+	return ok && !b
 }
 
 // modelUsage pulls the token counts off a span.model_request_end event. in is
@@ -832,5 +873,7 @@ func viewRangeIs(v any, line int) bool {
 	}
 	start, ok1 := arr[0].(float64)
 	end, ok2 := arr[1].(float64)
-	return ok1 && ok2 && int(start) == line && int(end) == line
+	// Exact equality, not int() truncation: a range like [57.5, 57.5] is not a
+	// request for line 57 and must not be graded as one.
+	return ok1 && ok2 && start == float64(line) && end == float64(line)
 }
