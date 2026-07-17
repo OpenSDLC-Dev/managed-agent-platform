@@ -128,7 +128,7 @@ func (e *Executor) step(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	if err := e.process(ctx, item); err != nil {
-		e.report(item, err)
+		e.report(telemetry.Extract(ctx, item.TraceContext), item, err)
 	}
 	return true, nil
 }
@@ -356,8 +356,13 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (domain.
 // but the fault is logged so an operator debugging "the tools never run" (a
 // Docker daemon down faults every item) sees it rather than a silent stall.
 // onFault is nil in production; tests set it to observe faults.
-func (e *Executor) report(item *queue.Item, err error) {
-	slog.Error("executor: tool_exec item faulted, lease left to expire",
+//
+// ctx carries the item's trace context rather than process's span: by the time
+// a fault is reported, process has returned and its span has ended, so the
+// record is parented on the turn that enqueued the item. That is the trace an
+// operator has open when they come looking for why the tools never ran.
+func (e *Executor) report(ctx context.Context, item *queue.Item, err error) {
+	slog.ErrorContext(ctx, "executor: tool_exec item faulted, lease left to expire",
 		"item", item.ID, "session", item.SessionID, "error", err)
 	if e.onFault != nil {
 		e.onFault(item, err)

@@ -11,8 +11,10 @@ import (
 	"fmt"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -71,9 +73,11 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 
 	traceOpts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(cfg.Endpoint)}
 	metricOpts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(cfg.Endpoint)}
+	logOpts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(cfg.Endpoint)}
 	if cfg.Insecure {
 		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
 		metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())
+		logOpts = append(logOpts, otlploggrpc.WithInsecure())
 	}
 
 	traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
@@ -84,6 +88,12 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	if err != nil {
 		_ = traceExporter.Shutdown(ctx)
 		return nil, fmt.Errorf("telemetry: create metric exporter: %w", err)
+	}
+	logExporter, err := otlploggrpc.New(ctx, logOpts...)
+	if err != nil {
+		_ = traceExporter.Shutdown(ctx)
+		_ = metricExporter.Shutdown(ctx)
+		return nil, fmt.Errorf("telemetry: create log exporter: %w", err)
 	}
 
 	sampleRatio := 1.0
@@ -99,13 +109,26 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
 	)
+	loggerProvider := sdklog.NewLoggerProvider(
+		sdklog.WithResource(res),
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
+	)
 
 	// Globals are only touched once nothing can fail anymore.
 	otel.SetTextMapPropagator(propagator)
 	otel.SetTracerProvider(tracerProvider)
 	otel.SetMeterProvider(meterProvider)
+	// The logger provider is reached through the slog default rather than
+	// otel/log/global: that package is experimental, and its sync.Once pins
+	// the first provider set for the life of the process, which a test suite
+	// calling Init more than once would never recover from.
+	installLogBridge(cfg.ServiceName, loggerProvider)
 
 	return func(ctx context.Context) error {
-		return errors.Join(tracerProvider.Shutdown(ctx), meterProvider.Shutdown(ctx))
+		return errors.Join(
+			tracerProvider.Shutdown(ctx),
+			meterProvider.Shutdown(ctx),
+			loggerProvider.Shutdown(ctx),
+		)
 	}, nil
 }

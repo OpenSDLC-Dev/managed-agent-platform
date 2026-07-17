@@ -64,7 +64,7 @@ func requestIDFrom(ctx context.Context) string {
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	ae, ok := err.(*apiError)
 	if !ok {
-		slog.Error("internal error", "method", r.Method, "path", r.URL.Path,
+		slog.ErrorContext(r.Context(), "internal error", "method", r.Method, "path", r.URL.Path,
 			"request_id", requestIDFrom(r.Context()), "err", err)
 		ae = &apiError{http.StatusInternalServerError, errTypeAPI, "internal server error"}
 	}

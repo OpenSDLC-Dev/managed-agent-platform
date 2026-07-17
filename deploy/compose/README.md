@@ -53,7 +53,7 @@ and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 | `CONTROLPLANE_BIND` | Interface the port binds to (default `127.0.0.1`). Set `0.0.0.0` — with a real key — to expose on the LAN. |
 | `MODEL_PROVIDERS_FILE` | Brain routing file to mount (default `model-providers.example.json`). Set to your copy to use a real endpoint. |
 | `EXECUTOR_IMAGE` | Base image for per-session sandbox containers (default `debian:stable-slim`). |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector; empty disables trace export. Set to `jaeger:4317` with the observability profile. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector for traces, metrics **and logs**; empty disables telemetry export entirely. Set to `jaeger:4317` with the observability profile — but note Jaeger ingests **traces only**, so each failed log-export batch prints one `Unimplemented … LogsService` line to stderr. Point at a collector that takes all three (an OTel Collector, Grafana Alloy) to silence it. |
 
 The **model routing** file (mounted into the brain at
 `/etc/map/model-providers.json`) is a **JSON array** of routes, each with `model`
@@ -81,6 +81,12 @@ docker compose --profile observability up --build
 ```
 
 Jaeger UI: `http://localhost:16686`.
+
+The endpoint is one address for all three signals, and this Jaeger takes only
+traces: the metric and log exporters will keep reporting `Unimplemented` to
+stderr, one line per failed batch. Harmless — traces still arrive, and the
+platform's own logs still reach the console — but if you want the logs stored
+and the noise gone, put an OTel Collector at `4317` and let it fan out.
 
 ## Teardown
 

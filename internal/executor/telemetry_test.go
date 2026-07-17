@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -85,6 +89,79 @@ func TestToolExecJoinsTheEnqueuingTurnsTrace(t *testing.T) {
 	}
 	if got := toolSpan.Status().Code; got != codes.Unset {
 		t.Errorf("clean run's span status = %v, want unset", got)
+	}
+}
+
+// captureLogs installs a slog handler that records what context each record was
+// emitted under, for one test.
+func captureLogs(t *testing.T) func() []loggedRecord {
+	t.Helper()
+	h := &capturingHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []loggedRecord {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return slices.Clone(h.records)
+	}
+}
+
+type loggedRecord struct {
+	message string
+	span    trace.SpanContext
+}
+
+type capturingHandler struct {
+	mu      sync.Mutex
+	records []loggedRecord
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *capturingHandler) Handle(ctx context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, loggedRecord{r.Message, trace.SpanContextFromContext(ctx)})
+	return nil
+}
+
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+// The fault log is the one an operator greps for when the tools never run, and
+// it is worth nothing on its own — "connection refused" without the session it
+// belongs to. It has to name the trace it came from. The span the fault
+// happened under has already ended by the time report is called, so the item's
+// own captured trace context is what carries it: getting this wrong (logging
+// under the executor's bare loop context) silently drops correlation without
+// dropping the line, which no other test would notice.
+func TestFaultLogJoinsTheEnqueuingTurnsTrace(t *testing.T) {
+	logged := captureLogs(t)
+
+	h := newHarness(t, &fakeSandbox{writeErr: errors.New("connection refused")})
+	h.exec.onFault = func(*queue.Item, error) {}
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19},
+		SpanID:     trace.SpanID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		TraceFlags: trace.FlagsSampled,
+	})
+	h.suspendUnder(t, trace.ContextWithSpanContext(context.Background(), sc), writeUse("out.txt", "hi"))
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+
+	records := logged()
+	i := slices.IndexFunc(records, func(r loggedRecord) bool {
+		return strings.Contains(r.message, "faulted")
+	})
+	if i < 0 {
+		t.Fatalf("no fault logged; records = %v", records)
+	}
+	if got := records[i].span.TraceID(); got != sc.TraceID() {
+		t.Errorf("fault log trace id = %s, want the enqueuing turn's %s", got, sc.TraceID())
 	}
 }
 

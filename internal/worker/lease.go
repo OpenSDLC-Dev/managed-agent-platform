@@ -270,7 +270,9 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 		w.forceStop(work.ID)
 	case outcomeComplete:
 		if hb.lostLease {
-			slog.Warn("worker: completed work but observed losing the lease, not stopping", "work", work.ID)
+			// runCtx, not ctx: the span has ended but its context has not, so the
+			// record still lands on the tool_exec span it is about.
+			slog.WarnContext(runCtx, "worker: completed work but observed losing the lease, not stopping", "work", work.ID)
 		} else {
 			w.forceStop(work.ID)
 		}
@@ -290,7 +292,7 @@ func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) item
 		// Could not determine liveness (a transient control-plane error, say):
 		// leave the item for reclaim rather than discarding a possibly-live
 		// session's work terminally.
-		slog.Error("worker: session liveness check failed, leaving item for reclaim",
+		slog.ErrorContext(ctx, "worker: session liveness check failed, leaving item for reclaim",
 			"session", sessionID, "work", work.ID, "err", err)
 		return outcomeReclaim
 	}
@@ -300,7 +302,7 @@ func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) item
 		// never fire on customer compute and the item does not reclaim-loop. This
 		// is the worker's equivalent of the executor's sessionForRun drain — the
 		// executor completes the item under the DB lock; the worker force-stops.
-		slog.Info("worker: session not live, draining work item", "session", sessionID, "work", work.ID)
+		slog.InfoContext(ctx, "worker: session not live, draining work item", "session", sessionID, "work", work.ID)
 		return outcomeDrain
 	}
 	if err := RunSessionTools(ctx, w.client, w.provider, sessionID, ToolExecConfig{
@@ -311,7 +313,7 @@ func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) item
 		// A tool backend-faulted (or the heartbeat cancelled the run): some tools
 		// may be unanswered. Leave the item live for reclaim, matching the
 		// executor's partial-fault semantics — do not force-stop it terminally.
-		slog.Error("worker: session tools did not complete, leaving item for reclaim",
+		slog.ErrorContext(ctx, "worker: session tools did not complete, leaving item for reclaim",
 			"session", sessionID, "work", work.ID, "err", err)
 		return outcomeReclaim
 	}
