@@ -21,8 +21,8 @@ never here. The verifier enforces both on its docs-consistency rung.
   phase 1) — an end-to-end suite driving the whole stack against a real model endpoint,
   with ten regression tasks. Plan and live progress: **[docs/EVALS_PLAN.md](./docs/EVALS_PLAN.md)**
   (4 PRs; PR 1 landed). Queued behind it, the two gaps before a self-hosted deploy is
-  turn-key: an operator surface for environment keys ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)),
-  and published images + a real helm-install acceptance ([#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75)).
+  turn-key: environment-key issuance ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43))
+  and published images + a helm-install acceptance ([#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75)).
 - **Release:** **v0.1.0** (2026-07-17) — the complete v1 loop; the `v0.1.0` tag is created
   on main at the release PR's squash-merge. New work accumulates under CHANGELOG's
   `[Unreleased]`.

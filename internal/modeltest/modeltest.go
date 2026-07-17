@@ -7,7 +7,7 @@
 //
 // The tiers, and what each costs:
 //
-//	RUN_LIVE_MODEL_TESTS=1  one real turn per provider adapter (cents)
+//	RUN_LIVE_MODEL_TESTS=1  one real turn against the configured endpoint (cents)
 //	RUN_EVALS=1             the end-to-end eval suite (minutes, dollars)
 //
 // Two variables rather than one because their costs differ by an order of
@@ -62,6 +62,8 @@ type Config struct {
 // String redacts the credential. Printing a Config is the natural first move
 // when a live turn misbehaves, so the redaction is a property of the type
 // rather than a warning in a comment that a %v somewhere else would ignore.
+// It covers the verbs that print a value — %v, %+v, %s. Reaching past them
+// (%#v, encoding/json) still reaches the field, so don't.
 func (c Config) String() string {
 	key := "unset"
 	if c.APIKey != "" {
@@ -151,6 +153,8 @@ func resolve(key string) string { return lookup(os.LookupEnv, dotEnv, key) }
 // invitation for the file to supply one. Anything outside MODEL_* never reaches
 // the file, which is both why a tier variable cannot be opted in from disk and
 // why a run that never asks for a MODEL_* key never opens the credential file.
+// That rests on the tier variables living outside the MODEL_ namespace: name a
+// tier MODEL_SOMETHING and the gate itself would start consulting the file.
 func lookup(lookupEnv func(string) (string, bool), file func() map[string]string, key string) string {
 	if v, ok := lookupEnv(key); ok {
 		return v
