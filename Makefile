@@ -17,7 +17,7 @@ SHELL := /usr/bin/env bash
 # internally), so refuse it rather than gate on a stale profile.
 .NOTPARALLEL:
 
-.PHONY: build crossbuild vet fmt-check test cover-gate verify
+.PHONY: build crossbuild vet fmt-check test cover-gate verify eval
 
 build:
 	go build ./...
@@ -81,3 +81,21 @@ cover-gate:
 	     }' coverage.out
 
 verify: build crossbuild vet fmt-check test cover-gate
+
+# The live end-to-end eval suite: whole sessions through the public API against
+# the .env endpoint and real Docker sandboxes. NOT part of `verify` — it spends
+# money and takes minutes — and deliberately not a coverage run:
+#
+#   - RUN_EVALS is command-scoped, never exported. An exported opt-in would make
+#     a later `make verify` in the same shell both call the model and count the
+#     eval packages toward the gate. modeltest reads it as consent (any non-empty
+#     value); the endpoint itself still comes from .env.
+#   - No -coverprofile: it would overwrite the coverage.out that cover-gate
+#     grades, and the eval packages are test-only besides.
+#   - 60m because a trial waits on a real model and real containers; the per-turn
+#     timeout inside the harness is the real guard, this is the outer backstop.
+#
+# Artifacts land in evals/artifacts/ (gitignored): report.json, summary.md, and
+# one transcript per failed trial.
+eval:
+	RUN_EVALS=1 go test -count=1 -v -timeout 60m ./evals/...

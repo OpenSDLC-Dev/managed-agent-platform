@@ -97,9 +97,13 @@ Phase 1 lands as five PRs, each green on its own (docs move with the code, per C
       `Debug` records ship to the collector while the console shows nothing. Two correlation
       gaps the bridge revealed elsewhere are filed rather than fixed: #92 (the brain's
       turn-fault log) and #93 (every binary's fatal-exit log).
-- [ ] **PR 4 — the harness + tasks 1–3 + `make eval`.** The stack wiring, the run loop
+- [x] **PR 4 — the harness + tasks 1–3 + `make eval`.** The stack wiring, the run loop
       (fresh session → drive → await idle on SSE → grade → reap), grader constructors, the
-      report (`evals/artifacts/`), and `fib-quickstart` / `echo-notool` / `shell-state`.
+      report (`evals/artifacts/`), and `fib-quickstart` / `echo-notool` / `shell-state`. The
+      three run 3/3 green against a live endpoint. `modeltest` grew a second gated tier
+      (`RUN_EVALS`, and a `TierEnabled` for the `TestMain` a `*testing.T` skip cannot serve);
+      the daily scheduled run is filed as
+      [#96](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/96).
 - [ ] **PR 5 — tasks 4–10, wrap-up.** The remaining seven, STATE/HISTORY, and the
       follow-up issues below.
 
