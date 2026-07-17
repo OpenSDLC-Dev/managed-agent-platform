@@ -62,14 +62,32 @@ type Config struct {
 // String redacts the credential. Printing a Config is the natural first move
 // when a live turn misbehaves, so the redaction is a property of the type
 // rather than a warning in a comment that a %v somewhere else would ignore.
-// It covers the verbs that print a value — %v, %+v, %s. Reaching past them
-// (%#v, encoding/json) still reaches the field, so don't.
 func (c Config) String() string {
 	key := "unset"
 	if c.APIKey != "" {
 		key = "[redacted]"
 	}
 	return fmt.Sprintf("{Protocol:%s BaseURL:%s APIKey:%s Model:%s}", c.Protocol, c.BaseURL, key, c.Model)
+}
+
+// Format carries the redaction to every verb fmt will let it. String alone
+// would not: fmt consults it for %v/%s and their kin, but reaches past it for
+// %#v, and for a mismatched verb like %d it falls back to a diagnostic that
+// prints the raw fields — precisely the debugging accident this type exists to
+// survive. Unexporting the credential would not help either; fmt prints
+// unexported fields too.
+//
+// %p is the one that gets through: fmt resolves %p and %T before consulting
+// any method ("we always do them first" — fmt/print.go, printArg), so %p on a
+// Config prints a %!p diagnostic carrying the fields. Nothing here can
+// intercept it; pointing %p at a struct value is already a mistake fmt shouts
+// about, so it is documented rather than defended against.
+func (c Config) Format(f fmt.State, verb rune) {
+	if verb == 'v' && f.Flag('#') {
+		io.WriteString(f, "modeltest.Config"+c.String())
+		return
+	}
+	io.WriteString(f, c.String())
 }
 
 // Endpoint gates a live tier and returns the endpoint it should drive.

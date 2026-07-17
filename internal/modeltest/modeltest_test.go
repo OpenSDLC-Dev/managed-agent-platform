@@ -226,12 +226,20 @@ func TestConfigFormattingRedactsTheKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected failure: %v", err)
 	}
-	for _, format := range []string{"%v", "%+v", "%s"} {
-		rendered := fmt.Sprintf(format, cfg)
-		if strings.Contains(rendered, secret) {
+	// Every verb, including the ones nobody should point at a Config: a
+	// mismatched verb makes fmt fall back to its own diagnostic, and that
+	// diagnostic prints the raw fields. Unexporting them would not help — fmt
+	// prints unexported fields too. %p is absent deliberately: fmt resolves it
+	// before consulting any method, so nothing the type does can redact it
+	// (see Format's comment).
+	for _, format := range []string{"%v", "%+v", "%s", "%#v", "%q", "%d", "%x", "%t"} {
+		if rendered := fmt.Sprintf(format, cfg); strings.Contains(rendered, secret) {
 			t.Errorf("%s of a Config leaks the API key: %s", format, rendered)
 		}
-		if !strings.Contains(rendered, "some-model") {
+	}
+	// The verbs someone would actually reach for have to stay worth reaching for.
+	for _, format := range []string{"%v", "%+v", "%s", "%#v"} {
+		if rendered := fmt.Sprintf(format, cfg); !strings.Contains(rendered, "some-model") {
 			t.Errorf("%s of a Config dropped the model, leaving nothing to debug with: %s", format, rendered)
 		}
 	}
