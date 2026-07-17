@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"go.opentelemetry.io/otel"
@@ -153,6 +154,38 @@ func TestToolExecSpanRecordsAFailedCommit(t *testing.T) {
 	}
 	if got := toolExecSpan(t, ended()).Status().Code; got != codes.Error {
 		t.Errorf("span status = %v after the results failed to commit, want %v", got, codes.Error)
+	}
+}
+
+// The session lookup runs on a claimed item, so a failure there is the platform
+// failing to handle work it already took — and it repeats, because the item is
+// left for reclaim. A consumer span stands for the handling of the message from
+// the moment it is received, so it must be open before the lookup: otherwise the
+// one fault that recurs every lease period is the one the enqueuing turn's trace
+// never mentions.
+func TestToolExecSpanCoversTheSessionLookup(t *testing.T) {
+	ended := recordSpans(t)
+
+	ctx := context.Background()
+	h := newHarness(t, &fakeSandbox{})
+	h.suspend(t, writeUse("out.txt", "hi"))
+
+	item, err := h.queue.Claim(ctx, queue.ToolExec, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %v, item %v", err, item)
+	}
+	// The database goes away under an item this executor already owns, so the
+	// session lookup fails before a tool could run — a Postgres outage, which
+	// faults every claimed item the same way until it clears.
+	h.pool.Close()
+
+	if err := h.exec.process(ctx, item); err == nil {
+		t.Fatal("process succeeded with no database")
+	}
+
+	span := toolExecSpan(t, ended())
+	if got := span.Status().Code; got != codes.Error {
+		t.Errorf("span status = %v after the session lookup failed, want %v", got, codes.Error)
 	}
 }
 

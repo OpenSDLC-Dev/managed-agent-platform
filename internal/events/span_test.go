@@ -42,7 +42,7 @@ func TestModelRequestSameSourceEmission(t *testing.T) {
 	// commit (the brain appends it atomically with the turn's settlement),
 	// then Finish closes the OTel side with the commit's fate.
 	speed := "standard"
-	endEv, err := mr.EndEvent(true, &domain.ModelUsage{
+	endEv, err := mr.EndEvent(true, domain.ModelUsage{
 		InputTokens: 100, OutputTokens: 25, CacheReadInputTokens: 7, Speed: &speed,
 	})
 	if err != nil {

@@ -22,10 +22,14 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   by anyone's oversight. The duration is the call to the provider and stops when the model's stream
   ends, not when the turn settles: settlement is a session-locked Postgres transaction the model had
   nothing to do with, and billing it as model latency would mislead exactly the person reading the
-  metric to explain a slow turn. A turn that died before the model reported usage records duration with
-  an `error.type` and no tokens, rather than a pair of zeroes no model ever produced diluting the
-  histogram — `EndEvent` now takes a nil usage to say "the model never told us", since the wire event
-  still wants a `model_usage` object and only it may flatten the two facts together. The input reading
+  metric to explain a slow turn. The duration and the reported usage are both taken there, by
+  `ModelDone`, because both are facts of the model's call: settlement is the wrong place to learn what
+  a model spent, since it renders an end event on some paths and not others — sourcing usage from it
+  would invent a pair of zeroes for turns the model never costed *and* drop real, billed tokens for a
+  turn that streamed an answer and then lost its lease. A turn that reported no usage records duration
+  with an `error.type` and no tokens rather than zeroes no model ever produced (with the caveat in
+  [#90](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/90): no adapter can yet say an
+  endpoint reported nothing). The input reading
   sums the fresh, cache-read and cache-creation counts: `gen_ai.token.type` has only `input` and
   `output`, so the convention has no bucket for a cache read, and the domain carries those apart only
   because Anthropic's wire shape does. That split must not leak into a metric whose vocabulary has no
@@ -86,10 +90,11 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   them was invisible. `Claim` now returns the trace context alongside the item, and the executor opens a
   consumer-kind `tool_exec` span under it, named and attributed as the worker's — so trace parenting is
   now the same guarantee at both deployment points, which is what the pull protocol being one protocol is
-  supposed to mean. The span covers the whole handling of the item, its commit included, which is what a
-  consumer span stands for: tools can run perfectly and still have their results fail to land, leaving the
-  item for reclaim to re-run next lease period, and ending the span at the tool boundary would show that
-  stall as a clean tool run. It carries an error status whenever the platform itself fails; a tool-level
+  supposed to mean. The span opens on a claimed item and closes when the item is done with, which is what
+  a consumer span stands for: the handling of one message, end to end. Both edges matter, because every
+  step can fail — the session lookup, the tools, the commit — and each failure leaves the item for reclaim
+  to retry next lease period, so a span covering only the middle would omit exactly the recurring faults
+  an operator opens the trace to find. It carries an error status whenever the platform itself fails; a tool-level
   failure the model can recover from leaves it unset, since erroring it for a missing file would light up
   every trace view on ordinary agent behaviour. The worker's equivalent span still reports no status at
   all — pre-existing, and left alone here rather than widening this change

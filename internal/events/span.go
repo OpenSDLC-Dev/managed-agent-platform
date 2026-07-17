@@ -73,21 +73,32 @@ type ModelRequest struct {
 	modelElapsed time.Duration
 }
 
-// ModelDone stops the clock on the call to the model provider. The caller must
-// invoke it as soon as the model's stream ends — before settling the turn.
+// ModelDone records what the call to the model provider cost: how long it took,
+// and the usage it reported (nil when it reported none, or when the stream
+// failed before saying). The caller must invoke it as soon as the model's
+// stream ends — before settling the turn.
 //
-// The span and the wire events deliberately stay open past this point: Finish
-// runs after the settlement transaction so it can record whether the end event
-// actually committed. But gen_ai.client.operation.duration is the convention's
-// measure of the client's call to the provider, and settlement is a
-// session-locked Postgres transaction the model had nothing to do with.
-// Measuring to Finish would file database contention under a model-latency
-// instrument — and only on the paths that reach settlement, since the abandon
-// paths finish straight after the stream, leaving the metric inconsistent with
-// itself. Repeat calls keep the first boundary.
-func (m *ModelRequest) ModelDone() {
-	if m.modelElapsed == 0 {
-		m.modelElapsed = time.Since(m.started)
+// Both are facts of the model's call, known exactly here, which is why they are
+// taken here rather than at Finish. The span and the wire events deliberately
+// stay open past this point: Finish runs after the settlement transaction so it
+// can record whether the end event actually committed. But settlement is a
+// session-locked Postgres transaction the model had nothing to do with, so
+// measuring the duration to Finish would file database contention under a
+// model-latency instrument — and only on the paths that reach settlement, since
+// the abandon paths finish straight after the stream, leaving the metric
+// inconsistent with itself. Usage sourced from settlement would be worse: a
+// turn that streams a full answer and then loses its lease renders no end event
+// at all, so tokens the model really spent and really billed would go
+// unrecorded on exactly the paths that already cost money for nothing.
+//
+// Repeat calls keep the first reading.
+func (m *ModelRequest) ModelDone(usage *domain.ModelUsage) {
+	if m.modelElapsed != 0 {
+		return
+	}
+	m.modelElapsed = time.Since(m.started)
+	if usage != nil {
+		m.usage, m.hasUsage = *usage, true
 	}
 }
 
@@ -102,26 +113,21 @@ func (m *ModelRequest) StartEventID() domain.ID { return m.startID }
 // wire event and the OTel span still come from one instrumentation point
 // (CLAUDE.md principle 3).
 //
-// usage is nil when the model never reported any — a turn that died before its
-// stream said so. The wire event still carries a model_usage object, because
-// the schema wants one, but nil and a real zero reading are different facts and
-// only the wire event may flatten them: the token histogram must not be fed
-// zeroes no model ever produced.
-func (m *ModelRequest) EndEvent(isError bool, usage *domain.ModelUsage) (NewEvent, error) {
-	reported := domain.ModelUsage{}
-	if usage != nil {
-		reported = *usage
-	}
+// usage is what the wire event reports; a failing turn passes the zero value,
+// because the schema wants a model_usage object whether or not a model ever
+// produced one. It deliberately does not feed the token metric — that reads the
+// usage ModelDone took from the stream itself. Settlement is the wrong place to
+// learn what the model spent: it renders this event on some paths and not
+// others, so sourcing the metric here would both invent zeroes for turns the
+// model never costed and drop real spend for turns that never settle.
+func (m *ModelRequest) EndEvent(isError bool, usage domain.ModelUsage) (NewEvent, error) {
 	payload, err := json.Marshal(map[string]any{
 		"is_error":               isError,
 		"model_request_start_id": m.startID.String(),
-		"model_usage":            reported,
+		"model_usage":            usage,
 	})
 	if err != nil {
 		return NewEvent{}, err
-	}
-	if usage != nil {
-		m.usage, m.hasUsage = reported, true
 	}
 	now := time.Now().UTC()
 	return NewEvent{

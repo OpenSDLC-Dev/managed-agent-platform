@@ -115,6 +115,20 @@ func infra(format string, args ...any) error {
 	return infraError{fmt.Errorf(format, args...)}
 }
 
+// streamUsage is what the model reported, or nil when the stream failed before
+// it could say. The distinction is the metric's: no reading and a zero reading
+// are different facts, and only a real one belongs in the token histogram.
+//
+// A stream that completed always reports something, because both adapters send
+// a usage object on their final chunk even when the endpoint supplied none — so
+// a non-compliant endpoint still yields zeroes here rather than nil (#90).
+func streamUsage(turn *turnResult) *domain.ModelUsage {
+	if turn == nil {
+		return nil
+	}
+	return &turn.usage
+}
+
 func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 	sid := item.SessionID
 
@@ -180,8 +194,10 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 	turn, streamErr := b.streamTurn(kctx, sid, p, req)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked
-	// settlement — and none of it belongs in a model-latency metric.
-	span.ModelDone()
+	// settlement — and none of it belongs in a model-latency metric. The usage
+	// goes with it: what the model spent is a fact of the call, and a turn that
+	// streamed an answer and then lost its lease still cost real tokens.
+	span.ModelDone(streamUsage(turn))
 	if err := keeper.close(); err != nil {
 		// The lease is gone or unmaintainable: another brain may own the
 		// turn already. Nothing of ours may commit — abandon quietly.
@@ -407,7 +423,7 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	if err != nil {
 		return err
 	}
-	endEv, err := span.EndEvent(false, &turn.usage)
+	endEv, err := span.EndEvent(false, turn.usage)
 	if err != nil {
 		return err
 	}
@@ -576,7 +592,7 @@ func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, s
 func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg string) error {
 	var head []events.NewEvent
 	if span != nil {
-		endEv, err := span.EndEvent(true, nil)
+		endEv, err := span.EndEvent(true, domain.ModelUsage{})
 		if err != nil {
 			return err
 		}

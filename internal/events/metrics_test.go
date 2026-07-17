@@ -81,7 +81,9 @@ func TestModelRequestRecordsGenAIMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if _, err := mr.EndEvent(false, &domain.ModelUsage{InputTokens: 11, OutputTokens: 7}); err != nil {
+	usage := domain.ModelUsage{InputTokens: 11, OutputTokens: 7}
+	mr.ModelDone(&usage)
+	if _, err := mr.EndEvent(false, usage); err != nil {
 		t.Fatalf("end event: %v", err)
 	}
 	mr.Finish(ctx, false, nil)
@@ -149,12 +151,14 @@ func TestModelRequestCountsCachedTokensAsInput(t *testing.T) {
 	}
 	// A replayed session: a big cache read, a little cache creation, and only a
 	// few genuinely fresh tokens.
-	if _, err := mr.EndEvent(false, &domain.ModelUsage{
+	usage := domain.ModelUsage{
 		InputTokens:              30,
 		CacheReadInputTokens:     9000,
 		CacheCreationInputTokens: 700,
 		OutputTokens:             12,
-	}); err != nil {
+	}
+	mr.ModelDone(&usage)
+	if _, err := mr.EndEvent(false, usage); err != nil {
 		t.Fatalf("end event: %v", err)
 	}
 	mr.Finish(ctx, false, nil)
@@ -197,7 +201,7 @@ func TestModelRequestRecordsFailureWithoutTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	ev, err := mr.EndEvent(true, nil)
+	ev, err := mr.EndEvent(true, domain.ModelUsage{})
 	if err != nil {
 		t.Fatalf("end event: %v", err)
 	}
@@ -227,6 +231,42 @@ func TestModelRequestRecordsFailureWithoutTokens(t *testing.T) {
 	}
 }
 
+// Tokens the model reported were really spent and really billed, whatever
+// becomes of the turn afterwards. A turn that streams a full answer and then
+// loses its lease never renders an end event — settlement is where that happens
+// — so sourcing the metric's usage from the end event would drop real spend on
+// exactly the paths that already cost money for nothing. The reported usage is
+// a fact of the model's call, so it is stamped where that call ends.
+func TestModelRequestRecordsUsageEvenWhenTheTurnNeverSettles(t *testing.T) {
+	pool := newPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	ctx := context.Background()
+	collect := collectMetrics(t)
+
+	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// The stream completed and reported usage...
+	mr.ModelDone(&domain.ModelUsage{InputTokens: 400, OutputTokens: 90})
+	// ...then the lease was lost, so nothing settles and no end event is ever
+	// rendered. The brain abandons the turn straight from here.
+	mr.Finish(ctx, true, nil)
+
+	tok := intPoints(collect(), "gen_ai.client.token.usage")
+	if len(tok) != 2 {
+		t.Fatalf("token points = %d, want 2 — the model's real spend was dropped because the turn never settled", len(tok))
+	}
+	byType := map[string]int64{}
+	for i := range tok {
+		byType[attrValue(tok, i, "gen_ai.token.type")] = tok[i].Sum
+	}
+	if byType["input"] != 400 || byType["output"] != 90 {
+		t.Errorf("usage = in %d / out %d, want 400/90", byType["input"], byType["output"])
+	}
+}
+
 // gen_ai.client.operation.duration is the convention's measure of the client's
 // call to the model provider. The brain finishes a span only after settling the
 // turn — a session-locked Postgres transaction the model had nothing to do with
@@ -244,10 +284,10 @@ func TestModelRequestDurationExcludesSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	mr.ModelDone() // the stream ended here
+	mr.ModelDone(&domain.ModelUsage{InputTokens: 1, OutputTokens: 1}) // the stream ended here
 	settle := 60 * time.Millisecond
 	time.Sleep(settle) // a slow settlement transaction
-	if _, err := mr.EndEvent(false, &domain.ModelUsage{InputTokens: 1, OutputTokens: 1}); err != nil {
+	if _, err := mr.EndEvent(false, domain.ModelUsage{InputTokens: 1, OutputTokens: 1}); err != nil {
 		t.Fatalf("end event: %v", err)
 	}
 	mr.Finish(ctx, false, nil)
