@@ -156,6 +156,39 @@ func (s *stack) listEvents(t *testing.T, sessionID string) []map[string]any {
 	}
 }
 
+// tryListEvents fetches a session's transcript best-effort, for the abort path
+// where the fatal-on-error listEvents cannot run: it is called from a defer
+// unwinding a t.Fatal, and a second t.Fatal there would nest another Goexit. It
+// reads a single page and swallows every error — a partial transcript for a
+// timed-out trial is worth more than none, and a fetch failure must not mask the
+// abort that triggered it. One page suffices: an aborted trial is short by
+// definition (it never reached idle), well under the list endpoint's maximum.
+func (s *stack) tryListEvents(sessionID string) []map[string]any {
+	ctx, cancel := context.WithTimeout(context.Background(), restTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		s.url+"/v1/sessions/"+sessionID+"/events?limit=1000", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("x-api-key", evalKey)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil
+	}
+	var body struct {
+		Data []map[string]any `json:"data"`
+	}
+	if json.NewDecoder(res.Body).Decode(&body) != nil {
+		return nil
+	}
+	return body.Data
+}
+
 // userMessage is the wire shape the control plane validates for a turn's input:
 // exactly {"type","content"}, content blocks of text/image/document.
 func userMessage(text string) map[string]any {

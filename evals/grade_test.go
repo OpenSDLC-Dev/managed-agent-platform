@@ -389,13 +389,23 @@ func bashCommands(tr *Trial) []string {
 	return cmds
 }
 
-// ContainerAbsent asserts no sandbox was ever made for the session — the
-// executor must not provision on a session whose agent called no tools.
+// ContainerAbsent asserts no sandbox was made for a session whose agent called
+// no tools — the executor must never provision without a tool_exec.
+//
+// The check is conditional on zero agent.tool_use, and that is what keeps it a
+// clean Platform signal. A model that disobeys a no-tools task and calls bash
+// makes the executor provision a container as the correct consequence of a real
+// tool call; flagging that as a platform bug would blame us for the model's
+// choice. NoToolUse already reports the disobedience, as the Model miss it is,
+// so here a container is only a platform fault when nothing asked for one.
 func ContainerAbsent(class Class) Grader {
 	return Grader{
 		Name:  "container-absent",
 		Class: class,
 		Check: func(t *testing.T, tr *Trial) error {
+			if len(eventsOfType(tr, "agent.tool_use")) > 0 {
+				return nil
+			}
 			if containerExists(t, tr.SessionID) {
 				return fmt.Errorf("container %s exists for a session that ran no tools",
 					containerName(tr.SessionID))

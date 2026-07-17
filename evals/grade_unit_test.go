@@ -100,6 +100,17 @@ func TestNoToolUseAndContainerGraders(t *testing.T) {
 	if err := NoToolUse(Model).Check(t, dirty); err == nil {
 		t.Error("NoToolUse should fail when a tool ran")
 	}
+
+	// ContainerAbsent short-circuits to a pass the moment a tool ran, before it
+	// asks Docker: a container for a tool the model actually called is the
+	// executor doing its job, and NoToolUse above already flags the model
+	// reaching for a tool it was told not to, so ContainerAbsent must not also
+	// blame the platform for it. This exercises that branch; drop the
+	// tool_use short-circuit and, on any host without Docker, it would fatal
+	// instead of returning nil — which is the bite this pins.
+	if err := ContainerAbsent(Platform).Check(t, dirty); err != nil {
+		t.Errorf("ContainerAbsent should pass without touching Docker when a tool ran: %v", err)
+	}
 }
 
 func TestToolResultGraders(t *testing.T) {

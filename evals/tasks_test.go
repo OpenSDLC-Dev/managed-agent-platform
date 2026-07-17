@@ -75,7 +75,11 @@ func echoNoTool() Task {
 			// Model: a model that reaches for bash to echo a string is being
 			// silly, not evidence of a broken product.
 			NoToolUse(Model),
-			FinalMessageHas("ECHO:{{NONCE}}", Platform),
+			// Either: the core pack already proves the platform delivered the
+			// turn and streamed a reply, so a missing marker here is most likely
+			// the model not echoing as asked — but a mangled delivery would look
+			// the same from the final message alone, so the class does not commit.
+			FinalMessageHas("ECHO:{{NONCE}}", Either),
 		},
 	}
 }

@@ -40,6 +40,12 @@ func TestEvals(t *testing.T) {
 // deferred record turns that silent drop into a recorded Platform failure; the
 // `completed` flag distinguishes a clean finish from an abort so the abort is
 // not misreported as a pass with no graders run.
+//
+// On an abort the happy-path transcript capture below is skipped too, so the
+// defer fetches the transcript best-effort: a drive timeout is the failure the
+// artifacts most need to make inspectable, and without this its transcript would
+// be dropped (writeArtifacts skips a record whose events are nil). The fetch is
+// non-fatal because it runs inside the unwinding t.Fatal.
 func runAndGrade(t *testing.T, s *stack, task Task) {
 	rec := &record{Task: task.ID}
 	completed := false
@@ -50,6 +56,9 @@ func runAndGrade(t *testing.T, s *stack, task Task) {
 				Error: "the trial aborted before grading finished (a drive timeout or API " +
 					"error, or a grader's t.Fatal); see the go test output for the fatal error",
 			})
+			if rec.Session != "" && rec.events == nil {
+				rec.events = s.tryListEvents(rec.Session)
+			}
 		}
 		rec.Pass = len(rec.Failures) == 0
 		recordTrial(*rec)
