@@ -812,11 +812,6 @@ func textOf(ev map[string]any) string {
 	return b.String()
 }
 
-func isErrorResult(ev map[string]any) bool {
-	b, _ := ev["is_error"].(bool)
-	return b
-}
-
 // isErrorFlag returns a tool_result's is_error and whether it was present. The
 // platform always stamps the flag, so a missing one is a malformed result: an
 // assertion that pins is_error in *either* direction must reject the absence
