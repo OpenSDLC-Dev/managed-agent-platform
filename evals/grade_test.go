@@ -1,10 +1,14 @@
 package evals
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
 // Grading is deliberately code-based: every assertion below is a deterministic
@@ -285,7 +289,7 @@ func ToolResultContains(sub string, class Class) Grader {
 		Check: func(_ *testing.T, tr *Trial) error {
 			want := subst(sub, tr.Nonce)
 			for _, ev := range eventsOfType(tr, "agent.tool_result") {
-				if isErrorResult(ev) {
+				if !okResult(ev) {
 					continue
 				}
 				if strings.Contains(textOf(ev), want) {
@@ -307,7 +311,7 @@ func ToolResultOK(class Class) Grader {
 		Check: func(_ *testing.T, tr *Trial) error {
 			results := eventsOfType(tr, "agent.tool_result")
 			for _, ev := range results {
-				if !isErrorResult(ev) {
+				if okResult(ev) {
 					return nil
 				}
 			}
@@ -415,6 +419,351 @@ func ContainerAbsent(class Class) Grader {
 	}
 }
 
+// FileEquals asserts a sandbox file's exact bytes, {{NONCE}} substituted. Where
+// FileLines forgives the trailing newline, this forgives nothing: it is for a
+// task whose point is that a file was changed surgically or left untouched, so
+// every byte is the assertion.
+func FileEquals(path, content string, class Class) Grader {
+	return Grader{
+		Name:  "file-equals:" + path,
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			raw, err := tr.readFile(t, path)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", path, err)
+			}
+			want := subst(content, tr.Nonce)
+			if string(raw) != want {
+				return fmt.Errorf("%s = %q, want exactly %q", path, string(raw), want)
+			}
+			return nil
+		},
+	}
+}
+
+// FileMatches asserts a sandbox file matches a regexp. The trailing newline is
+// trimmed first so an anchored pattern (^…$) can pin the whole content without
+// spelling the newline. {{NONCE}} is substituted into the pattern before compile.
+func FileMatches(path, pattern string, class Class) Grader {
+	return Grader{
+		Name:  "file-matches:" + path,
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			raw, err := tr.readFile(t, path)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", path, err)
+			}
+			re, err := regexp.Compile(subst(pattern, tr.Nonce))
+			if err != nil {
+				return fmt.Errorf("bad pattern %q: %w", pattern, err)
+			}
+			got := strings.TrimRight(string(raw), "\n")
+			if !re.MatchString(got) {
+				return fmt.Errorf("%s = %q, want it to match %q", path, got, re)
+			}
+			return nil
+		},
+	}
+}
+
+// ToolNotUsed asserts the agent never called a named tool — the guard for a task
+// that must be done with one tool and not another (an edit, not a whole-file
+// rewrite). Choosing the wrong tool is usually the model's to answer for, so its
+// uses are Model.
+func ToolNotUsed(name string, class Class) Grader {
+	return Grader{
+		Name:  "tool-not-used:" + name,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			if n := countToolUse(tr, name); n > 0 {
+				return fmt.Errorf("%s was called %d time(s), want never", name, n)
+			}
+			return nil
+		},
+	}
+}
+
+// ToolCallResult correlates a tool call to its own result. It finds a call to
+// the named tool whose input carries inputSub (nonce substituted), then checks
+// that call's joined result: its is_error against wantErr, and its content
+// against contentSub (a plain substring, nonce substituted; "" skips it). Tying
+// the input to the result is what keeps a task honest — an independent "some bash
+// ran the path" plus "some error result said exit 1" can be two unrelated calls,
+// which this cannot: it grades the result of the call it found.
+//
+// Class Either: no matching call is the model not doing as asked, a matching call
+// with the wrong result is the platform's tool misbehaving, and the transcript
+// cannot separate them.
+func ToolCallResult(name, inputSub string, wantErr bool, contentSub string, class Class) Grader {
+	return Grader{
+		Name:  fmt.Sprintf("tool-call-result:%s:%s", name, inputSub),
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			wantIn := subst(inputSub, tr.Nonce)
+			wantContent := subst(contentSub, tr.Nonce)
+			for _, use := range eventsOfType(tr, "agent.tool_use") {
+				if use["name"] != name || !strings.Contains(inputJSON(use), wantIn) {
+					continue
+				}
+				id, _ := use["id"].(string)
+				res := resultFor(tr, id)
+				if res == nil {
+					return fmt.Errorf("%s call with %q has no tool_result", name, wantIn)
+				}
+				gotErr, present := isErrorFlag(res)
+				if !present {
+					return fmt.Errorf("%s call with %q: result carries no is_error flag (%q)",
+						name, wantIn, textOf(res))
+				}
+				if gotErr != wantErr {
+					return fmt.Errorf("%s call with %q: result is_error=%v, want %v (%q)",
+						name, wantIn, gotErr, wantErr, textOf(res))
+				}
+				if wantContent != "" && !strings.Contains(textOf(res), wantContent) {
+					return fmt.Errorf("%s call with %q: result %q lacks %q",
+						name, wantIn, textOf(res), wantContent)
+				}
+				return nil
+			}
+			return fmt.Errorf("no %s call whose input contains %q", name, wantIn)
+		},
+	}
+}
+
+// EventAfterUserMessage asserts an event of evType appears after the nth
+// user.message on the log — proof that a later turn actually did something, not
+// that turn one did all the work. journal-multiturn uses it to require the second
+// turn to touch the sandbox, which a span-count over the whole transcript (turn
+// one alone emits two model-request spans) cannot.
+func EventAfterUserMessage(evType string, nth int, class Class) Grader {
+	return Grader{
+		Name:  fmt.Sprintf("event-after-user-message:%s:%d", evType, nth),
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			seen := 0
+			for i, ev := range tr.Events {
+				if ev["type"] != "user.message" {
+					continue
+				}
+				if seen++; seen < nth {
+					continue
+				}
+				for _, later := range tr.Events[i+1:] {
+					if later["type"] == evType {
+						return nil
+					}
+				}
+				return fmt.Errorf("no %s after user.message #%d", evType, nth)
+			}
+			return fmt.Errorf("fewer than %d user.message events", nth)
+		},
+	}
+}
+
+// EventCountAtLeast asserts the transcript holds at least n events of a type. A
+// floor, not an exact count: enough to know a resumed session re-invoked the
+// model (≥2 model-request spans) or that both turns were recorded, without
+// pinning a number a longer transcript would exceed.
+func EventCountAtLeast(evType string, n int, class Class) Grader {
+	return Grader{
+		Name:  fmt.Sprintf("event-count-at-least:%s:%d", evType, n),
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			if got := len(eventsOfType(tr, evType)); got < n {
+				return fmt.Errorf("%d %s event(s), want at least %d", got, evType, n)
+			}
+			return nil
+		},
+	}
+}
+
+// RequiresActionRaised asserts the session paused for confirmation — a
+// session.status_idle whose stop_reason is requires_action and names the events
+// awaiting a decision. It is the platform half of the permission bridge: the gate
+// stopped a tool before it ran.
+//
+// It fires only once a gated tool was actually called. A turn with no tool_use
+// had nothing to gate, and a Model-class grader (the task's ToolUseAtLeast) owns
+// "the model never called the tool" — so a Platform failure here means one thing:
+// a gated call the bridge failed to suspend.
+func RequiresActionRaised(class Class) Grader {
+	return Grader{
+		Name:  "requires-action-raised",
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			if len(eventsOfType(tr, "agent.tool_use")) == 0 {
+				return nil
+			}
+			for _, ev := range eventsOfType(tr, "session.status_idle") {
+				stop, _ := ev["stop_reason"].(map[string]any)
+				if stop["type"] != "requires_action" {
+					continue
+				}
+				ids, _ := stop["event_ids"].([]any)
+				if len(ids) == 0 {
+					return fmt.Errorf("requires_action idle carried no event_ids")
+				}
+				for _, raw := range ids {
+					if s, ok := raw.(string); !ok || s == "" {
+						return fmt.Errorf("requires_action idle carried a non-string or empty event id %v", raw)
+					}
+				}
+				return nil
+			}
+			return fmt.Errorf("no session.status_idle with stop_reason requires_action")
+		},
+	}
+}
+
+// EvaluatedPermissionAsk asserts a call to the named tool was recorded as gated —
+// evaluated_permission "ask" on the agent.tool_use. It pins that the tool the
+// task gated is the one the platform stopped.
+//
+// Like RequiresActionRaised it fires only when the tool was actually called: no
+// call means nothing to check (a Model grader owns the skip), and a Platform
+// failure means the tool ran without the "ask" the gate should have stamped.
+func EvaluatedPermissionAsk(name string, class Class) Grader {
+	return Grader{
+		Name:  "evaluated-permission-ask:" + name,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			for _, ev := range eventsOfType(tr, "agent.tool_use") {
+				if ev["name"] != name {
+					continue
+				}
+				if ev["evaluated_permission"] == "ask" {
+					return nil
+				}
+				return fmt.Errorf("%s tool_use evaluated_permission = %v, want ask",
+					name, ev["evaluated_permission"])
+			}
+			return nil
+		},
+	}
+}
+
+// ConfirmedResult asserts that the call a confirmation released produced the
+// expected result, sequenced after the confirmation. It correlates by
+// tool_use_id — the confirmation names the gated call, and only that call's
+// result counts, so a result for some other call cannot satisfy it — and checks
+// the result's is_error against wantErr and its content against contentSub (nonce
+// substituted; "" skips the content check). Reading position in the log is sound:
+// the list endpoint returns events in commit order.
+//
+// It passes when no confirmation is on the log: a turn that gated nothing has no
+// bridge outcome to grade, and a Model grader owns "the model never called the
+// gated tool". So a Platform failure here means one thing — a confirmation
+// happened and the platform's result for it was wrong, mis-sequenced, or missing.
+func ConfirmedResult(wantErr bool, contentSub string, class Class) Grader {
+	return Grader{
+		Name:  "confirmed-result",
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			wantContent := subst(contentSub, tr.Nonce)
+			for i, ev := range tr.Events {
+				if ev["type"] != "user.tool_confirmation" {
+					continue
+				}
+				tid, _ := ev["tool_use_id"].(string)
+				if tid == "" {
+					return fmt.Errorf("user.tool_confirmation carries no tool_use_id")
+				}
+				for _, later := range tr.Events[i+1:] {
+					if later["type"] != "agent.tool_result" || later["tool_use_id"] != tid {
+						continue
+					}
+					gotErr, present := isErrorFlag(later)
+					if !present {
+						return fmt.Errorf("result for confirmed %s carries no is_error flag (content %q)",
+							tid, textOf(later))
+					}
+					if gotErr != wantErr {
+						return fmt.Errorf("result for confirmed %s: is_error=%v, want %v (content %q)",
+							tid, gotErr, wantErr, textOf(later))
+					}
+					if wantContent != "" && !strings.Contains(textOf(later), wantContent) {
+						return fmt.Errorf("result for confirmed %s does not contain %q (got %q)",
+							tid, wantContent, textOf(later))
+					}
+					return nil
+				}
+				return fmt.Errorf("no agent.tool_result for confirmed %s after its confirmation", tid)
+			}
+			return nil
+		},
+	}
+}
+
+// ReadRangeRequested asserts the model asked to read exactly line..line of path
+// via view_range — the model half of the view-range task, reading the line the
+// prompt named. A miss is the model not following the instruction, so it is Model.
+func ReadRangeRequested(path string, line int, class Class) Grader {
+	return Grader{
+		Name:  fmt.Sprintf("read-range-requested:%s:%d", path, line),
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			if readRangeUse(tr, path, line) != nil {
+				return nil
+			}
+			return fmt.Errorf("no read requested %s view_range [%d,%d]", path, line, line)
+		},
+	}
+}
+
+// ReadRangeBytes asserts that IF such a read was made, it returned the line's
+// bytes verbatim — the off-by-one guard for view_range slicing. A matching read
+// that returns the neighbouring line or a stray newline is unambiguously the
+// platform's slicer, which is why this is Platform. The "no such read" case is
+// the model's and belongs to ReadRangeRequested, so this passes when no matching
+// read exists rather than blaming the platform for a line the model never read.
+func ReadRangeBytes(path string, line int, want string, class Class) Grader {
+	return Grader{
+		Name:  fmt.Sprintf("read-range-bytes:%s:%d", path, line),
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			use := readRangeUse(tr, path, line)
+			if use == nil {
+				return nil
+			}
+			id, _ := use["id"].(string)
+			res := resultFor(tr, id)
+			if res == nil {
+				return fmt.Errorf("read of %s line %d has no tool_result", path, line)
+			}
+			if !okResult(res) {
+				return fmt.Errorf("read of %s line %d errored or malformed: %q", path, line, textOf(res))
+			}
+			if got, wantText := textOf(res), subst(want, tr.Nonce); got != wantText {
+				return fmt.Errorf("read %s view_range [%d,%d] returned %q, want %q",
+					path, line, line, got, wantText)
+			}
+			return nil
+		},
+	}
+}
+
+// readRangeUse returns the first read tool_use requesting exactly [line, line] of
+// path, or nil. The file_path must be either the workspace-relative path or its
+// canonical absolute form under the sandbox workdir — a loose suffix match would
+// accept a wrong-root read of "/tmp/poem.txt" and then blame the platform when its
+// bytes fail ReadRangeBytes, misclassing the model's wrong path as a slicer bug.
+func readRangeUse(tr *Trial, path string, line int) map[string]any {
+	abs := sandbox.DefaultWorkdir + "/" + path
+	for _, use := range eventsOfType(tr, "agent.tool_use") {
+		if use["name"] != "read" {
+			continue
+		}
+		input, _ := use["input"].(map[string]any)
+		if p, _ := input["file_path"].(string); p != path && p != abs {
+			continue
+		}
+		if viewRangeIs(input["view_range"], line) {
+			return use
+		}
+	}
+	return nil
+}
+
 // --- transcript accessors -------------------------------------------------
 //
 // All of these read the raw wire JSON. A missing or reshaped field surfaces as
@@ -463,9 +812,24 @@ func textOf(ev map[string]any) string {
 	return b.String()
 }
 
-func isErrorResult(ev map[string]any) bool {
-	b, _ := ev["is_error"].(bool)
-	return b
+// isErrorFlag returns a tool_result's is_error and whether it was present. The
+// platform always stamps the flag, so a missing one is a malformed result: an
+// assertion that pins is_error in *either* direction must reject the absence
+// rather than read it as a zero-value false, which is how a dropped-flag wire
+// regression would otherwise sail through the wantErr==false direction of a
+// correlated grader.
+func isErrorFlag(ev map[string]any) (isErr, present bool) {
+	b, ok := ev["is_error"].(bool)
+	return b, ok
+}
+
+// okResult reports whether a tool_result is an explicit success — is_error
+// present and false. A missing or non-boolean is_error is not a success: the
+// platform always stamps the flag, so its absence is a malformed result a
+// success-requiring grader must reject rather than read as a zero-value false.
+func okResult(ev map[string]any) bool {
+	isErr, present := isErrorFlag(ev)
+	return present && !isErr
 }
 
 // modelUsage pulls the token counts off a span.model_request_end event. in is
@@ -498,4 +862,45 @@ func countToolUse(tr *Trial, name string) int {
 		}
 	}
 	return n
+}
+
+// inputJSON re-encodes a tool_use's input object. A grader matching a substring
+// of the input works on the JSON rather than reaching for one field, so it does
+// not have to know which key (command, file_path) a given tool carries the token
+// in.
+func inputJSON(ev map[string]any) string {
+	b, err := json.Marshal(ev["input"])
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// resultFor returns the agent.tool_result joined to a tool_use id, or nil. The
+// core pack's tool-results-joined grader proves the join is one-to-one; this only
+// fetches it.
+func resultFor(tr *Trial, id string) map[string]any {
+	if id == "" {
+		return nil
+	}
+	for _, ev := range eventsOfType(tr, "agent.tool_result") {
+		if ev["tool_use_id"] == id {
+			return ev
+		}
+	}
+	return nil
+}
+
+// viewRangeIs reports whether a decoded view_range input is exactly [line, line].
+// The wire carries the bounds as JSON numbers, so they arrive as float64.
+func viewRangeIs(v any, line int) bool {
+	arr, ok := v.([]any)
+	if !ok || len(arr) != 2 {
+		return false
+	}
+	start, ok1 := arr[0].(float64)
+	end, ok2 := arr[1].(float64)
+	// Exact equality, not int() truncation: a range like [57.5, 57.5] is not a
+	// request for line 57 and must not be graded as one.
+	return ok1 && ok2 && start == float64(line) && end == float64(line)
 }

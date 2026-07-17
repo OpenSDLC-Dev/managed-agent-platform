@@ -23,7 +23,29 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   the async loop to close — a tool call, a suspend, a wake on the result), `echo-notool` (a text-only
   baseline whose negative assertion is that **no** sandbox was
   provisioned), and `shell-state` (an `export` in one bash call must survive into the next, pinning the
-  persistent-shell snapshot) — with the remaining seven to follow.
+  persistent-shell snapshot).
+
+- The eval suite's remaining seven tasks, closing phase 1's ten-task set — all ten run **10/10 green**
+  live via `make eval`. `edit-config` (a surgical `edit`, graded by whole-file byte-equality so a
+  wholesale rewrite fails), `needle-search` (`glob` + `grep`, with grep's `path:line:text` line shape
+  asserted against a seeded needle among decoys), `perm-allow` and `perm-deny` (the permission bridge end
+  to end — a gated tool suspends the session on `requires_action`, a `user.tool_confirmation` allows or
+  denies, and a denial's synthesized `is_error` result and the untouched file are graded), `exit-code` (a
+  failed command's `exit code:` trailer, correlated to the failing call's own result — the model's
+  reported code is only a secondary signal, since cat of a missing file conventionally exits 1),
+  `journal-multiturn` (two turns on one session — event replay and sandbox reuse),
+  and `view-range` (`read` `view_range` slicing, byte-exact, an off-by-one guard). This grows the harness
+  three ways the first three tasks did not need: seed planting (files written into the session's container
+  before turn 1, which the executor then adopts), gated toolsets, and a confirmation-aware drive loop that
+  answers a `requires_action` pause and resumes. Findings stay classed P/M/E, and the two prompts a
+  refusal-prone model balked at were reworded to exercise the platform rather than trip a safety reflex —
+  a benign append the reviewer declines, a plain marker copied to a file — not tuned until only our
+  platform satisfies them.
+  Each tool assertion correlates a call to its own result by `tool_use` id, so a stray result elsewhere
+  in the transcript cannot green it, and the P/M/E classing is conditioned so a Platform finding fires
+  only on a genuine platform fault — a model that skips a gated tool reds under Model, never Platform.
+  All six built-in tools are graded: `edit`/`grep`/`bash` by a result contract, `read` byte-exact, and
+  `bash`/`read`/`glob`/`write` by a required tool-use floor.
   Grading is deterministic and code-based, never an LLM judge: each prompt demands a per-trial random
   nonce, so an exact-match check tests the agent rather than the grader's generosity. Every trial also
   runs a core pack — reaches idle with `stop_reason.type == "end_turn"`, no `session.error`, every

@@ -139,6 +139,19 @@ func TestToolResultGraders(t *testing.T) {
 	if err := ToolResultOK(Platform).Check(t, errOnly); err == nil {
 		t.Error("ToolResultOK should fail when every result is an error")
 	}
+
+	// A result with no is_error flag is malformed, not an implicit success: both
+	// success graders must skip it rather than count it, or a dropped-flag wire
+	// regression would green a run.
+	noFlag := trialWith([]map[string]any{
+		{"type": "agent.tool_result", "content": textBlocks("value is n0")},
+	})
+	if err := ToolResultOK(Platform).Check(t, noFlag); err == nil {
+		t.Error("ToolResultOK should not count a result missing is_error as a success")
+	}
+	if err := ToolResultContains("n0", Platform).Check(t, noFlag); err == nil {
+		t.Error("ToolResultContains should skip a result missing is_error")
+	}
 }
 
 func TestCorePackToolResultsJoined(t *testing.T) {
@@ -314,5 +327,371 @@ func TestSubstReplacesEveryOccurrence(t *testing.T) {
 	got := subst("a {{NONCE}} b {{NONCE}}", "xyz")
 	if strings.Contains(got, "{{NONCE}}") || got != "a xyz b xyz" {
 		t.Errorf("subst = %q, want all placeholders replaced", got)
+	}
+}
+
+func TestToolNotUsed(t *testing.T) {
+	clean := trialWith([]map[string]any{{"type": "agent.tool_use", "name": "edit"}})
+	if err := ToolNotUsed("write", Model).Check(t, clean); err != nil {
+		t.Errorf("ToolNotUsed(write) should pass when only edit ran: %v", err)
+	}
+	dirty := trialWith([]map[string]any{{"type": "agent.tool_use", "name": "write"}})
+	if err := ToolNotUsed("write", Model).Check(t, dirty); err == nil {
+		t.Error("ToolNotUsed(write) should fail when write ran")
+	}
+}
+
+func TestToolCallResult(t *testing.T) {
+	g := ToolCallResult("bash", "missing_{{NONCE}}", true, "exit code: 1", Either)
+
+	// The nonce'd call's own result is an error carrying the trailer.
+	ok := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/missing_n0.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": true,
+			"content": textBlocks("cat: missing: No such file\nexit code: 1")},
+	})
+	if err := g.Check(t, ok); err != nil {
+		t.Errorf("the nonce'd call's own error result should pass: %v", err)
+	}
+
+	// No bash call carries the nonce'd path — even though a stray result on the log
+	// holds the trailer, the grader must not borrow it.
+	noCall := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "ls /workspace"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": true,
+			"content": textBlocks("exit code: 1")},
+	})
+	if err := g.Check(t, noCall); err == nil {
+		t.Error("no matching call should fail rather than borrow another call's result")
+	}
+
+	// The matching call's OWN result succeeded, while an unrelated result errored.
+	// Correlation is the point: is_error is read off the call's own result, so the
+	// stray error must not green it.
+	wrongResult := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/missing_n0.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": false,
+			"content": textBlocks("(it somehow existed)")},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_other", "is_error": true,
+			"content": textBlocks("exit code: 1")},
+	})
+	if err := g.Check(t, wrongResult); err == nil {
+		t.Error("a success result on the matching call should fail even if another result errored")
+	}
+
+	// The matching call errored but with the wrong content.
+	wrongContent := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/missing_n0.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": true,
+			"content": textBlocks("permission denied")},
+	})
+	if err := g.Check(t, wrongContent); err == nil {
+		t.Error("the matching error result lacking the trailer should fail")
+	}
+
+	// The matching call's result dropped is_error entirely. A wantErr=false
+	// grader must reject the malformed result rather than read the absence as a
+	// zero-value false — the vacuous-pass the strict flag check closes.
+	ok2 := ToolCallResult("edit", "config.ini", false, "", Either)
+	noFlag := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "edit", "id": "toolu_1",
+			"input": map[string]any{"file_path": "/workspace/config.ini"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1",
+			"content": textBlocks("edited /workspace/config.ini (1 replacement(s))")},
+	})
+	if err := ok2.Check(t, noFlag); err == nil {
+		t.Error("a result with no is_error must fail a wantErr=false check, not pass vacuously")
+	}
+}
+
+func TestEventCountAtLeast(t *testing.T) {
+	tr := trialWith([]map[string]any{
+		{"type": "user.message"}, {"type": "user.message"}, {"type": "agent.message"},
+	})
+	if err := EventCountAtLeast("user.message", 2, Platform).Check(t, tr); err != nil {
+		t.Errorf("two user.message should meet a floor of 2: %v", err)
+	}
+	if err := EventCountAtLeast("user.message", 3, Platform).Check(t, tr); err == nil {
+		t.Error("a floor of 3 should fail with two events")
+	}
+}
+
+func TestRequiresActionRaised(t *testing.T) {
+	g := RequiresActionRaised(Platform)
+
+	// No tool ran, so there was nothing to gate. The model half (the task's
+	// ToolUseAtLeast) owns "the model never called the tool"; this passes rather
+	// than blaming the platform for a pause that was never due.
+	noTool := trialWith([]map[string]any{
+		{"type": "session.status_idle", "stop_reason": map[string]any{"type": "end_turn"}},
+	})
+	if err := g.Check(t, noTool); err != nil {
+		t.Errorf("no tool_use should pass vacuously: %v", err)
+	}
+
+	// A tool ran and the session paused with event_ids — the real bridge path.
+	paused := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash"},
+		{"type": "session.status_idle", "stop_reason": map[string]any{
+			"type": "requires_action", "event_ids": []any{"sevt_1"}}},
+	})
+	if err := g.Check(t, paused); err != nil {
+		t.Errorf("a requires_action idle with event_ids should pass: %v", err)
+	}
+
+	// A tool ran but the session never suspended — the gate failed to fire, which
+	// is a genuine platform fault.
+	ranWithoutPause := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash"},
+		{"type": "session.status_idle", "stop_reason": map[string]any{"type": "end_turn"}},
+	})
+	if err := g.Check(t, ranWithoutPause); err == nil {
+		t.Error("a gated tool that ran without a requires_action pause should fail")
+	}
+
+	// requires_action with no event_ids is the malformed shape, not a pause.
+	empty := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash"},
+		{"type": "session.status_idle", "stop_reason": map[string]any{
+			"type": "requires_action", "event_ids": []any{}}},
+	})
+	if err := g.Check(t, empty); err == nil {
+		t.Error("requires_action with no event_ids should fail")
+	}
+
+	// A non-empty event_ids array carrying a non-string (or empty string) id is
+	// also malformed: the harness cannot confirm it, so the grader must red rather
+	// than treat the pause as well-formed.
+	badID := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash"},
+		{"type": "session.status_idle", "stop_reason": map[string]any{
+			"type": "requires_action", "event_ids": []any{float64(42)}}},
+	})
+	if err := g.Check(t, badID); err == nil {
+		t.Error("requires_action with a non-string event id should fail")
+	}
+}
+
+func TestEvaluatedPermissionAsk(t *testing.T) {
+	g := EvaluatedPermissionAsk("bash", Platform)
+	ask := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "evaluated_permission": "ask"},
+	})
+	if err := g.Check(t, ask); err != nil {
+		t.Errorf("a gated bash tool_use should pass: %v", err)
+	}
+	allow := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "evaluated_permission": "allow"},
+	})
+	if err := g.Check(t, allow); err == nil {
+		t.Error("an ungated bash tool_use should fail evaluated-permission-ask")
+	}
+	// No bash at all: the model never called it, which the task's ToolUseAtLeast
+	// owns. This passes rather than double-blaming the platform for a "gated" tool
+	// the model simply never invoked.
+	none := trialWith([]map[string]any{{"type": "agent.tool_use", "name": "read"}})
+	if err := g.Check(t, none); err != nil {
+		t.Errorf("no bash tool_use should pass vacuously: %v", err)
+	}
+}
+
+func TestConfirmedResult(t *testing.T) {
+	// A denial: the synthesized result is an error carrying the deny message,
+	// sequenced after the confirmation and correlated by tool_use_id.
+	deny := ConfirmedResult(true, "DENY_{{NONCE}}", Platform)
+	denied := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "sevt_1"},
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": true,
+			"content": textBlocks("not approved: DENY_n0")},
+	})
+	if err := deny.Check(t, denied); err != nil {
+		t.Errorf("a denied call's synthesized error result should pass: %v", err)
+	}
+
+	// The result is for a DIFFERENT tool_use_id than the confirmation named — the
+	// correlation must reject it rather than green on a stray result.
+	crossed := trialWith([]map[string]any{
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_other", "is_error": true,
+			"content": textBlocks("not approved: DENY_n0")},
+	})
+	if err := deny.Check(t, crossed); err == nil {
+		t.Error("a result for another tool_use_id should not satisfy the confirmed call")
+	}
+
+	// The result precedes the confirmation, with nothing after it.
+	beforeOnly := trialWith([]map[string]any{
+		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": true,
+			"content": textBlocks("not approved: DENY_n0")},
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
+	})
+	if err := deny.Check(t, beforeOnly); err == nil {
+		t.Error("a result only before the confirmation should fail")
+	}
+
+	// No confirmation on the log: nothing gated, nothing to grade. The model half
+	// owns "the model never reached the gate", so this passes vacuously.
+	noConfirm := trialWith([]map[string]any{
+		{"type": "agent.message", "content": textBlocks("hi")},
+	})
+	if err := deny.Check(t, noConfirm); err != nil {
+		t.Errorf("no confirmation should pass vacuously: %v", err)
+	}
+
+	// An allow whose result succeeded — the wantErr=false, empty-content path.
+	allow := ConfirmedResult(false, "", Platform)
+	allowed := trialWith([]map[string]any{
+		{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "sevt_1"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": false,
+			"content": textBlocks("done")},
+	})
+	if err := allow.Check(t, allowed); err != nil {
+		t.Errorf("an allowed call's successful result should pass: %v", err)
+	}
+
+	// The allowed result dropped is_error. The wantErr=false direction must reject
+	// the malformed result, not read the absence as a zero-value false — the
+	// vacuous Platform pass the strict flag check closes.
+	allowNoFlag := trialWith([]map[string]any{
+		{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "sevt_1"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "content": textBlocks("done")},
+	})
+	if err := allow.Check(t, allowNoFlag); err == nil {
+		t.Error("a confirmed result with no is_error must fail wantErr=false, not pass vacuously")
+	}
+}
+
+func TestReadRangeRequested(t *testing.T) {
+	g := ReadRangeRequested("poem.txt", 57, Model)
+	asked := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "read", "id": "toolu_1", "input": map[string]any{
+			"file_path": "/workspace/poem.txt", "view_range": []any{float64(57), float64(57)}}},
+	})
+	if err := g.Check(t, asked); err != nil {
+		t.Errorf("an exact [57,57] read of poem.txt should pass: %v", err)
+	}
+	// The right file but the wrong range.
+	wrongRange := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "read", "id": "toolu_1", "input": map[string]any{
+			"file_path": "/workspace/poem.txt", "view_range": []any{float64(1), float64(100)}}},
+	})
+	if err := g.Check(t, wrongRange); err == nil {
+		t.Error("a whole-file read should fail read-range-requested")
+	}
+	// The right range on a sibling whose name only ends similarly — the
+	// component-boundary guard must reject it.
+	sibling := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "read", "id": "toolu_1", "input": map[string]any{
+			"file_path": "/workspace/my-poem.txt", "view_range": []any{float64(57), float64(57)}}},
+	})
+	if err := g.Check(t, sibling); err == nil {
+		t.Error("a sibling file ending in poem.txt should not satisfy the grader")
+	}
+	// The right basename and range but the wrong root: /tmp/poem.txt is a different
+	// file the model read by mistake, not the seeded /workspace one.
+	wrongRoot := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "read", "id": "toolu_1", "input": map[string]any{
+			"file_path": "/tmp/poem.txt", "view_range": []any{float64(57), float64(57)}}},
+	})
+	if err := g.Check(t, wrongRoot); err == nil {
+		t.Error("a read of /tmp/poem.txt should not satisfy a grader for the workspace poem.txt")
+	}
+	// The workspace-relative form is accepted (the model may pass a bare path).
+	relative := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "read", "id": "toolu_1", "input": map[string]any{
+			"file_path": "poem.txt", "view_range": []any{float64(57), float64(57)}}},
+	})
+	if err := g.Check(t, relative); err != nil {
+		t.Errorf("a workspace-relative poem.txt read should pass: %v", err)
+	}
+}
+
+func TestReadRangeBytes(t *testing.T) {
+	g := ReadRangeBytes("poem.txt", 57, "MARKER_{{NONCE}}", Platform)
+	read := func(resultText string, isErr bool) *Trial {
+		return trialWith([]map[string]any{
+			{"type": "agent.tool_use", "name": "read", "id": "toolu_1", "input": map[string]any{
+				"file_path": "/workspace/poem.txt", "view_range": []any{float64(57), float64(57)}}},
+			{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": isErr,
+				"content": textBlocks(resultText)},
+		})
+	}
+	if err := g.Check(t, read("MARKER_n0", false)); err != nil {
+		t.Errorf("the exact line bytes should pass: %v", err)
+	}
+	// The slicer returned the neighbouring line — the off-by-one this guards.
+	if err := g.Check(t, read("line-58", false)); err == nil {
+		t.Error("wrong bytes should fail read-range-bytes")
+	}
+	// An is_error result for the matching read is not a valid slice.
+	if err := g.Check(t, read("MARKER_n0", true)); err == nil {
+		t.Error("an is_error read result should fail read-range-bytes")
+	}
+	// No matching [57,57] read at all: this half is vacuous, since
+	// ReadRangeRequested owns the miss. It passes rather than blaming the slicer
+	// for a line the model never read.
+	noRead := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "read", "id": "toolu_1", "input": map[string]any{
+			"file_path": "/workspace/poem.txt", "view_range": []any{float64(1), float64(100)}}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": false,
+			"content": textBlocks("MARKER_n0")},
+	})
+	if err := g.Check(t, noRead); err != nil {
+		t.Errorf("no [57,57] read should pass vacuously: %v", err)
+	}
+}
+
+func TestEventAfterUserMessage(t *testing.T) {
+	g := EventAfterUserMessage("agent.tool_use", 2, Either)
+
+	// A tool_use follows the second user.message — the second turn did work.
+	after := trialWith([]map[string]any{
+		{"type": "user.message"},
+		{"type": "agent.tool_use", "name": "write"},
+		{"type": "user.message"},
+		{"type": "agent.tool_use", "name": "bash"},
+	})
+	if err := g.Check(t, after); err != nil {
+		t.Errorf("a tool_use after the 2nd user.message should pass: %v", err)
+	}
+
+	// Both tool_uses precede the second user.message — turn two did nothing. A
+	// whole-transcript count would be fooled by turn one's work; this is not.
+	onlyTurnOne := trialWith([]map[string]any{
+		{"type": "user.message"},
+		{"type": "agent.tool_use", "name": "write"},
+		{"type": "agent.tool_use", "name": "bash"},
+		{"type": "user.message"},
+	})
+	if err := g.Check(t, onlyTurnOne); err == nil {
+		t.Error("no tool_use after the 2nd user.message should fail")
+	}
+
+	// Fewer than two user.message events on the log at all.
+	oneTurn := trialWith([]map[string]any{
+		{"type": "user.message"},
+		{"type": "agent.tool_use", "name": "bash"},
+	})
+	if err := g.Check(t, oneTurn); err == nil {
+		t.Error("fewer than 2 user.message events should fail")
+	}
+}
+
+func TestOkResult(t *testing.T) {
+	// A result with no is_error field is malformed, not implicitly ok: a wire
+	// regression that dropped is_error must not read as success.
+	if okResult(map[string]any{"content": textBlocks("hi")}) {
+		t.Error("a result missing is_error should not be ok")
+	}
+	if okResult(map[string]any{"is_error": true, "content": textBlocks("boom")}) {
+		t.Error("an is_error result should not be ok")
+	}
+	if !okResult(map[string]any{"is_error": false, "content": textBlocks("hi")}) {
+		t.Error("an explicit is_error:false result should be ok")
 	}
 }

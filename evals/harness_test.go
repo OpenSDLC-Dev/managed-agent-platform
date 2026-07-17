@@ -19,13 +19,31 @@ import (
 // exists to stop a hung run, not to measure the agent.
 const turnTimeout = 5 * time.Minute
 
+// maxConfirmRounds caps how many requires_action pauses one turn may raise before
+// the harness gives up. Our permission tasks gate a single call, so one round is
+// the norm and a partial re-idle adds a few more at most; a turn that keeps
+// re-pausing past this — a model retrying a denied tool forever — would otherwise
+// loop until the whole-suite timeout, turning a model misbehaviour into an opaque
+// hang. The cap fails it fast, with a message that names the cause.
+const maxConfirmRounds = 8
+
 // Task is one eval: a prompt (or several) and what must be true afterwards.
 // Fields left zero mean "the default agent" — no system prompt, the bare
-// toolset.
+// toolset, no seeds.
 type Task struct {
 	ID string
 	// System is the agent's system prompt. {{NONCE}} is substituted.
 	System string
+	// Tools overrides the agent's toolset. Nil is the bare
+	// agent_toolset_20260401, whose default policy runs every tool unattended; a
+	// task that needs a gated tool (a permission round-trip) supplies the tools
+	// array verbatim so the wire shape it exercises is the one under test.
+	Tools []any
+	// Seeds are files planted in the sandbox before the first turn. The harness
+	// pre-provisions the session's container and writes them; the executor
+	// adopts that same container when it runs the first tool. {{NONCE}} is
+	// substituted into Path and Content.
+	Seeds []Seed
 	// Turns are the user messages, sent one at a time; each waits for the
 	// session to go idle before the next is sent.
 	Turns []Turn
@@ -34,9 +52,27 @@ type Task struct {
 	Graders []Grader
 }
 
+// Seed is a file planted before turn 1. Path may be relative (resolved against
+// the sandbox workdir) or absolute.
+type Seed struct {
+	Path    string
+	Content string
+}
+
 // Turn is one user message. {{NONCE}} is substituted into Message.
 type Turn struct {
 	Message string
+	// OnAsk answers a confirmation pause. Nil means the turn expects none; a
+	// gated turn supplies whether to allow or deny each gated tool call.
+	OnAsk *Ask
+}
+
+// Ask is how a turn answers a requires_action pause. DenyMessage (with
+// {{NONCE}} substituted) rides a denial back as the synthesized error result,
+// and is ignored on an allow.
+type Ask struct {
+	Allow       bool
+	DenyMessage string
 }
 
 // Trial is one execution of a Task: everything a grader is allowed to look at.
@@ -80,6 +116,13 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 	tr.SessionID = s.createSession(t, agentID, envID)
 	rec.Session = tr.SessionID
 
+	// Seeds are planted before the stream opens and the first turn is sent, so
+	// the files are already there when the agent's first tool runs. Seeding
+	// pre-provisions the container; the executor adopts that same one (see seed).
+	if len(task.Seeds) > 0 {
+		tr.seed(t, task.Seeds)
+	}
+
 	// The session's container is reaped at stack teardown, not here: a trial
 	// that times out with its model call still in flight would, if reaped now,
 	// have its tool result land on the still-running brain and the executor
@@ -94,11 +137,15 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 	start := time.Now()
 	for i, turn := range task.Turns {
 		s.sendEvents(t, tr.SessionID, userMessage(subst(turn.Message, nonce)))
-		idle, err := stream.awaitIdle(turnTimeout)
-		if err != nil {
-			t.Fatalf("turn %d of %d: %v (session %s)", i+1, len(task.Turns), err, tr.SessionID)
-		}
+		idle := s.driveToIdle(t, stream, tr.SessionID, turn, nonce, i, len(task.Turns))
 		tr.Idles = append(tr.Idles, idle)
+		// An unresolved pause (driveToIdle returning a requires_action idle) leaves
+		// the session wedged on a confirmation we won't give. Stop driving and let
+		// the graders classify this idle, rather than post the next turn into a
+		// stuck session where it would only time out.
+		if stopReasonType(idle) == "requires_action" {
+			break
+		}
 	}
 	tr.Elapsed = time.Since(start)
 
@@ -106,23 +153,119 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 	return tr
 }
 
+// driveToIdle waits for one turn to settle, answering any confirmation pause on
+// the way. A gated toolset suspends the session on a requires_action idle rather
+// than ending the turn; the turn's OnAsk says whether to allow or deny each
+// gated call, and the loop keeps confirming until an idle that is not a pause —
+// the turn's real end, which is what it returns. That idle joins tr.Idles (one
+// per turn, as the core pack expects); the intermediate requires_action idles are
+// evidence the permission graders read back from the transcript.
+//
+// When it *cannot* keep driving — the turn set no OnAsk yet the session paused, or
+// a model kept re-pausing past maxConfirmRounds, or the pause named no usable
+// event id — it returns that requires_action idle rather than aborting. runTrial
+// then stops driving and the graders classify it: the core pack's
+// ends-with-end-turn (Either) reds a non-end_turn final idle, and a permission
+// task's RequiresActionRaised (Platform) reds a malformed pause. A t.Fatalf here
+// would instead misread a platform gating regression as a forgotten test OnAsk,
+// or a re-pausing model as a platform abort, and skip P/M/E classing entirely.
+// Only a stream that never produces an idle (the turn-wide deadline) is fatal.
+func (s *stack) driveToIdle(t *testing.T, stream *sseStream, sessionID string, turn Turn, nonce string, turnIdx, turns int) map[string]any {
+	t.Helper()
+	// Every gated call answered so far this turn. The API re-idles after a
+	// partial confirmation with only the *remaining* ids, so a requires_action
+	// idle can list ids already confirmed — and confirming one twice is a 400.
+	// Tracking them, and confirming each id exactly once, makes the loop correct
+	// whether a turn gates one call or several (and however the intermediate
+	// re-idles interleave on the stream).
+	answered := map[string]bool{}
+	rounds := 0
+	// One deadline for the whole turn, not one per await: a model that re-pauses
+	// repeatedly cannot stretch the turn to maxConfirmRounds × turnTimeout and slip
+	// past the suite timeout before the round cap fires.
+	deadline := time.Now().Add(turnTimeout)
+	for {
+		idle, err := stream.awaitIdle(time.Until(deadline))
+		if err != nil {
+			t.Fatalf("turn %d of %d: %v (session %s)", turnIdx+1, turns, err, sessionID)
+		}
+		if stopReasonType(idle) != "requires_action" {
+			return idle
+		}
+		// An unanswerable pause is graded, not aborted (see the doc comment).
+		if turn.OnAsk == nil {
+			return idle
+		}
+		if rounds++; rounds > maxConfirmRounds {
+			return idle
+		}
+		stop, _ := idle["stop_reason"].(map[string]any)
+		ids, _ := stop["event_ids"].([]any)
+		// Confirm each not-yet-answered id, in one POST, referencing it by the
+		// event id requires_action named (the id the API's blocking-set query
+		// recognizes). A re-idle listing only already-answered ids adds nothing to
+		// send, so the loop simply waits for the turn to resume. A pause carrying no
+		// id or a malformed one is returned for RequiresActionRaised to class.
+		if len(ids) == 0 {
+			return idle
+		}
+		var confirmations []map[string]any
+		for _, raw := range ids {
+			eid, ok := raw.(string)
+			if !ok || eid == "" {
+				return idle
+			}
+			if answered[eid] {
+				continue
+			}
+			answered[eid] = true
+			confirmations = append(confirmations, toolConfirmation(eid, turn.OnAsk, nonce))
+		}
+		if len(confirmations) > 0 {
+			s.sendEvents(t, sessionID, confirmations...)
+		}
+	}
+}
+
 // agentBody builds the create-agent request. The agent's model is set to
 // MODEL_ID: the registry's single route sends MODEL_ID upstream whatever the
 // agent says, so any other string here would be a fiction the transcript then
 // records, naming a model the endpoint never saw.
 func agentBody(task Task, model, nonce string) map[string]any {
+	tools := task.Tools
+	if tools == nil {
+		// The bare agent toolset, whose default permission policy runs every
+		// tool unattended. A task that needs a gated toolset (a permission
+		// round-trip) supplies task.Tools instead.
+		tools = []any{map[string]any{"type": "agent_toolset_20260401"}}
+	}
 	body := map[string]any{
 		"name":  "eval-" + task.ID,
 		"model": model,
-		// The bare agent toolset, whose default permission policy runs every
-		// tool unattended. A task that needs a gated toolset (a permission
-		// round-trip) will override this.
-		"tools": []any{map[string]any{"type": "agent_toolset_20260401"}},
+		"tools": tools,
 	}
 	if task.System != "" {
 		body["system"] = subst(task.System, nonce)
 	}
 	return body
+}
+
+// toolConfirmation answers one gated tool call. It references the call by the
+// event id requires_action listed (the id the API's blocking-set query
+// recognizes), and a denial carries a message the platform echoes back as the
+// synthesized error result.
+func toolConfirmation(toolUseID string, ask *Ask, nonce string) map[string]any {
+	ev := map[string]any{"type": "user.tool_confirmation", "tool_use_id": toolUseID}
+	if ask.Allow {
+		ev["result"] = "allow"
+		return ev
+	}
+	ev["result"] = "deny"
+	if ask.DenyMessage != "" {
+		// deny_message is rejected with an allow, so it is set only here.
+		ev["deny_message"] = subst(ask.DenyMessage, nonce)
+	}
+	return ev
 }
 
 // readFile reads a path out of the trial's sandbox for an [fs] grader.
@@ -147,6 +290,33 @@ func (tr *Trial) readFile(t *testing.T, path string) ([]byte, error) {
 		path = sandbox.DefaultWorkdir + "/" + path
 	}
 	return sb.ReadFile(ctx, path)
+}
+
+// seed plants a task's files before turn 1. Like readFile it provisions to get a
+// handle, which here creates the session's container; the executor adopts that
+// same container (by session label) when it runs the first tool, so the agent
+// sees the seeded files. {{NONCE}} is substituted into every path and body so a
+// seed can carry the per-trial token a grader later checks.
+func (tr *Trial) seed(t *testing.T, seeds []Seed) {
+	t.Helper()
+	ctx := context.Background()
+	sb, err := tr.stack.sbx.Provision(ctx, sandbox.Spec{
+		SessionID:  domain.ID(tr.SessionID),
+		Image:      evalImage,
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+	})
+	if err != nil {
+		t.Fatalf("provision the sandbox to seed it: %v", err)
+	}
+	for _, sd := range seeds {
+		path := subst(sd.Path, tr.Nonce)
+		if !strings.HasPrefix(path, "/") {
+			path = sandbox.DefaultWorkdir + "/" + path
+		}
+		if err := sb.WriteFile(ctx, path, []byte(subst(sd.Content, tr.Nonce))); err != nil {
+			t.Fatalf("seed %s: %v", path, err)
+		}
+	}
 }
 
 // containerName mirrors the docker provider's naming. It is duplicated rather

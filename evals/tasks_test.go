@@ -1,5 +1,10 @@
 package evals
 
+import (
+	"fmt"
+	"strings"
+)
+
 // The task set. Each entry is a small, self-contained claim about the platform,
 // written so that the only way to satisfy it is for the whole chain to work:
 // REST accepted the session, the brain called the model, the queue carried the
@@ -21,7 +26,11 @@ var fib20 = []string{
 }
 
 func tasks() []Task {
-	return []Task{fibQuickstart(), echoNoTool(), shellState()}
+	return []Task{
+		fibQuickstart(), echoNoTool(), shellState(),
+		editConfig(), needleSearch(), permAllow(), permDeny(),
+		exitCode(), journalMultiturn(), viewRange(),
+	}
 }
 
 // fibQuickstart is the reference quickstart, kept deliberately close to the
@@ -129,4 +138,268 @@ func shellState() Task {
 			ToolResultContains("{{NONCE}}", Platform),
 		},
 	}
+}
+
+// editConfig pins the edit tool's surgical replace: change one placeholder and
+// nothing else. Whole-file byte-equality is the artifact assertion — a rewrite,
+// even to plausible content, drifts a byte (a trailing newline, the key order)
+// and fails — and ToolCallResult ties that to an edit that actually performed the
+// replacement: its input carries the nonce (so a no-op edit whose old and new
+// strings match does not count) and its own result names config.ini and did not
+// error (so a bash rewrite of the file cannot stand in for a broken edit).
+// ToolNotUsed(write) closes the write-tool sidestep.
+//
+// Both the byte check and the correlated edit are Either: a wrong file is the
+// platform's edit misbehaving or the model rewriting it clumsily, and the
+// transcript cannot separate the two.
+func editConfig() Task {
+	const seed = "[service]\nname = eval\ntoken = REPLACE_ME\nretries = 3\n"
+	const want = "[service]\nname = eval\ntoken = {{NONCE}}\nretries = 3\n"
+	return Task{
+		ID:    "edit-config",
+		Seeds: []Seed{{Path: "config.ini", Content: seed}},
+		Turns: []Turn{{Message: "The file /workspace/config.ini contains the placeholder " +
+			"REPLACE_ME. Read the file, then replace REPLACE_ME with {{NONCE}}, changing " +
+			"nothing else. When the file is updated, reply DONE:{{NONCE}}."}},
+		Graders: []Grader{
+			FileEquals("config.ini", want, Either),
+			ToolUseAtLeast("read", 1, Model),
+			ToolCallResult("edit", "{{NONCE}}", false, "config.ini", Either),
+			ToolNotUsed("write", Model),
+			FinalMessageHas("DONE:{{NONCE}}", Either),
+		},
+	}
+}
+
+// needleSearch pins the grep tool's path:line:text output contract against one
+// seeded needle among decoys. The nonce makes the needle findable and the decoys
+// not: a case-sensitive grep for NEEDLE_{{NONCE}} passes over the lowercase
+// "needle" decoy. ToolCallResult ties the assertion to the grep call itself — a
+// grep whose input carries the needle pattern, whose own result names the seeded
+// location — so unrelated bash output cannot stand in for it.
+//
+// glob is required (ToolUseAtLeast, Model — the prompt names it), so a glob that
+// never runs reds here; the core pack proves its result joined, which is as far as
+// a bare list of paths can be graded without pinning a filesystem order. The grep
+// half is Either: no such grep is the model not searching as asked, a grep with the
+// wrong result is the platform's tool.
+func needleSearch() Task {
+	return Task{
+		ID: "needle-search",
+		Seeds: []Seed{
+			{Path: "src/util/helpers.go", Content: "package util\n\n// NEEDLE_{{NONCE}} marks the spot\nfunc Help() int { return 0 }\n"},
+			{Path: "src/main.go", Content: "package main\n\nfunc main() {}\n"},
+			{Path: "src/util/other.go", Content: "package util\n\nfunc Other() {}\n"},
+			{Path: "src/decoy.go", Content: "package src\n\n// a needle in a haystack (decoy, lowercase)\nvar X = 1\n"},
+		},
+		Turns: []Turn{{Message: "Search /workspace for the Go source file that contains the exact " +
+			"text NEEDLE_{{NONCE}}. Use the glob tool to list the .go files and the grep tool to " +
+			"find the match. Write the location to /workspace/answer.txt as a single line " +
+			"`path:line` — the path relative to /workspace, e.g. src/foo.go:12 — then reply DONE:{{NONCE}}."}},
+		Graders: []Grader{
+			// grep runs with an absolute root, so its result line is
+			// "/workspace/src/util/helpers.go:3:…" and the path:line prefix is a
+			// substring of it. The answer regex accepts the absolute or a relative
+			// rewrite the model may write.
+			ToolUseAtLeast("glob", 1, Model),
+			ToolCallResult("grep", "NEEDLE_{{NONCE}}", false, "src/util/helpers.go:3:", Either),
+			FileMatches("answer.txt", `^(/workspace/)?src/util/helpers\.go:3$`, Either),
+			FinalMessageHas("DONE:{{NONCE}}", Either),
+		},
+	}
+}
+
+// permAllow pins the happy path of the permission bridge: a gated tool suspends
+// the session on requires_action, a confirmation releases it, and the tool runs
+// — with the result correlated to the approval by tool_use_id, so the gate is not
+// cosmetic. The toolset gates every tool via default_config, and the prompt uses
+// only bash, so the one pause is the bash call.
+//
+// ToolUseAtLeast("bash", Model) carries the model's half — it must call the gated
+// tool — which lets the pure bridge graders be clean Platform: RequiresActionRaised
+// and EvaluatedPermissionAsk pass vacuously when nothing was gated, so a Platform
+// failure there means the gate itself misbehaved, and a model that never calls bash
+// reds only under the Model grader. ConfirmedResult is Either, not Platform: it
+// pins that the approval released a result correlated to the confirmed call, but
+// whether that result *succeeded* rides on the model's command being valid (the
+// prompt only suggests an echo), so a failed allowed command is model-or-platform.
+// The gated.txt effect is Either too — a missing file is the model not writing it
+// or the platform not running the approved tool.
+func permAllow() Task {
+	return Task{
+		ID:    "perm-allow",
+		Tools: gatedToolset(),
+		Turns: []Turn{{
+			Message: "Use the bash tool to write the text GATED_{{NONCE}} to /workspace/gated.txt " +
+				"(for example, `echo GATED_{{NONCE}} > /workspace/gated.txt`). When the file is " +
+				"written, reply DONE:{{NONCE}}.",
+			OnAsk: &Ask{Allow: true},
+		}},
+		Graders: []Grader{
+			ToolUseAtLeast("bash", 1, Model),
+			RequiresActionRaised(Platform),
+			EvaluatedPermissionAsk("bash", Platform),
+			ConfirmedResult(false, "", Either),
+			FileLines("gated.txt", []string{"GATED_{{NONCE}}"}, Either),
+			FinalMessageHas("DONE:{{NONCE}}", Either),
+		},
+	}
+}
+
+// permDeny is the negative twin: the same gate, but the confirmation denies, and
+// the platform synthesizes an is_error tool_result carrying the deny message
+// instead of running the tool. The action is a benign append the reviewer happens
+// to decline — deliberately benign, because a task that asks the model to delete a
+// "protected" file tests the model's refusal reflex, not our denial path.
+//
+// ToolUseAtLeast("bash", Model) carries the model's half; ConfirmedResult
+// correlates the deny message to the confirmed call by tool_use_id; and the
+// seeded file being byte-for-byte unchanged is the clean Platform signal that the
+// command never ran — a changed file would mean the deny failed to block.
+func permDeny() Task {
+	return Task{
+		ID:    "perm-deny",
+		Tools: gatedToolset(),
+		Seeds: []Seed{{Path: "notes.txt", Content: "ORIGINAL_{{NONCE}}\n"}},
+		Turns: []Turn{{
+			Message: "Use the bash tool to append a line to /workspace/notes.txt by running " +
+				"`echo APPEND_{{NONCE}} >> /workspace/notes.txt`. If the command is blocked before " +
+				"it runs, reply DENIED:{{NONCE}}; if it runs, reply DONE:{{NONCE}}.",
+			OnAsk: &Ask{Allow: false, DenyMessage: "not approved: DENY_{{NONCE}}"},
+		}},
+		Graders: []Grader{
+			ToolUseAtLeast("bash", 1, Model),
+			RequiresActionRaised(Platform),
+			ConfirmedResult(true, "DENY_{{NONCE}}", Platform),
+			FileLines("notes.txt", []string{"ORIGINAL_{{NONCE}}"}, Platform),
+			FinalMessageHas("DENIED:{{NONCE}}", Either),
+		},
+	}
+}
+
+// exitCode pins tool-failure propagation: a command that exits non-zero must come
+// back as an is_error result whose content carries the `exit code:` trailer
+// (bash.go's contract). ToolCallResult asserts exactly that on the failing
+// command's own result — the load-bearing check here. The final EXIT:…:1 the model
+// reports is a secondary, Either signal, and a weaker one than it looks: a correct
+// 1 is consistent with the model having read the result, but cat of a missing file
+// conventionally exits 1, so a guessed 1 cannot be ruled out from the message
+// alone. The platform's trailer, not the model's report, is what this task grades.
+//
+// ToolCallResult correlates the nonce'd bash call to its own result, so a stray
+// "exit code: 1" from an unrelated command can no longer green the assertion. It
+// is Either: the failure modes it folds together — the model never ran the nonce'd
+// command versus a mis-joined streamed tool JSON — are indistinguishable from the
+// transcript alone.
+//
+// The prompt forbids `$?`/`echo`/`;`/`||` for a reason: a model that wraps the cat
+// (e.g. `cat missing; echo "EXIT:$?"`) makes the whole command exit 0, so the tool
+// result is not an error and carries no trailer — the failure is masked before the
+// platform can propagate it. Steering the model to the bare command is what keeps
+// this a test of the platform's failure path rather than of the model's shell wits.
+func exitCode() Task {
+	return Task{
+		ID: "exit-code",
+		Turns: []Turn{{Message: "Use the bash tool to run this one command, exactly as written and " +
+			"with nothing added to it:\n\ncat /workspace/missing_{{NONCE}}.txt\n\nThe file does not " +
+			"exist, so the command fails on its own. When a command fails, the bash tool marks its " +
+			"result as an error and ends it with a line `exit code: N`. Read N from that tool result — " +
+			"do not compute it yourself with `$?`, `echo`, `;`, or `||`. Then reply EXIT:{{NONCE}}:N."}},
+		Graders: []Grader{
+			ToolCallResult("bash", "missing_{{NONCE}}", true, "exit code: 1", Either),
+			FinalMessageHas("EXIT:{{NONCE}}:1", Either),
+		},
+	}
+}
+
+// journalMultiturn pins two turns on one session: the second must resume the
+// first's context (event replay) and see the first's file (the same container,
+// adopted again). The final file holding both lines is the workspace-persisted
+// signal, and a tool_use after the second user.message is the resume actually
+// doing work on turn two.
+//
+// The caveat: a model could reconstruct the first line from its replayed context
+// rather than from the file, so the file check does not by itself prove the
+// container was reused — but same-session containers are the same container by
+// construction (the executor adopts by session), and a tool_use after turn two's
+// message proves the resume ran and acted. Stated honestly, this is a
+// persistence-and-replay test, not a defence against a model rewriting the file
+// from memory.
+//
+// Classing: the two user.message events are ours to post, so fewer than two on
+// the log is unambiguously an event-log fault (Platform). The file contents and
+// the turn-two tool_use both ride on the model complying — appending correctly,
+// acting on the second turn — so a miss there is Model-or-Platform (Either).
+func journalMultiturn() Task {
+	return Task{
+		ID: "journal-multiturn",
+		Turns: []Turn{
+			{Message: "Create /workspace/journal.txt with a single first line reading exactly: " +
+				"entry-one-{{NONCE}}. Reply DONE1:{{NONCE}}."},
+			{Message: "Append a second line to /workspace/journal.txt, below the first, reading " +
+				"exactly: entry-two-{{NONCE}}. Keep the first line unchanged. Reply DONE2:{{NONCE}}."},
+		},
+		Graders: []Grader{
+			FileLines("journal.txt", []string{"entry-one-{{NONCE}}", "entry-two-{{NONCE}}"}, Either),
+			EventCountAtLeast("user.message", 2, Platform),
+			EventAfterUserMessage("agent.tool_use", 2, Either),
+			FinalMessageHas("DONE2:{{NONCE}}", Either),
+		},
+	}
+}
+
+// viewRange pins read's view_range slicing byte-for-byte: read line 57 of a
+// 100-line file and it must be exactly line 57, not its neighbour and not line 57
+// plus a stray newline. The seeded marker lives only on that line, so an
+// off-by-one in the slicer returns the wrong bytes.
+//
+// The two halves split cleanly: ReadRangeRequested (Model) owns "the model asked
+// to read line 57", and ReadRangeBytes (Platform, vacuous unless that read
+// happened) owns "the slice returned exactly those bytes" — an off-by-one there is
+// unambiguously the platform's. The marker is a plain token and the task a plain
+// copy: a "SECRET" on the line reads as something to exfiltrate and provokes the
+// model's refusal reflex, which tests the model, not the slicer.
+//
+// It doubles as the suite's write-tool coverage: the prompt names the write tool
+// for the copy, ToolUseAtLeast (Model) requires it, and FileLines checks its effect
+// — so a broken write reds the file check, and a model that copies with bash reds
+// the Model grader instead of silently passing on an ungraded tool.
+func viewRange() Task {
+	return Task{
+		ID:    "view-range",
+		Seeds: []Seed{{Path: "poem.txt", Content: poem()}},
+		Turns: []Turn{{Message: "The file /workspace/poem.txt has 100 numbered lines. Using the read " +
+			"tool's line-range feature, read only line 57. Then use the write tool to save that exact " +
+			"line to a new file /workspace/line57.txt, and reply DONE:{{NONCE}}."}},
+		Graders: []Grader{
+			ReadRangeRequested("poem.txt", 57, Model),
+			ReadRangeBytes("poem.txt", 57, "MARKER_{{NONCE}}", Platform),
+			ToolUseAtLeast("write", 1, Model),
+			FileLines("line57.txt", []string{"MARKER_{{NONCE}}"}, Either),
+			FinalMessageHas("DONE:{{NONCE}}", Either),
+		},
+	}
+}
+
+// gatedToolset is the built-in toolset with every tool set to always_ask, so the
+// first tool call suspends on requires_action. Gating via default_config (rather
+// than per-tool configs) keeps it simple: the permission tasks use only bash, so
+// one policy covers the one tool they call.
+func gatedToolset() []any {
+	return []any{map[string]any{
+		"type":           "agent_toolset_20260401",
+		"default_config": map[string]any{"permission_policy": map[string]any{"type": "always_ask"}},
+	}}
+}
+
+// poem builds the 100-line seed for view-range, with the nonce'd secret on line
+// 57. The other lines are numbered so a wrong slice is obvious in a failure
+// message (line-56 or line-58 instead of the secret).
+func poem() string {
+	lines := make([]string, 100)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line-%d", i+1)
+	}
+	lines[56] = "MARKER_{{NONCE}}" // line 57, 1-indexed
+	return strings.Join(lines, "\n") + "\n"
 }

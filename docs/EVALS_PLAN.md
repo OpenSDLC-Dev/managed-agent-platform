@@ -104,8 +104,11 @@ Phase 1 lands as five PRs, each green on its own (docs move with the code, per C
       (`RUN_EVALS`, and a `TierEnabled` for the `TestMain` a `*testing.T` skip cannot serve);
       the daily scheduled run is filed as
       [#96](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/96).
-- [ ] **PR 5 — tasks 4–10, wrap-up.** The remaining seven, STATE/HISTORY, and the
-      follow-up issues below.
+- [x] **PR 5 — tasks 4–10, wrap-up.** The remaining seven (`edit-config`, `needle-search`,
+      `perm-allow`, `perm-deny`, `exit-code`, `journal-multiturn`, `view-range`), landed with
+      the harness seams they needed — seed planting, gated toolsets, a confirmation-aware drive
+      loop — and grading the permission bridge end to end. All ten run **10/10 green** live via
+      `make eval`. STATE/HISTORY updated; the follow-ups below stay filed as issues.
 
 ## The ten tasks
 
@@ -121,16 +124,22 @@ accounting populated; the idle event observed on the SSE stream.
 | 2 | `echo-notool` | Text-only baseline. Negative: no `tool_exec` ⇒ **no container may exist** | — |
 | 3 | `shell-state` | The persistent shell: `export` in call 1 must survive into call 2 | — |
 | 4 | `edit-config` | `read` + `edit`. Whole-file equality proves the edit was surgical, not a rewrite | `config.ini` |
-| 5 | `needle-search` | `glob` + `grep` output contracts (`path:line:text`), decoys included | 4 files |
-| 6 | `perm-allow` | The permission bridge: `requires_action` → confirm → resume, with the tool result provably sequenced *after* the approval | — |
-| 7 | `perm-deny` | Its negative twin: denial synthesizes an `is_error` result, and the seeded file survives | `protected/keep.txt` |
-| 8 | `exit-code` | Tool failure propagation. The exit code exists nowhere but the real tool result, so reporting it proves the model consumed it | — |
-| 9 | `journal-multiturn` | Two turns, one session: event replay and sandbox reuse (same container id) | — |
+| 5 | `needle-search` | `grep`'s `path:line:text` output contract against a seeded needle among decoys; `glob` is invoked (its output not pinned) | 4 files |
+| 6 | `perm-allow` | The permission bridge: `requires_action` → confirm → resume, with the tool result correlated to the approval by `tool_use_id` | — |
+| 7 | `perm-deny` | Its negative twin: a denied append synthesizes an `is_error` result, and the seeded file is left untouched | `notes.txt` |
+| 8 | `exit-code` | Tool failure propagation: a failed command's `exit code:` trailer, correlated to the failing call's own result | — |
+| 9 | `journal-multiturn` | Two turns, one session: event replay and sandbox reuse (the executor adopts the session's container) | — |
 | 10 | `view-range` | `read` `view_range` slicing, byte-exact — an off-by-one guard | `poem.txt` |
 
-Coverage: all six tools (bash 1/3/6/7/8, read 4/10, write 10, edit 4, glob+grep 5); single
-and multi turn; allow and deny; seeded and unseeded; three negatives (2, 7, 8). Every
-trial exercises SSE and usage accounting through G0.
+Coverage: all six tools are exercised across the tasks, at two strengths. `edit` (4), `grep`
+(5) and `bash` (8, the failing command) are pinned by a result contract that ties a call to its
+own output, and `read` (10) byte-exact by the view-range slice grader. `bash` (3/6/7), `read`
+(4), `glob` (5) and `write` (10) ride on a required tool-use floor (the prompts name the tool);
+`write`'s effect is further pinned by its written artifact (line57.txt), while `glob` is
+invocation-only — its result is joined by the core pack, but a bare path list has no stable
+order to pin, so a broken glob that still returns something is not caught here. Single and multi
+turn; allow and deny; seeded and unseeded; three negatives (2, 7, 8). Every trial exercises SSE
+and usage accounting through G0.
 
 One image for the whole run, `python:3.12-slim` (Debian-slim underneath, so the toolset's
 `grep`/`stat`/`sort` probes see the same userland as the default `debian:stable-slim`).
