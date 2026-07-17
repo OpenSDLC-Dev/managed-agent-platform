@@ -124,20 +124,22 @@ accounting populated; the idle event observed on the SSE stream.
 | 2 | `echo-notool` | Text-only baseline. Negative: no `tool_exec` ⇒ **no container may exist** | — |
 | 3 | `shell-state` | The persistent shell: `export` in call 1 must survive into call 2 | — |
 | 4 | `edit-config` | `read` + `edit`. Whole-file equality proves the edit was surgical, not a rewrite | `config.ini` |
-| 5 | `needle-search` | `glob` + `grep` output contracts (`path:line:text`), decoys included | 4 files |
-| 6 | `perm-allow` | The permission bridge: `requires_action` → confirm → resume, with the tool result provably sequenced *after* the approval | — |
+| 5 | `needle-search` | `grep`'s `path:line:text` output contract against a seeded needle among decoys; `glob` is invoked (its output not pinned) | 4 files |
+| 6 | `perm-allow` | The permission bridge: `requires_action` → confirm → resume, with the tool result correlated to the approval by `tool_use_id` | — |
 | 7 | `perm-deny` | Its negative twin: a denied append synthesizes an `is_error` result, and the seeded file is left untouched | `notes.txt` |
-| 8 | `exit-code` | Tool failure propagation. The exit code exists nowhere but the real tool result, so reporting it proves the model consumed it | — |
-| 9 | `journal-multiturn` | Two turns, one session: event replay and sandbox reuse (same container id) | — |
+| 8 | `exit-code` | Tool failure propagation: a failed command's `exit code:` trailer, correlated to the failing call's own result | — |
+| 9 | `journal-multiturn` | Two turns, one session: event replay and sandbox reuse (the executor adopts the session's container) | — |
 | 10 | `view-range` | `read` `view_range` slicing, byte-exact — an off-by-one guard | `poem.txt` |
 
-Coverage: all six tools are graded across the tasks. `edit` (4), `grep` (5) and `bash` (8, the
-failing command) are pinned by a result contract that ties a call to its own output; `read` (10)
-is pinned byte-exact by the view-range slice grader; and `bash` (3/6/7), `read` (4), `glob` (5)
-and `write` (10) by a required tool-use floor with the artifact checked separately (a bare path
-list and a written file carry no output to pin byte-for-byte, and the prompts name both tools).
-Single and multi turn; allow and deny; seeded and unseeded; three negatives (2, 7, 8). Every
-trial exercises SSE and usage accounting through G0.
+Coverage: all six tools are exercised across the tasks, at two strengths. `edit` (4), `grep`
+(5) and `bash` (8, the failing command) are pinned by a result contract that ties a call to its
+own output, and `read` (10) byte-exact by the view-range slice grader. `bash` (3/6/7), `read`
+(4), `glob` (5) and `write` (10) ride on a required tool-use floor (the prompts name the tool);
+`write`'s effect is further pinned by its written artifact (line57.txt), while `glob` is
+invocation-only — its result is joined by the core pack, but a bare path list has no stable
+order to pin, so a broken glob that still returns something is not caught here. Single and multi
+turn; allow and deny; seeded and unseeded; three negatives (2, 7, 8). Every trial exercises SSE
+and usage accounting through G0.
 
 One image for the whole run, `python:3.12-slim` (Debian-slim underneath, so the toolset's
 `grep`/`stat`/`sort` probes see the same userland as the default `debian:stable-slim`).

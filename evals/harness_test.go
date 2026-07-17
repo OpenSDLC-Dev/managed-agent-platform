@@ -137,7 +137,15 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 	start := time.Now()
 	for i, turn := range task.Turns {
 		s.sendEvents(t, tr.SessionID, userMessage(subst(turn.Message, nonce)))
-		tr.Idles = append(tr.Idles, s.driveToIdle(t, stream, tr.SessionID, turn, nonce, i, len(task.Turns)))
+		idle := s.driveToIdle(t, stream, tr.SessionID, turn, nonce, i, len(task.Turns))
+		tr.Idles = append(tr.Idles, idle)
+		// An unresolved pause (driveToIdle returning a requires_action idle) leaves
+		// the session wedged on a confirmation we won't give. Stop driving and let
+		// the graders classify this idle, rather than post the next turn into a
+		// stuck session where it would only time out.
+		if stopReasonType(idle) == "requires_action" {
+			break
+		}
 	}
 	tr.Elapsed = time.Since(start)
 
@@ -148,10 +156,20 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 // driveToIdle waits for one turn to settle, answering any confirmation pause on
 // the way. A gated toolset suspends the session on a requires_action idle rather
 // than ending the turn; the turn's OnAsk says whether to allow or deny each
-// gated call, and the loop keeps going until an idle that is not a pause — the
-// turn's real end, which is what it returns. Only that terminal idle joins
-// tr.Idles (one per turn, as the core pack expects); the requires_action idles
-// are evidence the permission graders read back from the transcript.
+// gated call, and the loop keeps confirming until an idle that is not a pause —
+// the turn's real end, which is what it returns. That idle joins tr.Idles (one
+// per turn, as the core pack expects); the intermediate requires_action idles are
+// evidence the permission graders read back from the transcript.
+//
+// When it *cannot* keep driving — the turn set no OnAsk yet the session paused, or
+// a model kept re-pausing past maxConfirmRounds, or the pause named no usable
+// event id — it returns that requires_action idle rather than aborting. runTrial
+// then stops driving and the graders classify it: the core pack's
+// ends-with-end-turn (Either) reds a non-end_turn final idle, and a permission
+// task's RequiresActionRaised (Platform) reds a malformed pause. A t.Fatalf here
+// would instead misread a platform gating regression as a forgotten test OnAsk,
+// or a re-pausing model as a platform abort, and skip P/M/E classing entirely.
+// Only a stream that never produces an idle (the turn-wide deadline) is fatal.
 func (s *stack) driveToIdle(t *testing.T, stream *sseStream, sessionID string, turn Turn, nonce string, turnIdx, turns int) map[string]any {
 	t.Helper()
 	// Every gated call answered so far this turn. The API re-idles after a
@@ -162,37 +180,42 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, sessionID string, t
 	// re-idles interleave on the stream).
 	answered := map[string]bool{}
 	rounds := 0
+	// One deadline for the whole turn, not one per await: a model that re-pauses
+	// repeatedly cannot stretch the turn to maxConfirmRounds × turnTimeout and slip
+	// past the suite timeout before the round cap fires.
+	deadline := time.Now().Add(turnTimeout)
 	for {
-		idle, err := stream.awaitIdle(turnTimeout)
+		idle, err := stream.awaitIdle(time.Until(deadline))
 		if err != nil {
 			t.Fatalf("turn %d of %d: %v (session %s)", turnIdx+1, turns, err, sessionID)
 		}
 		if stopReasonType(idle) != "requires_action" {
 			return idle
 		}
+		// An unanswerable pause is graded, not aborted (see the doc comment).
 		if turn.OnAsk == nil {
-			t.Fatalf("turn %d of %d: session paused for confirmation but the turn set no OnAsk (session %s)",
-				turnIdx+1, turns, sessionID)
+			return idle
 		}
 		if rounds++; rounds > maxConfirmRounds {
-			t.Fatalf("turn %d of %d: still pausing for confirmation after %d rounds — model likely "+
-				"re-calling a gated tool without settling (session %s)",
-				turnIdx+1, turns, maxConfirmRounds, sessionID)
+			return idle
 		}
 		stop, _ := idle["stop_reason"].(map[string]any)
 		ids, _ := stop["event_ids"].([]any)
-		if len(ids) == 0 {
-			t.Fatalf("turn %d of %d: requires_action carried no event_ids (session %s)",
-				turnIdx+1, turns, sessionID)
-		}
 		// Confirm each not-yet-answered id, in one POST, referencing it by the
 		// event id requires_action named (the id the API's blocking-set query
 		// recognizes). A re-idle listing only already-answered ids adds nothing to
-		// send, so the loop simply waits for the turn to resume.
+		// send, so the loop simply waits for the turn to resume. A pause carrying no
+		// id or a malformed one is returned for RequiresActionRaised to class.
+		if len(ids) == 0 {
+			return idle
+		}
 		var confirmations []map[string]any
 		for _, raw := range ids {
-			eid, _ := raw.(string)
-			if eid == "" || answered[eid] {
+			eid, ok := raw.(string)
+			if !ok || eid == "" {
+				return idle
+			}
+			if answered[eid] {
 				continue
 			}
 			answered[eid] = true

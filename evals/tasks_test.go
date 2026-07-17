@@ -143,9 +143,11 @@ func shellState() Task {
 // editConfig pins the edit tool's surgical replace: change one placeholder and
 // nothing else. Whole-file byte-equality is the artifact assertion — a rewrite,
 // even to plausible content, drifts a byte (a trailing newline, the key order)
-// and fails — and ToolCallResult ties that to a non-error edit of config.ini, so
-// a broken edit tool cannot hide behind a bash rewrite that fixes the file
-// anyway. ToolNotUsed(write) closes the write-tool sidestep.
+// and fails — and ToolCallResult ties that to an edit that actually performed the
+// replacement: its input carries the nonce (so a no-op edit whose old and new
+// strings match does not count) and its own result names config.ini and did not
+// error (so a bash rewrite of the file cannot stand in for a broken edit).
+// ToolNotUsed(write) closes the write-tool sidestep.
 //
 // Both the byte check and the correlated edit are Either: a wrong file is the
 // platform's edit misbehaving or the model rewriting it clumsily, and the
@@ -162,7 +164,7 @@ func editConfig() Task {
 		Graders: []Grader{
 			FileEquals("config.ini", want, Either),
 			ToolUseAtLeast("read", 1, Model),
-			ToolCallResult("edit", "config.ini", false, "", Either),
+			ToolCallResult("edit", "{{NONCE}}", false, "config.ini", Either),
 			ToolNotUsed("write", Model),
 			FinalMessageHas("DONE:{{NONCE}}", Either),
 		},
@@ -214,12 +216,15 @@ func needleSearch() Task {
 // only bash, so the one pause is the bash call.
 //
 // ToolUseAtLeast("bash", Model) carries the model's half — it must call the gated
-// tool — which is what lets the bridge graders be clean Platform: they pass
-// vacuously when nothing was gated (RequiresActionRaised, EvaluatedPermissionAsk,
-// ConfirmedResult), so a Platform failure means the gate itself misbehaved, and a
-// model that never calls bash reds only under the Model grader. The gated.txt
-// effect is Either: a missing file is the model not writing it or the platform
-// not running the approved tool.
+// tool — which lets the pure bridge graders be clean Platform: RequiresActionRaised
+// and EvaluatedPermissionAsk pass vacuously when nothing was gated, so a Platform
+// failure there means the gate itself misbehaved, and a model that never calls bash
+// reds only under the Model grader. ConfirmedResult is Either, not Platform: it
+// pins that the approval released a result correlated to the confirmed call, but
+// whether that result *succeeded* rides on the model's command being valid (the
+// prompt only suggests an echo), so a failed allowed command is model-or-platform.
+// The gated.txt effect is Either too — a missing file is the model not writing it
+// or the platform not running the approved tool.
 func permAllow() Task {
 	return Task{
 		ID:    "perm-allow",
@@ -234,7 +239,7 @@ func permAllow() Task {
 			ToolUseAtLeast("bash", 1, Model),
 			RequiresActionRaised(Platform),
 			EvaluatedPermissionAsk("bash", Platform),
-			ConfirmedResult(false, "", Platform),
+			ConfirmedResult(false, "", Either),
 			FileLines("gated.txt", []string{"GATED_{{NONCE}}"}, Either),
 			FinalMessageHas("DONE:{{NONCE}}", Either),
 		},
@@ -272,12 +277,14 @@ func permDeny() Task {
 	}
 }
 
-// exitCode pins tool-failure propagation and guards against a hallucinated
-// answer: a command that exits non-zero must come back as an is_error result
-// whose content carries the exit-code trailer, and the model can only report the
-// code by having consumed that result. The exit code exists nowhere but the real
-// tool output — cat of a missing file exits 1 — so a correct EXIT:…:1 proves the
-// model read the true result rather than guessing.
+// exitCode pins tool-failure propagation: a command that exits non-zero must come
+// back as an is_error result whose content carries the `exit code:` trailer
+// (bash.go's contract). ToolCallResult asserts exactly that on the failing
+// command's own result — the load-bearing check here. The final EXIT:…:1 the model
+// reports is a secondary, Either signal, and a weaker one than it looks: a correct
+// 1 is consistent with the model having read the result, but cat of a missing file
+// conventionally exits 1, so a guessed 1 cannot be ruled out from the message
+// alone. The platform's trailer, not the model's report, is what this task grades.
 //
 // ToolCallResult correlates the nonce'd bash call to its own result, so a stray
 // "exit code: 1" from an unrelated command can no longer green the assertion. It

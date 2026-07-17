@@ -31,8 +31,9 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   asserted against a seeded needle among decoys), `perm-allow` and `perm-deny` (the permission bridge end
   to end — a gated tool suspends the session on `requires_action`, a `user.tool_confirmation` allows or
   denies, and a denial's synthesized `is_error` result and the untouched file are graded), `exit-code` (a
-  failed command's `exit code:` trailer, which exists only in the real tool result, so reporting it proves
-  the model consumed it), `journal-multiturn` (two turns on one session — event replay and sandbox reuse),
+  failed command's `exit code:` trailer, correlated to the failing call's own result — the model's
+  reported code is only a secondary signal, since cat of a missing file conventionally exits 1),
+  `journal-multiturn` (two turns on one session — event replay and sandbox reuse),
   and `view-range` (`read` `view_range` slicing, byte-exact, an off-by-one guard). This grows the harness
   three ways the first three tasks did not need: seed planting (files written into the session's container
   before turn 1, which the executor then adopts), gated toolsets, and a confirmation-aware drive loop that

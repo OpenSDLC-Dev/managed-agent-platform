@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
 // Grading is deliberately code-based: every assertion below is a deterministic
@@ -287,7 +289,7 @@ func ToolResultContains(sub string, class Class) Grader {
 		Check: func(_ *testing.T, tr *Trial) error {
 			want := subst(sub, tr.Nonce)
 			for _, ev := range eventsOfType(tr, "agent.tool_result") {
-				if isErrorResult(ev) {
+				if !okResult(ev) {
 					continue
 				}
 				if strings.Contains(textOf(ev), want) {
@@ -309,7 +311,7 @@ func ToolResultOK(class Class) Grader {
 		Check: func(_ *testing.T, tr *Trial) error {
 			results := eventsOfType(tr, "agent.tool_result")
 			for _, ev := range results {
-				if !isErrorResult(ev) {
+				if okResult(ev) {
 					return nil
 				}
 			}
@@ -508,9 +510,14 @@ func ToolCallResult(name, inputSub string, wantErr bool, contentSub string, clas
 				if res == nil {
 					return fmt.Errorf("%s call with %q has no tool_result", name, wantIn)
 				}
-				if isErrorResult(res) != wantErr {
+				gotErr, present := isErrorFlag(res)
+				if !present {
+					return fmt.Errorf("%s call with %q: result carries no is_error flag (%q)",
+						name, wantIn, textOf(res))
+				}
+				if gotErr != wantErr {
 					return fmt.Errorf("%s call with %q: result is_error=%v, want %v (%q)",
-						name, wantIn, isErrorResult(res), wantErr, textOf(res))
+						name, wantIn, gotErr, wantErr, textOf(res))
 				}
 				if wantContent != "" && !strings.Contains(textOf(res), wantContent) {
 					return fmt.Errorf("%s call with %q: result %q lacks %q",
@@ -592,10 +599,16 @@ func RequiresActionRaised(class Class) Grader {
 				if stop["type"] != "requires_action" {
 					continue
 				}
-				if ids, _ := stop["event_ids"].([]any); len(ids) > 0 {
-					return nil
+				ids, _ := stop["event_ids"].([]any)
+				if len(ids) == 0 {
+					return fmt.Errorf("requires_action idle carried no event_ids")
 				}
-				return fmt.Errorf("requires_action idle carried no event_ids")
+				for _, raw := range ids {
+					if s, ok := raw.(string); !ok || s == "" {
+						return fmt.Errorf("requires_action idle carried a non-string or empty event id %v", raw)
+					}
+				}
+				return nil
 			}
 			return fmt.Errorf("no session.status_idle with stop_reason requires_action")
 		},
@@ -659,9 +672,14 @@ func ConfirmedResult(wantErr bool, contentSub string, class Class) Grader {
 					if later["type"] != "agent.tool_result" || later["tool_use_id"] != tid {
 						continue
 					}
-					if isErrorResult(later) != wantErr {
+					gotErr, present := isErrorFlag(later)
+					if !present {
+						return fmt.Errorf("result for confirmed %s carries no is_error flag (content %q)",
+							tid, textOf(later))
+					}
+					if gotErr != wantErr {
 						return fmt.Errorf("result for confirmed %s: is_error=%v, want %v (content %q)",
-							tid, isErrorResult(later), wantErr, textOf(later))
+							tid, gotErr, wantErr, textOf(later))
 					}
 					if wantContent != "" && !strings.Contains(textOf(later), wantContent) {
 						return fmt.Errorf("result for confirmed %s does not contain %q (got %q)",
@@ -725,15 +743,18 @@ func ReadRangeBytes(path string, line int, want string, class Class) Grader {
 }
 
 // readRangeUse returns the first read tool_use requesting exactly [line, line] of
-// path, or nil. The path matches on a component boundary so a sibling like
-// "my-poem.txt" cannot satisfy a grader for "poem.txt".
+// path, or nil. The file_path must be either the workspace-relative path or its
+// canonical absolute form under the sandbox workdir — a loose suffix match would
+// accept a wrong-root read of "/tmp/poem.txt" and then blame the platform when its
+// bytes fail ReadRangeBytes, misclassing the model's wrong path as a slicer bug.
 func readRangeUse(tr *Trial, path string, line int) map[string]any {
+	abs := sandbox.DefaultWorkdir + "/" + path
 	for _, use := range eventsOfType(tr, "agent.tool_use") {
 		if use["name"] != "read" {
 			continue
 		}
 		input, _ := use["input"].(map[string]any)
-		if p, _ := input["file_path"].(string); p != path && !strings.HasSuffix(p, "/"+path) {
+		if p, _ := input["file_path"].(string); p != path && p != abs {
 			continue
 		}
 		if viewRangeIs(input["view_range"], line) {
@@ -796,13 +817,24 @@ func isErrorResult(ev map[string]any) bool {
 	return b
 }
 
+// isErrorFlag returns a tool_result's is_error and whether it was present. The
+// platform always stamps the flag, so a missing one is a malformed result: an
+// assertion that pins is_error in *either* direction must reject the absence
+// rather than read it as a zero-value false, which is how a dropped-flag wire
+// regression would otherwise sail through the wantErr==false direction of a
+// correlated grader.
+func isErrorFlag(ev map[string]any) (isErr, present bool) {
+	b, ok := ev["is_error"].(bool)
+	return b, ok
+}
+
 // okResult reports whether a tool_result is an explicit success — is_error
 // present and false. A missing or non-boolean is_error is not a success: the
 // platform always stamps the flag, so its absence is a malformed result a
 // success-requiring grader must reject rather than read as a zero-value false.
 func okResult(ev map[string]any) bool {
-	b, ok := ev["is_error"].(bool)
-	return ok && !b
+	isErr, present := isErrorFlag(ev)
+	return present && !isErr
 }
 
 // modelUsage pulls the token counts off a span.model_request_end event. in is

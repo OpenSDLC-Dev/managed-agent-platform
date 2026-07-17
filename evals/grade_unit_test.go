@@ -139,6 +139,19 @@ func TestToolResultGraders(t *testing.T) {
 	if err := ToolResultOK(Platform).Check(t, errOnly); err == nil {
 		t.Error("ToolResultOK should fail when every result is an error")
 	}
+
+	// A result with no is_error flag is malformed, not an implicit success: both
+	// success graders must skip it rather than count it, or a dropped-flag wire
+	// regression would green a run.
+	noFlag := trialWith([]map[string]any{
+		{"type": "agent.tool_result", "content": textBlocks("value is n0")},
+	})
+	if err := ToolResultOK(Platform).Check(t, noFlag); err == nil {
+		t.Error("ToolResultOK should not count a result missing is_error as a success")
+	}
+	if err := ToolResultContains("n0", Platform).Check(t, noFlag); err == nil {
+		t.Error("ToolResultContains should skip a result missing is_error")
+	}
 }
 
 func TestCorePackToolResultsJoined(t *testing.T) {
@@ -379,6 +392,20 @@ func TestToolCallResult(t *testing.T) {
 	if err := g.Check(t, wrongContent); err == nil {
 		t.Error("the matching error result lacking the trailer should fail")
 	}
+
+	// The matching call's result dropped is_error entirely. A wantErr=false
+	// grader must reject the malformed result rather than read the absence as a
+	// zero-value false — the vacuous-pass the strict flag check closes.
+	ok2 := ToolCallResult("edit", "config.ini", false, "", Either)
+	noFlag := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "edit", "id": "toolu_1",
+			"input": map[string]any{"file_path": "/workspace/config.ini"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1",
+			"content": textBlocks("edited /workspace/config.ini (1 replacement(s))")},
+	})
+	if err := ok2.Check(t, noFlag); err == nil {
+		t.Error("a result with no is_error must fail a wantErr=false check, not pass vacuously")
+	}
 }
 
 func TestEventCountAtLeast(t *testing.T) {
@@ -434,6 +461,18 @@ func TestRequiresActionRaised(t *testing.T) {
 	})
 	if err := g.Check(t, empty); err == nil {
 		t.Error("requires_action with no event_ids should fail")
+	}
+
+	// A non-empty event_ids array carrying a non-string (or empty string) id is
+	// also malformed: the harness cannot confirm it, so the grader must red rather
+	// than treat the pause as well-formed.
+	badID := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash"},
+		{"type": "session.status_idle", "stop_reason": map[string]any{
+			"type": "requires_action", "event_ids": []any{float64(42)}}},
+	})
+	if err := g.Check(t, badID); err == nil {
+		t.Error("requires_action with a non-string event id should fail")
 	}
 }
 
@@ -514,6 +553,17 @@ func TestConfirmedResult(t *testing.T) {
 	if err := allow.Check(t, allowed); err != nil {
 		t.Errorf("an allowed call's successful result should pass: %v", err)
 	}
+
+	// The allowed result dropped is_error. The wantErr=false direction must reject
+	// the malformed result, not read the absence as a zero-value false — the
+	// vacuous Platform pass the strict flag check closes.
+	allowNoFlag := trialWith([]map[string]any{
+		{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "sevt_1"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "content": textBlocks("done")},
+	})
+	if err := allow.Check(t, allowNoFlag); err == nil {
+		t.Error("a confirmed result with no is_error must fail wantErr=false, not pass vacuously")
+	}
 }
 
 func TestReadRangeRequested(t *testing.T) {
@@ -541,6 +591,23 @@ func TestReadRangeRequested(t *testing.T) {
 	})
 	if err := g.Check(t, sibling); err == nil {
 		t.Error("a sibling file ending in poem.txt should not satisfy the grader")
+	}
+	// The right basename and range but the wrong root: /tmp/poem.txt is a different
+	// file the model read by mistake, not the seeded /workspace one.
+	wrongRoot := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "read", "id": "toolu_1", "input": map[string]any{
+			"file_path": "/tmp/poem.txt", "view_range": []any{float64(57), float64(57)}}},
+	})
+	if err := g.Check(t, wrongRoot); err == nil {
+		t.Error("a read of /tmp/poem.txt should not satisfy a grader for the workspace poem.txt")
+	}
+	// The workspace-relative form is accepted (the model may pass a bare path).
+	relative := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "read", "id": "toolu_1", "input": map[string]any{
+			"file_path": "poem.txt", "view_range": []any{float64(57), float64(57)}}},
+	})
+	if err := g.Check(t, relative); err != nil {
+		t.Errorf("a workspace-relative poem.txt read should pass: %v", err)
 	}
 }
 
