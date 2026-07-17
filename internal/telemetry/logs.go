@@ -18,9 +18,11 @@ var consoleOut io.Writer = os.Stderr
 
 // fanoutHandler writes every record to each handler in turn: the console keeps
 // working exactly as before the bridge existed, and the collector gets the same
-// record. Errors are joined rather than short-circuited — a failing OTLP export
-// must never cost the operator the stderr line, which is the one that still
-// works when the collector is the thing that is broken.
+// record. No branch may short-circuit another — a failing OTLP export must never
+// cost the operator the stderr line, which is the one that still works when the
+// collector is the thing that is broken. (slog.Logger discards Handle's error,
+// so the returned join is for a wrapping handler's benefit, not ours; what
+// matters is that a branch's failure does not skip the branches after it.)
 type fanoutHandler struct {
 	handlers []slog.Handler
 }
@@ -37,11 +39,15 @@ func (f *fanoutHandler) Enabled(ctx context.Context, level slog.Level) bool {
 func (f *fanoutHandler) Handle(ctx context.Context, r slog.Record) error {
 	var errs []error
 	for _, h := range f.handlers {
+		// Required, not defensive: slog's Handler contract says Handle "will
+		// only be called when Enabled returns true", and our own Enabled is an
+		// OR across the branches — so a level one branch wants and another
+		// does not still reaches here.
 		if !h.Enabled(ctx, r.Level) {
 			continue
 		}
-		// Each handler owns its record: Handle may retain the attrs, and
-		// several are documented as free to mutate what they are given.
+		// A Record shares a backing array with its copies; Clone exists so two
+		// consumers cannot interfere, which is exactly what a fan-out is.
 		if err := h.Handle(ctx, r.Clone()); err != nil {
 			errs = append(errs, err)
 		}
