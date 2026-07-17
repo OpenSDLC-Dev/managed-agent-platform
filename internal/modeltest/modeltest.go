@@ -70,10 +70,25 @@ func (c Config) String() string {
 	return fmt.Sprintf("{Protocol:%s BaseURL:%s APIKey:%s Model:%s}", c.Protocol, c.BaseURL, key, c.Model)
 }
 
-// GoString redacts the credential under %#v, which is the verb a debugger
-// reaches for and the one that walks straight past String() into the fields.
-// Unexporting the credential would not help: fmt prints unexported fields too.
-func (c Config) GoString() string { return "modeltest.Config" + c.String() }
+// Format carries the redaction to every verb fmt will let it. String alone
+// would not: fmt consults it for %v/%s and their kin, but reaches past it for
+// %#v, and for a mismatched verb like %d it falls back to a diagnostic that
+// prints the raw fields — precisely the debugging accident this type exists to
+// survive. Unexporting the credential would not help either; fmt prints
+// unexported fields too.
+//
+// %p is the one that gets through: fmt resolves %p and %T before consulting
+// any method ("we always do them first" — fmt/print.go, printArg), so %p on a
+// Config prints a %!p diagnostic carrying the fields. Nothing here can
+// intercept it; pointing %p at a struct value is already a mistake fmt shouts
+// about, so it is documented rather than defended against.
+func (c Config) Format(f fmt.State, verb rune) {
+	if verb == 'v' && f.Flag('#') {
+		io.WriteString(f, "modeltest.Config"+c.String())
+		return
+	}
+	io.WriteString(f, c.String())
+}
 
 // Endpoint gates a live tier and returns the endpoint it should drive.
 //

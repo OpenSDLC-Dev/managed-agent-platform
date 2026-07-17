@@ -20,9 +20,11 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   which is what keeps a non-opted-in run from opening the credential file at all and makes the file
   structurally unable to opt a tier in; its values are never pushed into the process environment, so no
   test's `t.Setenv` can strip a key from a later one. A resolved endpoint redacts its credential under
-  every `fmt` verb, `%#v` included — the one a debugger reaches for, and the one that walks past
-  `String()` into the raw fields (unexporting them would not help: `fmt` prints those too). First step of
-  the eval system planned in [docs/EVALS_PLAN.md](./docs/EVALS_PLAN.md)
+  every `fmt` verb the type can intercept — `%#v` walks past a `String()` method, and a mismatched verb
+  like `%d` makes `fmt` print the raw fields, so the redaction is a `Format` method (unexporting the field
+  would not help: `fmt` prints unexported fields too). `%p` is the exception, documented at the method:
+  `fmt` resolves it before consulting anything. First step of the eval system planned in
+  [docs/EVALS_PLAN.md](./docs/EVALS_PLAN.md)
   ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)).
 
 ### Changed
