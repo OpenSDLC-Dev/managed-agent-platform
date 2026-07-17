@@ -40,6 +40,11 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   refusal-prone model balked at were reworded to exercise the platform rather than trip a safety reflex —
   a benign append the reviewer declines, a plain marker copied to a file — not tuned until only our
   platform satisfies them.
+  Each tool assertion correlates a call to its own result by `tool_use` id, so a stray result elsewhere
+  in the transcript cannot green it, and the P/M/E classing is conditioned so a Platform finding fires
+  only on a genuine platform fault — a model that skips a gated tool reds under Model, never Platform.
+  All six built-in tools are graded: `edit`/`grep`/`bash` by a result contract, `read` byte-exact, and
+  `bash`/`read`/`glob`/`write` by a required tool-use floor.
   Grading is deterministic and code-based, never an LLM judge: each prompt demands a per-trial random
   nonce, so an exact-match check tests the agent rather than the grader's generosity. Every trial also
   runs a core pack — reaches idle with `stop_reason.type == "end_turn"`, no `session.error`, every

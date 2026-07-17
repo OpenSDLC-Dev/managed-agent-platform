@@ -131,12 +131,13 @@ accounting populated; the idle event observed on the SSE stream.
 | 9 | `journal-multiturn` | Two turns, one session: event replay and sandbox reuse (same container id) | — |
 | 10 | `view-range` | `read` `view_range` slicing, byte-exact — an off-by-one guard | `poem.txt` |
 
-Coverage: all six tools are graded across the tasks — bash (1/3/6/7/8), read (4/10), edit (4)
-and grep (5/8) by a result contract that ties a call to its own output, and glob (5) and
-write (10) by a required tool-use floor with the artifact checked separately (a bare path
-list and a written file carry no output to pin byte-for-byte, and the prompts name both
-tools). Single and multi turn; allow and deny; seeded and unseeded; three negatives (2, 7,
-8). Every trial exercises SSE and usage accounting through G0.
+Coverage: all six tools are graded across the tasks. `edit` (4), `grep` (5) and `bash` (8, the
+failing command) are pinned by a result contract that ties a call to its own output; `read` (10)
+is pinned byte-exact by the view-range slice grader; and `bash` (3/6/7), `read` (4), `glob` (5)
+and `write` (10) by a required tool-use floor with the artifact checked separately (a bare path
+list and a written file carry no output to pin byte-for-byte, and the prompts name both tools).
+Single and multi turn; allow and deny; seeded and unseeded; three negatives (2, 7, 8). Every
+trial exercises SSE and usage accounting through G0.
 
 One image for the whole run, `python:3.12-slim` (Debian-slim underneath, so the toolset's
 `grep`/`stat`/`sort` probes see the same userland as the default `debian:stable-slim`).
