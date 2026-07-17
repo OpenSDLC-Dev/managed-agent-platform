@@ -25,7 +25,13 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   metric to explain a slow turn. A turn that died before the model reported usage records duration with
   an `error.type` and no tokens, rather than a pair of zeroes no model ever produced diluting the
   histogram — `EndEvent` now takes a nil usage to say "the model never told us", since the wire event
-  still wants a `model_usage` object and only it may flatten the two facts together.
+  still wants a `model_usage` object and only it may flatten the two facts together. The input reading
+  sums the fresh, cache-read and cache-creation counts: `gen_ai.token.type` has only `input` and
+  `output`, so the convention has no bucket for a cache read, and the domain carries those apart only
+  because Anthropic's wire shape does. That split must not leak into a metric whose vocabulary has no
+  room for it — on this platform especially, where a long-horizon turn replays the whole session and a
+  cache read is the normal case, reporting only the fresh remainder under-reports the prompt by orders
+  of magnitude (a real 9,730-token prompt read as 30).
 - A tool call records `tool.execution.duration` from `toolset.Run` — the one place both the cloud
   executor and the BYOC worker pass through, so the metric means the same thing at both deployment
   points. This is deliberately not one of the `gen_ai.*` instruments: running bash in a container is not

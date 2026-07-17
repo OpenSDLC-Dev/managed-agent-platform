@@ -64,6 +64,16 @@ func (m *ModelRequest) recordMetrics(ctx context.Context, isError bool, commitEr
 		return
 	}
 	model := tok.AttrRequestModel(m.backend.Model)
-	tok.Record(ctx, m.usage.InputTokens, genaiconv.OperationNameChat, provider, genaiconv.TokenTypeInput, model)
+	// gen_ai.token.type has exactly two values, input and output — the
+	// convention has no bucket for a cache read, and describes the instrument as
+	// the number of input and output tokens used. Cached and cache-creation
+	// tokens ARE prompt tokens; the domain carries them apart only because
+	// Anthropic's wire shape does (principle 1), and that split must not leak
+	// into a metric whose vocabulary has no room for it. Recording only the
+	// fresh remainder would under-report the prompt by an order of magnitude on
+	// this platform in particular, where a long-horizon turn replays the whole
+	// session and a cache read is the normal case, not the exception.
+	input := m.usage.InputTokens + m.usage.CacheReadInputTokens + m.usage.CacheCreationInputTokens
+	tok.Record(ctx, input, genaiconv.OperationNameChat, provider, genaiconv.TokenTypeInput, model)
 	tok.Record(ctx, m.usage.OutputTokens, genaiconv.OperationNameChat, provider, genaiconv.TokenTypeOutput, model)
 }

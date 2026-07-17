@@ -129,6 +129,53 @@ func TestModelRequestRecordsGenAIMetrics(t *testing.T) {
 	}
 }
 
+// gen_ai.token.type has exactly two values, input and output — the convention
+// has no bucket for a cache read. Cached and cache-creation tokens are prompt
+// tokens; the domain splits them out only because Anthropic's wire shape does.
+// So the input reading is their sum, and it matters most here: a long-horizon
+// agent replays its whole event log every turn, so a cached turn is the normal
+// case, and reporting only the fresh remainder would under-report the prompt by
+// an order of magnitude in the very metric the evals read to explain a trial.
+func TestModelRequestCountsCachedTokensAsInput(t *testing.T) {
+	pool := newPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	ctx := context.Background()
+	collect := collectMetrics(t)
+
+	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// A replayed session: a big cache read, a little cache creation, and only a
+	// few genuinely fresh tokens.
+	if _, err := mr.EndEvent(false, &domain.ModelUsage{
+		InputTokens:              30,
+		CacheReadInputTokens:     9000,
+		CacheCreationInputTokens: 700,
+		OutputTokens:             12,
+	}); err != nil {
+		t.Fatalf("end event: %v", err)
+	}
+	mr.Finish(ctx, false, nil)
+
+	tok := intPoints(collect(), "gen_ai.client.token.usage")
+	if len(tok) != 2 {
+		t.Fatalf("token points = %d, want 2", len(tok))
+	}
+	byType := map[string]int64{}
+	for i := range tok {
+		byType[attrValue(tok, i, "gen_ai.token.type")] = tok[i].Sum
+	}
+	if want := int64(30 + 9000 + 700); byType["input"] != want {
+		t.Errorf("input tokens = %d, want %d (fresh + cache read + cache creation); "+
+			"reporting only the fresh remainder hides the real prompt size", byType["input"], want)
+	}
+	if byType["output"] != 12 {
+		t.Errorf("output tokens = %d, want 12", byType["output"])
+	}
+}
+
 // A turn that failed is the one worth finding in a dashboard, so it must be
 // distinguishable — and it has no usage to report, which must not surface as a
 // pair of zero-token readings diluting the real ones.
