@@ -169,6 +169,60 @@ func TestUncorrelatedLogsStillExport(t *testing.T) {
 	}
 }
 
+// Installing the bridge must not widen what the process logs. slog's default
+// handler has an Info floor, so before the bridge a slog.Debug was dropped at
+// the Enabled check — never formatted, never written, never sent anywhere. The
+// OTLP branch imposes no floor of its own (sdk/log's BatchProcessor.Enabled
+// returns true unconditionally), so a fan-out that merely ORs its branches
+// hands Debug records to the collector while the console, which keeps its Info
+// floor, shows nothing. That is the worst shape available: a developer adds a
+// debug line with a request body or a key in it, sees a silent console, and
+// concludes debug logging is off — while every one of those records is leaving
+// the machine.
+func TestBridgeDoesNotWidenTheLevelFloor(t *testing.T) {
+	restoreLogging(t)
+	buf := console(t)
+	collector := startFakeCollector(t)
+	ctx := context.Background()
+
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		t.Fatal("precondition: slog's default already logs Debug, so this test proves nothing")
+	}
+
+	shutdown, err := telemetry.Init(ctx, telemetry.Config{
+		ServiceName: "level-floor-test",
+		Endpoint:    collector.addr,
+		Insecure:    true,
+	})
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		t.Error("the bridge enabled Debug process-wide; before it, Debug was dropped at the Enabled check")
+	}
+
+	slog.DebugContext(ctx, "debug detail", "api_key", "sk-ant-must-not-leave")
+	slog.InfoContext(ctx, "info detail")
+
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := shutdown(flushCtx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	bodies := collector.logBodies()
+	if slices.Contains(bodies, "debug detail") {
+		t.Error("a Debug record reached the collector; the console never showed it, so this leaves the machine unseen")
+	}
+	if !slices.Contains(bodies, "info detail") {
+		t.Errorf("Info no longer exports: %v — the floor was raised, not preserved", bodies)
+	}
+	if strings.Contains(buf.String(), "debug detail") {
+		t.Error("a Debug record reached the console; the floor moved there too")
+	}
+}
+
 // The regression this whole file exists to prevent.
 //
 // slog.SetDefault also reroutes the standard library's log package into the
@@ -244,10 +298,18 @@ func TestInitWithoutEndpointLeavesLoggingAlone(t *testing.T) {
 	}
 }
 
-// Init reports a failure rather than half-installing. The endpoint here is
-// deliberately one that fails while *building an exporter* rather than in
-// config validation — validation returns before any of the bridge's code runs,
-// so a test driving that path would pass no matter what installLogBridge did.
+// Init installs the bridge only once nothing can fail anymore, so a failure
+// leaves logging exactly as it was rather than half-installed.
+//
+// To be precise about what this can and cannot catch: installLogBridge is the
+// last statement before Init's success return, so no failing Init reaches it —
+// a panic planted at the top of installLogBridge leaves this test passing. It
+// cannot, therefore, detect a defect *inside* the bridge. What it pins is the
+// ordering: move installLogBridge above any fallible call and this test fails,
+// which is the regression worth guarding, since a half-installed bridge would
+// leave the process logging through a handler whose exporter never came up.
+// The endpoint fails in the exporter's URL parse rather than in config
+// validation, so the ordering it spans is the whole of Init's fallible part.
 func TestInitLeavesLoggingUntouchedOnError(t *testing.T) {
 	restoreLogging(t)
 	before := slog.Default()

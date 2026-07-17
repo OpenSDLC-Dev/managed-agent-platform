@@ -118,10 +118,11 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	otel.SetTextMapPropagator(propagator)
 	otel.SetTracerProvider(tracerProvider)
 	otel.SetMeterProvider(meterProvider)
-	// The logger provider is reached through the slog default rather than
-	// otel/log/global: that package is experimental, and its sync.Once pins
-	// the first provider set for the life of the process, which a test suite
-	// calling Init more than once would never recover from.
+	// The bridge is handed the provider directly rather than reached through
+	// otel/log/global. The global buys nothing here — otelslog takes the
+	// provider as an option, so the indirection would only add a process-wide
+	// variable and a second way for two Inits to disagree — and otel/log is
+	// still pre-1.0.
 	installLogBridge(cfg.ServiceName, loggerProvider)
 
 	return func(ctx context.Context) error {

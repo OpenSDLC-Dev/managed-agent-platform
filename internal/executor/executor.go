@@ -127,9 +127,8 @@ func (e *Executor) step(ctx context.Context) (bool, error) {
 	if item == nil {
 		return false, nil
 	}
-	if err := e.process(ctx, item); err != nil {
-		e.report(telemetry.Extract(ctx, item.TraceContext), item, err)
-	}
+	// A fault is reported by process itself, from inside its span — see report.
+	_ = e.process(ctx, item)
 	return true, nil
 }
 
@@ -163,6 +162,9 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	defer func() {
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
+			// Inside the span, so the record lands on the tool_exec the fault is
+			// about — that red span is where an operator asks for it.
+			e.report(ctx, item, err)
 		}
 		span.End()
 	}()
@@ -357,10 +359,10 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (domain.
 // Docker daemon down faults every item) sees it rather than a silent stall.
 // onFault is nil in production; tests set it to observe faults.
 //
-// ctx carries the item's trace context rather than process's span: by the time
-// a fault is reported, process has returned and its span has ended, so the
-// record is parented on the turn that enqueued the item. That is the trace an
-// operator has open when they come looking for why the tools never ran.
+// Called from process's deferred exit rather than from step, so ctx still
+// carries the tool_exec span. Reporting from step would work and correlate to
+// the right *trace*, but only to the enqueuing turn's span — leaving the red
+// tool_exec span, the one an operator clicks, with no log under it.
 func (e *Executor) report(ctx context.Context, item *queue.Item, err error) {
 	slog.ErrorContext(ctx, "executor: tool_exec item faulted, lease left to expire",
 		"item", item.ID, "session", item.SessionID, "error", err)

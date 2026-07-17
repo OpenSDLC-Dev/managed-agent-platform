@@ -15,16 +15,28 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   since the project started. When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, `telemetry.Init` now also builds
   an OTLP log exporter and points the default `slog` logger at a fan-out handler — the console, exactly
   as before, plus the collector. Every existing `slog` call site exports with no new logging API, and
-  the five that had a trace context in reach now pass it (`slog.*Context`), so the record lands *in* the
+  the six that had a trace context in reach now pass it (`slog.*Context`), so the record lands *in* the
   trace an operator already has open rather than beside it: the API's internal-error log, the worker's
-  three work-item-fate logs, and the executor's fault log. The executor's is the interesting one — by
-  the time a fault is reported its span has ended, so the item's own captured trace context carries it,
-  which is what parents the record on the turn that enqueued the work. The remaining call sites (process
-  startup, the poll and heartbeat loops) have no span in reach and export uncorrelated, which is correct
-  rather than a gap. Logging is left untouched when no endpoint is configured.
-  The bridge deliberately does **not** use `otel/log/global`: it is experimental, and its `sync.Once`
-  pins the first provider for the life of the process, which a suite calling `Init` more than once could
-  never recover from.
+  four work-item-fate logs, and the executor's fault log. Two are worth naming. The executor's fault log
+  is reported after `process` has returned and its span has ended, so the item's own captured trace
+  context is what parents the record on the turn that enqueued the work. The worker's lease-loss warning
+  is likewise emitted after `span.End()`, but there `runCtx` is still in scope — and a span's context
+  outlives its `End()`, so that record lands on the tool_exec span itself rather than on its parent.
+  Most of the remaining 17 call sites (process startup, the poll and heartbeat loops) have no span in
+  reach and export uncorrelated, which is correct rather than a gap. Two of them are a real gap and are
+  filed rather than fixed here: the brain's turn-fault log, the direct counterpart of the executor's
+  ([#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92)), and every binary's
+  fatal-exit log, which reaches stderr but never OTLP because the telemetry shutdown that stops the log
+  processor is deferred inside `run()` while the log is emitted in `main()` after it returns
+  ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)). Logging is left untouched
+  when no endpoint is configured.
+  The bridge keeps the level floor the process already had (Info, slog's own default): the OTLP branch
+  imposes no floor — `sdk/log`'s `BatchProcessor.Enabled` returns true unconditionally — so a fan-out
+  that merely ORed its branches would have shipped `Debug` records to the collector while the console
+  showed nothing. Configuring an endpoint changes where records go, never which records exist.
+  The bridge is handed its provider directly rather than through `otel/log/global`: `otelslog` takes the
+  provider as an option, so the global would add a process-wide variable and a second way for two `Init`
+  calls to disagree, and buy nothing. (`otel/log` is also still pre-1.0.)
 
 - Worktree configuration, so parallel sessions each get a working checkout — git worktrees were named
   planned practice in [docs/HISTORY.md](./docs/HISTORY.md) and this lands them. `.gitignore` now covers

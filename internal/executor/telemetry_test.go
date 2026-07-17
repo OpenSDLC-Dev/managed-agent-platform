@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"log/slog"
 	"slices"
 	"strings"
@@ -94,12 +95,25 @@ func TestToolExecJoinsTheEnqueuingTurnsTrace(t *testing.T) {
 
 // captureLogs installs a slog handler that records what context each record was
 // emitted under, for one test.
+//
+// The stdlib-log save/restore is the same one telemetry.Init needs, for the same
+// reason: slog.SetDefault reroutes the standard log package into whatever handler
+// it installs. Restoring only slog.Default() does not undo that — on the way back
+// the previous handler IS a *defaultHandler, so SetDefault's type check skips the
+// log.SetOutput call entirely and log keeps pointing at this test's finished
+// handler. Every later log.Print in the package's test binary would vanish into
+// it, and log.Flags() would stay 0 for the rest of the run.
 func captureLogs(t *testing.T) func() []loggedRecord {
 	t.Helper()
 	h := &capturingHandler{}
 	prev := slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(h))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
 	return func() []loggedRecord {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -131,12 +145,15 @@ func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
 
 // The fault log is the one an operator greps for when the tools never run, and
 // it is worth nothing on its own — "connection refused" without the session it
-// belongs to. It has to name the trace it came from. The span the fault
-// happened under has already ended by the time report is called, so the item's
-// own captured trace context is what carries it: getting this wrong (logging
-// under the executor's bare loop context) silently drops correlation without
-// dropping the line, which no other test would notice.
-func TestFaultLogJoinsTheEnqueuingTurnsTrace(t *testing.T) {
+// belongs to. It has to land on the span it describes: the operator finds the
+// red tool_exec span in the trace view and asks for its logs. Parenting it on
+// the enqueuing turn instead would put the same line under a span owned by the
+// brain, so the red span answers with nothing — correlation that looks right in
+// a trace-id check and is useless in the tool that matters. Hence both
+// assertions: the trace id is shared by parent and child and cannot tell the
+// two designs apart.
+func TestFaultLogLandsOnTheToolExecSpan(t *testing.T) {
+	ended := recordSpans(t)
 	logged := captureLogs(t)
 
 	h := newHarness(t, &fakeSandbox{writeErr: errors.New("connection refused")})
@@ -162,6 +179,11 @@ func TestFaultLogJoinsTheEnqueuingTurnsTrace(t *testing.T) {
 	}
 	if got := records[i].span.TraceID(); got != sc.TraceID() {
 		t.Errorf("fault log trace id = %s, want the enqueuing turn's %s", got, sc.TraceID())
+	}
+	toolSpan := toolExecSpan(t, ended())
+	if got := records[i].span.SpanID(); got != toolSpan.SpanContext().SpanID() {
+		t.Errorf("fault log span id = %s, want the tool_exec span %s (parent turn is %s — the red span must answer with this log)",
+			got, toolSpan.SpanContext().SpanID(), sc.SpanID())
 	}
 }
 

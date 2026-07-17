@@ -16,6 +16,12 @@ import (
 // test can read what was written; production never reassigns it.
 var consoleOut io.Writer = os.Stderr
 
+// bridgeLevel is the floor the fan-out keeps, and it is deliberately the floor
+// the process already had: slog's default handler logs at Info and above
+// (log/slog's logLoggerLevel, which nothing here moves), so before the bridge a
+// slog.Debug was dropped at the Enabled check and never existed at all.
+const bridgeLevel = slog.LevelInfo
+
 // fanoutHandler writes every record to each handler in turn: the console keeps
 // working exactly as before the bridge existed, and the collector gets the same
 // record. No branch may short-circuit another — a failing OTLP export must never
@@ -27,25 +33,23 @@ type fanoutHandler struct {
 	handlers []slog.Handler
 }
 
-func (f *fanoutHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	for _, h := range f.handlers {
-		if h.Enabled(ctx, level) {
-			return true
-		}
-	}
-	return false
+// Enabled answers for the fan-out as a whole rather than ORing its branches.
+// The OTLP branch has no floor of its own — sdk/log's BatchProcessor.Enabled
+// returns true unconditionally — so an OR would answer true for Debug and
+// installing the bridge would silently widen what the process logs: Debug
+// records would ship to the collector while the console, still at Info, showed
+// nothing. Adding an endpoint must change where records go, never which records
+// exist.
+func (f *fanoutHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= bridgeLevel
 }
 
+// Handle sends the record to every branch. There is no per-branch Enabled
+// re-check because both branches are built here with bridgeLevel as their floor,
+// so Enabled above has already answered for all of them.
 func (f *fanoutHandler) Handle(ctx context.Context, r slog.Record) error {
 	var errs []error
 	for _, h := range f.handlers {
-		// Required, not defensive: slog's Handler contract says Handle "will
-		// only be called when Enabled returns true", and our own Enabled is an
-		// OR across the branches — so a level one branch wants and another
-		// does not still reaches here.
-		if !h.Enabled(ctx, r.Level) {
-			continue
-		}
 		// A Record shares a backing array with its copies; Clone exists so two
 		// consumers cannot interfere, which is exactly what a fan-out is.
 		if err := h.Handle(ctx, r.Clone()); err != nil {
@@ -95,7 +99,10 @@ func (f *fanoutHandler) WithGroup(name string) slog.Handler {
 // endpoint is configured, which the CHANGELOG declares.
 func installLogBridge(serviceName string, lp *sdklog.LoggerProvider) {
 	handler := &fanoutHandler{handlers: []slog.Handler{
-		slog.NewTextHandler(consoleOut, nil),
+		// bridgeLevel explicitly, though it is also TextHandler's default: the
+		// two floors agreeing must be a decision, not a coincidence that a
+		// later edit could quietly break.
+		slog.NewTextHandler(consoleOut, &slog.HandlerOptions{Level: bridgeLevel}),
 		otelslog.NewHandler(serviceName, otelslog.WithLoggerProvider(lp)),
 	}}
 

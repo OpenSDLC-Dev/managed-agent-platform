@@ -88,11 +88,15 @@ Phase 1 lands as five PRs, each green on its own (docs move with the code, per C
 - [x] **PR 3 — the OTel log bridge.** Split out of PR 2, which was already a full review's
       worth of signal: `telemetry.Init` installed no slog handler, so no log record left the
       process over OTLP or carried the trace of the turn that wrote it. Now a configured
-      endpoint installs a console + OTLP fan-out, and the five call sites with a trace
-      context in reach pass it. The bridge has one sharp edge, guarded by a test:
-      `slog.SetDefault` also reroutes the standard library's `log` package into the handler,
-      and OTel reports export failures with `log.Print` — connected, one log line against a
-      collector that rejects logs becomes an unbounded error spiral.
+      endpoint installs a console + OTLP fan-out, and the six call sites with a trace context
+      in reach pass it. Two sharp edges, each guarded by a test. `slog.SetDefault` also
+      reroutes the standard library's `log` package into the handler, and OTel reports export
+      failures with `log.Print` — connected, one log line against a collector that rejects
+      logs becomes an unbounded error spiral. And the OTLP branch imposes no level floor of
+      its own, so the fan-out has to supply the Info floor the process already had, or
+      `Debug` records ship to the collector while the console shows nothing. Two correlation
+      gaps the bridge revealed elsewhere are filed rather than fixed: #92 (the brain's
+      turn-fault log) and #93 (every binary's fatal-exit log).
 - [ ] **PR 4 — the harness + tasks 1–3 + `make eval`.** The stack wiring, the run loop
       (fresh session → drive → await idle on SSE → grade → reap), grader constructors, the
       report (`evals/artifacts/`), and `fib-quickstart` / `echo-notool` / `shell-state`.
