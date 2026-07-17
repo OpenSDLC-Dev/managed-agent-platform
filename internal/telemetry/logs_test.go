@@ -244,21 +244,27 @@ func TestInitWithoutEndpointLeavesLoggingAlone(t *testing.T) {
 	}
 }
 
-// Init reports a failure rather than half-installing: an unresolvable endpoint
-// must leave logging exactly as it was.
+// Init reports a failure rather than half-installing. The endpoint here is
+// deliberately one that fails while *building an exporter* rather than in
+// config validation — validation returns before any of the bridge's code runs,
+// so a test driving that path would pass no matter what installLogBridge did.
 func TestInitLeavesLoggingUntouchedOnError(t *testing.T) {
 	restoreLogging(t)
 	before := slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags()
 
 	_, err := telemetry.Init(context.Background(), telemetry.Config{
 		ServiceName: "t",
-		Endpoint:    "localhost:4317",
-		SampleRatio: ratio(2),
+		Endpoint:    "http://%%%", // survives validation, fails in the exporter's URL parse
+		Insecure:    true,
 	})
 	if err == nil {
-		t.Fatal("Init with an invalid sample ratio = nil error, want error")
+		t.Fatal("Init with an unparseable endpoint = nil error, want error")
 	}
 	if slog.Default() != before {
 		t.Errorf("a failed Init replaced the default slog logger")
+	}
+	if log.Writer() != prevOut || log.Flags() != prevFlags {
+		t.Errorf("a failed Init left the stdlib log package rerouted")
 	}
 }
