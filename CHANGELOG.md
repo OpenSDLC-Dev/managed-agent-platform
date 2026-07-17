@@ -17,13 +17,15 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   as before, plus the collector. Every existing `slog` call site exports with no new logging API, and
   the six that had a trace context in reach now pass it (`slog.*Context`), so the record lands *in* the
   trace an operator already has open rather than beside it: the API's internal-error log, the worker's
-  four work-item-fate logs, and the executor's fault log. Two are worth naming. The executor's fault log
-  is reported after `process` has returned and its span has ended, so the item's own captured trace
-  context is what parents the record on the turn that enqueued the work. The worker's lease-loss warning
-  is likewise emitted after `span.End()`, but there `runCtx` is still in scope — and a span's context
-  outlives its `End()`, so that record lands on the tool_exec span itself rather than on its parent.
-  Most of the remaining 17 call sites (process startup, the poll and heartbeat loops) have no span in
-  reach and export uncorrelated, which is correct rather than a gap. Two of them are a real gap and are
+  four work-item-fate logs, and the executor's fault log. Two are worth naming, because for both the
+  obvious spelling correlates to the wrong span rather than to none. The executor's fault log is now
+  reported from inside `process`'s deferred exit, before `span.End()`, so it lands on the `tool_exec`
+  span it describes; reporting it from `step` — where `process` has already returned — would still have
+  found the right *trace*, but hung the record off the enqueuing turn's span, leaving the red span an
+  operator actually clicks with no log under it. The worker's lease-loss warning is emitted after its
+  `span.End()`, yet still lands on that span: `runCtx` is in scope and a span's context outlives its
+  `End()`. Most of the remaining 16 uncorrelated call sites (process startup, the poll and heartbeat
+  loops) have no span in reach, which is correct rather than a gap. Two of them are a real gap and are
   filed rather than fixed here: the brain's turn-fault log, the direct counterpart of the executor's
   ([#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92)), and every binary's
   fatal-exit log, which reaches stderr but never OTLP because the telemetry shutdown that stops the log

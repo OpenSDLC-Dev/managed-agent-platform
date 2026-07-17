@@ -15,9 +15,12 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
 
-// restoreLogging saves and restores every global Init touches, so one test's
-// bridge does not leak into the next (the suite calls Init repeatedly, and a
-// leaked handler points at a torn-down collector).
+// restoreLogging saves and restores the logging globals Init touches — the slog
+// default and the stdlib log package — so one test's bridge does not leak into
+// the next (the suite calls Init repeatedly, and a leaked handler points at a
+// torn-down collector). Init's otel globals (propagator, tracer and meter
+// providers) are deliberately not covered: the suite has always left those set,
+// and containing them is a separate change from containing the bridge.
 func restoreLogging(t *testing.T) {
 	t.Helper()
 	prevSlog := slog.Default()

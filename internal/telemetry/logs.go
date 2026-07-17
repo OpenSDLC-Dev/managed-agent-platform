@@ -20,6 +20,13 @@ var consoleOut io.Writer = os.Stderr
 // the process already had: slog's default handler logs at Info and above
 // (log/slog's logLoggerLevel, which nothing here moves), so before the bridge a
 // slog.Debug was dropped at the Enabled check and never existed at all.
+//
+// A const, not a Config field, because nothing asks for another value: there is
+// no Debug call site in the tree and no operator switch for one. It does close
+// slog.SetLogLoggerLevel as an escape hatch once the bridge is installed —
+// nothing uses that either, and a knob that ships records off the machine is
+// worth adding deliberately, with a config field and a test, rather than
+// inheriting by accident.
 const bridgeLevel = slog.LevelInfo
 
 // fanoutHandler writes every record to each handler in turn: the console keeps
@@ -44,9 +51,11 @@ func (f *fanoutHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= bridgeLevel
 }
 
-// Handle sends the record to every branch. There is no per-branch Enabled
-// re-check because both branches are built here with bridgeLevel as their floor,
-// so Enabled above has already answered for all of them.
+// Handle sends the record to every branch, with no per-branch Enabled re-check:
+// Enabled above has already answered for all of them. Neither branch can want
+// less than it gates — the console's TextHandler is built with bridgeLevel, and
+// the OTLP branch accepts everything (otelslog has no level option at all; its
+// Enabled delegates to the BatchProcessor's, which is unconditionally true).
 func (f *fanoutHandler) Handle(ctx context.Context, r slog.Record) error {
 	var errs []error
 	for _, h := range f.handlers {
@@ -100,8 +109,10 @@ func (f *fanoutHandler) WithGroup(name string) slog.Handler {
 func installLogBridge(serviceName string, lp *sdklog.LoggerProvider) {
 	handler := &fanoutHandler{handlers: []slog.Handler{
 		// bridgeLevel explicitly, though it is also TextHandler's default: the
-		// two floors agreeing must be a decision, not a coincidence that a
-		// later edit could quietly break.
+		// console's floor agreeing with the fan-out's must be a decision, not a
+		// coincidence that a later edit could quietly break. The OTLP branch
+		// takes no floor — otelslog has no option for one — which is exactly
+		// why Enabled above cannot ask its branches and must answer itself.
 		slog.NewTextHandler(consoleOut, &slog.HandlerOptions{Level: bridgeLevel}),
 		otelslog.NewHandler(serviceName, otelslog.WithLoggerProvider(lp)),
 	}}
