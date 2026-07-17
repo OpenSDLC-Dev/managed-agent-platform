@@ -24,14 +24,15 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   found the right *trace*, but hung the record off the enqueuing turn's span, leaving the red span an
   operator actually clicks with no log under it. The worker's lease-loss warning is emitted after its
   `span.End()`, yet still lands on that span: `runCtx` is in scope and a span's context outlives its
-  `End()`. Most of the remaining 16 uncorrelated call sites (process startup, the poll and heartbeat
-  loops) have no span in reach, which is correct rather than a gap. Two of them are a real gap and are
-  filed rather than fixed here: the brain's turn-fault log, the direct counterpart of the executor's
-  ([#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92)), and every binary's
-  fatal-exit log, which reaches stderr but never OTLP because the telemetry shutdown that stops the log
-  processor is deferred inside `run()` while the log is emitted in `main()` after it returns
-  ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)). Logging is left untouched
-  when no endpoint is configured.
+  `End()`. Sixteen call sites stay uncorrelated. Eleven of them (each binary's startup line, the
+  worker's poll and heartbeat loops) have no span in reach, which is correct rather than a gap — there
+  is no trace to name. The other five are two real gaps, filed rather than
+  fixed here: the brain's turn-fault log, the direct counterpart of the executor's
+  ([#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92)), and each of the four
+  binaries' fatal-exit log, which reaches stderr but never OTLP because the telemetry shutdown that
+  stops the log processor is deferred inside `run()` while the log is emitted in `main()` after it
+  returns ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)). Logging is left
+  untouched when no endpoint is configured.
   The bridge keeps the level floor the process already had (Info, slog's own default): the OTLP branch
   imposes no floor — `sdk/log`'s `BatchProcessor.Enabled` returns true unconditionally — so a fan-out
   that merely ORed its branches would have shipped `Debug` records to the collector while the console
