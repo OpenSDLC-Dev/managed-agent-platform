@@ -1,0 +1,40 @@
+# Gitignored files copied into each new worktree (`claude --worktree`, parallel
+# desktop sessions, subagent worktrees). Gitignore syntax; a pattern only copies
+# a file that is ALSO gitignored, so nothing tracked is ever duplicated.
+#
+# A worktree is a fresh checkout, so it starts without the local-only files that
+# make this repo runnable. List only what something actually reads and what the
+# worktree cannot regenerate for itself.
+
+# The model endpoint for the live tiers: MODEL_PROTOCOL / MODEL_BASE_URL /
+# MODEL_API_KEY / MODEL_ID. internal/modeltest opens this from the *repo root*,
+# which inside a worktree is the worktree's own root (it resolves the path from
+# its own source file), so an uncopied .env is simply absent rather than
+# inherited from the main checkout. It has to be here because the opt-in
+# contract is deliberately fail-closed: `make test` still passes without it (no
+# consent variable, no paid call), but opting in with RUN_LIVE_MODEL_TESTS=1 or
+# RUN_EVALS=1 then FAILS rather than skips — a missing endpoint must never look
+# like a green build. So a worktree without this file looks perfectly healthy
+# right up until you ask it to reach a model.
+.env
+
+# A filled-in copy of model-providers.example.json, mounted by the compose stack
+# when MODEL_PROVIDERS_FILE names it (deploy/compose/README.md). Same class as
+# .env: gitignored precisely because it carries a live api_key, and
+# unrecoverable by the worktree. No leading slash, so it is covered wherever it
+# is created — deploy/compose/model-providers.json included. (Helm does not read
+# this file; its secret key of the same name is templated from Helm values.)
+model-providers.json
+
+# Not listed, deliberately:
+#   go.work / go.work.sum — a workspace file's `use` paths are relative, so a
+#     copy would resolve them against the worktree and point at the wrong
+#     modules. Worse than absent.
+#   coverage.out, *.test, /bin, .impeccable/ — build output and caches. `make
+#     verify` regenerates them; a stale copy is a lie about what was run.
+#   .claude/scheduled_tasks.lock — a lock. Copying one into a second working
+#     directory is how you get two owners of the same lease.
+#   .claude/settings.local.json and the rest of .claude/ — not this file's
+#     business. Claude Code carries its own project configuration into a
+#     worktree; verified by probe that settings.local.json lands there with no
+#     pattern for it here.

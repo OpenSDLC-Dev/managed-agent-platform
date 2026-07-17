@@ -11,6 +11,25 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- Worktree configuration, so parallel sessions each get a working checkout — git worktrees were named
+  planned practice in [docs/HISTORY.md](./docs/HISTORY.md) and this lands them. `.gitignore` now covers
+  `.claude/worktrees/` (a worktree is a whole checkout under the repo root; without this every one of
+  them shows up as untracked files in the main tree), and `.dockerignore` excludes it too — the compose
+  build's context is the repo root with a `COPY . .`, so a live worktree would otherwise be swept into
+  the build context. No secret could leak that way (the secret patterns there already depth-match), but
+  the context would carry a repo copy per worktree.
+  A new **[.worktreeinclude](./.worktreeinclude)** copies the two gitignored files a fresh checkout
+  cannot run without: `.env` and a filled-in `model-providers.json`. `.env` is the load-bearing one —
+  `internal/modeltest` opens it from the *repo root*, which inside a worktree is that worktree's own
+  root, so it is absent rather than inherited, and the opt-in contract is fail-closed: a worktree
+  without it passes `make test` and looks perfectly healthy right up until you ask it to reach a model.
+  Only files that are both listed and gitignored are copied, so nothing tracked is duplicated; caches,
+  build output, locks and `go.work` are deliberately left out, and the file says why for each.
+  `make fmt-check` now prunes `.claude/` from its walk, which the worktree support needs to be usable
+  at all: `gofmt` walks the filesystem rather than the module, so unlike `go vet ./...` it does not skip
+  dot-directories, and it was descending into every live worktree — a parallel session's half-typed file
+  failed *this* checkout's `make verify`, which is exactly the interference worktrees exist to prevent.
+  A malformed file in the repo proper is still caught.
 - OTel metrics on the execution chain. A model turn records `gen_ai.client.operation.duration` and
   `gen_ai.client.token.usage` from the same point that already opens its span and writes its `span.*`
   wire events, so the three views of one turn cannot drift (design principle 3). These are OTel's GenAI

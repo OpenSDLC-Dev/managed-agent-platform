@@ -33,3 +33,6 @@ model-providers.json
 # Claude Code personal settings (the shared .claude/settings.json IS committed)
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+# Parallel-session worktrees live here; without this every worktree's checkout
+# shows up as untracked files in the main one. See .worktreeinclude.
+.claude/worktrees/
