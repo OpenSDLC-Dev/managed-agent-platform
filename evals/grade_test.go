@@ -1,7 +1,9 @@
 package evals
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -415,6 +417,298 @@ func ContainerAbsent(class Class) Grader {
 	}
 }
 
+// FileEquals asserts a sandbox file's exact bytes, {{NONCE}} substituted. Where
+// FileLines forgives the trailing newline, this forgives nothing: it is for a
+// task whose point is that a file was changed surgically or left untouched, so
+// every byte is the assertion.
+func FileEquals(path, content string, class Class) Grader {
+	return Grader{
+		Name:  "file-equals:" + path,
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			raw, err := tr.readFile(t, path)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", path, err)
+			}
+			want := subst(content, tr.Nonce)
+			if string(raw) != want {
+				return fmt.Errorf("%s = %q, want exactly %q", path, string(raw), want)
+			}
+			return nil
+		},
+	}
+}
+
+// FileMatches asserts a sandbox file matches a regexp. The trailing newline is
+// trimmed first so an anchored pattern (^…$) can pin the whole content without
+// spelling the newline. {{NONCE}} is substituted into the pattern before compile.
+func FileMatches(path, pattern string, class Class) Grader {
+	return Grader{
+		Name:  "file-matches:" + path,
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			raw, err := tr.readFile(t, path)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", path, err)
+			}
+			re, err := regexp.Compile(subst(pattern, tr.Nonce))
+			if err != nil {
+				return fmt.Errorf("bad pattern %q: %w", pattern, err)
+			}
+			got := strings.TrimRight(string(raw), "\n")
+			if !re.MatchString(got) {
+				return fmt.Errorf("%s = %q, want it to match %q", path, got, re)
+			}
+			return nil
+		},
+	}
+}
+
+// ToolNotUsed asserts the agent never called a named tool — the guard for a task
+// that must be done with one tool and not another (an edit, not a whole-file
+// rewrite). Choosing the wrong tool is usually the model's to answer for, so its
+// uses are Model.
+func ToolNotUsed(name string, class Class) Grader {
+	return Grader{
+		Name:  "tool-not-used:" + name,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			if n := countToolUse(tr, name); n > 0 {
+				return fmt.Errorf("%s was called %d time(s), want never", name, n)
+			}
+			return nil
+		},
+	}
+}
+
+// ToolUseInputContains asserts some call to the named tool carried sub in its
+// input (the whole input object, JSON-encoded, {{NONCE}} substituted). It guards
+// the brain's reassembly of a streamed tool call: a task puts the nonce in the
+// path it tells the model to use, and a mis-joined input JSON would not carry the
+// token into the event.
+func ToolUseInputContains(name, sub string, class Class) Grader {
+	return Grader{
+		Name:  "tool-input-contains:" + name + ":" + sub,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			want := subst(sub, tr.Nonce)
+			for _, ev := range eventsOfType(tr, "agent.tool_use") {
+				if name != "" && ev["name"] != name {
+					continue
+				}
+				if strings.Contains(inputJSON(ev), want) {
+					return nil
+				}
+			}
+			return fmt.Errorf("no %s tool_use input contains %q", name, want)
+		},
+	}
+}
+
+// ToolResultEquals asserts some non-error tool_result is byte-exactly sub (nonce
+// substituted) — the byte-equal counterpart to ToolResultContains, for a task
+// that pins a slice of a file (a read view_range whose result must be the
+// requested line and not its neighbour).
+func ToolResultEquals(sub string, class Class) Grader {
+	return Grader{
+		Name:  "tool-result-equals:" + sub,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			want := subst(sub, tr.Nonce)
+			for _, ev := range eventsOfType(tr, "agent.tool_result") {
+				if isErrorResult(ev) {
+					continue
+				}
+				if textOf(ev) == want {
+					return nil
+				}
+			}
+			return fmt.Errorf("no successful tool_result equals %q", want)
+		},
+	}
+}
+
+// ToolResultMatches asserts some non-error tool_result matches a regexp (nonce
+// substituted before compile). It pins an output contract a plain contains-check
+// cannot — grep's path:line:text line shape, anchored so a reshaped format fails.
+func ToolResultMatches(pattern string, class Class) Grader {
+	return Grader{
+		Name:  "tool-result-matches:" + pattern,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			re, err := regexp.Compile(subst(pattern, tr.Nonce))
+			if err != nil {
+				return fmt.Errorf("bad pattern %q: %w", pattern, err)
+			}
+			for _, ev := range eventsOfType(tr, "agent.tool_result") {
+				if isErrorResult(ev) {
+					continue
+				}
+				if re.MatchString(textOf(ev)) {
+					return nil
+				}
+			}
+			return fmt.Errorf("no successful tool_result matches %q", re)
+		},
+	}
+}
+
+// ToolErrorResultContains asserts some error tool_result carries sub (nonce
+// substituted). Its two uses — a failed command's exit-code trailer and a
+// denial's synthesized message — live only on an is_error result, which a
+// contains-check that skips errors (ToolResultContains) would never see.
+func ToolErrorResultContains(sub string, class Class) Grader {
+	return Grader{
+		Name:  "tool-error-result-contains:" + sub,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			want := subst(sub, tr.Nonce)
+			for _, ev := range eventsOfType(tr, "agent.tool_result") {
+				if isErrorResult(ev) && strings.Contains(textOf(ev), want) {
+					return nil
+				}
+			}
+			return fmt.Errorf("no error tool_result contains %q", want)
+		},
+	}
+}
+
+// EventCountAtLeast asserts the transcript holds at least n events of a type. A
+// floor, not an exact count: enough to know a resumed session re-invoked the
+// model (≥2 model-request spans) or that both turns were recorded, without
+// pinning a number a longer transcript would exceed.
+func EventCountAtLeast(evType string, n int, class Class) Grader {
+	return Grader{
+		Name:  fmt.Sprintf("event-count-at-least:%s:%d", evType, n),
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			if got := len(eventsOfType(tr, evType)); got < n {
+				return fmt.Errorf("%d %s event(s), want at least %d", got, evType, n)
+			}
+			return nil
+		},
+	}
+}
+
+// RequiresActionRaised asserts the session paused for confirmation at least once
+// — a session.status_idle whose stop_reason is requires_action and names the
+// events awaiting a decision. It is the platform half of the permission bridge:
+// the gate stopped a tool before it ran.
+func RequiresActionRaised(class Class) Grader {
+	return Grader{
+		Name:  "requires-action-raised",
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			for _, ev := range eventsOfType(tr, "session.status_idle") {
+				stop, _ := ev["stop_reason"].(map[string]any)
+				if stop["type"] != "requires_action" {
+					continue
+				}
+				if ids, _ := stop["event_ids"].([]any); len(ids) > 0 {
+					return nil
+				}
+				return fmt.Errorf("requires_action idle carried no event_ids")
+			}
+			return fmt.Errorf("no session.status_idle with stop_reason requires_action")
+		},
+	}
+}
+
+// EvaluatedPermissionAsk asserts a call to the named tool was recorded as gated —
+// evaluated_permission "ask" on the agent.tool_use. It pins that the tool the
+// task gated is the one the platform stopped, not that some other tool paused.
+func EvaluatedPermissionAsk(name string, class Class) Grader {
+	return Grader{
+		Name:  "evaluated-permission-ask:" + name,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			for _, ev := range eventsOfType(tr, "agent.tool_use") {
+				if ev["name"] != name {
+					continue
+				}
+				if ev["evaluated_permission"] == "ask" {
+					return nil
+				}
+				return fmt.Errorf("%s tool_use evaluated_permission = %v, want ask",
+					name, ev["evaluated_permission"])
+			}
+			return fmt.Errorf("no %s tool_use to check evaluated_permission", name)
+		},
+	}
+}
+
+// ResultAfterConfirmation asserts a tool_result is sequenced after the
+// confirmation that released it — the property that makes the bridge meaningful:
+// the tool did not run until the decision landed. It reads position in the log,
+// which the list endpoint returns in commit order.
+func ResultAfterConfirmation(class Class) Grader {
+	return Grader{
+		Name:  "result-after-confirmation",
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			confirmed := -1
+			for i, ev := range tr.Events {
+				if ev["type"] == "user.tool_confirmation" {
+					confirmed = i
+					break
+				}
+			}
+			if confirmed < 0 {
+				return fmt.Errorf("no user.tool_confirmation on the log")
+			}
+			for _, ev := range tr.Events[confirmed+1:] {
+				if ev["type"] == "agent.tool_result" {
+					return nil
+				}
+			}
+			return fmt.Errorf("no agent.tool_result after the confirmation at index %d", confirmed)
+		},
+	}
+}
+
+// ReadRangeLine asserts a read of exactly line..line from path returned that
+// line's bytes verbatim — the off-by-one guard for view_range slicing. It finds
+// the read whose input requested that single-line range and checks its joined
+// result byte-for-byte, so a slicer that returned the neighbouring line or added
+// a stray newline fails. A wrong result is the platform's slicing; no matching
+// read at all is the model not reading as asked — the transcript cannot separate
+// them, which is why callers class this Either.
+func ReadRangeLine(path string, line int, want string, class Class) Grader {
+	return Grader{
+		Name:  fmt.Sprintf("read-range-line:%s:%d", path, line),
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			wantText := subst(want, tr.Nonce)
+			for _, use := range eventsOfType(tr, "agent.tool_use") {
+				if use["name"] != "read" {
+					continue
+				}
+				input, _ := use["input"].(map[string]any)
+				if p, _ := input["file_path"].(string); !strings.HasSuffix(p, path) {
+					continue
+				}
+				if !viewRangeIs(input["view_range"], line) {
+					continue
+				}
+				id, _ := use["id"].(string)
+				res := resultFor(tr, id)
+				if res == nil {
+					return fmt.Errorf("read of %s line %d has no tool_result", path, line)
+				}
+				if isErrorResult(res) {
+					return fmt.Errorf("read of %s line %d errored: %q", path, line, textOf(res))
+				}
+				if got := textOf(res); got != wantText {
+					return fmt.Errorf("read %s view_range [%d,%d] returned %q, want %q",
+						path, line, line, got, wantText)
+				}
+				return nil
+			}
+			return fmt.Errorf("no read requested %s view_range [%d,%d]", path, line, line)
+		},
+	}
+}
+
 // --- transcript accessors -------------------------------------------------
 //
 // All of these read the raw wire JSON. A missing or reshaped field surfaces as
@@ -498,4 +792,43 @@ func countToolUse(tr *Trial, name string) int {
 		}
 	}
 	return n
+}
+
+// inputJSON re-encodes a tool_use's input object. A grader matching a substring
+// of the input works on the JSON rather than reaching for one field, so it does
+// not have to know which key (command, file_path) a given tool carries the token
+// in.
+func inputJSON(ev map[string]any) string {
+	b, err := json.Marshal(ev["input"])
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// resultFor returns the agent.tool_result joined to a tool_use id, or nil. The
+// core pack's tool-results-joined grader proves the join is one-to-one; this only
+// fetches it.
+func resultFor(tr *Trial, id string) map[string]any {
+	if id == "" {
+		return nil
+	}
+	for _, ev := range eventsOfType(tr, "agent.tool_result") {
+		if ev["tool_use_id"] == id {
+			return ev
+		}
+	}
+	return nil
+}
+
+// viewRangeIs reports whether a decoded view_range input is exactly [line, line].
+// The wire carries the bounds as JSON numbers, so they arrive as float64.
+func viewRangeIs(v any, line int) bool {
+	arr, ok := v.([]any)
+	if !ok || len(arr) != 2 {
+		return false
+	}
+	start, ok1 := arr[0].(float64)
+	end, ok2 := arr[1].(float64)
+	return ok1 && ok2 && int(start) == line && int(end) == line
 }

@@ -8,7 +8,7 @@ never here. The verifier enforces both on its docs-consistency rung.
 
 ## Snapshot
 
-- **Last updated:** 2026-07-17
+- **Last updated:** 2026-07-18
 - **v1 is complete.** All delivery slices (0–9) landed and verified: wire-compatible
   control-plane CRUD, append-only event log + SSE streaming, config-driven model providers
   (Anthropic-protocol and OpenAI-compatible), the brain orchestration loop, executor +
@@ -18,13 +18,14 @@ never here. The verifier enforces both on its docs-consistency rung.
   local docker-compose stack. The slice-8 acceptance — a real `ant beta:worker` end to
   end — has been run and passed (see docs/HISTORY.md).
 - **Current focus:** the **eval test system** ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)
-  phase 1) — an end-to-end suite driving the whole stack against a real model endpoint with
-  ten regression tasks, plus the OTel signals that explain a failing trial. Plan and live
-  progress: **[docs/EVALS_PLAN.md](./docs/EVALS_PLAN.md)** (5 PRs; 1–4 landed — the harness
-  and its first three tasks run 3/3 green live via `make eval`; PR 5 adds tasks 4–10). Queued
-  behind it, the two gaps before a self-hosted deploy is turn-key: environment-key issuance
+  phase 1) is **complete** — an end-to-end suite driving the whole stack against a real model
+  endpoint, its ten regression tasks running **10/10 green** live via `make eval`, plus the OTel
+  signals that explain a failing trial (all 5 PRs landed; plan and per-task map in
+  **[docs/EVALS_PLAN.md](./docs/EVALS_PLAN.md)**). Next are the two gaps before a self-hosted
+  deploy is turn-key: environment-key issuance
   ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)) and published
   images + a helm-install acceptance ([#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75)).
+  Eval follow-ups (a daily scheduled run [#96], `tool_choice` for phase 1.5 on #30) are filed, not queued.
 - **Release:** **v0.1.0** (2026-07-17) — the complete v1 loop; the `v0.1.0` tag is created
   on main at the release PR's squash-merge. New work accumulates under CHANGELOG's
   `[Unreleased]`.

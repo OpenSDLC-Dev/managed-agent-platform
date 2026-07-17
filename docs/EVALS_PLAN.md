@@ -104,8 +104,11 @@ Phase 1 lands as five PRs, each green on its own (docs move with the code, per C
       (`RUN_EVALS`, and a `TierEnabled` for the `TestMain` a `*testing.T` skip cannot serve);
       the daily scheduled run is filed as
       [#96](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/96).
-- [ ] **PR 5 — tasks 4–10, wrap-up.** The remaining seven, STATE/HISTORY, and the
-      follow-up issues below.
+- [x] **PR 5 — tasks 4–10, wrap-up.** The remaining seven (`edit-config`, `needle-search`,
+      `perm-allow`, `perm-deny`, `exit-code`, `journal-multiturn`, `view-range`), landed with
+      the harness seams they needed — seed planting, gated toolsets, a confirmation-aware drive
+      loop — and grading the permission bridge end to end. All ten run **10/10 green** live via
+      `make eval`. STATE/HISTORY updated; the follow-ups below stay filed as issues.
 
 ## The ten tasks
 
