@@ -1,35 +1,32 @@
 package anthropic_test
 
 import (
-	"bufio"
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modeltest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/anthropic"
 )
 
 // TestIntegrationRealEndpoint drives one real model turn against the
-// endpoint configured in the environment (MODEL_PROTOCOL / MODEL_BASE_URL /
-// MODEL_API_KEY / MODEL_ID, optionally loaded from the repo-root .env). It
-// skips — never fails — when no endpoint is configured, so CI without
-// credentials is unaffected. Credential values are never logged.
+// anthropic-protocol endpoint configured for the live tier. It runs only under
+// RUN_LIVE_MODEL_TESTS (see internal/modeltest for the opt-in contract), so an
+// ordinary `go test ./...` never spends money. modeltest resolves the endpoint
+// without printing the credential; an error raised by the endpoint itself is
+// logged as-is, and some adapters quote a failing response body verbatim.
 func TestIntegrationRealEndpoint(t *testing.T) {
+	// Gate first: short mode may decline to spend the time, but it must not
+	// become a way to opt in and still not be told the configuration is broken.
+	cfg := modeltest.Endpoint(t, modeltest.LiveEnv, "anthropic")
 	if testing.Short() {
 		t.Skip("short mode: skipping the real model call")
 	}
-	loadDotEnv(t)
-	baseURL, apiKey, model := os.Getenv("MODEL_BASE_URL"), os.Getenv("MODEL_API_KEY"), os.Getenv("MODEL_ID")
-	if os.Getenv("MODEL_PROTOCOL") != "anthropic" || baseURL == "" || apiKey == "" || model == "" {
-		t.Skip("no anthropic-protocol model endpoint configured (MODEL_* env)")
-	}
 
 	p, err := anthropic.New(provider.Config{
-		Protocol: "anthropic", Model: model, BaseURL: baseURL, APIKey: apiKey,
+		Protocol: cfg.Protocol, Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -75,34 +72,4 @@ func TestIntegrationRealEndpoint(t *testing.T) {
 	}
 	t.Logf("real turn ok: %d output tokens, stop_reason=%s, text=%q",
 		done.Usage.OutputTokens, done.StopReason, text.String())
-}
-
-// loadDotEnv fills MODEL_* from the repo root .env when unset (the file is
-// gitignored; only these four keys are read, values never printed).
-func loadDotEnv(t *testing.T) {
-	t.Helper()
-	f, err := os.Open(filepath.Join("..", "..", "..", ".env"))
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		key, value, ok := strings.Cut(line, "=")
-		if !ok || strings.HasPrefix(line, "#") || !strings.HasPrefix(key, "MODEL_") {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		// A quoted value is unwrapped as-is; an unquoted one loses any
-		// trailing inline comment.
-		if n := len(value); n >= 2 && (value[0] == '"' || value[0] == '\'') && value[n-1] == value[0] {
-			value = value[1 : n-1]
-		} else if i := strings.Index(value, " #"); i >= 0 {
-			value = strings.TrimSpace(value[:i])
-		}
-		if os.Getenv(key) == "" {
-			os.Setenv(key, value)
-		}
-	}
 }

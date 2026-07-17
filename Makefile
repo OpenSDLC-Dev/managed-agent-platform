@@ -39,14 +39,16 @@ fmt-check:
 		exit 1; \
 	fi
 
-# Coverage denominator: logic packages only. internal/pgtest and
-# internal/sandbox/sandboxtest are test support — packages solely because a
-# test in another package must import them. Their uncovered statements are the
-# assertion branches that run only when a suite fails, so counting them
-# measures nothing and dilutes the gate, exactly as cmd/ main glue would.
+# Coverage denominator: logic packages only. internal/pgtest,
+# internal/sandbox/sandboxtest and internal/modeltest are test support —
+# packages solely because a test in another package must import them. What is
+# uncovered in them are the branches no unit test can reach: the ones that fire
+# when a suite fails, when a live tier is misconfigured, or only under the
+# opt-in tiers themselves. Counting those measures nothing and dilutes the
+# gate, exactly as cmd/ main glue would.
 test:
 	@set -euo pipefail; \
-	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|sandboxtest)$$' | paste -sd, -)"; \
+	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|sandboxtest|modeltest)$$' | paste -sd, -)"; \
 	set -x; \
 	go test -count=1 -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
 
