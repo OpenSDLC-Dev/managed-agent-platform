@@ -80,7 +80,17 @@ type Runner struct {
 
 // Run executes the named built-in tool. id names this call — the tool-use
 // event's id — and scopes the bash shell's per-call files.
-func (r Runner) Run(ctx context.Context, id domain.ID, name string, input json.RawMessage) (Result, error) {
+//
+// Every tool call the platform runs arrives here, from the cloud executor and
+// the BYOC worker alike, so this is the one place the tool-execution metric can
+// be recorded once and mean the same thing at both deployment points.
+func (r Runner) Run(ctx context.Context, id domain.ID, name string, input json.RawMessage) (res Result, err error) {
+	start := time.Now()
+	defer func() { recordToolRun(ctx, name, time.Since(start), res, err) }()
+	return r.dispatch(ctx, id, name, input)
+}
+
+func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input json.RawMessage) (Result, error) {
 	var (
 		res Result
 		err error

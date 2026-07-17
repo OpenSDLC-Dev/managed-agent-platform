@@ -73,21 +73,25 @@ supplies consent. `internal/modeltest` owns this contract.
 
 ## Progress
 
-Phase 1 lands as four PRs, each green on its own (docs move with the code, per CLAUDE.md).
+Phase 1 lands as five PRs, each green on its own (docs move with the code, per CLAUDE.md).
 
 - [x] **PR 1 — live-test tier + `internal/modeltest`.** The opt-in contract above, the
       dotenv loader extracted from its two copy-pasted homes, both provider integration
       tests converted (this removes the `.env` auto-opt-in defect), `modeltest` excluded
       from the coverage denominator, and this file.
-- [ ] **PR 2 — OTel metrics and logs on the execution chain.** Evals grade the outcome;
-      metrics explain it. Model-turn and tool-exec duration/outcome/token instruments at
-      the same points that already start spans (design principle 3: one instrumentation
-      source, so the two views cannot drift), and an OTLP log bridge so a failing trial's
-      logs carry its trace.
-- [ ] **PR 3 — the harness + tasks 1–3 + `make eval`.** The stack wiring, the run loop
+- [x] **PR 2 — OTel traces and metrics on the execution chain.** Evals grade the outcome;
+      metrics explain it. The model turn's duration and token usage recorded at the point
+      that already opens its span and writes its `span.*` events, the tool call's duration
+      recorded in `toolset.Run` (the one place both deployment points pass through), and
+      the platform-managed tool run finally parented on the turn that enqueued it — the
+      queue has carried that trace context all along, but only the BYOC half ever read it.
+- [ ] **PR 3 — the OTel log bridge.** Split out of PR 2, which was already a full review's
+      worth of signal: `telemetry.Init` installs no slog handler today, so no log record
+      leaves the process over OTLP or carries the trace of the turn that wrote it.
+- [ ] **PR 4 — the harness + tasks 1–3 + `make eval`.** The stack wiring, the run loop
       (fresh session → drive → await idle on SSE → grade → reap), grader constructors, the
       report (`evals/artifacts/`), and `fib-quickstart` / `echo-notool` / `shell-state`.
-- [ ] **PR 4 — tasks 4–10, wrap-up.** The remaining seven, STATE/HISTORY, and the
+- [ ] **PR 5 — tasks 4–10, wrap-up.** The remaining seven, STATE/HISTORY, and the
       follow-up issues below.
 
 ## The ten tasks

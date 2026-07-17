@@ -31,7 +31,7 @@ func TestModelRequestSameSourceEmission(t *testing.T) {
 	restore := swapTracerProvider(tp)
 	defer restore()
 
-	spanCtx, mr, err := log.StartModelRequest(ctx, sid)
+	spanCtx, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestModelRequestSameSourceEmission(t *testing.T) {
 	if _, err := log.Append(spanCtx, sid, []events.NewEvent{endEv}); err != nil {
 		t.Fatalf("append end event: %v", err)
 	}
-	mr.Finish(true, nil)
+	mr.Finish(ctx, true, nil)
 
 	// Exactly one OTel span left the process.
 	spans := recorder.Ended()
@@ -110,7 +110,7 @@ func TestModelRequestSameSourceEmission(t *testing.T) {
 	}
 
 	// Failure path: a start against a dead session emits no span leak.
-	if _, _, err := log.StartModelRequest(ctx, domain.NewID("sesn")); err == nil {
+	if _, _, err := log.StartModelRequest(ctx, domain.NewID("sesn"), events.Backend{Provider: "anthropic", Model: "claude-x"}); err == nil {
 		t.Error("start on unknown session should fail")
 	}
 }

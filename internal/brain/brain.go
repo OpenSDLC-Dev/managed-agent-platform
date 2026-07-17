@@ -115,6 +115,20 @@ func infra(format string, args ...any) error {
 	return infraError{fmt.Errorf(format, args...)}
 }
 
+// streamUsage is what the model reported, or nil when the stream failed before
+// it could say. The distinction is the metric's: no reading and a zero reading
+// are different facts, and only a real one belongs in the token histogram.
+//
+// A stream that completed always reports something, because both adapters send
+// a usage object on their final chunk even when the endpoint supplied none — so
+// a non-compliant endpoint still yields zeroes here rather than nil (#90).
+func streamUsage(turn *turnResult) *domain.ModelUsage {
+	if turn == nil {
+		return nil
+	}
+	return &turn.usage
+}
+
 func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 	sid := item.SessionID
 
@@ -166,31 +180,42 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 		return b.failTurn(ctx, sid, item, nil, watermark, fmt.Sprintf("no provider for model %q", agent.Model.ID))
 	}
 
-	sctx, span, err := b.log.StartModelRequest(ctx, sid)
+	// The route resolved above, named for telemetry. Provider() just succeeded,
+	// so Describe cannot miss; an empty backend would only mean unlabelled
+	// metrics, never a failed turn.
+	desc, _ := b.registry.Describe(agent.Model.ID)
+	sctx, span, err := b.log.StartModelRequest(ctx, sid,
+		events.Backend{Provider: desc.Protocol, Model: desc.Model})
 	if err != nil {
 		return fmt.Errorf("span start: %w", err)
 	}
 
 	kctx, keeper := b.keepLease(sctx, item)
 	turn, streamErr := b.streamTurn(kctx, sid, p, req)
+	// The call to the model ended here, whatever happens to the turn from now
+	// on. Everything below is ours — leases, classification, a session-locked
+	// settlement — and none of it belongs in a model-latency metric. The usage
+	// goes with it: what the model spent is a fact of the call, and a turn that
+	// streamed an answer and then lost its lease still cost real tokens.
+	span.ModelDone(streamUsage(turn))
 	if err := keeper.close(); err != nil {
 		// The lease is gone or unmaintainable: another brain may own the
 		// turn already. Nothing of ours may commit — abandon quietly.
-		span.Finish(true, err)
+		span.Finish(sctx, true, err)
 		return fmt.Errorf("lease keeper: %w", err)
 	}
 	if streamErr != nil {
 		var ie infraError
 		if errors.As(streamErr, &ie) {
-			span.Finish(true, streamErr)
+			span.Finish(sctx, true, streamErr)
 			return streamErr
 		}
-		return b.failTurn(ctx, sid, item, span, watermark, streamErr.Error())
+		return b.failTurn(sctx, sid, item, span, watermark, streamErr.Error())
 	}
 	if turn.stopReason == "tool_use" && len(turn.toolUses) == 0 {
 		// A tool_use stop with no tool blocks has nothing to wait for and
 		// nothing to chain — settling either way would wedge or spin.
-		return b.failTurn(ctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
+		return b.failTurn(sctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
 	}
 
 	// Only a turn that actually called a tool needs the name→type and
@@ -201,7 +226,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 	if len(turn.toolUses) > 0 {
 		kinds, pols, err := classify(agent)
 		if err != nil {
-			return b.failTurn(ctx, sid, item, span, watermark, fmt.Sprintf("classify tools: %v", err))
+			return b.failTurn(sctx, sid, item, span, watermark, fmt.Sprintf("classify tools: %v", err))
 		}
 		toolKind, policy = kinds, pols
 	}
@@ -386,7 +411,7 @@ func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy m
 // whose duplicate tool intents would poison every future replay).
 func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType, watermark int64) error {
 	err := b.commitTurn(ctx, sid, item, span, turn, toolKind, policy, watermark)
-	span.Finish(false, err)
+	span.Finish(ctx, false, err)
 	if err != nil {
 		return fmt.Errorf("settle: %w", err)
 	}
@@ -559,7 +584,7 @@ func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID, batch []even
 func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg string) error {
 	err := b.commitFailure(ctx, sid, item, span, watermark, msg)
 	if span != nil {
-		span.Finish(true, err)
+		span.Finish(ctx, true, err)
 	}
 	return err
 }

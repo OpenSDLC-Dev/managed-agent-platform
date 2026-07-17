@@ -35,10 +35,18 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracerName is the executor's OTel instrumentation scope.
+const tracerName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/executor"
 
 // Config tunes the loop. Image is the sandbox base image (a deployment choice —
 // the wire's environment config has no image field). LeaseTTL must comfortably
@@ -126,7 +134,39 @@ func (e *Executor) step(ctx context.Context) (bool, error) {
 }
 
 // process runs one tool_exec item to completion.
-func (e *Executor) process(ctx context.Context, item *queue.Item) error {
+func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
+	// Parent the work on the turn that enqueued it, whose trace context the
+	// queue captured onto the item — so a session's model turns and the tools
+	// they trigger are one trace, the same guarantee the BYOC worker already
+	// gets from the poll response.
+	//
+	// The span opens on a claimed item and closes when the item is done with,
+	// which is what a consumer span stands for: the handling of one message,
+	// end to end. Both edges matter. Everything below can fail — the session
+	// lookup, the tools, the commit — and every one of those leaves the item for
+	// reclaim to retry next lease period, so a span that covered only the middle
+	// would omit exactly the recurring faults an operator opens the trace to
+	// find. The tools' own timing is toolset's duration metric, not this span's
+	// business.
+	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(
+		telemetry.Extract(ctx, item.TraceContext), "tool_exec",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("session.id", item.SessionID.String()),
+			attribute.String("work.id", item.ID.String()),
+		))
+	// Every failure this function reports is the platform's own — a tool the
+	// model can read and recover from (a missing file, a nonzero exit) never
+	// reaches here: it rides the log verbatim and the toolset metric's
+	// error.type, and erroring the span for it would light up every trace view
+	// on ordinary agent behaviour.
+	defer func() {
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
 	// Drain work for a session that is no longer live before doing anything
 	// expensive. Archiving freezes the status and makes every append the run
 	// would commit fail, so without this the item reclaim-loops forever,
@@ -134,11 +174,8 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) error {
 	// claimLiveSession. Loading the egress policy under the same lock keeps it
 	// to one round trip.
 	net, live, err := e.sessionForRun(ctx, item)
-	if err != nil {
+	if err != nil || !live {
 		return err
-	}
-	if !live {
-		return nil
 	}
 
 	// Keep the lease alive from before provisioning through the tool run: an
@@ -147,6 +184,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) error {
 	// session's tools. Provisioning and every tool run happen under kctx, so
 	// losing the lease cancels the work.
 	kctx, keeper := e.keepLease(ctx, item)
+
 	results, faultErr, runErr := e.provisionAndRun(kctx, item, net)
 	if kerr := keeper.close(); kerr != nil {
 		// The lease is gone — another executor may already own this item.

@@ -49,6 +49,11 @@ type Item struct {
 	// the session was mid-turn when its brain died, so the new claimant
 	// should surface recovery (session.status_rescheduled) before replaying.
 	Reclaimed bool
+	// TraceContext is the W3C trace context captured at enqueue, so the
+	// claimant can parent its work on the turn that produced it — the same
+	// context a BYOC worker gets from its poll response (see Work). Nil when
+	// the item was enqueued with no active span.
+	TraceContext map[string]string
 }
 
 // Work is a work_items row projected for the wire work API (poll/get/list and
@@ -117,10 +122,10 @@ func New(pool *pgxpool.Pool) *Queue { return &Queue{pool: pool} }
 // created; false means an existing live item already covers the work.
 func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, kind Kind) (bool, error) {
 	// Only tool_exec work is ever run as a tool execution, so only it carries a
-	// trace context — consumed by the BYOC worker's poll (and, later, the cloud
-	// executor). A model_turn drives the brain, which opens its own model_request
-	// span per turn and never reads this back, so capturing it there would only
-	// persist an unread payload; leave it NULL.
+	// trace context — consumed by the cloud executor's Claim and the BYOC
+	// worker's poll. A model_turn drives the brain, which opens its own
+	// model_request span per turn and never reads this back, so capturing it
+	// there would only persist an unread payload; leave it NULL.
 	var traceCtx any
 	if kind == ToolExec {
 		traceCtx = traceContextArg(ctx)
@@ -186,8 +191,10 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 		     updated_at = now()
 		 FROM picked p
 		 WHERE w.id = p.id
-		 RETURNING w.id, w.environment_id, w.session_id, w.kind, w.lease_expires_at, p.state`,
-		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.Kind, &it.Lease, &prevState)
+		 RETURNING w.id, w.environment_id, w.session_id, w.kind, w.lease_expires_at, p.state,
+		           w.trace_context`,
+		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.Kind, &it.Lease, &prevState,
+		&it.TraceContext)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

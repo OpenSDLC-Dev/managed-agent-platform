@@ -11,6 +11,40 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- OTel metrics on the execution chain. A model turn records `gen_ai.client.operation.duration` and
+  `gen_ai.client.token.usage` from the same point that already opens its span and writes its `span.*`
+  wire events, so the three views of one turn cannot drift (design principle 3). These are OTel's GenAI
+  semantic conventions rather than names of our own, because a model turn *is* a client call to a GenAI
+  provider, which is exactly what those instruments describe. They are labelled from the route the
+  provider registry resolved (`gen_ai.provider.name` is the configured protocol, `gen_ai.request.model`
+  the model id sent upstream), which telemetry reads through the new `provider.Registry.Describe` — a
+  descriptor carrying only what may be said out loud, so the credential cannot reach a metric attribute
+  by anyone's oversight. The duration is the call to the provider and stops when the model's stream
+  ends, not when the turn settles: settlement is a session-locked Postgres transaction the model had
+  nothing to do with, and billing it as model latency would mislead exactly the person reading the
+  metric to explain a slow turn. The duration and the reported usage are both taken there, by
+  `ModelDone`, because both are facts of the model's call: settlement is the wrong place to learn what
+  a model spent, since it renders an end event on some paths and not others — sourcing usage from it
+  would invent a pair of zeroes for turns the model never costed *and* drop real, billed tokens for a
+  turn that streamed an answer and then lost its lease. A turn that reported no usage records duration
+  with an `error.type` and no tokens rather than zeroes no model ever produced (with the caveat in
+  [#90](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/90): no adapter can yet say an
+  endpoint reported nothing). The input reading
+  sums the fresh, cache-read and cache-creation counts: `gen_ai.token.type` has only `input` and
+  `output`, so the convention has no bucket for a cache read, and the domain carries those apart only
+  because Anthropic's wire shape does. That split must not leak into a metric whose vocabulary has no
+  room for it — on this platform especially, where a long-horizon turn replays the whole session and a
+  cache read is the normal case, reporting only the fresh remainder under-reports the prompt by orders
+  of magnitude (a real 9,730-token prompt read as 30).
+- A tool call records `tool.execution.duration` from `toolset.Run` — the one place both the cloud
+  executor and the BYOC worker pass through, so the metric means the same thing at both deployment
+  points. This is deliberately not one of the `gen_ai.*` instruments: running bash in a container is not
+  a call to a GenAI provider, and inventing a `gen_ai.provider.name` to satisfy the convention would make
+  the metric lie about what it measured. Unlike the model-turn metrics it is not co-located with a span,
+  because tool execution has no `span.*` wire event to stay in step with — the tool's outcome is on the
+  log as `agent.tool_result`. Its `error.type` separates a tool-level failure the model can recover from
+  (`tool_error`) from the backend faulting
+  ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)).
 - Live-test tier opt-in — `internal/modeltest`, the shared gate for every tier that calls a real model
   endpoint. Consent is an environment variable (`RUN_LIVE_MODEL_TESTS=1` for the provider live-contract
   tier, `RUN_EVALS=1` for the end-to-end eval suite; two variables because their costs differ by an order
@@ -44,6 +78,28 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   `internal/sandbox/sandboxtest`: test-support packages whose uncovered statements are the branches that
   fire only when a suite fails or a tier is misconfigured. `modeltest`'s own suite still runs under
   `go test ./...` — the exclusion drops it from the denominator, not from the run.
+
+### Fixed
+
+- Platform-managed tool runs now join the trace of the turn that asked for them. The queue has captured
+  each `tool_exec` item's W3C trace context at enqueue since the work-queue slice, and the column's own
+  doc comment says it exists "so the executor or worker that runs the item can parent its tool-execution
+  spans on the turn that produced the work" — but only the BYOC worker's poll ever read it back. The
+  cloud executor had no OTel instrumentation at all, so on the deployment point most people run, a
+  session's model turns and the tools they triggered landed in two unrelated traces and the gap between
+  them was invisible. `Claim` now returns the trace context alongside the item, and the executor opens a
+  consumer-kind `tool_exec` span under it, named and attributed as the worker's — so trace parenting is
+  now the same guarantee at both deployment points, which is what the pull protocol being one protocol is
+  supposed to mean. The span opens on a claimed item and closes when the item is done with, which is what
+  a consumer span stands for: the handling of one message, end to end. Both edges matter, because every
+  step can fail — the session lookup, the tools, the commit — and each failure leaves the item for reclaim
+  to retry next lease period, so a span covering only the middle would omit exactly the recurring faults
+  an operator opens the trace to find. It carries an error status whenever the platform itself fails; a tool-level
+  failure the model can recover from leaves it unset, since erroring it for a missing file would light up
+  every trace view on ordinary agent behaviour. The worker's equivalent span still reports no status at
+  all — pre-existing, and left alone here rather than widening this change
+  ([#87](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/87))
+  ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)).
 
 ## [0.1.0] - 2026-07-17
 
