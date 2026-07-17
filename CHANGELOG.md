@@ -11,6 +11,36 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- OTel logs on the execution chain, completing the "traces, metrics, and logs" README.md has claimed
+  since the project started. When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, `telemetry.Init` now also builds
+  an OTLP log exporter and points the default `slog` logger at a fan-out handler — the console, exactly
+  as before, plus the collector. Every existing `slog` call site exports with no new logging API, and
+  the six that had a trace context in reach now pass it (`slog.*Context`), so the record lands *in* the
+  trace an operator already has open rather than beside it: the API's internal-error log, the worker's
+  four work-item-fate logs, and the executor's fault log. Two are worth naming, because for both the
+  obvious spelling correlates to the wrong span rather than to none. The executor's fault log is now
+  reported from inside `process`'s deferred exit, before `span.End()`, so it lands on the `tool_exec`
+  span it describes; reporting it from `step` — where `process` has already returned — would still have
+  found the right *trace*, but hung the record off the enqueuing turn's span, leaving the red span an
+  operator actually clicks with no log under it. The worker's lease-loss warning is emitted after its
+  `span.End()`, yet still lands on that span: `runCtx` is in scope and a span's context outlives its
+  `End()`. Sixteen call sites stay uncorrelated. Eleven of them (each binary's startup line, the
+  worker's poll and heartbeat loops) have no span in reach, which is correct rather than a gap — there
+  is no trace to name. The other five are two real gaps, filed rather than
+  fixed here: the brain's turn-fault log, the direct counterpart of the executor's
+  ([#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92)), and each of the four
+  binaries' fatal-exit log, which reaches stderr but never OTLP because the telemetry shutdown that
+  stops the log processor is deferred inside `run()` while the log is emitted in `main()` after it
+  returns ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)). Logging is left
+  untouched when no endpoint is configured.
+  The bridge keeps the level floor the process already had (Info, slog's own default): the OTLP branch
+  imposes no floor — `sdk/log`'s `BatchProcessor.Enabled` returns true unconditionally — so a fan-out
+  that merely ORed its branches would have shipped `Debug` records to the collector while the console
+  showed nothing. Configuring an endpoint changes where records go, never which records exist.
+  The bridge is handed its provider directly rather than through `otel/log/global`: `otelslog` takes the
+  provider as an option, so the global would add a process-wide variable and a second way for two `Init`
+  calls to disagree, and buy nothing. (`otel/log` is also still pre-1.0.)
+
 - Worktree configuration, so parallel sessions each get a working checkout — git worktrees were named
   planned practice in [docs/HISTORY.md](./docs/HISTORY.md) and this lands them. `.gitignore` now covers
   `.claude/worktrees/` (a worktree is a whole checkout under the repo root; without this every one of
@@ -82,6 +112,24 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Changed
 
+- **Console log format changes when an OTLP endpoint is configured** (unset endpoint: unchanged). Lines
+  go from the standard library's `2026/07/17 20:35:05 INFO msg key=value` to `slog`'s text format,
+  `time=2026-07-17T20:35:05.000+08:00 level=INFO msg=msg key=value`. This is forced rather than chosen.
+  `slog.SetDefault` reroutes the standard library's `log` package into whatever handler it installs, and
+  the handler `slog` starts with writes *through* `log` — so a fan-out that wrapped it would deadlock the
+  two on `log`'s mutex, which is precisely what the `*defaultHandler` type check in `SetDefault` exists
+  to prevent. A `TextHandler` owns its writer and has no such edge.
+  That same rerouting is why `Init` now restores `log`'s writer and flags after installing the bridge.
+  OTel reports its own export failures with `log.Print` when no error-handler delegate is set, so left
+  connected the two close a circuit: an export fails, OTel `log.Print`s it, the line enters the slog
+  handler, the bridge enqueues it as a record, exporting *that* fails, and so on for the life of the
+  process. Measured against a traces-only collector, one ordinary log line produced 2 error lines within
+  2s and 5 within 8s, still climbing; with the restore it produces exactly one.
+- `deploy/compose/README.md` no longer describes `OTEL_EXPORTER_OTLP_ENDPOINT` as disabling "trace
+  export" — it governs all three signals — and now says that the bundled Jaeger ingests **traces only**,
+  so the metric and log exporters report `Unimplemented` once per failed batch against it. The metric
+  half of that has been true since metrics landed and was simply never written down. Traces still arrive
+  and the platform's own logs still reach the console; an OTel Collector at `4317` takes all three.
 - The provider integration tests no longer opt themselves in — `.env` supplies configuration, never
   consent. Before, merely having a configured `.env` made an ordinary `go test ./...` spend money on a
   real model call; now that run skips, and `RUN_LIVE_MODEL_TESTS=1` runs it. Once opted in, missing or

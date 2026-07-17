@@ -51,6 +51,7 @@ func TestInitWithoutEndpointIsNoOp(t *testing.T) {
 }
 
 func TestInitExportsSpansAndMetrics(t *testing.T) {
+	restoreLogging(t)
 	collector := startFakeCollector(t)
 	ctx := context.Background()
 
@@ -90,6 +91,7 @@ func TestInitExportsSpansAndMetrics(t *testing.T) {
 }
 
 func TestSampleRatioIsApplied(t *testing.T) {
+	restoreLogging(t)
 	collector := startFakeCollector(t)
 	ctx := context.Background()
 
@@ -123,6 +125,7 @@ func TestSampleRatioIsApplied(t *testing.T) {
 }
 
 func TestSampleRatioZeroSendsNoTraces(t *testing.T) {
+	restoreLogging(t)
 	collector := startFakeCollector(t)
 	ctx := context.Background()
 

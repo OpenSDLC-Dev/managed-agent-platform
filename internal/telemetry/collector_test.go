@@ -2,23 +2,27 @@ package telemetry_test
 
 import (
 	"context"
+	"encoding/hex"
 	"net"
 	"sync"
 	"testing"
 
+	collectorlogs "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	collectormetrics "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	collectortrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/grpc"
 )
 
 // fakeCollector is an in-process OTLP/gRPC collector that records every
-// exported span and metric, so tests can assert on what actually left the
-// process.
+// exported span, metric and log record, so tests can assert on what actually
+// left the process.
 type fakeCollector struct {
 	traces  fakeTraceService
 	metrics fakeMetricService
+	logs    fakeLogService
 	addr    string
 }
 
@@ -48,6 +52,19 @@ func (s *fakeMetricService) Export(_ context.Context, req *collectormetrics.Expo
 	return &collectormetrics.ExportMetricsServiceResponse{}, nil
 }
 
+type fakeLogService struct {
+	collectorlogs.UnimplementedLogsServiceServer
+	mu   sync.Mutex
+	logs []*logspb.ResourceLogs
+}
+
+func (s *fakeLogService) Export(_ context.Context, req *collectorlogs.ExportLogsServiceRequest) (*collectorlogs.ExportLogsServiceResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logs = append(s.logs, req.GetResourceLogs()...)
+	return &collectorlogs.ExportLogsServiceResponse{}, nil
+}
+
 func startFakeCollector(t *testing.T) *fakeCollector {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -58,6 +75,7 @@ func startFakeCollector(t *testing.T) *fakeCollector {
 	srv := grpc.NewServer()
 	collectortrace.RegisterTraceServiceServer(srv, &c.traces)
 	collectormetrics.RegisterMetricsServiceServer(srv, &c.metrics)
+	collectorlogs.RegisterLogsServiceServer(srv, &c.logs)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	return c
@@ -91,6 +109,49 @@ func (c *fakeCollector) resourceAttr(key string) string {
 		}
 	}
 	return ""
+}
+
+// logRecord is one exported log record, flattened to what the tests assert on.
+type logRecord struct {
+	body     string
+	severity string
+	attrs    map[string]string
+	traceID  string
+	spanID   string
+}
+
+// logRecords flattens every received log record across resource/scope nesting.
+func (c *fakeCollector) logRecords() []logRecord {
+	c.logs.mu.Lock()
+	defer c.logs.mu.Unlock()
+	var out []logRecord
+	for _, rl := range c.logs.logs {
+		for _, sl := range rl.GetScopeLogs() {
+			for _, r := range sl.GetLogRecords() {
+				rec := logRecord{
+					body:     r.GetBody().GetStringValue(),
+					severity: r.GetSeverityText(),
+					attrs:    map[string]string{},
+					traceID:  hex.EncodeToString(r.GetTraceId()),
+					spanID:   hex.EncodeToString(r.GetSpanId()),
+				}
+				for _, kv := range r.GetAttributes() {
+					rec.attrs[kv.GetKey()] = kv.GetValue().GetStringValue()
+				}
+				out = append(out, rec)
+			}
+		}
+	}
+	return out
+}
+
+// logBodies flattens every received log record's body.
+func (c *fakeCollector) logBodies() []string {
+	var bodies []string
+	for _, r := range c.logRecords() {
+		bodies = append(bodies, r.body)
+	}
+	return bodies
 }
 
 // metricNames flattens every received metric name.
