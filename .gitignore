@@ -8,6 +8,10 @@
 *.out
 coverage.*
 
+# Eval run artifacts (report.json, summary.md, failed-trial transcripts). A run
+# is a point-in-time record of one endpoint's behaviour, not source.
+/evals/artifacts/
+
 # Go workspace files (local-only)
 go.work
 go.work.sum

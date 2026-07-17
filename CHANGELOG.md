@@ -11,6 +11,38 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ### Added
 
+- An end-to-end eval suite (`make eval`), the first test that drives a whole session through the public
+  REST API against a real model and real Docker sandboxes — every other loop test in the repo scripts
+  the provider, so nothing before this exercised brain → work queue → executor → sandbox → SSE for real.
+  It lives as `*_test.go` under a top-level `evals/` package (no runner binary — `go test` already gives
+  subtests, timeouts and panic-safe cleanup) and composes the platform in one process the way `cmd/*`
+  do: `pgtest` Postgres, the real `api.NewHandler`, a `provider.Registry` over the `.env` endpoint, and
+  `brain`/`executor` loops against `docker.New`. Only `main()` glue is bypassed, which CI's compose job
+  already smokes. This phase ships three tasks — `fib-quickstart` (write a script, run it, capture its
+  output: the reference quickstart, and the broadest single test since producing the file at all needs
+  the async loop to close — a tool call, a suspend, a wake on the result), `echo-notool` (a text-only
+  baseline whose negative assertion is that **no** sandbox was
+  provisioned), and `shell-state` (an `export` in one bash call must survive into the next, pinning the
+  persistent-shell snapshot) — with the remaining seven to follow.
+  Grading is deterministic and code-based, never an LLM judge: each prompt demands a per-trial random
+  nonce, so an exact-match check tests the agent rather than the grader's generosity. Every trial also
+  runs a core pack — reaches idle with `stop_reason.type == "end_turn"`, no `session.error`, every
+  `agent.tool_use` joined by exactly one `agent.tool_result`, token usage populated, and the idle
+  observed on the SSE stream. Findings are classed **P**latform (our bug — a red run to fix),
+  **M**odel (the model wandered — worth seeing, not a defect), or **E**ither, so a red run says whose
+  problem it is instead of "probably the model". Artifacts land in `evals/artifacts/` (gitignored):
+  `report.json`, a `summary.md`, and one full transcript per failed trial. The report reduces the
+  endpoint to host:port and never records the key.
+  The suite is opt-in through `RUN_EVALS`, the second tier `internal/modeltest` now gates (a new
+  `TierEnabled` answers the one caller a `*testing.T`-based skip cannot serve — the suite's `TestMain`,
+  which starts Postgres before any test can skip). Consent is the environment variable; the endpoint is
+  still `.env`; an opted-in run with a rotted `.env` fails rather than skips. `make eval` scopes
+  `RUN_EVALS=1` to the one command and runs no coverage profile, so a later `make verify` in the same
+  shell neither spends money nor has its coverage gate clobbered. The daily scheduled run that would
+  make this a standing net is filed as
+  [#96](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/96) — it needs repository secrets
+  a maintainer must set, and a workflow that silently no-ops without them is worse than none.
+
 - OTel logs on the execution chain, completing the "traces, metrics, and logs" README.md has claimed
   since the project started. When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, `telemetry.Init` now also builds
   an OTLP log exporter and points the default `slog` logger at a fan-out handler — the console, exactly

@@ -115,8 +115,31 @@ func Endpoint(t *testing.T, tierEnv string, protocols ...string) Config {
 	return cfg
 }
 
+// TierEnabled reports whether tierEnv opts into its tier, for the one caller
+// that cannot use Endpoint: a TestMain, which has no *testing.T to skip.
+//
+// It exists so that caller asks the same question Endpoint asks instead of
+// re-spelling the rule — two copies of "what counts as opted in" drift, and the
+// drift is silent in the worst direction: a TestMain that reads "off" while
+// Endpoint reads "on" skips the suite's setup and then runs its tests against
+// the setup that never happened.
+//
+// A TestMain needs this because expensive setup (a database container, an image
+// pull) runs before m.Run and so before any test can skip itself. Tests
+// themselves must still call Endpoint — this only answers whether to build the
+// world, never whether a given test may run.
+func TierEnabled(tierEnv string) bool { return tierEnabled(resolve, tierEnv) }
+
+// tierEnabled is the single spelling of the rule, shared with endpoint below.
+// Any non-empty value opts in: naming the variable at all is the consent, and
+// second-guessing the value ("0" and "false" look like off) would make the
+// contract depend on a convention nobody stated.
+func tierEnabled(getenv func(string) string, tierEnv string) bool {
+	return getenv(tierEnv) != ""
+}
+
 func endpoint(getenv func(string) string, tierEnv string, protocols []string) (Config, string, error) {
-	if getenv(tierEnv) == "" {
+	if !tierEnabled(getenv, tierEnv) {
 		return Config{}, fmt.Sprintf("%s is not set: skipping the live tier (no model is called)", tierEnv), nil
 	}
 	cfg := Config{

@@ -105,6 +105,67 @@ func TestLookupNeverReadsTheFileForATierVariable(t *testing.T) {
 	}
 }
 
+// TierEnabled exists so a TestMain can ask the same question Endpoint asks,
+// rather than re-spelling the rule and drifting from it. This test is the
+// agreement itself: for every value, the two must reach the same verdict. A
+// TestMain that decided "off" while Endpoint decided "on" would skip the
+// suite's setup and then run its tests against it.
+func TestTierEnabledAgreesWithEndpoint(t *testing.T) {
+	for _, value := range []struct {
+		name   string
+		set    bool
+		val    string
+		wantOn bool
+	}{
+		{"unset", false, "", false},
+		{"set empty", true, "", false},
+		{"set to 1", true, "1", true},
+		{"set to 0", true, "0", true}, // non-empty: opted in, however odd it looks
+		{"set to false", true, "false", true},
+		{"set to whitespace", true, " ", true},
+	} {
+		t.Run(value.name, func(t *testing.T) {
+			env := map[string]string{}
+			if value.set {
+				env[EvalsEnv] = value.val
+			}
+			full := fullEnv(env)
+			if !value.set {
+				delete(full, EvalsEnv)
+			}
+
+			// wantOn is hardcoded on purpose. The gate and the tier both derive
+			// from one tierEnabled, so checking them only against each other
+			// would stay green even if that rule started trimming whitespace or
+			// reading "0" as off — the drift this test exists to catch. Pinning
+			// both to the contract's stated answer is what makes it bite.
+			if got := tierEnabled(getenvFrom(full), EvalsEnv); got != value.wantOn {
+				t.Errorf("tierEnabled(%q) = %v, want %v", value.val, got, value.wantOn)
+			}
+			_, skip, _ := endpoint(getenvFrom(full), EvalsEnv, nil)
+			if endpointOn := skip == ""; endpointOn != value.wantOn {
+				t.Errorf("Endpoint %s for %q, want opted-in=%v",
+					map[bool]string{true: "runs", false: "skips"}[endpointOn], value.val, value.wantOn)
+			}
+		})
+	}
+}
+
+// TestTierEnabledReadsItsArgument pins the exported wrapper to the process
+// environment and to the variable it is handed — the table above drives the
+// unexported tierEnabled through an injected lookup, which cannot catch a
+// TierEnabled that consulted the wrong env or ignored its argument.
+func TestTierEnabledReadsItsArgument(t *testing.T) {
+	t.Setenv(LiveEnv, "") // off regardless of the ambient environment
+	t.Setenv(EvalsEnv, "1")
+	if !TierEnabled(EvalsEnv) {
+		t.Error("TierEnabled(EvalsEnv) = false after setting it to 1")
+	}
+	if TierEnabled(LiveEnv) {
+		t.Error("TierEnabled(LiveEnv) = true though only EvalsEnv was set")
+	}
+}
+
 func TestEndpointSkipsWhenNotOptedIn(t *testing.T) {
 	// A fully configured .env is consent to *how* the tier runs, never consent
 	// to run it: an ordinary `go test ./...` must call no model.

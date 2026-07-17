@@ -66,6 +66,7 @@ make build                 # build (go build ./...)
 make test                  # unit + contract tests (go test -count=1, with coverage profile)
 make vet fmt-check         # lint
 make verify                # the whole Go gate (CI additionally runs its helm/compose jobs)
+make eval                  # RUN_EVALS=1: the live end-to-end eval suite (real model + sandboxes)
 ```
 
 Tests come in tiers. The first two run on every PR and call no model; the rest drive a
@@ -79,7 +80,7 @@ itself when its credentials rot is not a safety net.
 | Unit & contract | — | logic, wire shapes, scripted provider streams |
 | Dependency integration | — | real Postgres, Docker, and Kubernetes (hard-fail without them) |
 | Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn against your endpoint, through the adapter whose protocol it speaks (the other adapter's test skips) |
-| Live-system evals *(being built)* | `RUN_EVALS=1` | whole sessions: API → brain → real model → sandbox → SSE — the suite and its `make eval` entry point are [in progress](./docs/EVALS_PLAN.md); the variable already gates it |
+| Live-system evals | `RUN_EVALS=1` (`make eval`) | whole sessions: API → brain → real model → sandbox → SSE, deterministically graded. Three regression tasks today, [growing to ten](./docs/EVALS_PLAN.md); results land in `evals/artifacts/` |
 
 Configure the endpoint once in a gitignored repo-root `.env` — `MODEL_PROTOCOL`
 (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID` — and the live tiers
