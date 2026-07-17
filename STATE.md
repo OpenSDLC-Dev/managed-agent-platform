@@ -18,13 +18,12 @@ never here. The verifier enforces both on its docs-consistency rung.
   local docker-compose stack. The slice-8 acceptance — a real `ant beta:worker` end to
   end — has been run and passed (see docs/HISTORY.md).
 - **Current focus:** the **eval test system** ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)
-  phase 1) — an end-to-end suite driving the whole stack against a real model endpoint,
-  with ten regression tasks, plus the OTel signals that explain a failing trial. Plan and
-  live progress: **[docs/EVALS_PLAN.md](./docs/EVALS_PLAN.md)** (5 PRs; 1–2 landed — the
-  tier gate, then traces + metrics on the execution chain). Queued behind it, the two gaps
-  before a self-hosted deploy is turn-key: environment-key issuance
-  ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43))
-  and published images + a helm-install acceptance ([#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75)).
+  phase 1) — an end-to-end suite driving the whole stack against a real model endpoint with
+  ten regression tasks, plus the OTel signals that explain a failing trial. Plan and live
+  progress: **[docs/EVALS_PLAN.md](./docs/EVALS_PLAN.md)** (5 PRs; 1–2 landed). Queued
+  behind it, the two gaps before a self-hosted deploy is turn-key: environment-key issuance
+  ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)) and published
+  images + a helm-install acceptance ([#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75)).
 - **Release:** **v0.1.0** (2026-07-17) — the complete v1 loop; the `v0.1.0` tag is created
   on main at the release PR's squash-merge. New work accumulates under CHANGELOG's
   `[Unreleased]`.

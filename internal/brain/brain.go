@@ -178,24 +178,28 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 
 	kctx, keeper := b.keepLease(sctx, item)
 	turn, streamErr := b.streamTurn(kctx, sid, p, req)
+	// The call to the model ended here, whatever happens to the turn from now
+	// on. Everything below is ours — leases, classification, a session-locked
+	// settlement — and none of it belongs in a model-latency metric.
+	span.ModelDone()
 	if err := keeper.close(); err != nil {
 		// The lease is gone or unmaintainable: another brain may own the
 		// turn already. Nothing of ours may commit — abandon quietly.
-		span.Finish(ctx, true, err)
+		span.Finish(sctx, true, err)
 		return fmt.Errorf("lease keeper: %w", err)
 	}
 	if streamErr != nil {
 		var ie infraError
 		if errors.As(streamErr, &ie) {
-			span.Finish(ctx, true, streamErr)
+			span.Finish(sctx, true, streamErr)
 			return streamErr
 		}
-		return b.failTurn(ctx, sid, item, span, watermark, streamErr.Error())
+		return b.failTurn(sctx, sid, item, span, watermark, streamErr.Error())
 	}
 	if turn.stopReason == "tool_use" && len(turn.toolUses) == 0 {
 		// A tool_use stop with no tool blocks has nothing to wait for and
 		// nothing to chain — settling either way would wedge or spin.
-		return b.failTurn(ctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
+		return b.failTurn(sctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
 	}
 
 	// Only a turn that actually called a tool needs the name→type and
@@ -206,7 +210,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 	if len(turn.toolUses) > 0 {
 		kinds, pols, err := classify(agent)
 		if err != nil {
-			return b.failTurn(ctx, sid, item, span, watermark, fmt.Sprintf("classify tools: %v", err))
+			return b.failTurn(sctx, sid, item, span, watermark, fmt.Sprintf("classify tools: %v", err))
 		}
 		toolKind, policy = kinds, pols
 	}
@@ -403,7 +407,7 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	if err != nil {
 		return err
 	}
-	endEv, err := span.EndEvent(false, turn.usage)
+	endEv, err := span.EndEvent(false, &turn.usage)
 	if err != nil {
 		return err
 	}
@@ -572,7 +576,7 @@ func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, s
 func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg string) error {
 	var head []events.NewEvent
 	if span != nil {
-		endEv, err := span.EndEvent(true, domain.ModelUsage{})
+		endEv, err := span.EndEvent(true, nil)
 		if err != nil {
 			return err
 		}

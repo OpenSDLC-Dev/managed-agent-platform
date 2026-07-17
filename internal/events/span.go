@@ -67,6 +67,28 @@ type ModelRequest struct {
 	hasUsage bool
 	backend  Backend
 	started  time.Time
+	// modelElapsed is how long the call to the provider took, stamped by
+	// ModelDone. Zero until then; see ModelDone for why Finish cannot measure
+	// this itself.
+	modelElapsed time.Duration
+}
+
+// ModelDone stops the clock on the call to the model provider. The caller must
+// invoke it as soon as the model's stream ends — before settling the turn.
+//
+// The span and the wire events deliberately stay open past this point: Finish
+// runs after the settlement transaction so it can record whether the end event
+// actually committed. But gen_ai.client.operation.duration is the convention's
+// measure of the client's call to the provider, and settlement is a
+// session-locked Postgres transaction the model had nothing to do with.
+// Measuring to Finish would file database contention under a model-latency
+// instrument — and only on the paths that reach settlement, since the abandon
+// paths finish straight after the stream, leaving the metric inconsistent with
+// itself. Repeat calls keep the first boundary.
+func (m *ModelRequest) ModelDone() {
+	if m.modelElapsed == 0 {
+		m.modelElapsed = time.Since(m.started)
+	}
 }
 
 // StartEventID is the id of the span.model_request_start event, which the
@@ -79,16 +101,28 @@ func (m *ModelRequest) StartEventID() domain.ID { return m.startID }
 // Finish then closes the OTel side; both halves live on ModelRequest so the
 // wire event and the OTel span still come from one instrumentation point
 // (CLAUDE.md principle 3).
-func (m *ModelRequest) EndEvent(isError bool, usage domain.ModelUsage) (NewEvent, error) {
+//
+// usage is nil when the model never reported any — a turn that died before its
+// stream said so. The wire event still carries a model_usage object, because
+// the schema wants one, but nil and a real zero reading are different facts and
+// only the wire event may flatten them: the token histogram must not be fed
+// zeroes no model ever produced.
+func (m *ModelRequest) EndEvent(isError bool, usage *domain.ModelUsage) (NewEvent, error) {
+	reported := domain.ModelUsage{}
+	if usage != nil {
+		reported = *usage
+	}
 	payload, err := json.Marshal(map[string]any{
 		"is_error":               isError,
 		"model_request_start_id": m.startID.String(),
-		"model_usage":            usage,
+		"model_usage":            reported,
 	})
 	if err != nil {
 		return NewEvent{}, err
 	}
-	m.usage, m.hasUsage = usage, true
+	if usage != nil {
+		m.usage, m.hasUsage = reported, true
+	}
 	now := time.Now().UTC()
 	return NewEvent{
 		Type:        domain.EventSpanModelRequestEnd,

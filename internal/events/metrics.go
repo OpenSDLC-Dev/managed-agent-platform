@@ -47,7 +47,14 @@ func (m *ModelRequest) recordMetrics(ctx context.Context, isError bool, commitEr
 	case isError:
 		attrs = append(attrs, dur.AttrErrorType(errorTypeModel))
 	}
-	dur.Record(ctx, time.Since(m.started).Seconds(), genaiconv.OperationNameChat, provider, attrs...)
+	// The call to the provider, not the turn: ModelDone stamped the boundary
+	// when the stream ended. A turn abandoned mid-stream never stamped one, and
+	// there the request's whole elapsed IS the attempt.
+	elapsed := m.modelElapsed
+	if elapsed == 0 {
+		elapsed = time.Since(m.started)
+	}
+	dur.Record(ctx, elapsed.Seconds(), genaiconv.OperationNameChat, provider, attrs...)
 
 	if !m.hasUsage {
 		return

@@ -1,8 +1,10 @@
 package events_test
 
 import (
+	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -79,7 +81,7 @@ func TestModelRequestRecordsGenAIMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if _, err := mr.EndEvent(false, domain.ModelUsage{InputTokens: 11, OutputTokens: 7}); err != nil {
+	if _, err := mr.EndEvent(false, &domain.ModelUsage{InputTokens: 11, OutputTokens: 7}); err != nil {
 		t.Fatalf("end event: %v", err)
 	}
 	mr.Finish(ctx, false, nil)
@@ -130,6 +132,13 @@ func TestModelRequestRecordsGenAIMetrics(t *testing.T) {
 // A turn that failed is the one worth finding in a dashboard, so it must be
 // distinguishable — and it has no usage to report, which must not surface as a
 // pair of zero-token readings diluting the real ones.
+//
+// This drives the brain's real failure ordering: commitFailure renders an end
+// event before failTurn finishes the span. The wire schema still wants a
+// model_usage object on that event, so it carries zeroes — and those zeroes are
+// exactly what must not reach the token histogram. Finishing with no end event
+// at all is an ordering the brain never uses while a span is live, so asserting
+// on it would leave this gate untested on the only path it exists for.
 func TestModelRequestRecordsFailureWithoutTokens(t *testing.T) {
 	pool := newPool(t)
 	log := events.NewLog(pool)
@@ -140,6 +149,15 @@ func TestModelRequestRecordsFailureWithoutTokens(t *testing.T) {
 	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "openai", Model: "gpt-x"})
 	if err != nil {
 		t.Fatalf("start: %v", err)
+	}
+	ev, err := mr.EndEvent(true, nil)
+	if err != nil {
+		t.Fatalf("end event: %v", err)
+	}
+	// The wire event still reports a usage object whatever the metric does —
+	// the zeroes belong on the log, just not in the histogram.
+	if !bytes.Contains(ev.Payload, []byte(`"model_usage"`)) {
+		t.Errorf("end event dropped model_usage: %s", ev.Payload)
 	}
 	mr.Finish(ctx, true, nil)
 
@@ -159,5 +177,65 @@ func TestModelRequestRecordsFailureWithoutTokens(t *testing.T) {
 	}
 	if pts := intPoints(rm, "gen_ai.client.token.usage"); len(pts) != 0 {
 		t.Errorf("token usage points = %d on a turn that never reported usage, want 0", len(pts))
+	}
+}
+
+// gen_ai.client.operation.duration is the convention's measure of the client's
+// call to the model provider. The brain finishes a span only after settling the
+// turn — a session-locked Postgres transaction the model had nothing to do with
+// — so measuring to Finish would file database contention under a model-latency
+// instrument, and would do it only on the paths that settle, leaving the metric
+// inconsistent with itself. ModelDone stops the clock at the real boundary.
+func TestModelRequestDurationExcludesSettlement(t *testing.T) {
+	pool := newPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	ctx := context.Background()
+	collect := collectMetrics(t)
+
+	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	mr.ModelDone() // the stream ended here
+	settle := 60 * time.Millisecond
+	time.Sleep(settle) // a slow settlement transaction
+	if _, err := mr.EndEvent(false, &domain.ModelUsage{InputTokens: 1, OutputTokens: 1}); err != nil {
+		t.Fatalf("end event: %v", err)
+	}
+	mr.Finish(ctx, false, nil)
+
+	dur := floatPoints(collect(), "gen_ai.client.operation.duration")
+	if len(dur) != 1 {
+		t.Fatalf("duration points = %d, want 1", len(dur))
+	}
+	if dur[0].Sum >= settle.Seconds() {
+		t.Errorf("duration = %vs, which includes the %v settlement — the metric is reporting database time as model latency",
+			dur[0].Sum, settle)
+	}
+}
+
+// A turn that died before the stream ever finished never marks a model
+// boundary. It still has a duration worth recording — the attempt — so the
+// measure must fall back to the request's own elapsed rather than report zero.
+func TestModelRequestDurationFallsBackWhenTheStreamNeverEnded(t *testing.T) {
+	pool := newPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	ctx := context.Background()
+	collect := collectMetrics(t)
+
+	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	mr.Finish(ctx, true, nil) // no ModelDone: the turn was abandoned mid-stream
+
+	dur := floatPoints(collect(), "gen_ai.client.operation.duration")
+	if len(dur) != 1 {
+		t.Fatalf("duration points = %d, want 1", len(dur))
+	}
+	if dur[0].Sum <= 0 {
+		t.Errorf("duration = %v on an abandoned turn, want the elapsed attempt", dur[0].Sum)
 	}
 }

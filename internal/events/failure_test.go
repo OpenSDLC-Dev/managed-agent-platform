@@ -48,7 +48,7 @@ func TestLogFailurePaths(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE sessions SET archived_at = now() WHERE id = $1`, sid.String()); err != nil {
 		t.Fatal(err)
 	}
-	endEv, err := mr.EndEvent(false, domain.ModelUsage{})
+	endEv, err := mr.EndEvent(false, &domain.ModelUsage{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestClosedPoolFailurePaths(t *testing.T) {
 	if _, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventUserMessage, Payload: text("x")}}); err == nil {
 		t.Error("append on closed pool should error")
 	}
-	endEv, err := mr.EndEvent(false, domain.ModelUsage{})
+	endEv, err := mr.EndEvent(false, &domain.ModelUsage{})
 	if err != nil {
 		t.Fatal(err)
 	}

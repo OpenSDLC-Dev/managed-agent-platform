@@ -111,6 +111,51 @@ func TestToolExecSpanRecordsABackendFault(t *testing.T) {
 	}
 }
 
+// The tools can run perfectly and the work still have no effect: if the results
+// never commit, the item is left for reclaim and every tool re-runs next lease
+// period. A SpanKindConsumer span stands for the handling of the message, not
+// just the part before the write, so ending it green here would show an
+// operator a clean tool_exec under a session that visibly stalled.
+func TestToolExecSpanRecordsAFailedCommit(t *testing.T) {
+	ended := recordSpans(t)
+
+	entered := make(chan struct{}, 1)
+	gate := make(chan struct{})
+	h := newHarness(t, &fakeSandbox{entered: entered, gate: gate})
+	var faults int
+	h.exec.onFault = func(*queue.Item, error) { faults++ }
+	h.suspend(t, writeUse("out.txt", "hi"))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := h.exec.step(context.Background()); err != nil {
+			t.Errorf("step: %v", err)
+		}
+	}()
+
+	// Archive the session behind the running tool. Liveness was checked at
+	// claim, so the results append is the first thing to see it gone: the tools
+	// ran, and nothing they produced can land.
+	<-entered
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET archived_at = now() WHERE id = $1`, h.sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	close(gate)
+	<-done
+
+	if faults != 1 {
+		t.Fatalf("faults = %d, want 1 (the commit must have failed)", faults)
+	}
+	if got := len(h.types(t, "agent.tool_result")); got != 0 {
+		t.Fatalf("results = %d, want 0 (nothing committed)", got)
+	}
+	if got := toolExecSpan(t, ended()).Status().Code; got != codes.Error {
+		t.Errorf("span status = %v after the results failed to commit, want %v", got, codes.Error)
+	}
+}
+
 // A tool the model can recover from — a missing file, a nonzero exit — is the
 // agent doing agent things, and marking the span errored for it would light up
 // every dashboard on ordinary agent behaviour. Only the platform's own faults
