@@ -62,8 +62,6 @@ type Config struct {
 // String redacts the credential. Printing a Config is the natural first move
 // when a live turn misbehaves, so the redaction is a property of the type
 // rather than a warning in a comment that a %v somewhere else would ignore.
-// It covers the verbs that print a value — %v, %+v, %s. Reaching past them
-// (%#v, encoding/json) still reaches the field, so don't.
 func (c Config) String() string {
 	key := "unset"
 	if c.APIKey != "" {
@@ -71,6 +69,11 @@ func (c Config) String() string {
 	}
 	return fmt.Sprintf("{Protocol:%s BaseURL:%s APIKey:%s Model:%s}", c.Protocol, c.BaseURL, key, c.Model)
 }
+
+// GoString redacts the credential under %#v, which is the verb a debugger
+// reaches for and the one that walks straight past String() into the fields.
+// Unexporting the credential would not help: fmt prints unexported fields too.
+func (c Config) GoString() string { return "modeltest.Config" + c.String() }
 
 // Endpoint gates a live tier and returns the endpoint it should drive.
 //

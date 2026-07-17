@@ -226,7 +226,10 @@ func TestConfigFormattingRedactsTheKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected failure: %v", err)
 	}
-	for _, format := range []string{"%v", "%+v", "%s"} {
+	// %#v is the one a debugger reaches for, and it is exactly the verb that
+	// walks past String() into the raw fields — unexporting them would not
+	// help either, since fmt prints those too.
+	for _, format := range []string{"%v", "%+v", "%s", "%#v"} {
 		rendered := fmt.Sprintf(format, cfg)
 		if strings.Contains(rendered, secret) {
 			t.Errorf("%s of a Config leaks the API key: %s", format, rendered)
