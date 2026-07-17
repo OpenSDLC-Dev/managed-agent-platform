@@ -192,6 +192,15 @@ func writeArtifacts() error {
 	if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
 		return err
 	}
+	// Clear a prior run's per-failure transcripts so the directory reflects only
+	// this run. report.json and summary.md are overwritten below, but transcripts
+	// are named per session and would otherwise accumulate — a stale one sitting
+	// beside a fresh green summary reads as a failure of the run that just passed.
+	if old, err := filepath.Glob(filepath.Join(artifactsDir, "transcript-*.json")); err == nil {
+		for _, f := range old {
+			_ = os.Remove(f)
+		}
+	}
 	// Every artifact is scrubbed of known secrets on its way to disk (see
 	// secretsOf): the scrub runs over the final rendered bytes, so a credential
 	// is caught wherever it surfaced rather than at each call site.

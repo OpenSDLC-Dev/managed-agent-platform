@@ -80,7 +80,7 @@ itself when its credentials rot is not a safety net.
 | Unit & contract | — | logic, wire shapes, scripted provider streams |
 | Dependency integration | — | real Postgres, Docker, and Kubernetes (hard-fail without them) |
 | Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn against your endpoint, through the adapter whose protocol it speaks (the other adapter's test skips) |
-| Live-system evals | `RUN_EVALS=1` (`make eval`) | whole sessions: API → brain → real model → sandbox → SSE, deterministically graded. [Ten regression tasks](./docs/EVALS_PLAN.md) covering all six tools, permission allow/deny, and single- and multi-turn; results land in `evals/artifacts/` |
+| Live-system evals | `RUN_EVALS=1` (`make eval`) | whole sessions: API → brain → real model → sandbox → SSE, deterministically graded. [Ten regression tasks](./docs/EVALS_PLAN.md) spanning the built-in toolset, permission allow/deny, and single- and multi-turn; results land in `evals/artifacts/` |
 
 Configure the endpoint once in a gitignored repo-root `.env` — `MODEL_PROTOCOL`
 (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID` — and the live tiers

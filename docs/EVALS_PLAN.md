@@ -126,14 +126,17 @@ accounting populated; the idle event observed on the SSE stream.
 | 4 | `edit-config` | `read` + `edit`. Whole-file equality proves the edit was surgical, not a rewrite | `config.ini` |
 | 5 | `needle-search` | `glob` + `grep` output contracts (`path:line:text`), decoys included | 4 files |
 | 6 | `perm-allow` | The permission bridge: `requires_action` → confirm → resume, with the tool result provably sequenced *after* the approval | — |
-| 7 | `perm-deny` | Its negative twin: denial synthesizes an `is_error` result, and the seeded file survives | `protected/keep.txt` |
+| 7 | `perm-deny` | Its negative twin: a denied append synthesizes an `is_error` result, and the seeded file is left untouched | `notes.txt` |
 | 8 | `exit-code` | Tool failure propagation. The exit code exists nowhere but the real tool result, so reporting it proves the model consumed it | — |
 | 9 | `journal-multiturn` | Two turns, one session: event replay and sandbox reuse (same container id) | — |
 | 10 | `view-range` | `read` `view_range` slicing, byte-exact — an off-by-one guard | `poem.txt` |
 
-Coverage: all six tools (bash 1/3/6/7/8, read 4/10, write 10, edit 4, glob+grep 5); single
-and multi turn; allow and deny; seeded and unseeded; three negatives (2, 7, 8). Every
-trial exercises SSE and usage accounting through G0.
+Coverage: the six tools appear across the tasks — bash (1/3/6/7/8), read (4/10), edit (4)
+and grep (5) are graded directly by a tool-use floor or a result contract; write (9/10) and
+glob (5) are exercised in the prompts but not separately required, because a model may reach
+the same artifact another way and the artifact is what these tasks grade. Single and multi
+turn; allow and deny; seeded and unseeded; three negatives (2, 7, 8). Every trial exercises
+SSE and usage accounting through G0.
 
 One image for the whole run, `python:3.12-slim` (Debian-slim underneath, so the toolset's
 `grep`/`stat`/`sort` probes see the same userland as the default `debian:stable-slim`).

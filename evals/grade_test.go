@@ -684,7 +684,9 @@ func ReadRangeLine(path string, line int, want string, class Class) Grader {
 					continue
 				}
 				input, _ := use["input"].(map[string]any)
-				if p, _ := input["file_path"].(string); !strings.HasSuffix(p, path) {
+				// Match on a path-component boundary so a sibling like
+				// "my-poem.txt" cannot satisfy a grader for "poem.txt".
+				if p, _ := input["file_path"].(string); p != path && !strings.HasSuffix(p, "/"+path) {
 					continue
 				}
 				if !viewRangeIs(input["view_range"], line) {
