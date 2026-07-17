@@ -1,6 +1,7 @@
 package modeltest
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -36,21 +37,71 @@ MODEL_EMPTY=
 	}
 }
 
-func TestParseDotEnvQuotedValueKeepsHash(t *testing.T) {
-	got := parseDotEnv(strings.NewReader(`MODEL_ID="model # not-a-comment"`))
-	if got["MODEL_ID"] != "model # not-a-comment" {
-		t.Errorf("MODEL_ID = %q, want the hash preserved inside quotes", got["MODEL_ID"])
+// A .env is hand-written, so its comments and quotes are whatever a human
+// typed. Every case here is one a real file produces and an earlier version of
+// this parser got wrong — silently, by handing the endpoint a value with a
+// comment welded onto it.
+func TestParseValue(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"plain", `some-model`, "some-model"},
+		{"space-delimited comment", `some-model # pinned`, "some-model"},
+		{"tab-delimited comment", "some-model\t# pinned", "some-model"},
+		{"hash inside the value", `sk-abc#def`, "sk-abc#def"},
+		{"double-quoted", `"https://gateway.example/api"`, "https://gateway.example/api"},
+		{"single-quoted", `'sk-secret'`, "sk-secret"},
+		{"quoted, then a comment", `"abc" # note`, "abc"},
+		{"hash inside quotes", `"model # pinned"`, "model # pinned"},
+		{"hash inside quotes, then a comment", `"model # pinned" # note`, "model # pinned"},
+		{"unbalanced quote", `"abc`, `"abc`},
+		{"empty", ``, ""},
+		{"surrounding space", `  spaced  `, "spaced"},
+	} {
+		if got := parseValue(tc.in); got != tc.want {
+			t.Errorf("%s: parseValue(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
 	}
 }
 
-func TestEnabled(t *testing.T) {
-	t.Setenv(EvalsEnv, "")
-	if Enabled(EvalsEnv) {
-		t.Error("an unset tier variable must not enable the tier")
+func TestLookupPrefersTheEnvironment(t *testing.T) {
+	file := staticFile(map[string]string{"MODEL_ID": "from-file"})
+	env := lookupFrom(map[string]string{"MODEL_ID": "from-env"})
+	if got := lookup(env, file, "MODEL_ID"); got != "from-env" {
+		t.Errorf("MODEL_ID = %q, want the environment to win over the file", got)
 	}
-	t.Setenv(EvalsEnv, "1")
-	if !Enabled(EvalsEnv) {
-		t.Error("a set tier variable must enable the tier")
+}
+
+func TestLookupFallsBackToTheFile(t *testing.T) {
+	file := staticFile(map[string]string{"MODEL_ID": "from-file"})
+	if got := lookup(lookupFrom(nil), file, "MODEL_ID"); got != "from-file" {
+		t.Errorf("MODEL_ID = %q, want the file to supply an unset key", got)
+	}
+}
+
+// An explicitly empty MODEL_API_KEY means "I am unsetting this", which the gate
+// must report as missing. Treating it as absent would let the .env quietly
+// refill it and spend money the operator was trying to stop.
+func TestLookupTreatsAnExplicitEmptyValueAsTheAnswer(t *testing.T) {
+	file := staticFile(map[string]string{"MODEL_API_KEY": "sk-from-file"})
+	env := lookupFrom(map[string]string{"MODEL_API_KEY": ""})
+	if got := lookup(env, file, "MODEL_API_KEY"); got != "" {
+		t.Errorf("MODEL_API_KEY = %q, want an explicitly emptied variable to stay empty", got)
+	}
+}
+
+// The two halves of "the file supplies configuration, never consent": a tier
+// variable never reads the file, so the file cannot opt anyone in — and a run
+// that asks only about tier variables never opens the credential file at all.
+func TestLookupNeverReadsTheFileForATierVariable(t *testing.T) {
+	opened := false
+	file := func() map[string]string {
+		opened = true
+		return map[string]string{EvalsEnv: "1", LiveEnv: "1"}
+	}
+	if got := lookup(lookupFrom(nil), file, EvalsEnv); got != "" {
+		t.Errorf("%s = %q, want the file to be unable to opt a tier in", EvalsEnv, got)
+	}
+	if opened {
+		t.Errorf("resolving %s opened the credential file", EvalsEnv)
 	}
 }
 
@@ -89,9 +140,7 @@ func TestEndpointReturnsConfigWhenOptedIn(t *testing.T) {
 }
 
 func TestEndpointNamesEveryMissingKey(t *testing.T) {
-	env := fullEnv(nil)
-	delete(env, "MODEL_BASE_URL")
-	delete(env, "MODEL_API_KEY")
+	env := fullEnv(map[string]string{"MODEL_BASE_URL": "", "MODEL_API_KEY": ""})
 
 	_, skip, err := endpoint(getenvFrom(env), LiveEnv, nil)
 	if skip != "" {
@@ -108,12 +157,14 @@ func TestEndpointNamesEveryMissingKey(t *testing.T) {
 }
 
 func TestEndpointRejectsUnknownProtocol(t *testing.T) {
-	env := fullEnv(map[string]string{"MODEL_PROTOCOL": "grpc-telepathy"})
-	_, skip, err := endpoint(getenvFrom(env), LiveEnv, nil)
+	// A typo must not sneak out as a protocol-mismatch skip: the tier would go
+	// quiet exactly when its configuration broke.
+	env := fullEnv(map[string]string{"MODEL_PROTOCOL": "anthropci"})
+	_, skip, err := endpoint(getenvFrom(env), LiveEnv, []string{"anthropic"})
 	if skip != "" {
 		t.Fatalf("an invalid protocol must fail, not skip (got skip %q)", skip)
 	}
-	if err == nil || !strings.Contains(err.Error(), "grpc-telepathy") {
+	if err == nil || !strings.Contains(err.Error(), "anthropci") {
 		t.Errorf("error = %v, want it to name the unknown protocol", err)
 	}
 }
@@ -135,7 +186,7 @@ func TestEndpointSkipsForAnotherAdaptersEndpoint(t *testing.T) {
 
 func TestEndpointAcceptsAnyProtocolWhenNoneNamed(t *testing.T) {
 	// The eval suite drives whatever the registry can route.
-	for _, protocol := range []string{"anthropic", "openai"} {
+	for _, protocol := range knownProtocols {
 		env := fullEnv(map[string]string{"MODEL_PROTOCOL": protocol})
 		cfg, skip, err := endpoint(getenvFrom(env), EvalsEnv, nil)
 		if err != nil || skip != "" {
@@ -168,6 +219,24 @@ func TestEndpointNeverLeaksTheKey(t *testing.T) {
 	}
 }
 
+// Printing a Config is what anyone does first when a live turn misbehaves, so
+// the redaction has to survive that, not just the paths this package controls.
+func TestConfigFormattingRedactsTheKey(t *testing.T) {
+	cfg, _, err := endpoint(getenvFrom(fullEnv(nil)), LiveEnv, nil)
+	if err != nil {
+		t.Fatalf("unexpected failure: %v", err)
+	}
+	for _, format := range []string{"%v", "%+v", "%s"} {
+		rendered := fmt.Sprintf(format, cfg)
+		if strings.Contains(rendered, secret) {
+			t.Errorf("%s of a Config leaks the API key: %s", format, rendered)
+		}
+		if !strings.Contains(rendered, "some-model") {
+			t.Errorf("%s of a Config dropped the model, leaving nothing to debug with: %s", format, rendered)
+		}
+	}
+}
+
 const secret = "sk-do-not-print-me"
 
 // fullEnv is an opted-in, completely configured anthropic endpoint, with
@@ -193,6 +262,14 @@ func fullEnv(overrides map[string]string) map[string]string {
 
 func getenvFrom(env map[string]string) func(string) string {
 	return func(key string) string { return env[key] }
+}
+
+func lookupFrom(env map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) { v, ok := env[key]; return v, ok }
+}
+
+func staticFile(m map[string]string) func() map[string]string {
+	return func() map[string]string { return m }
 }
 
 func keysOf(m map[string]string) []string {

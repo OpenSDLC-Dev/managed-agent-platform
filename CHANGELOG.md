@@ -14,10 +14,14 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 - Live-test tier opt-in — `internal/modeltest`, the shared gate for every tier that calls a real model
   endpoint. Consent is an environment variable (`RUN_LIVE_MODEL_TESTS=1` for the provider live-contract
   tier, `RUN_EVALS=1` for the end-to-end eval suite; two variables because their costs differ by an order
-  of magnitude). It also resolves the one endpoint they drive, loading `MODEL_*` from the gitignored
-  repo-root `.env` when unset — the dotenv reader, previously copy-pasted into both provider integration
-  tests, now lives here once. First step of the eval system planned in
-  [docs/EVALS_PLAN.md](./docs/EVALS_PLAN.md) ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)).
+  of magnitude). It also resolves the one endpoint they drive, falling back to the gitignored repo-root
+  `.env` for `MODEL_*` keys the environment does not set — the dotenv reader, previously copy-pasted into
+  both provider integration tests, now lives here once. The file is read lazily and only for `MODEL_*`,
+  which is what keeps a non-opted-in run from opening the credential file at all and makes the file
+  structurally unable to opt a tier in; its values are never pushed into the process environment, so no
+  test's `t.Setenv` can strip a key from a later one. A resolved endpoint redacts its credential when
+  formatted. First step of the eval system planned in [docs/EVALS_PLAN.md](./docs/EVALS_PLAN.md)
+  ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)).
 
 ### Changed
 
@@ -26,9 +30,12 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   real model call; now that run skips, and `RUN_LIVE_MODEL_TESTS=1` runs it. Once opted in, missing or
   invalid `MODEL_*` configuration **fails** the tier instead of skipping it — the old silent skip meant a
   rotted credential looked exactly like a green build ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)).
-  An endpoint speaking the *other* protocol still skips: one `.env` holds one endpoint, and the adapter it
-  does not belong to has nothing to prove against it. Verified all three ways against a real endpoint —
-  skip with no opt-in, a real turn with it, and a hard failure when opted in with no configuration.
+  That check now runs before the `-short` skip, so short mode declines to spend the time without becoming
+  a way to opt in and not be told the configuration is broken. An endpoint speaking the *other* protocol
+  still skips: one `.env` holds one endpoint, and the adapter it does not belong to has nothing to prove
+  against it; a protocol that is neither is a typo, and fails. Verified against a real endpoint every way
+  — skip with no opt-in, a real turn with it, a skip for the other adapter, and hard failures for an
+  unconfigured tier, a mistyped protocol under `-short`, and an explicitly emptied `MODEL_API_KEY`.
 - `make test`'s coverage denominator now also excludes `internal/modeltest`, joining `internal/pgtest` and
   `internal/sandbox/sandboxtest`: test-support packages whose uncovered statements are the branches that
   fire only when a suite fails or a tier is misconfigured. `modeltest`'s own suite still runs under

@@ -63,7 +63,7 @@ Two ideas, borrowed and cited:
 | Variable | Tier | Cost |
 |---|---|---|
 | *(none)* | unit, contract, dependency integration | free, every PR |
-| `RUN_LIVE_MODEL_TESTS=1` | provider live-contract: one real turn per adapter | cents |
+| `RUN_LIVE_MODEL_TESTS=1` | provider live-contract: one real turn through the adapter whose protocol the endpoint speaks | cents |
 | `RUN_EVALS=1` | live-system evals: whole sessions, real sandboxes | minutes, dollars |
 
 Unset → skip (an ordinary `go test ./...` calls no model, even with a populated `.env`).

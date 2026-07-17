@@ -78,7 +78,7 @@ itself when its credentials rot is not a safety net.
 |---|---|---|
 | Unit & contract | — | logic, wire shapes, scripted provider streams |
 | Dependency integration | — | real Postgres, Docker, and Kubernetes (hard-fail without them) |
-| Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn per provider adapter against your endpoint |
+| Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn against your endpoint, through the adapter whose protocol it speaks (the other adapter's test skips) |
 | Live-system evals *(being built)* | `RUN_EVALS=1` | whole sessions: API → brain → real model → sandbox → SSE — the suite and its `make eval` entry point are [in progress](./docs/EVALS_PLAN.md); the variable already gates it |
 
 Configure the endpoint once in a gitignored repo-root `.env` — `MODEL_PROTOCOL`

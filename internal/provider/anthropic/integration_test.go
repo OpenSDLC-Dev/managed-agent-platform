@@ -14,13 +14,16 @@ import (
 // TestIntegrationRealEndpoint drives one real model turn against the
 // anthropic-protocol endpoint configured for the live tier. It runs only under
 // RUN_LIVE_MODEL_TESTS (see internal/modeltest for the opt-in contract), so an
-// ordinary `go test ./...` never spends money. Credential values are never
-// logged.
+// ordinary `go test ./...` never spends money. modeltest resolves the endpoint
+// without printing the credential; an error raised by the endpoint itself is
+// logged as-is, and some adapters quote a failing response body verbatim.
 func TestIntegrationRealEndpoint(t *testing.T) {
+	// Gate first: short mode may decline to spend the time, but it must not
+	// become a way to opt in and still not be told the configuration is broken.
+	cfg := modeltest.Endpoint(t, modeltest.LiveEnv, "anthropic")
 	if testing.Short() {
 		t.Skip("short mode: skipping the real model call")
 	}
-	cfg := modeltest.Endpoint(t, modeltest.LiveEnv, "anthropic")
 
 	p, err := anthropic.New(provider.Config{
 		Protocol: cfg.Protocol, Model: cfg.Model, BaseURL: cfg.BaseURL, APIKey: cfg.APIKey,
