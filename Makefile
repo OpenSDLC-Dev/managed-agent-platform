@@ -30,9 +30,19 @@ crossbuild:
 vet:
 	go vet ./...
 
+# gofmt walks the filesystem rather than the module, so unlike `go vet ./...` it
+# does not skip dot-directories — and .claude/worktrees holds whole checkouts of
+# this same repo. Without this, a parallel session's half-typed file fails THIS
+# checkout's gate, which is precisely the interference worktrees exist to
+# prevent. Each worktree's own `make verify` covers its own files.
+#
+# -prune, not a -path filter: a filter still descends and only withholds the
+# match, so an unreadable directory in a sibling worktree makes find itself
+# error out and takes the gate down with it under `set -e` — the same failure
+# through a different door. -prune never enters.
 fmt-check:
 	@set -euo pipefail; \
-	unformatted="$$(gofmt -l .)"; \
+	unformatted="$$(find . -path ./.claude -prune -o -name '*.go' -exec gofmt -l {} +)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:" >&2; \
 		echo "$$unformatted" >&2; \

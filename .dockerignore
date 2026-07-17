@@ -3,6 +3,12 @@
 # local secret — at any level — out of the build context and its cache.
 .git
 .github
+# Parallel-session worktrees: each is a whole extra checkout under the repo
+# root, and compose builds with context ../.., so without this every live
+# worktree is swept into the build context. The secret patterns below already
+# depth-match, so nothing leaked — this is about context size and stale
+# artifacts (coverage.out below is root-only).
+.claude/worktrees
 **/.env
 **/.env.*
 **/*.local.yaml
