@@ -159,11 +159,20 @@ func newHarnessWith(t *testing.T, provider sandbox.Provider, cfg Config) *harnes
 // agent.tool_use intents and enqueues one tool_exec item, one transaction.
 func (h *harness) suspend(t *testing.T, uses ...string) []domain.Event {
 	t.Helper()
+	return h.suspendUnder(t, context.Background(), uses...)
+}
+
+// suspendUnder is suspend under a caller's context, so a test can enqueue the
+// item from inside a span the way a real mid-turn brain does. Enqueue dedupes
+// per (session, kind) while an item is live, so the span has to be here — a
+// second Enqueue would be a no-op and leave the first item's context in place.
+func (h *harness) suspendUnder(t *testing.T, ctx context.Context, uses ...string) []domain.Event {
+	t.Helper()
 	var evs []events.NewEvent
 	for _, u := range uses {
 		evs = append(evs, events.NewEvent{Type: domain.EventAgentToolUse, Payload: json.RawMessage(u)})
 	}
-	out, err := h.log.AppendWith(context.Background(), h.sid, evs, events.AppendOptions{
+	out, err := h.log.AppendWith(ctx, h.sid, evs, events.AppendOptions{
 		Then: func(ctx context.Context, tx pgx.Tx) error {
 			_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sid, queue.ToolExec)
 			return err

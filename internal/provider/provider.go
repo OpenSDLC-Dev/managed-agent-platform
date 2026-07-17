@@ -150,6 +150,45 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 	return r, nil
 }
 
+// Descriptor is what may be said out loud about the backend a model routes to:
+// the protocol its endpoint speaks and the model id sent upstream. It exists so
+// telemetry can name the backend without being handed a Config, which carries
+// the credential — the redaction is the type's shape, not a caller's discipline.
+type Descriptor struct {
+	Protocol string
+	Model    string
+}
+
+// Describe resolves a model string to its backend's Descriptor, reporting
+// whether a route exists. It answers from configuration alone and never
+// constructs a provider, so telemetry about an unroutable model costs nothing.
+func (r *Registry) Describe(model string) (Descriptor, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cfg, ok := r.route(model)
+	if !ok {
+		return Descriptor{}, false
+	}
+	return Descriptor{Protocol: cfg.Protocol, Model: cfg.Model}, true
+}
+
+// route resolves a model string to its config, applying the pass-through of the
+// agent's own model name when the route names no upstream one. Callers hold the
+// lock.
+func (r *Registry) route(model string) (Config, bool) {
+	cfg, ok := r.routes[model]
+	if !ok {
+		if r.fallback == nil {
+			return Config{}, false
+		}
+		cfg = *r.fallback
+	}
+	if cfg.Model == "" {
+		cfg.Model = model
+	}
+	return cfg, true
+}
+
 // Provider resolves the provider for an agent's model string. When the
 // route's config has no upstream model set, the agent's own model string
 // passes through (a gateway that understands the platform's model names).
@@ -159,15 +198,9 @@ func (r *Registry) Provider(model string) (Provider, error) {
 	if p, ok := r.cache[model]; ok {
 		return p, nil
 	}
-	cfg, ok := r.routes[model]
+	cfg, ok := r.route(model)
 	if !ok {
-		if r.fallback == nil {
-			return nil, fmt.Errorf("no provider route for model %q", model)
-		}
-		cfg = *r.fallback
-	}
-	if cfg.Model == "" {
-		cfg.Model = model
+		return nil, fmt.Errorf("no provider route for model %q", model)
 	}
 	cfg.Headers = cloneHeaders(cfg.Headers)
 	p, err := r.factories[cfg.Protocol](cfg)

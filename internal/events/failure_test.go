@@ -41,7 +41,7 @@ func TestLogFailurePaths(t *testing.T) {
 	// span helpers surface append failures. The end event render never
 	// touches the database; committing it on an archived session must
 	// return the error, and Finish records that fate on the OTel span.
-	_, mr, err := log.StartModelRequest(ctx, sid)
+	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,13 +56,13 @@ func TestLogFailurePaths(t *testing.T) {
 	if !errors.Is(err, events.ErrSessionArchived) {
 		t.Errorf("end event append on archived session err = %v, want ErrSessionArchived", err)
 	}
-	mr.Finish(false, err)
+	mr.Finish(ctx, false, err)
 
 	// And a deleted session fails the start append.
 	if _, err := pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sid.String()); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := log.StartModelRequest(ctx, sid); err == nil {
+	if _, _, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"}); err == nil {
 		t.Error("StartModelRequest on deleted session should error")
 	}
 }
@@ -73,7 +73,7 @@ func TestClosedPoolFailurePaths(t *testing.T) {
 	sid := newSession(t, pool)
 	ctx := context.Background()
 
-	_, mr, err := log.StartModelRequest(ctx, sid)
+	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestClosedPoolFailurePaths(t *testing.T) {
 	if _, err := log.Append(ctx, sid, []events.NewEvent{endEv}); err == nil {
 		t.Error("span end append on closed pool should error")
 	}
-	mr.Finish(false, err)
+	mr.Finish(ctx, false, err)
 	if err := preview.Delta(ctx, 0, "x"); err == nil {
 		t.Error("delta on closed pool should error")
 	}

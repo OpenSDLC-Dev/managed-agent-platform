@@ -166,7 +166,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 		return b.failTurn(ctx, sid, item, nil, watermark, fmt.Sprintf("no provider for model %q", agent.Model.ID))
 	}
 
-	sctx, span, err := b.log.StartModelRequest(ctx, sid)
+	// The route resolved above, named for telemetry. Provider() just succeeded,
+	// so Describe cannot miss; an empty backend would only mean unlabelled
+	// metrics, never a failed turn.
+	desc, _ := b.registry.Describe(agent.Model.ID)
+	sctx, span, err := b.log.StartModelRequest(ctx, sid,
+		events.Backend{Provider: desc.Protocol, Model: desc.Model})
 	if err != nil {
 		return fmt.Errorf("span start: %w", err)
 	}
@@ -176,13 +181,13 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 	if err := keeper.close(); err != nil {
 		// The lease is gone or unmaintainable: another brain may own the
 		// turn already. Nothing of ours may commit — abandon quietly.
-		span.Finish(true, err)
+		span.Finish(ctx, true, err)
 		return fmt.Errorf("lease keeper: %w", err)
 	}
 	if streamErr != nil {
 		var ie infraError
 		if errors.As(streamErr, &ie) {
-			span.Finish(true, streamErr)
+			span.Finish(ctx, true, streamErr)
 			return streamErr
 		}
 		return b.failTurn(ctx, sid, item, span, watermark, streamErr.Error())
@@ -386,7 +391,7 @@ func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy m
 // whose duplicate tool intents would poison every future replay).
 func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType, watermark int64) error {
 	err := b.commitTurn(ctx, sid, item, span, turn, toolKind, policy, watermark)
-	span.Finish(false, err)
+	span.Finish(ctx, false, err)
 	if err != nil {
 		return fmt.Errorf("settle: %w", err)
 	}
@@ -559,7 +564,7 @@ func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID, batch []even
 func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg string) error {
 	err := b.commitFailure(ctx, sid, item, span, watermark, msg)
 	if span != nil {
-		span.Finish(true, err)
+		span.Finish(ctx, true, err)
 	}
 	return err
 }

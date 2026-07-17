@@ -35,10 +35,18 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracerName is the executor's OTel instrumentation scope.
+const tracerName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/executor"
 
 // Config tunes the loop. Image is the sandbox base image (a deployment choice —
 // the wire's environment config has no image field). LeaseTTL must comfortably
@@ -147,7 +155,30 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) error {
 	// session's tools. Provisioning and every tool run happen under kctx, so
 	// losing the lease cancels the work.
 	kctx, keeper := e.keepLease(ctx, item)
-	results, faultErr, runErr := e.provisionAndRun(kctx, item, net)
+
+	// Parent the tool run on the turn that enqueued it, whose trace context the
+	// queue captured onto the item — so a session's model turns and the tools
+	// they trigger are one trace, the same guarantee the BYOC worker already
+	// gets from the poll response. Only the run is spanned; the lease keeper is
+	// bookkeeping, and the commit below is the queue's, not the tools'.
+	runCtx, span := otel.GetTracerProvider().Tracer(tracerName).Start(
+		telemetry.Extract(kctx, item.TraceContext), "tool_exec",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("session.id", item.SessionID.String()),
+			attribute.String("work.id", item.ID.String()),
+		))
+	results, faultErr, runErr := e.provisionAndRun(runCtx, item, net)
+	// Only the platform's own faults are span errors (provisionAndRun returns at
+	// most one of the two). A tool the model can read and recover from — a
+	// missing file, a nonzero exit — is the agent doing agent things: it rides
+	// the log verbatim and the toolset metric's error.type, and erroring the
+	// span for it would light up every trace view on ordinary agent behaviour.
+	if err := errors.Join(runErr, faultErr); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
+
 	if kerr := keeper.close(); kerr != nil {
 		// The lease is gone — another executor may already own this item.
 		// Nothing of ours may commit; the results we ran are re-derived on the

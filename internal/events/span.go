@@ -14,11 +14,24 @@ import (
 
 const tracerName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 
+// Backend names the model backend one request goes to: the protocol its
+// endpoint speaks and the model id sent upstream. It is telemetry's view of the
+// route the provider registry resolved — never the credential, and never the
+// provider itself, which would drag model backends into the event log.
+type Backend struct {
+	// Provider is the OTel gen_ai.provider.name — "anthropic" or "openai",
+	// which are the protocol values the registry routes on.
+	Provider string
+	// Model is the gen_ai.request.model: what the endpoint was asked for.
+	Model string
+}
+
 // StartModelRequest emits the span.model_request_start event and opens the
 // matching OTel client span from one instrumentation point, so the wire
-// events and the OTel trace can never drift (CLAUDE.md principle 3). The
+// events and the OTel trace can never drift (CLAUDE.md principle 3). Finish
+// records the turn's metrics from the same point, for the same reason. The
 // returned context carries the span for downstream propagation.
-func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID) (context.Context, *ModelRequest, error) {
+func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID, backend Backend) (context.Context, *ModelRequest, error) {
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "model_request",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attribute.String("session.id", sessionID.String())))
@@ -35,7 +48,10 @@ func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID) (conte
 		span.End()
 		return ctx, nil, err
 	}
-	return ctx, &ModelRequest{log: l, sessionID: sessionID, startID: evs[0].ID, span: span}, nil
+	return ctx, &ModelRequest{
+		log: l, sessionID: sessionID, startID: evs[0].ID, span: span,
+		backend: backend, started: time.Now(),
+	}, nil
 }
 
 // ModelRequest is one in-flight model call being traced.
@@ -45,6 +61,12 @@ type ModelRequest struct {
 	startID   domain.ID
 	span      trace.Span
 	usage     domain.ModelUsage // recorded by EndEvent for Finish's attributes
+	// hasUsage records whether EndEvent ran. A turn that died before reporting
+	// usage has none, and emitting a pair of zeroes for it would dilute the
+	// token histogram with readings no model ever produced.
+	hasUsage bool
+	backend  Backend
+	started  time.Time
 }
 
 // StartEventID is the id of the span.model_request_start event, which the
@@ -66,7 +88,7 @@ func (m *ModelRequest) EndEvent(isError bool, usage domain.ModelUsage) (NewEvent
 	if err != nil {
 		return NewEvent{}, err
 	}
-	m.usage = usage
+	m.usage, m.hasUsage = usage, true
 	now := time.Now().UTC()
 	return NewEvent{
 		Type:        domain.EventSpanModelRequestEnd,
@@ -75,11 +97,11 @@ func (m *ModelRequest) EndEvent(isError bool, usage domain.ModelUsage) (NewEvent
 	}, nil
 }
 
-// Finish closes the OTel span. commitErr is the fate of the transaction that
-// carried the EndEvent (or the reason no end event was attempted): non-nil
-// records the drift explicitly, so the trace never masks an aborted request
-// as a clean one.
-func (m *ModelRequest) Finish(isError bool, commitErr error) {
+// Finish closes the OTel span and records the turn's metrics. commitErr is the
+// fate of the transaction that carried the EndEvent (or the reason no end event
+// was attempted): non-nil records the drift explicitly, so the trace never masks
+// an aborted request as a clean one.
+func (m *ModelRequest) Finish(ctx context.Context, isError bool, commitErr error) {
 	switch {
 	case commitErr != nil:
 		m.span.SetStatus(codes.Error, "span.model_request_end not committed: "+commitErr.Error())
@@ -90,5 +112,6 @@ func (m *ModelRequest) Finish(isError bool, commitErr error) {
 		attribute.Int64("model.input_tokens", m.usage.InputTokens),
 		attribute.Int64("model.output_tokens", m.usage.OutputTokens),
 	)
+	m.recordMetrics(ctx, isError, commitErr)
 	m.span.End()
 }
