@@ -13,22 +13,18 @@ We take Anthropic's **Claude Managed Agents** as our **reference implementation*
 
 - **Plans live in [docs/plan/](./docs/plan/)** — one file per plan, named `NN_short-name.md` (two-digit sequence, ascending, assigned when the file enters the repo). Each opens with YAML frontmatter: `status: draft | approved | in-progress | archived`, plus an optional `issue:` naming the tracking issue. Lifecycle: `draft` = authored in-repo for discussion; `approved` = accepted but not started — a plan approved in plan mode is copied here in the first PR that touches it, and the repo copy is canonical from then on; `in-progress` = flipped in the PR that starts development (a plan whose first landing PR already starts the work lands as `in-progress` directly, skipping a committed `approved` state); `archived` = completed or superseded (the file says which), flipped in the final PR.
 - **Plan files carry no progress tracking** — no checklists ticked as work lands, whatever the status. While a plan is active its progress lives in STATE.md; once it archives, the delivery record is docs/HISTORY.md and CHANGELOG.md.
-- **Current state: [STATE.md](./STATE.md)** — a slim resumption file: snapshot, the active plan's progress track (linking its docs/plan file, updated in every PR that advances it), where everything lives, environment gotchas. Read it at the start of a session. It has a hard size budget: completed-work narrative goes to [docs/HISTORY.md](./docs/HISTORY.md) (same PR) — an archiving plan's progress summary moves there too — and the backlog lives in GitHub issues; never grow STATE.md with either.
+- **Current state: [STATE.md](./STATE.md)** — a slim resumption file: snapshot, the active plan's progress track (linking its docs/plan file, updated in every PR that advances it), where everything lives, environment gotchas. Read it at the start of a session. It has a hard size budget: a change's narrative is written **once**, in [CHANGELOG.md](./CHANGELOG.md); [docs/HISTORY.md](./docs/HISTORY.md) receives only what a changelog structurally cannot hold (acceptance-run and review-hardening records, decisions evaluated and rejected, archived plans' progress summaries — an archiving plan's summary moves there in the archiving PR); the backlog lives in GitHub issues. Never grow STATE.md with any of them.
 - **The backlog is GitHub issues** — the only backlog. Neither plan files nor STATE.md accumulate future work.
 
 The v1 design plan is [docs/plan/01_v1-managed-agent-platform.md](./docs/plan/01_v1-managed-agent-platform.md) (archived; mostly implemented) — consult it for rationale before large architectural changes.
 
 ## Core architecture — decouple brain / hands / session
 
-An agent is three independently-swappable pieces (a pattern we take from the reference):
+An agent is three independently-swappable pieces (a pattern we take from the reference): the **session** — an append-only event log in Postgres, the single source of truth; the **brain/harness** — the stateless, horizontally-scalable loop that calls the model and routes tool calls (a crashed brain loses nothing: any fresh brain replays the log and continues); and the **sandbox ("hands")** — a disposable per-session container that runs tools ("cattle not pets": a dying container is one tool-call error, not a lost session). Four `cmd/` binaries: `controlplane` · `brain` · `executor` · `worker`.
 
-- **Session** = append-only **event log** in Postgres. The *single source of truth*. All durable state lives here.
-- **Brain / Harness** = the loop that calls the model and routes tool calls. **Stateless, horizontally scalable.** Crash → any fresh brain replays the log and continues.
-- **Sandbox / Executor ("hands")** = disposable per-session container that runs tools. "Cattle not pets": a container dying is one tool-call error, not a lost session.
+**Execution is fully async through the event log + work queue.** The brain never runs tools in-process — it emits `agent.tool_use`, an executor pulls the work, runs it in a sandbox, posts the result event, and the brain wakes and continues. Platform-managed `cloud` and customer BYOC `self_hosted` are the **same pull protocol at two deployment points**.
 
-Processes (each a `cmd/` binary): `controlplane` (REST + event log + queue + state machine) · `brain` (harness pool) · `executor` (built-in sandbox worker) · `worker` (distributable BYOC worker).
-
-**Execution is fully async through the event log + work queue.** The brain never runs tools in-process — it emits `agent.tool_use`, an executor pulls the work, runs it in a sandbox, posts `agent.tool_result` (platform-managed) or `user.tool_result` (self-hosted/BYOC), and the brain wakes and continues. Platform-managed `cloud` and customer `self_hosted` are the **same pull protocol at two deployment points**.
+The as-built depth — process topology, the full execution flow (permissions/HITL, crash recovery), the wire-compatibility model, a per-package reference, security invariants, observability, testing architecture — is **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)**.
 
 ## Non-negotiable design principles
 
@@ -59,20 +55,23 @@ Four read-only local reference sources serve as ground truth and design referenc
 cmd/{controlplane,brain,executor,worker}   # the four binaries
 internal/
   domain/     # Anthropic-native types — the source of truth; no adk/genai here
-  api/        # wire-compatible REST handlers, ID prefixes, auth adapter
+  api/        # wire-compatible REST handlers, ID prefixes, auth, work API
   events/     # append-only store, SSE (Postgres LISTEN/NOTIFY), delta reconciliation
   brain/      # orchestration loop, replay, provider request assembly
   provider/   # ModelProvider iface + anthropic/ + openai/ + registry (model→provider)
-  mcp/        # MCP client wrapper (github.com/modelcontextprotocol/go-sdk)
-  sandbox/    # SandboxProvider iface + docker/ + k8s/
+  executor/   # tool_exec consumer — the platform-managed half of the pull protocol
+  worker/     # BYOC worker — the customer-hosted twin of executor/, wire-only
+  toolset/    # the built-in tools (agent_toolset_20260401)
+  sandbox/    # Sandbox/Provider iface + docker/ + k8s/ + backend selection + shell/
   queue/      # work queue (Postgres FOR UPDATE SKIP LOCKED; redis optional later)
-  policy/     # permission policy + HITL confirmation bridge
   telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
   store/      # Postgres schema/migrations, reserved multi-tenant columns
 deploy/{helm,compose}
 ```
 
-Primary deps: `github.com/anthropics/anthropic-sdk-go`, `github.com/modelcontextprotocol/go-sdk`, `go.opentelemetry.io/otel` (+ OTLP), `github.com/jackc/pgx`. `google.golang.org/adk/v2` is **not** a hard dependency.
+(Plus test-support: `internal/{pgtest,modeltest}`, `internal/sandbox/sandboxtest`, and the top-level `evals/` live suite. There is no `internal/mcp` or `internal/policy`: no MCP client is built yet, and permission policy lives across `domain`/`toolset`/`brain`/`api`.) What each package's files actually do: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) → "Package reference".
+
+Primary deps: `github.com/anthropics/anthropic-sdk-go`, `go.opentelemetry.io/otel` (+ OTLP), `github.com/jackc/pgx`. Neither `github.com/modelcontextprotocol/go-sdk` (no MCP client yet) nor `google.golang.org/adk/v2` is a dependency.
 
 ## Development
 
@@ -103,7 +102,7 @@ Every change lands through a PR; **never commit directly to `main`**.
 Review tiering: a diff whose changed paths (by `git diff main...HEAD --name-only`) are exclusively documentation markdown — `*.md` files outside `.claude/`, excluding CLAUDE.md and AGENTS.md themselves — may run a **single** code reviewer instead of the dual pass in step 4, but always keeps the verifier run, including its docs-consistency rung. Markdown that steers behavior (`.claude/` agents and skills, CLAUDE.md, AGENTS.md), anything else, or any ambiguity takes the full ritual.
 
 1. Branch off a fresh `main`: `git checkout main && git pull && git checkout -b <type>/<short-name>` (e.g. `feat/telemetry`, `fix/event-seq`, `chore/ci`).
-2. Develop on the branch (TDD as below). **Docs move with code, in the same PR:** STATE.md's snapshot updated (within its size budget) with the work's narrative appended to docs/HISTORY.md; the active plan's frontmatter status and STATE.md's Active plan section whenever the change starts, advances, or archives a plan; a CHANGELOG.md entry for every notable change; a docs/DIVERGENCES.md entry for any new wire divergence or inference; README.md (status line, development notes) whenever the change alters what it describes — README's roadmap section deliberately defers to CHANGELOG.md and the issue tracker instead of tracking work itself. A doc that overclaims or lags the code is a defect, not a nice-to-have — the verifier checks docs consistency as a dedicated rung.
+2. Develop on the branch (TDD as below). **Docs move with code, in the same PR:** STATE.md's snapshot updated (within its size budget); a CHANGELOG.md entry for every notable change — the **one** place a change's narrative is written (docs/HISTORY.md receives only acceptance-run and review-hardening records, decisions evaluated and rejected, and archived plans' progress summaries — never a per-PR narrative); the active plan's frontmatter status and STATE.md's Active plan section whenever the change starts, advances, or archives a plan; a docs/DIVERGENCES.md entry for any new wire divergence or inference; README.md (status line, development notes) whenever the change alters what it describes — README's roadmap section deliberately defers to CHANGELOG.md and the issue tracker instead of tracking work itself. A doc that overclaims or lags the code is a defect, not a nice-to-have — the verifier checks docs consistency as a dedicated rung.
 3. Run the **verifier subagent** (see "Independent verification"); fix findings before review.
 4. **Dual code review**, one pass each: the Codex reviewer and `/code-review` (Claude reviewer). **Model and reasoning effort are not defaults you may accept — a weak reviewer finds nothing and its silence reads like a clean bill of health.** The exact invocations and pins (verifier stays on its pinned `claude-fable-5`; `/code-review` agents run on Opus 4.8 via the persisted-script edit; Codex runs `gpt-5.6-sol` at the config's `ultra` effort through the `task` subcommand) live in the **`run-reviews` skill** (`.claude/skills/run-reviews/SKILL.md`), which governs both reviewers and the verifier — read it before launching any of them. Branch scope reviews the **committed** diff against `main` — commit before launching, or uncommitted fixes escape the review. Address findings from both reviewers; if a fix changes behavior, re-run the verifier. **Verify every finding against the source before acting on it** — reviewers have produced confidently-argued findings that were false (see the `dec.More()` note in `internal/provider/config.go`); refute with evidence rather than "fixing" working code.
 5. Push and open the PR (`gh pr create`); include the verifier verdict and the outcome of every review the tier required in the description — a stalled reviewer pass (see the skill's stall note) is reported as such, never silently dropped.

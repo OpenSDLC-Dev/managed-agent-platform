@@ -1,34 +1,34 @@
 # STATE.md — Current State
 
 The session-resumption file: what this project is right now, and where everything else
-lives. **Size budget: ~60 lines.** Completed-work narrative moves to
-[docs/HISTORY.md](./docs/HISTORY.md) in the same PR; the backlog lives in GitHub issues,
-never here. The verifier enforces both on its docs-consistency rung.
+lives. **Size budget: ~60 lines.** A change's narrative is written once, in
+[CHANGELOG.md](./CHANGELOG.md); the backlog lives in GitHub issues — never grow this
+file with either. The verifier enforces both on its docs-consistency rung.
 
 ## Snapshot
 
 - **Last updated:** 2026-07-18
-- **v1 is complete.** All delivery slices (0–9) landed and verified: wire-compatible
-  control-plane CRUD, append-only event log + SSE streaming, config-driven model providers
-  (Anthropic-protocol and OpenAI-compatible), the brain orchestration loop, executor +
-  Docker/K8s sandboxes running the built-in toolset, permission policies with the
-  `user.tool_confirmation` round-trip, the wire-compatible work API + BYOC worker
-  (dead-worker reclaim, one OTel trace across the process boundary), a Helm chart, and a
-  local docker-compose stack; the slice-8 acceptance — a real `ant beta:worker` end to
-  end — ran and passed (docs/HISTORY.md).
-- **Current focus:** none in flight. The **eval test system** ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)
-  phase 1) is complete — ten regression tasks **10/10 green** live via `make eval` (plan:
-  [docs/plan/02_evals-system.md](./docs/plan/02_evals-system.md), archived; follow-ups #96,
-  #99, and phase-1.5 `tool_choice` on #30 are filed, not queued). Next: environment-key
-  issuance ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)) and
-  published images + a helm-install acceptance ([#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75)).
+- **v1 is complete** — all delivery slices (0–9) landed and verified. The as-built system
+  is [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md); the slice-8 acceptance (a real
+  `ant beta:worker` end to end) ran and passed (docs/HISTORY.md).
+- **Current focus:** the docs restructure (plan 03, below). The **eval test system** ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)
+  phase 1) is complete — ten regression tasks **10/10 green** live via `make eval`
+  (plan 02 archived; follow-ups #96/#99/phase-1.5 filed). Next: environment-key issuance
+  ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)) and published
+  images + a helm-install acceptance ([#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75)).
 - **Release:** **v0.1.0** (2026-07-17) — the complete v1 loop, tagged at the release PR's
   squash-merge; new work accumulates under CHANGELOG's `[Unreleased]`.
 
 ## Active plan
 
-None. When one is active, this section links its [docs/plan/](./docs/plan/) file and carries
-its progress track (updated in every PR that advances it; the plan file itself carries none).
+**[docs/plan/03_docs-restructure.md](./docs/plan/03_docs-restructure.md)** — docs
+restructure: ARCHITECTURE.md + HISTORY slimming (PR A, this one), STATE.md as a pure
+work tracker (PR B), issue-triage subagent (PR C).
+
+- [x] PR A — docs/ARCHITECTURE.md created; HISTORY.md slimmed (530→217 lines) under the
+  one-writer rule, written into CLAUDE.md/AGENTS.md/CHANGELOG+HISTORY headers/verifier rung 5.
+- [ ] PR B — STATE.md reduced to Active work + Tasks (~30 lines); verifier STATE checks updated.
+- [ ] PR C — `.claude/agents/issue-triage.md` (Sonnet 5, JSON-only triage verdict) + CLAUDE.md trigger rule.
 
 ## Where things live
 
@@ -36,12 +36,12 @@ its progress track (updated in every PR that advances it; the plan file itself c
   — the only backlog. Post-v1 deferrals are #50–#57 (+ #77); do not build ahead of them.
   Wire assumptions awaiting a real managed-agents recording are cross-linked from
   docs/DIVERGENCES.md's INFERRED section (#27, #58–#61, #63, #67, #78).
-- **Completed-work archive:** [docs/HISTORY.md](./docs/HISTORY.md) — the full per-slice
-  narrative (moved verbatim from this file), alongside [CHANGELOG.md](./CHANGELOG.md).
+- **Completed-work record:** [CHANGELOG.md](./CHANGELOG.md) — the one narrative per change —
+  plus [docs/HISTORY.md](./docs/HISTORY.md) for acceptance runs, rejected decisions, and
+  archived-plan summaries. The as-built system: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 - **Plans:** [docs/plan/](./docs/plan/) — one file per plan (`NN_short-name.md`), status in
   its frontmatter; conventions in CLAUDE.md → "Plans, state, and backlog". The v1 design
-  rationale is [01_v1-managed-agent-platform.md](./docs/plan/01_v1-managed-agent-platform.md)
-  (archived; mostly implemented, open remnants tracked as issues).
+  rationale is [01_v1-managed-agent-platform.md](./docs/plan/01_v1-managed-agent-platform.md) (archived).
 - **Wire divergences & inferences:** [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) — the
   single registry; the verifier's wire-compat allowlist.
 - **Reference projects:** [docs/REFERENCE_PROJECTS.md](./docs/REFERENCE_PROJECTS.md) —
