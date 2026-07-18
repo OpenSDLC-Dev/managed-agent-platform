@@ -47,7 +47,7 @@ Progress is tracked in:
 
 - **[CHANGELOG.md](./CHANGELOG.md)** — what has landed, newest first.
 - **[GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues)** — the backlog and open questions.
-- **[STATE.md](./STATE.md)** — the current snapshot and the active plan's progress. The as-built system is [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md); acceptance and decision records are [docs/HISTORY.md](./docs/HISTORY.md).
+- **[STATE.md](./STATE.md)** — the active work and its task progress. The as-built system is [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md); acceptance and decision records are [docs/HISTORY.md](./docs/HISTORY.md).
 
 Deferred past v1 (seams reserved, not implemented — each tracked as an issue): secret vaults and egress credential injection, scheduled deployments, memory stores, multi-agent threads, skills, and multi-tenant RBAC/SSO.
 

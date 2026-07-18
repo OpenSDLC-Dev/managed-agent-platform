@@ -184,6 +184,17 @@ copy of an entry here.
 
 ### Changed
 
+- **STATE.md is now a pure active-work tracker** (docs only; plan 03, PR B). Two sections — Active
+  work (the current plan or issue) and Tasks (its checklist with progress and evidence links) — under
+  a ~30-line budget, replacing the snapshot / "Where things live" / environment-notes structure. What
+  moved out already had (or now has) a better home: the system description went to ARCHITECTURE.md in
+  PR A, release status lives in this file, the doc index was already CLAUDE.md's job, and the two
+  environment notes CLAUDE.md lacked (build `ant` from the read-only checkout; the module path's
+  deliberate mixed-case owner) moved into its Development section, and the backlog's deferral
+  pointers (#50–#57, #77) into its backlog bullet. CLAUDE.md's STATE description, AGENTS.md's mirror, README's pointer, and
+  the verifier's rung-5 STATE checks (now: only the two sections, the named plan real, task progress
+  agreeing with reality) updated in the same PR.
+
 - **The completed-work record now has a one-writer rule** (docs only). A change's narrative is written
   once, in this file; docs/HISTORY.md receives only what a changelog structurally cannot hold —
   acceptance-run and review-hardening records, decisions evaluated and rejected, and archived plans'
