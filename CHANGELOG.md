@@ -15,6 +15,24 @@ copy of an entry here.
 
 ### Added
 
+- **An `issue-triage` subagent** (`.claude/agents/issue-triage.md`) — the last piece of
+  [docs/plan/03_docs-restructure.md](./docs/plan/03_docs-restructure.md), which this PR archives.
+  Dispatched only when work is about to start from a GitHub issue, it reads the issue and surveys the
+  affected code, then returns one strict-JSON verdict. Its read-only promise is enforced, not just
+  instructed: a `PreToolUse` hook (`.claude/hooks/issue-triage-bash-guard.sh`, the documented mechanism
+  — the frontmatter `tools` field cannot express a command allowlist) confines Bash to
+  `gh issue view/list`, `gh pr view`, and `git log/show`, rejecting shell metacharacters (newlines and
+  carriage returns matched portably, not via a `/bin/sh`-unsafe `$'\n'` bashism), git's file-writing
+  `--output` flags, gh's browser-opening `--web`/`-w`, and everything else with a deny exit; an untrusted-input ground rule additionally treats issue text as data to judge,
+  never instructions to follow, since a triage agent ingests third-party text by design. Pinned to
+  Sonnet 5 — a triage judgment does not need the session model. The verdict: `needs_plan` — true on multi-PR scope, an
+  architectural decision, ambiguity needing the user, or required wire-schema verification; false for
+  single-PR mechanical work, with suggested `direct_tasks` — plus complexity, reasoning, dependencies,
+  and open questions. Deliberately judgment-only: drafting a plan, or turning the suggestions into
+  STATE.md's Tasks, stays with the main agent, so the subagent can never commit the session to a
+  decomposition nobody reviewed. CLAUDE.md's "Plans, state, and backlog" carries the trigger rule and
+  the scope limits.
+
 - **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)** — the as-built architecture reference, giving the
   system's description one home instead of three. It consolidates what was scattered: CLAUDE.md's
   architecture depth (the brain/hands/session decoupling, process topology, async execution flow —
