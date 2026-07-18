@@ -51,26 +51,44 @@ The plan's slice-8 acceptance, deferred until the local stack existed, has now b
 
 Pruned 2026-07-18 (plan 03). Each subsection's delivery narrative lives **once** in
 [CHANGELOG.md](../CHANGELOG.md) — find it under § 0.1.0 (or § [Unreleased] for later
-work) by the same slice/PR tag the heading carries — and its per-file reference in
+work) by the same slice/PR tag the heading carries; sections without a tag carry their
+own pointer line below — and its per-file reference in
 [ARCHITECTURE.md](./ARCHITECTURE.md) § "Package reference". The headings survive as
-citation anchors for [DIVERGENCES.md](./DIVERGENCES.md); what remains under a heading is
-recorded nowhere else.
+citation anchors for [DIVERGENCES.md](./DIVERGENCES.md); where a citation's parenthetical
+quotes prose from a pruned body, that prose lives on in the matching CHANGELOG entry or
+ARCHITECTURE row. What remains under a heading is recorded nowhere else.
 
 ### Repository & tooling
 
+*Narrative: the foundation entries at the bottom of CHANGELOG § 0.1.0 — "Project
+foundation", "CI pipeline", "CI coverage gate", "GitHub checks", "Dual code review",
+"Docs-consistency rule", "STATE.md".*
+
 ### `internal/domain` — Anthropic-native core types
+
+*Narrative: CHANGELOG § 0.1.0 → "Project foundation" (slice 0).*
 
 ### `internal/telemetry` — OTel init + W3C trace-context propagation
 
+*Narrative: CHANGELOG § 0.1.0 → "`internal/telemetry` — OTel foundation"; the log bridge
+is under § [Unreleased] → "OTel logs on the execution chain".*
+
 ### `internal/store` — Postgres schema + migrations
 
+*Narrative: CHANGELOG § 0.1.0 → "`internal/store` — Postgres schema + embedded
+migrations (slice 1)".*
+
 ### `internal/api` + `cmd/controlplane` — wire-compatible control-plane CRUD
+
+*Narrative: CHANGELOG § 0.1.0 → "`internal/api` + `cmd/controlplane`" (slice 2).*
 
 ### `internal/events` + events API — append-only log, send/list, SSE stream (slice 3)
 
 ### `internal/provider` — config-driven model access (slice 4)
 
 #### OpenAI-compatible adapter (`internal/provider/openai`)
+
+*Narrative: CHANGELOG § 0.1.0 → "OpenAI-compatible provider adapter".*
 
 ### `internal/brain` + `internal/queue` + state machine — the orchestration loop (slice 5)
 

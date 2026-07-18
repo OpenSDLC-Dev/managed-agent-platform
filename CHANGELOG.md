@@ -7,8 +7,9 @@ grouped newest-first by the PR that landed them.
 A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 "Iteration workflow". This file is the **one place a change's narrative is
 written**: [docs/HISTORY.md](./docs/HISTORY.md) holds only what a changelog
-structurally cannot (acceptance-run records, decisions evaluated and rejected,
-archived plans' progress summaries), never a second copy of an entry here.
+structurally cannot (acceptance-run and review-hardening records, decisions
+evaluated and rejected, archived plans' progress summaries), never a second
+copy of an entry here.
 
 ## [Unreleased]
 
@@ -18,7 +19,9 @@ archived plans' progress summaries), never a second copy of an entry here.
   system's description one home instead of three. It consolidates what was scattered: CLAUDE.md's
   architecture depth (the brain/hands/session decoupling, process topology, async execution flow —
   CLAUDE.md keeps the compressed guardrails and links here for the rest), HISTORY.md's per-package file
-  tables (migrated with a freshness pass — every row checked against the code it describes), and the
+  tables (migrated with a freshness pass — every referenced file verified to exist, headline claims
+  spot-checked against the code, stale rows corrected — then hardened by the review pass, which caught
+  and fixed several more stale behavioral claims the migration had carried over), and the
   system overview STATE.md's snapshot half-carried. Sections beyond the consolidation: the execution
   flow end to end (permissions/HITL, crash recovery), the wire-compatibility model, security
   invariants, observability, and the testing architecture. CLAUDE.md's repo-layout sketch was
@@ -183,13 +186,16 @@ archived plans' progress summaries), never a second copy of an entry here.
 
 - **The completed-work record now has a one-writer rule** (docs only). A change's narrative is written
   once, in this file; docs/HISTORY.md receives only what a changelog structurally cannot hold —
-  acceptance-run records, decisions evaluated and rejected, and archived plans' progress summaries.
-  HISTORY.md is slimmed to match (530 → 199 lines): its per-package file tables moved to
+  acceptance-run and review-hardening records, decisions evaluated and rejected, and archived plans'
+  progress summaries.
+  HISTORY.md is slimmed to match (530 → 217 lines): its per-package file tables moved to
   ARCHITECTURE.md's package reference, and its per-slice delivery narratives — each verified against
   this file's entries before deletion, with anything found nowhere else kept in place or rehomed —
   are pruned, git history as the backstop. Every pruned section's heading survives as a stub, because
-  docs/DIVERGENCES.md cites those headings as evidence anchors (all 78 citations still resolve). The
-  rule is written into both files' headers, CLAUDE.md's workflow step 2, AGENTS.md, and the verifier's
+  docs/DIVERGENCES.md cites those headings as evidence anchors: all 78 citations still resolve to
+  their headings, and where a citation's parenthetical quotes pruned prose, that prose lives on in
+  the matching CHANGELOG entry or ARCHITECTURE row (the stubs' intro says so). The rule is written
+  into both files' headers, CLAUDE.md's workflow step 2, AGENTS.md, and the verifier's
   docs-consistency rung, which now also treats a stale ARCHITECTURE.md claim as a finding.
 
 - **Plan management is now a repo convention** (docs only; no behavior change). Plans live in

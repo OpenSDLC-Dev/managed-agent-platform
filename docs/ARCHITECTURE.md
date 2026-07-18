@@ -75,13 +75,18 @@ platform's own executor, just deployed elsewhere.
    `event_start`/`event_delta` SSE previews) and `span.model_request_start/_end`.
 3. A tool call becomes an `agent.tool_use` event plus a `tool_exec` work item; the
    brain suspends (it holds nothing in memory a crash could lose).
-4. An executor (cloud) or BYOC worker (self_hosted) claims the item via the same
-   pull-based work API — `poll`/`ack`/`heartbeat`/`stop`, with lease expiry and
-   dead-worker reclaim — runs the tool in the session's sandbox, and posts the result
-   event (`agent.tool_result` platform-managed, `user.tool_result` self-hosted).
-5. The result event wakes the brain (Postgres LISTEN/NOTIFY); it replays and continues
-   until the model stops calling tools, then writes `session.status_idle` with
-   `stop_reason.end_turn`.
+4. For a platform-managed (`cloud`) environment the executor claims the item straight
+   off the Postgres queue (`FOR UPDATE SKIP LOCKED`, lease + reclaim); for a
+   `self_hosted` environment a BYOC worker claims the same kind of item over the wire
+   work API (`poll`/`ack`/`heartbeat`/`stop`, lease expiry, dead-worker reclaim) — the
+   same pull semantics at two deployment points. Either runs the tool in the session's
+   sandbox and posts the result event (`agent.tool_result` platform-managed,
+   `user.tool_result` self-hosted).
+5. The commit that appends the result also enqueues the next `model_turn` — only once
+   every tool use in the turn is answered. A brain claims it (brains wake by polling the
+   queue; Postgres LISTEN/NOTIFY serves the SSE fan-out, not the brain), replays, and
+   continues until the model stops calling tools, then writes `session.status_idle`
+   with `stop_reason.end_turn`.
 
 **Permissions / human-in-the-loop.** A tool whose resolved `permission_policy` is
 `always_ask` suspends the session *before* execution: the brain writes
@@ -123,7 +128,8 @@ What each package does and where its pieces live, in repo-layout order. Descript
 originate from the delivery-time records (migrated from HISTORY.md, 2026-07-18) and were
 freshness-checked against the code on migration; treat the code as authoritative when
 they drift. Where one file carries several distinct responsibilities, it gets one row per
-responsibility (`file.go — aspect`).
+responsibility (`file.go — aspect`). Ordering is by layer: the domain and wire surface
+first, then the execution chain, then the shared infrastructure.
 
 ### internal/domain
 
@@ -181,7 +187,7 @@ the turn atomically.
 
 | File | Contents |
 |---|---|
-| `brain.go` — the turn | Claim → replay → generate → **commit the whole turn atomically**: the emitted events (`agent.message`, tool intents), `span.model_request_end`, the status change, the usage fold, the processed watermark, and the work item's fate are ONE transaction under the session row lock, with the queue's lease proof inside it. That single commit is both the liveness guarantee (API triggers serialize on the same lock — a tool result posted mid-settle either sees the live item, suppressed, or the completed one, enqueued; never the gap) and the integrity guarantee (a brain that lost its claim rolls the whole turn back — the log never carries a loser's half-turn, whose duplicate tool intents could never all be answered and would poison every future replay). `tool_use` suspends and completes the item; `end_turn` idles unless pending input (a mid-turn `user.message` **or** a suppressed tool result) chains the turn by **requeueing its own item**; failures append `session.error` (`model_request_failed_error`) and idle with `retries_exhausted` — unless input is pending, which chains a fresh turn instead of stranding it. The error's `retry_status` follows that decision, not the code path: `exhausted` (terminal) when the session idles, `retrying` when a chained turn is about to run. Both settlements go through one `settle` helper, so the chain-or-idle contract cannot drift. Errors are classified: provider/model and deterministic input failures fail the turn visibly; brain-side infra failures (database, lost lease) abandon the turn to lease expiry with nothing committed and nothing on the wire. A lease keeper goroutine re-extends the lease at TTL/3 during streaming; each renewal is bounded by the lease it is racing (`TTL − TTL/3`, a duration, so the deadline never depends on the database and this process agreeing on the clock), and a renewal only counts as a lost lease once it has actually let the lease lapse. Losing it abandons the turn. Reclaimed items surface `session.status_rescheduled` + `status_running` with the lease asserted in the same transaction; the staleness check (status/archived, under the session lock) runs first, so a reclaim of finished work never flips an idle session back to running. |
+| `brain.go` — the turn | Claim → replay → generate → **settle the turn atomically**: the emitted events (`agent.message`, tool intents), `span.model_request_end`, the status change, the usage fold, the processed watermark, and the work item's fate are ONE settlement transaction under the session row lock, with the queue's lease proof inside it. (Two things commit mid-stream, outside it: `span.model_request_start` and completed `agent.thinking` events — a brain that dies mid-turn can leave a dangling span start or a duplicate thinking event on the log; replay skips both. The recorded crash-window residue.) That settlement commit is both the liveness guarantee (API triggers serialize on the same lock — a tool result posted mid-settle either sees the live item, suppressed, or the completed one, enqueued; never the gap) and the integrity guarantee (a brain that lost its claim rolls the settlement back — the log never carries a loser's tool intents, which could never all be answered and would poison every future replay). `tool_use` suspends and completes the item; `end_turn` idles unless pending input (a mid-turn `user.message` **or** a suppressed tool result) chains the turn by **requeueing its own item**; failures append `session.error` (`model_request_failed_error`) and idle with `retries_exhausted` — unless input is pending, which chains a fresh turn instead of stranding it. The error's `retry_status` follows that decision, not the code path: `exhausted` (terminal) when the session idles, `retrying` when a chained turn is about to run. Both settlements go through one `settle` helper, so the chain-or-idle contract cannot drift. Errors are classified: provider/model and deterministic input failures fail the turn visibly; brain-side infra failures (database, lost lease) abandon the turn to lease expiry with nothing committed and nothing on the wire. A lease keeper goroutine re-extends the lease at TTL/3 during streaming; each renewal is bounded by the lease it is racing (`TTL − TTL/3`, a duration, so the deadline never depends on the database and this process agreeing on the clock — an `Extend` that outlives the budget has let the lease lapse anyway), and any renewal failure aborts the in-flight stream and abandons the turn at once, with nothing committed. Reclaimed items surface `session.status_rescheduled` + `status_running` with the lease asserted in the same transaction; the staleness check (status/archived, under the session lock) runs first, so a reclaim of finished work never flips an idle session back to running. |
 | `brain.go` — intents & gating | `turnEvents` stamps each model-emitted tool intent with the type `classify` resolved (a custom tool → `agent.custom_tool_use`, client-executed, never enters the queue; a built-in → `agent.tool_use`; unknown names default to custom, the safe direction — a client-executed intent never strands a session) and stamps `evaluated_permission` (`allow` or `ask`) on every platform tool use, pre-minting the `sevt_` ids of the `ask` intents so the same ids can name them in the stop_reason. When a turn suspends on platform tools and every intent is `allow`, `commitTurn` enqueues one `tool_exec` item in the same transaction that commits the intents and completes the model_turn item. When any intent is `always_ask`, it gates the **whole** turn: `session.status_idle` carrying `stop_reason:{type:"requires_action", event_ids:[…ask ids]}`, session `idle`, **no** `tool_exec` — even the `always_allow` tools in that turn wait for confirmation. A turn that suspends only on custom tools enqueues nothing (the client answers those). |
 | `replay.go` | The log IS the conversation: role-run merging, tool_result blocks sorted ahead of text within a user turn, `tool_use` blocks rebuilt under their **event ids** (the provider-side tool id is discarded at emission; result events reference the event id), string content normalized, `system.message` text appended to the system prompt. `buildRequest` expands each tool entry by type: a `custom` tool becomes a client-executed definition, and an `agent_toolset_20260401` entry is expanded through `toolset.Tools` into the built-in definitions the model sees. One `classify(agent)` pass resolves both maps the brain stamps from: tool name → event type (custom vs platform), and platform tool → resolved permission policy (via `toolset.Policies`; custom tools are client-executed and carry none). `mcp_toolset` expansion waits for the MCP client. |
 | `stream.go` | Provider chunks → wire: `agent.message` preview opened at the first **non-empty** text delta (provider block index → content entry index), `agent.thinking` preview per block (start-only, buffered event under the preview id), tool_use collected, the buffered `agent.message` lands **before** `span.model_request_end` (the SDK accumulator closes previews at span end). Empty text deltas are skipped before anything is allocated, so a block that never produces text takes no content index — the preview's delta indices and the stored content array can never disagree. A `tool_use` whose input is not a JSON object (truncated, or a bare string/array/number) fails the turn visibly rather than reaching the append-only log. Database failures mid-stream are marked infra — never reported as model failures. |
@@ -193,7 +199,7 @@ Config-driven model access (design principle 4).
 | File | Contents |
 |---|---|
 | `provider.go` | `Config` (`protocol` / `model` / `base_url` / `api_key` / optional headers), `Request`/`Message` in Anthropic Messages semantics with content blocks and tool definitions as **raw wire JSON** (the Anthropic adapter is near-zero-conversion; lossy mapping stays confined to the non-Anthropic adapters), `Chunk` stream (`text_delta` / `thinking_delta` / complete `tool_use` after input accumulation / `done` with `stop_reason` + `domain.ModelUsage`), `Provider`/`Stream`/`Factory` interfaces, and the model→provider `Registry` (exact match + `"*"` default; a route without an upstream `model` passes the agent's model string through to the endpoint). |
-| `anthropic/anthropic.go` | The Anthropic-protocol adapter over the official SDK: `base_url` is **required** (no silent api.anthropic.com fallback), extra headers pass through for gateway routing, streaming events translate to chunks (tool_use inputs accumulate from `input_json_delta`, `message_delta` carries stop reason + output usage). |
+| `anthropic/anthropic.go` | The Anthropic-protocol adapter over the official SDK: `base_url` is **required** (no silent api.anthropic.com fallback), extra headers pass through for gateway routing, streaming events translate to chunks (tool_use inputs accumulate from `input_json_delta`, `message_delta` carries stop reason + output usage). Retry policy is the SDK's default — no override. |
 | `openai/openai.go` | The OpenAI-compatible adapter (OpenAI, vLLM, or an internal gateway) — the platform's **lossy seam**, confined here. Anthropic-native turns translate to Chat Completions on the way out (system prepended; text→content; assistant `tool_use`→`tool_calls` with object input→JSON-string arguments; user `tool_result`→`tool` role messages; tools→function tools) and the stream back (delta.content→`text_delta`, accumulated `tool_calls`→`tool_use`, usage→`ModelUsage`); **`stop_reason` is `tool_use` whenever the stream carried any tool call** (not read from `finish_reason`, which some servers set to `stop`/`length` on a tool turn — honoring that would strand the tool the brain never runs). `base_url` is required and is the API root (adapter appends `/v1/chat/completions`); `[DONE]` completes a turn, a body ending with neither `finish_reason` nor `[DONE]` (or a mid-stream error frame) fails loudly. Known lossy gaps, documented not silent: thinking blocks dropped, image blocks (top-level or inside a `tool_result`) fail loudly, and a tool_result's `is_error` boolean dropped (the error text in the result content is still forwarded). |
 | `config.go` | `LoadRoutes` reads the `model_providers` JSON file (`model` / `protocol` / `base_url` / `upstream_model` / `api_key` or `api_key_env`; unknown keys rejected). |
 
@@ -236,7 +242,7 @@ The built-in tools — what an `agent_toolset_20260401` entry enables.
 
 | File | Contents |
 |---|---|
-| `toolset.go` | `Runner` (sandbox + session + workdir) and `Run(ctx, id, name, input)`. The one line the package draws: a **tool** failure (missing file, bad regex, nonzero exit, a non-regular target, a NUL in a path) is a `Result` with `IsError` — the model reads it and recovers — while a **backend** failure (sandbox gone, daemon unreachable) is an `error` and never a result the model would try to reason about. Every result is capped at `MaxOutputBytes` (100 KiB, a rune boundary, the reference's limit) because the tool result goes on the event log forever; `capWithTrailer` caps bash's output *with* its exit-code/timeout line so the load-bearing "did it fail" signal survives a huge output rather than being lopped off the end. `singleQuote` is what makes a model-supplied path or pattern reach bash as data rather than code, and `badField` rejects a NUL byte in a path or pattern before it can reach the sandbox as a broken tar header. |
+| `toolset.go` | `Runner` (sandbox + session + workdir) and `Run(ctx, id, name, input)`. The one line the package draws: a **tool** failure (missing file, bad regex, nonzero exit, a non-regular target, a NUL in a path) is a `Result` with `IsError` — the model reads it and recovers — while a **backend** failure (sandbox gone, daemon unreachable) is an `error` and never a result the model would try to reason about. Tool output is capped at `MaxOutputBytes` (100 KiB on a rune boundary, the reference's limit — a truncated result carries an `[output truncated]` marker just past it) because the tool result goes on the event log forever; `capWithTrailer` caps bash's output *with* its exit-code/timeout line so the load-bearing "did it fail" signal survives a huge output rather than being lopped off the end. `singleQuote` is what makes a model-supplied path or pattern reach bash as data rather than code, and `badField` rejects a NUL byte in a path or pattern before it can reach the sandbox as a broken tar header. |
 | `definitions.go` | `Tools(entry)` → the model-facing definitions an `agent_toolset_20260401` entry enables, in the wire's order — schemas are the wire's field for field (SDK `BetaManagedAgentsAgentToolset20260401{Bash,Read,Write,Edit,Glob,Grep}Input`) — and `Policies(entry)` → each enabled tool's resolved `permission_policy`, keyed by name. A shared `resolveToolset` backs both, so enable resolution (per-tool config > `default_config` > on) and policy resolution (same precedence, default `DefaultAgentToolsetPolicy`) can never disagree about which tools exist. An unknown `permission_policy.type` on an enabled tool is a hard error — a policy the platform cannot evaluate never silently resolves to "run it anyway". |
 | `bash.go` | The shell package's persistent session, plus the wire's `restart` / `timeout_ms`. A nonzero exit is an error result carrying the code; a timeout is an error result carrying **no** code (`TimedOut` is the sandbox's authoritative field) and saying that the call's shell state was dropped. |
 | `file.go` | `read` / `write` / `edit` over the sandbox's file primitives — no shell, so a command that shadowed `cat` or broke `PATH` cannot reach them. `edit`'s unique-match rule, `read`'s 1-indexed inclusive `view_range` (end ≤ 0 means EOF), and their messages are the reference's. Line ranges stay `int64` end to end: a range the model invented must not overflow an index on the 32-bit build CI cross-compiles. `fileFault` classifies the sandbox's file sentinels — not-found, is-a-directory, not-a-regular-file (a FIFO/device/socket read), and too-large — as tool errors the model can act on; anything else is the sandbox failing and stays an `error`. |
@@ -250,7 +256,7 @@ The `tool_exec` consumer — the platform-managed half of the pull protocol.
 | File | Contents |
 |---|---|
 | `executor.go` | `Run` polls the queue; `step` claims the oldest `tool_exec` item (reclaiming an expired lease) and `process` runs it: load the session's egress policy, provision the sandbox (idempotent per session), gather the session's **unanswered** tool uses, run them, and commit the results, the resume, and the item's fate together. The append's `Then` — under the session row lock — enqueues a `model_turn` **only when every tool use is answered** (`events.HasUnansweredToolUse`, the same full-set gate the control plane uses for client results), and completes the item only when every tool actually ran. |
-| `toolwork.go` | `unansweredToolUses` diffs the session's `agent.tool_use` events against the `agent.tool_result` events already on the log, oldest first — the work this item must run, and the reclaim ledger. The lease keeper (`keepLease`) renews the claim at TTL/3 while tools run and cancels the work context if it ever loses the lease, mirroring the brain's; the renewed lease is the proof the settling commit uses. |
+| `toolwork.go` | `unansweredToolUses` diffs the session's `agent.tool_use` events against the answering `agent.tool_result` / `user.tool_result` events already on the log, oldest first — the work this item must run, and the reclaim ledger. The lease keeper (`keepLease`) renews the claim at TTL/3 while tools run and cancels the work context if it ever loses the lease, mirroring the brain's; the renewed lease is the proof the settling commit uses. |
 
 ### internal/worker
 
@@ -260,7 +266,7 @@ database.
 | File | Contents |
 |---|---|
 | `client.go` | The SDK client a worker authenticates to the control plane with — environment key as `Authorization: Bearer`. |
-| `lease.go` | The lease loop: poll with `block_ms`/`Anthropic-Worker-ID`, ack, session-liveness gate, force-stop on exit, `traceparent` extraction from the poll response headers. The heartbeat goroutine starts **before** the liveness check and the run — the reference's ordering, because every moment between the ack and the first heartbeat is a window the control plane sees no liveness signal in; the cadence is derived from the response TTL (`ttl/2`, clamped `[1s, 30s]`), and `desired_ttl_seconds` is not sent, per the reference. |
+| `lease.go` | The lease loop: poll with `block_ms`/`Anthropic-Worker-ID`, ack, session-liveness gate, `traceparent` extraction from the poll response headers. A finished item is force-stopped only while this worker still exclusively owns the lease, and a dead session's item is force-stopped unconditionally (nothing live to disrupt); a fault or an observed lease loss leaves the item live for the queue's reclaim instead — force-stop is terminal, and no reclaim recovers a stopped item. The heartbeat goroutine starts **before** the liveness check and the run — the reference's ordering, because every moment between the ack and the first heartbeat is a window the control plane sees no liveness signal in; the cadence is derived from the response TTL (`ttl/2`, clamped `[1s, 30s]`), and `desired_ttl_seconds` is not sent, per the reference. |
 | `toolexec.go` | `RunSessionTools`, the tool-exec driver: diff unanswered `agent.tool_use` over the wire, run each in a local sandbox via the shared `toolset.Runner`, post `user.tool_result` per tool as each completes. |
 
 Two cross-package notes travel with the worker. The "answered" diff — an
@@ -291,7 +297,7 @@ Postgres schema + migrations.
 | `migrations/0001_init.sql` | Core schema: `agents` + `agent_versions` (optimistic `version`, immutable snapshots), `environments` (kind CHECK `cloud/self_hosted`, config required with a CHECK forcing `config->>'type' = kind` — the wire keeps the discriminator inside the config union), `sessions` (resolved-agent jsonb snapshot, status CHECK, composite FK `(agent_id, agent_version) → agent_versions` so the audit trail can't dangle, `vault_ids` seam, audit-only `created_by`, **no user_id**), `events` (append-only log, `UNIQUE (session_id, seq)`), `work_items` (`state` CHECK matches the wire enum; `kind` CHECK `model_turn/tool_exec` is the **internal** queue taxonomy, not a wire field; lease + heartbeat columns; poll + session indexes), `api_keys` / `environment_keys` (hash only, `revoked_at` rotation). Wire-required plain strings (`sessions.title`, `environments.description`) are `NOT NULL DEFAULT ''`. Every top-level table reserves `org_id`/`workspace_id`/`project_id` (default `'default'`). |
 | `migrations/0002`–`0006` | Follow-on DDL, one concern each: session `archived_at` (0002), the per-(session, kind) live-item partial unique index behind `Enqueue`'s idempotency (0003), the four work-item lifecycle-timestamp columns (0004), the `trace_context` jsonb column that carries `traceparent` through work items (0005), the `worker_polls` table behind `workers_polling` (0006). Migrations are immutable once merged; new DDL goes in a new numbered file. |
 | `migrate.go` | `Migrate`: embedded-FS migrations in filename order, one transaction for the whole run (all-or-nothing), `pg_advisory_xact_lock` so concurrently starting binaries don't race, versions recorded in `schema_migrations`. |
-| `store.go` | `Open(ctx, dsn)`: pool + ping + migrate; the single startup entry point for every binary. |
+| `store.go` | `Open(ctx, dsn)`: pool + ping + migrate; the single startup entry point for every database-backed binary (the BYOC worker is deliberately database-free). |
 
 ### Test support and cmd/
 
@@ -337,12 +343,16 @@ four binaries, loopback-bound control plane, optional Jaeger profile).
 
 ## Observability
 
-OpenTelemetry is built in, not bolted on. Every cross-process call propagates W3C
-`traceparent` — HTTP headers between processes, a `trace_context` column through work
-items to executors and BYOC workers — so one session's turn is one trace across process
-boundaries. Anthropic `span.*` wire events and OTel spans are emitted from the **same
-instrumentation point** (they cannot drift); metrics (turn duration, token usage, tool
-latency, queue depth) ride the same points, and a configured OTLP endpoint bridges
+OpenTelemetry is built in, not bolted on. Trace context propagates as W3C `traceparent`
+across every process hop that continues a trace — HTTP headers between processes, and a
+`trace_context` column that carries a turn's trace through `tool_exec` work items to
+executors and BYOC workers (a `model_turn` item deliberately stores none: nothing reads
+it back) — so one session's turn is one trace across process boundaries. Anthropic
+`span.*` wire events and OTel spans are emitted from the **same instrumentation point**
+(they cannot drift); the metrics ride the same points (model-request duration and
+token-usage counters in `internal/events/metrics.go`, tool-run duration in
+`internal/toolset/telemetry.go`; queue depth is not a metric — it is an on-demand
+derived view served by the work-stats endpoint), and a configured OTLP endpoint bridges
 `slog` records — trace-correlated where a span is in reach — to the collector.
 `internal/telemetry` owns init and propagation; an empty endpoint is a fully-offline
 no-op.
@@ -357,9 +367,13 @@ environment variable (`RUN_LIVE_MODEL_TESTS`, `RUN_EVALS`), configured by the gi
 `.env`, and fail rather than skip when misconfigured (`internal/modeltest` owns the
 contract).
 
-Backend variability lives behind interfaces with **shared contract suites**: every
-sandbox provider passes `internal/sandbox/sandboxtest`, every queue backend the queue
-suite — a new backend inherits the whole battery. The merge gate is `make verify`
+Backend variability lives behind interfaces, and where more than one backend exists the
+contract is a **shared suite**: every sandbox provider passes
+`internal/sandbox/sandboxtest` — a new backend inherits the whole battery. The queue and
+the model providers each have one production implementation contract-tested in their own
+packages today (Postgres; the two protocol adapters) — a shared provider contract suite
+is tracked as [#48](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/48),
+and a second queue backend would owe the same extraction. The merge gate is `make verify`
 (build, linux/arm cross-compile, vet, gofmt, `go test -count=1`, and **≥90% total
 statement coverage** over the logic packages of `./internal/...`). On top sits the eval
 system (`make eval`, [plan 02](./plan/02_evals-system.md)): ten deterministic regression

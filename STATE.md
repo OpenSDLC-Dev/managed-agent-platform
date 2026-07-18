@@ -25,7 +25,7 @@ file with either. The verifier enforces both on its docs-consistency rung.
 restructure: ARCHITECTURE.md + HISTORY slimming (PR A, this one), STATE.md as a pure
 work tracker (PR B), issue-triage subagent (PR C).
 
-- [x] PR A — docs/ARCHITECTURE.md created; HISTORY.md slimmed (530→199 lines) under the
+- [x] PR A — docs/ARCHITECTURE.md created; HISTORY.md slimmed (530→217 lines) under the
   one-writer rule, written into CLAUDE.md/AGENTS.md/CHANGELOG+HISTORY headers/verifier rung 5.
 - [ ] PR B — STATE.md reduced to Active work + Tasks (~30 lines); verifier STATE checks updated.
 - [ ] PR C — `.claude/agents/issue-triage.md` (Sonnet 5, JSON-only triage verdict) + CLAUDE.md trigger rule.
