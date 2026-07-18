@@ -7,8 +7,15 @@
 
 cmd=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))') || exit 2
 
+# Newline and carriage return are held in variables, not glob literals: under a
+# POSIX /bin/sh (dash) the bashism $'\n' is the four literal characters $ ' \ n,
+# so it would never match a real newline and an embedded second command would
+# ride an allowed prefix. A literal-newline variable matches portably.
+nl='
+'
+cr=$(printf '\r')
 case "$cmd" in
-  ''|*';'*|*'|'*|*'&'*|*'>'*|*'<'*|*'`'*|*'$('*|*$'\n'*)
+  ''|*';'*|*'|'*|*'&'*|*'>'*|*'<'*|*'`'*|*'$('*|*"$nl"*|*"$cr"*)
     echo "issue-triage guard: empty command or shell metacharacters are not allowed" >&2
     exit 2;;
 esac
