@@ -133,6 +133,7 @@ Only task 1 needs Python.
   harness reaps its own and does not wait for #64.
 - **A daily scheduled CI run.** Phase 1 is `make eval` on a developer's machine. The
   scheduled workflow needs repo `MODEL_*` secrets and a hard-fail guard so the net cannot
-  vanish silently — its own PR once someone configures the secrets. **PR 4 files the issue.**
+  vanish silently — its own PR once someone configures the secrets. Filed as
+  [#96](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/96).
 - **Black-box mode against the compose stack.** Mostly redundant with CI's compose job; no
   issue filed, and none intended unless the in-process stack proves to be hiding something.

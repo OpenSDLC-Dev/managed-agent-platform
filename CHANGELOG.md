@@ -9,20 +9,6 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ## [Unreleased]
 
-### Changed
-
-- **Plan management is now a repo convention** (docs only; no behavior change). Plans live in
-  `docs/plan/`, one file per plan named `NN_short-name.md`, each opening with YAML frontmatter carrying
-  `status: draft | approved | in-progress | archived`; plan files carry no progress tracking — the active
-  plan's progress lives in STATE.md's new "Active plan" section, the delivery record in docs/HISTORY.md
-  and this changelog, and the backlog stays GitHub issues. Two existing plans migrated: the v1 design
-  plan (previously a local, repo-external file) imported as
-  [docs/plan/01_v1-managed-agent-platform.md](./docs/plan/01_v1-managed-agent-platform.md) — translated
-  to English, content preserved as written — and docs/EVALS_PLAN.md moved to
-  [docs/plan/02_evals-system.md](./docs/plan/02_evals-system.md) with its PR checklist reduced to a
-  slicing note (the record lives in HISTORY). CLAUDE.md documents the convention; the verifier's
-  docs-consistency rung now enforces it.
-
 ### Added
 
 - An end-to-end eval suite (`make eval`), the first test that drives a whole session through the public
@@ -179,6 +165,18 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)).
 
 ### Changed
+
+- **Plan management is now a repo convention** (docs only; no behavior change). Plans live in
+  `docs/plan/`, one file per plan named `NN_short-name.md`, each opening with YAML frontmatter carrying
+  `status: draft | approved | in-progress | archived`; plan files carry no progress tracking — the active
+  plan's progress lives in STATE.md's new "Active plan" section, the delivery record in docs/HISTORY.md
+  and this changelog, and the backlog stays GitHub issues. Two existing plans migrated: the v1 design
+  plan (previously a local, repo-external file) imported as
+  [docs/plan/01_v1-managed-agent-platform.md](./docs/plan/01_v1-managed-agent-platform.md) — translated
+  to English, content preserved as written — and docs/EVALS_PLAN.md moved to
+  [docs/plan/02_evals-system.md](./docs/plan/02_evals-system.md) with its PR checklist reduced to a
+  slicing note (the record lives in HISTORY). CLAUDE.md documents the convention; the verifier's
+  docs-consistency rung now enforces it.
 
 - **Console log format changes when an OTLP endpoint is configured** (unset endpoint: unchanged). Lines
   go from the standard library's `2026/07/17 20:35:05 INFO msg key=value` to `slog`'s text format,

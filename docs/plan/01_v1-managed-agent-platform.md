@@ -6,7 +6,8 @@ status: archived
 
 > **Archived.** The v1 design plan, authored in plan mode before this repository existed
 > and imported on the plan-management restructure (translated from the Chinese original at
-> `~/.claude/plans/agent-managed-agent-encapsulated-moonbeam.md`). Content is preserved as
+> `~/.claude/plans/agent-managed-agent-encapsulated-moonbeam.md`; terminology normalized in
+> translation, e.g. 线兼容 → wire-compatible throughout). Content is preserved as
 > written — including details that later drifted during implementation (e.g. the toolset
 > shipped six tools, without `web_fetch`/`web_search`); CHANGELOG.md, docs/HISTORY.md and
 > docs/DIVERGENCES.md record what actually landed, and this file is not back-edited.
@@ -115,7 +116,7 @@ Goal: the real `ant` CLI and the official Anthropic SDKs work against our server
 
 **Auth adaptation layer**: the management side uses `x-api-key` (platform-issued org API keys); the worker side uses environment keys (`Authorization: Bearer`, format modeled on `sk-ant-oat01-...`, scoped to a single environment's work queue). Both are platform-issued, stored in Postgres, rotatable.
 
-**Key request/response shapes** (implemented verbatim in v1; details in the research notes):
+**Key request/response shapes** (to be implemented verbatim in v1; details in the research notes):
 
 - `POST /v1/agents` body: `name` (required), `model` (a string or `{"id","speed":"standard|fast"}`), `system`, `tools[]`, `mcp_servers[]`, `skills[]`, `multiagent`, `description`, `metadata`; the response carries `id/type/version (from 1)/created_at/updated_at/archived_at`.
 - The `tools[]` union: `{"type":"agent_toolset_20260401", default_config?, configs?[]}` (tool names `bash read write edit glob grep web_fetch web_search`), `{"type":"custom", name, description, input_schema}`, `{"type":"mcp_toolset", mcp_server_name, default_config?, configs?[]}`. `permission_policy`: `{"type":"always_allow"|"always_ask"}` (default: agent toolset = allow, mcp toolset = ask).
@@ -128,7 +129,7 @@ Goal: the real `ant` CLI and the official Anthropic SDKs work against our server
 
 The event log is the **single source of truth**, serving brain replay, the SSE stream, audit, and worker dispatch all at once.
 
-- Table `events(id sevt_…, session_id, seq bigint, thread_id?, type, payload jsonb, processed_at, created_at)`; `(session_id, seq)` unique, `seq` monotonic (one counter per session; writes allocate it with an advisory lock or `SELECT … FOR UPDATE`).
+- Table `events(id sevt_…, session_id, seq bigint, thread_id?, type, payload jsonb, processed_at, created_at)`; `(session_id, seq)` unique, `seq` monotonic (one counter per session; writes allocate it with `INSERT …` + an advisory lock, or `SELECT … FOR UPDATE`).
 - **Event taxonomy** (aligned verbatim with Anthropic):
   - user (inbound): `user.message`, `user.interrupt`, `user.tool_confirmation`, `user.custom_tool_result`, `user.tool_result` (self_hosted posting agent_toolset results), `user.define_outcome`, `system.message`
   - agent (outbound): `agent.message`, `agent.thinking`, `agent.tool_use`, `agent.tool_result`, `agent.mcp_tool_use`, `agent.mcp_tool_result`, `agent.custom_tool_use`
