@@ -1,11 +1,16 @@
-# Eval test system — plan and progress
+---
+status: archived
+issue: "#30"
+---
+
+# Eval test system
 
 The plan for [#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)'s
 phase 1: an end-to-end **eval suite** that drives the whole stack against a real model
-endpoint, plus the ten regression tasks it runs daily. This file is the working plan and
-its progress tracker; it retires when phase 1 closes (its narrative goes to
-[HISTORY.md](./HISTORY.md), the leftovers to issues). STATE.md links here rather than
-carrying any of it — the ~60-line budget is for the snapshot, not for a plan.
+endpoint, plus the ten regression tasks it runs. Phase 1 is delivered — all ten tasks run
+10/10 green live via `make eval`; the delivery narrative lives in
+[HISTORY.md](../HISTORY.md) and [CHANGELOG.md](../../CHANGELOG.md), and the leftovers are
+issues (#96, #99, and phase 1.5 on #30).
 
 ## Why
 
@@ -71,44 +76,14 @@ Set but misconfigured → **fail, never skip**: a safety net that skips itself w
 credentials rot is not a safety net. `.env` supplies configuration; the tier variable
 supplies consent. `internal/modeltest` owns this contract.
 
-## Progress
+## Delivery slicing
 
-Phase 1 lands as five PRs, each green on its own (docs move with the code, per CLAUDE.md).
-
-- [x] **PR 1 — live-test tier + `internal/modeltest`.** The opt-in contract above, the
-      dotenv loader extracted from its two copy-pasted homes, both provider integration
-      tests converted (this removes the `.env` auto-opt-in defect), `modeltest` excluded
-      from the coverage denominator, and this file.
-- [x] **PR 2 — OTel traces and metrics on the execution chain.** Evals grade the outcome;
-      metrics explain it. The model turn's duration and token usage recorded at the point
-      that already opens its span and writes its `span.*` events, the tool call's duration
-      recorded in `toolset.Run` (the one place both deployment points pass through), and
-      the platform-managed tool run finally parented on the turn that enqueued it — the
-      queue has carried that trace context all along, but only the BYOC half ever read it.
-- [x] **PR 3 — the OTel log bridge.** Split out of PR 2, which was already a full review's
-      worth of signal: `telemetry.Init` installed no slog handler, so no log record left the
-      process over OTLP or carried the trace of the turn that wrote it. Now a configured
-      endpoint installs a console + OTLP fan-out, and the six call sites with a trace context
-      in reach pass it. Two sharp edges, each guarded by a test. `slog.SetDefault` also
-      reroutes the standard library's `log` package into the handler, and OTel reports export
-      failures with `log.Print` — connected, one log line against a collector that rejects
-      logs becomes an unbounded error spiral. And the OTLP branch imposes no level floor of
-      its own, so the fan-out has to supply the Info floor the process already had, or
-      `Debug` records ship to the collector while the console shows nothing. Two correlation
-      gaps the bridge revealed elsewhere are filed rather than fixed: #92 (the brain's
-      turn-fault log) and #93 (every binary's fatal-exit log).
-- [x] **PR 4 — the harness + tasks 1–3 + `make eval`.** The stack wiring, the run loop
-      (fresh session → drive → await idle on SSE → grade → reap), grader constructors, the
-      report (`evals/artifacts/`), and `fib-quickstart` / `echo-notool` / `shell-state`. The
-      three run 3/3 green against a live endpoint. `modeltest` grew a second gated tier
-      (`RUN_EVALS`, and a `TierEnabled` for the `TestMain` a `*testing.T` skip cannot serve);
-      the daily scheduled run is filed as
-      [#96](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/96).
-- [x] **PR 5 — tasks 4–10, wrap-up.** The remaining seven (`edit-config`, `needle-search`,
-      `perm-allow`, `perm-deny`, `exit-code`, `journal-multiturn`, `view-range`), landed with
-      the harness seams they needed — seed planting, gated toolsets, a confirmation-aware drive
-      loop — and grading the permission bridge end to end. All ten run **10/10 green** live via
-      `make eval`. STATE/HISTORY updated; the follow-ups below stay filed as issues.
+Phase 1 lands as five PRs, each green on its own (docs move with the code, per CLAUDE.md):
+the live-test tier + `internal/modeltest` (the opt-in contract, removing the `.env`
+auto-opt-in defect); OTel traces and metrics on the execution chain; the OTel log bridge
+(split out of the metrics PR); the harness + tasks 1–3 + `make eval`; and tasks 4–10 with
+the wrap-up. The delivery record — what each PR actually shipped and found — lives in
+[HISTORY.md](../HISTORY.md) and [CHANGELOG.md](../../CHANGELOG.md), not here.
 
 ## The ten tasks
 

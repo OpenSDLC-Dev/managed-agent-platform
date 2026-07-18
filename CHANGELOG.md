@@ -9,6 +9,20 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
 
 ## [Unreleased]
 
+### Changed
+
+- **Plan management is now a repo convention** (docs only; no behavior change). Plans live in
+  `docs/plan/`, one file per plan named `NN_short-name.md`, each opening with YAML frontmatter carrying
+  `status: draft | approved | in-progress | archived`; plan files carry no progress tracking — the active
+  plan's progress lives in STATE.md's new "Active plan" section, the delivery record in docs/HISTORY.md
+  and this changelog, and the backlog stays GitHub issues. Two existing plans migrated: the v1 design
+  plan (previously a local, repo-external file) imported as
+  [docs/plan/01_v1-managed-agent-platform.md](./docs/plan/01_v1-managed-agent-platform.md) — translated
+  to English, content preserved as written — and docs/EVALS_PLAN.md moved to
+  [docs/plan/02_evals-system.md](./docs/plan/02_evals-system.md) with its PR checklist reduced to a
+  slicing note (the record lives in HISTORY). CLAUDE.md documents the convention; the verifier's
+  docs-consistency rung now enforces it.
+
 ### Added
 
 - An end-to-end eval suite (`make eval`), the first test that drives a whole session through the public
@@ -161,7 +175,7 @@ A change and its changelog entry land in the **same PR** — see CLAUDE.md →
   like `%d` makes `fmt` print the raw fields, so the redaction is a `Format` method (unexporting the field
   would not help: `fmt` prints unexported fields too). `%p` is the exception, documented at the method:
   `fmt` resolves it before consulting anything. First step of the eval system planned in
-  [docs/EVALS_PLAN.md](./docs/EVALS_PLAN.md)
+  [docs/plan/02_evals-system.md](./docs/plan/02_evals-system.md)
   ([#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/30)).
 
 ### Changed
