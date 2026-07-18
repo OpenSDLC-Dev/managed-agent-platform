@@ -21,8 +21,9 @@ copy of an entry here.
   affected code, then returns one strict-JSON verdict. Its read-only promise is enforced, not just
   instructed: a `PreToolUse` hook (`.claude/hooks/issue-triage-bash-guard.sh`, the documented mechanism
   — the frontmatter `tools` field cannot express a command allowlist) confines Bash to
-  `gh issue view/list`, `gh pr view`, and `git log/show`, rejecting metacharacters and everything else
-  with a deny exit; an untrusted-input ground rule additionally treats issue text as data to judge,
+  `gh issue view/list`, `gh pr view`, and `git log/show`, rejecting shell metacharacters, git's
+  file-writing `--output` flags, gh's browser-opening `--web`/`-w`, and everything else with a deny
+  exit; an untrusted-input ground rule additionally treats issue text as data to judge,
   never instructions to follow, since a triage agent ingests third-party text by design. Pinned to
   Sonnet 5 — a triage judgment does not need the session model. The verdict: `needs_plan` — true on multi-PR scope, an
   architectural decision, ambiguity needing the user, or required wire-schema verification; false for

@@ -13,6 +13,22 @@ case "$cmd" in
     exit 2;;
 esac
 
+# Write-capable or out-of-sandbox flags riding an allowed prefix: git's
+# --output(-*) writes a file; gh's --web/-w opens a browser (-w is only denied
+# for gh — for git log it is the whitespace flag and harmless).
+case "$cmd" in
+  'git '*)
+    case " $cmd" in *' --output'*)
+      echo "issue-triage guard: git --output writes a file and is not allowed" >&2
+      exit 2;;
+    esac;;
+  'gh '*)
+    case " $cmd" in *' --web'*|*' -w '*|*' -w')
+      echo "issue-triage guard: gh --web/-w opens a browser and is not allowed" >&2
+      exit 2;;
+    esac;;
+esac
+
 case "$cmd" in
   'gh issue view '*|'gh issue list'|'gh issue list '*|'gh pr view '*|'git log'|'git log '*|'git show '*)
     exit 0;;
