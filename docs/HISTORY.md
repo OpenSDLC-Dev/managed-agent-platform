@@ -215,3 +215,16 @@ The first test that drives a whole session the way a customer does — public RE
 Prompts are written the way the docs tell a user to write them — a prompt tuned until only our platform's quirks satisfy it stops being a regression test. Two that a refusal-prone live model (MiniMax-M3) balked at were reworded to exercise the platform rather than trip a safety reflex: `perm-deny`'s "delete a file in a `protected` directory" became a benign append the reviewer declines, and `view-range`'s "SECRET" marker copied "to another file" — which the model read as exfiltration — became a plain marker copied to a file. All ten run 10/10 green live.
 
 Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/96), needs repo `MODEL_*` secrets), `tool_choice`/`disable_parallel_tool_use` for phase 1.5 (on #30), and production sandbox reaping ([#64](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/64)). The harness reaps its own containers at stack teardown.
+
+---
+
+## Docs restructure (plan 03) — archived 2026-07-18
+
+[docs/plan/03_docs-restructure.md](./plan/03_docs-restructure.md), delivered complete in
+three PRs (narratives in CHANGELOG § [Unreleased]): **#101** — docs/ARCHITECTURE.md
+created as the as-built reference and HISTORY.md slimmed 530 → 217 lines under the
+one-writer rule (verifier ×2, Codex 17 findings, /code-review 5 — all resolved against
+source); **#102** — STATE.md reduced to a pure active-work tracker (63 → 23 lines), the
+verifier's STATE checks rewritten; **the issue-triage PR** — `.claude/agents/issue-triage.md`
+(Sonnet 5, read-only, strict-JSON `needs_plan` judgment) with its CLAUDE.md trigger rule,
+archiving this plan.

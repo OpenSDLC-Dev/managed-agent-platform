@@ -9,15 +9,9 @@ file's claims against reality on its docs-consistency rung.
 
 ## Active work
 
-**[docs/plan/03_docs-restructure.md](./docs/plan/03_docs-restructure.md)** (in-progress)
-— docs restructure: ARCHITECTURE.md + HISTORY slimming, STATE.md as a pure work tracker,
-issue-triage subagent.
+None. (Plan 03, the docs restructure, archived 2026-07-18 — summary in
+[docs/HISTORY.md](./docs/HISTORY.md), narratives in CHANGELOG.)
 
 ## Tasks
 
-- [x] PR A — docs/ARCHITECTURE.md created; HISTORY.md slimmed (530→217 lines) under the
-  one-writer rule. Merged as [#101](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/101).
-- [x] PR B — STATE.md reduced to Active work + Tasks; environment notes and doc pointers
-  folded into CLAUDE.md; verifier STATE checks updated — this PR.
-- [ ] PR C — `.claude/agents/issue-triage.md` (Sonnet 5, read-only, JSON-only triage
-  verdict) + the CLAUDE.md trigger rule.
+None.
