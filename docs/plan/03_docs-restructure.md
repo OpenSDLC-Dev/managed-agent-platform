@@ -86,7 +86,7 @@ trigger rule.
 ## PR slicing
 
 - **PR A** — WS1 + WS2 (coupled: the tables move between the same two files), this plan
-  file landing `in-progress`, STATE.md's Active plan section tracking it.
+  file landing `in-progress`, STATE.md's active-work track carrying its progress.
 - **PR B** — WS3 (depends on A: the snapshot's destinations must exist first).
 - **PR C** — WS4 (independent; may run parallel to B).
 
