@@ -15,6 +15,81 @@ copy of an entry here.
 
 ### Fixed
 
+- **The K8s sandbox could kill a command on its deadline and report it as not timed out**
+  ([#95](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/95),
+  [#110](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/110)) — the deadline was
+  always enforced; only the *label* was lost. `Exec` classified a timeout as
+  `(code == sigkillExit && v.aliveAtDeadline) || v.overran`, so a punctual kill needed the
+  pre-deadline liveness probe to have caught the command alive. That probe is itself an in-pod exec,
+  so what it reports is the state of the pod one apiserver round trip *after* it was asked — and the
+  watchdog's own clock starts when the wrapper reaches the pod, not when `Exec` starts timing. The
+  whole margin is `probeLead` (50 ms) against the difference of two independent exec-setup
+  latencies, which on a loaded kind runner is a coin flip; a second route reaches the same place
+  without the pod answering at all, since the command's stream closes when the kill lands,
+  `stopProbing` cancels the in-flight probe, and `alive` reads that cancellation as "the command
+  finished early". Either way a real timeout came back `ExitCode: 137, TimedOut: false` — a wrong
+  answer handed to the brain, not only a flaky test. The constant was inherited from the docker
+  backend, where the same 50 ms sits in front of a local daemon `top` call rather than a second
+  Kubernetes exec.
+
+  The fix stops asking a probe to witness something the killer already knows. The in-pod watchdog
+  marks its own firing between its final `kill -0` and its `kill -9`, and `exitScript` reads that
+  mark home alongside the recorded exit code and clears it with the rest of the exec's state:
+
+  ```sh
+  if kill -0 "$cmd" 2>/dev/null; then
+    mkdir "$3.killed" 2>/dev/null
+    kill -9 -"$cmd" 2>/dev/null
+  fi
+  ```
+
+  The mark is a **directory**, and that is the load-bearing detail rather than a curiosity. The one
+  thing the mark must never do is hold the kill back, and a redirect cannot promise that: `: >
+  "$3.killed"` opens the path, and a tenant that plants a FIFO there — the state path is its own
+  parent's argv, readable from `/proc` — blocks that open forever, so the watchdog never reaches
+  `kill -9` and the runaway never dies. That is strictly worse than the bug being fixed, and it was
+  in the first version of this change; the review caught it and it is now pinned by a test that runs
+  the real wrapper against a real FIFO (with the redirect restored, the command survives its full
+  30 s and exits 0). `mkdir` is the one creation primitive that cannot block — it creates the path or
+  fails immediately, whatever is already there — and, not being a shell special builtin, it also
+  cannot abort the watchdog subshell on a redirection failure under a POSIX-mode bash.
+
+  Classification moves into a pure `classifyTimeout`, which reads the mark only alongside a recorded
+  SIGKILL, and only for a command that was given a deadline at all — without one there is no watchdog
+  to have marked anything, so a mark found there is planted, and an untimed command must not be able
+  to label itself timed out by planting one and exiting 137 (the one new mislabel path this change
+  would otherwise have opened; the Codex pass found it). Every term only ever *adds* a timeout, so
+  the mark cannot withdraw one. The probes stay for what the mark cannot cover — a SIGKILL the watchdog did not
+  deliver, because the tenant killed it or the node did the killing. Reading the mark in
+  `exitScript` rather than folding it into the exit line in the wrapper is deliberate too: it is what
+  lets a timeout survive the `$PPID` sabotage, where the command kills the wrapper before it can
+  record a code but the watchdog, a separate process, still marked its kill. For the same reason the
+  mark is printed *ahead* of the code — client-go stops copying stdout at its first error, so a lost
+  stream drops a suffix, and losing the code leaves a synthesized SIGKILL with a mark that still
+  says the deadline caused it, rather than the reverse.
+
+  This re-introduces in-pod state that the docker backend removed by design (docs/HISTORY.md §
+  "`internal/sandbox` — the hands (slice 6, first part)"). It is sound here and not there for two
+  reasons, both new to this backend:
+  Kubernetes exposes no out-of-band handle on a running exec, so this verdict already rested on
+  in-pod state (`$3.pid`) before the mark existed; and the mark is an OR-term gated on a real
+  SIGKILL, so a tenant that forges it mislabels only its own tool call, while one that erases it is
+  back to the probes — exactly where the backend stood before. docs/DIVERGENCES.md records the added
+  tamper direction. The docker backend has the same *shape* of race — its probe lead is also 50 ms —
+  but against a local-socket `GET /containers/{id}/top` that creates no process and is retried, so
+  its margin is orders of magnitude wider; it is left alone deliberately.
+
+  Regression coverage runs the wrapper and `exitScript` under the host's `/bin/bash`, the way the
+  #103 and #105 script tests do, so the classification is pinned with no cluster and no wall-clock
+  race: a command killed on its deadline is marked and classifies as a timeout, one that finishes
+  early or SIGKILLs itself is not, a command whose mark is blocked by a planted FIFO,
+  symlink-to-FIFO, file, or directory still dies on its deadline (in POSIX mode too), and a sabotaged
+  wrapper still reports the timeout the mark witnessed. Five mutations are each caught: removing the
+  mark write, dropping `watchdogFired` from the classification, writing the mark with a redirect
+  instead of `mkdir`, clearing it with `rm -f` instead of `rm -rf`, and dropping the no-deadline
+  guard. The live contract suite's two flaking subtests now report elapsed time on failure, which is
+  what tells a mis-read punctual kill from a `killGrace` timeout if either ever fails again.
+
 - **The K8s sandbox can no longer return a short read as a whole file**
   ([#105](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/105)) — the read-side mirror
   of #103 below, and unlike it a hazard rather than an observed defect. `ReadFile` returned
