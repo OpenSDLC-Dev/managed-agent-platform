@@ -4,26 +4,26 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93) — every binary's fatal-exit
-log reached stderr but never OTLP, because each `main()` logged it after `run()`'s deferred telemetry
-shutdown had already stopped the log processor. No plan file (single-PR fix; triage returned
-`needs_plan: false`).
+[#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88) — a `"*"` pass-through route
+lets a client-supplied model string reach the `gen_ai.request.model` metric attribute. The metric is
+accepted as an operator responsibility (no behavior change); the same trigger's unbounded provider
+cache is fixed. No plan file (single-PR fix; triage said `needs_plan: true` only for the product
+decision, which the maintainer made).
 
 ## Tasks
 
-- [x] Reproduced against the real binaries: pre-fix `brain` with an unreachable `DATABASE_URL` logs
-      to stderr while the collector receives nothing.
-- [x] `telemetry.Run` owns init → body → fatal log → flush, so the ordering is not re-implementable
-      per binary (`internal/telemetry/service.go`).
-- [x] `telemetry.Init` moved ahead of each body, so pre-`Init` failures (missing env vars, a sandbox
-      backend that will not construct) fall inside the bridge's lifetime too.
-- [x] All four `main()`s rewired; `context.Canceled` is a clean exit in one place instead of three
-      (new for the controlplane — a SIGTERM mid-startup now exits 0), flush on `context.Background()`.
-- [x] Tests against the in-process OTLP collector the bridge suite already had; confirmed to fail
-      under the old ordering.
-- [x] End-to-end: post-fix `brain` exports `brain exiting` with `exception.message` to a live
-      OTLP/gRPC sink on the identical input that produced nothing before.
-- [x] `make verify` green (coverage 91.63%); verifier PASS with findings, all addressed.
-- [x] Review round: the exit flush now drains logs first — sharing one deadline with traces and
-      metrics could starve the fatal record — and both flush choices have mutation-checked tests.
-- [ ] PR open, CI green, review threads settled.
+- [x] Decision recorded: pass-through cardinality documented in `deploy/compose/README.md` and the
+      Helm `modelProviders` values comment, with the rationale in CHANGELOG.
+- [x] Provider cache deleted (registry is now immutable and lock-free), pinned by
+      `TestRegistryRetainsNothingPerModelString` and
+      `TestRegistryDefaultRouteWithUpstreamModelIgnoresClientString` — both fail on `main`.
+- [x] Verifier PASS, re-run after the review fixes; it measured the leak at 258 MB retained per
+      200k distinct model strings on `main` versus none on the branch.
+- [x] Reviews: Codex found the aliased factory table and a `Factory` doc that would have rebuilt #88
+      inside an adapter. `/code-review` (Opus 4.8, xhigh) returned ten defects, seven taken —
+      chiefly that the cardinality warning omitted session `agent_with_overrides` as an injection
+      point, and that two of the new tests did not fail on the mutation they claimed to fence.
+- [x] Timeout risk the reviews surfaced, pre-existing and out of scope, filed as
+      [#121](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/121).
+- [x] PR [#117](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/117) green on CI after
+      the review fixes; ready to leave draft.
