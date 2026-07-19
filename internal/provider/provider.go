@@ -94,8 +94,13 @@ type Provider interface {
 // acquire no per-instance resource — no private http.Transport, no connection
 // pool, no goroutine — because the registry calls it once per turn rather than
 // retaining what it builds (see Registry). Both adapters satisfy this by
-// sharing http.DefaultClient; an adapter that cannot must bring its own cache
-// keyed by resolved Config, never by the agent's model string.
+// sharing http.DefaultClient.
+//
+// An adapter that genuinely cannot must cache the shared resource itself, and
+// must key that cache by the endpoint alone — protocol, base URL, credential,
+// headers. NOT by the whole Config: under a pass-through route Config.Model is
+// the agent's model string, so a Config-keyed cache would be keyed by client
+// input and would rebuild issue #88 inside the adapter.
 type Factory func(Config) (Provider, error)
 
 // Route binds an agent-facing model string to a provider config. Model "*"
@@ -116,10 +121,10 @@ type Route struct {
 // little to pay for the branch: a constructed provider is a value struct over
 // the shared http.DefaultClient, the connection pool that matters lives in the
 // process-global http.DefaultTransport, and Provider is called once per turn
-// immediately before a model round trip that costs six orders of magnitude
-// more. With nothing to insert into, the bound is a property of the type
-// rather than of a policy — and the registry is immutable after NewRegistry,
-// so it needs no lock.
+// immediately before a model round trip that dwarfs the construction. With
+// nothing to insert into, the bound is a property of the type rather than of a
+// policy — and the registry owns copies of everything it was given, so it is
+// immutable after NewRegistry and needs no lock.
 type Registry struct {
 	routes    map[string]Config
 	fallback  *Config
@@ -127,9 +132,15 @@ type Registry struct {
 }
 
 func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error) {
+	// The registry owns its copies — of the factory table as much as of each
+	// route's Headers below. Aliasing the caller's map would leave a live
+	// handle on the dispatch table the lock-free Provider path reads.
 	r := &Registry{
 		routes:    make(map[string]Config, len(routes)),
-		factories: factories,
+		factories: make(map[string]Factory, len(factories)),
+	}
+	for protocol, f := range factories {
+		r.factories[protocol] = f
 	}
 	for _, route := range routes {
 		if route.Model == "" {

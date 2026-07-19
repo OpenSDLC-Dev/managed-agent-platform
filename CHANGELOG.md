@@ -19,20 +19,23 @@ copy of an entry here.
   ([#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88)) — `provider.Registry`
   cached each constructed provider under the *agent's* model string (`r.cache[model] = p`). Under a
   `"*"` default route any string a client puts on `POST /v1/agents` routes successfully, so that map
-  was keyed by client input and grew for the life of the brain process. The leak was broader than
-  the issue describes: the cache write did not depend on which branch `route()` took, so a `"*"`
-  route that *does* set `upstream_model` retained one byte-identical provider per distinct string
-  too — a fix that merely skipped the cache on the pass-through path would have left half of it in
-  place.
+  was keyed by client input and grew for the life of the brain process. The issue reports only the
+  metric consequence of that pass-through; this is a second consequence of the same trigger, and it
+  is not confined to the pass-through: the cache write did not depend on which branch `route()`
+  took, so a `"*"` route that *does* set `upstream_model` retained one byte-identical provider per
+  distinct string too. A fix that merely skipped the cache on the pass-through path would have left
+  half of it in place.
 
   The cache is deleted rather than re-keyed. Bounding it by route would have worked, but the cache
   was buying almost nothing to begin with: both adapters share `http.DefaultClient` (the anthropic
   one because `option.WithoutEnvironmentDefaults()` sends `sdk.NewClient` down the branch that never
   clones `http.DefaultTransport`), so no connection pool, TLS session cache, or goroutine is
-  per-instance, and construction measures ~450 ns against a model round trip of hundreds of
+  per-instance — the source proves the resource sharing, and a development-machine probe put
+  construction at roughly half a microsecond against a model round trip of hundreds of
   milliseconds. Deleting it makes the growth structurally impossible instead of policy-avoided, and
-  since `routes`/`fallback`/`factories` are write-once in `NewRegistry`, the registry's mutex goes
-  with it — the per-turn path now takes no process-global lock at all. An LRU or size cap was
+  since the registry owns copies of everything it is given and writes them only in `NewRegistry`
+  (the factory table is now copied too, as each route's headers already were), its mutex goes with
+  it — the per-turn path now takes no process-global lock at all. An LRU or size cap was
   rejected for the same reason plus a worse one: under a flood of distinct strings a cap poisons
   permanently and an LRU thrashes to a zero hit rate, so both pay for a data structure that buys
   nothing exactly when it is needed. The cheapness the design now rests on is stated as an invariant
