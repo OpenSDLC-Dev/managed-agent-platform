@@ -19,8 +19,11 @@ decision, which the maintainer made).
       `TestRegistryDefaultRouteWithUpstreamModelIgnoresClientString` — both fail on `main`.
 - [x] Verifier PASS, re-run after the review fixes; it measured the leak at 258 MB retained per
       200k distinct model strings on `main` versus none on the branch.
-- [x] Reviews: Codex (`gpt-5.6-sol`, `ultra`) found the aliased factory table and a `Factory` doc
-      that would have rebuilt #88 inside an adapter — both fixed; one finding refuted. A four-
-      dimension Opus 4.8 pass returned six findings, all six refuted with evidence.
-- [x] PR [#117](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/117) green on CI.
-- [ ] `/code-review` (user-invocable only) before merge.
+- [x] Reviews: Codex found the aliased factory table and a `Factory` doc that would have rebuilt #88
+      inside an adapter. `/code-review` (Opus 4.8, xhigh) returned ten defects, seven taken —
+      chiefly that the cardinality warning omitted session `agent_with_overrides` as an injection
+      point, and that two of the new tests did not fail on the mutation they claimed to fence.
+- [x] Timeout risk the reviews surfaced, pre-existing and out of scope, filed as
+      [#121](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/121).
+- [ ] PR [#117](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/117) green on CI after
+      the review fixes.
