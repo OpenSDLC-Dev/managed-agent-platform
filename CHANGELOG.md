@@ -59,6 +59,82 @@ copy of an entry here.
   the choice: [`deploy/compose/README.md`](./deploy/compose/README.md) and the Helm chart's
   `modelProviders` values documentation.
 
+- **Every binary's fatal-exit log reached stderr but never the collector**
+  ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)) — the one line that says
+  why a process died was the only one the OTLP backend never received. Each `main()` logged it after
+  `run()` returned, by which point `run()`'s deferred telemetry shutdown had stopped the log
+  processor: `sdk/log`'s `BatchProcessor.OnEmit` returns without enqueueing once `Shutdown` has set
+  its stopped flag, and does so silently — no error, no dropped-record counter — while the fan-out's
+  console half went on printing. So `DATABASE_URL is required`, or a `store.Open` failure, reached
+  stderr and never landed beside the traces it explains. `ForceFlush` is gated by the same flag,
+  leaving no after-the-fact rescue.
+
+  Resequencing the log alone would not have been enough. The obvious repair — a named `err` return
+  logged from inside the existing defer — reaches only errors raised after `telemetry.Init`, because
+  before it that defer has not been registered: every environment-validation failure, and in the
+  executor and worker a sandbox backend that will not construct, is returned *earlier* and would
+  have been logged nowhere at all, which is worse than the defect. So `Init` moves ahead of the body
+  too, and the whole shape — init, body, fatal log, flush — becomes one function, `telemetry.Run`,
+  which each `main()` calls with a service name and its `run`. That moves the ordering from a
+  convention four binaries re-implemented into one place a test can reach, which is the point:
+  `cmd/` is outside the coverage denominator by design, and this regression arrived with the log
+  bridge precisely because nothing there could test it. `telemetry.Run` is covered against the
+  in-process OTLP collector the bridge suite already had — restore the old ordering and the
+  collector receives nothing at all. It is worth being exact about the guarantee, though: `Init`
+  stays exported for the suite's own use, so a binary that went back to calling it directly would
+  reintroduce the defect with the telemetry tests still green. What stops that is review, not the
+  compiler.
+
+  A `context.Canceled` body error is still a clean exit rather than a fatal log, and the predicate
+  now lives in one place instead of three. That does change the controlplane, which alone among the
+  four never had the guard: `store.Open` wraps its ping with `%w`, so a SIGTERM arriving while the
+  process is still connecting to Postgres used to exit 1 having logged
+  `store: connect: context canceled`, and now exits 0 silently. The other three have always behaved
+  that way, and a process that stopped because it was asked to is not a failure. The flush runs on a
+  fresh `context.Background()` rather than the process context, and a test pins that choice: on a
+  signal-driven exit the process context is already cancelled, and `BatchProcessor.Shutdown` skips
+  its final queue flush outright when its shutdown context is done — which would put the fatal record
+  straight back where this defect had it, on the console and nowhere else.
+
+  The exit flush also drains logs first now, ahead of traces and metrics. All three providers shut
+  down on one deadline in argument order, and the fatal record is by construction the last thing
+  queued before it — so with logs draining last, a collector that accepts them but stalls on metrics
+  spent the whole budget elsewhere and left `BatchProcessor.Shutdown` to return on `ctx.Done` without
+  draining its queue, losing precisely the record this entry is about. A meter provider exports
+  unconditionally at `Shutdown` once a reader is registered, so a service that recorded no
+  instruments was exposed too. Traces and metrics are the telemetry a dying process can afford to
+  lose; the line saying why it died is not.
+
+  One cost is deliberate. Because `Init` now precedes the environment validation, a misconfigured
+  process pointed at an *unreachable* collector spends the exporter's connection timeout on the way
+  out — about eleven seconds against a blackholed endpoint, where it used to fail in milliseconds.
+  Exit stays bounded, a reachable or unconfigured collector is unaffected, and what the wait buys is
+  the class of failure this entry is about.
+
+- **Metadata carrying U+0000 was a 500, or a silent no-op, instead of a 400**
+  ([#73](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/73)) — `\u0000` is a
+  well-formed JSON escape that Postgres cannot store, and the metadata parsers only checked that a
+  value decoded as a string. So a well-formed request became a server fault at insert time on every
+  metadata-accepting endpoint: agent, environment, and session create and update, and the work-item
+  metadata patch. The break had two mechanisms, not one — a NUL in a key or an upserted value hit
+  the `jsonb` bind (`SQLSTATE 22P05`, unsupported Unicode escape sequence), while a NUL in a *delete*
+  key on the work patch hit the `text[]` bind of `(metadata || $3::jsonb) - $4::text[]`
+  (`SQLSTATE 22021`, invalid byte sequence for encoding UTF8) — and neither error is an `apiError`,
+  so `writeError` mapped both to a 500 `api_error`.
+  A NUL delete key against agents, environments, or sessions was worse than a 500: their merge runs
+  in Go, so the unstorable key was deleted from a map, never reached SQL, and the request returned
+  **200** — the identical patch that 500s against the work endpoint. The guard is now hoisted into
+  the two shared parsers, `parseMetadata` and `splitMetadataPatch`, which between them back every
+  one of those endpoints, so the rejection cannot drift apart per-endpoint again; it covers keys as
+  well as values, and delete keys as well as upserts, which is what closes the 200/500 asymmetry.
+  This is the same rule `internal/events` already applied to inbound event payloads; one
+  docs/DIVERGENCES.md INFERRED entry now covers both guards, since rejecting a delete key turns a
+  previously-200 request into a 400 and the reference's own behaviour is undecidable from the typed
+  schema. A shared sweep in `internal/api/edge_test.go` pins all fifteen endpoint-and-position
+  combinations at a wire-shaped 400. NUL in non-metadata text fields (name, title, system,
+  description, package names) is the same bug class one field over and remains open — out of scope
+  here, tracked separately.
+
 - **The K8s sandbox could kill a command on its deadline and report it as not timed out**
   ([#95](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/95),
   [#110](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/110)) — the deadline was
