@@ -46,8 +46,8 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		// The same skip costs us the SDK's ResponseHeaderTimeout, and
 		// nothing else bounds a turn: an endpoint that accepts the
 		// connection and never sends headers hangs it. Pre-existing and
-		// orthogonal to the caching question — tracked separately, and
-		// whoever fixes it must not reintroduce a per-instance pool.
+		// orthogonal to the caching question — tracked in #121, whose fix
+		// must not reintroduce a per-instance pool.
 		option.WithoutEnvironmentDefaults(),
 		option.WithBaseURL(cfg.BaseURL),
 		option.WithAPIKey(cfg.APIKey),
