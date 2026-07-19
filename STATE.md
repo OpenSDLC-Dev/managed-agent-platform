@@ -25,5 +25,5 @@ decision, which the maintainer made).
       point, and that two of the new tests did not fail on the mutation they claimed to fence.
 - [x] Timeout risk the reviews surfaced, pre-existing and out of scope, filed as
       [#121](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/121).
-- [ ] PR [#117](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/117) green on CI after
-      the review fixes.
+- [x] PR [#117](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/117) green on CI after
+      the review fixes; ready to leave draft.
