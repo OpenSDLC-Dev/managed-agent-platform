@@ -15,6 +15,37 @@ copy of an entry here.
 
 ### Fixed
 
+- **Every binary's fatal-exit log reached stderr but never the collector**
+  ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)) — the one line that says
+  why a process died was the only one the OTLP backend never received. Each `main()` logged it after
+  `run()` returned, by which point `run()`'s deferred telemetry shutdown had stopped the log
+  processor: `sdk/log`'s `BatchProcessor.OnEmit` returns without enqueueing once `Shutdown` has set
+  its stopped flag, and does so silently — no error, no dropped-record counter — while the fan-out's
+  console half went on printing. So `DATABASE_URL is required`, or a `store.Open` failure, reached
+  stderr and never landed beside the traces it explains. `ForceFlush` is gated by the same flag,
+  leaving no after-the-fact rescue.
+
+  Resequencing the log alone would not have been enough. The obvious repair — a named `err` return
+  logged from inside the existing defer — reaches only errors raised after `telemetry.Init`, because
+  before it that defer has not been registered: every environment-validation failure, and in the
+  executor and worker a sandbox backend that will not construct, is returned *earlier* and would
+  have been logged nowhere at all, which is worse than the defect. So `Init` moves ahead of the body
+  too, and the whole shape — init, body, fatal log, flush — becomes one function, `telemetry.Run`,
+  which each `main()` calls with a service name and its `run`. The ordering is now unavailable to a
+  caller rather than a convention four binaries re-implement, which is the point: `cmd/` is outside
+  the coverage denominator by design, and this regression arrived with the log bridge precisely
+  because nothing there could test it. `telemetry.Run` is covered against the in-process OTLP
+  collector the bridge suite already had — restore the old ordering and the collector receives
+  nothing at all.
+
+  Two behaviours are preserved deliberately. A `context.Canceled` body error is still a clean exit
+  rather than a fatal log, with the predicate in one place instead of three; the controlplane, alone
+  among the four, never had that guard and now shares it, which changes no exit code because its
+  `run` returns `srv.Shutdown`'s error and that is never `context.Canceled`. And the flush still runs
+  on a fresh `context.Background()` rather than the process context — on a signal-driven exit that
+  context is already cancelled, and `BatchProcessor.Shutdown` skips its final queue flush outright
+  when its shutdown context is done.
+
 - **Metadata carrying U+0000 was a 500, or a silent no-op, instead of a 400**
   ([#73](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/73)) — `\u0000` is a
   well-formed JSON escape that Postgres cannot store, and the metadata parsers only checked that a

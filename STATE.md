@@ -4,8 +4,23 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+[#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93) — every binary's fatal-exit
+log reached stderr but never OTLP, because each `main()` logged it after `run()`'s deferred telemetry
+shutdown had already stopped the log processor. No plan file (single-PR fix; triage returned
+`needs_plan: false`).
 
 ## Tasks
 
-None.
+- [x] Reproduced against the real binaries: pre-fix `brain` with an unreachable `DATABASE_URL` logs
+      to stderr while the collector receives nothing.
+- [x] `telemetry.Run` owns init → body → fatal log → flush, so the ordering is not re-implementable
+      per binary (`internal/telemetry/service.go`).
+- [x] `telemetry.Init` moved ahead of each body, so pre-`Init` failures (missing env vars, a sandbox
+      backend that will not construct) fall inside the bridge's lifetime too.
+- [x] All four `main()`s rewired; `context.Canceled` stays a clean exit and the flush keeps its own
+      `context.Background()`.
+- [x] Tests against the in-process OTLP collector the bridge suite already had; confirmed to fail
+      under the old ordering.
+- [x] End-to-end: post-fix `brain` exports `brain exiting` with `exception.message` to a live
+      OTLP/gRPC sink on the identical input that produced nothing before.
+- [ ] `make verify`, dual review, PR.

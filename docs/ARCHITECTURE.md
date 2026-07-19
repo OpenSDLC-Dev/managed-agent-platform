@@ -286,6 +286,7 @@ OTel init + W3C trace-context propagation.
 |---|---|
 | `telemetry.go` | `Config` (`ServiceName` / `Endpoint` / `Insecure` / `SampleRatio`) + `Init`: installs the global W3C propagator; with an endpoint configured, installs OTLP/gRPC-exporting tracer + meter + logger providers (`ParentBased(TraceIDRatioBased)` sampler, `service.name` resource). Empty endpoint = fully offline no-op. Returns a flush-at-exit shutdown func. |
 | `logs.go` | The slog → OTLP bridge. A configured endpoint points `slog.SetDefault` at a fan-out handler: a `TextHandler` on the console, plus `otelslog` on the logger provider. The fan-out's `Enabled` answers for itself at `bridgeLevel` (Info — the floor slog's own default handler already had) rather than asking its branches, because the OTLP branch has no floor to ask about: `otelslog`'s `Enabled` delegates to `sdk/log`'s `BatchProcessor.Enabled`, which is unconditionally true. So adding an endpoint changes where records go, never which records exist. |
+| `service.go` | `Run` — the startup/exit shape all four binaries share: `Init`, then the body, then the fatal-exit log, then the flush, reporting whether the process should exit zero (a `context.Canceled` body error is a clean signal-driven stop, not a fatal). Init leads so that every error a body can return is already inside the bridge's lifetime, and the log precedes the flush because a stopped `BatchProcessor` drops records silently — a fatal line logged after the flush reaches stderr and never the collector. Owning the whole sequence is what keeps that ordering out of `cmd/`, which no test can reach. |
 | `propagation.go` | `Inject` / `Extract` — W3C `traceparent`/`tracestate` over any `map[string]string` carrier (HTTP request/response headers and a work item's stored trace context both flatten to this shape). Fixed propagator, works without `Init`. |
 
 ### internal/store
@@ -354,8 +355,9 @@ token-usage counters in `internal/events/metrics.go`, tool-run duration in
 `internal/toolset/telemetry.go`; queue depth is not a metric — it is an on-demand
 derived view served by the work-stats endpoint), and a configured OTLP endpoint bridges
 `slog` records — trace-correlated where a span is in reach — to the collector.
-`internal/telemetry` owns init and propagation; an empty endpoint is a fully-offline
-no-op.
+`internal/telemetry` owns init, propagation, and the shared process startup/exit sequence
+that keeps a binary's fatal-exit log ahead of the flush that would drop it; an empty
+endpoint is a fully-offline no-op.
 
 ## Testing architecture
 
