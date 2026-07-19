@@ -75,6 +75,30 @@ func TestRegistryIsolatesCallerConfig(t *testing.T) {
 	}
 }
 
+// TestRegistryOwnsTheFactoryTable pins the copy the registry makes of the
+// factory table, for the same reason it copies each route's headers: the
+// lock-free Provider path reads that table, so a caller left holding the
+// original could redirect dispatch — or, by deleting the entry, panic it —
+// long after NewRegistry validated the routes against it.
+func TestRegistryOwnsTheFactoryTable(t *testing.T) {
+	callers := map[string]provider.Factory{"anthropic": fakeFactory}
+	reg, err := provider.NewRegistry([]provider.Route{
+		{Model: "m", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw"}},
+	}, callers)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	delete(callers, "anthropic")
+	p, err := reg.Provider("m")
+	if err != nil {
+		t.Fatalf("dispatch followed the caller's map: %v", err)
+	}
+	if _, ok := p.(*fakeProvider); !ok {
+		t.Errorf("dispatch produced %T, not the factory the registry was built with", p)
+	}
+}
+
 // TestRegistryRetainsNothingPerModelString fences issue #88's memory half. The
 // registry used to cache constructed providers under the agent's model string,
 // which a "*" route makes client-controlled: every distinct string a client
