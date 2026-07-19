@@ -15,6 +15,63 @@ copy of an entry here.
 
 ### Fixed
 
+- **The K8s sandbox could kill a command on its deadline and report it as not timed out**
+  ([#95](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/95),
+  [#110](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/110)) — the deadline was
+  always enforced; only the *label* was lost. `Exec` classified a timeout as
+  `(code == sigkillExit && v.aliveAtDeadline) || v.overran`, so a punctual kill needed the
+  pre-deadline liveness probe to have caught the command alive. That probe is itself an in-pod exec,
+  so what it reports is the state of the pod one apiserver round trip *after* it was asked — and the
+  watchdog's own clock starts when the wrapper reaches the pod, not when `Exec` starts timing. The
+  whole margin is `probeLead` (50 ms) against the difference of two independent exec-setup
+  latencies, which on a loaded kind runner is a coin flip; a second route reaches the same place
+  without the pod answering at all, since the command's stream closes when the kill lands,
+  `stopProbing` cancels the in-flight probe, and `alive` reads that cancellation as "the command
+  finished early". Either way a real timeout came back `ExitCode: 137, TimedOut: false` — a wrong
+  answer handed to the brain, not only a flaky test. The constant was inherited from the docker
+  backend, where the same 50 ms sits in front of a local daemon `top` call rather than a second
+  Kubernetes exec.
+
+  The fix stops asking a probe to witness something the killer already knows. The in-pod watchdog
+  marks `$3.killed` between its final `kill -0` and its `kill -9`, the wrapper folds that mark onto
+  the exit line it already records, and `exitScript` carries it home and removes it with the rest of
+  the exec's state:
+
+  ```sh
+  if kill -0 "$cmd" 2>/dev/null; then
+    : > "$3.killed"
+    kill -9 -"$cmd" 2>/dev/null
+  fi
+  ```
+
+  The mark's write is deliberately *not* chained to the kill with `&&`: a mark that cannot be written
+  — a read-only `/tmp`, or a path a tenant pre-created as a directory — must never suppress the kill,
+  which chaining would have let a one-line `mkdir` do. Classification moves into a pure
+  `classifyTimeout(code, watchdogFired, verdict)`, which reads the mark only alongside a recorded
+  SIGKILL: every term only ever *adds* a timeout, so the mark cannot withdraw one, and the window
+  between the watchdog's last `kill -0` and its signal — where the command exits on its own terms
+  with the mark already written — is not mislabelled. The probes stay for what the mark cannot cover:
+  a SIGKILL the watchdog did not deliver, because the tenant killed it or the node did the killing.
+
+  This re-introduces in-pod state that the docker backend removed by design (docs/HISTORY.md § the
+  docker deadline). It is sound here and not there for two reasons, both new to this backend:
+  Kubernetes exposes no out-of-band handle on a running exec, so this verdict already rested on
+  in-pod state (`$3.pid`) before the mark existed; and the mark is an OR-term gated on a real
+  SIGKILL, so a tenant that forges it mislabels only its own tool call, while one that erases it is
+  back to the probes — exactly where the backend stood before. docs/DIVERGENCES.md records the added
+  tamper direction. The docker backend has the same *shape* of race — its probe lead is also 50 ms —
+  but against a local-socket `GET /containers/{id}/top` that creates no process and is retried, so
+  its margin is orders of magnitude wider; it is left alone deliberately.
+
+  Regression coverage runs the wrapper and `exitScript` under the host's `/bin/bash`, the way the
+  #103 and #105 script tests do, so the classification is pinned with no cluster and no wall-clock
+  race: a command killed on its deadline records the mark and classifies as a timeout, one that
+  finishes early or SIGKILLs itself records none, and a mark blocked by a pre-created directory still
+  dies on time. Each guard is mutation-tested — removing the mark, dropping it from the
+  classification, or chaining it to the kill each fails exactly its own case. The live contract
+  suite's two flaking subtests now report elapsed time on failure, which is what tells a mis-read
+  punctual kill from a `killGrace` timeout if either ever fails again.
+
 - **The K8s sandbox can no longer return a short read as a whole file**
   ([#105](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/105)) — the read-side mirror
   of #103 below, and unlike it a hazard rather than an observed defect. `ReadFile` returned

@@ -9,8 +9,13 @@ import (
 )
 
 // verdict is what the sandbox saw of a command's life from outside the pod, at
-// the only two instants that decide a timeout. It mirrors the docker backend's
-// verdict exactly; only the liveness primitive underneath differs.
+// the two instants it looks. It has the same shape as the docker backend's, but
+// it does not carry the same weight: docker's liveness primitive is a cheap
+// out-of-band daemon call, while this one is a whole in-pod exec, so its
+// pre-deadline answer is too late to be relied on for a punctual kill. What
+// decides that here is the watchdog's own mark (see deadline.go's execWrapper);
+// these two instants are the reach around it, and classifyTimeout weighs all
+// three.
 type verdict struct {
 	// aliveAtDeadline: still running as the deadline arrived, so a SIGKILL that
 	// follows is the watchdog's and not the command's own.

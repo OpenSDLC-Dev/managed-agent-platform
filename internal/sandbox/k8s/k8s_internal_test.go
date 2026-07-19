@@ -556,6 +556,274 @@ func TestReadStdoutRequiresTheMarker(t *testing.T) {
 	})
 }
 
+// classifyTimeout is where #95 and #110 were lost: the watchdog's SIGKILL landed
+// (exit 137) and the call still reported TimedOut false, because the only
+// evidence that the kill was the deadline's came from a probe that had raced an
+// apiserver round trip and lost. Pinning the decision here costs no clock and no
+// cluster, which is the point — on a live cluster the losing case is exactly the
+// one that cannot be staged on demand.
+func TestClassifyTimeout(t *testing.T) {
+	const other = 7
+	cases := []struct {
+		name          string
+		code          int
+		watchdogFired bool
+		v             verdict
+		want          bool
+	}{
+		// The regression. The watchdog says it fired and the exit code agrees a
+		// SIGKILL landed; no probe needs to have caught the command alive.
+		{"WatchdogFiredAndProbeMissedIt", sigkillExit, true, verdict{}, true},
+		{"WatchdogFiredAndProbeSawIt", sigkillExit, true, verdict{aliveAtDeadline: true}, true},
+
+		// A SIGKILL the watchdog did not deliver is still the deadline's if the
+		// command was alive to receive it — the tenant can kill the watchdog, and
+		// the node can do the killing, so the probe keeps earning its place.
+		{"ProbeAloneStillCounts", sigkillExit, false, verdict{aliveAtDeadline: true}, true},
+
+		// Overrunning is a timeout on its own authority: a command still running
+		// past the deadline and the slop can report no exit code worth believing.
+		{"OverranWithoutASigkill", other, false, verdict{overran: true}, true},
+		{"OverranWithNoEvidenceAtAll", 0, false, verdict{overran: true}, true},
+
+		// The self-inflicted kill the contract suite pins: exit 137, but the
+		// watchdog never fired and the command was already gone when Exec looked.
+		{"SelfInflictedKillIsNotATimeout", sigkillExit, false, verdict{}, false},
+
+		// A mark without a SIGKILL is not a timeout. This is the window between
+		// the watchdog's last `kill -0` and its `kill -9`, where the command exits
+		// on its own terms and the mark is already written — and it is also what
+		// keeps a forged mark from manufacturing a timeout out of a clean exit.
+		{"MarkWithoutASigkill", other, true, verdict{}, false},
+		{"MarkWithACleanExit", 0, true, verdict{}, false},
+
+		// An honest command that finished inside its deadline.
+		{"CleanExit", 0, false, verdict{}, false},
+		{"CleanExitSeenAliveJustBefore", 0, false, verdict{aliveAtDeadline: true}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := classifyTimeout(c.code, c.watchdogFired, c.v); got != c.want {
+				t.Errorf("classifyTimeout(%d, %v, %+v) = %v, want %v",
+					c.code, c.watchdogFired, c.v, got, c.want)
+			}
+		})
+	}
+}
+
+// parseExit is the other half of the same decision, and the half that has to
+// stay compatible: the wrapper's mark rides on the exit line, so "the wrapper
+// recorded nothing" must still be the one and only empty case.
+func TestParseExitReadsTheWatchdogsMark(t *testing.T) {
+	cases := []struct {
+		name   string
+		out    string
+		code   int
+		killed bool
+		fails  bool
+	}{
+		{name: "KilledByTheWatchdog", out: "137 K\n", code: sigkillExit, killed: true},
+		{name: "FinishedOnItsOwn", out: "0 \n", code: 0},
+		{name: "NonZeroExit", out: "7 \n", code: 7},
+		// The $PPID sabotage: no wrapper left to record anything. It reads as the
+		// kill's code, and there is no mark to believe with the wrapper gone.
+		{name: "NothingRecorded", out: "", code: sigkillExit},
+		{name: "WhitespaceOnly", out: "\n", code: sigkillExit},
+		// Only the mark's presence is trusted, never its content — the wrapper
+		// writes the letter itself and never echoes the file's bytes.
+		{name: "UnknownSecondField", out: "137 X\n", code: sigkillExit},
+		{name: "GarbageCode", out: "not-a-code\n", fails: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			code, killed, err := parseExit(c.out)
+			if c.fails {
+				if err == nil {
+					t.Fatalf("parseExit(%q) = %d, %v, nil; want an error", c.out, code, killed)
+				}
+				return
+			}
+			if err != nil || code != c.code || killed != c.killed {
+				t.Errorf("parseExit(%q) = %d, %v, %v; want %d, %v, nil",
+					c.out, code, killed, err, c.code, c.killed)
+			}
+		})
+	}
+}
+
+// setsidEnv supplies a `setsid` shim when — and only when — the host has none,
+// which macOS does not. execWrapper backgrounds the command through it, and the
+// watchdog's group kill only reaches the command's children because of it, so a
+// shim that merely `exec`s would prove nothing about the kill: this one creates
+// the session for real. On Linux and in CI the util-linux binary the image
+// contract names still runs. It returns the environment to hand the script, nil
+// meaning "inherit".
+func setsidEnv(t *testing.T) []string {
+	t.Helper()
+	if _, err := exec.LookPath("setsid"); err == nil {
+		return nil
+	}
+	perl, err := exec.LookPath("perl")
+	if err != nil {
+		t.Skipf("host has neither setsid nor perl to stand in for it: %v", err)
+	}
+	bin := t.TempDir()
+	shim := "#!/bin/sh\nexec " + perl +
+		" -e 'use POSIX qw(setsid); setsid() != -1 or die \"setsid: $!\"; exec @ARGV or die \"exec: $!\"' \"$@\"\n"
+	if err := os.WriteFile(bin+"/setsid", []byte(shim), 0o755); err != nil {
+		t.Fatalf("stage setsid shim: %v", err)
+	}
+	return append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// The watchdog is the only thing in this backend that knows whether a SIGKILL
+// was the deadline's, so what it records is the fix for #95/#110 and is pinned
+// here rather than left to the live cluster: no cluster can be told to answer a
+// liveness probe late, but the mark itself is observable from the host's shell.
+//
+// This runs the script through the host's /bin/bash rather than the sandbox
+// image, as the write- and read-side tests do. It pins what the script does with
+// its arguments; that the image carries a userland able to run it is the live
+// contract test's job.
+func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
+	env := setsidEnv(t)
+	dir := t.TempDir()
+	run := func(t *testing.T, name, command string, seconds int) string {
+		t.Helper()
+		state := dir + "/" + name
+		cmd := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", command, strconv.Itoa(seconds), state)
+		cmd.Env = env
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("run execWrapper: %v", err)
+		}
+		recorded, err := os.ReadFile(state + ".exit")
+		if err != nil {
+			t.Fatalf("read recorded exit: %v", err)
+		}
+		return string(recorded)
+	}
+
+	// The #95 signature, from the other side: the command is killed on its
+	// deadline, and the exit line says who did it. Read back through the same
+	// parse and classification the provider uses, a punctual kill is a timeout
+	// with no probe involved at all.
+	t.Run("KilledOnItsDeadline", func(t *testing.T) {
+		code, killed, err := parseExit(run(t, "killed", "sleep 30", 1))
+		if err != nil || code != sigkillExit || !killed {
+			t.Fatalf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
+		}
+		if !classifyTimeout(code, killed, verdict{}) {
+			t.Error("a command the watchdog killed on its deadline did not classify as a timeout")
+		}
+	})
+
+	// An honest command that finishes early leaves no mark, and its own exit code
+	// stands. Its watchdog is still asleep when it exits, so this also pins that
+	// the wrapper never waits for the watchdog to notice.
+	t.Run("FinishedInsideItsDeadline", func(t *testing.T) {
+		code, killed, err := parseExit(run(t, "clean", "exit 7", 5))
+		if err != nil || code != 7 || killed {
+			t.Fatalf("parseExit = %d, %v, %v; want 7, false, nil", code, killed, err)
+		}
+		if classifyTimeout(code, killed, verdict{}) {
+			t.Error("a command that finished inside its deadline classified as a timeout")
+		}
+	})
+
+	// A command that SIGKILLs itself exits 137 without the watchdog firing, so
+	// the mark is what keeps 137 from meaning "timeout" on its own.
+	t.Run("SelfInflictedKillLeavesNoMark", func(t *testing.T) {
+		code, killed, err := parseExit(run(t, "selfkill", "kill -9 $$", 30))
+		if err != nil || code != sigkillExit || killed {
+			t.Fatalf("parseExit = %d, %v, %v; want %d, false, nil", code, killed, err, sigkillExit)
+		}
+		if classifyTimeout(code, killed, verdict{}) {
+			t.Error("a self-inflicted SIGKILL classified as a timeout")
+		}
+	})
+
+	// The mark must never be able to hold the kill back. A tenant that
+	// pre-creates the mark's path as a directory makes the write fail; the kill
+	// still has to land, and the command still has to die on its deadline —
+	// classification falls back to the probes, which is where it stood before.
+	t.Run("AnUnwritableMarkStillKills", func(t *testing.T) {
+		state := dir + "/blocked"
+		if err := os.Mkdir(state+".killed", 0o755); err != nil {
+			t.Fatalf("stage the blocked mark: %v", err)
+		}
+		cmd := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", "sleep 30", "1", state)
+		cmd.Env = env
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("run execWrapper: %v", err)
+		}
+		recorded, err := os.ReadFile(state + ".exit")
+		if err != nil {
+			t.Fatalf("read recorded exit: %v", err)
+		}
+		code, killed, err := parseExit(string(recorded))
+		if err != nil || code != sigkillExit {
+			t.Fatalf("parseExit = %d, %v, %v; want %d — the kill did not land", code, killed, err, sigkillExit)
+		}
+		if killed {
+			t.Error("a mark that could not be written was read as written")
+		}
+	})
+}
+
+// exitScript carries the mark home and takes the exec's state with it, so the
+// two halves are pinned together: a mark the provider cannot read is a lost
+// timeout, and one it does not remove is a file per timed-out command left in
+// the pod for the session's life.
+func TestExitScriptReportsAndClearsTheWatchdogsMark(t *testing.T) {
+	dir := t.TempDir()
+	run := func(t *testing.T, state string) string {
+		t.Helper()
+		cmd := exec.Command("/bin/bash", "-c", exitScript, "map-exit", state)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("run exitScript: %v", err)
+		}
+		for _, suffix := range []string{".pid", ".exit", ".killed"} {
+			if _, err := os.Stat(state + suffix); !os.IsNotExist(err) {
+				t.Errorf("%s survived the read: stat err = %v", suffix, err)
+			}
+		}
+		return string(out)
+	}
+	stage := func(t *testing.T, name string, files map[string]string) string {
+		t.Helper()
+		state := dir + "/" + name
+		for suffix, content := range files {
+			if err := os.WriteFile(state+suffix, []byte(content), 0o644); err != nil {
+				t.Fatalf("stage %s: %v", suffix, err)
+			}
+		}
+		return state
+	}
+
+	t.Run("KilledByTheWatchdog", func(t *testing.T) {
+		state := stage(t, "killed", map[string]string{".pid": "42\n", ".exit": "137 K\n", ".killed": ""})
+		if code, killed, err := parseExit(run(t, state)); err != nil || code != sigkillExit || !killed {
+			t.Errorf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
+		}
+	})
+
+	t.Run("FinishedOnItsOwn", func(t *testing.T) {
+		state := stage(t, "clean", map[string]string{".pid": "42\n", ".exit": "0 \n"})
+		if code, killed, err := parseExit(run(t, state)); err != nil || code != 0 || killed {
+			t.Errorf("parseExit = %d, %v, %v; want 0, false, nil", code, killed, err)
+		}
+	})
+
+	// The wrapper never recorded anything, and the cleanup still has to run.
+	t.Run("NothingRecorded", func(t *testing.T) {
+		state := stage(t, "sabotaged", map[string]string{".pid": "42\n"})
+		if out := run(t, state); out != "" {
+			t.Errorf("exitScript printed %q for a command that recorded nothing", out)
+		}
+	})
+}
+
 func TestDestroySurfacesError(t *testing.T) {
 	sid := domain.ID("sesn_derr")
 	cs := fake.NewClientset(readyPod(sid))

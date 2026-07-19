@@ -114,8 +114,11 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if err != nil {
 			t.Fatalf("exec: %v", err)
 		}
+		// Elapsed goes in the message because it is what tells the failure modes
+		// apart: a backend that mis-read a punctual kill returns at about the
+		// deadline, one that gave up waiting returns a killGrace later (#95, #110).
 		if !res.TimedOut {
-			t.Errorf("result = %+v, want TimedOut", res)
+			t.Errorf("result = %+v after %s, want TimedOut", res, time.Since(start))
 		}
 		if res.Stdout != "" || res.Stderr != "" {
 			t.Errorf("the kill leaked into the tool result: stdout=%q stderr=%q", res.Stdout, res.Stderr)
@@ -141,6 +144,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		defer cancel()
 
 		// 987654 is just a distinctive duration to count for afterwards.
+		start := time.Now()
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{
 			Command: `sleep 987654 & wait`, Timeout: time.Second,
 		})
@@ -148,7 +152,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			t.Fatalf("exec: %v", err)
 		}
 		if !res.TimedOut {
-			t.Fatalf("result = %+v, want TimedOut", res)
+			t.Fatalf("result = %+v after %s, want TimedOut", res, time.Since(start))
 		}
 		if n := countProcesses(t, sb, "sleep 987654"); n != 0 {
 			t.Errorf("%d descendant(s) of the killed command survived the deadline", n)
