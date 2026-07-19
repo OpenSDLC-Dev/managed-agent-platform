@@ -65,6 +65,19 @@ path (`/v1/messages` or `/v1/chat/completions`), so give e.g.
 (so the stack starts and idles); point `MODEL_PROVIDERS_FILE` at your gitignored
 copy for real turns.
 
+A route may also set `upstream_model`, the model id the endpoint actually
+receives. Leaving it unset — as the committed example does — **passes the
+agent's own model string through** to the endpoint, which is the point of a
+`"*"` route in front of a gateway that already understands your model names.
+Note what that also means for metrics: the passed-through string becomes the
+`gen_ai.request.model` attribute on `gen_ai.client.operation.duration` and
+`gen_ai.client.token.usage`, and metric attributes are aggregation keys, so
+under a `"*"` route with no `upstream_model` **whoever can create agents
+controls how many series your metrics backend stores**. That is deliberate —
+the label is genuinely the interesting dimension in exactly that deployment —
+but if agent creation is not trusted, set `upstream_model`, or replace the
+`"*"` route with per-model routes ([#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88)).
+
 ## The sandbox and the Docker socket
 
 The executor runs each session's tools in a per-session sandbox container. Under

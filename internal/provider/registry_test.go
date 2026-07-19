@@ -53,7 +53,7 @@ func TestRegistryRouting(t *testing.T) {
 	}
 }
 
-func TestRegistryCachesAndIsolatesConfig(t *testing.T) {
+func TestRegistryIsolatesCallerConfig(t *testing.T) {
 	headers := map[string]string{"x-tenant": "acme"}
 	routes := []provider.Route{{Model: "m", Config: provider.Config{
 		Protocol: "anthropic", BaseURL: "http://gw", Headers: headers}}}
@@ -62,23 +62,88 @@ func TestRegistryCachesAndIsolatesConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p1, err := reg.Provider("m")
+	p, err := reg.Provider("m")
 	if err != nil {
 		t.Fatal(err)
-	}
-	p2, err := reg.Provider("m")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p1 != p2 {
-		t.Error("providers are not cached: two calls constructed two instances")
 	}
 
 	// Mutating the caller's map after construction must not reach the
 	// provider's config.
 	headers["x-tenant"] = "mallory"
-	if got := p1.(*fakeProvider).cfg.Headers["x-tenant"]; got != "acme" {
+	if got := p.(*fakeProvider).cfg.Headers["x-tenant"]; got != "acme" {
 		t.Errorf("caller mutation leaked into provider config: %q", got)
+	}
+}
+
+// TestRegistryRetainsNothingPerModelString fences issue #88's memory half. The
+// registry used to cache constructed providers under the agent's model string,
+// which a "*" route makes client-controlled: every distinct string a client
+// invented retained an entry for the life of the brain process. Nothing is
+// cached now, and a returned instance can only be a cache hit if it is the same
+// instance — so non-identity is the observable that a reintroduced
+// string-keyed cache would break.
+func TestRegistryRetainsNothingPerModelString(t *testing.T) {
+	reg, err := provider.NewRegistry([]provider.Route{
+		{Model: "*", Config: provider.Config{Protocol: "anthropic", BaseURL: "http://gw"}},
+	}, factories)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p1, err := reg.Provider("invented-by-a-client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := reg.Provider("invented-by-a-client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1 == p2 {
+		t.Error("one model string was served the same instance twice: the registry is retaining providers keyed by client input")
+	}
+
+	// Each pass-through provider still carries the string it was built for.
+	for _, model := range []string{"one", "two", "three"} {
+		p, err := reg.Provider(model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := p.(*fakeProvider).cfg.Model; got != model {
+			t.Errorf("pass-through provider for %q got model %q", model, got)
+		}
+	}
+}
+
+// TestRegistryDefaultRouteWithUpstreamModelIgnoresClientString covers the half
+// of the leak issue #88 does not describe: the old cache stored under the
+// client's string whichever branch the route took, so a "*" route that DOES
+// name an upstream model retained one byte-identical provider per distinct
+// string too. A fix that only skipped the cache for the pass-through would
+// have left this in place.
+func TestRegistryDefaultRouteWithUpstreamModelIgnoresClientString(t *testing.T) {
+	reg, err := provider.NewRegistry([]provider.Route{
+		{Model: "*", Config: provider.Config{
+			Protocol: "anthropic", BaseURL: "http://gw", Model: "upstream-fixed"}},
+	}, factories)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, model := range []string{"a", "b", "c"} {
+		first, err := reg.Provider(model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := first.(*fakeProvider).cfg.Model; got != "upstream-fixed" {
+			t.Errorf("client string %q reached the endpoint as model %q", model, got)
+		}
+		second, err := reg.Provider(model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first == second {
+			t.Errorf("model %q was served a retained instance: the registry still keys on client input", model)
+		}
 	}
 }
 

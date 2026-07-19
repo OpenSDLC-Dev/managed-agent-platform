@@ -33,6 +33,15 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		// autoloads ambient ANTHROPIC_* credentials (auth-token env,
 		// profile files) underneath our options and would leak the
 		// operator's real Anthropic credential to a third-party base_url.
+		//
+		// It also decides what construction costs, which the registry
+		// depends on: this branch skips the SDK's DefaultClientOptions,
+		// so no per-client http.Transport is cloned and every instance
+		// shares http.DefaultClient. That is why provider.Registry can
+		// build one of these per turn instead of retaining them (#88).
+		// Replacing this with a narrower credential guard would give
+		// each instance its own connection pool — re-read the Registry
+		// doc before doing so.
 		option.WithoutEnvironmentDefaults(),
 		option.WithBaseURL(cfg.BaseURL),
 		option.WithAPIKey(cfg.APIKey),

@@ -4,8 +4,19 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+[#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88) — a `"*"` pass-through route
+lets a client-supplied model string reach the `gen_ai.request.model` metric attribute. The metric is
+accepted as an operator responsibility (no behavior change); the same trigger's unbounded provider
+cache is fixed. No plan file (single-PR fix; triage said `needs_plan: true` only for the product
+decision, which the maintainer made).
 
 ## Tasks
 
-None.
+- [x] Decision recorded: pass-through cardinality documented in `deploy/compose/README.md` and the
+      Helm `modelProviders` values comment, with the rationale in CHANGELOG.
+- [x] Provider cache deleted (registry is now immutable and lock-free), pinned by
+      `TestRegistryRetainsNothingPerModelString` and
+      `TestRegistryDefaultRouteWithUpstreamModelIgnoresClientString` — both fail on `main`.
+- [ ] Verifier verdict.
+- [ ] Dual review (Codex + `/code-review`).
+- [ ] PR green on CI.

@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
@@ -91,7 +90,12 @@ type Provider interface {
 	Generate(ctx context.Context, req Request) (Stream, error)
 }
 
-// Factory constructs a Provider for one protocol.
+// Factory constructs a Provider for one protocol. It must be cheap and must
+// acquire no per-instance resource — no private http.Transport, no connection
+// pool, no goroutine — because the registry calls it once per turn rather than
+// retaining what it builds (see Registry). Both adapters satisfy this by
+// sharing http.DefaultClient; an adapter that cannot must bring its own cache
+// keyed by resolved Config, never by the agent's model string.
 type Factory func(Config) (Provider, error)
 
 // Route binds an agent-facing model string to a provider config. Model "*"
@@ -103,22 +107,29 @@ type Route struct {
 
 // Registry resolves agent model strings to constructed providers. Routing is
 // exact-match with an optional "*" default, so an enterprise maps its model
-// names onto endpoints purely in configuration. Constructed providers are
-// cached per model string — one client per backend, not one per turn.
+// names onto endpoints purely in configuration.
+//
+// Nothing is retained, deliberately. Providers used to be cached per model
+// string, and under a "*" route that string is whatever a client put on its
+// agent — so the map grew without bound in the long-running brain (issue #88).
+// Keying it by the route instead would bound it, but the cache was buying too
+// little to pay for the branch: a constructed provider is a value struct over
+// the shared http.DefaultClient, the connection pool that matters lives in the
+// process-global http.DefaultTransport, and Provider is called once per turn
+// immediately before a model round trip that costs six orders of magnitude
+// more. With nothing to insert into, the bound is a property of the type
+// rather than of a policy — and the registry is immutable after NewRegistry,
+// so it needs no lock.
 type Registry struct {
 	routes    map[string]Config
 	fallback  *Config
 	factories map[string]Factory
-
-	mu    sync.Mutex
-	cache map[string]Provider
 }
 
 func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error) {
 	r := &Registry{
 		routes:    make(map[string]Config, len(routes)),
 		factories: factories,
-		cache:     make(map[string]Provider),
 	}
 	for _, route := range routes {
 		if route.Model == "" {
@@ -163,8 +174,6 @@ type Descriptor struct {
 // whether a route exists. It answers from configuration alone and never
 // constructs a provider, so telemetry about an unroutable model costs nothing.
 func (r *Registry) Describe(model string) (Descriptor, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	cfg, ok := r.route(model)
 	if !ok {
 		return Descriptor{}, false
@@ -173,8 +182,11 @@ func (r *Registry) Describe(model string) (Descriptor, bool) {
 }
 
 // route resolves a model string to its config, applying the pass-through of the
-// agent's own model name when the route names no upstream one. Callers hold the
-// lock.
+// agent's own model name when the route names no upstream one. That the
+// passed-through string is client-controlled — and so, via Describe, is the
+// gen_ai.request.model metric attribute's cardinality — is a deliberate
+// operator responsibility, not an oversight: see deploy/compose/README.md and
+// issue #88.
 func (r *Registry) route(model string) (Config, bool) {
 	cfg, ok := r.routes[model]
 	if !ok {
@@ -189,26 +201,17 @@ func (r *Registry) route(model string) (Config, bool) {
 	return cfg, true
 }
 
-// Provider resolves the provider for an agent's model string. When the
+// Provider constructs the provider for an agent's model string. When the
 // route's config has no upstream model set, the agent's own model string
 // passes through (a gateway that understands the platform's model names).
+// Every call constructs a fresh instance; see the Registry doc for why.
 func (r *Registry) Provider(model string) (Provider, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if p, ok := r.cache[model]; ok {
-		return p, nil
-	}
 	cfg, ok := r.route(model)
 	if !ok {
 		return nil, fmt.Errorf("no provider route for model %q", model)
 	}
 	cfg.Headers = cloneHeaders(cfg.Headers)
-	p, err := r.factories[cfg.Protocol](cfg)
-	if err != nil {
-		return nil, err
-	}
-	r.cache[model] = p
-	return p, nil
+	return r.factories[cfg.Protocol](cfg)
 }
 
 func cloneHeaders(h map[string]string) map[string]string {
