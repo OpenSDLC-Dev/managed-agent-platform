@@ -6,9 +6,10 @@ import "time"
 // the way the docker backend's does — but adapted to Kubernetes, which (unlike
 // Docker's exec-inspect) exposes no out-of-band handle on a running exec. So the
 // command runs as a background child rather than via `exec`, and the wrapper
-// records what the provider needs to judge the deadline from outside: the
-// command's pid ($3.pid) and, once it finishes, its exit code together with
-// whether the watchdog was the one that killed it ($3.exit).
+// records the three things the provider needs to judge the deadline from
+// outside: the command's pid ($3.pid), its exit code once it finishes ($3.exit),
+// and — written by the watchdog, not the wrapper — whether the deadline's own
+// kill was what ended it ($3.killed).
 //
 // $1 is the command, $2 the timeout in whole seconds ("0" = no limit), $3 the
 // state-file base path (unique per exec).
@@ -32,25 +33,24 @@ import "time"
 // watchdog reports having fired.
 //
 // That last piece — the watchdog marking `$3.killed` between its final `kill -0`
-// and its `kill -9`, which the wrapper folds into `$3.exit` — is what makes a
-// punctual kill classifiable at all here (#95, #110). Exec's pre-deadline
-// liveness probe is itself an in-pod exec, so its answer reflects an instant one
-// apiserver round trip after it was asked for; when that round trip outruns the
-// one that started this wrapper, the probe reads a command the watchdog has just
-// killed as one that was never running, and a real timeout came back
-// `ExitCode: 137, TimedOut: false`. The watchdog knows what the probe was
-// guessing at. The mark is written *before* the signal so it is on disk by the
-// time `wait` returns, and its write is deliberately not chained to the kill: a
-// mark that cannot be written (a read-only /tmp, or a path a tenant pre-created
-// as a directory) must never suppress the kill itself.
+// and its `kill -9` — is what makes a punctual kill classifiable at all here
+// (#95, #110); why the mark rather than a probe, and why it is safe to weigh
+// in-pod state at all, is argued once at classifyTimeout, where the decision is
+// made. What belongs here is how the mark is written.
 //
-// The mark is in-pod state, which the docker backend deliberately does not keep
-// (docs/HISTORY.md § the docker deadline: a marker file was its first design and
-// was removed). Two things make it sound here and not there: Kubernetes exposes
-// no out-of-band handle, so this backend's verdict already rests on in-pod state
-// (`$3.pid`) either way; and the mark is only ever an *additional* reason to
-// call a timeout, weighed by Exec alongside a recorded SIGKILL, never a reason
-// to withdraw one. Only its content is untrusted, so only its existence is read.
+// It is a **directory**, made with `mkdir`, and that is the whole point rather
+// than an oddity. The mark must never be able to hold the kill back, and a
+// redirect cannot promise that: `: > "$3.killed"` opens the path, and a tenant
+// who plants a FIFO there (the state path is its own parent's argv, so it is
+// readable from /proc) blocks that open forever — the watchdog would hang before
+// `kill -9` and the runaway would never die, a strictly worse outcome than the
+// bug this fixes. `mkdir` is the one creation primitive that cannot block: it
+// either creates the path or fails immediately, whatever is already sitting
+// there. Nor is it a shell special builtin, so a redirection failure cannot
+// abort the watchdog subshell under a POSIX-mode bash. A tenant can still make
+// the `mkdir` fail and suppress its own mark — that only returns the
+// classification to where it stood before this existed, which is the direction
+// this trade is allowed to fail in.
 //
 // The command's stderr is handed fd 3 (the exec's real stderr, saved first) and
 // then fd 3 is closed in the command (`2>&3 3>&-`): its stderr still reaches the
@@ -78,16 +78,13 @@ if [ "$2" != "0" ]; then
       n=$((n + 1))
     done
     if kill -0 "$cmd" 2>/dev/null; then
-      : > "$3.killed"
+      mkdir "$3.killed" 2>/dev/null
       kill -9 -"$cmd" 2>/dev/null
     fi
   ) >/dev/null 2>&1 3>&- &
 fi
 wait "$cmd"
-rc=$?
-k=
-[ -f "$3.killed" ] && k=K
-echo "$rc $k" > "$3.exit"
+echo "$?" > "$3.exit"
 `
 
 // aliveScript answers whether the command pid recorded in $1.pid is still alive.
@@ -109,23 +106,39 @@ p=$(cat "$1.pid" 2>/dev/null)
 if [ -z "$p" ] || kill -0 "$p" 2>/dev/null; then echo A; else echo D; fi
 `
 
-// exitScript prints the line the wrapper recorded — the exit code, then the
-// watchdog's mark if it fired — or nothing if the command has not finished (the
-// file is absent), then removes the exec's state files. The read happens once
-// the probes are done (Exec has the verdict before it calls this), so the
-// cleanup cannot race a probe, and it keeps /tmp from accumulating three files
-// per command over a session's thousands of execs.
+// exitScript collects both halves of the answer in one exec and takes the whole
+// exec's state with it: the watchdog's mark if it fired, then the exit code the
+// wrapper recorded (nothing, if the command never finished or the wrapper was
+// killed before it could write one). The read happens once the probes are done
+// (Exec has the verdict before it calls this), so the cleanup cannot race a
+// probe, and it keeps /tmp from accumulating three entries per command over a
+// session's thousands of execs.
 //
-// The mark rides in the same file rather than being read as a second one, so
-// "the wrapper recorded nothing at all" stays exactly one thing — empty output —
-// and keeps meaning what it has always meant to readExit.
-const exitScript = `cat "$1.exit" 2>/dev/null; rm -f "$1.pid" "$1.exit" "$1.killed" 2>/dev/null`
+// The mark is printed *first* because it is the more load-bearing of the two and
+// this stream is unframed: client-go stops copying stdout at its first error, so
+// what a lost stream drops is always a suffix. Losing the code leaves a
+// synthesized SIGKILL and a mark that still says the deadline caused it; losing
+// the mark instead would put a real timeout back on the probe race #95 was filed
+// for. Reading the mark here rather than in the wrapper is what lets it survive
+// the wrapper's own sabotage: a command that kills its parent before the exit
+// code is recorded leaves the mark, and the timeout still shows.
+//
+// `rm -rf` on the mark, because the tenant chooses what type of thing sits at
+// that path; `rm -f` would leave a directory or a planted FIFO behind forever.
+const exitScript = `
+k=
+[ -d "$1.killed" ] && k=K
+c=$(cat "$1.exit" 2>/dev/null)
+rm -f "$1.pid" "$1.exit" 2>/dev/null
+rm -rf "$1.killed" 2>/dev/null
+echo "$k $c"
+`
 
 // sigkillExit is what bash reports for a job killed by SIGKILL (128 + 9).
 const sigkillExit = 137
 
-// killedMark is what the wrapper writes after the exit code when the watchdog
-// reports having fired.
+// killedMark is what exitScript prints ahead of the exit code when it finds the
+// watchdog's mark.
 const killedMark = "K"
 
 const (
@@ -139,12 +152,8 @@ const (
 	defaultOverrunSlop = 500 * time.Millisecond
 	// defaultProbeLead is how far before the deadline Exec asks whether the
 	// command is still alive — before, not at, since a command the watchdog has
-	// already killed looks like one never there. It is only a lead on Exec's own
-	// clock: the watchdog's starts when the wrapper reaches the pod, and the
-	// probe's answer arrives an exec round trip after it is asked for, so this
-	// buys no reliable margin against the kill and is not what classifies a
-	// timeout — the watchdog's own mark is (see execWrapper). What the lead still
-	// earns is the case the mark cannot cover: a SIGKILL the watchdog did not
-	// deliver.
+	// already killed looks like one never there. It is a lead on Exec's own clock
+	// only, which is why it is not what classifies a punctual timeout here; see
+	// classifyTimeout.
 	defaultProbeLead = 50 * time.Millisecond
 )

@@ -13,8 +13,10 @@ command on its deadline and reported `TimedOut: false`. No plan file (single-PR 
 
 - [x] Root-caused: the pre-deadline liveness probe is itself an in-pod exec, so its answer lands an
       apiserver round trip late and misses the watchdog's kill. Independently confirmed.
-- [x] Fixed: the watchdog marks its own kill, the wrapper folds the mark onto the exit line, and
-      `classifyTimeout` weighs it alongside a recorded SIGKILL.
+- [x] Fixed: the watchdog marks its own kill with `mkdir` (the one primitive a planted FIFO cannot
+      block), `exitScript` reads it home, and `classifyTimeout` weighs it beside a recorded SIGKILL.
 - [x] Pinned without a cluster: wrapper and `exitScript` under host `/bin/bash`, plus table tests on
-      `classifyTimeout`/`parseExit`. Three mutations each fail exactly their own case.
-- [ ] Verifier, dual review, PR green on CI's kind cluster.
+      `classifyTimeout`/`parseExit`. Four mutations caught, including the blocking-redirect one.
+- [x] Verifier: PASS with findings (local `make verify` red is the pre-existing kind EOF flake,
+      identical on `main`). Reviews: `/code-review` found the FIFO defect — fixed and pinned.
+- [ ] Codex review, then PR green on CI's kind cluster.

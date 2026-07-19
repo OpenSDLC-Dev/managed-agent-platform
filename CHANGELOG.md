@@ -33,28 +33,41 @@ copy of an entry here.
   Kubernetes exec.
 
   The fix stops asking a probe to witness something the killer already knows. The in-pod watchdog
-  marks `$3.killed` between its final `kill -0` and its `kill -9`, the wrapper folds that mark onto
-  the exit line it already records, and `exitScript` carries it home and removes it with the rest of
-  the exec's state:
+  marks its own firing between its final `kill -0` and its `kill -9`, and `exitScript` reads that
+  mark home alongside the recorded exit code and clears it with the rest of the exec's state:
 
   ```sh
   if kill -0 "$cmd" 2>/dev/null; then
-    : > "$3.killed"
+    mkdir "$3.killed" 2>/dev/null
     kill -9 -"$cmd" 2>/dev/null
   fi
   ```
 
-  The mark's write is deliberately *not* chained to the kill with `&&`: a mark that cannot be written
-  — a read-only `/tmp`, or a path a tenant pre-created as a directory — must never suppress the kill,
-  which chaining would have let a one-line `mkdir` do. Classification moves into a pure
-  `classifyTimeout(code, watchdogFired, verdict)`, which reads the mark only alongside a recorded
-  SIGKILL: every term only ever *adds* a timeout, so the mark cannot withdraw one, and the window
-  between the watchdog's last `kill -0` and its signal — where the command exits on its own terms
-  with the mark already written — is not mislabelled. The probes stay for what the mark cannot cover:
-  a SIGKILL the watchdog did not deliver, because the tenant killed it or the node did the killing.
+  The mark is a **directory**, and that is the load-bearing detail rather than a curiosity. The one
+  thing the mark must never do is hold the kill back, and a redirect cannot promise that: `: >
+  "$3.killed"` opens the path, and a tenant that plants a FIFO there — the state path is its own
+  parent's argv, readable from `/proc` — blocks that open forever, so the watchdog never reaches
+  `kill -9` and the runaway never dies. That is strictly worse than the bug being fixed, and it was
+  in the first version of this change; the review caught it and it is now pinned by a test that runs
+  the real wrapper against a real FIFO (with the redirect restored, the command survives its full
+  30 s and exits 0). `mkdir` is the one creation primitive that cannot block — it creates the path or
+  fails immediately, whatever is already there — and, not being a shell special builtin, it also
+  cannot abort the watchdog subshell on a redirection failure under a POSIX-mode bash.
 
-  This re-introduces in-pod state that the docker backend removed by design (docs/HISTORY.md § the
-  docker deadline). It is sound here and not there for two reasons, both new to this backend:
+  Classification moves into a pure `classifyTimeout(code, watchdogFired, verdict)`, which reads the
+  mark only alongside a recorded SIGKILL: every term only ever *adds* a timeout, so the mark cannot
+  withdraw one. The probes stay for what the mark cannot cover — a SIGKILL the watchdog did not
+  deliver, because the tenant killed it or the node did the killing. Reading the mark in
+  `exitScript` rather than folding it into the exit line in the wrapper is deliberate too: it is what
+  lets a timeout survive the `$PPID` sabotage, where the command kills the wrapper before it can
+  record a code but the watchdog, a separate process, still marked its kill. For the same reason the
+  mark is printed *ahead* of the code — client-go stops copying stdout at its first error, so a lost
+  stream drops a suffix, and losing the code leaves a synthesized SIGKILL with a mark that still
+  says the deadline caused it, rather than the reverse.
+
+  This re-introduces in-pod state that the docker backend removed by design (docs/HISTORY.md §
+  "`internal/sandbox` — the hands (slice 6, first part)"). It is sound here and not there for two
+  reasons, both new to this backend:
   Kubernetes exposes no out-of-band handle on a running exec, so this verdict already rested on
   in-pod state (`$3.pid`) before the mark existed; and the mark is an OR-term gated on a real
   SIGKILL, so a tenant that forges it mislabels only its own tool call, while one that erases it is
@@ -65,12 +78,14 @@ copy of an entry here.
 
   Regression coverage runs the wrapper and `exitScript` under the host's `/bin/bash`, the way the
   #103 and #105 script tests do, so the classification is pinned with no cluster and no wall-clock
-  race: a command killed on its deadline records the mark and classifies as a timeout, one that
-  finishes early or SIGKILLs itself records none, and a mark blocked by a pre-created directory still
-  dies on time. Each guard is mutation-tested — removing the mark, dropping it from the
-  classification, or chaining it to the kill each fails exactly its own case. The live contract
-  suite's two flaking subtests now report elapsed time on failure, which is what tells a mis-read
-  punctual kill from a `killGrace` timeout if either ever fails again.
+  race: a command killed on its deadline is marked and classifies as a timeout, one that finishes
+  early or SIGKILLs itself is not, a mark blocked by a planted FIFO, file, or directory still dies on
+  its deadline (in POSIX mode too), and a sabotaged wrapper still reports the timeout the mark
+  witnessed. Four mutations are each caught: removing the mark write, dropping `watchdogFired` from
+  the classification, writing the mark with a redirect instead of `mkdir`, and clearing it with
+  `rm -f` instead of `rm -rf`. The live contract suite's two flaking subtests now report elapsed time
+  on failure, which is what tells a mis-read punctual kill from a `killGrace` timeout if either ever
+  fails again.
 
 - **The K8s sandbox can no longer return a short read as a whole file**
   ([#105](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/105)) — the read-side mirror

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	gopath "path"
 	"strconv"
+	"syscall"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -622,17 +623,18 @@ func TestParseExitReadsTheWatchdogsMark(t *testing.T) {
 		killed bool
 		fails  bool
 	}{
-		{name: "KilledByTheWatchdog", out: "137 K\n", code: sigkillExit, killed: true},
-		{name: "FinishedOnItsOwn", out: "0 \n", code: 0},
-		{name: "NonZeroExit", out: "7 \n", code: 7},
-		// The $PPID sabotage: no wrapper left to record anything. It reads as the
-		// kill's code, and there is no mark to believe with the wrapper gone.
-		{name: "NothingRecorded", out: "", code: sigkillExit},
-		{name: "WhitespaceOnly", out: "\n", code: sigkillExit},
-		// Only the mark's presence is trusted, never its content — the wrapper
-		// writes the letter itself and never echoes the file's bytes.
-		{name: "UnknownSecondField", out: "137 X\n", code: sigkillExit},
-		{name: "GarbageCode", out: "not-a-code\n", fails: true},
+		{name: "KilledByTheWatchdog", out: "K 137\n", code: sigkillExit, killed: true},
+		{name: "FinishedOnItsOwn", out: " 0\n", code: 0},
+		{name: "NonZeroExit", out: " 7\n", code: 7},
+		// The $PPID sabotage: the wrapper never recorded a code. It reads as the
+		// kill's — and the watchdog's mark, left independently of the wrapper,
+		// still says the deadline was what caused it.
+		{name: "NothingRecorded", out: " \n", code: sigkillExit},
+		{name: "Empty", out: "", code: sigkillExit},
+		{name: "SabotagedWrapperButMarked", out: "K \n", code: sigkillExit, killed: true},
+		// The mark leads, so a stream that loses its tail loses the code and keeps
+		// the timeout, never the other way round.
+		{name: "GarbageCode", out: "K not-a-code\n", fails: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -665,7 +667,9 @@ func setsidEnv(t *testing.T) []string {
 	}
 	perl, err := exec.LookPath("perl")
 	if err != nil {
-		t.Skipf("host has neither setsid nor perl to stand in for it: %v", err)
+		// Not a skip: skipping would delete the whole #95 regression suite on a
+		// host that happens to lack both, and take the tamper cases with it.
+		t.Fatalf("host has neither setsid nor perl to stand in for it: %v", err)
 	}
 	bin := t.TempDir()
 	shim := "#!/bin/sh\nexec " + perl +
@@ -688,19 +692,25 @@ func setsidEnv(t *testing.T) []string {
 func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 	env := setsidEnv(t)
 	dir := t.TempDir()
-	run := func(t *testing.T, name, command string, seconds int) string {
+	// Both scripts run, the way the provider runs them: the wrapper records the
+	// exec's state and exitScript is the one that reads the mark back out.
+	run := func(t *testing.T, name, command string, seconds int, extraEnv ...string) string {
 		t.Helper()
 		state := dir + "/" + name
-		cmd := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", command, strconv.Itoa(seconds), state)
-		cmd.Env = env
-		if err := cmd.Run(); err != nil {
+		wrapper := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", command, strconv.Itoa(seconds), state)
+		base := env
+		if base == nil {
+			base = os.Environ()
+		}
+		wrapper.Env = append(append([]string{}, base...), extraEnv...)
+		if err := wrapper.Run(); err != nil {
 			t.Fatalf("run execWrapper: %v", err)
 		}
-		recorded, err := os.ReadFile(state + ".exit")
+		out, err := exec.Command("/bin/bash", "-c", exitScript, "map-exit", state).Output()
 		if err != nil {
-			t.Fatalf("read recorded exit: %v", err)
+			t.Fatalf("run exitScript: %v", err)
 		}
-		return string(recorded)
+		return string(out)
 	}
 
 	// The #95 signature, from the other side: the command is killed on its
@@ -742,30 +752,89 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 		}
 	})
 
-	// The mark must never be able to hold the kill back. A tenant that
-	// pre-creates the mark's path as a directory makes the write fail; the kill
-	// still has to land, and the command still has to die on its deadline —
-	// classification falls back to the probes, which is where it stood before.
-	t.Run("AnUnwritableMarkStillKills", func(t *testing.T) {
-		state := dir + "/blocked"
-		if err := os.Mkdir(state+".killed", 0o755); err != nil {
-			t.Fatalf("stage the blocked mark: %v", err)
+	// The mark must never be able to hold the kill back — the property that makes
+	// it safe to write one at all. The path is the wrapper's own argv, so a
+	// command can read it out of /proc and plant whatever it likes there before
+	// the watchdog fires. Each of these makes the mark fail; each must still
+	// leave the command dead on its deadline, with the classification falling
+	// back to the probes, which is where it stood before the mark existed.
+	//
+	// The FIFO is the one that matters. `: > "$3.killed"` — the obvious way to
+	// write a mark — blocks forever opening a FIFO for writing, so the watchdog
+	// would never reach `kill -9` and the runaway would outlive its deadline
+	// entirely. `mkdir` cannot block on any of these.
+	//
+	// What each plant does to the *label* differs, and is asserted rather than
+	// waved at: a planted directory is indistinguishable from the watchdog's own
+	// mark, so it forges a timeout — the tenant mislabelling its own tool call,
+	// the one direction this trade is allowed to fail in. A file or a FIFO is not
+	// a directory, so those suppress the mark instead.
+	blocked := []struct {
+		name       string
+		plant      func(t *testing.T, path string) error
+		wantMarked bool
+	}{
+		{"Fifo", func(t *testing.T, path string) error { return syscall.Mkfifo(path, 0o644) }, false},
+		{"RegularFile", func(t *testing.T, path string) error {
+			return os.WriteFile(path, []byte("not mine"), 0o644)
+		}, false},
+		{"Directory", func(t *testing.T, path string) error { return os.Mkdir(path, 0o755) }, true},
+	}
+	for _, b := range blocked {
+		t.Run("MarkBlockedBy"+b.name+"StillKills", func(t *testing.T) {
+			state := "blocked" + b.name
+			if err := b.plant(t, dir+"/"+state+".killed"); err != nil {
+				t.Fatalf("plant %s at the mark: %v", b.name, err)
+			}
+			code, killed, err := parseExit(run(t, state, "sleep 30", 1))
+			if err != nil || code != sigkillExit {
+				t.Fatalf("parseExit = %d, %v, %v; want %d — the kill did not land",
+					code, killed, err, sigkillExit)
+			}
+			if killed != b.wantMarked {
+				t.Errorf("watchdogFired = %v, want %v", killed, b.wantMarked)
+			}
+		})
+	}
+
+	// bash aborts on a redirection failure in a POSIX special builtin when it is
+	// in POSIX mode, which the deployment's own image can turn on through the
+	// environment. That is why the mark is not written with a redirect at all:
+	// the kill has to land whatever mode the shell is in.
+	t.Run("PosixModeStillKills", func(t *testing.T) {
+		state := "posix"
+		if err := syscall.Mkfifo(dir+"/"+state+".killed", 0o644); err != nil {
+			t.Fatalf("plant a fifo at the mark: %v", err)
 		}
-		cmd := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", "sleep 30", "1", state)
-		cmd.Env = env
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("run execWrapper: %v", err)
-		}
-		recorded, err := os.ReadFile(state + ".exit")
-		if err != nil {
-			t.Fatalf("read recorded exit: %v", err)
-		}
-		code, killed, err := parseExit(string(recorded))
+		code, killed, err := parseExit(run(t, state, "sleep 30", 1, "POSIXLY_CORRECT=1"))
 		if err != nil || code != sigkillExit {
-			t.Fatalf("parseExit = %d, %v, %v; want %d — the kill did not land", code, killed, err, sigkillExit)
+			t.Fatalf("parseExit = %d, %v, %v; want %d — the kill did not land in POSIX mode",
+				code, killed, err, sigkillExit)
 		}
 		if killed {
-			t.Error("a mark that could not be written was read as written")
+			t.Error("a mark the watchdog could not make was read as made")
+		}
+	})
+
+	// The $PPID sabotage: the command kills the wrapper before it can record an
+	// exit code. The watchdog is a separate process and still marks its kill, and
+	// because the mark is read by exitScript rather than folded in by the wrapper,
+	// the timeout survives the sabotage.
+	t.Run("MarkSurvivesASabotagedWrapper", func(t *testing.T) {
+		state := dir + "/sabotaged"
+		if err := os.Mkdir(state+".killed", 0o755); err != nil {
+			t.Fatalf("stage the watchdog's mark: %v", err)
+		}
+		out, err := exec.Command("/bin/bash", "-c", exitScript, "map-exit", state).Output()
+		if err != nil {
+			t.Fatalf("run exitScript: %v", err)
+		}
+		code, killed, err := parseExit(string(out))
+		if err != nil || code != sigkillExit || !killed {
+			t.Fatalf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
+		}
+		if !classifyTimeout(code, killed, verdict{}) {
+			t.Error("a watchdog kill whose wrapper was sabotaged did not classify as a timeout")
 		}
 	})
 }
@@ -790,36 +859,71 @@ func TestExitScriptReportsAndClearsTheWatchdogsMark(t *testing.T) {
 		}
 		return string(out)
 	}
-	stage := func(t *testing.T, name string, files map[string]string) string {
+	stage := func(t *testing.T, name, exitLine string, marked bool) string {
 		t.Helper()
 		state := dir + "/" + name
-		for suffix, content := range files {
-			if err := os.WriteFile(state+suffix, []byte(content), 0o644); err != nil {
-				t.Fatalf("stage %s: %v", suffix, err)
+		if err := os.WriteFile(state+".pid", []byte("42\n"), 0o644); err != nil {
+			t.Fatalf("stage .pid: %v", err)
+		}
+		if exitLine != "" {
+			if err := os.WriteFile(state+".exit", []byte(exitLine), 0o644); err != nil {
+				t.Fatalf("stage .exit: %v", err)
+			}
+		}
+		if marked {
+			if err := os.Mkdir(state+".killed", 0o755); err != nil {
+				t.Fatalf("stage the watchdog's mark: %v", err)
 			}
 		}
 		return state
 	}
 
 	t.Run("KilledByTheWatchdog", func(t *testing.T) {
-		state := stage(t, "killed", map[string]string{".pid": "42\n", ".exit": "137 K\n", ".killed": ""})
+		state := stage(t, "killed", "137\n", true)
 		if code, killed, err := parseExit(run(t, state)); err != nil || code != sigkillExit || !killed {
 			t.Errorf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
 		}
 	})
 
 	t.Run("FinishedOnItsOwn", func(t *testing.T) {
-		state := stage(t, "clean", map[string]string{".pid": "42\n", ".exit": "0 \n"})
+		state := stage(t, "clean", "0\n", false)
 		if code, killed, err := parseExit(run(t, state)); err != nil || code != 0 || killed {
 			t.Errorf("parseExit = %d, %v, %v; want 0, false, nil", code, killed, err)
 		}
 	})
 
+	// The mark is a directory, and a tenant may have made the path something else
+	// entirely. Either way the cleanup has to take it: `rm -f` alone would leave
+	// one entry per timed-out command in the pod for the session's life.
+	t.Run("MarkOfAnyShapeIsCleared", func(t *testing.T) {
+		state := dir + "/planted"
+		if err := os.WriteFile(state+".pid", []byte("42\n"), 0o644); err != nil {
+			t.Fatalf("stage .pid: %v", err)
+		}
+		if err := syscall.Mkfifo(state+".killed", 0o644); err != nil {
+			t.Fatalf("stage a fifo at the mark: %v", err)
+		}
+		if code, killed, err := parseExit(run(t, state)); err != nil || code != sigkillExit || killed {
+			t.Errorf("parseExit = %d, %v, %v; want %d, false, nil — a fifo is not the watchdog's mark",
+				code, killed, err, sigkillExit)
+		}
+	})
+
 	// The wrapper never recorded anything, and the cleanup still has to run.
 	t.Run("NothingRecorded", func(t *testing.T) {
-		state := stage(t, "sabotaged", map[string]string{".pid": "42\n"})
-		if out := run(t, state); out != "" {
-			t.Errorf("exitScript printed %q for a command that recorded nothing", out)
+		state := stage(t, "sabotaged", "", false)
+		if code, killed, err := parseExit(run(t, state)); err != nil || code != sigkillExit || killed {
+			t.Errorf("parseExit = %d, %v, %v; want %d, false, nil", code, killed, err, sigkillExit)
+		}
+	})
+
+	// The same sabotage, but the watchdog did fire before the wrapper died. The
+	// mark is the only witness left, and it is read here rather than by the
+	// wrapper precisely so this case is not lost.
+	t.Run("NothingRecordedButMarked", func(t *testing.T) {
+		state := stage(t, "sabotaged-marked", "", true)
+		if code, killed, err := parseExit(run(t, state)); err != nil || code != sigkillExit || !killed {
+			t.Errorf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
 		}
 	})
 }

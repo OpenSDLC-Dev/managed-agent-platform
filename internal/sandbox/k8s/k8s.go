@@ -366,22 +366,20 @@ func (pd *pod) execErr(ctx context.Context, err error) error {
 // code it chose.
 //
 // Where it does not mirror docker is what says a punctual kill *was* the
-// deadline's. Docker asks its daemon, out of band and cheaply; Kubernetes offers
-// no such handle, so asking costs a second in-pod exec whose answer lands an
-// apiserver round trip late — late enough, on a loaded cluster, to miss the kill
-// it was sent to witness (#95, #110). So the watchdog marks its own firing and
-// classifyTimeout weighs that mark; the probes stay for what a mark cannot cover.
+// deadline's: docker asks its daemon out of band, this backend has the watchdog
+// mark its own firing (#95, #110). classifyTimeout is where that is weighed and
+// argued.
 //
 // One axis is weaker than the docker backend. The state Exec reads — the pid it
-// watches, and the watchdog's mark — lives in files inside the sandbox, since
-// Kubernetes exposes no out-of-band handle on a running exec the way Docker's
-// exec-inspect does. So a command that both kills its watchdog and overwrites the
-// pid file to look dead can hide an overrun, and one that writes the mark and
-// contrives a SIGKILL can claim a timeout it never hit. Both are deliberately
-// malicious commands, the same case the derived-name adoption check (`ours`) does
-// not defend, and the second only mislabels the tenant's own tool call. The
-// honest runaway the deadline exists for forges nothing: its real pid stays in
-// the file, and killing its watchdog alone buys only overrunSlop of unnoticed
+// watches, and the watchdog's mark — lives inside the sandbox, since Kubernetes
+// exposes no out-of-band handle on a running exec the way Docker's exec-inspect
+// does. So a command that both kills its watchdog and overwrites the pid file to
+// look dead can hide an overrun, and one that plants the mark and contrives a
+// SIGKILL can claim a timeout it never hit. Both are deliberately malicious
+// commands, the same case the derived-name adoption check (`ours`) does not
+// defend, and the second only mislabels the tenant's own tool call. The honest
+// runaway the deadline exists for forges nothing: its real pid stays in the
+// file, and killing its watchdog alone buys only overrunSlop of unnoticed
 // overrun before the probe catches it.
 //
 // The command runs in a background goroutine because it may block: a straggler
@@ -490,19 +488,33 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 //
 // Three ways a finished command can have hit its deadline, and a SIGKILL is the
 // evidence for two of them, because a command cannot survive one to fake it.
-// The watchdog reports having fired: it, and only it, knows the kill was the
-// deadline's rather than the command's own or the node's. Or the command was
-// still alive when Exec looked just before the deadline, which covers a SIGKILL
-// the watchdog did not deliver (the tenant killed the watchdog, or the node
-// did the killing) — the pre-deadline probe is a sampled guess, so it is read
-// only as extra reach, never as a veto. Or it outlived the deadline and the
-// slop and exited anyway, which on the honest path the watchdog would have
-// prevented; that one needs no exit code, since none it chose can be believed.
+// The watchdog reports having fired — the only witness that is not a guess,
+// which is why it exists: the pre-deadline probe is a second in-pod exec, so its
+// answer describes the pod an apiserver round trip after it was asked, and on a
+// loaded cluster that lands past the kill it was sent to see (#95, #110). Or the
+// command was still alive when that probe looked, which covers a SIGKILL the
+// watchdog did not deliver — the tenant killed the watchdog, or the node did the
+// killing — so the probe stays as extra reach, never as a veto. Or it outlived
+// the deadline and the slop and exited anyway, which on the honest path the
+// watchdog would have prevented; that one needs no exit code, since none it
+// chose can be believed.
 //
-// Every term only ever adds a timeout. That is what lets the watchdog's mark be
-// in-pod state without weakening the guarantee: a tenant that forges the mark
-// mislabels its own tool call, and one that erases it is back to the probes,
-// which is exactly where this backend stood before.
+// The mark is not quite proof of authorship: the watchdog marks after `kill -0`
+// says the command is there, and a command that exits in the moment between
+// that look and the signal is marked without having been killed. Requiring a
+// SIGKILL alongside the mark is what makes that harmless — the command's own
+// exit code is whatever it chose — except for the one command that chooses 137
+// inside that window, which is the same unconditional cost the probe lead has
+// always paid.
+//
+// Every term only ever adds a timeout. That is what lets the mark be in-pod
+// state at all — the thing docker keeps out of its container on purpose
+// (docs/HISTORY.md § "`internal/sandbox` — the hands (slice 6, first part)").
+// Kubernetes exposes no out-of-band handle on a running exec, so this backend's
+// verdict already rested on in-pod state (the pid file) before the mark existed;
+// what the mark adds is a tenant that forges it mislabelling its own tool call,
+// while one that erases it is back to the probes — exactly where this backend
+// stood before.
 func classifyTimeout(code int, watchdogFired bool, v verdict) bool {
 	return (code == sigkillExit && (watchdogFired || v.aliveAtDeadline)) || v.overran
 }
@@ -518,21 +530,24 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, bool, error) {
 	return parseExit(out)
 }
 
-// parseExit reads exitScript's output: the exit code, then killedMark if the
-// watchdog fired. Nothing at all means the wrapper was killed before it could
-// record anything (its own $PPID sabotage) — the command left no honest code, so
-// it reads as the kill's, and with no wrapper left to vouch for the watchdog
-// there is no mark to believe either.
+// parseExit reads exitScript's output: killedMark if the watchdog fired, then
+// the exit code. No code means the wrapper was killed before it could record one
+// (its own $PPID sabotage) — the command left no honest code, so it reads as the
+// kill's, and the mark, which the watchdog left independently, still says whose.
 func parseExit(out string) (int, bool, error) {
 	fields := strings.Fields(out)
+	watchdogFired := len(fields) > 0 && fields[0] == killedMark
+	if watchdogFired {
+		fields = fields[1:]
+	}
 	if len(fields) == 0 {
-		return sigkillExit, false, nil
+		return sigkillExit, watchdogFired, nil
 	}
 	code, err := strconv.Atoi(fields[0])
 	if err != nil {
 		return 0, false, fmt.Errorf("k8s: unparseable exit code %q: %w", fields[0], err)
 	}
-	return code, len(fields) > 1 && fields[1] == killedMark, nil
+	return code, watchdogFired, nil
 }
 
 // nonce is a per-exec random token: the suffix for the wrapper's state files, so
