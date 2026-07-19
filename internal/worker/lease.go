@@ -445,14 +445,25 @@ func (w *Worker) sessionLive(ctx context.Context, sessionID string) (bool, error
 // forceStop stops the work item, ignoring a 409 (already stopping/stopped, which
 // the reference also ignores). It runs on a fresh background context so the item
 // is still stopped even when the worker is shutting down and ctx is cancelled.
+//
+// Stop answers a bodiless 204, but the generated method is typed
+// *BetaSelfHostedWork, so the SDK's strict decoder fails a successful call with
+// "expected destination type of 'string' or '[]byte' …". Rebinding the response
+// destination to **http.Response trips the decoder bypass — the same workaround
+// the reference's own poller applies, for the same reason (anthropic-sdk-go
+// lib/environments/poller.go, stopWork).
 func (w *Worker) forceStop(workID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
+	var raw *http.Response
 	if _, err := w.client.Beta.Environments.Work.Stop(ctx, workID, sdk.BetaEnvironmentWorkStopParams{
 		EnvironmentID:                 w.cfg.EnvironmentID,
 		BetaSelfHostedWorkStopRequest: sdk.BetaSelfHostedWorkStopRequestParam{Force: sdk.Bool(true)},
-	}); err != nil && !isStatus(err, 409) {
+	}, option.WithResponseBodyInto(&raw)); err != nil && !isStatus(err, 409) {
 		slog.Warn("worker: force-stop failed", "work", workID, "err", err)
+	}
+	if raw != nil && raw.Body != nil {
+		_ = raw.Body.Close()
 	}
 }
 

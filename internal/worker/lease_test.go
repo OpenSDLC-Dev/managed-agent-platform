@@ -3,8 +3,10 @@ package worker
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -131,6 +133,51 @@ func TestWorkerPollsRunsAndStops(t *testing.T) {
 		t.Errorf("work item state = %q, want stopped", got)
 	}
 	waitExit(t, cancel, errc)
+}
+
+// TestWorkerForceStopAcceptsNoContent pins the worker half of the wire's
+// bodiless-204 Stop. The control plane's success carries no body, but the
+// generated SDK method is typed *BetaSelfHostedWork, so without the response-body
+// bypass the strict Go decoder fails a call that in fact succeeded — the item
+// still reaches stopped, and the only visible damage is the worker crying wolf
+// on every clean finish. Asserting the state alone therefore cannot catch a
+// missing bypass; this asserts the absence of the false warning, against the
+// real control plane rather than a hand-written 204 fixture.
+func TestWorkerForceStopAcceptsNoContent(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.suspend(t, writeUse("out.txt", "hello"))
+	h.enqueueWork(t)
+
+	var logs strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&safeWriter{w: &logs}, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	w, done := h.newWorker(Config{})
+	cancel, errc := runWorker(w)
+	waitDone(t, done)
+	waitExit(t, cancel, errc)
+
+	if got := h.workState(t); got != "stopped" {
+		t.Fatalf("work item state = %q, want stopped", got)
+	}
+	if out := logs.String(); strings.Contains(out, "force-stop failed") {
+		t.Errorf("a successful 204 stop logged a failure; the SDK decoder bypass is missing:\n%s", out)
+	}
+}
+
+// safeWriter serializes writes from the worker's goroutines into a test buffer;
+// slog handlers are concurrency-safe but strings.Builder is not.
+type safeWriter struct {
+	mu sync.Mutex
+	w  *strings.Builder
+}
+
+func (s *safeWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // TestWorkerToolSpanParentsOnEnqueueTrace pins cross-process tracing end to end:
