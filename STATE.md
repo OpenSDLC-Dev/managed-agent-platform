@@ -18,5 +18,9 @@ three endpoints a silent 200). Plan-less: single-PR scope, no new wire shape.
       and values alike, so no endpoint can drift from its peers.
 - [x] Pin it with a shared sweep across all seven surfaces — `TestMetadataRejectsNUL` in
       `internal/api/edge_test.go`, green.
-- [x] CHANGELOG entry.
-- [ ] Verifier, dual review, PR green, squash merge.
+- [x] CHANGELOG entry, and a docs/DIVERGENCES.md INFERRED entry covering this guard and the
+      pre-existing `internal/events` one — rejecting a delete key turns a previously-200 request
+      into a 400, which both reviewers judged a wire-observable choice worth registering.
+- [x] Verifier PASS; Codex found no correctness blockers. Sibling text fields (name, title,
+      system, description, package names) carry the same defect — out of scope, filed as #114.
+- [ ] PR green, review threads settled, squash merge.

@@ -31,10 +31,13 @@ copy of an entry here.
   the two shared parsers, `parseMetadata` and `splitMetadataPatch`, which between them back every
   one of those endpoints, so the rejection cannot drift apart per-endpoint again; it covers keys as
   well as values, and delete keys as well as upserts, which is what closes the 200/500 asymmetry.
-  This is the same rule `internal/events` already applied to inbound event payloads, and it is a
-  storage-validity guard rather than a wire-shape choice, so it carries no DIVERGENCES entry —
-  matching the precedent that guard set. A shared sweep in `internal/api/edge_test.go` pins all
-  fifteen endpoint-and-position combinations at a wire-shaped 400.
+  This is the same rule `internal/events` already applied to inbound event payloads; one
+  docs/DIVERGENCES.md INFERRED entry now covers both guards, since rejecting a delete key turns a
+  previously-200 request into a 400 and the reference's own behaviour is undecidable from the typed
+  schema. A shared sweep in `internal/api/edge_test.go` pins all fifteen endpoint-and-position
+  combinations at a wire-shaped 400. NUL in non-metadata text fields (name, title, system,
+  description, package names) is the same bug class one field over and remains open — out of scope
+  here, tracked separately.
 
 - **The K8s sandbox could kill a command on its deadline and report it as not timed out**
   ([#95](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/95),
