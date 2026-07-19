@@ -11,27 +11,18 @@ because it reverses a CONFIRMED entry in docs/DIVERGENCES.md.
 
 ## Tasks
 
-- [x] Settled the contract against the pinned SDK: `lib/environments/poller.go:439-465` states the
-      server returns 204 with no body, and its `WithResponseBodyInto` workaround exists for exactly
-      that; `worker_test.go:118-120` scripts Stop as 204.
-- [x] Adversarial review's counterargument (200 + JSON serves a superset of clients) heard and
-      answered in the plan — the superset holds only a consumer already broken against the
-      reference, and being lenient is a migration hazard.
-- [x] Server: `handleNoContent` adapter beside `handle`; `stopWork` returns only `error`. Errors and
-      the 409 conflict path unchanged.
-- [x] Worker: `forceStop` adopts the reference poller's response-body bypass, so a successful stop
-      no longer logs `worker: force-stop failed`.
-- [x] Tests: Stop asserts 204 + zero body bytes + no `Content-Type` for graceful and force, state
-      read back via GET; new worker test pins the absent false warning. Mutation-checked — removing
-      the bypass reproduces the SDK's quoted decoder error verbatim.
-- [x] Docs: the CONFIRMED divergence replaced (not deleted), the stale `Tracked: #27` on the
-      graceful/force entry repointed to #25, CHANGELOG entry written.
+- [x] Contract settled against the pinned SDK: `poller.go:439-465` states the server returns 204
+      with no body, and its `WithResponseBodyInto` workaround exists for exactly that.
+- [x] Server: `handleNoContent` beside `handle`; `stopWork` returns only `error`. Errors and the
+      409 conflict path unchanged. Worker: `forceStop` adopts the reference poller's bypass.
+- [x] Tests: 204 + zero body bytes + absent `Content-Type` for graceful and force, state read back
+      via GET; worker test pins the absent false warning. Mutation-checked in a scratch copy —
+      removing the bypass reproduces the SDK's quoted decoder error verbatim.
 - [x] `make verify` green (coverage 91.75%); verifier PASS with findings, including a live
       `ant beta:environments:work stop` run against the 204 server (graceful and force, exit 0).
-- [x] Review round: reviewers were right that the public Stop Work reference documents a
-      `BetaSelfHostedWork` return and ranks *above* the SDK checkout — so this is now recorded as a
-      deliberate divergence from the published spec toward the deployed service, not as "no
-      divergence"; the compatibility break is stated rather than glossed; the plan's empty-poll
-      aside was backwards and is corrected (the poller calls `Work.Poll` with no bypass, so
-      `200` + `null` stands); the log-capture helper now restores the stdlib `log` package too.
+- [x] Review round. The public Stop Work reference documents a `BetaSelfHostedWork` return and
+      ranks *above* the SDK checkout, so this is recorded as a deliberate divergence from the
+      published spec toward the deployed service, not as "no divergence", and the compatibility
+      break is stated rather than glossed. The plan's empty-poll aside was backwards and is
+      corrected (`200` + `null` stands). The log-capture helper restores the stdlib `log` too.
 - [ ] PR open, CI green, review threads settled.
