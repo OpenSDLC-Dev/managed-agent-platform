@@ -110,8 +110,9 @@ func TestToolResultRefs(t *testing.T) {
 	}
 
 	// An unreadable ref drops silently. This function feeds the resume trigger,
-	// not validation — ValidateToolResults rejects these same shapes, and the
-	// divergence is asserted here so it stays visible in one place.
+	// not validation; ValidateToolResults rejects these same shapes instead
+	// (TestValidateToolResults/malformed_payload), and the divergence is
+	// deliberate.
 	got = events.ToolResultRefs([]events.NewEvent{
 		inResult(domain.EventUserToolResult, "tool_use_id", "V"),
 		inRaw(domain.EventUserToolResult, `[1,2]`),
@@ -123,8 +124,11 @@ func TestToolResultRefs(t *testing.T) {
 		t.Errorf(`refs = %#v, want %#v (a JSON-null ref decodes to "", the rest drop)`, got, want)
 	}
 
-	// Nil, never an allocated empty slice: the result is bound straight into
-	// the != ALL($4) arrays, where the two differ (see TestHasUnansweredToolUse).
+	// Nil, never an allocated empty slice. Downstream the two are equivalent —
+	// the callers normalize nil before binding it (see the extra-refs cases) —
+	// so this pins the representation the collectors actually return, which is
+	// what makes that normalization the only thing standing between a nil and
+	// the != ALL(NULL) trap.
 	if got := events.ToolResultRefs(nil); got != nil {
 		t.Errorf("ToolResultRefs(nil) = %#v, want nil", got)
 	}
@@ -226,20 +230,52 @@ func TestHasUnansweredToolUse(t *testing.T) {
 		}
 	})
 
-	// The COALESCE returns its FIRST non-null arm, so one event cannot answer
-	// two tool uses by carrying two keys. Reordering the arms breaks only this.
+	// The COALESCE returns its FIRST non-null arm, so one event carrying two
+	// keys answers one tool use, not both. Adjacent pairs are driven separately
+	// because a swap of arms two and three is invisible to a first-vs-third
+	// fixture.
 	t.Run("coalesce arm precedence", func(t *testing.T) {
-		sid := newSession(t, pool)
-		x := toolUse(t, log, sid, domain.EventAgentToolUse, "")
-		y := toolUse(t, log, sid, domain.EventAgentMCPToolUse, "")
-		appendEvent(t, log, sid, "", domain.EventAgentToolResult,
-			fmt.Sprintf(`{"tool_use_id":%q,"mcp_tool_use_id":%q}`, x, y))
-		if !check(t, sid, nil) {
-			t.Error("the second COALESCE arm answered y; only the first arm should be read")
+		for _, tc := range []struct {
+			name            string
+			winner, loser   domain.EventType
+			winKey, loseKey string
+			loserResultType domain.EventType
+		}{
+			{"tool_use_id over mcp_tool_use_id", domain.EventAgentToolUse, domain.EventAgentMCPToolUse,
+				"tool_use_id", "mcp_tool_use_id", domain.EventAgentMCPToolResult},
+			{"custom_tool_use_id over mcp_tool_use_id", domain.EventAgentCustomToolUse, domain.EventAgentMCPToolUse,
+				"custom_tool_use_id", "mcp_tool_use_id", domain.EventAgentMCPToolResult},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sid := newSession(t, pool)
+				win := toolUse(t, log, sid, tc.winner, "")
+				lose := toolUse(t, log, sid, tc.loser, "")
+				appendEvent(t, log, sid, "", domain.EventAgentToolResult,
+					fmt.Sprintf(`{%q:%q,%q:%q}`, tc.winKey, win, tc.loseKey, lose))
+				// Either ordering leaves one use outstanding, so this says only
+				// that the two-key event did not answer both.
+				if !check(t, sid, nil) {
+					t.Error("a result carrying two keys answered both tool uses")
+				}
+				// Answering the losing arm on its own is what separates them:
+				// in arm order the session is now settled; swapped, the winner
+				// was never answered and is still outstanding.
+				answerWith(t, log, sid, tc.loserResultType, tc.loseKey, lose)
+				if check(t, sid, nil) {
+					t.Errorf("%s did not win the COALESCE — the %s is still unanswered", tc.winKey, tc.winner)
+				}
+			})
 		}
-		answerWith(t, log, sid, domain.EventAgentMCPToolResult, "mcp_tool_use_id", y)
+	})
+
+	// The query constrains neither the pairing of result kind to use kind nor
+	// which key names which, so a custom result answers a built-in tool use.
+	t.Run("kinds need not pair", func(t *testing.T) {
+		sid := newSession(t, pool)
+		id := toolUse(t, log, sid, domain.EventAgentToolUse, "")
+		answerWith(t, log, sid, domain.EventUserCustomToolRes, "custom_tool_use_id", id)
 		if check(t, sid, nil) {
-			t.Error("y still unanswered after its own result")
+			t.Error("a custom result did not answer a built-in tool use")
 		}
 	})
 
@@ -396,9 +432,6 @@ func TestValidateToolResults(t *testing.T) {
 		// that message reading as the more natural fit.
 		err := validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", msg.String()))
 		wantErrIs(t, err, fmt.Sprintf(`events[0]: tool_use_id %q references a agent.message event, not agent.tool_use`, msg))
-		if err != nil && strings.Contains(err.Error(), "does not name") {
-			t.Errorf("a reference to a non-tool-use event reported as missing: %v", err)
-		}
 	})
 
 	t.Run("already answered", func(t *testing.T) {
@@ -421,19 +454,35 @@ func TestValidateToolResults(t *testing.T) {
 		}
 
 		// One event answers one tool use: the COALESCE stops at its first
-		// non-null arm, so a result carrying both keys settles the built-in and
-		// leaves the custom one open. Reordering the arms swaps which.
+		// non-null arm. Both adjacent pairs are driven — a swap of arms two and
+		// three does not move a first-vs-second fixture.
 		t.Run("coalesce arm precedence", func(t *testing.T) {
-			sid := newSession(t, pool)
-			u := toolUse(t, log, sid, domain.EventAgentToolUse, "")
-			c := toolUse(t, log, sid, domain.EventAgentCustomToolUse, "")
-			appendEvent(t, log, sid, "", domain.EventAgentToolResult,
-				fmt.Sprintf(`{"tool_use_id":%q,"custom_tool_use_id":%q}`, u, c))
-			wantErrHas(t, validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", u.String())),
-				"already has a result")
-			if err := validate(sid, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", c.String())); err != nil {
-				t.Errorf("the second COALESCE arm answered the custom tool use: %v", err)
-			}
+			// tool_use_id wins over custom_tool_use_id: the built-in is
+			// answered, the custom one stays open.
+			t.Run("first over second", func(t *testing.T) {
+				sid := newSession(t, pool)
+				u := toolUse(t, log, sid, domain.EventAgentToolUse, "")
+				c := toolUse(t, log, sid, domain.EventAgentCustomToolUse, "")
+				appendEvent(t, log, sid, "", domain.EventAgentToolResult,
+					fmt.Sprintf(`{"tool_use_id":%q,"custom_tool_use_id":%q}`, u, c))
+				wantErrHas(t, validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", u.String())),
+					"already has a result")
+				if err := validate(sid, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", c.String())); err != nil {
+					t.Errorf("a later COALESCE arm answered the custom tool use: %v", err)
+				}
+			})
+
+			// custom_tool_use_id wins over mcp_tool_use_id. Only this pair
+			// notices the two later arms trading places.
+			t.Run("second over third", func(t *testing.T) {
+				sid := newSession(t, pool)
+				c := toolUse(t, log, sid, domain.EventAgentCustomToolUse, "")
+				m := toolUse(t, log, sid, domain.EventAgentMCPToolUse, "")
+				appendEvent(t, log, sid, "", domain.EventAgentToolResult,
+					fmt.Sprintf(`{"custom_tool_use_id":%q,"mcp_tool_use_id":%q}`, c, m))
+				wantErrHas(t, validate(sid, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", c.String())),
+					"already has a result")
+			})
 		})
 
 		// A key the COALESCE does not read leaves the tool use answerable.
@@ -501,9 +550,35 @@ func TestValidateToolResults(t *testing.T) {
 				"is awaiting confirmation")
 		})
 
-		// Only the literal "ask" gates. The absent and null legs go through
-		// COALESCE(...,'') here — a different mechanism from UnconfirmedAskEvents'
-		// bare equality, which is why both are pinned.
+		// Only a user.tool_confirmation opens the gate. Another event carrying
+		// the same tool_use_id must not — without the type predicate, any event
+		// keyed by the id would let a result answer a tool the user never
+		// approved, and the append-only log would record it permanently.
+		t.Run("only a confirmation opens the gate", func(t *testing.T) {
+			sid := newSession(t, pool)
+			id := ask(t, log, sid)
+			appendEvent(t, log, sid, "", domain.EventUserMessage,
+				fmt.Sprintf(`{"tool_use_id":%q,"content":[]}`, id))
+			wantErrHas(t, validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", id.String())),
+				"is awaiting confirmation")
+		})
+
+		// The gate reads evaluated_permission on any tool-use kind, while only
+		// agent.tool_use is confirmable. An ask-stamped custom tool use is
+		// therefore unanswerable from both sides at once. Pinned as current
+		// behavior, not endorsed: the brain stamps a policy on built-ins only,
+		// so nothing reaches this state today.
+		t.Run("gates kinds that cannot be confirmed", func(t *testing.T) {
+			sid := newSession(t, pool)
+			id := toolUse(t, log, sid, domain.EventAgentCustomToolUse, `"ask"`)
+			wantErrHas(t, validate(sid, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", id.String())),
+				"is awaiting confirmation")
+			wantErrHas(t, events.ValidateToolConfirmations(ctx, pool, sid, []events.NewEvent{inConfirm(id.String())}),
+				"does not name a tool use in this session")
+		})
+
+		// Only the literal "ask" gates. The absent and null legs reach the
+		// COALESCE(...,'') as the empty string.
 		t.Run("only ask gates", func(t *testing.T) {
 			for _, perm := range []string{`"allow"`, "", "null"} {
 				sid := newSession(t, pool)
@@ -513,6 +588,24 @@ func TestValidateToolResults(t *testing.T) {
 				}
 			}
 		})
+	})
+
+	// The decode failure is the client's own field-type error and must be named
+	// as such: swallowed, ref becomes "" and the caller is told instead that an
+	// empty id names no tool use, pointing them at the wrong mistake.
+	t.Run("malformed payload", func(t *testing.T) {
+		sid := newSession(t, pool)
+		for _, payload := range []string{`{}`, `{"tool_use_id":5}`, `null`} {
+			wantErrIs(t, validate(sid, inRaw(domain.EventUserToolResult, payload)),
+				"events[0]: tool_use_id must be a string")
+		}
+		// The key reported is the one that event's own type calls for.
+		wantErrIs(t, validate(sid, inRaw(domain.EventUserCustomToolRes, `{}`)),
+			"events[0]: custom_tool_use_id must be a string")
+		// The decoder's own wording is an implementation detail.
+		for _, payload := range []string{`[1,2]`, ``} {
+			wantErrHas(t, validate(sid, inRaw(domain.EventUserToolResult, payload)), "events[0]: ")
+		}
 	})
 
 	// Non-result types are skipped before the payload is decoded at all, so a
@@ -601,11 +694,8 @@ func TestValidateToolConfirmations(t *testing.T) {
 		for _, typ := range []domain.EventType{domain.EventAgentCustomToolUse, domain.EventAgentMCPToolUse} {
 			sid := newSession(t, pool)
 			id := toolUse(t, log, sid, typ, `"ask"`)
-			err := validate(sid, inConfirm(id.String()))
-			wantErrIs(t, err, fmt.Sprintf(`events[0]: tool_use_id %q does not name a tool use in this session`, id))
-			if err != nil && strings.Contains(err.Error(), "was not gated") {
-				t.Errorf("%s reported as ungated rather than missing: %v", typ, err)
-			}
+			wantErrIs(t, validate(sid, inConfirm(id.String())),
+				fmt.Sprintf(`events[0]: tool_use_id %q does not name a tool use in this session`, id))
 		}
 	})
 
@@ -626,6 +716,20 @@ func TestValidateToolConfirmations(t *testing.T) {
 			fmt.Sprintf(`events[0]: tool use %q is already confirmed`, id))
 	})
 
+	// Only a user.tool_confirmation counts as one. Without the type predicate,
+	// any other event carrying the id would make the human's genuine first
+	// approval be rejected as a repeat — leaving the ask permanently
+	// unresolvable and the session stuck in requires_action.
+	t.Run("only a confirmation counts as already confirmed", func(t *testing.T) {
+		sid := newSession(t, pool)
+		id := ask(t, log, sid)
+		appendEvent(t, log, sid, "", domain.EventUserMessage,
+			fmt.Sprintf(`{"tool_use_id":%q,"content":[]}`, id))
+		if err := validate(sid, inConfirm(id.String())); err != nil {
+			t.Errorf("a non-confirmation event carrying the id blocked the first confirmation: %v", err)
+		}
+	})
+
 	// That check is session-scoped: a confirmation of the same id in another
 	// session must not resolve this one.
 	t.Run("already-confirmed check is session scoped", func(t *testing.T) {
@@ -643,11 +747,8 @@ func TestValidateToolConfirmations(t *testing.T) {
 		sid := newSession(t, pool)
 		id := toolUse(t, log, sid, domain.EventAgentToolUse, `"allow"`)
 		confirmOnLog(t, log, sid, id)
-		err := validate(sid, inConfirm(id.String()))
-		wantErrIs(t, err, fmt.Sprintf(`events[0]: tool use %q was not gated for confirmation`, id))
-		if err != nil && strings.Contains(err.Error(), "already confirmed") {
-			t.Errorf("reported as already confirmed: %v", err)
-		}
+		wantErrIs(t, validate(sid, inConfirm(id.String())),
+			fmt.Sprintf(`events[0]: tool use %q was not gated for confirmation`, id))
 	})
 
 	// The whole-payload null leg is the interesting one: the first decode
@@ -655,11 +756,8 @@ func TestValidateToolConfirmations(t *testing.T) {
 	t.Run("malformed payload", func(t *testing.T) {
 		sid := newSession(t, pool)
 		for _, payload := range []string{`{}`, `{"tool_use_id":5}`, `null`} {
-			err := validate(sid, inRaw(domain.EventUserToolConfirm, payload))
-			wantErrIs(t, err, "events[0]: tool_use_id must be a string")
-			if err != nil && strings.Contains(err.Error(), "cannot unmarshal") {
-				t.Errorf("payload %s reported as a decode error: %v", payload, err)
-			}
+			wantErrIs(t, validate(sid, inRaw(domain.EventUserToolConfirm, payload)),
+				"events[0]: tool_use_id must be a string")
 		}
 		// The decoder's own wording is an implementation detail; only the
 		// batch-index prefix is pinned for these.
@@ -742,8 +840,9 @@ func TestUnconfirmedAskEvents(t *testing.T) {
 		}
 	})
 
-	// Absent and null are excluded by the bare equality's three-valued logic,
-	// not by a COALESCE — the counterpart to ValidateToolResults' ask gate.
+	// Absent and null are excluded along with allow and deny. Only the row set
+	// is pinned, not the mechanism: WHERE discards SQL UNKNOWN and FALSE alike,
+	// so this cannot tell the bare equality from a COALESCE(...,'').
 	t.Run("only ask qualifies", func(t *testing.T) {
 		sid := newSession(t, pool)
 		for _, perm := range []string{`"allow"`, `"deny"`, "", "null"} {
@@ -873,9 +972,13 @@ func TestToolflowChecksSeeCallerTransaction(t *testing.T) {
 		"does not name a tool use in this session")
 }
 
-// A driver failure must surface as a wrapped query error, never as a client
-// diagnosis: without the err check after Scan, ValidateToolResults would read
-// an empty useType and report a kind mismatch for what is really a dead pool.
+// A driver failure on the query itself must surface as a wrapped query error,
+// never as a client diagnosis: without the err check after Scan,
+// ValidateToolResults would read an empty useType and report a kind mismatch
+// for what is really a dead pool. This covers each function's query error only
+// — UnconfirmedAskEvents returns a mid-iteration rows.Scan failure unwrapped
+// (toolflow.go:278), which a closed pool cannot reach because it fails at
+// Query first.
 func TestToolflowQueryErrorsAreWrapped(t *testing.T) {
 	pool := newPool(t)
 	log := events.NewLog(pool)

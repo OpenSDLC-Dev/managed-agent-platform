@@ -330,3 +330,49 @@ argued: `/proc/meminfo` stats as 0 bytes and streams 1392. The gate split as the
 predicts — locally `make verify` is red only in `internal/sandbox/k8s`, reproduced on unmodified
 `main` in a fresh worktree, while CI's kind cluster ran that package to `ok` in 51.0s with the full
 contract suite. Coverage 91.38-91.48% across runs.
+
+## `internal/events/toolflow.go` characterization suite — verification record (2026-07-19)
+
+Narrative: CHANGELOG.md § [Unreleased] → Added. Recorded here is only the verification, plus one
+claim this project made and then had to retract.
+
+**A claim of ours that was wrong.** The first version of the changelog entry said the two
+`if extraRefs == nil { extraRefs = []string{} }` normalizations were "previously unguarded by any
+test". Both reviewers challenged it and the measurement refuted it: removing either line and running
+only the pre-existing suites (`./internal/brain/ ./internal/api/`, with the new file absent) turns
+both red — `brain_test.go:155` calls `HasUnansweredToolUse` directly, and
+`internal/api/confirmation_test.go` covers the `UnconfirmedAskEvents` side. The trap is real and the
+new tests name it directly; the novelty claim was not. Recorded because the wrong claim was the
+entry's headline, and it survived self-review.
+
+**Verification record.** Each case was proven able to fail by mutating `toolflow.go` in place,
+running the suite, and reverting — never by assertion. Twenty-two single-edit breakages in total.
+Caught on the first pass: dropped `r.session_id` / `c.session_id` predicates, `ORDER BY tu.seq` →
+`tu.id`, both nil normalizations removed, `seen` re-keyed by kind+id, `wantUse` pinned to
+`agent.tool_use`, the ask gate deleted, the platform variant widened to every tool-use kind or made
+to ignore `extraRefs`, `confirmableToolUseTypes` widened in either query, the `Scan` error check
+dropped, and the COALESCE reduced to a single key.
+
+Six survived the first suite and each is now closed by a named subtest, with the same mutation
+re-run to prove the closure: the second and third `COALESCE` arms trading places in
+`hasUnansweredToolUse` and in `ValidateToolResults` (every existing leg carried one key, or compared
+only the first arm against a later one); the `c.type` predicate in `ValidateToolResults`' ask gate
+and in `ValidateToolConfirmations`' already-confirmed check (no fixture had ever put a second event
+carrying the gated id beside the confirmation); `ValidateToolResults` swallowing its payload-decode
+error; and the ask gate restricted to built-ins. For the last of these the closure was double-checked
+in both directions — with the new subtest removed the mutation goes green again, with it present that
+subtest is the one that fails.
+
+**Two mutations that cannot be caught, and were not chased.** Dropping `c.type = $4` outright leaves
+`$4` unbound and pgx rejects the query, so it is a broken build rather than a silent regression.
+Widening that same predicate to admit `user.tool_result` is unobservable through the ask gate: a
+`user.tool_result` carrying the id makes the tool use *answered*, and the answered check fires first,
+so both implementations return the same error. The observable form of the widening — admitting a type
+that carries the id without answering it — is what the new fixtures use.
+
+**Method note.** Two intermediate results in this audit were false positives from a careless harness
+and are recorded so the next audit avoids them: a `grep FAIL` verdict counted build failures and SQL
+syntax errors as "caught", and a mutation pattern indented with two tabs matched *both* confirmation
+subqueries as a suffix of the three-tab one, so an occurrence-0 edit silently hit
+`ValidateToolResults` twice while `ValidateToolConfirmations` was never mutated at all. Every verdict
+above is from the corrected harness, which vets the build and distinguishes the two sites explicitly.
