@@ -320,3 +320,13 @@ describes, which `client.exec` already surfaces as `err != nil` rather than a `s
 stdout copy and concluding no mid-stream hole can reach the buffer. Nobody induced one; there is no
 way to. This file already records that a confidently-argued, well-cited claim about this exact
 transport was wrong once.
+
+**Verification record.** Each half of the guard was proven able to fail, in throwaway copies rather
+than by assertion: reverting `readScript` to `exec cat "$f"` turns `TestReadScriptMarksWhatItSent`
+red; reverting the read buffer's room to `MaxFileBytes + 1` turns the live `ReadFileAtTheCap` red;
+and flipping one byte while keeping the length turns it red at that subtest's content comparison
+specifically. The procfs case that ruled out the `sz` comparison was measured in a real pod, not
+argued: `/proc/meminfo` stats as 0 bytes and streams 1392. The gate split as the blocker above
+predicts — locally `make verify` is red only in `internal/sandbox/k8s`, reproduced on unmodified
+`main` in a fresh worktree, while CI's kind cluster ran that package to `ok` in 51.0s with the full
+contract suite. Coverage 91.38-91.48% across runs.
