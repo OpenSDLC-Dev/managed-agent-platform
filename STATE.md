@@ -4,8 +4,19 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+[#105 — K8s sandbox: `ReadFile` can return a short read as a success](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/105).
+Plan-less, single-PR scope (issue-triage: `needs_plan` false); the read-side mirror of #103.
 
 ## Tasks
 
-None.
+- [x] Clusterless tests first, red before the fix: `TestReadStdoutRequiresTheMarker` (9 subtests) and
+      `TestReadScriptMarksWhatItSent` (9 subtests, host bash, `stat -c` shimmed on BSD hosts)
+- [x] `readScript` marks the end of what it sent (`cat "$f" || exit 1`, then `printf %s "$3"` with a
+      per-call `nonce()`); `ReadFile` requires and strips it via `readStdout`
+- [x] Read buffer's room becomes cap+marker exactly, so `truncated` alone decides oversize and a file
+      at `MaxFileBytes` still succeeds
+- [x] `ReadFileAtTheCap` in the shared suite; docker passes unchanged (4/4 file subtests green)
+- [x] Docs: CHANGELOG entry, HISTORY design record + amended #103 deferral bullet, ARCHITECTURE row
+- [x] Verifier: PASS — falsification probes red both halves; live kind + docker file subtests green;
+      `make verify` red only in the k8s package, reproduced on unmodified `main`
+- [ ] Dual code review, PR green, review threads settled, squash merge

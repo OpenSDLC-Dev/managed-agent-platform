@@ -312,6 +312,250 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 	})
 }
 
+// gnuStatEnv supplies a `stat -c %s` shim when — and only when — the host's own
+// stat rejects `-c`, which BSD stat does. readScript reaches its size gate before
+// anything under test here, so on a macOS dev host the script would die there and
+// the tests below would cover nothing; on Linux and in CI the real binary the
+// image contract names still runs. It returns the environment to hand the script,
+// nil meaning "inherit".
+func gnuStatEnv(t *testing.T) []string {
+	t.Helper()
+	if exec.Command("stat", "-c", "%s", os.DevNull).Run() == nil {
+		return nil
+	}
+	bin := t.TempDir()
+	// readScript's one and only stat invocation is `stat -c %s "$f"`.
+	shim := "#!/bin/sh\nexec /usr/bin/stat -f %z \"$3\"\n"
+	if err := os.WriteFile(bin+"/stat", []byte(shim), 0o755); err != nil {
+		t.Fatalf("stage stat shim: %v", err)
+	}
+	return append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// readScript's marker is what makes a short exec stdout stream visible, so its
+// contract is pinned here rather than left to the live cluster: no cluster can be
+// told to lose bytes, but everything else — that the marker goes out on success
+// and only on success, and that the classification exits still fire ahead of it —
+// is observable from the host's shell, on any machine, in milliseconds.
+//
+// This runs the script through the host's /bin/bash rather than the sandbox
+// image, as the write-side test does. It pins what the script does with its
+// arguments; that the image carries a userland able to run it is the live
+// contract test's job.
+func TestReadScriptMarksWhatItSent(t *testing.T) {
+	const marker = "0123456789abcdef"
+	env := gnuStatEnv(t)
+	dir := t.TempDir()
+	run := func(t *testing.T, path string, cap int) (int, []byte) {
+		t.Helper()
+		var out bytes.Buffer
+		cmd := exec.Command("/bin/bash", "-c", readScript, "map-read", path, strconv.Itoa(cap), marker)
+		cmd.Env, cmd.Stdout = env, &out
+		if err := cmd.Run(); err != nil {
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("run readScript: %v", err)
+			}
+			return ee.ExitCode(), out.Bytes()
+		}
+		return 0, out.Bytes()
+	}
+	stage := func(t *testing.T, name string, b []byte) string {
+		t.Helper()
+		p := dir + "/" + name
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatalf("stage %s: %v", name, err)
+		}
+		return p
+	}
+
+	// The bytes come back intact — including ones no shell round-trip would
+	// survive — with the marker behind them.
+	t.Run("FullDelivery", func(t *testing.T) {
+		payload := []byte{0x00, 0x01, 0xff, 0xfe, 'h', 'i', 0x00}
+		code, out := run(t, stage(t, "blob.bin", payload), sandbox.MaxFileBytes)
+		if want := append(append([]byte{}, payload...), marker...); code != 0 || !bytes.Equal(out, want) {
+			t.Errorf("exit %d, stdout %v; want 0 and %v", code, out, want)
+		}
+	})
+
+	// A payload spanning many stream buffers, which a handful of bytes does not
+	// reach.
+	t.Run("LargePayload", func(t *testing.T) {
+		payload := make([]byte, 1<<20)
+		for i := range payload {
+			payload[i] = byte(i)
+		}
+		code, out := run(t, stage(t, "large.bin", payload), sandbox.MaxFileBytes)
+		if want := append(append([]byte{}, payload...), marker...); code != 0 || !bytes.Equal(out, want) {
+			t.Errorf("exit %d, %d bytes; want 0 and %d matching", code, len(out), len(want))
+		}
+	})
+
+	// Reading no bytes is a legitimate read of an empty file, so it is marked like
+	// any other — that is what keeps it distinguishable from a stream that
+	// delivered nothing at all.
+	t.Run("EmptyFileIsMarked", func(t *testing.T) {
+		code, out := run(t, stage(t, "empty", nil), sandbox.MaxFileBytes)
+		if code != 0 || string(out) != marker {
+			t.Errorf("exit %d, stdout %q; want 0 and the marker alone", code, out)
+		}
+	})
+
+	// A read that cannot happen keeps its own failure code and emits no marker, so
+	// an unreadable file cannot arrive as a successful read of fewer bytes.
+	t.Run("UnreadableFileIsNotMarked", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores the read bit, so this proves nothing")
+		}
+		p := stage(t, "noperm", []byte("secret"))
+		if err := os.Chmod(p, 0o000); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		if code, out := run(t, p, sandbox.MaxFileBytes); code == 0 || len(out) != 0 {
+			t.Errorf("exit %d, %d bytes; want a non-zero exit and no output", code, len(out))
+		}
+	})
+
+	// The classification gates still run ahead of the cat, so none of them can
+	// arrive as a marked read of zero bytes.
+	t.Run("ClassifiesBeforeCatting", func(t *testing.T) {
+		gate := stage(t, "gate.bin", []byte("seven!!"))
+		if err := os.Symlink(gate, dir+"/link"); err != nil {
+			t.Fatalf("stage symlink: %v", err)
+		}
+		if err := os.Mkdir(dir+"/sub", 0o755); err != nil {
+			t.Fatalf("stage dir: %v", err)
+		}
+		if err := exec.Command("mkfifo", dir+"/fifo").Run(); err != nil {
+			t.Fatalf("stage fifo: %v", err)
+		}
+		for _, c := range []struct {
+			name string
+			path string
+			cap  int
+			want int
+		}{
+			{"Missing", dir + "/nope", sandbox.MaxFileBytes, readNotExist},
+			{"Directory", dir + "/sub", sandbox.MaxFileBytes, readIsDir},
+			{"Symlink", dir + "/link", sandbox.MaxFileBytes, readNotRegular},
+			{"Fifo", dir + "/fifo", sandbox.MaxFileBytes, readNotRegular},
+			{"OverTheCap", gate, 2, readTooLarge},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				if code, out := run(t, c.path, c.cap); code != c.want || len(out) != 0 {
+					t.Errorf("exit %d, %d bytes; want %d and no output", code, len(out), c.want)
+				}
+			})
+		}
+	})
+}
+
+// readStdout is where a short read is caught, and no cluster can stage one — a
+// stream cannot be told to lose bytes. Its branches are pinned against streams
+// fed byte-for-byte into the buffer ReadFile actually uses, so the cap arithmetic
+// is exercised rather than asserted: the marker rides in the same buffer as the
+// content, which puts the largest legal file and the first oversize one one
+// marker-length apart.
+func TestReadStdoutRequiresTheMarker(t *testing.T) {
+	const marker = "0123456789abcdef"
+	// The buffer ReadFile hands the exec, filled the way the stream fills it.
+	recv := func(chunks ...[]byte) *cappedBuffer {
+		out := &cappedBuffer{limit: sandbox.MaxFileBytes + len(marker)}
+		for _, c := range chunks {
+			for len(c) > 0 {
+				n := min(len(c), 32768)
+				_, _ = out.Write(c[:n])
+				c = c[n:]
+			}
+		}
+		return out
+	}
+	mark := []byte(marker)
+	body := func(n int) []byte { return bytes.Repeat([]byte{'x'}, n) }
+
+	// Bytes then marker is a complete read, and only the file's bytes come back.
+	t.Run("WholeFile", func(t *testing.T) {
+		want := []byte{0x00, 0x01, 0xff, 0xfe, 'h', 'i', 0x00}
+		got, err := readStdout("/w/f", marker, recv(want, mark))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("readStdout = %v, %v; want %v", got, err, want)
+		}
+	})
+
+	// An empty file is a file, which is why the marker goes out unconditionally on
+	// success: an empty read is not evidence of a lost stream.
+	t.Run("EmptyFileIsNotShort", func(t *testing.T) {
+		got, err := readStdout("/w/f", marker, recv(mark))
+		if err != nil || len(got) != 0 {
+			t.Errorf("readStdout = %q, %v; want an empty read", got, err)
+		}
+	})
+
+	// Only the tail is stripped, so a file whose own bytes contain the marker
+	// still round-trips whole.
+	t.Run("ContentContainingTheMarker", func(t *testing.T) {
+		want := append(append([]byte{}, mark...), body(10)...)
+		got, err := readStdout("/w/f", marker, recv(want, mark))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("readStdout = %d bytes, %v; want %d", len(got), err, len(want))
+		}
+	})
+
+	// The #105 signature: the exec exited 0 and stdout stopped early. Each of
+	// these is, without the marker, indistinguishable from a shorter file.
+	t.Run("NothingArrived", func(t *testing.T) {
+		if got, err := readStdout("/w/f", marker, recv()); err == nil {
+			t.Errorf("an empty stream read back as %d bytes", len(got))
+		}
+	})
+	t.Run("TailLost", func(t *testing.T) {
+		got, err := readStdout("/w/f", marker, recv(body(100)))
+		if err == nil {
+			t.Fatalf("a stream that lost its tail read back as %d bytes", len(got))
+		}
+		if errors.Is(err, sandbox.ErrFileTooLarge) {
+			t.Errorf("err = %v, want a short read rather than a size fault", err)
+		}
+	})
+	t.Run("MarkerCutInHalf", func(t *testing.T) {
+		if _, err := readStdout("/w/f", marker, recv(body(100), mark[:len(mark)/2])); err == nil {
+			t.Error("a half-delivered marker read back as a whole file")
+		}
+	})
+
+	// A file at exactly the cap is the largest legal read, and the buffer carries
+	// the marker on top of the cap so it still fits. Sizing the buffer as if the
+	// marker came out of the file's budget fails here — the case that would make
+	// the guard worse than the hazard.
+	t.Run("AtTheCapIsNotTooLarge", func(t *testing.T) {
+		got, err := readStdout("/w/f", marker, recv(body(sandbox.MaxFileBytes), mark))
+		if err != nil || len(got) != sandbox.MaxFileBytes {
+			t.Errorf("readStdout = %d bytes, %v; want %d and no error", len(got), err, sandbox.MaxFileBytes)
+		}
+	})
+
+	// One byte past it is a size fault, not a short read: the file grew after
+	// readScript's gate, and the cap dropped the marker along with the excess, so
+	// only the order of the two checks decides which answer the caller gets.
+	t.Run("PastTheCapIsTooLarge", func(t *testing.T) {
+		if _, err := readStdout("/w/f", marker, recv(body(sandbox.MaxFileBytes+1), mark)); !errors.Is(err, sandbox.ErrFileTooLarge) {
+			t.Errorf("err = %v, want ErrFileTooLarge", err)
+		}
+	})
+
+	// The returned slice must not lend its spare capacity back over the marker.
+	t.Run("ReturnedSliceIsClipped", func(t *testing.T) {
+		got, err := readStdout("/w/f", marker, recv(body(4), mark))
+		if err != nil {
+			t.Fatalf("readStdout: %v", err)
+		}
+		if cap(got) != len(got) {
+			t.Errorf("cap %d, len %d: appending would write over the marker", cap(got), len(got))
+		}
+	})
+}
+
 func TestDestroySurfacesError(t *testing.T) {
 	sid := domain.ID("sesn_derr")
 	cs := fake.NewClientset(readyPod(sid))

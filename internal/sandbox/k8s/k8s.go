@@ -501,8 +501,9 @@ func (pd *pod) readExit(ctx context.Context, state string) (int, error) {
 	return code, nil
 }
 
-// nonce is a per-exec suffix for the wrapper's state files, so concurrent execs
-// in one pod cannot collide.
+// nonce is a per-exec random token: the suffix for the wrapper's state files, so
+// concurrent execs in one pod cannot collide, and the marker a read uses to frame
+// its stdout.
 func nonce() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
@@ -512,24 +513,21 @@ func nonce() string {
 // ReadFile returns a file's bytes, distinguishing the reasons a read is not a
 // plain success so the toolset can hand the model a recoverable error. It runs
 // one probe-and-cat script: the exit code classifies the path, and on success
-// stdout carries the raw bytes (binary included).
+// stdout carries the raw bytes (binary included) followed by this call's marker.
 func (pd *pod) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	marker := nonce()
 	var out cappedBuffer
-	out.limit = sandbox.MaxFileBytes + 1 // one past the cap so oversize is detectable
-	argv := []string{"/bin/bash", "-c", readScript, "map-read", path, strconv.FormatInt(sandbox.MaxFileBytes, 10)}
+	// Room for a file at the cap and its marker, and not one byte more, so
+	// out.truncated means exactly "the file was over the cap" — see readStdout.
+	out.limit = sandbox.MaxFileBytes + len(marker)
+	argv := []string{"/bin/bash", "-c", readScript, "map-read", path, strconv.FormatInt(sandbox.MaxFileBytes, 10), marker}
 	res, err := pd.client.exec(ctx, pd.name, containerName, argv, nil, &out, io.Discard)
 	if err != nil {
 		return nil, pd.execErr(ctx, err)
 	}
 	switch res.code {
 	case 0:
-		if len(out.Bytes()) > sandbox.MaxFileBytes {
-			// readScript's size gate was evaded — a file that grew between the stat
-			// and the cat, say. The one-past-the-cap buffer makes the overrun
-			// visible here so oversize bytes never reach the caller as a success.
-			return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
-		}
-		return out.Bytes(), nil
+		return readStdout(path, marker, &out)
 	case readNotExist:
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
 	case readIsDir:
@@ -540,6 +538,35 @@ func (pd *pod) ReadFile(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
 	default:
 		return nil, fmt.Errorf("k8s: read %s: exit %d", path, res.code)
+	}
+}
+
+// readStdout turns what readScript sent into the file's bytes, and is the only
+// place a short read can be caught. Nothing else in the path can notice one:
+// client-go hands a failed stdout copy to runtime.HandleError and never to the
+// caller, so a stream that ended early is byte-for-byte a shorter file (issue
+// #105). The harm is why a hazard never seen firing is still worth a guard —
+// `edit` reads a file and writes back what it read, so a truncation handed to the
+// model is a truncation committed to disk.
+//
+// Size is decided first, and by out.truncated rather than by a length. The
+// buffer's room is a capped file plus its marker exactly, so the flag is set
+// precisely when the file held more than the cap — it grew between readScript's
+// stat and its cat. Such a read loses its marker along with the excess, so this
+// order is the whole of what decides which error the caller gets. A length
+// comparison would not do the same job: the buffer stops at its limit, so it can
+// never exceed it.
+func readStdout(path, marker string, out *cappedBuffer) ([]byte, error) {
+	b := out.Bytes()
+	switch {
+	case out.truncated:
+		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
+	case !bytes.HasSuffix(b, []byte(marker)):
+		return nil, fmt.Errorf("k8s: read %s: short read (exec stdout ended before the pod finished sending)", path)
+	default:
+		n := len(b) - len(marker)
+		// Clipped, so a caller that appends cannot write over the marker's bytes.
+		return b[:n:n], nil
 	}
 }
 
@@ -582,8 +609,9 @@ const (
 	writeShort     = 14
 )
 
-// readScript classifies $1 and cats it on success. $2 is the byte cap. ($0 is
-// the "map-read" label, so the real args start at $1 — bash -c's convention.)
+// readScript classifies $1, cats it on success, and marks the end of what it
+// sent. $2 is the byte cap and $3 the marker. ($0 is the "map-read" label, so the
+// real args start at $1 — bash -c's convention.)
 //
 // A symlink is rejected up front, as the docker backend rejects a non-regular
 // tar entry: `stat -c %s` on a link reports the link's own tiny size while `cat`
@@ -591,6 +619,38 @@ const (
 // short link past the size gate and read its large target. The `-h` test is
 // lstat, so it catches the link before the size and regular-file checks (which
 // follow it) ever run.
+//
+// The marker is the read-side half of writeScript's guard (issue #105), and says
+// the same thing from the other end: only the pod knows what it sent. The `sz`
+// above cannot say it — that is the size of the file, not the length of the
+// stream, and here the difference is not a fine point. A file rewritten between
+// the `stat` and the `cat` would fail a read that returned exactly what the file
+// then held, and every procfs entry reports a `stat` size of 0 while `cat`
+// streams real content, so /proc/meminfo would stop being readable. The marker
+// rides the same stream as the bytes, so it measures the delivery and nothing
+// else.
+//
+// A marker rather than a byte count because every loss this transport can suffer
+// is a suffix: client-go copies stdout with a single io.Copy, which stops at its
+// first error, so the stream can end early but cannot arrive with a hole in it. A
+// stream still ending in the marker therefore lost nothing in transit. That is
+// read out of client-go's stream protocol, not instrumented — nobody induced a
+// hole, and there is no way to. It says nothing about what else wrote to stdout:
+// a shell profile that prints a banner ahead of the `cat` corrupts every read in
+// this backend, marker or not, and always has.
+//
+// The marker rides in argv, so a process inside the pod can read it out of /proc
+// and plant it. That is the deliberately-malicious-command case the derived-name
+// adoption check (`ours`) and Exec's pid file do not defend either; against the
+// transport failure this guards, a per-call crypto/rand token is what keeps a
+// file's own bytes from ending in the marker by accident.
+//
+// `cat` is not exec'd, because the script has to outlive it to emit the marker;
+// that is the whole reason, and not the one #103 had for dropping `exec` on the
+// write side. `|| exit 1` collapses every `cat` failure onto a code that means
+// nothing else: codes 10-14 are one flat namespace shared with writeScript, and
+// the filesystem is agent-controlled, so a `cat` left to exit 13 on its own would
+// be reported to the model as a file too large.
 const readScript = `
 f="$1"
 if [ -h "$f" ]; then exit 12; fi
@@ -599,7 +659,8 @@ if [ -d "$f" ]; then exit 11; fi
 if [ ! -f "$f" ]; then exit 12; fi
 sz=$(stat -c %s "$f") || exit 1
 if [ "$sz" -gt "$2" ]; then exit 13; fi
-exec cat "$f"
+cat "$f" || exit 1
+printf %s "$3"
 `
 
 // writeScript makes $2 (the parent dir), writes stdin to $1, and checks that

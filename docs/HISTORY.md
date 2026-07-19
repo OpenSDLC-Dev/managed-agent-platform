@@ -261,7 +261,8 @@ investigators produce exactly this kind of plausible, well-cited, wrong finding.
 - *Mirroring the check on the read side.* `ReadFile` has the same structural hazard (exit 0 + short
   stdout reads as success) and `readScript` already computes `sz`, but the evidence rules it out as
   the cause here and a naive fix false-positives on a file rewritten between the `stat` and the
-  `cat`. Filed as #105 rather than widening this diff.
+  `cat`. Filed as #105 rather than widening this diff — closed there by marking the end of the
+  stream rather than counting it (record below).
 
 Also left out deliberately: `cat > "$1"` truncates the target before the first byte arrives, so a
 detected short write still leaves a truncated file on disk. Making the write all-or-nothing is
@@ -274,3 +275,48 @@ connection cooldown all failed to restore it; `kubectl exec` stays ~93-100% whil
 breaks under provision churn, and it is not FD limits (`ulimit -n` 1048576) or TIME_WAIT exhaustion.
 Targeted evidence stands on its own (the two new tests, the #103 subtest, and the docker backend on
 the same shared subtest all pass); CI's fresh kind cluster on Linux is the gate.
+
+---
+
+## K8s read-side short-read guard (#105) — design record (2026-07-19)
+
+The hazard and the guard: CHANGELOG.md § [Unreleased]. Recorded here is only what a changelog
+cannot hold — what was measured and rejected, and the sense in which nothing was reproduced.
+
+**Nothing was observed.** Roughly 35 reads of 1 MiB, 4 MiB and 20 MiB files through the pod-exec
+stream produced zero silent short reads. Three runs failed with a transport `error: EOF` delivering
+**zero** bytes and a non-zero exit — the same environmental flakiness the #103 record above
+describes, which `client.exec` already surfaces as `err != nil` rather than a `streamResult`, so
+`ReadFile` already errored on those. The guard closes a structural hazard, not a reproduced failure.
+
+**Evaluated and rejected.**
+
+- *Comparing the bytes received against `readScript`'s existing `sz`.* The fix the issue asked for a
+  decision on, and worse than the issue argued. Beyond the file rewritten between the `stat` and the
+  `cat`, it breaks every procfs read: measured in-pod, `/proc/self/status` reports a `stat` size of 0
+  while `cat` streams ~1.1 KB, so an ordinary `/proc/meminfo` would come back as a short read. It is
+  also a re-read of the target, the mistake #103's review rejected.
+- *Counting the stream on stderr (`cat "$f" | tee /dev/fd/3 | wc -c` under `pipefail`, the literal
+  mirror of `writeScript`).* Byte-exact in every probe — 0 B to 20 MiB, as root and under
+  `runAsUser: 65534` — and rejected on portability, not correctness. `/dev/fd/3` is a reopen rather
+  than a dup: against a socket descriptor it fails with `ENXIO`, and under an in-pod uid transition
+  (`su`, `setpriv`) with `EPERM` (measured), so every read in the backend would depend on what kind
+  of stdio a container runtime hands an exec — an invisible dependency in the backend whose whole
+  purpose is customer clusters nobody here has seen. Its one advantage over a marker, catching a hole
+  in the middle of the stream, has no reachable input: client-go copies stdout with a single
+  `io.Copy` (`streamProtocolV2.copyStdout`), which stops at its first error, so every loss is a
+  suffix truncation. It also adds a second stream whose independent damage becomes a false positive
+  on an otherwise good read.
+- *A fixed marker constant instead of a per-call `nonce()`.* Cheaper, and it puts the literal in the
+  repo — in `k8s.go` and in this file — so files a sandboxed agent routinely reads would contain it,
+  turning a negligible false negative into one with instances on disk. `nonce()` already existed, is
+  `crypto/rand`, and rides in argv.
+- *A `sandbox.ErrShortRead` sentinel.* Same answer as `ErrShortWrite` above. A plain error falls
+  through `toolset`'s default arm to the executor as a backend fault, which is where a retriable
+  transport failure belongs — the model must not be handed a truncated file to route around, least
+  of all through `edit`, which writes back what it read.
+
+**Stated as inference, not instrumentation.** That a marker suffices rests on reading client-go's
+stdout copy and concluding no mid-stream hole can reach the buffer. Nobody induced one; there is no
+way to. This file already records that a confidently-argued, well-cited claim about this exact
+transport was wrong once.

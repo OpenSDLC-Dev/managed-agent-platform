@@ -15,6 +15,52 @@ copy of an entry here.
 
 ### Fixed
 
+- **The K8s sandbox can no longer return a short read as a whole file**
+  ([#105](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/105)) — the read-side mirror
+  of #103 below, and unlike it a hazard rather than an observed defect. `ReadFile` returned
+  `out.Bytes(), nil` on any exit 0, so a stdout stream that ended early was indistinguishable from a
+  shorter file, and nothing else in that path could contradict it: client-go copies stdout with an
+  `io.Copy` whose error goes to a logger rather than to the caller. What made it worth closing is the
+  asymmetry with the other backend — docker reads a tar entry whose header declares the length and
+  fills it with `io.ReadFull`, so a stream that ends early is already an error there — and the blast
+  radius: a truncated read reaches the model as a whole file, and `edit` reads then writes back, so
+  the truncation lands on disk. `readScript` now says where its output ended, in place of
+  `exec cat "$f"`:
+
+  ```sh
+  cat "$f" || exit 1
+  printf %s "$3"
+  ```
+
+  `$3` is a per-call random marker (the existing `nonce()`, passed in argv rather than spliced into
+  the script), and `ReadFile` requires it at the end of what the stream delivered before returning a
+  byte, then strips it. `cat` is no longer `exec`'d because the script has to outlive it to emit the
+  marker — not for the reason #103 dropped `exec` on the write side, where it pointed the *shell's*
+  stdout at the target file. `|| exit 1` collapses every `cat` failure onto a code that means nothing
+  else: exits 10-14 are one flat namespace shared with `writeScript`, and on this agent-controlled
+  filesystem a `cat` left to exit 13 on its own would reach the model as a file too large.
+
+  A marker rather than a byte count, because every loss this transport can suffer is a suffix:
+  stdout is copied by a single `io.Copy` that stops at its first error, so the stream can end early
+  but cannot arrive with a hole in it. And a marker rather than the size `readScript` already
+  `stat`s, because that asks what the file holds now — wrong for a file rewritten between the `stat`
+  and the `cat`, and wrong for every procfs entry, whose `stat` size is 0 while `cat` streams real
+  content. (Why the literal mirror of #103's stream count lost, measured:
+  [docs/HISTORY.md](./docs/HISTORY.md) § "K8s read-side short-read guard (#105)".)
+
+  The read buffer's room becomes a capped file plus its marker exactly, which makes overrun mean
+  precisely "the file grew past the cap after the size gate" — still `ErrFileTooLarge`, decided
+  before the marker is looked at — while a file of exactly `MaxFileBytes` stays a plain success. A
+  short read is a plain error, not a new sentinel, so it reaches the executor as a retriable backend
+  fault instead of the model as a tool result. No new exit code and no image-contract change:
+  `printf` is a bash builtin. Like #103 this converts a silent truncation into a loud error rather
+  than proving the stream cannot lose bytes — and it claims less than #103 did, which at least had a
+  failure to eliminate. Tests: `TestReadStdoutRequiresTheMarker` pins the client-side check and its
+  cap arithmetic against hand-fed streams, `TestReadScriptMarksWhatItSent` runs the real script under
+  the host's bash (with a `stat -c` shim where the host has only BSD `stat`), and a new shared
+  contract subtest `ReadFileAtTheCap` pins the other side of the size boundary, which the docker
+  backend passes unchanged (its gate is a strict `>`).
+
 - **The K8s sandbox no longer reports a truncated file write as a success**
   ([#103](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/103), and
   [#86](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/86), which is the same subtest
