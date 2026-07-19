@@ -632,10 +632,18 @@ const (
 //
 // A marker rather than a byte count because every loss this transport can suffer
 // is a suffix: client-go copies stdout with a single io.Copy, which stops at its
-// first error, so the stream can end early but cannot arrive with a hole in it.
-// Bytes followed by the marker are therefore whole bytes. That is read out of
-// client-go's stream protocol, not instrumented — nobody induced a hole, and
-// there is no way to.
+// first error, so the stream can end early but cannot arrive with a hole in it. A
+// stream still ending in the marker therefore lost nothing in transit. That is
+// read out of client-go's stream protocol, not instrumented — nobody induced a
+// hole, and there is no way to. It says nothing about what else wrote to stdout:
+// a shell profile that prints a banner ahead of the `cat` corrupts every read in
+// this backend, marker or not, and always has.
+//
+// The marker rides in argv, so a process inside the pod can read it out of /proc
+// and plant it. That is the deliberately-malicious-command case the derived-name
+// adoption check (`ours`) and Exec's pid file do not defend either; against the
+// transport failure this guards, a per-call crypto/rand token is what keeps a
+// file's own bytes from ending in the marker by accident.
 //
 // `cat` is not exec'd, because the script has to outlive it to emit the marker;
 // that is the whole reason, and not the one #103 had for dropping `exec` on the

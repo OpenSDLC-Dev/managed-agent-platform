@@ -504,8 +504,14 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if err != nil || res.ExitCode != 0 {
 			t.Fatalf("stage a file at the cap: %+v, %v", res, err)
 		}
-		if got, err := sb.ReadFile(ctx, workdir+"/cap.bin"); err != nil || len(got) != sandbox.MaxFileBytes {
+		got, err := sb.ReadFile(ctx, workdir+"/cap.bin")
+		if err != nil || len(got) != sandbox.MaxFileBytes {
 			t.Fatalf("read = %d bytes, %v; want %d and no error", len(got), err, sandbox.MaxFileBytes)
+		}
+		// Content too, not just the count: mis-accounting by a framing length
+		// shifts the bytes as readily as it shortens them.
+		if want := make([]byte, sandbox.MaxFileBytes); !bytes.Equal(got, want) {
+			t.Errorf("read back the right length but the wrong bytes; first difference at %d", firstDiff(got, want))
 		}
 	})
 

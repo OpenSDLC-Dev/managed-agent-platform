@@ -42,13 +42,11 @@ copy of an entry here.
 
   A marker rather than a byte count, because every loss this transport can suffer is a suffix:
   stdout is copied by a single `io.Copy` that stops at its first error, so the stream can end early
-  but cannot arrive with a hole in it. Counting instead would have meant reopening the exec's own
-  stdout through `/dev/fd/3` and parsing a count off stderr — machinery whose behavior depends on
-  what kind of descriptor a container runtime hands an exec, bought for a shape of damage that
-  cannot occur. The size `readScript` already `stat`s is deliberately **not** what the delivery is
-  compared against: that asks what the file holds now, which is wrong for a file rewritten between
-  the `stat` and the `cat`, and wrong for every procfs entry, whose `stat` size is 0 while `cat`
-  streams real content — `/proc/meminfo` would have stopped being readable.
+  but cannot arrive with a hole in it. And a marker rather than the size `readScript` already
+  `stat`s, because that asks what the file holds now — wrong for a file rewritten between the `stat`
+  and the `cat`, and wrong for every procfs entry, whose `stat` size is 0 while `cat` streams real
+  content. (Why the literal mirror of #103's stream count lost, measured:
+  [docs/HISTORY.md](./docs/HISTORY.md) § "K8s read-side short-read guard (#105)".)
 
   The read buffer's room becomes a capped file plus its marker exactly, which makes overrun mean
   precisely "the file grew past the cap after the size gate" — still `ErrFileTooLarge`, decided

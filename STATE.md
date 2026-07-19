@@ -17,8 +17,6 @@ Plan-less, single-PR scope (issue-triage: `needs_plan` false); the read-side mir
       at `MaxFileBytes` still succeeds
 - [x] `ReadFileAtTheCap` in the shared suite; docker passes unchanged (4/4 file subtests green)
 - [x] Docs: CHANGELOG entry, HISTORY design record + amended #103 deferral bullet, ARCHITECTURE row
-- [ ] Verifier verdict
+- [x] Verifier: PASS — falsification probes red both halves; live kind + docker file subtests green;
+      `make verify` red only in the k8s package, reproduced on unmodified `main`
 - [ ] Dual code review, PR green, review threads settled, squash merge
-
-K8s contract suite stays environmentally red locally (docs/HISTORY.md § "Local verification
-blocker"); the file subtests passed 2 of 3 full runs on kind, CI is the gate.
