@@ -23,4 +23,7 @@ shutdown had already stopped the log processor. No plan file (single-PR fix; tri
       under the old ordering.
 - [x] End-to-end: post-fix `brain` exports `brain exiting` with `exception.message` to a live
       OTLP/gRPC sink on the identical input that produced nothing before.
-- [ ] `make verify`, dual review, PR.
+- [x] `make verify` green (coverage 91.63%); verifier PASS with findings, all addressed.
+- [x] Review round: the exit flush now drains logs first — sharing one deadline with traces and
+      metrics could starve the fatal record — and both flush choices have mutation-checked tests.
+- [ ] PR open, CI green, review threads settled.
