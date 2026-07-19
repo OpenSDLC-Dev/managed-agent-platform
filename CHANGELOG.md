@@ -15,6 +15,30 @@ copy of an entry here.
 
 ### Fixed
 
+- **Metadata carrying U+0000 was a 500, or a silent no-op, instead of a 400**
+  ([#73](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/73)) — `\u0000` is a
+  well-formed JSON escape that Postgres cannot store, and the metadata parsers only checked that a
+  value decoded as a string. So a well-formed request became a server fault at insert time on every
+  metadata-accepting endpoint: agent, environment, and session create and update, and the work-item
+  metadata patch. The break had two mechanisms, not one — a NUL in a key or an upserted value hit
+  the `jsonb` bind (`SQLSTATE 22P05`, unsupported Unicode escape sequence), while a NUL in a *delete*
+  key on the work patch hit the `text[]` bind of `(metadata || $3::jsonb) - $4::text[]`
+  (`SQLSTATE 22021`, invalid byte sequence for encoding UTF8) — and neither error is an `apiError`,
+  so `writeError` mapped both to a 500 `api_error`.
+  A NUL delete key against agents, environments, or sessions was worse than a 500: their merge runs
+  in Go, so the unstorable key was deleted from a map, never reached SQL, and the request returned
+  **200** — the identical patch that 500s against the work endpoint. The guard is now hoisted into
+  the two shared parsers, `parseMetadata` and `splitMetadataPatch`, which between them back every
+  one of those endpoints, so the rejection cannot drift apart per-endpoint again; it covers keys as
+  well as values, and delete keys as well as upserts, which is what closes the 200/500 asymmetry.
+  This is the same rule `internal/events` already applied to inbound event payloads; one
+  docs/DIVERGENCES.md INFERRED entry now covers both guards, since rejecting a delete key turns a
+  previously-200 request into a 400 and the reference's own behaviour is undecidable from the typed
+  schema. A shared sweep in `internal/api/edge_test.go` pins all fifteen endpoint-and-position
+  combinations at a wire-shaped 400. NUL in non-metadata text fields (name, title, system,
+  description, package names) is the same bug class one field over and remains open — out of scope
+  here, tracked separately.
+
 - **The K8s sandbox could kill a command on its deadline and report it as not timed out**
   ([#95](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/95),
   [#110](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/110)) — the deadline was

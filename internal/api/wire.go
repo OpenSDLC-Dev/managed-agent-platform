@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -88,6 +89,24 @@ func requiredString(obj map[string]json.RawMessage, key string) (string, error) 
 	return val, nil
 }
 
+// rejectMetadataNUL rejects U+0000 in a metadata string — keys and values
+// alike. It is valid JSON (the \u0000 escape) but Postgres can store it in
+// neither a jsonb value nor the text[] the work endpoint binds its delete keys
+// to, so letting it through turns a well-formed request into a 500 at insert
+// time. Both metadata parsers call this, which is what keeps the endpoints from
+// diverging: the Go-side merge behind agents/environments/sessions would
+// otherwise drop an unstorable delete key as a silent no-op while the identical
+// patch against the work endpoint's SQL-side merge failed. internal/events
+// applies the same rule to inbound event payloads.
+func rejectMetadataNUL(strs ...string) error {
+	for _, s := range strs {
+		if strings.ContainsRune(s, 0) {
+			return errInvalid(`metadata must not contain U+0000 (the \u0000 escape): it cannot be stored`)
+		}
+	}
+	return nil
+}
+
 // parseMetadata parses a full metadata object (create semantics: all values
 // must be strings).
 func parseMetadata(obj map[string]json.RawMessage) (map[string]string, error) {
@@ -101,6 +120,11 @@ func parseMetadata(obj map[string]json.RawMessage) (map[string]string, error) {
 	}
 	if md == nil {
 		md = map[string]string{}
+	}
+	for k, v := range md {
+		if err := rejectMetadataNUL(k, v); err != nil {
+			return nil, err
+		}
 	}
 	return md, nil
 }
@@ -118,11 +142,17 @@ func splitMetadataPatch(raw json.RawMessage, emptyDeletes bool) (upserts map[str
 	}
 	upserts = map[string]string{}
 	for k, v := range patch {
+		if err := rejectMetadataNUL(k); err != nil {
+			return nil, nil, err
+		}
 		if v == nil || (emptyDeletes && *v == "") {
 			deletes = append(deletes, k)
-		} else {
-			upserts[k] = *v
+			continue
 		}
+		if err := rejectMetadataNUL(*v); err != nil {
+			return nil, nil, err
+		}
+		upserts[k] = *v
 	}
 	return upserts, deletes, nil
 }
