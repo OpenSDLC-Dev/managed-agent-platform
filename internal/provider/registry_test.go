@@ -62,24 +62,43 @@ func TestRegistryIsolatesCallerConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p, err := reg.Provider("m")
+	before, err := reg.Provider("m")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Mutating the caller's map after construction must not reach the
-	// provider's config.
+	// provider's config — neither one built before the mutation nor one
+	// built after it. The second is what pins NewRegistry's own clone:
+	// without it r.routes aliases the caller's map, and since providers are
+	// built per turn, an edit made at any point after startup would reach
+	// every later turn.
 	headers["x-tenant"] = "mallory"
-	if got := p.(*fakeProvider).cfg.Headers["x-tenant"]; got != "acme" {
-		t.Errorf("caller mutation leaked into provider config: %q", got)
+	after, err := reg.Provider("m")
+	if err != nil {
+		t.Fatal(err)
 	}
+	for name, p := range map[string]provider.Provider{"before": before, "after": after} {
+		if got := p.(*fakeProvider).cfg.Headers["x-tenant"]; got != "acme" {
+			t.Errorf("caller mutation leaked into the provider built %s it: %q", name, got)
+		}
+	}
+}
+
+// otherProvider stands in for a factory the registry was NOT built with.
+type otherProvider struct{}
+
+func (*otherProvider) Generate(context.Context, provider.Request) (provider.Stream, error) {
+	return nil, nil
 }
 
 // TestRegistryOwnsTheFactoryTable pins the copy the registry makes of the
 // factory table, for the same reason it copies each route's headers: the
 // lock-free Provider path reads that table, so a caller left holding the
-// original could redirect dispatch — or, by deleting the entry, panic it —
-// long after NewRegistry validated the routes against it.
+// original could redirect dispatch long after NewRegistry validated the routes
+// against it. It substitutes rather than deletes, so the aliasing regression
+// surfaces as this test's own message — deleting the entry would leave a nil
+// Factory and report itself as a panic instead.
 func TestRegistryOwnsTheFactoryTable(t *testing.T) {
 	callers := map[string]provider.Factory{"anthropic": fakeFactory}
 	reg, err := provider.NewRegistry([]provider.Route{
@@ -89,13 +108,15 @@ func TestRegistryOwnsTheFactoryTable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	delete(callers, "anthropic")
+	callers["anthropic"] = func(provider.Config) (provider.Provider, error) {
+		return &otherProvider{}, nil
+	}
 	p, err := reg.Provider("m")
 	if err != nil {
-		t.Fatalf("dispatch followed the caller's map: %v", err)
+		t.Fatal(err)
 	}
 	if _, ok := p.(*fakeProvider); !ok {
-		t.Errorf("dispatch produced %T, not the factory the registry was built with", p)
+		t.Errorf("dispatch produced %T: the registry followed the caller's map", p)
 	}
 }
 

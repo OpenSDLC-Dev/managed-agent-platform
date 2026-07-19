@@ -49,6 +49,15 @@ no other keys. `base_url` is the API root — the adapter appends `/v1/messages`
 also accepts `api_key_env`, but the chart injects no extra
 env into the brain, so supply `api_key` here.) See `internal/provider` for the schema.
 
+The install above — a `"*"` route with no `upstream_model`, the common shape in front
+of a gateway — **passes the caller's own model string through** to the endpoint and
+into the `gen_ai.request.model` metric attribute. Metric attributes are aggregation
+keys, so anyone who can supply a model string (creating an agent, or a session with an
+`agent_with_overrides` block) then controls your metrics backend's series count. Set
+`upstream_model`, or use per-model routes, if those paths are exposed to untrusted
+callers — see the `brain.modelProviders` comment in `values.yaml` and
+[#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88).
+
 ## The executor and the Kubernetes sandbox
 
 The executor is wired to the **k8s** sandbox backend (`SANDBOX_BACKEND=k8s`). It launches,

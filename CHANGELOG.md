@@ -53,11 +53,13 @@ copy of an entry here.
   would break the pass-through that exists precisely so unknown-to-us names work (and would need
   `internal/api`, which knows nothing of routes, to learn them), while omitting or placeholdering
   the label would destroy it in the default deployment — the one where it is most informative. The
-  exposure needs untrusted agent creation, which v1's single-tenant management key does not grant,
-  and an operator who configures a pass-through has already agreed to forward arbitrary strings to
-  their own gateway. It is therefore recorded as an operator responsibility where the operator makes
-  the choice: [`deploy/compose/README.md`](./deploy/compose/README.md) and the Helm chart's
-  `modelProviders` values documentation.
+  exposure needs an untrusted caller able to supply a model string — by creating an agent, or by
+  creating or updating a session with an `agent_with_overrides` block — which v1's single-tenant
+  management key does not grant, and an operator who configures a pass-through has already agreed
+  to forward arbitrary strings to their own gateway. It is therefore recorded as an operator
+  responsibility everywhere the operator makes the choice:
+  [`deploy/compose/README.md`](./deploy/compose/README.md) and, on the Helm side, both the
+  `modelProviders` values documentation and the chart README's install walkthrough.
 
 - **Every binary's fatal-exit log reached stderr but never the collector**
   ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)) — the one line that says

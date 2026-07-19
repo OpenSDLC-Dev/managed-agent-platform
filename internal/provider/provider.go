@@ -96,11 +96,14 @@ type Provider interface {
 // retaining what it builds (see Registry). Both adapters satisfy this by
 // sharing http.DefaultClient.
 //
-// An adapter that genuinely cannot must cache the shared resource itself, and
-// must key that cache by the endpoint alone — protocol, base URL, credential,
-// headers. NOT by the whole Config: under a pass-through route Config.Model is
-// the agent's model string, so a Config-keyed cache would be keyed by client
-// input and would rebuild issue #88 inside the adapter.
+// It must also be safe to call concurrently: the registry holds no lock, so
+// turns in flight on different sessions enter the factory at the same time.
+//
+// An adapter that genuinely cannot be cheap must cache the shared resource
+// itself, and must key that cache by the endpoint alone — protocol, base URL,
+// credential, headers. NOT by the whole Config: under a pass-through route
+// Config.Model is the agent's model string, so a Config-keyed cache would be
+// keyed by client input and would rebuild issue #88 inside the adapter.
 type Factory func(Config) (Provider, error)
 
 // Route binds an agent-facing model string to a provider config. Model "*"
@@ -149,7 +152,11 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 		if route.Config.Protocol == "" || route.Config.BaseURL == "" {
 			return nil, fmt.Errorf("route %q needs a protocol and a base_url", route.Model)
 		}
-		if _, ok := factories[route.Config.Protocol]; !ok {
+		// Validated against the registry's own copy, and by nil rather than
+		// presence: Provider dispatches through this table without a nil
+		// check, so a protocol mapped to a nil Factory would pass a
+		// comma-ok test and panic a turn instead of failing construction.
+		if r.factories[route.Config.Protocol] == nil {
 			return nil, fmt.Errorf("route %q uses unknown protocol %q", route.Model, route.Config.Protocol)
 		}
 		// The registry owns its config copies: Headers is a reference
@@ -194,7 +201,8 @@ func (r *Registry) Describe(model string) (Descriptor, bool) {
 
 // route resolves a model string to its config, applying the pass-through of the
 // agent's own model name when the route names no upstream one. That the
-// passed-through string is client-controlled — and so, via Describe, is the
+// passed-through string is client-controlled — it reaches here from an agent's
+// spec or from a session's agent_with_overrides, and so, via Describe, sets the
 // gen_ai.request.model metric attribute's cardinality — is a deliberate
 // operator responsibility, not an oversight: see deploy/compose/README.md and
 // issue #88.
