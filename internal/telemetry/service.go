@@ -7,9 +7,11 @@ import (
 	"time"
 )
 
-// flushTimeout bounds the export of whatever telemetry is still buffered when
-// the process is on its way out — including the fatal-exit log Run just
-// emitted, which is the record an operator most wants and the last one queued.
+// flushTimeout is the deadline handed to the exit flush. It is the deadline the
+// three provider shutdowns share, not a bound on how long exit takes: an export
+// already in flight on a background context can outlive it, so a process aimed
+// at an unreachable collector takes appreciably longer than this to die. What
+// the deadline is for is making sure the flush ends at all.
 const flushTimeout = 5 * time.Second
 
 // Run initializes telemetry from cfg, runs body as the process's main body, and
@@ -25,7 +27,14 @@ const flushTimeout = 5 * time.Second
 // exit after Run therefore reached stderr and never the collector, leaving the
 // one line that explains why the process died as the only one missing from the
 // backend an operator was looking at. Owning init, body, log and flush together
-// is what makes that ordering unavailable to a caller.
+// is what keeps that ordering in one place a test can reach; Init stays exported
+// for the suite, so this is the shape to use rather than a shape it enforces.
+//
+// A body that panics is outside all of this: the fatal log below never runs, and
+// the panic reaches stderr through the runtime. The deferred flush still ships
+// whatever was already queued, and a panic in a goroutine the body started takes
+// the process without reaching even that. #93 is about the errors a body
+// returns.
 //
 // Init runs before body rather than partway through it for the same reason:
 // every failure a service can report — a missing DATABASE_URL, a sandbox

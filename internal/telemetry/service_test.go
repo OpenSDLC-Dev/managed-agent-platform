@@ -216,15 +216,26 @@ func TestRunReportsAFailedTelemetryInitWithoutRunningTheBody(t *testing.T) {
 }
 
 // Init installs no bridge without an endpoint, so Run must stay a plain
-// call-the-body wrapper there — a deployment with no collector is the default.
+// call-the-body wrapper there — a deployment with no collector is the default,
+// and the fatal line still has to reach the operator's stderr.
 func TestRunWorksWithoutAnEndpoint(t *testing.T) {
 	restoreLogging(t)
+	buf := &bytes.Buffer{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
 
-	ok := telemetry.Run(context.Background(), telemetry.Config{
+	if ok := telemetry.Run(context.Background(), telemetry.Config{
 		ServiceName: "offline-test",
-	}, func(context.Context) error { return nil })
-
-	if !ok {
+	}, func(context.Context) error { return nil }); !ok {
 		t.Errorf("Run() = false, want true with no endpoint configured")
+	}
+
+	if ok := telemetry.Run(context.Background(), telemetry.Config{
+		ServiceName: "offline-test",
+	}, func(context.Context) error { return errors.New("DATABASE_URL is required") }); ok {
+		t.Errorf("Run() = true, want false for a body that returned an error")
+	}
+	if out := buf.String(); !strings.Contains(out, "offline-test exiting") ||
+		!strings.Contains(out, "DATABASE_URL is required") {
+		t.Errorf("log = %q, want the fatal-exit line with no collector configured", out)
 	}
 }

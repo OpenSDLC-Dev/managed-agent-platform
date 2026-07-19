@@ -17,8 +17,8 @@ shutdown had already stopped the log processor. No plan file (single-PR fix; tri
       per binary (`internal/telemetry/service.go`).
 - [x] `telemetry.Init` moved ahead of each body, so pre-`Init` failures (missing env vars, a sandbox
       backend that will not construct) fall inside the bridge's lifetime too.
-- [x] All four `main()`s rewired; `context.Canceled` stays a clean exit and the flush keeps its own
-      `context.Background()`.
+- [x] All four `main()`s rewired; `context.Canceled` is a clean exit in one place instead of three
+      (new for the controlplane — a SIGTERM mid-startup now exits 0), flush on `context.Background()`.
 - [x] Tests against the in-process OTLP collector the bridge suite already had; confirmed to fail
       under the old ordering.
 - [x] End-to-end: post-fix `brain` exports `brain exiting` with `exception.message` to a live

@@ -31,12 +31,15 @@ copy of an entry here.
   executor and worker a sandbox backend that will not construct, is returned *earlier* and would
   have been logged nowhere at all, which is worse than the defect. So `Init` moves ahead of the body
   too, and the whole shape — init, body, fatal log, flush — becomes one function, `telemetry.Run`,
-  which each `main()` calls with a service name and its `run`. The ordering is now unavailable to a
-  caller rather than a convention four binaries re-implement, which is the point: `cmd/` is outside
-  the coverage denominator by design, and this regression arrived with the log bridge precisely
-  because nothing there could test it. `telemetry.Run` is covered against the in-process OTLP
-  collector the bridge suite already had — restore the old ordering and the collector receives
-  nothing at all.
+  which each `main()` calls with a service name and its `run`. That moves the ordering from a
+  convention four binaries re-implemented into one place a test can reach, which is the point:
+  `cmd/` is outside the coverage denominator by design, and this regression arrived with the log
+  bridge precisely because nothing there could test it. `telemetry.Run` is covered against the
+  in-process OTLP collector the bridge suite already had — restore the old ordering and the
+  collector receives nothing at all. It is worth being exact about the guarantee, though: `Init`
+  stays exported for the suite's own use, so a binary that went back to calling it directly would
+  reintroduce the defect with the telemetry tests still green. What stops that is review, not the
+  compiler.
 
   A `context.Canceled` body error is still a clean exit rather than a fatal log, and the predicate
   now lives in one place instead of three. That does change the controlplane, which alone among the
