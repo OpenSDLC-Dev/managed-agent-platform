@@ -41,7 +41,13 @@ copy of an entry here.
   the model writes it down or reads it back; and a file seeded before turn 1 that the model is
   never told about, asserted byte-for-byte at grading. Nothing the model does can restore the
   seeded file, so a container recreated anywhere between the seed and the grade reds — the clean
-  Platform signal the journal contents cannot be.
+  Platform signal the journal contents cannot be. The recall prompt's wording is load-bearing: an
+  earlier draft called the token a "code word" and forbade writing it to a file or running any
+  command containing it, and a live run refused turn two outright, reading the pair as a secret
+  and the request to repeat it as an attempt to extract it. It is the trap `view-range` already
+  avoids by not calling its marker a SECRET — a prompt that sounds like a confidentiality rule
+  tests the model's refusal reflex, not the platform — so the token is now the user's own
+  reference code and staying off disk is a convenience, not a prohibition.
 
   **`glob` was invocation-only.** Its output is now graded in the two halves that can be told
   apart: `GlobPathList` (Platform) holds every successful result to one absolute path per line, or
@@ -64,6 +70,21 @@ copy of an entry here.
   `json.Marshal` HTML-escapes `<`, `>` and `&`, so a marker carrying a redirect — `echo GATED_… >
   /workspace/gated.txt`, the permission tasks' own command — could never have matched. `ToolCallResult`
   keeps its existing first-match semantics and signature untouched; the new graders are separate.
+
+  Review hardening, on top of the four gaps themselves. `shell-state`'s two Platform claims are
+  now gated on the premises they rest on — the model ran the instructed export carrying this
+  trial's nonce, and wrote the file with a bash call that read the variable back — via `OnlyIf`,
+  whose predicate is `ToolCalledWith`'s over the same finder, so the window where a Platform check
+  falls silent is exactly the window where the Model check beside it reds. `ConfirmedResult`
+  requires *every* confirmation to resolve to a well-formed result, not only the one the markers
+  select, so narrowing to the task's own call decides which result is graded for content and never
+  which faults are visible. `CallResult` treats a missing `is_error` as terminal rather than
+  something a later retry forgives. `GlobPathList` rejects a success with no content (glob says
+  `no matches` for an empty list, so that shape is a dropped content block) and a result missing
+  `is_error`, and checks every record rather than the first. `NotInToolTraffic` reads the encoded
+  input as well as the decoded values, so a token hidden in an object key still reds. The file
+  graders substitute tokens into their *path*, which `Seed` already did — an asymmetry that would
+  have red the platform for a file sitting exactly where it belonged.
 
   Substitution is now one function, `(*Trial).fill`, through which every string a task author
   writes passes — prompts, seeds and grader expectations alike. The first cut of this change kept

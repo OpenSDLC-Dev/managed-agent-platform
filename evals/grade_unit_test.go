@@ -1,6 +1,7 @@
 package evals
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -491,6 +492,17 @@ func TestEvaluatedPermissionAsk(t *testing.T) {
 	if err := g.Check(t, none); err != nil {
 		t.Errorf("no bash tool_use should pass vacuously: %v", err)
 	}
+
+	// Two calls, the second unstamped — a gate that held only for the opening
+	// call. A first-call-only check passes this, which is why every call is
+	// checked.
+	secondUngated := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "sevt_1", "evaluated_permission": "ask"},
+		{"type": "agent.tool_use", "name": "bash", "id": "sevt_2", "evaluated_permission": "allow"},
+	})
+	if err := g.Check(t, secondUngated); err == nil {
+		t.Error("a second bash call that was not gated should fail even when the first was")
+	}
 }
 
 func TestConfirmedResult(t *testing.T) {
@@ -525,6 +537,22 @@ func TestConfirmedResult(t *testing.T) {
 	})
 	if err := deny.Check(t, danglingID); err == nil {
 		t.Error("a confirmation naming no tool_use on the log should fail")
+	}
+
+	// The same dangling confirmation, but alongside a graded call that was
+	// confirmed and answered properly. This is what isolates the join: with the
+	// dangling check removed the trial above still reds through the "none of them
+	// for the graded call" branch, so only a transcript where the graded call IS
+	// resolved can tell the two apart.
+	danglingBeside := trialWith([]map[string]any{
+		gatedCall("sevt_1", appended),
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": true,
+			"content": textBlocks("not approved: DENY_n0")},
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_span"},
+	})
+	if err := deny.Check(t, danglingBeside); err == nil {
+		t.Error("a confirmation naming no tool_use should fail even when the graded call resolved cleanly")
 	}
 
 	// A confirmation for a real but different call, while the call the task means
@@ -570,6 +598,46 @@ func TestConfirmedResult(t *testing.T) {
 	})
 	if err := deny.Check(t, noID); err == nil {
 		t.Error("a confirmation with no tool_use_id should fail")
+	}
+
+	// The graded call is answered correctly, but ANOTHER confirmed call's result
+	// dropped its is_error flag. Narrowing to the task's own call decides which
+	// result is graded for content, not which confirmations have to resolve — a
+	// malformed answer to any confirmed call is still the platform's.
+	siblingMalformed := trialWith([]map[string]any{
+		gatedCall("sevt_1", appended),
+		gatedCall("sevt_2", "cat /workspace/notes.txt"),
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_2"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_2",
+			"content": textBlocks("not approved: DENY_n0")},
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": true,
+			"content": textBlocks("not approved: DENY_n0")},
+	})
+	if err := deny.Check(t, siblingMalformed); err == nil {
+		t.Error("a confirmed call whose result dropped is_error should fail even when the graded call is fine")
+	}
+
+	// The denial produced a success result: the deny did not block.
+	notBlocked := trialWith([]map[string]any{
+		gatedCall("sevt_1", appended),
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": false,
+			"content": textBlocks("not approved: DENY_n0")},
+	})
+	if err := deny.Check(t, notBlocked); err == nil {
+		t.Error("a denied call whose result succeeded should fail")
+	}
+
+	// The right flag, but the deny message never made it back.
+	wrongMessage := trialWith([]map[string]any{
+		gatedCall("sevt_1", appended),
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": true,
+			"content": textBlocks("permission denied")},
+	})
+	if err := deny.Check(t, wrongMessage); err == nil {
+		t.Error("a denial that lost its deny message should fail")
 	}
 
 	// No confirmation on the log: nothing gated, nothing to grade. The model half
@@ -660,6 +728,46 @@ func TestToolCalledWith(t *testing.T) {
 	}
 }
 
+func TestOnlyIf(t *testing.T) {
+	// shell-state's shape: the Platform file check speaks only once the model has
+	// run the export the file's content depends on.
+	exported := calledWith("bash", "export MARK", "{{NONCE}}")
+	inner := Grader{Name: "always-fails", Class: Platform,
+		Check: func(_ *testing.T, _ *Trial) error { return errAlways }}
+	g := OnlyIf(inner, exported)
+
+	if g.Name != inner.Name || g.Class != inner.Class {
+		t.Errorf("OnlyIf = %s/%s, want the wrapped grader's own name and class", g.Name, g.Class)
+	}
+
+	// The premise never held: the platform is not asked to answer for it.
+	skipped := trialWith([]map[string]any{bashUse("echo hi > /workspace/mark.txt")})
+	if err := g.Check(t, skipped); err != nil {
+		t.Errorf("a grader whose premise never held should pass: %v", err)
+	}
+
+	// The model did as asked, so the claim is live.
+	did := trialWith([]map[string]any{bashUse("export MARK=n0")})
+	if err := g.Check(t, did); err == nil {
+		t.Error("a grader whose premise held should run and report the inner failure")
+	}
+
+	// Every premise must hold, not just one.
+	both := OnlyIf(inner, exported, calledWith("bash", "$MARK", "mark.txt"))
+	if err := both.Check(t, did); err != nil {
+		t.Errorf("one premise of two should not be enough to make the claim live: %v", err)
+	}
+
+	// The premise matches the same markers ToolCalledWith does, so a trial that
+	// silences the Platform grader always reds the Model one beside it — the
+	// property that keeps a gate from opening a window where neither fires.
+	if err := ToolCalledWith("bash", []string{"export MARK", "{{NONCE}}"}, Model).Check(t, skipped); err == nil {
+		t.Error("the Model grader must red on exactly the trial that made the Platform grader vacuous")
+	}
+}
+
+var errAlways = errors.New("the wrapped grader ran")
+
 func TestCallResult(t *testing.T) {
 	g := CallResult("bash", []string{"cat /workspace/mark.txt"}, false, "{{NONCE}}", Platform)
 
@@ -723,6 +831,34 @@ func TestCallResult(t *testing.T) {
 		t.Errorf("one satisfying call among several should pass: %v", err)
 	}
 
+	// The content is right but the flag says the call errored: the wantErr check
+	// must not be skipped just because the text matched.
+	wrongFlag := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": true,
+			"content": textBlocks("n0")},
+	})
+	if err := g.Check(t, wrongFlag); err == nil {
+		t.Error("a matching call whose result errored should fail even with the right content")
+	}
+
+	// A dropped is_error is terminal, not something a later good call forgives:
+	// the second result says nothing about the first, and letting a retry erase a
+	// missing wire field is the vacuous pass the flag check exists to close.
+	flaglessThenGood := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "content": textBlocks("n0")},
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_2",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_2", "is_error": false,
+			"content": textBlocks("n0")},
+	})
+	if err := g.Check(t, flaglessThenGood); err == nil {
+		t.Error("a result missing is_error must fail even when a later matching call is well-formed")
+	}
+
 	// An empty marker list grades any call to the tool — needle-search's glob.
 	anyGlob := CallResult("glob", nil, false, "/workspace/src/util/helpers.go", Either)
 	globbed := trialWith([]map[string]any{
@@ -775,6 +911,27 @@ func TestGlobPathList(t *testing.T) {
 	if err := g.Check(t, globResult("glob: bad pattern", true)); err != nil {
 		t.Errorf("an errored glob should pass: %v", err)
 	}
+	// A success with no content at all: glob says "no matches" for an empty list,
+	// so this is the shape of a dropped content block, and a grader that walked
+	// zero lines would accept it silently.
+	if err := g.Check(t, globResult("", false)); err == nil {
+		t.Error("a glob success with no content should fail glob-path-list")
+	}
+	// Every record is checked, not just the first — a shape regression that
+	// mangles the tail would otherwise sail through.
+	if err := g.Check(t, globResult("/workspace/good.go\nrelative.go", false)); err == nil {
+		t.Error("a relative path after a good one should fail glob-path-list")
+	}
+	// A result with no is_error flag is malformed, not an implicit failure to skip.
+	noFlag := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "glob", "id": "toolu_1",
+			"input": map[string]any{"pattern": "**/*.go"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1",
+			"content": textBlocks("/workspace/src/main.go")},
+	})
+	if err := g.Check(t, noFlag); err == nil {
+		t.Error("a glob result missing is_error should fail rather than be skipped")
+	}
 	// No glob at all: the task's tool-use floor owns that miss.
 	if err := g.Check(t, trialWith([]map[string]any{bashUse("ls")})); err != nil {
 		t.Errorf("no glob call should pass vacuously: %v", err)
@@ -810,6 +967,17 @@ func TestNotInToolTraffic(t *testing.T) {
 	})
 	if err := g.Check(t, readBack); err == nil {
 		t.Error("a token coming back in a tool result should fail")
+	}
+
+	// Somewhere inputText does not look: an object key, and a non-string value.
+	// This grader's job is to find the token wherever it is, so it reads the
+	// encoded input too.
+	inKey := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "write", "id": "toolu_1",
+			"input": map[string]any{"command": "echo safe", "r0": true}},
+	})
+	if err := g.Check(t, inKey); err == nil {
+		t.Error("a token carried as an input key should fail")
 	}
 }
 

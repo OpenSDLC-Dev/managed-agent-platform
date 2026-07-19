@@ -167,8 +167,11 @@ func corePack(task Task) []Grader {
 	}}
 }
 
-// FileLines asserts a sandbox file's exact lines, in order. Each want entry may
-// carry {{NONCE}}.
+// FileLines asserts a sandbox file's exact lines, in order. The path and each
+// want entry may carry the trial's tokens — the path because Seed substitutes
+// into its own, and a grader reading the literal-braced name while the seed
+// wrote the filled one would red the platform for a file that is exactly where
+// it should be.
 //
 // Lines rather than bytes, because the one byte these tasks cannot pin is the
 // trailing newline: a model that prints line by line emits one and a model that
@@ -182,7 +185,7 @@ func FileLines(path string, want []string, class Class) Grader {
 		Name:  "file-lines:" + path,
 		Class: class,
 		Check: func(t *testing.T, tr *Trial) error {
-			raw, err := tr.readFile(t, path)
+			raw, err := tr.readFile(t, tr.fill(path))
 			if err != nil {
 				return fmt.Errorf("read %s: %w", path, err)
 			}
@@ -404,7 +407,7 @@ func FileEquals(path, content string, class Class) Grader {
 		Name:  "file-equals:" + path,
 		Class: class,
 		Check: func(t *testing.T, tr *Trial) error {
-			raw, err := tr.readFile(t, path)
+			raw, err := tr.readFile(t, tr.fill(path))
 			if err != nil {
 				return fmt.Errorf("read %s: %w", path, err)
 			}
@@ -425,7 +428,7 @@ func FileMatches(path, pattern string, class Class) Grader {
 		Name:  "file-matches:" + path,
 		Class: class,
 		Check: func(t *testing.T, tr *Trial) error {
-			raw, err := tr.readFile(t, path)
+			raw, err := tr.readFile(t, tr.fill(path))
 			if err != nil {
 				return fmt.Errorf("read %s: %w", path, err)
 			}
@@ -561,9 +564,14 @@ func CallResult(name string, markers []string, wantErr bool, sub string, class C
 					continue
 				}
 				gotErr, present := isErrorFlag(res)
+				if !present {
+					// Terminal, not "try the next call": a later well-formed result
+					// says nothing about this one, and letting a retry erase a
+					// dropped wire field is the vacuous pass the flag check exists
+					// to close.
+					return fmt.Errorf("call %s: result carries no is_error flag (%q)", id, textOf(res))
+				}
 				switch {
-				case !present:
-					last = fmt.Errorf("call %s: result carries no is_error flag (%q)", id, textOf(res))
 				case gotErr != wantErr:
 					last = fmt.Errorf("call %s: result is_error=%v, want %v (%q)",
 						id, gotErr, wantErr, textOf(res))
@@ -601,16 +609,33 @@ func GlobPathList(class Class) Grader {
 				}
 				id, _ := use["id"].(string)
 				res := resultFor(tr, id)
-				if res == nil || !okResult(res) {
+				if res == nil {
+					// The core pack's tool-results-joined grader owns the missing
+					// answer; there is no list to shape-check here.
+					continue
+				}
+				gotErr, present := isErrorFlag(res)
+				if !present {
+					return fmt.Errorf("glob call %s: result carries no is_error flag (%q)", id, textOf(res))
+				}
+				if gotErr {
 					// A failed glob is the model's pattern or a real tool error;
-					// either way there is no path list to shape-check here.
+					// either way there is no path list to shape-check.
 					continue
 				}
 				out := textOf(res)
 				if out == "no matches" {
 					continue
 				}
-				for _, line := range splitLines(out) {
+				// An empty success is not an empty list — glob says "no matches"
+				// for that. Nothing here is the shape of a dropped content block,
+				// and a grader that walked zero lines would accept it silently.
+				lines := splitLines(out)
+				if len(lines) == 0 {
+					return fmt.Errorf("glob call %s succeeded with no content, want a path list or %q",
+						id, "no matches")
+				}
+				for _, line := range lines {
 					if !strings.HasPrefix(line, "/") {
 						return fmt.Errorf("glob call %s returned %q, whose line %q is not an absolute path",
 							id, out, line)
@@ -636,7 +661,12 @@ func NotInToolTraffic(sub string, class Class) Grader {
 		Check: func(_ *testing.T, tr *Trial) error {
 			want := tr.fill(sub)
 			for _, ev := range eventsOfType(tr, "agent.tool_use") {
-				if strings.Contains(inputText(ev), want) {
+				// The encoded input as well as the decoded values: this grader is
+				// the one that must find the token wherever it is, including a
+				// place inputText does not look (an object key, a non-string
+				// value). Everywhere else the decoded form is what a marker should
+				// match; here breadth wins over precision.
+				if strings.Contains(inputText(ev), want) || strings.Contains(inputJSON(ev), want) {
 					return fmt.Errorf("%v tool call carries %q in its input, so the token is on disk, "+
 						"not only in the replayed context", ev["name"], want)
 				}
@@ -649,6 +679,45 @@ func NotInToolTraffic(sub string, class Class) Grader {
 			return nil
 		},
 	}
+}
+
+// OnlyIf makes a grader vacuous unless every premise holds — the mechanism
+// behind a Platform-class claim that is only the platform's *given* that the
+// model did as it was asked.
+//
+// CallResult builds its own premise in (the call it grades must have happened),
+// which covers a claim about that call's result. This is for the other shape: a
+// claim about an artifact, whose premise is some earlier call the grader does
+// not otherwise look at. shell-state is the case — mark.txt holds the nonce only
+// if the model exported it and then wrote it with the variable, and a trial that
+// skipped either step is a Model miss, not a broken shell snapshot.
+//
+// The grader keeps its name and class, so a gated check reports exactly as it
+// did before; what changes is when it speaks.
+func OnlyIf(g Grader, premises ...func(*Trial) bool) Grader {
+	return Grader{
+		Name:  g.Name,
+		Class: g.Class,
+		Check: func(t *testing.T, tr *Trial) error {
+			for _, holds := range premises {
+				if !holds(tr) {
+					return nil
+				}
+			}
+			return g.Check(t, tr)
+		},
+	}
+}
+
+// calledWith is OnlyIf's premise: the model called name with every marker in its
+// input. It is ToolCalledWith's condition over the same finder, deliberately —
+// pair the two on the same markers and the Platform grader goes vacuous exactly
+// when the Model grader beside it reds, so the two can never disagree about
+// whether the instructed call happened. A premise that matched a narrower set
+// than the Model grader it is paired with would open a window where neither
+// fires, which is the one thing a gate must not do.
+func calledWith(name string, markers ...string) func(*Trial) bool {
+	return func(tr *Trial) bool { return len(toolCallsWith(tr, name, markers)) > 0 }
 }
 
 // toolCallsWith returns every agent.tool_use of the named tool whose decoded
@@ -863,7 +932,12 @@ func ConfirmedResult(name string, markers []string, wantErr bool, contentSub str
 		Name:  fmt.Sprintf("confirmed-result:%s:%s", name, strings.Join(markers, "|")),
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
-			// Every confirmation, and where on the log it sits.
+			// Every confirmation, and where on the log it sits. Each must name a
+			// call on the log and be answered by a well-formed result — that much
+			// is structural and holds for every confirmation, matching or not.
+			// Narrowing to the task's own call decides which result is graded for
+			// its content, never which confirmations have to resolve at all; a
+			// malformed answer to a call the task did not name is still ours.
 			confirmedAt := map[string]int{}
 			for i, ev := range tr.Events {
 				if ev["type"] != "user.tool_confirmation" {
@@ -879,6 +953,14 @@ func ConfirmedResult(name string, markers []string, wantErr bool, contentSub str
 				}
 				if _, seen := confirmedAt[tid]; !seen {
 					confirmedAt[tid] = i
+				}
+				res := resultAfter(tr, i, tid)
+				if res == nil {
+					return fmt.Errorf("no agent.tool_result for confirmed %s after its confirmation", tid)
+				}
+				if _, present := isErrorFlag(res); !present {
+					return fmt.Errorf("result for confirmed %s carries no is_error flag (content %q)",
+						tid, textOf(res))
 				}
 			}
 			if len(confirmedAt) == 0 {

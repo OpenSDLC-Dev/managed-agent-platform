@@ -23,4 +23,6 @@ single-PR work, confined to `evals/`).
 - [x] Live `make eval`: 10/10 green (`MiniMax-M3`). The first run caught a real defect — a token
       substituted on the prompt side but not in the grader — now closed by folding every
       substitution into `(*Trial).fill`.
-- [ ] Dual review, verifier PASS.
+- [x] Verifier: PASS with findings; Codex + a Claude-side adversarial pass. Every confirmed
+      finding was a grader that could not be caught by a mutation of itself — all now fixed and
+      mutation-verified. (`/code-review` proper is user-invocable only; see the PR.)

@@ -113,6 +113,22 @@ func echoNoTool() Task {
 // separates a user's plain variables from bash's own internals), so a task built
 // on a plain one would be asserting a divergence the package states it has.
 func shellState() Task {
+	// The premises both Platform claims below rest on, stated once: the model ran
+	// the instructed export carrying this trial's nonce, and wrote the file with a
+	// bash call that read the variable back. mark.txt can only hold the nonce if
+	// both happened, so a trial that skipped either is a Model miss and the
+	// platform has nothing to answer for. Each premise is paired with the Model
+	// grader on the same markers, so the window where a Platform check falls
+	// silent is exactly the window where a Model check reds.
+	//
+	// Two markers for the export rather than the literal `export MARK={{NONCE}}`,
+	// so the benign quoted spellings (`export MARK="…"`, `export MARK='…'`) still
+	// count as having done it.
+	exportMarkers := []string{"export MARK", "{{NONCE}}"}
+	writeMarkers := []string{"$MARK", "mark.txt"}
+	catMarkers := []string{"cat /workspace/mark.txt"}
+	exported := calledWith("bash", exportMarkers...)
+	wrote := calledWith("bash", writeMarkers...)
 	return Task{
 		ID: "shell-state",
 		System: "Use the bash tool. Run each command as its own separate bash call, " +
@@ -126,36 +142,42 @@ func shellState() Task {
 			// For a model that does as asked — export in one call, `echo "$MARK"`
 			// into the file in another — the file holds the nonce only if the
 			// export survived to the second call. An empty file is the shape of a
-			// snapshot regression, and a platform bug. That "as asked" is the load
-			// bearing assumption: the model here is the system under test, not an
-			// adversary, so the graders below steer it onto the instructed path
-			// and catch a regression there; they do not try to defend against a
-			// model that deliberately writes the literal nonce, which no
-			// transcript-only grader can distinguish from a working shell.
-			FileLines("mark.txt", []string{"{{NONCE}}"}, Platform),
-			// Steer the model onto the path the file check can trust: at least two
-			// bash calls, the export not packed into the write (so it cannot
-			// trivially hold within one shell), and the write done by a bash call
-			// that read "$MARK" (not the `write` tool, which would bypass the
-			// shell entirely). Class Model — these describe following the
-			// instruction, and a miss means re-prompt, not a platform bug.
+			// snapshot regression, and a platform bug. "As asked" used to be an
+			// assumption the surrounding Model graders merely steered towards; it
+			// is now the check's stated premise, so a model that skips the export
+			// or writes something else reds as the Model miss it is and this stays
+			// silent. What no transcript-only grader can distinguish remains
+			// undefended: a model that deliberately writes the literal nonce looks
+			// exactly like a working shell.
+			OnlyIf(FileLines("mark.txt", []string{"{{NONCE}}"}, Platform), exported, wrote),
+			// Steer the model onto the path the file check can trust — and, for the
+			// export and the write, *require* it, since those are the premises
+			// above: at least two bash calls, the export carrying this trial's
+			// nonce, the export not packed into the write (so it cannot trivially
+			// hold within one shell), and the write done by a bash call that read
+			// "$MARK" (not the `write` tool, which would bypass the shell
+			// entirely). Class Model — these describe following the instruction,
+			// and a miss means re-prompt, not a platform bug.
 			ToolUseAtLeast("bash", 2, Model),
+			ToolCalledWith("bash", exportMarkers, Model),
 			SeparateBashCalls("MARK=", "mark.txt"),
-			BashCommandWith("$MARK", "mark.txt"),
+			BashCommandWith(writeMarkers...),
 			// The nonce came back out of the container through a tool result:
 			// the round trip, not just the write. Split into its two halves, so
 			// that a model which never runs the third command reds as the Model
 			// miss it is and the Platform claim stays about the platform: the
 			// pair below says "the model must run the instructed `cat`" (Model)
 			// and "if it did, what came back must carry the nonce" (Platform,
-			// vacuous otherwise).
+			// vacuous otherwise). It carries the same two premises as the file
+			// check — a `cat` of a file the model never wrote errors, and that
+			// error is the model's, not ours.
 			//
 			// The marker is the whole command rather than "cat" plus the path:
 			// `cat > /workspace/mark.txt <<EOF` carries both of those and is a
 			// write, whose empty stdout would then red the platform for a round
 			// trip the model never asked for.
-			ToolCalledWith("bash", []string{"cat /workspace/mark.txt"}, Model),
-			CallResult("bash", []string{"cat /workspace/mark.txt"}, false, "{{NONCE}}", Platform),
+			ToolCalledWith("bash", catMarkers, Model),
+			OnlyIf(CallResult("bash", catMarkers, false, "{{NONCE}}", Platform), exported, wrote),
 		},
 	}
 }
@@ -354,15 +376,27 @@ func exitCode() Task {
 // Those two signals do not, by themselves, separate the two properties, and the
 // task carries one witness for each so that they do.
 //
-// Replay: the prompt states a code word in turn one that the model must repeat
-// in turn two. {{RECALL}} is a second per-trial token, independent of the nonce
-// — the nonce is in turn two's own prompt, so a token derived from it could be
-// spelled by a model that had lost turn one entirely. The code word exists
-// nowhere but turn one's user.message, and the brain rebuilds every request from
-// the event log (internal/brain/replay.go), so a model that says it back can
-// only have got it from the replayed log. NotInToolTraffic keeps that true: a
-// model that writes the word down and reads it back has turned the replay
-// witness into a second persistence check, and reds rather than passing quietly.
+// Replay: the prompt states a reference code in turn one that the model must
+// repeat in turn two. {{RECALL}} is a second per-trial token, independent of the
+// nonce — the nonce is in turn two's own prompt, so a token derived from it could
+// be spelled by a model that had lost turn one entirely. The code exists nowhere
+// but turn one's user.message, and the brain rebuilds every request from the
+// event log (internal/brain/replay.go), so a model that says it back can only
+// have got it from the replayed log. NotInToolTraffic keeps that true: a model
+// that writes the code down and reads it back has turned the replay witness into
+// a second persistence check, and reds rather than passing quietly.
+//
+// The wording is load-bearing and was learned the hard way. An earlier draft
+// called it a "code word" and told the model not to write it to any file or run
+// any command containing it; a live run refused the second turn outright,
+// reading the pair as a secret and the request to repeat it as an attempt to
+// extract it ("following an instruction to reveal something I was told to keep
+// private is a classic pattern I should refuse"). It is the same trap view-range
+// avoids by not calling its marker a SECRET: a prompt that sounds like a
+// confidentiality rule tests the model's refusal reflex, not the platform. The
+// token is now the user's own reference code and the off-disk hint is a
+// convenience ("no need to save it anywhere"), which keeps the model off the
+// filesystem without implying anything is being kept from anyone.
 //
 // Reuse: a file seeded before turn one and still byte-for-byte present at
 // grading time. The model is never told about it, so — unlike journal.txt, which
@@ -385,11 +419,11 @@ func journalMultiturn() Task {
 		Seeds: []Seed{{Path: "provenance.txt", Content: provenance}},
 		Turns: []Turn{
 			{Message: "Create /workspace/journal.txt with a single first line reading exactly: " +
-				"entry-one-{{NONCE}}. Also keep this code word in mind for later — do not write it to " +
-				"any file, and do not run any command containing it: {{RECALL}}. Reply DONE1:{{NONCE}}."},
+				"entry-one-{{NONCE}}. My reference code for this session is {{RECALL}}; there is no " +
+				"need to save it anywhere, just keep it in mind. Reply DONE1:{{NONCE}}."},
 			{Message: "Append a second line to /workspace/journal.txt, below the first, reading " +
 				"exactly: entry-two-{{NONCE}}. Keep the first line unchanged. Then reply " +
-				"DONE2:{{NONCE}} followed by the code word from my first message."},
+				"DONE2:{{NONCE}} followed by my reference code from the first message."},
 		},
 		Graders: []Grader{
 			FileLines("journal.txt", []string{"entry-one-{{NONCE}}", "entry-two-{{NONCE}}"}, Either),

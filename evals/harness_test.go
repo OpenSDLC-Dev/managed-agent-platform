@@ -380,10 +380,15 @@ func reap(sessionID string) {
 //
 // An unset Recall leaves {{RECALL}} standing rather than substituting the empty
 // string, and that is deliberate: every consumer of a filled string is a
-// substring check, and `strings.Contains(anything, "")` is true, so a trial
-// built without the token would green a recall assertion while proving nothing.
-// The placeholder left in place makes it red loudly instead — the same reason
-// the result graders reject a missing is_error rather than reading it as false.
+// substring check, and `strings.Contains(anything, "")` is true, so an empty
+// substitution would green a recall assertion against any text at all. The
+// placeholder left standing at least fails closed for a grader-only trial, where
+// nothing put the literal in front of the model.
+//
+// It is a backstop, not the guarantee: runTrial sets both tokens unconditionally
+// (a trial that reached a prompt has a real recall token), and if one ever did
+// not, the literal would go out in the prompt and could come back in the reply.
+// The guarantee is that the harness always fills both.
 func (tr *Trial) fill(s string) string {
 	out := strings.ReplaceAll(s, "{{NONCE}}", tr.Nonce)
 	if tr.Recall == "" {
