@@ -1,12 +1,15 @@
 package telemetry_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
@@ -67,6 +70,78 @@ func TestRunFatalExitLogAlsoReachesTheConsole(t *testing.T) {
 	}
 }
 
+// The flush runs on its own context.Background(), and this is the test that
+// says so. On a signal-driven exit the process context is already cancelled by
+// the time the body returns, and sdk/log's BatchProcessor.Shutdown skips its
+// final queue flush outright when the shutdown context is done — so deriving
+// the flush context from ctx puts the fatal record back exactly where #93 had
+// it: printed on the console, never exported. Every other test here passes a
+// context.Background() that is never cancelled, so that mutation survives all
+// of them.
+func TestRunFlushesTheFatalLogEvenWhenTheProcessContextIsCancelled(t *testing.T) {
+	restoreLogging(t)
+	console(t)
+	collector := startFakeCollector(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ok := telemetry.Run(ctx, telemetry.Config{
+		ServiceName: "sigterm-test",
+		Endpoint:    collector.addr,
+		Insecure:    true,
+	}, func(context.Context) error {
+		cancel() // the signal lands, then the body fails on the way down
+		return errors.New("store: pool closed unexpectedly")
+	})
+
+	if ok {
+		t.Errorf("Run() = true, want false for a body that returned an error")
+	}
+	if bodies := collector.logBodies(); !slices.Contains(bodies, "sigterm-test exiting") {
+		t.Fatalf("collector log bodies = %v, want the fatal-exit record despite the cancelled process context", bodies)
+	}
+}
+
+// The fatal record is the last thing queued before the flush, so it is the
+// first thing a shared shutdown deadline can starve. All three providers shut
+// down on one deadline, and a meter provider exports unconditionally at
+// Shutdown even for a service that recorded nothing — so a collector that takes
+// logs but stalls on metrics would, with logs draining last, spend the whole
+// budget and leave BatchProcessor.Shutdown to return on ctx.Done without ever
+// flushing its queue. Logs drain first for exactly this reason.
+func TestRunFlushesTheFatalLogAheadOfSlowerTelemetry(t *testing.T) {
+	restoreLogging(t)
+	console(t)
+	// Park the BatchProcessor's background poller past the end of the test, so
+	// the shutdown flush is the only thing that can deliver the record. Left at
+	// its 1s default the poller ships it during the stall on its own, and the
+	// shutdown order this test exists to pin makes no difference to the result.
+	t.Setenv("OTEL_BLRP_SCHEDULE_DELAY", "600000")
+	collector := startFakeCollector(t)
+	collector.stallMetrics(t)
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- telemetry.Run(context.Background(), telemetry.Config{
+			ServiceName: "stalled-metrics-test",
+			Endpoint:    collector.addr,
+			Insecure:    true,
+		}, func(context.Context) error { return errors.New("store: pool closed unexpectedly") })
+	}()
+
+	select {
+	case ok := <-done:
+		if ok {
+			t.Errorf("Run() = true, want false for a body that returned an error")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not return; the flush is not bounded")
+	}
+	if bodies := collector.logBodies(); !slices.Contains(bodies, "stalled-metrics-test exiting") {
+		t.Fatalf("collector log bodies = %v, want the fatal-exit record despite metrics stalling the shutdown", bodies)
+	}
+}
+
 // A signal-cancelled shutdown is how these processes are meant to stop, so it
 // is neither a fatal error to log nor a non-zero exit. The predicate lives here
 // alone — a caller that re-derived it could drift from what Run logs.
@@ -115,9 +190,14 @@ func TestRunReportsACleanExitForANilError(t *testing.T) {
 // Telemetry failing to start is the one error that predates the bridge it would
 // have been exported through, so it can only reach stderr. It must still stop
 // the process rather than run the body without telemetry.
+//
+// The console seam is no use here — it belongs to the bridge, and on this path
+// Init returns before installing one — so the assertion goes through the
+// default logger, which also keeps the line out of the suite's own stderr.
 func TestRunReportsAFailedTelemetryInitWithoutRunningTheBody(t *testing.T) {
 	restoreLogging(t)
-	console(t)
+	buf := &bytes.Buffer{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
 
 	ran := false
 	ok := telemetry.Run(context.Background(), telemetry.Config{
@@ -129,6 +209,9 @@ func TestRunReportsAFailedTelemetryInitWithoutRunningTheBody(t *testing.T) {
 	}
 	if ran {
 		t.Errorf("Run called body after telemetry.Init failed")
+	}
+	if out := buf.String(); !strings.Contains(out, "telemetry: ServiceName is required") {
+		t.Errorf("log = %q, want Init's error reported before the process gives up", out)
 	}
 }
 
@@ -143,9 +226,5 @@ func TestRunWorksWithoutAnEndpoint(t *testing.T) {
 
 	if !ok {
 		t.Errorf("Run() = false, want true with no endpoint configured")
-	}
-	if !telemetry.Run(context.Background(), telemetry.Config{ServiceName: "offline-test"},
-		func(context.Context) error { return nil }) {
-		t.Errorf("Run must stay usable with telemetry disabled")
 	}
 }

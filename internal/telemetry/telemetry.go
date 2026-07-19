@@ -1,8 +1,9 @@
 // Package telemetry initializes OpenTelemetry tracing and metrics for one
 // process and provides W3C trace-context propagation helpers. Every binary
-// (controlplane, brain, executor, worker) calls Init at startup; the event
-// log later emits span.* domain events from the same spans started here, so
-// the two views never drift.
+// (controlplane, brain, executor, worker) starts through Run, which calls Init
+// for it and owns the exit sequence that Init's shutdown has to come last in;
+// the event log later emits span.* domain events from the same spans started
+// here, so the two views never drift.
 package telemetry
 
 import (
@@ -125,11 +126,22 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	// still pre-1.0.
 	installLogBridge(cfg.ServiceName, loggerProvider)
 
+	// Logs drain first, and the order is load-bearing rather than tidy. All
+	// three shutdowns share one deadline and run in argument order, and the
+	// last record queued before this runs is the fatal-exit log Run just
+	// emitted — the one an operator is looking for. A meter provider's
+	// Shutdown exports unconditionally once a reader is registered, even for a
+	// service that recorded nothing, so a collector that accepts logs but
+	// stalls on metrics could spend the whole budget before the log flush was
+	// reached; BatchProcessor.Shutdown then takes its ctx.Done branch and
+	// returns without draining the queue. Draining logs first costs the traces
+	// and metrics nothing they can complain about — they are already the
+	// telemetry an operator can afford to lose at exit.
 	return func(ctx context.Context) error {
 		return errors.Join(
+			loggerProvider.Shutdown(ctx),
 			tracerProvider.Shutdown(ctx),
 			meterProvider.Shutdown(ctx),
-			loggerProvider.Shutdown(ctx),
 		)
 	}, nil
 }

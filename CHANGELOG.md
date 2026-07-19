@@ -38,13 +38,31 @@ copy of an entry here.
   collector the bridge suite already had — restore the old ordering and the collector receives
   nothing at all.
 
-  Two behaviours are preserved deliberately. A `context.Canceled` body error is still a clean exit
-  rather than a fatal log, with the predicate in one place instead of three; the controlplane, alone
-  among the four, never had that guard and now shares it, which changes no exit code because its
-  `run` returns `srv.Shutdown`'s error and that is never `context.Canceled`. And the flush still runs
-  on a fresh `context.Background()` rather than the process context — on a signal-driven exit that
-  context is already cancelled, and `BatchProcessor.Shutdown` skips its final queue flush outright
-  when its shutdown context is done.
+  A `context.Canceled` body error is still a clean exit rather than a fatal log, and the predicate
+  now lives in one place instead of three. That does change the controlplane, which alone among the
+  four never had the guard: `store.Open` wraps its ping with `%w`, so a SIGTERM arriving while the
+  process is still connecting to Postgres used to exit 1 having logged
+  `store: connect: context canceled`, and now exits 0 silently. The other three have always behaved
+  that way, and a process that stopped because it was asked to is not a failure. The flush runs on a
+  fresh `context.Background()` rather than the process context, and a test pins that choice: on a
+  signal-driven exit the process context is already cancelled, and `BatchProcessor.Shutdown` skips
+  its final queue flush outright when its shutdown context is done — which would put the fatal record
+  straight back where this defect had it, on the console and nowhere else.
+
+  The exit flush also drains logs first now, ahead of traces and metrics. All three providers shut
+  down on one deadline in argument order, and the fatal record is by construction the last thing
+  queued before it — so with logs draining last, a collector that accepts them but stalls on metrics
+  spent the whole budget elsewhere and left `BatchProcessor.Shutdown` to return on `ctx.Done` without
+  draining its queue, losing precisely the record this entry is about. A meter provider exports
+  unconditionally at `Shutdown` once a reader is registered, so a service that recorded no
+  instruments was exposed too. Traces and metrics are the telemetry a dying process can afford to
+  lose; the line saying why it died is not.
+
+  One cost is deliberate. Because `Init` now precedes the environment validation, a misconfigured
+  process pointed at an *unreachable* collector spends the exporter's connection timeout on the way
+  out — about eleven seconds against a blackholed endpoint, where it used to fail in milliseconds.
+  Exit stays bounded, a reachable or unconfigured collector is unaffected, and what the wait buys is
+  the class of failure this entry is about.
 
 - **Metadata carrying U+0000 was a 500, or a silent no-op, instead of a 400**
   ([#73](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/73)) — `\u0000` is a
