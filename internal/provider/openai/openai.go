@@ -48,6 +48,7 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		model:    cfg.Model,
 		headers:  cfg.Headers,
 		client:   http.DefaultClient,
+		redact:   provider.NewRedactor(cfg),
 	}, nil
 }
 
@@ -57,6 +58,7 @@ type openaiProvider struct {
 	model    string
 	headers  map[string]string
 	client   *http.Client
+	redact   provider.Redactor
 }
 
 func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (provider.Stream, error) {
@@ -82,7 +84,9 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(raw))
 	if err != nil {
-		return nil, err
+		// A URL parse failure quotes the endpoint back, and base_url may carry
+		// a credential; net/http only strips one from an error it builds itself.
+		return nil, p.redact.Error(err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
@@ -95,14 +99,18 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, p.redact.Error(err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
+		// The body is quoted because the status alone rarely explains a gateway
+		// misconfiguration — but an endpoint that echoes the request's
+		// Authorization header into it must not get the credential into an
+		// error the platform persists as a session.error event.
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("openai endpoint returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+		return nil, fmt.Errorf("openai endpoint returned %s: %s", resp.Status, p.redact.String(strings.TrimSpace(string(msg))))
 	}
-	return &stream{body: resp.Body, r: bufio.NewReader(resp.Body)}, nil
+	return &stream{body: resp.Body, r: bufio.NewReader(resp.Body), redact: p.redact}, nil
 }
 
 // --- outgoing request shapes (Anthropic-native -> OpenAI Chat Completions) ---
@@ -323,8 +331,9 @@ func convertTools(tools []json.RawMessage) ([]chatTool, error) {
 // --- incoming stream translation (OpenAI SSE -> provider chunks) ---
 
 type stream struct {
-	body io.ReadCloser
-	r    *bufio.Reader
+	body   io.ReadCloser
+	r      *bufio.Reader
+	redact provider.Redactor
 
 	pending []provider.Chunk
 	cur     provider.Chunk
@@ -499,7 +508,9 @@ func (s *stream) process(payload string) error {
 		return fmt.Errorf("openai stream frame: %w", err)
 	}
 	if fr.Error != nil {
-		return fmt.Errorf("openai stream error: %s", fr.Error.Message)
+		// Endpoint-supplied text under HTTP 200: the same credential echo as
+		// the non-200 path, on the route an operator is least likely to test.
+		return fmt.Errorf("openai stream error: %s", s.redact.String(fr.Error.Message))
 	}
 	if fr.Usage != nil {
 		// prompt_tokens counts cached tokens too; split the cached subset out so

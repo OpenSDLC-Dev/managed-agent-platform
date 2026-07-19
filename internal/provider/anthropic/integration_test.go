@@ -16,7 +16,8 @@ import (
 // RUN_LIVE_MODEL_TESTS (see internal/modeltest for the opt-in contract), so an
 // ordinary `go test ./...` never spends money. modeltest resolves the endpoint
 // without printing the credential; an error raised by the endpoint itself is
-// logged as-is, and some adapters quote a failing response body verbatim.
+// logged as-is, and adapters quote a failing response body with the configured
+// credentials redacted out of it.
 func TestIntegrationRealEndpoint(t *testing.T) {
 	// Gate first: short mode may decline to spend the time, but it must not
 	// become a way to opt in and still not be told the configuration is broken.

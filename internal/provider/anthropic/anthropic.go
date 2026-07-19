@@ -41,12 +41,15 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		opts = append(opts, option.WithHeader(k, v))
 	}
 	client := sdk.NewClient(opts...)
-	return &anthropicProvider{client: client, model: cfg.Model}, nil
+	return &anthropicProvider{client: client, model: cfg.Model, redact: provider.NewRedactor(cfg)}, nil
 }
 
 type anthropicProvider struct {
 	client sdk.Client
 	model  string
+	// The SDK's API error quotes the whole response body and the request URL,
+	// so both an echoed credential and one carried in base_url reach its text.
+	redact provider.Redactor
 }
 
 // defaultMaxTokens applies when the request doesn't set one; the wire field
@@ -95,9 +98,12 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 
 	events := p.client.Messages.NewStreaming(ctx, params)
 	if err := events.Err(); err != nil {
-		return nil, err
+		return nil, p.redact.Error(err)
 	}
-	return &stream{events: events}, nil
+	// The stream carries the redactor too: an endpoint can report a failure
+	// mid-stream under HTTP 200, and that error surfaces from Err() after
+	// Next(), never from here.
+	return &stream{events: events, redact: p.redact}, nil
 }
 
 // stream translates the Messages API event stream into provider chunks:
@@ -106,6 +112,7 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 // output usage, emitted as the final done chunk.
 type stream struct {
 	events *ssestream.Stream[sdk.MessageStreamEventUnion]
+	redact provider.Redactor
 	cur    provider.Chunk
 	err    error
 
@@ -239,7 +246,7 @@ func (s *stream) Next() bool {
 			return true
 		}
 	}
-	s.err = s.events.Err()
+	s.err = s.redact.Error(s.events.Err())
 	// A drained stream without message_stop is a truncated turn, not a
 	// success: callers must never mistake it for a turn that merely
 	// produced no done chunk.

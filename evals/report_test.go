@@ -105,8 +105,10 @@ func endpointHost(baseURL string) string {
 // userinfo password, never the query string). So a credential in
 // MODEL_BASE_URL's query — some gateways take ?api_key=… — would otherwise ride
 // that error into report.json, summary.md and the failed-trial transcript, all
-// of which get pasted into issues. The API key is header-only and cannot reach
-// an error, but is scrubbed too as defence in depth. Every non-empty piece is
+// of which get pasted into issues. The API key is header-only, and the adapters
+// now redact it from anything an endpoint echoes back, but it is scrubbed here
+// too as defence in depth — this suite must not depend on that. Every non-empty
+// piece is
 // replaced before any artifact is written (see scrub); artifacts are rendered
 // without HTML escaping so an "&" in a multi-parameter query stays literal and
 // the raw substring still matches.

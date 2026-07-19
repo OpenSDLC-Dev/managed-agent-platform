@@ -4,26 +4,25 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93) — every binary's fatal-exit
-log reached stderr but never OTLP, because each `main()` logged it after `run()`'s deferred telemetry
-shutdown had already stopped the log processor. No plan file (single-PR fix; triage returned
-`needs_plan: false`).
+[#83](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/83) — provider adapters quoted a
+failing endpoint's response body verbatim, so an endpoint echoing the request's auth header back put
+the model credential into an error that lands in an append-only `session.error` event. No plan file
+(single-PR fix; triage returned `needs_plan: false`).
 
 ## Tasks
 
-- [x] Reproduced against the real binaries: pre-fix `brain` with an unreachable `DATABASE_URL` logs
-      to stderr while the collector receives nothing.
-- [x] `telemetry.Run` owns init → body → fatal log → flush, so the ordering is not re-implementable
-      per binary (`internal/telemetry/service.go`).
-- [x] `telemetry.Init` moved ahead of each body, so pre-`Init` failures (missing env vars, a sandbox
-      backend that will not construct) fall inside the bridge's lifetime too.
-- [x] All four `main()`s rewired; `context.Canceled` is a clean exit in one place instead of three
-      (new for the controlplane — a SIGTERM mid-startup now exits 0), flush on `context.Background()`.
-- [x] Tests against the in-process OTLP collector the bridge suite already had; confirmed to fail
-      under the old ordering.
-- [x] End-to-end: post-fix `brain` exports `brain exiting` with `exception.message` to a live
-      OTLP/gRPC sink on the identical input that produced nothing before.
-- [x] `make verify` green (coverage 91.63%); verifier PASS with findings, all addressed.
-- [x] Review round: the exit flush now drains logs first — sharing one deadline with traces and
-      metrics could starve the fatal record — and both flush choices have mutation-checked tests.
+- [x] All five leak sites reproduced by test, each failing on *finding* the secret: the two the issue
+      named, plus openai's mid-stream error frame, anthropic's post-`Next()` `Err()` (both under
+      HTTP 200), and a `base_url` userinfo password the SDK prints with `String()`, not `Redacted()`.
+- [x] `provider.NewRedactor` matches configured secrets by exact value — api key, `base_url`
+      password, auth-named header values — since the observed echo was a bare token that a
+      `Bearer`-shaped matcher would have missed (`internal/provider/redact.go`).
+- [x] Non-auth header values deliberately not redacted, so a routing tag still reads back out of the
+      diagnostic the quoted body exists to provide.
+- [x] `Redactor.Error` overrides `Error()` and keeps `Unwrap`: `%w` would re-render the leaking
+      message, but discarding the chain would block retry logic reading an upstream status.
+- [x] Docs corrected: `docs/ARCHITECTURE.md`'s security invariant claimed this redaction already
+      existed (false when written); both integration-test comments and `evals/report_test.go`'s
+      "cannot reach an error" premise updated.
+- [ ] `make verify`, verifier, dual review.
 - [ ] PR open, CI green, review threads settled.

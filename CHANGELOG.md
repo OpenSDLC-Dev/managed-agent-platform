@@ -15,6 +15,49 @@ copy of an entry here.
 
 ### Fixed
 
+- **Provider adapter errors could quote a credential back from the endpoint's response body**
+  ([#83](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/83)) — both adapters quote
+  what a failing endpoint said about itself, because the status alone rarely explains a gateway
+  misconfiguration. An endpoint that echoes the request's auth header into that diagnostic body —
+  some gateways do on a 401 — therefore put the model credential into the error. That error is not
+  merely logged: a failed turn becomes a `session.error` event, which is **append-only** in Postgres
+  and re-served to API clients on every list and every SSE replay, so a leaked key could not be
+  edited back out. (It reaches neither `slog` nor the OTel span; the fix is not a logging matter.)
+
+  The issue named two sites; there were five. The openai adapter also embeds an endpoint-supplied
+  mid-stream error frame, and the anthropic stream surfaces an upstream failure from `Err()` after
+  `Next()` — **both under HTTP 200**, the route an operator is least likely to exercise, and the
+  anthropic one returns `nil` from `Generate`, so a fix applied only where the issue pointed would
+  have passed its own test and leaked in production. The fifth needs no cooperation from the
+  endpoint at all: the SDK formats the request URL into every API error with `String()` rather than
+  `Redacted()`, so a credential in `base_url`'s userinfo leaks on any upstream failure.
+
+  Redaction matches the configured secret **by exact value, never by token shape**. The observed
+  anthropic echo was a bare value with no `Bearer` prefix and no header name beside it — the
+  Anthropic protocol sends `x-api-key` — so the shape-matcher the issue floated would have missed
+  the very leak it was filed for, and a `base_url` may point at any gateway, proxy, or self-hosted
+  model (principle 4), whose token format is unknowable. The adapter holds the secret, so it does
+  not have to guess: `provider.NewRedactor` collects the api key, a `base_url` userinfo password,
+  and the values of auth-named headers (plus the token alone from a `Bearer <token>` value, since an
+  endpoint may echo either form). Header values are covered because the openai adapter applies
+  configured headers *after* setting `Authorization`, which makes them an auth channel by
+  construction; non-auth headers are deliberately left alone so that redaction cannot mangle the
+  diagnostic it exists to protect — `x-gateway-route: llm-pool-7` still reads back out of "no
+  capacity in pool llm-pool-7". Everything but the secret survives: status line, error type, the
+  endpoint's own message, the request id.
+
+  `Redactor.Error` wraps rather than reformats. `fmt.Errorf("%w", err)` was not an option — `%w`
+  re-renders the wrapped message, which *is* the leak — so the redacted error overrides `Error()`
+  and keeps the original reachable through `Unwrap`. Nothing unwraps a provider error today (the
+  brain's only `errors.As` is for its own `infraError`), but retry logic reading an upstream status
+  is the obvious next caller, and it should not have to choose between the status and a safe message.
+
+  `docs/ARCHITECTURE.md`'s security invariants already claimed provider errors redacted the key;
+  that sentence was false when written and is now true, minus the half about config printouts, which
+  `provider.Config` still does not implement and the text no longer claims. Left alone deliberately:
+  the anthropic path quotes an **unbounded** body (the SDK reads it with a bare `io.ReadAll`) where
+  openai caps at 4 KiB — a payload-size concern, not a credential one.
+
 - **Every binary's fatal-exit log reached stderr but never the collector**
   ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)) — the one line that says
   why a process died was the only one the OTLP backend never received. Each `main()` logged it after

@@ -326,8 +326,12 @@ four binaries, loopback-bound control plane, optional Jaeger profile).
 
 - **Credentials never enter the sandbox.** Tool credentials are a reserved egress-time
   seam (vaults, deferred); model keys live in the brain's provider config; the sandbox
-  sees none of them. Provider errors and config printouts redact the key under every
-  `fmt` verb that can be intercepted.
+  sees none of them. Provider adapters redact the credentials they were configured with
+  — the api key, a `base_url` userinfo password, an auth header — from every error that
+  quotes an endpoint (`internal/provider/redact.go`), so an endpoint echoing the
+  request's auth header back cannot land the key in a `session.error` event, which is
+  append-only and re-served to clients. `provider.Config` has no redacting `String`, so
+  it must not be formatted whole.
 - **A session is not a context window.** The harness may replay, slice, or rewind the
   event log before feeding the model; context strategy is never baked into an
   irreversible compaction.

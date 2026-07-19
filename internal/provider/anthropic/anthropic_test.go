@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -21,7 +22,14 @@ type fakeServer struct {
 	gotBody map[string]any
 	gotHead http.Header
 	status  int
+	// echoKey makes the error body quote the request's x-api-key header back,
+	// the way some gateways do (see TestGenerateUpstreamErrorNeverQuotes...).
+	echoKey bool
 }
+
+// testAPIKey is the credential start() configures the adapter with, so a test
+// can assert an error never quotes it.
+const testAPIKey = "test-key-123"
 
 func (f *fakeServer) handler(w http.ResponseWriter, r *http.Request) {
 	f.t.Helper()
@@ -33,9 +41,22 @@ func (f *fakeServer) handler(w http.ResponseWriter, r *http.Request) {
 		f.t.Errorf("decode request body: %v", err)
 	}
 	if f.status != 0 {
+		msg := "bad key"
+		if f.echoKey {
+			key := r.Header.Get("x-api-key")
+			if key == "" {
+				// Without this the handler would echo "", the body would carry
+				// no credential, and a leak assertion would pass vacuously.
+				f.t.Fatal("echoKey: request carried no x-api-key header to echo")
+			}
+			// The body must stay valid JSON: the SDK only keeps a response body
+			// it could parse, so an HTML echo would never reach the error text
+			// and the assertion would pass for the wrong reason.
+			msg = "rejected credential " + key
+		}
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(f.status)
-		fmt.Fprint(w, `{"type":"error","error":{"type":"authentication_error","message":"bad key"}}`)
+		fmt.Fprintf(w, `{"type":"error","error":{"type":"authentication_error","message":%q}}`, msg)
 		return
 	}
 	w.Header().Set("content-type", "text/event-stream")
@@ -57,7 +78,7 @@ func start(t *testing.T, f *fakeServer) provider.Provider {
 		Protocol: "anthropic",
 		Model:    "upstream-model",
 		BaseURL:  srv.URL,
-		APIKey:   "test-key-123",
+		APIKey:   testAPIKey,
 		Headers:  map[string]string{"x-gateway-route": "llm-pool-7"},
 	})
 	if err != nil {
@@ -308,6 +329,89 @@ func TestGenerateUpstreamError(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("401 upstream produced no error")
+	}
+}
+
+// generateErr runs one turn and returns whichever error surfaced — the SDK may
+// report an upstream failure from Generate or defer it to the first read.
+func generateErr(t *testing.T, p provider.Provider) error {
+	t.Helper()
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+	for stream.Next() {
+	}
+	return stream.Err()
+}
+
+// A gateway that echoes the request's x-api-key into its own diagnostic body
+// must not get the credential into the returned error: that error becomes a
+// session.error event, which is append-only in Postgres and re-served to API
+// clients on every read. The rest of the body must survive — it is what makes
+// a misconfiguration diagnosable.
+func TestGenerateUpstreamErrorNeverQuotesTheCredential(t *testing.T) {
+	p := start(t, &fakeServer{status: http.StatusUnauthorized, echoKey: true})
+	err := generateErr(t, p)
+	if err == nil {
+		t.Fatal("401 upstream produced no error")
+	}
+	if strings.Contains(err.Error(), testAPIKey) {
+		t.Errorf("error quotes the credential back: %q", err)
+	}
+	if !strings.Contains(err.Error(), "rejected credential") {
+		t.Errorf("redaction destroyed the diagnostic: %q", err)
+	}
+}
+
+// The same leak arrives under HTTP 200 through a mid-stream error event. It
+// surfaces from Err() after Next(), not from Generate, so a fix applied only
+// where Generate returns would leave this path live.
+func TestStreamErrorEventNeverQuotesTheCredential(t *testing.T) {
+	p := start(t, &fakeServer{sse: []string{
+		`{"type":"error","error":{"type":"overloaded_error","message":"key ` + testAPIKey + ` exhausted in pool llm-pool-7"}}`,
+	}})
+	err := generateErr(t, p)
+	if err == nil {
+		t.Fatal("an error event should fail the stream")
+	}
+	if strings.Contains(err.Error(), testAPIKey) {
+		t.Errorf("stream error quotes the credential back: %q", err)
+	}
+}
+
+// A credential in base_url's userinfo needs no cooperation from the endpoint
+// at all: the SDK formats the request URL into every API error with String(),
+// not Redacted().
+func TestErrorNeverQuotesBaseURLCredentials(t *testing.T) {
+	const password = "pw-secret-456"
+	f := &fakeServer{t: t, status: http.StatusInternalServerError}
+	srv := httptest.NewServer(http.HandlerFunc(f.handler))
+	t.Cleanup(srv.Close)
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	u.User = url.UserPassword("gateway-user", password)
+
+	p, err := anthropic.New(provider.Config{
+		Protocol: "anthropic",
+		Model:    "upstream-model",
+		BaseURL:  u.String(),
+		APIKey:   testAPIKey,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = generateErr(t, p)
+	if err == nil {
+		t.Fatal("500 upstream produced no error")
+	}
+	if strings.Contains(err.Error(), password) {
+		t.Errorf("error quotes the base_url credential back: %q", err)
 	}
 }
 
