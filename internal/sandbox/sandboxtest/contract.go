@@ -491,6 +491,24 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// The other side of that boundary: the cap is a limit, not a forbidden value,
+	// so a file of exactly MaxFileBytes must read back whole. It is where a
+	// backend that frames or counts its own stream is likeliest to mis-account by
+	// the length of that framing and fail the largest legal read (issue #105).
+	t.Run("ReadFileAtTheCap", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: fmt.Sprintf("head -c %d /dev/zero > cap.bin", sandbox.MaxFileBytes),
+		})
+		if err != nil || res.ExitCode != 0 {
+			t.Fatalf("stage a file at the cap: %+v, %v", res, err)
+		}
+		if got, err := sb.ReadFile(ctx, workdir+"/cap.bin"); err != nil || len(got) != sandbox.MaxFileBytes {
+			t.Fatalf("read = %d bytes, %v; want %d and no error", len(got), err, sandbox.MaxFileBytes)
+		}
+	})
+
 	t.Run("ReadFileDirectory", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
 		_, err := sb.ReadFile(context.Background(), workdir)
