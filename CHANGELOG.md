@@ -196,9 +196,9 @@ copy of an entry here.
 
   What the indirect route could not reach is most of the SQL. Each arm of the answered subquery's
   `COALESCE` over `tool_use_id` / `custom_tool_use_id` / `mcp_tool_use_id` gets its own leg, and
-  *adjacent pairs* of arms are driven separately: one result carrying two keys answers only the
-  earlier arm's tool use, and a swap of the second and third arms is invisible to any first-vs-second
-  fixture. The `session_id` predicate on both sides of every `EXISTS` is pinned by cross-session
+  every *adjacent pair* of arms is driven separately in `hasUnansweredToolUse`, and the first two in
+  `ValidateToolResults`: one result carrying two keys answers only the earlier arm's tool use, and a
+  swap of any one pair is invisible to a fixture built on another. The `session_id` predicate on both sides of every `EXISTS` is pinned by cross-session
   fixtures, as is the `c.type` predicate that restricts the confirmation lookups — without it, any
   event carrying an ask-gated `tool_use_id` would either open the human-approval gate or make the
   genuine first confirmation be rejected as a repeat. The `extraRefs` / `extraConfirmed` arrays are

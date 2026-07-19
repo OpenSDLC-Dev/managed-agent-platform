@@ -338,10 +338,12 @@ claim this project made and then had to retract.
 
 **A claim of ours that was wrong.** The first version of the changelog entry said the two
 `if extraRefs == nil { extraRefs = []string{} }` normalizations were "previously unguarded by any
-test". Both reviewers challenged it and the measurement refuted it: removing either line and running
-only the pre-existing suites (`./internal/brain/ ./internal/api/`, with the new file absent) turns
-both red — `brain_test.go:155` calls `HasUnansweredToolUse` directly, and
-`internal/api/confirmation_test.go` covers the `UnconfirmedAskEvents` side. The trap is real and the
+test". Both reviewers challenged it and the measurement refuted it. With the new file absent, removing the
+`extraRefs` line turns `./internal/brain/` red (`TestParallelToolCallsResumeOnFullSet`) *and*
+`./internal/api/` red (five confirmation tests); removing the `extraConfirmed` line leaves
+`./internal/brain/` green and turns `./internal/api/` red
+(`TestConfirmationUserMessageDoesNotBypassGate`) — `brain_test.go:155` calls `HasUnansweredToolUse`
+directly, and `internal/api/confirmation_test.go` covers the `UnconfirmedAskEvents` side. The trap is real and the
 new tests name it directly; the novelty claim was not. Recorded because the wrong claim was the
 entry's headline, and it survived self-review.
 
@@ -353,9 +355,11 @@ Caught on the first pass: dropped `r.session_id` / `c.session_id` predicates, `O
 to ignore `extraRefs`, `confirmableToolUseTypes` widened in either query, the `Scan` error check
 dropped, and the COALESCE reduced to a single key.
 
-Six survived the first suite and each is now closed by a named subtest, with the same mutation
+Seven survived the first suite and each is now closed by a named subtest, with the same mutation
 re-run to prove the closure: the second and third `COALESCE` arms trading places in
-`hasUnansweredToolUse` and in `ValidateToolResults` (every existing leg carried one key, or compared
+`hasUnansweredToolUse` and in `ValidateToolResults`, and — caught only by the re-verification pass,
+after the first fix drove the (1,3) and (2,3) pairs but not (1,2) — the first and second arms trading
+places in `hasUnansweredToolUse` (every existing leg carried one key, or compared
 only the first arm against a later one); the `c.type` predicate in `ValidateToolResults`' ask gate
 and in `ValidateToolConfirmations`' already-confirmed check (no fixture had ever put a second event
 carrying the gated id beside the confirmation); `ValidateToolResults` swallowing its payload-decode
@@ -364,7 +368,8 @@ in both directions — with the new subtest removed the mutation goes green agai
 subtest is the one that fails.
 
 **Two mutations that cannot be caught, and were not chased.** Dropping `c.type = $4` outright leaves
-`$4` unbound and pgx rejects the query, so it is a broken build rather than a silent regression.
+`$4` unbound, and pgx rejects the query at run time (`expected 3 arguments, got 4`) — the suite fails
+loudly on it, so it is a broken query rather than a silent regression.
 Widening that same predicate to admit `user.tool_result` is unobservable through the ask gate: a
 `user.tool_result` carrying the id makes the tool use *answered*, and the answered check fires first,
 so both implementations return the same error. The observable form of the widening — admitting a type

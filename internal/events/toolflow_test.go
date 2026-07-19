@@ -241,6 +241,8 @@ func TestHasUnansweredToolUse(t *testing.T) {
 			winKey, loseKey string
 			loserResultType domain.EventType
 		}{
+			{"tool_use_id over custom_tool_use_id", domain.EventAgentToolUse, domain.EventAgentCustomToolUse,
+				"tool_use_id", "custom_tool_use_id", domain.EventUserCustomToolRes},
 			{"tool_use_id over mcp_tool_use_id", domain.EventAgentToolUse, domain.EventAgentMCPToolUse,
 				"tool_use_id", "mcp_tool_use_id", domain.EventAgentMCPToolResult},
 			{"custom_tool_use_id over mcp_tool_use_id", domain.EventAgentCustomToolUse, domain.EventAgentMCPToolUse,
