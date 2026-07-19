@@ -186,6 +186,49 @@ copy of an entry here.
 
 ### Added
 
+- **Direct tests for the tool-flow checks** (`internal/events/toolflow_test.go`) — `toolflow.go` holds
+  the checks the send handler runs over an inbound batch before it is appended, and had no test file
+  of its own: of its seven exported functions only `HasUnansweredToolUse` was ever called from a test
+  (`internal/brain/brain_test.go`, as part of a harness, not to characterize it), and the rest were
+  exercised only through `internal/api`, which normalizes payloads first and so cannot present the
+  shapes these functions exist to reject. No production code changes with this — the tests are
+  characterization, pinning what the file already does.
+
+  What the indirect route could not reach is most of the SQL. Each arm of the answered subquery's
+  `COALESCE` over `tool_use_id` / `custom_tool_use_id` / `mcp_tool_use_id` gets its own leg, and
+  every *adjacent pair* of arms is driven separately in `hasUnansweredToolUse`, and the first two in
+  `ValidateToolResults`: one result carrying two keys answers only the earlier arm's tool use, and a
+  swap of any one pair is invisible to a fixture built on another. The `session_id` predicate on both sides of every `EXISTS` is pinned by cross-session
+  fixtures, as is the `c.type` predicate that restricts the confirmation lookups — without it, any
+  event carrying an ask-gated `tool_use_id` would either open the human-approval gate or make the
+  genuine first confirmation be rejected as a repeat. The `extraRefs` / `extraConfirmed` arrays are
+  driven `nil` as well as empty, because pgx binds a nil slice as SQL `NULL` and `tu.id != ALL(NULL)`
+  is `NULL` rather than true: without the normalization in `hasUnansweredToolUse` and
+  `UnconfirmedAskEvents`, zero rows match and the wrong answer is silent rather than an error. (Those
+  two lines were already load-bearing for `internal/brain` and `internal/api` tests; what is new is a
+  test that names the trap rather than tripping over it from three layers up.)
+
+  Two behaviors are pinned because their error message is the counter-intuitive one, and a plausible
+  refactor would change it. A confirmation naming an ask-gated `agent.custom_tool_use` reports "does
+  not name a tool use in this session", not "was not gated" — `confirmableToolUseTypes` restricts the
+  `WHERE` clause, so a non-confirmable kind arrives as `ErrNoRows`. And because the tool-use lookup in
+  `ValidateToolResults` has no type predicate, a result naming an `agent.message` is *found* and
+  rejected as a kind mismatch, despite "does not name" reading as the better fit. These strings are
+  wire surface — `internal/api/events.go` passes them verbatim into the 400 body — so they are
+  asserted exactly, and a reworded message is meant to fail here and be re-decided.
+
+  The suite also records one asymmetry it does not fix: `ValidateToolResults` gates on
+  `evaluated_permission` for *any* tool-use kind, while only `agent.tool_use` can be confirmed, so an
+  ask-stamped `agent.custom_tool_use` would be unanswerable from both sides at once. Unreachable
+  today — the brain stamps a policy on built-ins only — and pinned as current behavior, not endorsed.
+
+  Every case was proven able to fail: see docs/HISTORY.md § "`internal/events/toolflow.go`
+  characterization suite — verification record".
+
+  Written while investigating [#58](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/58),
+  which is blocked on a recording against a real managed-agents endpoint; this coverage gap was
+  independent of how that resolves.
+
 - **An `issue-triage` subagent** (`.claude/agents/issue-triage.md`) — the last piece of
   [docs/plan/03_docs-restructure.md](./docs/plan/03_docs-restructure.md), which this PR archives.
   Dispatched only when work is about to start from a GitHub issue, it reads the issue and surveys the
