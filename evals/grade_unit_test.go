@@ -13,8 +13,12 @@ import (
 
 // trialWith builds a Trial from a hand-written transcript. The nonce is fixed so
 // a grader's {{NONCE}} substitution is checkable.
+// Both tokens are set: an unset Recall would leave {{RECALL}} unsubstituted and
+// a grader looking for the literal placeholder reds, which is the loud failure
+// fill is written to produce (TestFillLeavesAnUnsetRecallStanding pins it) but
+// not what any other test here means to exercise.
 func trialWith(events []map[string]any) *Trial {
-	return &Trial{Nonce: "n0", Events: events}
+	return &Trial{Nonce: "n0", Recall: "r0", Events: events}
 }
 
 func textBlocks(text string) []any {
@@ -123,34 +127,23 @@ func TestToolResultGraders(t *testing.T) {
 	if err := ToolResultOK(Platform).Check(t, tr); err != nil {
 		t.Errorf("ToolResultOK should pass with one successful result: %v", err)
 	}
-	if err := ToolResultContains("n0", Platform).Check(t, tr); err != nil {
-		t.Errorf("ToolResultContains should find the nonce in the ok result: %v", err)
-	}
 
-	// The nonce appears only in an error result — a contains-check that ignored
-	// is_error would wrongly pass, so this pins that it does not.
 	errOnly := trialWith([]map[string]any{
 		{"type": "agent.tool_result", "is_error": true,
 			"content": textBlocks("boom n0")},
 	})
-	if err := ToolResultContains("n0", Platform).Check(t, errOnly); err == nil {
-		t.Error("ToolResultContains should ignore error results")
-	}
 	if err := ToolResultOK(Platform).Check(t, errOnly); err == nil {
 		t.Error("ToolResultOK should fail when every result is an error")
 	}
 
-	// A result with no is_error flag is malformed, not an implicit success: both
-	// success graders must skip it rather than count it, or a dropped-flag wire
+	// A result with no is_error flag is malformed, not an implicit success: the
+	// grader must skip it rather than count it, or a dropped-flag wire
 	// regression would green a run.
 	noFlag := trialWith([]map[string]any{
 		{"type": "agent.tool_result", "content": textBlocks("value is n0")},
 	})
 	if err := ToolResultOK(Platform).Check(t, noFlag); err == nil {
 		t.Error("ToolResultOK should not count a result missing is_error as a success")
-	}
-	if err := ToolResultContains("n0", Platform).Check(t, noFlag); err == nil {
-		t.Error("ToolResultContains should skip a result missing is_error")
 	}
 }
 
@@ -323,10 +316,11 @@ func corePackByName(t *testing.T, name string) Grader {
 	return Grader{}
 }
 
-func TestSubstReplacesEveryOccurrence(t *testing.T) {
-	got := subst("a {{NONCE}} b {{NONCE}}", "xyz")
-	if strings.Contains(got, "{{NONCE}}") || got != "a xyz b xyz" {
-		t.Errorf("subst = %q, want all placeholders replaced", got)
+func TestFillReplacesEveryOccurrence(t *testing.T) {
+	tr := &Trial{Nonce: "xyz", Recall: "r0"}
+	got := tr.fill("a {{NONCE}} b {{NONCE}} c {{RECALL}}")
+	if strings.Contains(got, "{{") || got != "a xyz b xyz c r0" {
+		t.Errorf("fill = %q, want all placeholders replaced", got)
 	}
 }
 
@@ -500,11 +494,17 @@ func TestEvaluatedPermissionAsk(t *testing.T) {
 }
 
 func TestConfirmedResult(t *testing.T) {
+	deny := ConfirmedResult("bash", []string{"APPEND_{{NONCE}}"}, true, "DENY_{{NONCE}}", Platform)
+	gatedCall := func(id, command string) map[string]any {
+		return map[string]any{"type": "agent.tool_use", "name": "bash", "id": id,
+			"input": map[string]any{"command": command}}
+	}
+	const appended = "echo APPEND_n0 >> /workspace/notes.txt"
+
 	// A denial: the synthesized result is an error carrying the deny message,
 	// sequenced after the confirmation and correlated by tool_use_id.
-	deny := ConfirmedResult(true, "DENY_{{NONCE}}", Platform)
 	denied := trialWith([]map[string]any{
-		{"type": "agent.tool_use", "name": "bash", "id": "sevt_1"},
+		gatedCall("sevt_1", appended),
 		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
 		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": true,
 			"content": textBlocks("not approved: DENY_n0")},
@@ -513,9 +513,37 @@ func TestConfirmedResult(t *testing.T) {
 		t.Errorf("a denied call's synthesized error result should pass: %v", err)
 	}
 
+	// The confirmation names an id that is on no agent.tool_use — the shape a gate
+	// that listed the wrong event in requires_action produces. Correlating only
+	// forward from the confirmation cannot see it, since the platform would answer
+	// the id it was handed; this is the join that catches it.
+	danglingID := trialWith([]map[string]any{
+		gatedCall("sevt_1", appended),
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_span"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_span", "is_error": true,
+			"content": textBlocks("not approved: DENY_n0")},
+	})
+	if err := deny.Check(t, danglingID); err == nil {
+		t.Error("a confirmation naming no tool_use on the log should fail")
+	}
+
+	// A confirmation for a real but different call, while the call the task means
+	// went through ungated: the bridge stopped the wrong thing.
+	wrongCall := trialWith([]map[string]any{
+		gatedCall("sevt_1", appended),
+		gatedCall("sevt_2", "ls /workspace"),
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_2"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_2", "is_error": true,
+			"content": textBlocks("not approved: DENY_n0")},
+	})
+	if err := deny.Check(t, wrongCall); err == nil {
+		t.Error("a confirmation for another call should not satisfy the graded one")
+	}
+
 	// The result is for a DIFFERENT tool_use_id than the confirmation named — the
 	// correlation must reject it rather than green on a stray result.
 	crossed := trialWith([]map[string]any{
+		gatedCall("sevt_1", appended),
 		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
 		{"type": "agent.tool_result", "tool_use_id": "sevt_other", "is_error": true,
 			"content": textBlocks("not approved: DENY_n0")},
@@ -526,12 +554,22 @@ func TestConfirmedResult(t *testing.T) {
 
 	// The result precedes the confirmation, with nothing after it.
 	beforeOnly := trialWith([]map[string]any{
+		gatedCall("sevt_1", appended),
 		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": true,
 			"content": textBlocks("not approved: DENY_n0")},
 		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
 	})
 	if err := deny.Check(t, beforeOnly); err == nil {
 		t.Error("a result only before the confirmation should fail")
+	}
+
+	// A confirmation with no tool_use_id is malformed, not an absent gate.
+	noID := trialWith([]map[string]any{
+		gatedCall("sevt_1", appended),
+		{"type": "user.tool_confirmation", "result": "deny"},
+	})
+	if err := deny.Check(t, noID); err == nil {
+		t.Error("a confirmation with no tool_use_id should fail")
 	}
 
 	// No confirmation on the log: nothing gated, nothing to grade. The model half
@@ -543,9 +581,25 @@ func TestConfirmedResult(t *testing.T) {
 		t.Errorf("no confirmation should pass vacuously: %v", err)
 	}
 
+	// The model gated something else entirely and never made the call the task
+	// described. Every confirmation still resolves, so the bridge is fine; the
+	// Model-class ToolCalledWith owns the miss and this must not blame the
+	// platform for it.
+	otherCallOnly := trialWith([]map[string]any{
+		gatedCall("sevt_2", "ls /workspace"),
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_2"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_2", "is_error": true,
+			"content": textBlocks("not approved: DENY_n0")},
+	})
+	if err := deny.Check(t, otherCallOnly); err != nil {
+		t.Errorf("a trial whose model never made the graded call should pass vacuously: %v", err)
+	}
+
 	// An allow whose result succeeded — the wantErr=false, empty-content path.
-	allow := ConfirmedResult(false, "", Platform)
+	allow := ConfirmedResult("bash", []string{"GATED_{{NONCE}}"}, false, "", Platform)
+	const gatedWrite = "echo GATED_n0 > /workspace/gated.txt"
 	allowed := trialWith([]map[string]any{
+		gatedCall("sevt_1", gatedWrite),
 		{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "sevt_1"},
 		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": false,
 			"content": textBlocks("done")},
@@ -558,11 +612,257 @@ func TestConfirmedResult(t *testing.T) {
 	// the malformed result, not read the absence as a zero-value false — the
 	// vacuous Platform pass the strict flag check closes.
 	allowNoFlag := trialWith([]map[string]any{
+		gatedCall("sevt_1", gatedWrite),
 		{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "sevt_1"},
 		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "content": textBlocks("done")},
 	})
 	if err := allow.Check(t, allowNoFlag); err == nil {
 		t.Error("a confirmed result with no is_error must fail wantErr=false, not pass vacuously")
+	}
+}
+
+func TestToolCalledWith(t *testing.T) {
+	g := ToolCalledWith("bash", []string{"cat /workspace/mark.txt"}, Model)
+
+	ok := trialWith([]map[string]any{
+		bashUse("export MARK=n0"),
+		bashUse("cat /workspace/mark.txt"),
+	})
+	if err := g.Check(t, ok); err != nil {
+		t.Errorf("the instructed command should satisfy tool-called-with: %v", err)
+	}
+
+	// A heredoc write mentioning both `cat` and the path is not the read the task
+	// asked for — the reason the marker is the whole command and not two words.
+	heredoc := trialWith([]map[string]any{
+		bashUse("cat > /workspace/mark.txt <<'EOF'\nn0\nEOF"),
+	})
+	if err := g.Check(t, heredoc); err == nil {
+		t.Error("a heredoc write should not count as the instructed cat")
+	}
+
+	// The marker carries characters json.Marshal escapes (`>`), so a matcher
+	// working on the encoded input would never find them. This pins that the
+	// match is against what the model wrote.
+	redirect := ToolCalledWith("bash", []string{"echo GATED_{{NONCE}} > /workspace/gated.txt"}, Model)
+	wrote := trialWith([]map[string]any{bashUse("echo GATED_n0 > /workspace/gated.txt")})
+	if err := redirect.Check(t, wrote); err != nil {
+		t.Errorf("a marker containing > should match the decoded command: %v", err)
+	}
+
+	// A marker must be carried by one call, not assembled from two.
+	split := trialWith([]map[string]any{
+		bashUse("cat /workspace/other.txt"),
+		bashUse("ls /workspace/mark.txt"),
+	})
+	if err := g.Check(t, split); err == nil {
+		t.Error("markers spread across two calls should not satisfy tool-called-with")
+	}
+}
+
+func TestCallResult(t *testing.T) {
+	g := CallResult("bash", []string{"cat /workspace/mark.txt"}, false, "{{NONCE}}", Platform)
+
+	ok := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": false,
+			"content": textBlocks("n0")},
+	})
+	if err := g.Check(t, ok); err != nil {
+		t.Errorf("the matching call's own result should pass: %v", err)
+	}
+
+	// The round trip came back empty — the persistent-shell regression this pins.
+	empty := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": false,
+			"content": textBlocks("")},
+	})
+	if err := g.Check(t, empty); err == nil {
+		t.Error("an empty result for the matching call should fail")
+	}
+
+	// The nonce is on the log, but on some other call's result. Correlation is
+	// what keeps that from greening the claim.
+	elsewhere := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": false,
+			"content": textBlocks("")},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_2", "is_error": false,
+			"content": textBlocks("n0")},
+	})
+	if err := g.Check(t, elsewhere); err == nil {
+		t.Error("another call's result carrying the nonce should not satisfy the graded call")
+	}
+
+	// No such call: the Model half owns the miss, so a Platform-class grader must
+	// pass here rather than blame the platform for a command never run.
+	noCall := trialWith([]map[string]any{
+		bashUse("export MARK=n0"),
+	})
+	if err := g.Check(t, noCall); err != nil {
+		t.Errorf("no matching call should pass vacuously: %v", err)
+	}
+
+	// A second attempt that worked satisfies the claim: how many times a model
+	// reaches for a tool is its own business.
+	retried := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": true,
+			"content": textBlocks("boom")},
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_2",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_2", "is_error": false,
+			"content": textBlocks("n0")},
+	})
+	if err := g.Check(t, retried); err != nil {
+		t.Errorf("one satisfying call among several should pass: %v", err)
+	}
+
+	// An empty marker list grades any call to the tool — needle-search's glob.
+	anyGlob := CallResult("glob", nil, false, "/workspace/src/util/helpers.go", Either)
+	globbed := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "glob", "id": "toolu_1",
+			"input": map[string]any{"pattern": "**/*.go"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": false,
+			"content": textBlocks("/workspace/src/util/helpers.go\n/workspace/src/main.go")},
+	})
+	if err := anyGlob.Check(t, globbed); err != nil {
+		t.Errorf("a glob result naming the seeded file should pass: %v", err)
+	}
+	missed := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "glob", "id": "toolu_1",
+			"input": map[string]any{"pattern": "*.go"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": false,
+			"content": textBlocks("no matches")},
+	})
+	if err := anyGlob.Check(t, missed); err == nil {
+		t.Error("a glob result that never names the seeded file should fail")
+	}
+}
+
+func TestGlobPathList(t *testing.T) {
+	g := GlobPathList(Platform)
+	globResult := func(text string, isErr bool) *Trial {
+		return trialWith([]map[string]any{
+			{"type": "agent.tool_use", "name": "glob", "id": "toolu_1",
+				"input": map[string]any{"pattern": "**/*.go"}},
+			{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": isErr,
+				"content": textBlocks(text)},
+		})
+	}
+	if err := g.Check(t, globResult("/workspace/src/main.go\n/workspace/src/decoy.go", false)); err != nil {
+		t.Errorf("absolute paths should pass: %v", err)
+	}
+	// The tool's own "nothing matched" answer is not a malformed path list.
+	if err := g.Check(t, globResult("no matches", false)); err != nil {
+		t.Errorf("no matches should pass: %v", err)
+	}
+	// The mtime stat prefix leaking into the records — a real shape of a broken
+	// glob that still returns something.
+	if err := g.Check(t, globResult("1712.9 /workspace/src/main.go", false)); err == nil {
+		t.Error("an mtime prefix on the record should fail glob-path-list")
+	}
+	// Relative paths: the caller cannot join them to anything.
+	if err := g.Check(t, globResult("src/main.go", false)); err == nil {
+		t.Error("a relative path should fail glob-path-list")
+	}
+	// A failed glob has no path list to shape-check; the pattern is the model's.
+	if err := g.Check(t, globResult("glob: bad pattern", true)); err != nil {
+		t.Errorf("an errored glob should pass: %v", err)
+	}
+	// No glob at all: the task's tool-use floor owns that miss.
+	if err := g.Check(t, trialWith([]map[string]any{bashUse("ls")})); err != nil {
+		t.Errorf("no glob call should pass vacuously: %v", err)
+	}
+}
+
+func TestNotInToolTraffic(t *testing.T) {
+	g := NotInToolTraffic("{{RECALL}}", Either)
+
+	clean := trialWith([]map[string]any{
+		bashUse("echo entry-one-n0 > /workspace/journal.txt"),
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": false,
+			"content": textBlocks("")},
+		{"type": "agent.message", "content": textBlocks("DONE2:n0 r0")},
+	})
+	if err := g.Check(t, clean); err != nil {
+		t.Errorf("a token that only ever appears in a message should pass: %v", err)
+	}
+
+	// The model stashed the word in a file: the replay witness has quietly become
+	// a second persistence check.
+	stashed := trialWith([]map[string]any{
+		bashUse("echo r0 > /workspace/note.txt"),
+	})
+	if err := g.Check(t, stashed); err == nil {
+		t.Error("a token written through a tool input should fail")
+	}
+
+	// And read back out.
+	readBack := trialWith([]map[string]any{
+		{"type": "agent.tool_result", "tool_use_id": "toolu_1", "is_error": false,
+			"content": textBlocks("r0")},
+	})
+	if err := g.Check(t, readBack); err == nil {
+		t.Error("a token coming back in a tool result should fail")
+	}
+}
+
+// An unset Recall must leave {{RECALL}} standing rather than substitute the
+// empty string: strings.Contains(anything, "") is true, so the empty
+// substitution would green every recall assertion while proving nothing.
+func TestFillLeavesAnUnsetRecallStanding(t *testing.T) {
+	tr := &Trial{Nonce: "n0", Events: []map[string]any{
+		{"type": "agent.message", "content": textBlocks("all done n0")},
+	}}
+	if got := tr.fill("say {{RECALL}}"); got != "say {{RECALL}}" {
+		t.Errorf("fill on a trial with no Recall = %q, want the placeholder left in place", got)
+	}
+	if err := FinalMessageHas("{{RECALL}}", Either).Check(t, tr); err == nil {
+		t.Error("a recall assertion on a trial with no Recall must fail, not pass vacuously")
+	}
+
+	// And with the token set it must pass on a message that carries it. Without
+	// this direction the test above passes for the wrong reason on a grader that
+	// never substitutes {{RECALL}} at all — which is exactly what the live suite
+	// caught when only some graders knew the token.
+	tr.Recall = "r0"
+	tr.Events = []map[string]any{
+		{"type": "agent.message", "content": textBlocks("DONE2:n0 r0")},
+	}
+	if err := FinalMessageHas("{{RECALL}}", Either).Check(t, tr); err != nil {
+		t.Errorf("a message carrying the recall token should pass: %v", err)
+	}
+	if got := tr.fill("say {{RECALL}} about n0"); got != "say r0 about n0" {
+		t.Errorf("fill = %q, want both tokens substituted", got)
+	}
+}
+
+func TestInputTextMatchesWhatTheModelWrote(t *testing.T) {
+	// json.Marshal would render this as > and \n; the decoded form is what
+	// a marker is matched against.
+	got := inputText(map[string]any{"input": map[string]any{
+		"command": "echo A > /tmp/x && cat <<'EOF'\nB\nEOF",
+	}})
+	if !strings.Contains(got, "echo A > /tmp/x") {
+		t.Errorf("inputText = %q, want the raw redirect", got)
+	}
+
+	// Every string value is included, in key order, one per line — so a marker
+	// cannot straddle two fields.
+	multi := inputText(map[string]any{"input": map[string]any{
+		"path": "/workspace", "pattern": "**/*.go",
+	}})
+	if multi != "/workspace\n**/*.go\n" {
+		t.Errorf("inputText = %q, want both values newline-separated in key order", multi)
+	}
+	if strings.Contains(multi, "/workspace**") {
+		t.Error("values must not be concatenated into a marker nobody wrote")
 	}
 }
 

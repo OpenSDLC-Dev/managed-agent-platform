@@ -99,20 +99,21 @@ accounting populated; the idle event observed on the SSE stream.
 | 2 | `echo-notool` | Text-only baseline. Negative: no `tool_exec` ⇒ **no container may exist** | — |
 | 3 | `shell-state` | The persistent shell: `export` in call 1 must survive into call 2 | — |
 | 4 | `edit-config` | `read` + `edit`. Whole-file equality proves the edit was surgical, not a rewrite | `config.ini` |
-| 5 | `needle-search` | `grep`'s `path:line:text` output contract against a seeded needle among decoys; `glob` is invoked (its output not pinned) | 4 files |
+| 5 | `needle-search` | `grep`'s `path:line:text` output contract against a seeded needle among decoys; `glob`'s output shape and the seeded path in it | 4 files |
 | 6 | `perm-allow` | The permission bridge: `requires_action` → confirm → resume, with the tool result correlated to the approval by `tool_use_id` | — |
 | 7 | `perm-deny` | Its negative twin: a denied append synthesizes an `is_error` result, and the seeded file is left untouched | `notes.txt` |
 | 8 | `exit-code` | Tool failure propagation: a failed command's `exit code:` trailer, correlated to the failing call's own result | — |
-| 9 | `journal-multiturn` | Two turns, one session: event replay and sandbox reuse (the executor adopts the session's container) | — |
+| 9 | `journal-multiturn` | Two turns, one session: event replay (a code word stated only in turn 1) and sandbox reuse (a seeded file the model is never told about) | `provenance.txt` |
 | 10 | `view-range` | `read` `view_range` slicing, byte-exact — an off-by-one guard | `poem.txt` |
 
 Coverage: all six tools are exercised across the tasks, at two strengths. `edit` (4), `grep`
 (5) and `bash` (8, the failing command) are pinned by a result contract that ties a call to its
 own output, and `read` (10) byte-exact by the view-range slice grader. `bash` (3/6/7), `read`
-(4), `glob` (5) and `write` (10) ride on a required tool-use floor (the prompts name the tool);
-`write`'s effect is further pinned by its written artifact (line57.txt), while `glob` is
-invocation-only — its result is joined by the core pack, but a bare path list has no stable
-order to pin, so a broken glob that still returns something is not caught here. Single and multi
+(4) and `write` (10) ride on a required tool-use floor (the prompts name the tool);
+`write`'s effect is further pinned by its written artifact (line57.txt). `glob` (5) rides on
+the same floor plus its output in the two halves that can be told apart: its records must be
+absolute paths whatever pattern the model chose (Platform), and the seeded file must be among
+them (Either, since the pattern is the model's). Single and multi
 turn; allow and deny; seeded and unseeded; three negatives (2, 7, 8). Every trial exercises SSE
 and usage accounting through G0.
 
