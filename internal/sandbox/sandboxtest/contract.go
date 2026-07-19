@@ -415,9 +415,16 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 	t.Run("FileRoundTripLargePayload", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
 		ctx := context.Background()
+		// xorshift32, so the content does not repeat within the payload: a
+		// periodic filler whose period divides the loss would match past the gap
+		// and report the wrong first-difference offset.
 		want := make([]byte, 1<<20)
+		x := uint32(0x9E3779B9)
 		for i := range want {
-			want[i] = byte(i*7 + i/251) // no run of repeats a stream could paper over
+			x ^= x << 13
+			x ^= x >> 17
+			x ^= x << 5
+			want[i] = byte(x)
 		}
 		path := workdir + "/large.bin"
 		if err := sb.WriteFile(ctx, path, want); err != nil {

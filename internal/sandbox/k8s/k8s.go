@@ -561,7 +561,7 @@ func (pd *pod) WriteFile(ctx context.Context, path string, data []byte) error {
 		// the chain still finished cleanly — see writeScript. Nothing else in the
 		// path can notice, so this is the only place a truncated write can be
 		// turned into the error it is rather than a silent half-written file.
-		return fmt.Errorf("k8s: write %s: short write (exec stdin delivered fewer than %d bytes)", path, len(data))
+		return fmt.Errorf("k8s: write %s: short write (exec stdin did not deliver all %d bytes)", path, len(data))
 	default:
 		// The write failed in the pod — a directory where a file was meant to go, a
 		// read-only path, a full disk. A clean exec that exited non-zero wrote
@@ -608,11 +608,12 @@ exec cat "$f"
 // Both departures from the obvious `exec cat > "$1"` are deliberate, and they
 // are the same fix seen from two sides (issue #103).
 //
-// `cat` is not exec'd. `exec` points the *shell's* stdout at the file, which
-// closes the container's stdout pipe for the rest of the command; the exec
-// session then tears its stdin down early and `cat` sees EOF after whatever
-// bytes had arrived — one 32 KiB io.Copy buffer, in the reproduction. Keeping
-// the shell alive holds that pipe open until the write is finished.
+// `cat` is not exec'd. What is measured: with `exec`, a 1 MiB write arrived as
+// one 32 KiB io.Copy buffer, every time; without it, intact. The mechanism we
+// infer — `exec` points the *shell's* stdout at the file, closing the
+// container's stdout pipe for the rest of the command, and the exec session
+// then tears its stdin down early — was not instrumented at either end, so the
+// length check below is what the guarantee actually rests on.
 //
 // The length check is what makes the guarantee independent of that reasoning.
 // A short stdin stream is invisible everywhere else in the path: client-go
@@ -621,13 +622,23 @@ exec cat "$f"
 // that lost its tail is byte-for-byte indistinguishable from one that never had
 // a tail. Only the pod can count what actually arrived, so it does.
 //
-// `wc -c` rather than `stat -c %s`: it is POSIX, so the exit-code contract is
-// testable on any dev machine's shell, and `-eq` tolerates the leading padding
-// BSD `wc` emits.
+// The count is taken from the stream, not from the file: `tee` passes the bytes
+// through to `wc` on their way to disk. Re-reading the target instead would ask
+// a different question — what the path holds now — and get it wrong wherever
+// that is not what we just sent: a destination that keeps nothing (`/dev/null`
+// and other device nodes), a file writable but not readable by the sandbox
+// user, or a path another process in the same sandbox is also writing. Each of
+// those is a successful write, and each would fail a re-stat. Counting the
+// stream also measures exactly what went missing in the bug this guards.
+//
+// `set -o pipefail` so a `tee` that cannot open the target still fails the
+// command substitution — otherwise the pipeline would report only `wc`'s
+// status, and an unwritable path would come back as a short write instead of
+// the write failure it is. `-eq` tolerates the leading padding BSD `wc` emits.
 const writeScript = `
 mkdir -p "$2" || exit 1
-cat > "$1" || exit 1
-sz=$(wc -c < "$1") || exit 1
+set -o pipefail
+sz=$(tee "$1" | wc -c) || exit 1
 [ "$sz" -eq "$3" ] || exit 14
 `
 

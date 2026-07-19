@@ -18,9 +18,8 @@ same subtest and assertion.
       (exit 14 → an error from `WriteFile`).
 - [x] Green: both new tests pass, plus `ProvisionIsIdempotentPerSession` (the #103 subtest) and the
       docker backend on the same shared subtest.
-- [ ] Full `make verify` — **blocked locally**: the K8s contract suite fails with transport `EOF`s on
-      unmodified `main` too (17/21/8 subtests), so it is environmental, not this change. Node restart,
-      cluster recreate, image sideload, Docker Desktop restart and a connection cooldown all failed to
-      restore it; `kubectl exec` stays ~93-100% while our process breaks under provision churn. CI
-      (fresh kind on Linux) is the gate.
-- [ ] Verifier subagent, dual review, PR.
+- [x] Verifier: PASS with findings (reproduced the pre-fix loss 5/5, post-fix green 5/5); dual review
+      landed, both reviewers converging on the re-stat flaw now fixed.
+- [ ] Full `make verify` green — delegated to CI: the local K8s suite fails on unmodified `main` too,
+      so the branch cannot be gated here (diagnosis in docs/HISTORY.md).
+- [ ] PR to green CI.

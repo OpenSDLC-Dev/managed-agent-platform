@@ -212,10 +212,10 @@ func TestProvisionReclaimsUnreadyPodItCreated(t *testing.T) {
 }
 
 // writeScript is the one place a short exec stdin stream can be caught, so its
-// exit-code contract is pinned here rather than left to the live cluster: the
-// loss it guards against is a rare race there, but declaring a length the stdin
-// bytes do not match reproduces the same signature deterministically, on any
-// machine, in milliseconds.
+// exit-code contract is pinned here rather than left to the live cluster:
+// declaring a length the stdin bytes do not match reproduces the signature
+// deterministically, on any machine, in milliseconds, without needing a cluster
+// to lose the bytes for real.
 //
 // This runs the script through the host's /bin/bash rather than the sandbox
 // image. It pins what the script does with its arguments; that the image carries
@@ -282,6 +282,32 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 	t.Run("UnwritablePathIsNotShort", func(t *testing.T) {
 		if code := run(t, []byte("x"), 1, dir); code == 0 || code == writeShort {
 			t.Errorf("exit %d writing onto a directory, want a non-zero code other than %d", code, writeShort)
+		}
+	})
+
+	// The count comes from the stream, not from re-reading the target, so a
+	// destination that keeps nothing is still a delivered write. Re-stating the
+	// path here would report 0 bytes and fail a write that in fact succeeded —
+	// and the docker backend accepts this, so the two would diverge.
+	t.Run("DestinationThatKeepsNothing", func(t *testing.T) {
+		if code := run(t, []byte("swallowed"), 9, "/dev/null"); code != 0 {
+			t.Errorf("exit %d writing to /dev/null, want 0", code)
+		}
+	})
+
+	// `tee` needs only write permission; re-reading the target would need read
+	// permission the sandbox user may not have on a file it can legitimately
+	// write.
+	t.Run("WriteOnlyFile", func(t *testing.T) {
+		path := dir + "/writeonly"
+		if err := os.WriteFile(path, nil, 0o200); err != nil {
+			t.Fatalf("stage write-only file: %v", err)
+		}
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores the read bit, so this proves nothing")
+		}
+		if code := run(t, []byte("kept"), 4, path); code != 0 {
+			t.Errorf("exit %d writing a write-only file, want 0", code)
 		}
 	})
 }

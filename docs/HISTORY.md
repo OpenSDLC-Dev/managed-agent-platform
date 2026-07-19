@@ -233,11 +233,8 @@ archiving this plan.
 
 ## K8s silent short write (#103/#86) — investigation record (2026-07-19)
 
-**What the investigation overturned.** Both issues were filed as flaky-test reports and #103
-described #86 as a different subtest; they are the same subtest and the same assertion, and the
-defect is not rare. A 1 MiB contract subtest failed on the first attempt against a live cluster
-(`read back 32768 bytes, want 1048576`), so every write past one 32 KiB `io.Copy` buffer was
-truncated while `WriteFile` returned nil. Narrative: CHANGELOG.md § [Unreleased].
+Narrative and the defect itself: CHANGELOG.md § [Unreleased]. Recorded here is only what a
+changelog cannot hold — a refuted mechanism, the alternatives rejected, and the verification record.
 
 **A confidently-argued mechanism that was wrong.** The first account blamed client-go teardown:
 `StreamWithContext` returning before `cat` exits, letting `defer conn.Close()` cut stdin. Refuted at
@@ -251,14 +248,24 @@ investigators produce exactly this kind of plausible, well-cited, wrong finding.
   the old `exec cat` script the WebSocket executor lost the same 1 MiB payload 14/15 times (SPDY
   15/15). The loss is transport-independent, so the swap fixes nothing and would change every exec
   in the backend.
-- *Dropping `exec` alone.* Empirically sufficient in ~1600 checks, but it rests on an inferred
-  mechanism nobody instrumented. The length check makes the guarantee hold whatever the layer.
+- *Dropping `exec` alone.* Empirically sufficient, but it rests on an inferred mechanism nobody
+  instrumented. The length check makes the guarantee hold whatever the layer.
+- *Verifying by re-reading the target (`wc -c < "$1"`).* Landed first and caught in review by both
+  reviewers independently: re-reading asks what the path holds now, not what the stream delivered,
+  so it fails a **successful** write to `/dev/null` or any device node (reproduced: old exit 14, new
+  exit 0), to a file the sandbox user may write but not read, or to a path another process in the
+  sandbox is touching — and it is TOCTOU besides. Replaced by counting the stream itself
+  (`tee "$1" | wc -c`), which measures exactly the quantity that went missing.
 - *A `sandbox.ErrShortWrite` sentinel.* No caller distinguishes it, and `sandbox.go` already commits
   the package to all-or-nothing semantics; a sentinel would legitimize the outcome it rejects.
 - *Mirroring the check on the read side.* `ReadFile` has the same structural hazard (exit 0 + short
   stdout reads as success) and `readScript` already computes `sz`, but the evidence rules it out as
   the cause here and a naive fix false-positives on a file rewritten between the `stat` and the
-  `cat`. Left for its own issue rather than widening this diff.
+  `cat`. Filed as #105 rather than widening this diff.
+
+Also left out deliberately: `cat > "$1"` truncates the target before the first byte arrives, so a
+detected short write still leaves a truncated file on disk. Making the write all-or-nothing is
+already tracked by #71 (atomic `WriteFile`), and doing it here would widen this diff into that one.
 
 **Local verification blocker.** The K8s contract suite could not be run to green on the development
 machine: it fails with transport `EOF`s on unmodified `main` too (17/21/8 subtests), so it is
