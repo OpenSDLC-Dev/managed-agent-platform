@@ -15,6 +15,58 @@ copy of an entry here.
 
 ### Fixed
 
+- **Every binary's fatal-exit log reached stderr but never the collector**
+  ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)) — the one line that says
+  why a process died was the only one the OTLP backend never received. Each `main()` logged it after
+  `run()` returned, by which point `run()`'s deferred telemetry shutdown had stopped the log
+  processor: `sdk/log`'s `BatchProcessor.OnEmit` returns without enqueueing once `Shutdown` has set
+  its stopped flag, and does so silently — no error, no dropped-record counter — while the fan-out's
+  console half went on printing. So `DATABASE_URL is required`, or a `store.Open` failure, reached
+  stderr and never landed beside the traces it explains. `ForceFlush` is gated by the same flag,
+  leaving no after-the-fact rescue.
+
+  Resequencing the log alone would not have been enough. The obvious repair — a named `err` return
+  logged from inside the existing defer — reaches only errors raised after `telemetry.Init`, because
+  before it that defer has not been registered: every environment-validation failure, and in the
+  executor and worker a sandbox backend that will not construct, is returned *earlier* and would
+  have been logged nowhere at all, which is worse than the defect. So `Init` moves ahead of the body
+  too, and the whole shape — init, body, fatal log, flush — becomes one function, `telemetry.Run`,
+  which each `main()` calls with a service name and its `run`. That moves the ordering from a
+  convention four binaries re-implemented into one place a test can reach, which is the point:
+  `cmd/` is outside the coverage denominator by design, and this regression arrived with the log
+  bridge precisely because nothing there could test it. `telemetry.Run` is covered against the
+  in-process OTLP collector the bridge suite already had — restore the old ordering and the
+  collector receives nothing at all. It is worth being exact about the guarantee, though: `Init`
+  stays exported for the suite's own use, so a binary that went back to calling it directly would
+  reintroduce the defect with the telemetry tests still green. What stops that is review, not the
+  compiler.
+
+  A `context.Canceled` body error is still a clean exit rather than a fatal log, and the predicate
+  now lives in one place instead of three. That does change the controlplane, which alone among the
+  four never had the guard: `store.Open` wraps its ping with `%w`, so a SIGTERM arriving while the
+  process is still connecting to Postgres used to exit 1 having logged
+  `store: connect: context canceled`, and now exits 0 silently. The other three have always behaved
+  that way, and a process that stopped because it was asked to is not a failure. The flush runs on a
+  fresh `context.Background()` rather than the process context, and a test pins that choice: on a
+  signal-driven exit the process context is already cancelled, and `BatchProcessor.Shutdown` skips
+  its final queue flush outright when its shutdown context is done — which would put the fatal record
+  straight back where this defect had it, on the console and nowhere else.
+
+  The exit flush also drains logs first now, ahead of traces and metrics. All three providers shut
+  down on one deadline in argument order, and the fatal record is by construction the last thing
+  queued before it — so with logs draining last, a collector that accepts them but stalls on metrics
+  spent the whole budget elsewhere and left `BatchProcessor.Shutdown` to return on `ctx.Done` without
+  draining its queue, losing precisely the record this entry is about. A meter provider exports
+  unconditionally at `Shutdown` once a reader is registered, so a service that recorded no
+  instruments was exposed too. Traces and metrics are the telemetry a dying process can afford to
+  lose; the line saying why it died is not.
+
+  One cost is deliberate. Because `Init` now precedes the environment validation, a misconfigured
+  process pointed at an *unreachable* collector spends the exporter's connection timeout on the way
+  out — about eleven seconds against a blackholed endpoint, where it used to fail in milliseconds.
+  Exit stays bounded, a reachable or unconfigured collector is unaffected, and what the wait buys is
+  the class of failure this entry is about.
+
 - **Metadata carrying U+0000 was a 500, or a silent no-op, instead of a 400**
   ([#73](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/73)) — `\u0000` is a
   well-formed JSON escape that Postgres cannot store, and the metadata parsers only checked that a

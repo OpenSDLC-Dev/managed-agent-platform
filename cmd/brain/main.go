@@ -32,16 +32,19 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil && !errors.Is(err, context.Canceled) {
-		slog.Error("brain exiting", "err", err)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if !telemetry.Run(ctx, telemetry.Config{
+		ServiceName: "brain",
+		Endpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		Insecure:    os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
+	}, run) {
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
+func run(ctx context.Context) error {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return errors.New("DATABASE_URL is required")
@@ -74,20 +77,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
-	shutdownTelemetry, err := telemetry.Init(ctx, telemetry.Config{
-		ServiceName: "brain",
-		Endpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-		Insecure:    os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
-	})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = shutdownTelemetry(flushCtx)
-	}()
 
 	pool, err := store.Open(ctx, dsn)
 	if err != nil {
