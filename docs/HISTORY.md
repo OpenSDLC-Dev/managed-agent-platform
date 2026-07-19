@@ -228,3 +228,49 @@ source); **#102** — STATE.md reduced to a pure active-work tracker (63 → 23 
 verifier's STATE checks rewritten; **the issue-triage PR** — `.claude/agents/issue-triage.md`
 (Sonnet 5, read-only, strict-JSON `needs_plan` judgment) with its CLAUDE.md trigger rule,
 archiving this plan.
+
+---
+
+## K8s silent short write (#103/#86) — investigation record (2026-07-19)
+
+Narrative and the defect itself: CHANGELOG.md § [Unreleased]. Recorded here is only what a
+changelog cannot hold — a refuted mechanism, the alternatives rejected, and the verification record.
+
+**A confidently-argued mechanism that was wrong.** The first account blamed client-go teardown:
+`StreamWithContext` returning before `cat` exits, letting `defer conn.Close()` cut stdin. Refuted at
+source — `v4.go`'s `wg.Wait()` then `return <-errorChan`, gated by `io.ReadAll(errorStream)`, cannot
+return before the remote process terminates; and `WriteFile` passes a non-nil stderr, so `cat`
+holds fd 2 regardless of the fd 1 redirection. Recorded because CLAUDE.md warns that reviewers and
+investigators produce exactly this kind of plausible, well-cited, wrong finding.
+
+**Evaluated and rejected.**
+- *Swapping `NewSPDYExecutor` for the WebSocket or fallback executor.* Measured, not assumed: with
+  the old `exec cat` script the WebSocket executor lost the same 1 MiB payload 14/15 times (SPDY
+  15/15). The loss is transport-independent, so the swap fixes nothing and would change every exec
+  in the backend.
+- *Dropping `exec` alone.* Empirically sufficient, but it rests on an inferred mechanism nobody
+  instrumented. The length check makes the guarantee hold whatever the layer.
+- *Verifying by re-reading the target (`wc -c < "$1"`).* Landed first and caught in review by both
+  reviewers independently: re-reading asks what the path holds now, not what the stream delivered,
+  so it fails a **successful** write to `/dev/null` or any device node (reproduced: old exit 14, new
+  exit 0), to a file the sandbox user may write but not read, or to a path another process in the
+  sandbox is touching — and it is TOCTOU besides. Replaced by counting the stream itself
+  (`tee "$1" | wc -c`), which measures exactly the quantity that went missing.
+- *A `sandbox.ErrShortWrite` sentinel.* No caller distinguishes it, and `sandbox.go` already commits
+  the package to all-or-nothing semantics; a sentinel would legitimize the outcome it rejects.
+- *Mirroring the check on the read side.* `ReadFile` has the same structural hazard (exit 0 + short
+  stdout reads as success) and `readScript` already computes `sz`, but the evidence rules it out as
+  the cause here and a naive fix false-positives on a file rewritten between the `stat` and the
+  `cat`. Filed as #105 rather than widening this diff.
+
+Also left out deliberately: `cat > "$1"` truncates the target before the first byte arrives, so a
+detected short write still leaves a truncated file on disk. Making the write all-or-nothing is
+already tracked by #71 (atomic `WriteFile`), and doing it here would widen this diff into that one.
+
+**Local verification blocker.** The K8s contract suite could not be run to green on the development
+machine: it fails with transport `EOF`s on unmodified `main` too (17/21/8 subtests), so it is
+environmental. Node restart, cluster recreate, image sideload, a Docker Desktop restart and a
+connection cooldown all failed to restore it; `kubectl exec` stays ~93-100% while the Go process
+breaks under provision churn, and it is not FD limits (`ulimit -n` 1048576) or TIME_WAIT exhaustion.
+Targeted evidence stands on its own (the two new tests, the #103 subtest, and the docker backend on
+the same shared subtest all pass); CI's fresh kind cluster on Linux is the gate.
