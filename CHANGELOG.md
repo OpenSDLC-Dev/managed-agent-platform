@@ -82,13 +82,13 @@ copy of an entry here.
   Regression coverage runs the wrapper and `exitScript` under the host's `/bin/bash`, the way the
   #103 and #105 script tests do, so the classification is pinned with no cluster and no wall-clock
   race: a command killed on its deadline is marked and classifies as a timeout, one that finishes
-  early or SIGKILLs itself is not, a mark blocked by a planted FIFO, file, or directory still dies on
-  its deadline (in POSIX mode too), and a sabotaged wrapper still reports the timeout the mark
-  witnessed. Five mutations are each caught: removing the mark write, dropping `watchdogFired` from
-  the classification, writing the mark with a redirect instead of `mkdir`, clearing it with `rm -f`
-  instead of `rm -rf`, and dropping the no-deadline guard. The live contract suite's two flaking subtests now report elapsed time
-  on failure, which is what tells a mis-read punctual kill from a `killGrace` timeout if either ever
-  fails again.
+  early or SIGKILLs itself is not, a command whose mark is blocked by a planted FIFO,
+  symlink-to-FIFO, file, or directory still dies on its deadline (in POSIX mode too), and a sabotaged
+  wrapper still reports the timeout the mark witnessed. Five mutations are each caught: removing the
+  mark write, dropping `watchdogFired` from the classification, writing the mark with a redirect
+  instead of `mkdir`, clearing it with `rm -f` instead of `rm -rf`, and dropping the no-deadline
+  guard. The live contract suite's two flaking subtests now report elapsed time on failure, which is
+  what tells a mis-read punctual kill from a `killGrace` timeout if either ever fails again.
 
 - **The K8s sandbox can no longer return a short read as a whole file**
   ([#105](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/105)) — the read-side mirror

@@ -780,6 +780,12 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 		wantMarked bool
 	}{
 		{"Fifo", func(t *testing.T, path string) error { return syscall.Mkfifo(path, 0o644) }, false},
+		{"SymlinkToFifo", func(t *testing.T, path string) error {
+			if err := syscall.Mkfifo(path+".target", 0o644); err != nil {
+				return err
+			}
+			return os.Symlink(path+".target", path)
+		}, false},
 		{"RegularFile", func(t *testing.T, path string) error {
 			return os.WriteFile(path, []byte("not mine"), 0o644)
 		}, false},
