@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"log"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -149,10 +150,7 @@ func TestWorkerForceStopAcceptsNoContent(t *testing.T) {
 	h.suspend(t, writeUse("out.txt", "hello"))
 	h.enqueueWork(t)
 
-	var logs strings.Builder
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&safeWriter{w: &logs}, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	warnings := captureWarnings(t)
 
 	w, done := h.newWorker(Config{})
 	cancel, errc := runWorker(w)
@@ -162,22 +160,54 @@ func TestWorkerForceStopAcceptsNoContent(t *testing.T) {
 	if got := h.workState(t); got != "stopped" {
 		t.Fatalf("work item state = %q, want stopped", got)
 	}
-	if out := logs.String(); strings.Contains(out, "force-stop failed") {
+	if out := warnings(); strings.Contains(out, "force-stop failed") {
 		t.Errorf("a successful 204 stop logged a failure; the SDK decoder bypass is missing:\n%s", out)
 	}
 }
 
-// safeWriter serializes writes from the worker's goroutines into a test buffer;
-// slog handlers are concurrency-safe but strings.Builder is not.
-type safeWriter struct {
-	mu sync.Mutex
-	w  *strings.Builder
+// captureWarnings routes WARN-and-above logging into a buffer for one test and
+// returns a locked accessor for it.
+//
+// The stdlib-log save/restore is not optional, for the reason internal/executor's
+// captureLogs documents: slog.SetDefault reroutes the standard log package into
+// whatever handler it installs, and restoring only slog.Default() does not undo
+// that — on the way back the previous handler IS a *defaultHandler, so
+// SetDefault's type check skips the log.SetOutput call and log keeps pointing at
+// this finished test's handler. Every later log.Print in this package's test
+// binary would vanish into it, taking the httptest control plane's diagnostics
+// (superfluous WriteHeader, handler panics) with them.
+func captureWarnings(t *testing.T) func() string {
+	t.Helper()
+	buf := &lockedBuffer{}
+	prev := slog.Default()
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	return buf.String
 }
 
-func (s *safeWriter) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.w.Write(p)
+// lockedBuffer guards the assertion's read against writes from any logger still
+// live when it runs — the in-process control plane keeps logging on its own
+// goroutines. slog's handler serializes its own writes, but not against us.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // TestWorkerToolSpanParentsOnEnqueueTrace pins cross-process tracing end to end:

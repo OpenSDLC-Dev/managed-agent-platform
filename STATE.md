@@ -24,7 +24,14 @@ because it reverses a CONFIRMED entry in docs/DIVERGENCES.md.
 - [x] Tests: Stop asserts 204 + zero body bytes + no `Content-Type` for graceful and force, state
       read back via GET; new worker test pins the absent false warning. Mutation-checked — removing
       the bypass reproduces the SDK's quoted decoder error verbatim.
-- [x] Docs: the CONFIRMED divergence replaced (not deleted) with the corrected contract, the stale
-      `Tracked: #27` on the graceful/force entry repointed to #25, CHANGELOG entry written.
-- [ ] `make verify`, verifier PASS, dual review.
+- [x] Docs: the CONFIRMED divergence replaced (not deleted), the stale `Tracked: #27` on the
+      graceful/force entry repointed to #25, CHANGELOG entry written.
+- [x] `make verify` green (coverage 91.75%); verifier PASS with findings, including a live
+      `ant beta:environments:work stop` run against the 204 server (graceful and force, exit 0).
+- [x] Review round: reviewers were right that the public Stop Work reference documents a
+      `BetaSelfHostedWork` return and ranks *above* the SDK checkout — so this is now recorded as a
+      deliberate divergence from the published spec toward the deployed service, not as "no
+      divergence"; the compatibility break is stated rather than glossed; the plan's empty-poll
+      aside was backwards and is corrected (the poller calls `Work.Poll` with no bypass, so
+      `200` + `null` stands); the log-capture helper now restores the stdlib `log` package too.
 - [ ] PR open, CI green, review threads settled.

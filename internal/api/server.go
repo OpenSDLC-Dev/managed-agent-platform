@@ -245,8 +245,9 @@ func methodNotAllowed(r *http.Request) *apiError {
 }
 
 // handle adapts a typed handler to http.HandlerFunc: JSON out, error envelope
-// on failure. The reference returns 200 for every successful call, including
-// creates.
+// on failure. The reference returns 200 for every successful call it answers
+// with a body, including creates; the bodiless exception is Stop, which uses
+// handleNoContent.
 func (s *server) handle(fn func(*http.Request) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		v, err := fn(r)

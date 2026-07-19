@@ -68,11 +68,15 @@ compatibility gain, and imports a defect Anthropic has an open `TODO` to remove.
 
 It loses on three counts.
 
-- **The consumer it "breaks" is already broken against the reference.** The naive generated method
-  fails against Anthropic's own service today; no real client depends on it working. The clients
-  that exist do not: the SDK's worker and poller apply the body bypass, and the real `ant` CLI binds
-  `*[]byte` for *every* work command (`anthropic-cli/pkg/cmd/betaenvironmentwork.go:662-663`), so
-  `ant beta:environments:work stop` is content with an empty body.
+- **The consumer it "breaks" is already broken against the reference.** This *is* a compatibility
+  break, and for exactly one caller: code that drove the generated `Work.Stop` against *this
+  platform's* old 200 + JSON response, plus any hand-written consumer of that body. It is worth
+  taking because the same code fails against Anthropic's own service today — we would be preserving
+  compatibility with ourselves, not with the reference. The clients that exist are unaffected: the
+  SDK's worker and poller apply the body bypass, and the real `ant` CLI binds `*[]byte` for *every*
+  work command (`anthropic-cli/pkg/cmd/betaenvironmentwork.go:662-663`), so
+  `ant beta:environments:work stop` is content with an empty body — confirmed by driving the real
+  CLI against the local server.
 - **Being more permissive is the lock-in hazard this project exists to prevent.** A customer who
   develops against a self-hosted platform that answers `200` + JSON, using the generated method,
   gets working code that fails the moment it is pointed at Anthropic. Accepting more than the
@@ -84,10 +88,22 @@ It loses on three counts.
   corrected. Neither restores a JSON body. TypeScript and Python decode `204` natively already; only
   Go is behind.
 
-The typed schema does rank first in CLAUDE.md's resolution order, and it declares
-`*BetaSelfHostedWork`. That ordering governs what to believe when the answer is unknown — not when
-the schema's own authors ship a present-tense erratum naming this exact field as a body "the server
-never sends."
+One thing the objection gets right, and it must be stated plainly rather than glossed: **the
+top-ranked source disagrees with us.** CLAUDE.md's resolution order is public docs → the local
+reference checkouts (typed schema first, then the CLI) → a recorded `ant` stream, and the public
+[Stop Work reference](https://platform.claude.com/docs/en/api/beta/environments/work/stop) documents
+a `BetaSelfHostedWork` return with a full JSON response example. `api.md` and the generated method
+agree with it.
+
+What breaks the tie is that these are not three independent witnesses. The published reference, the
+`api.md` entry, and the generated method's signature are all downstream of one OpenAPI spec — the
+very artifact the poller's `TODO` names as wrong ("currently it declares a `BetaSelfHostedWork` JSON
+body that the server never sends"). Ranking public docs first governs what to believe when the
+answer is unknown; it does not survive the spec's own maintainers shipping a present-tense erratum,
+plus a workaround, plus fixtures, against that exact field. So this is a deliberate divergence *from
+the published spec*, taken to match the deployed service — and it is recorded as one, not waved
+through as "no divergence." Only a recording against a real managed-agents endpoint can close it for
+good; that recording is the standing follow-up.
 
 ## Approach
 
@@ -113,7 +129,16 @@ never sends."
 ## Out of scope
 
 Graceful-stop lifecycle convergence (#25) and the identity-blind hung-worker race (#62) are
-untouched; this plan changes only the HTTP response contract. `GET …/work/poll`'s empty-queue
-response is a separate open question — the same SDK test fixture returns `204` for an empty poll,
-which is worth revisiting against the INFERRED entry that currently pins it at `200` + `null`, but
-it is not this issue's scope and gets an issue comment rather than a code change here.
+untouched; this plan changes only the HTTP response contract.
+
+`GET …/work/poll`'s empty-queue response looks like it should follow — `worker_test.go` scripts an
+empty poll as `204` too — but applying this plan's own evidentiary standard points the other way,
+and the registry's `200` + `null` entry stands. The poller calls `Work.Poll` **directly**
+(`poller.go:299`), with no `WithResponseBodyInto` bypass, and its empty-queue branch
+(`poller.go:329`, `work == nil || work.ID == ""`) is reachable only from a decoded body: a `204`
+would error into the backoff path on every idle poll, so the absence of a workaround there is
+meaningful in a way Stop's presence of one is. The `204` fixture cannot speak to it either — that
+branch belongs to a second poll a single-`Next()` test never makes. Measured against the pinned SDK:
+`200` + `null` decodes to `(nil, nil)`, a bare `204` reproduces the strict-decoder error, and a
+`204` with a JSON content type fails with `error parsing response json: EOF`. Nothing to revisit and
+no issue comment owed.

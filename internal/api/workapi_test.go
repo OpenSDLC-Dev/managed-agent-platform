@@ -527,8 +527,10 @@ func wantNoContent(t *testing.T, s *tserver, path, key string, reqBody map[strin
 	if len(raw) != 0 {
 		t.Errorf("stop returned %d body bytes (%q), want an empty body", len(raw), raw)
 	}
-	if ct := res.Header.Get("Content-Type"); ct != "" {
-		t.Errorf("stop set Content-Type %q, want none", ct)
+	// Check the header map directly: Header.Get returns "" for an absent header
+	// and for a present-but-empty one alike, so it cannot prove absence.
+	if ct, ok := res.Header["Content-Type"]; ok {
+		t.Errorf("stop set Content-Type %q, want the header absent entirely", ct)
 	}
 }
 

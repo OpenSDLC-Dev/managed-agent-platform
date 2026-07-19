@@ -79,12 +79,21 @@ copy of an entry here.
   the server never sends". A client workaround shipped by the reference SDK is evidence *for* the
   204, not against it.
 
-  Emitting 200 + JSON was the more permissive choice, and permissiveness is the trap here: it
-  satisfies the naive generated method, which fails against Anthropic's own service, so code
-  developed against this platform would break on contact with the reference — the migration hazard a
-  drop-in self-hostable platform exists to avoid. Every client that actually exists is unaffected:
-  the SDK's worker and poller apply the body bypass, and the real `ant` CLI binds `*[]byte` for
-  every work command.
+  The published spec does say otherwise — the public Stop Work reference documents a
+  `BetaSelfHostedWork` return, as do `api.md` and the generated signature — so this is a deliberate
+  divergence from the spec in favour of the deployed service, recorded as such in
+  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) and left open for a recording against a real endpoint
+  to close. The three spec-side witnesses are one witness: docs, `api.md` and the method signature
+  are all generated from the OpenAPI document the erratum names as wrong.
+
+  **This is a compatibility break, for one caller:** code that drove the generated `Work.Stop`
+  against *this platform's* old 200 + JSON response, and any hand-written consumer of that body, now
+  gets a decoder error. It is worth taking because the same code already fails against Anthropic's
+  own service — the old shape preserved compatibility with us, not with the reference, and code
+  developed against it would break on contact with the real thing. Every client that exists in the
+  wild is unaffected: the SDK's worker and poller apply the body bypass, and the real `ant` CLI binds
+  `*[]byte` for every work command (verified by driving the real CLI against a local server: both
+  graceful and forced stop exit 0).
 
   This platform's own BYOC worker was the one real casualty, and it is fixed in the same change.
   `internal/worker`'s `forceStop` called the generated method with no bypass, so against a 204 every
