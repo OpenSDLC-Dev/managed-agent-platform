@@ -16,7 +16,7 @@ command on its deadline and reported `TimedOut: false`. No plan file (single-PR 
 - [x] Fixed: the watchdog marks its own kill with `mkdir` (the one primitive a planted FIFO cannot
       block), `exitScript` reads it home, and `classifyTimeout` weighs it beside a recorded SIGKILL.
 - [x] Pinned without a cluster: wrapper and `exitScript` under host `/bin/bash`, plus table tests on
-      `classifyTimeout`/`parseExit`. Four mutations caught, including the blocking-redirect one.
-- [x] Verifier: PASS with findings (local `make verify` red is the pre-existing kind EOF flake,
-      identical on `main`). Reviews: `/code-review` found the FIFO defect — fixed and pinned.
-- [ ] Codex review, then PR green on CI's kind cluster.
+      `classifyTimeout`/`parseExit`. Five mutations caught, including the blocking-redirect one.
+- [x] Reviews: `/code-review` found the blocking-mark defect, Codex the no-deadline one — both fixed
+      and pinned. Verifier PASS on the first commit; re-verification of the fixes in flight.
+- [ ] PR green on CI's kind cluster.

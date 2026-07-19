@@ -472,7 +472,7 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 		return sandbox.ExecResult{}, pd.execErr(ctx, err)
 	}
 
-	timedOut := classifyTimeout(code, watchdogFired, v)
+	timedOut := classifyTimeout(seconds > 0, code, watchdogFired, v)
 	return sandbox.ExecResult{
 		Stdout:    stdout.String(),
 		Stderr:    stderr.String(),
@@ -486,8 +486,11 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 // finished command, and nothing else — no clock, so what it decides is testable
 // without one.
 //
-// Three ways a finished command can have hit its deadline, and a SIGKILL is the
-// evidence for two of them, because a command cannot survive one to fake it.
+// Three ways a finished command can have hit its deadline, and an exit code of
+// 137 is what two of them are read against. It is evidence, not proof: bash
+// reports it for a job SIGKILLed out from under it, and a command is free to
+// choose it. What it rules out is a command that reports some other code and
+// calls itself killed.
 // The watchdog reports having fired — the only witness that is not a guess,
 // which is why it exists: the pre-deadline probe is a second in-pod exec, so its
 // answer describes the pod an apiserver round trip after it was asked, and on a
@@ -515,7 +518,14 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 // what the mark adds is a tenant that forges it mislabelling its own tool call,
 // while one that erases it is back to the probes — exactly where this backend
 // stood before.
-func classifyTimeout(code int, watchdogFired bool, v verdict) bool {
+func classifyTimeout(deadlined bool, code int, watchdogFired bool, v verdict) bool {
+	// A command with no deadline was never given a watchdog, so nothing can
+	// honestly have marked it and no probe ever ran. Saying so here rather than
+	// trusting the terms to come out false keeps a planted mark from labelling an
+	// untimed command as timed out.
+	if !deadlined {
+		return false
+	}
 	return (code == sigkillExit && (watchdogFired || v.aliveAtDeadline)) || v.overran
 }
 

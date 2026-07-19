@@ -54,9 +54,12 @@ copy of an entry here.
   fails immediately, whatever is already there — and, not being a shell special builtin, it also
   cannot abort the watchdog subshell on a redirection failure under a POSIX-mode bash.
 
-  Classification moves into a pure `classifyTimeout(code, watchdogFired, verdict)`, which reads the
-  mark only alongside a recorded SIGKILL: every term only ever *adds* a timeout, so the mark cannot
-  withdraw one. The probes stay for what the mark cannot cover — a SIGKILL the watchdog did not
+  Classification moves into a pure `classifyTimeout`, which reads the mark only alongside a recorded
+  SIGKILL, and only for a command that was given a deadline at all — without one there is no watchdog
+  to have marked anything, so a mark found there is planted, and an untimed command must not be able
+  to label itself timed out by planting one and exiting 137 (the one new mislabel path this change
+  would otherwise have opened; the Codex pass found it). Every term only ever *adds* a timeout, so
+  the mark cannot withdraw one. The probes stay for what the mark cannot cover — a SIGKILL the watchdog did not
   deliver, because the tenant killed it or the node did the killing. Reading the mark in
   `exitScript` rather than folding it into the exit line in the wrapper is deliberate too: it is what
   lets a timeout survive the `$PPID` sabotage, where the command kills the wrapper before it can
@@ -81,9 +84,9 @@ copy of an entry here.
   race: a command killed on its deadline is marked and classifies as a timeout, one that finishes
   early or SIGKILLs itself is not, a mark blocked by a planted FIFO, file, or directory still dies on
   its deadline (in POSIX mode too), and a sabotaged wrapper still reports the timeout the mark
-  witnessed. Four mutations are each caught: removing the mark write, dropping `watchdogFired` from
-  the classification, writing the mark with a redirect instead of `mkdir`, and clearing it with
-  `rm -f` instead of `rm -rf`. The live contract suite's two flaking subtests now report elapsed time
+  witnessed. Five mutations are each caught: removing the mark write, dropping `watchdogFired` from
+  the classification, writing the mark with a redirect instead of `mkdir`, clearing it with `rm -f`
+  instead of `rm -rf`, and dropping the no-deadline guard. The live contract suite's two flaking subtests now report elapsed time
   on failure, which is what tells a mis-read punctual kill from a `killGrace` timeout if either ever
   fails again.
 

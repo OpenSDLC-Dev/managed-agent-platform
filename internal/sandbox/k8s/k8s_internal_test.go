@@ -567,46 +567,51 @@ func TestClassifyTimeout(t *testing.T) {
 	const other = 7
 	cases := []struct {
 		name          string
+		undeadlined   bool
 		code          int
 		watchdogFired bool
 		v             verdict
 		want          bool
 	}{
+		// A command given no deadline has no watchdog to mark it, so a mark it is
+		// found wearing is one it planted — and an untimed command must not be
+		// able to call itself timed out by planting one and exiting 137.
+		{name: "NoDeadlineIgnoresAPlantedMark", undeadlined: true, code: sigkillExit, watchdogFired: true, want: false},
 		// The regression. The watchdog says it fired and the exit code agrees a
 		// SIGKILL landed; no probe needs to have caught the command alive.
-		{"WatchdogFiredAndProbeMissedIt", sigkillExit, true, verdict{}, true},
-		{"WatchdogFiredAndProbeSawIt", sigkillExit, true, verdict{aliveAtDeadline: true}, true},
+		{name: "WatchdogFiredAndProbeMissedIt", code: sigkillExit, watchdogFired: true, want: true},
+		{name: "WatchdogFiredAndProbeSawIt", code: sigkillExit, watchdogFired: true, v: verdict{aliveAtDeadline: true}, want: true},
 
 		// A SIGKILL the watchdog did not deliver is still the deadline's if the
 		// command was alive to receive it — the tenant can kill the watchdog, and
 		// the node can do the killing, so the probe keeps earning its place.
-		{"ProbeAloneStillCounts", sigkillExit, false, verdict{aliveAtDeadline: true}, true},
+		{name: "ProbeAloneStillCounts", code: sigkillExit, v: verdict{aliveAtDeadline: true}, want: true},
 
 		// Overrunning is a timeout on its own authority: a command still running
 		// past the deadline and the slop can report no exit code worth believing.
-		{"OverranWithoutASigkill", other, false, verdict{overran: true}, true},
-		{"OverranWithNoEvidenceAtAll", 0, false, verdict{overran: true}, true},
+		{name: "OverranWithoutASigkill", code: other, v: verdict{overran: true}, want: true},
+		{name: "OverranWithNoEvidenceAtAll", v: verdict{overran: true}, want: true},
 
 		// The self-inflicted kill the contract suite pins: exit 137, but the
 		// watchdog never fired and the command was already gone when Exec looked.
-		{"SelfInflictedKillIsNotATimeout", sigkillExit, false, verdict{}, false},
+		{name: "SelfInflictedKillIsNotATimeout", code: sigkillExit},
 
 		// A mark without a SIGKILL is not a timeout. This is the window between
 		// the watchdog's last `kill -0` and its `kill -9`, where the command exits
 		// on its own terms and the mark is already written — and it is also what
 		// keeps a forged mark from manufacturing a timeout out of a clean exit.
-		{"MarkWithoutASigkill", other, true, verdict{}, false},
-		{"MarkWithACleanExit", 0, true, verdict{}, false},
+		{name: "MarkWithoutASigkill", code: other, watchdogFired: true},
+		{name: "MarkWithACleanExit", watchdogFired: true},
 
 		// An honest command that finished inside its deadline.
-		{"CleanExit", 0, false, verdict{}, false},
-		{"CleanExitSeenAliveJustBefore", 0, false, verdict{aliveAtDeadline: true}, false},
+		{name: "CleanExit"},
+		{name: "CleanExitSeenAliveJustBefore", v: verdict{aliveAtDeadline: true}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := classifyTimeout(c.code, c.watchdogFired, c.v); got != c.want {
-				t.Errorf("classifyTimeout(%d, %v, %+v) = %v, want %v",
-					c.code, c.watchdogFired, c.v, got, c.want)
+			if got := classifyTimeout(!c.undeadlined, c.code, c.watchdogFired, c.v); got != c.want {
+				t.Errorf("classifyTimeout(%v, %d, %v, %+v) = %v, want %v",
+					!c.undeadlined, c.code, c.watchdogFired, c.v, got, c.want)
 			}
 		})
 	}
@@ -722,7 +727,7 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 		if err != nil || code != sigkillExit || !killed {
 			t.Fatalf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
 		}
-		if !classifyTimeout(code, killed, verdict{}) {
+		if !classifyTimeout(true, code, killed, verdict{}) {
 			t.Error("a command the watchdog killed on its deadline did not classify as a timeout")
 		}
 	})
@@ -735,7 +740,7 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 		if err != nil || code != 7 || killed {
 			t.Fatalf("parseExit = %d, %v, %v; want 7, false, nil", code, killed, err)
 		}
-		if classifyTimeout(code, killed, verdict{}) {
+		if classifyTimeout(true, code, killed, verdict{}) {
 			t.Error("a command that finished inside its deadline classified as a timeout")
 		}
 	})
@@ -747,7 +752,7 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 		if err != nil || code != sigkillExit || killed {
 			t.Fatalf("parseExit = %d, %v, %v; want %d, false, nil", code, killed, err, sigkillExit)
 		}
-		if classifyTimeout(code, killed, verdict{}) {
+		if classifyTimeout(true, code, killed, verdict{}) {
 			t.Error("a self-inflicted SIGKILL classified as a timeout")
 		}
 	})
@@ -833,7 +838,7 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 		if err != nil || code != sigkillExit || !killed {
 			t.Fatalf("parseExit = %d, %v, %v; want %d, true, nil", code, killed, err, sigkillExit)
 		}
-		if !classifyTimeout(code, killed, verdict{}) {
+		if !classifyTimeout(true, code, killed, verdict{}) {
 			t.Error("a watchdog kill whose wrapper was sabotaged did not classify as a timeout")
 		}
 	})
