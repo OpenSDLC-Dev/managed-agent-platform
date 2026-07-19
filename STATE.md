@@ -13,7 +13,7 @@ same subtest and assertion.
 - [x] Reproduce: new contract subtest `FileRoundTripLargePayload` fails on the live cluster at 1 MiB —
       `read back 32768 bytes, want 1048576; first difference at 32768`, `WriteFile` having returned nil.
 - [x] Pin the script's exit-code contract deterministically, no cluster:
-      `TestWriteScriptVerifiesDeliveredLength` (5 subtests, host bash).
+      `TestWriteScriptVerifiesDeliveredLength` (7 subtests, host bash).
 - [x] Fix `writeScript` — drop `exec` (removes the trigger) and verify the delivered byte count
       (exit 14 → an error from `WriteFile`).
 - [x] Green: both new tests pass, plus `ProvisionIsIdempotentPerSession` (the #103 subtest) and the
