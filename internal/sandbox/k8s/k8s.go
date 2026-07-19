@@ -544,22 +544,31 @@ func (pd *pod) ReadFile(ctx context.Context, path string) ([]byte, error) {
 }
 
 // WriteFile writes data, creating parents and overwriting. The bytes go in over
-// stdin so no shell round-trip touches them.
+// stdin so no shell round-trip touches them, and the script is told how many to
+// expect so a stream that delivered fewer cannot pass as a success.
 func (pd *pod) WriteFile(ctx context.Context, path string, data []byte) error {
 	dir := gopath.Dir(path)
-	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir}
+	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir, strconv.Itoa(len(data))}
 	res, err := pd.client.exec(ctx, pd.name, containerName, argv, bytes.NewReader(data), io.Discard, io.Discard)
 	if err != nil {
 		return pd.execErr(ctx, err)
 	}
-	if res.code != 0 {
+	switch res.code {
+	case 0:
+		return nil
+	case writeShort:
+		// Fewer bytes reached the pod than we handed the stream, and every call in
+		// the chain still finished cleanly — see writeScript. Nothing else in the
+		// path can notice, so this is the only place a truncated write can be
+		// turned into the error it is rather than a silent half-written file.
+		return fmt.Errorf("k8s: write %s: short write (exec stdin delivered fewer than %d bytes)", path, len(data))
+	default:
 		// The write failed in the pod — a directory where a file was meant to go, a
 		// read-only path, a full disk. A clean exec that exited non-zero wrote
 		// nothing; the docker backend surfaces the daemon's error here, so this
 		// must not read as a successful write.
 		return fmt.Errorf("k8s: write %s: exit %d", path, res.code)
 	}
-	return nil
 }
 
 // shellQuote makes a path a single, literal shell word.
@@ -570,6 +579,7 @@ const (
 	readIsDir      = 11
 	readNotRegular = 12
 	readTooLarge   = 13
+	writeShort     = 14
 )
 
 // readScript classifies $1 and cats it on success. $2 is the byte cap. ($0 is
@@ -592,10 +602,33 @@ if [ "$sz" -gt "$2" ]; then exit 13; fi
 exec cat "$f"
 `
 
-// writeScript makes $2 (the parent dir) and writes stdin to $1.
+// writeScript makes $2 (the parent dir), writes stdin to $1, and checks that
+// exactly $3 bytes landed.
+//
+// Both departures from the obvious `exec cat > "$1"` are deliberate, and they
+// are the same fix seen from two sides (issue #103).
+//
+// `cat` is not exec'd. `exec` points the *shell's* stdout at the file, which
+// closes the container's stdout pipe for the rest of the command; the exec
+// session then tears its stdin down early and `cat` sees EOF after whatever
+// bytes had arrived — one 32 KiB io.Copy buffer, in the reproduction. Keeping
+// the shell alive holds that pipe open until the write is finished.
+//
+// The length check is what makes the guarantee independent of that reasoning.
+// A short stdin stream is invisible everywhere else in the path: client-go
+// hands a failed stdin copy to runtime.HandleError and never to the caller, the
+// redirection has already truncated the file, and `cat` exits 0 — so a write
+// that lost its tail is byte-for-byte indistinguishable from one that never had
+// a tail. Only the pod can count what actually arrived, so it does.
+//
+// `wc -c` rather than `stat -c %s`: it is POSIX, so the exit-code contract is
+// testable on any dev machine's shell, and `-eq` tolerates the leading padding
+// BSD `wc` emits.
 const writeScript = `
 mkdir -p "$2" || exit 1
-exec cat > "$1"
+cat > "$1" || exit 1
+sz=$(wc -c < "$1") || exit 1
+[ "$sz" -eq "$3" ] || exit 14
 `
 
 // cappedBuffer keeps at most limit bytes and records whether more arrived. A

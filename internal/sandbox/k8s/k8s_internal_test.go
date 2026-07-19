@@ -1,8 +1,13 @@
 package k8s
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	gopath "path"
+	"strconv"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -204,6 +209,81 @@ func TestProvisionReclaimsUnreadyPodItCreated(t *testing.T) {
 	if _, err := cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("Provision left its unready pod behind: get err = %v, want NotFound", err)
 	}
+}
+
+// writeScript is the one place a short exec stdin stream can be caught, so its
+// exit-code contract is pinned here rather than left to the live cluster: the
+// loss it guards against is a rare race there, but declaring a length the stdin
+// bytes do not match reproduces the same signature deterministically, on any
+// machine, in milliseconds.
+//
+// This runs the script through the host's /bin/bash rather than the sandbox
+// image. It pins what the script does with its arguments; that the image carries
+// a shell able to run it is the live contract test's job.
+func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
+	run := func(t *testing.T, stdin []byte, declared int, path string) int {
+		t.Helper()
+		cmd := exec.Command("/bin/bash", "-c", writeScript, "map-write", path, gopath.Dir(path), strconv.Itoa(declared))
+		cmd.Stdin = bytes.NewReader(stdin)
+		if err := cmd.Run(); err != nil {
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("run writeScript: %v", err)
+			}
+			return ee.ExitCode()
+		}
+		return 0
+	}
+	dir := t.TempDir()
+
+	// The bytes arrived intact — including ones no shell round-trip would
+	// survive — and the parent directory is created on the way.
+	t.Run("FullDelivery", func(t *testing.T) {
+		payload := []byte{0x00, 0x01, 0xff, 0xfe, 'h', 'i', 0x00}
+		path := dir + "/deep/nested/blob.bin"
+		if code := run(t, payload, len(payload), path); code != 0 {
+			t.Fatalf("exit %d, want 0", code)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, payload) {
+			t.Errorf("file = %v, %v; want %v", got, err, payload)
+		}
+	})
+
+	// The #103 signature: the stdin stream delivered nothing, the redirection
+	// truncated the file anyway, and `cat` exited 0. Without the length check
+	// this is indistinguishable from a successful write.
+	t.Run("NothingDelivered", func(t *testing.T) {
+		if code := run(t, nil, 4, dir+"/lost"); code != writeShort {
+			t.Errorf("exit %d, want %d (short write)", code, writeShort)
+		}
+	})
+
+	// A stream that lost only its tail must not read as success either.
+	t.Run("PartialDelivery", func(t *testing.T) {
+		if code := run(t, []byte("kept"), 100, dir+"/partial"); code != writeShort {
+			t.Errorf("exit %d, want %d (short write)", code, writeShort)
+		}
+	})
+
+	// Writing no bytes is a legitimate write of an empty file, not a loss.
+	t.Run("EmptyWriteIsNotShort", func(t *testing.T) {
+		path := dir + "/empty"
+		if code := run(t, nil, 0, path); code != 0 {
+			t.Fatalf("exit %d, want 0", code)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("stat empty file: %v", err)
+		}
+	})
+
+	// A write that cannot land at all keeps its own failure code — the length
+	// check must not swallow it and report a short write instead.
+	t.Run("UnwritablePathIsNotShort", func(t *testing.T) {
+		if code := run(t, []byte("x"), 1, dir); code == 0 || code == writeShort {
+			t.Errorf("exit %d writing onto a directory, want a non-zero code other than %d", code, writeShort)
+		}
+	})
 }
 
 func TestDestroySurfacesError(t *testing.T) {

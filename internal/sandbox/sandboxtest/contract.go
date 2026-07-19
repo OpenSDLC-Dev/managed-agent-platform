@@ -406,6 +406,33 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// A payload spanning many stream buffers, which the small round-trip above
+	// does not reach. A backend that ships file bytes over a stream can lose a
+	// chunk of one and still see every call finish cleanly, so the write reports
+	// success and the file is short — the failure mode behind issue #103. Size is
+	// well under MaxFileBytes; the content is deterministic so a mismatch names
+	// the first bad offset rather than dumping a megabyte.
+	t.Run("FileRoundTripLargePayload", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		want := make([]byte, 1<<20)
+		for i := range want {
+			want[i] = byte(i*7 + i/251) // no run of repeats a stream could paper over
+		}
+		path := workdir + "/large.bin"
+		if err := sb.WriteFile(ctx, path, want); err != nil {
+			t.Fatalf("write %d bytes: %v", len(want), err)
+		}
+		got, err := sb.ReadFile(ctx, path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("read back %d bytes, want %d; first difference at %d",
+				len(got), len(want), firstDiff(got, want))
+		}
+	})
+
 	// Files and commands see one filesystem — the whole point of the sandbox.
 	t.Run("FilesAndExecShareTheFilesystem", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
@@ -553,6 +580,18 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			t.Error("unrestricted sandbox has no route out")
 		}
 	})
+}
+
+// firstDiff returns the index of the first byte where a and b differ, or the
+// shorter length when one is a prefix of the other. It keeps a large-payload
+// mismatch readable: the offset says whether a stream lost its head or its tail.
+func firstDiff(a, b []byte) int {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return min(len(a), len(b))
 }
 
 // countProcesses counts live processes in the sandbox whose command line starts

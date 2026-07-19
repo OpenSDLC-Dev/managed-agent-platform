@@ -13,6 +13,47 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The K8s sandbox no longer reports a truncated file write as a success**
+  ([#103](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/103), and
+  [#86](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/86), which is the same subtest
+  and assertion — #103 is its recurrence, not a sibling). Both were filed as flaky-test reports; the
+  defect underneath is silent data loss, and it is not rare. `writeScript` ran `exec cat > "$1"`,
+  which points the *shell's* stdout at the file and so closes the container's stdout pipe for the rest
+  of the command; the exec session then tore its stdin down early and `cat` saw EOF after whatever
+  bytes had arrived. A new contract subtest, `FileRoundTripLargePayload`, catches this at 1 MiB and
+  failed on the first attempt against a live kind cluster — `read back 32768 bytes, want 1048576` —
+  so **every K8s-backend write past one 32 KiB `io.Copy` buffer was being truncated**, with
+  `WriteFile` returning nil. For an agent session that meant `file_write` reporting success on a
+  truncated file, and `edit` — a read-modify-write — destroying a file's existing contents while
+  telling the model the edit applied. A separate diagnostic confirmed the loss is transport-independent
+  (client-go's WebSocket executor lost the same payload 14/15 times), so it was the `exec`, not SPDY.
+  The script now keeps the shell alive across the write and verifies its own work against a declared
+  byte count, exiting a distinct code 14 that `WriteFile` maps to an error:
+
+  ```sh
+  mkdir -p "$2" || exit 1
+  cat > "$1" || exit 1
+  sz=$(wc -c < "$1") || exit 1
+  [ "$sz" -eq "$3" ] || exit 14
+  ```
+
+  The two halves are one fix seen from two sides: dropping `exec` removes the trigger, and the length
+  check is what makes the guarantee independent of that reasoning — a short stdin stream is invisible
+  everywhere else in the path, since client-go hands a failed stdin copy to `runtime.HandleError` and
+  never to the caller, the redirection has already truncated the file, and `cat` exits 0. Only the pod
+  can count what actually arrived. Stated plainly: this **eliminates the observed truncation and
+  converts any residual short write into a loud, diagnosable error** — it does not prove the
+  underlying stream race impossible, so the K8s contract test can still go red, but it will name the
+  defect instead of presenting an empty file. `wc -c` rather than `stat -c %s` keeps the check POSIX,
+  so a new unit test can pin the exit-code contract on any dev machine's shell with no cluster;
+  `readScript` still uses `stat -c %s`, so the image contract is unchanged. Two tests cover it: that
+  unit test (`TestWriteScriptVerifiesDeliveredLength`, which reproduces the #103 signature
+  deterministically by declaring a length the stdin bytes do not match) and the shared contract
+  subtest, which every backend must pass — the docker backend passes it unchanged, being immune by
+  construction (it PUTs a tar with a declared `Size` and reads with `io.ReadFull`).
+
 ### Added
 
 - **An `issue-triage` subagent** (`.claude/agents/issue-triage.md`) — the last piece of
