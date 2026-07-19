@@ -17,6 +17,10 @@ decision, which the maintainer made).
 - [x] Provider cache deleted (registry is now immutable and lock-free), pinned by
       `TestRegistryRetainsNothingPerModelString` and
       `TestRegistryDefaultRouteWithUpstreamModelIgnoresClientString` — both fail on `main`.
-- [ ] Verifier verdict.
-- [ ] Dual review (Codex + `/code-review`).
-- [ ] PR green on CI.
+- [x] Verifier PASS, re-run after the review fixes; it measured the leak at 258 MB retained per
+      200k distinct model strings on `main` versus none on the branch.
+- [x] Reviews: Codex (`gpt-5.6-sol`, `ultra`) found the aliased factory table and a `Factory` doc
+      that would have rebuilt #88 inside an adapter — both fixed; one finding refuted. A four-
+      dimension Opus 4.8 pass returned six findings, all six refuted with evidence.
+- [x] PR [#117](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/117) green on CI.
+- [ ] `/code-review` (user-invocable only) before merge.
