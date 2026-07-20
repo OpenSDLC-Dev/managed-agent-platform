@@ -115,18 +115,15 @@ func infra(format string, args ...any) error {
 	return infraError{fmt.Errorf(format, args...)}
 }
 
-// streamUsage is what the model reported, or nil when the stream failed before
-// it could say. The distinction is the metric's: no reading and a zero reading
-// are different facts, and only a real one belongs in the token histogram.
-//
-// A stream that completed always reports something, because both adapters send
-// a usage object on their final chunk even when the endpoint supplied none — so
-// a non-compliant endpoint still yields zeroes here rather than nil (#90).
+// streamUsage is what the model reported, or nil when nobody said: the stream
+// failed before it could, or the endpoint itself reported no usage. The
+// distinction is the metric's: no reading and a zero reading are different
+// facts, and only a real one belongs in the token histogram (#90).
 func streamUsage(turn *turnResult) *domain.ModelUsage {
 	if turn == nil {
 		return nil
 	}
-	return &turn.usage
+	return turn.usage
 }
 
 func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
@@ -423,13 +420,22 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	if err != nil {
 		return err
 	}
-	endEv, err := span.EndEvent(false, turn.usage)
+	// Absent usage settles as zeroes here, deliberately: the wire schema wants
+	// a model_usage object on every span.model_request_end, and the session's
+	// cumulative usage must still be folded (a skipped fold would also skip the
+	// session row's updated_at). Only the metric distinguishes absent from zero
+	// — that path runs through streamUsage into ModelDone (#90).
+	usage := domain.ModelUsage{}
+	if turn.usage != nil {
+		usage = *turn.usage
+	}
+	endEv, err := span.EndEvent(false, usage)
 	if err != nil {
 		return err
 	}
 	head = append(head, endEv)
 	opts := events.AppendOptions{
-		AddUsage:             &turn.usage,
+		AddUsage:             &usage,
 		MarkProcessedThrough: watermark,
 	}
 

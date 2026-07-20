@@ -4,8 +4,19 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+[#90](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/90) — both provider adapters
+always sent a non-nil `Chunk.Usage`, so an endpoint that reported no usage was indistinguishable
+from a model that spent nothing, and the token metric recorded a false zero. No plan file (triage
+returned `needs_plan: false`: single-PR scope, no wire-schema question).
 
 ## Tasks
 
-None.
+- [x] Both adapters send `Usage: nil` when no usage object arrived — anthropic judges presence by
+      the SDK's `respjson.Field.Valid()` on `message_start`/`message_delta`, openai by its existing
+      per-frame `fr.Usage != nil`.
+- [x] `turnResult.usage` is `*domain.ModelUsage` and `streamUsage` returns it directly; settlement
+      substitutes zeroes so `span.model_request_end` keeps its `model_usage` object and the session
+      usage fold is unchanged.
+- [ ] Verifier PASS.
+- [ ] Reviews: Codex + `/code-review`.
+- [ ] PR green on CI.

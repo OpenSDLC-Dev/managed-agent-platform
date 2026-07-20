@@ -688,6 +688,60 @@ func TestGenerateTruncatedStream(t *testing.T) {
 	}
 }
 
+// An endpoint that reports no usage at all must be distinguishable from one
+// that reports zeroes: the done chunk carries no usage rather than a zeroed
+// one, so the token metric records nothing instead of a free turn (#90).
+func TestGenerateReportsNoUsageWhenTheEndpointSentNone(t *testing.T) {
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_9","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+	done := chunks[len(chunks)-1]
+	if done.Kind != provider.KindDone || done.StopReason != "end_turn" {
+		t.Fatalf("done = %+v", done)
+	}
+	if done.Usage != nil {
+		t.Errorf("usage = %+v, want nil: the endpoint reported none", done.Usage)
+	}
+}
+
+// A usage object that is present but empty is still a report — the endpoint
+// spoke, and the zeroes are its answer. Only silence yields nil.
+func TestGenerateReportsAnEmptyUsageObjectAsAReading(t *testing.T) {
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_10","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+	done := chunks[len(chunks)-1]
+	if done.Usage == nil {
+		t.Fatal("usage = nil, want a zeroed reading: the endpoint sent a usage object")
+	}
+	if done.Usage.InputTokens != 0 || done.Usage.OutputTokens != 0 {
+		t.Errorf("usage = %+v, want zeroes", done.Usage)
+	}
+}
+
 func TestConfigValidation(t *testing.T) {
 	if _, err := anthropic.New(provider.Config{Model: "m"}); err == nil {
 		t.Error("missing base_url should error — no silent api.anthropic.com fallback")

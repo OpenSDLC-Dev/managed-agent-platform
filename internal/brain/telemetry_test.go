@@ -75,3 +75,42 @@ func TestATurnReportsWhatTheModelSpent(t *testing.T) {
 		t.Errorf("usage = in %d / out %d, want 10/25", got["input"], got["output"])
 	}
 }
+
+// tokenPoints returns the token histogram's data points. tokenSums cannot
+// answer this test's question: a zero-valued point and an absent point both
+// sum to zero, and the whole point of #90 is that those are different facts.
+func tokenPoints(t *testing.T, rm metricdata.ResourceMetrics) []metricdata.HistogramDataPoint[int64] {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "gen_ai.client.token.usage" {
+				continue
+			}
+			h, ok := m.Data.(metricdata.Histogram[int64])
+			if !ok {
+				t.Fatalf("gen_ai.client.token.usage is %T, want an int64 histogram", m.Data)
+			}
+			return h.DataPoints
+		}
+	}
+	return nil
+}
+
+// An endpoint that reports no usage — an OpenAI-compatible gateway ignoring
+// stream_options.include_usage — must record no token reading at all. Recording
+// zeroes instead would dilute the histogram with turns that look free (#90).
+func TestATurnWhoseEndpointReportedNoUsageRecordsNoTokens(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		textChunk(0, "hi"),
+		// Deliberately not done(): that helper always attaches usage.
+		{Kind: provider.KindDone, StopReason: "end_turn"},
+	}}, nil)
+	h.wake(t, "hello")
+	h.runOnce(t)
+
+	if pts := tokenPoints(t, collect()); len(pts) != 0 {
+		t.Errorf("recorded %d token data point(s), want none: the endpoint reported no usage", len(pts))
+	}
+}

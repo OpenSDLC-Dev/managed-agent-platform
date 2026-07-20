@@ -20,7 +20,11 @@ type turnResult struct {
 	messageEventID domain.ID
 	toolUses       []provider.ToolUse
 	stopReason     string
-	usage          domain.ModelUsage
+	// usage is what the model reported, or nil when the endpoint reported
+	// nothing — the two are different facts and only the first belongs in
+	// the token metric (#90). A turn that never reached its done chunk also
+	// leaves this nil.
+	usage *domain.ModelUsage
 }
 
 // streamTurn drives one provider stream, broadcasting message previews as
@@ -133,7 +137,10 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 			}
 			turn.stopReason = c.StopReason
 			if c.Usage != nil {
-				turn.usage = *c.Usage
+				// Copied, not aliased: the chunk belongs to the provider,
+				// and this value outlives the stream it came from.
+				u := *c.Usage
+				turn.usage = &u
 			}
 		}
 	}

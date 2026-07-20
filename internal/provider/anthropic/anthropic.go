@@ -139,7 +139,13 @@ type stream struct {
 	toolSeed  json.RawMessage // complete input carried on content_block_start
 	inTool    bool
 
-	usage      domain.ModelUsage
+	usage domain.ModelUsage
+	// sawUsage records that a usage object actually arrived on the wire, so
+	// the done chunk can say "the endpoint reported none" rather than report
+	// zeroes (#90). Presence is judged by the decoder's field metadata, not
+	// by the counters: an endpoint that genuinely spent nothing sends an
+	// object full of zeroes, and that is a reading like any other.
+	sawUsage   bool
 	stopReason string
 	done       bool
 }
@@ -156,10 +162,13 @@ func (s *stream) Next() bool {
 		ev := s.events.Current()
 		switch ev.Type {
 		case "message_start":
-			u := ev.Message.Usage
-			s.usage.InputTokens = u.InputTokens
-			s.usage.CacheCreationInputTokens = u.CacheCreationInputTokens
-			s.usage.CacheReadInputTokens = u.CacheReadInputTokens
+			if ev.Message.JSON.Usage.Valid() {
+				s.sawUsage = true
+				u := ev.Message.Usage
+				s.usage.InputTokens = u.InputTokens
+				s.usage.CacheCreationInputTokens = u.CacheCreationInputTokens
+				s.usage.CacheReadInputTokens = u.CacheReadInputTokens
+			}
 
 		case "content_block_start":
 			if ev.ContentBlock.Type == "tool_use" {
@@ -227,6 +236,9 @@ func (s *stream) Next() bool {
 			if r := string(ev.Delta.StopReason); r != "" {
 				s.stopReason = r
 			}
+			if ev.JSON.Usage.Valid() {
+				s.sawUsage = true
+			}
 			// Cumulative counters override the message_start snapshot when
 			// the endpoint reports them here; a frame without usage must
 			// not zero what an earlier frame already reported.
@@ -256,8 +268,12 @@ func (s *stream) Next() bool {
 				return false
 			}
 			s.done = true
-			usage := s.usage
-			s.cur = provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: &usage}
+			var usage *domain.ModelUsage
+			if s.sawUsage {
+				u := s.usage
+				usage = &u
+			}
+			s.cur = provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: usage}
 			return true
 		}
 	}

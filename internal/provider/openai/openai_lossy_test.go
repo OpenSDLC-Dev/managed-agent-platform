@@ -395,6 +395,30 @@ func TestCachedTokensClamped(t *testing.T) {
 	}
 }
 
+// An OpenAI-compatible endpoint that ignores stream_options.include_usage
+// sends no usage frame. That silence must reach the brain as "no reading"
+// rather than as a turn that cost nothing (#90).
+func TestNoUsageFrameReportsNoUsage(t *testing.T) {
+	f := &fakeServer{sse: []string{
+		`{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+	done := chunks[len(chunks)-1]
+	if done.Kind != provider.KindDone || done.StopReason != "end_turn" {
+		t.Fatalf("done = %+v", done)
+	}
+	if done.Usage != nil {
+		t.Errorf("usage = %+v, want nil: the endpoint sent no usage frame", done.Usage)
+	}
+}
+
 // The deprecated function_call streaming format is rejected loudly rather than
 // silently losing the tool call.
 func TestLegacyFunctionCallRejected(t *testing.T) {

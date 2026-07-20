@@ -361,6 +361,7 @@ type stream struct {
 
 	stopReason string
 	usage      domain.ModelUsage
+	sawUsage   bool // a usage object arrived; zeroes without one are not a reading
 	sawFinish  bool // a finish_reason arrived
 	sawTools   bool // at least one tool call was accumulated this turn
 	completed  bool // the done chunk has been queued
@@ -449,8 +450,12 @@ func (s *stream) complete() {
 	} else if stop == "" {
 		stop = "end_turn"
 	}
-	usage := s.usage
-	s.pending = append(s.pending, provider.Chunk{Kind: provider.KindDone, StopReason: stop, Usage: &usage})
+	var usage *domain.ModelUsage
+	if s.sawUsage {
+		u := s.usage
+		usage = &u
+	}
+	s.pending = append(s.pending, provider.Chunk{Kind: provider.KindDone, StopReason: stop, Usage: usage})
 }
 
 type readStatus int
@@ -531,6 +536,9 @@ func (s *stream) process(payload string) error {
 		return fmt.Errorf("openai stream error: %s", s.redact.String(fr.Error.Message))
 	}
 	if fr.Usage != nil {
+		// The endpoint answered. A server that ignores include_usage never
+		// gets here, and its done chunk carries no usage at all (#90).
+		s.sawUsage = true
 		// prompt_tokens counts cached tokens too; split the cached subset out so
 		// InputTokens carries only fresh input, matching the Anthropic usage
 		// shape the domain and the anthropic adapter use.
