@@ -11,9 +11,9 @@ returned `needs_plan: false`: single-PR scope, no wire-schema question).
 
 ## Tasks
 
-- [x] Both adapters send `Usage: nil` when no usage object arrived — anthropic judges presence by
-      the SDK's `respjson.Field.Valid()` on `message_start`/`message_delta`, openai by its existing
-      per-frame `fr.Usage != nil`.
+- [x] Both adapters send `Usage: nil` when no usage object arrived — anthropic judges presence on
+      `message_start`/`message_delta` via `reportedUsage` (the SDK's `respjson.Field.Valid()` plus an
+      object-kind check, see below), openai by its existing per-frame `fr.Usage != nil`.
 - [x] `turnResult.usage` is `*domain.ModelUsage` and `streamUsage` returns it directly; settlement
       substitutes zeroes so `span.model_request_end` keeps its `model_usage` object and the session
       usage fold is unchanged.
@@ -25,4 +25,5 @@ returned `needs_plan: false`: single-PR scope, no wire-schema question).
       with an object-kind check. Claude-side adversarial review (Opus 4.8, four lenses) raised nine
       findings and confirmed none; its coverage note (the delta-only presence branch) is now fenced.
       `/code-review` itself is `disable-model-invocation`, so a workflow stood in for it.
-- [ ] PR green on CI.
+- [x] PR [#130](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/130) green on CI (ci,
+      coverage, helm, compose, CodeQL); ready to leave draft.
