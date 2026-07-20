@@ -4,28 +4,25 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[#128](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/128) — the anthropic adapter's
-`message_start` branch copied three of the four usage counters and dropped `output_tokens`, so an
-endpoint that reports its whole reading up front and closes with a stop-reason-only `message_delta`
-was recorded as having produced zero output tokens. No plan file: single-PR scope.
+[#114](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/114) — reject U+0000 in the
+non-metadata text fields with a 400 (it is currently a Postgres-level 500), the same bug class #73
+closed for `metadata`. Plan-less: single-PR scope, no new wire shape.
 
 ## Tasks
 
-- [x] Contract test in both adapters for a reading that arrives before the closing frame. The
-      anthropic one red on `main` with `output_tokens: 0`; the openai one passed unchanged and
-      stays as a regression guard.
-- [x] `message_start` seeds `OutputTokens` alongside the other three, inside the `reportedUsage`
-      presence check #90 added; `message_delta` still overrides, and its `> 0` guard keeps a sparse
-      closing frame from zeroing the seed.
-- [x] `make verify` green (exit 0, coverage 91.93%). The pinned `verifier` subagent did **not** run
-      — the branch was developed from outside the repo, so its `.claude/` agents never loaded.
-- [x] Reviews: two independent Claude reviewers, both PASS. Both new tests mutation-checked (each
-      fails iff its invariant is broken); the change matches the SDK's own accumulator and records
-      identical numbers for official-API streams. Both raised one `docs/ARCHITECTURE.md`
-      imprecision, now fixed.
-- [ ] Codex reviewer — **not run**: account usage limit (reset 2026-07-25); a second independent
-      Claude reviewer stood in for the dual-review rule.
-- [x] Rebased onto `main` after #90/#130 landed: the `OutputTokens` seed moved inside their
-      `reportedUsage` check, and both CHANGELOG entries kept.
-- [ ] PR [#133](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/133) marked ready; green
-      on CI, then squash-merged.
+- [x] Reproduce — 17 field-and-endpoint pairs 500 against real Postgres (`SQLSTATE 22021` text
+      binds, `22P05` jsonb binds), the issue's table plus the nested `tools`/`mcp_servers`/`skills`
+      and `allowed_hosts` cases. Evidence: `TestStringFieldsRejectNUL` failing 17/17 pre-fix.
+- [x] Move the guard to `decodeObject` (`internal/api/wire.go`) as a walk over the whole decoded
+      body, naming the offending path — a per-field check on `stringField`/`requiredString` would
+      miss the nested raw-JSON payloads. `rejectMetadataNUL` is unreachable under it, so it goes.
+- [x] Pin it with `TestStringFieldsRejectNUL` (`internal/api/edge_test.go`), with
+      `TestMetadataRejectsNUL` still green over its fifteen metadata surfaces.
+- [x] CHANGELOG entry; widen the existing docs/DIVERGENCES.md INFERRED entry — the registered
+      behaviour is unchanged, only its scope.
+- [x] Verifier PASS; review findings applied — the second decode now uses `UseNumber` (a plain
+      `any` decode rejected out-of-range literals like `1e400`, turning a working request into a
+      400; pinned by `TestNULGuardKeepsOutOfRangeNumbers`), the walk is gated on the raw escape,
+      and the "every JSON body" wording is scoped to bodies that are JSON objects. Path/query NUL
+      is the same class on a surface with no body decode — filed as #135.
+- [ ] PR green, threads settled, squash merge. Codex reviewer unavailable (quota exhausted).

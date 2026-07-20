@@ -18,6 +18,10 @@ import (
 // documents, not payloads.
 const maxBodyBytes = 4 << 20
 
+// nulEscape is the six bytes of the JSON escape for U+0000, spelled as a byte
+// slice so no editor or tool can rewrite the sequence into the byte it denotes.
+var nulEscape = []byte{'\\', 'u', '0', '0', '0', '0'}
+
 // decodeObject reads the request body as a single JSON object, keyed by raw
 // field so handlers can distinguish omitted / null / value — the reference
 // updates are patches where that distinction is semantic.
@@ -42,7 +46,98 @@ func decodeObject(r *http.Request) (map[string]json.RawMessage, error) {
 	if obj == nil {
 		return map[string]json.RawMessage{}, nil
 	}
+	if err := rejectNULBody(raw); err != nil {
+		return nil, err
+	}
 	return obj, nil
+}
+
+// rejectNULBody rejects U+0000 anywhere in the request body. It is valid JSON
+// (the \u0000 escape) but Postgres can store it in neither a text column
+// (SQLSTATE 22021) nor a jsonb value (22P05), nor bind it in the text[] the
+// work endpoint's metadata deletes use — so letting it through turns a
+// well-formed request into a 500 at insert time.
+//
+// The guard sits here, on the decode every JSON *object* body passes through,
+// rather than on the individual field parsers: the unstorable byte is a property
+// of the request, not of any one field, and the nested raw-JSON payloads (the
+// agent spec's tools/mcp_servers/skills, the environment config's package lists
+// and allowed_hosts) never reach stringField at all. One chokepoint is also what
+// keeps the endpoints from diverging — the Go-side metadata merge behind
+// agents/environments/sessions would otherwise drop an unstorable delete key as
+// a silent no-op while the identical patch against the work endpoint's SQL-side
+// merge failed. internal/events applies the same rule to inbound event payloads.
+//
+// Two body reads are deliberately not covered, neither of which can reach
+// Postgres: parseStopForce reads the stop body's single bool directly, and the
+// archive/ack/heartbeat handlers read no body at all. Path IDs and query
+// parameters are a separate surface carrying the same defect — see #135.
+func rejectNULBody(raw []byte) error {
+	// A raw 0x00 byte in a JSON string is itself invalid JSON, so the object
+	// decode above has already rejected it: the six-byte escape is the only way
+	// a NUL survives into a decoded string. Its absence therefore proves the
+	// body clean without a second parse, which on the events endpoint — the one
+	// carrying megabyte tool output — is the difference between ~14ms and ~0.04ms.
+	if !bytes.Contains(raw, nulEscape) {
+		return nil
+	}
+	// UseNumber keeps number literals as their source text. Decoding into the
+	// default float64 would reject an out-of-range literal such as 1e400 — legal
+	// JSON that Postgres stores happily, and that reaches here through any
+	// passthrough field (a custom tool's input_schema, the environment config) —
+	// turning a working request into a 400 on a body this guard should only ever
+	// have inspected. json.Number is a distinct type, so the walk ignores it.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return errInvalid("request body must be a JSON object")
+	}
+	return rejectNUL(v, "")
+}
+
+// rejectNUL walks every decoded string — object keys and values alike — and
+// names the offending path, so a client can find the value instead of hunting
+// through its own request.
+func rejectNUL(v any, path string) error {
+	const rule = `must not contain U+0000 (the \u0000 escape): it cannot be stored`
+	switch x := v.(type) {
+	case string:
+		if strings.ContainsRune(x, 0) {
+			return errInvalid("%s %s", fieldPath(path), rule)
+		}
+	case []any:
+		for i, elem := range x {
+			if err := rejectNUL(elem, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		for k, elem := range x {
+			// A NUL-bearing key is reported by its parent: echoing the key back
+			// would put the byte we just rejected into the error message.
+			if strings.ContainsRune(k, 0) {
+				return errInvalid("%s keys %s", fieldPath(path), rule)
+			}
+			child := k
+			if path != "" {
+				child = path + "." + k
+			}
+			if err := rejectNUL(elem, child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// fieldPath names the request itself when the offending value sits at the root
+// (a top-level key), where there is no field path to quote.
+func fieldPath(path string) string {
+	if path == "" {
+		return "the request body"
+	}
+	return path
 }
 
 // rejectUnknownKeys mirrors the reference API's strict parameter validation:
@@ -89,26 +184,9 @@ func requiredString(obj map[string]json.RawMessage, key string) (string, error) 
 	return val, nil
 }
 
-// rejectMetadataNUL rejects U+0000 in a metadata string — keys and values
-// alike. It is valid JSON (the \u0000 escape) but Postgres can store it in
-// neither a jsonb value nor the text[] the work endpoint binds its delete keys
-// to, so letting it through turns a well-formed request into a 500 at insert
-// time. Both metadata parsers call this, which is what keeps the endpoints from
-// diverging: the Go-side merge behind agents/environments/sessions would
-// otherwise drop an unstorable delete key as a silent no-op while the identical
-// patch against the work endpoint's SQL-side merge failed. internal/events
-// applies the same rule to inbound event payloads.
-func rejectMetadataNUL(strs ...string) error {
-	for _, s := range strs {
-		if strings.ContainsRune(s, 0) {
-			return errInvalid(`metadata must not contain U+0000 (the \u0000 escape): it cannot be stored`)
-		}
-	}
-	return nil
-}
-
 // parseMetadata parses a full metadata object (create semantics: all values
-// must be strings).
+// must be strings). Unstorable U+0000 in a key or value is already gone:
+// rejectNULBody rejects it for the whole body, before any parser runs.
 func parseMetadata(obj map[string]json.RawMessage) (map[string]string, error) {
 	md := map[string]string{}
 	raw, ok := obj["metadata"]
@@ -120,11 +198,6 @@ func parseMetadata(obj map[string]json.RawMessage) (map[string]string, error) {
 	}
 	if md == nil {
 		md = map[string]string{}
-	}
-	for k, v := range md {
-		if err := rejectMetadataNUL(k, v); err != nil {
-			return nil, err
-		}
 	}
 	return md, nil
 }
@@ -142,15 +215,9 @@ func splitMetadataPatch(raw json.RawMessage, emptyDeletes bool) (upserts map[str
 	}
 	upserts = map[string]string{}
 	for k, v := range patch {
-		if err := rejectMetadataNUL(k); err != nil {
-			return nil, nil, err
-		}
 		if v == nil || (emptyDeletes && *v == "") {
 			deletes = append(deletes, k)
 			continue
-		}
-		if err := rejectMetadataNUL(*v); err != nil {
-			return nil, nil, err
 		}
 		upserts[k] = *v
 	}

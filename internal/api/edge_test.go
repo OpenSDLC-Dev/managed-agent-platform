@@ -2,7 +2,9 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -139,9 +141,10 @@ func TestUpdateValidationEdgeCases(t *testing.T) {
 // It is well-formed JSON (the \u0000 escape) but Postgres cannot store it in a
 // jsonb value, nor bind it in the text[] of delete keys the work patch uses, so
 // without a guard a well-formed request becomes a 500 at insert time. The guard
-// lives in the two shared parsers (parseMetadata and splitMetadataPatch), and
-// this sweep is what keeps the endpoints from drifting apart — it is the same
-// rejection internal/events already applies to inbound event payloads.
+// lives in decodeObject, which every JSON body passes through (see
+// TestStringFieldsRejectNUL for the rest of the surface it covers), and this
+// sweep is what keeps the metadata endpoints from drifting apart — it is the
+// same rejection internal/events already applies to inbound event payloads.
 //
 // Keys are rejected alongside values, and a delete key alongside an upsert: a
 // NUL is unstorable wherever it appears, and on the Go-side merge a NUL delete
@@ -205,6 +208,119 @@ func TestMetadataRejectsNUL(t *testing.T) {
 			continue
 		}
 		wantErr(t, res.StatusCode, obj, http.StatusBadRequest, "invalid_request_error")
+	}
+}
+
+// TestStringFieldsRejectNUL is the metadata sweep's twin for every other
+// client-supplied string: a U+0000 anywhere in the request body is a 400, not a
+// 500. Before the guard moved to decodeObject these all reached Postgres, where
+// a text bind fails with 22021 and a jsonb bind with 22P05 — neither an
+// *apiError, so writeError rendered both as a 500 api_error.
+//
+// The nested cases are the reason the guard walks the whole decoded body rather
+// than sitting on stringField/requiredString: config.packages.npm[],
+// networking.allowed_hosts[], and the tools/mcp_servers/skills entries are
+// parsed straight out of raw JSON and would slip past a per-field check.
+func TestStringFieldsRejectNUL(t *testing.T) {
+	s := newTestServer(t)
+	agentID := createAgent(t, s, map[string]any{"name": "nul-str", "model": "m"})["id"].(string)
+	envID := createEnvironment(t, s, map[string]any{"name": "nul-str-env"})["id"].(string)
+	sessID := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+
+	const nul = "a\x00b"
+
+	for name, tc := range map[string]struct {
+		path string
+		body any
+		// field is the path the message must name, so a client can find the
+		// offending value instead of hunting through its own request.
+		field string
+	}{
+		"agent create name":        {"/v1/agents", map[string]any{"name": nul, "model": "m"}, "name"},
+		"agent create model":       {"/v1/agents", map[string]any{"name": "x", "model": nul}, "model"},
+		"agent create system":      {"/v1/agents", map[string]any{"name": "x", "model": "m", "system": nul}, "system"},
+		"agent create description": {"/v1/agents", map[string]any{"name": "x", "model": "m", "description": nul}, "description"},
+		"agent create tool name": {"/v1/agents", map[string]any{"name": "x", "model": "m", "tools": []any{
+			map[string]any{"type": "custom", "name": nul, "description": "d", "input_schema": map[string]any{}},
+		}}, "tools[0].name"},
+		"agent create mcp server url": {"/v1/agents", map[string]any{"name": "x", "model": "m", "mcp_servers": []any{
+			map[string]any{"type": "url", "name": "n", "url": nul},
+		}}, "mcp_servers[0].url"},
+		"agent create skill id": {"/v1/agents", map[string]any{"name": "x", "model": "m", "skills": []any{
+			map[string]any{"type": "anthropic", "skill_id": nul},
+		}}, "skills[0].skill_id"},
+		"agent update name":   {"/v1/agents/" + agentID, map[string]any{"version": 1, "name": nul}, "name"},
+		"agent update system": {"/v1/agents/" + agentID, map[string]any{"version": 1, "system": nul}, "system"},
+
+		"env create name":        {"/v1/environments", map[string]any{"name": nul}, "name"},
+		"env create description": {"/v1/environments", map[string]any{"name": "x", "description": nul}, "description"},
+		"env create package": {"/v1/environments", map[string]any{"name": "x", "config": map[string]any{
+			"type": "cloud", "packages": map[string]any{"npm": []any{nul}},
+		}}, "config.packages.npm[0]"},
+		"env create allowed host": {"/v1/environments", map[string]any{"name": "x", "config": map[string]any{
+			"type": "cloud", "networking": map[string]any{"type": "limited", "allowed_hosts": []any{nul}},
+		}}, "config.networking.allowed_hosts[0]"},
+		"env update description": {"/v1/environments/" + envID, map[string]any{"description": nul}, "description"},
+		"env update package": {"/v1/environments/" + envID, map[string]any{"config": map[string]any{
+			"type": "cloud", "packages": map[string]any{"npm": []any{nul}},
+		}}, "config.packages.npm[0]"},
+
+		"session create title": {"/v1/sessions", map[string]any{
+			"agent": agentID, "environment_id": envID, "title": nul,
+		}, "title"},
+		"session update title": {"/v1/sessions/" + sessID, map[string]any{"title": nul}, "title"},
+
+		// A NUL in a *top-level* key has no field path to quote, so the message
+		// names the body itself — and must not echo the key, which would put the
+		// rejected byte back into the response.
+		"top-level key": {"/v1/agents", map[string]any{"name": "x", "model": "m", nul: "v"}, "the request body"},
+	} {
+		status, res := s.do(http.MethodPost, tc.path, tc.body)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400 (%v)", name, status, res)
+			continue
+		}
+		wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		inner, _ := res["error"].(map[string]any)
+		msg, _ := inner["message"].(string)
+		if !strings.Contains(msg, "U+0000") || !strings.Contains(msg, tc.field) {
+			t.Errorf("%s: message = %q, want it to name %q and U+0000", name, msg, tc.field)
+		}
+	}
+}
+
+// TestNULGuardKeepsOutOfRangeNumbers pins the one way this guard could have made
+// a working request fail. It inspects the body by decoding it a second time, and
+// a plain `any` decode turns every number into a float64 — so a literal outside
+// float64 range, such as the 1e400 a JSON Schema may legitimately carry in a
+// passthrough field, would have failed that decode and become a 400 on a body
+// with nothing wrong with it. Postgres stores the value fine, so the only correct
+// answer is to store it. Both halves matter: the number alone must still be
+// accepted, and a body carrying the number *and* a NUL must still be rejected for
+// the NUL, naming the field rather than blaming the body's shape.
+func TestNULGuardKeepsOutOfRangeNumbers(t *testing.T) {
+	s := newTestServer(t)
+	schema := map[string]any{"type": "object", "maximum": json.RawMessage("1e400")}
+	tool := func(name string) any {
+		return map[string]any{"type": "custom", "name": name, "description": "d", "input_schema": schema}
+	}
+
+	// Status only, not the parsed body: the response echoes the spec back, and
+	// this test client decodes into float64 — the very decode the fix had to stop
+	// doing server-side, here demonstrating the hazard from the other end.
+	if status, res := s.do(http.MethodPost, "/v1/agents", map[string]any{
+		"name": "big-number", "model": "m", "tools": []any{tool("t")},
+	}); status != http.StatusOK {
+		t.Fatalf("agent create with an out-of-range number literal: status %d, body %v", status, res)
+	}
+
+	status, res := s.do(http.MethodPost, "/v1/agents", map[string]any{
+		"name": "big-number-nul", "model": "m", "tools": []any{tool("a\x00b")},
+	})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	inner, _ := res["error"].(map[string]any)
+	if msg, _ := inner["message"].(string); !strings.Contains(msg, "tools[0].name") {
+		t.Errorf("message = %q, want it to name tools[0].name", msg)
 	}
 }
 
