@@ -220,47 +220,43 @@ Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https
 
 ## Work Stop 204 (plan 04) — archived 2026-07-20
 
-[docs/plan/04_work-stop-204.md](./plan/04_work-stop-204.md), delivered in one PR (**#122**;
-narrative in CHANGELOG § [Unreleased]). Recorded here is only what the changelog cannot hold — how
-a *confirmed* registry entry came to be wrong, and what the review round changed about the answer.
+[docs/plan/04_work-stop-204.md](./plan/04_work-stop-204.md), delivered in one PR (**#122**). The
+change and the reasoning behind it are the CHANGELOG § [Unreleased] entry; recorded here is only
+what a changelog cannot hold.
 
-**A CONFIRMED divergence that was backwards, and the inference that made it so.** The registry
-asserted 200 + a JSON work object as the reference contract, reasoning that the generated
-`Work.Stop` is typed `*BetaSelfHostedWork` and that driving the SDK against a 204/empty-body server
-makes its decoder error. The measurement was real and reproducible; the inference was not. It
-measured the *client* and concluded something about the *service* — while the same pinned SDK ships
-a helper whose comment exists precisely to say the server sends 204 anyway, worked around with
-`WithResponseBodyInto` because only Go's decoder is strict. The lesson generalizes past this
+**The generalizable lesson: "confirmed" did not mean re-derivable.** The registry's entry was not a
+guess — it was CONFIRMED, and the measurement behind it reproduces to this day. What it lacked was a
+check that the thing measured was the thing claimed. Two rules fall out, both wider than this
 endpoint: a client-side workaround shipped by the reference SDK is evidence *for* the behavior it
-works around, and "confirmed" in this registry has never meant "re-derivable from the artifact that
-confirmed it."
+works around, never against it; and a CONFIRMED entry earns re-derivation whenever the change under
+review depends on it, because the artifact that confirmed it may never have supported it.
 
-**Evaluated and rejected — keeping 200 + JSON as a leniency divergence.** Adversarial review argued
-it seriously: 200 + JSON satisfies a strict superset of clients (measured — the generated method
-decodes it, the bypassing helper and CLI tolerate either), so 204 breaks a consumer for no
-compatibility gain. Rejected because the "extra" consumer is one already broken against Anthropic's
-own service: the old shape preserved compatibility with *us*, not with the reference, and code
-developed against it would fail on contact with the real endpoint — the migration trap a drop-in
-self-hostable platform exists to avoid.
+**Evaluated and rejected — keeping 200 + JSON as a deliberate leniency divergence.** Adversarial
+review made the case seriously, and it was measured rather than asserted: 200 + JSON satisfies a
+strict superset of clients (the generated method decodes it; the bypassing helper and the `ant` CLI
+tolerate either shape). Rejected because "superset of clients" is the wrong objective for a
+compatibility layer — the extra consumer it buys is one already broken against Anthropic's own
+service, so the leniency bought compatibility with this platform rather than with the reference. Two
+reviewers reached this position independently and both were overruled on that ground; recorded here
+because the argument is a good one and will recur the next time a divergence looks harmlessly
+permissive.
 
-**What the review round corrected.** Two reviewer findings changed the answer's framing rather than
-its substance, and one was a plain error of ours. CLAUDE.md ranks *public docs* above the reference
-checkouts, and the published Stop Work reference documents a `BetaSelfHostedWork` return — the plan
-had claimed the typed schema ranked first. So the entry is now recorded as a deliberate divergence
-*from the published spec* toward the deployed service, not waved through as "no divergence", and
-left open for a recording (#78) to close. What breaks the tie is that the published reference,
-`api.md`, and the generated signature are one witness rather than three — all downstream of the
-OpenAPI document the erratum names as wrong. The compatibility break is now stated outright instead
-of glossed. Separately, the plan's aside that the empty-poll response might follow Stop to 204 had
-the evidence backwards: the poller calls `Work.Poll` with no bypass and its empty-queue branch needs
-a decoded body, so `200` + `null` stands.
+**What the review round corrected — including an error of ours.** CLAUDE.md ranks *public docs*
+above the reference checkouts, and the plan asserted the typed schema ranked first. That was simply
+wrong, and it mattered: the top-ranked source disagrees with the change. The conclusion survived
+(the spec-side witnesses are one witness, not three), but the framing had to change from "not a
+divergence" to a deliberate divergence from the published spec, left open for a recording (#78) to
+close, with the compatibility break stated rather than glossed. Separately, the plan's aside that
+the empty-poll response might follow Stop to 204 had its evidence backwards — the poller calls
+`Work.Poll` with no bypass and its empty-queue branch needs a decoded body — so `200` + `null`
+stands. Both corrections came from reviewers reading the primary sources rather than the plan.
 
-**Verification.** The mutation check is the load-bearing evidence: removing the worker's bypass
-fails `TestWorkerForceStopAcceptsNoContent` with the SDK's quoted error string verbatim. Asserting
-work state alone cannot catch a missing bypass — the stop still succeeds server-side, and the only
-damage is a fictional `worker: force-stop failed` on every clean finish. The verifier additionally
-drove the real `ant beta:environments:work stop`, built from the reference checkout, against the
-204 server: exit 0 for both graceful and forced stop.
+**Why the mutation check was the load-bearing evidence.** Asserting the resulting work state cannot
+catch a missing decoder bypass: the stop succeeds server-side either way, and the only damage is a
+fictional `worker: force-stop failed` on every clean finish — invisible to a suite that checks the
+database. Only removing the bypass and watching `TestWorkerForceStopAcceptsNoContent` fail with the
+SDK's quoted error string proves the test constrains anything. A green suite was not evidence here;
+a red one was.
 
 ---
 
