@@ -572,16 +572,22 @@ grader is Platform-class is not a safety argument.
 The bump itself is two lines of `go.mod`/`go.sum`. It is recorded here because CLAUDE.md makes the
 pinned SDK this project's **authoritative typed wire schema**, so a minor-version bump is a
 wire-schema event whose *outcome* has to be auditable even when — as here — the outcome is that
-nothing in the contract moved. Without this record the next bump has to redo the same diff to learn
-that v1.56.0 → v1.58.0 was contract-neutral.
+no field or enum drifted and no code change became necessary. Without this record the next bump has
+to redo the same diff to learn that. (Stated that precisely rather than as "contract-neutral": one
+documented bound *did* widen — see the custom tool `Description` below — it simply lands where this
+repo enforces nothing.)
 
 **What the range contains.** Two upstream releases: v1.57.0 (a "dreaming" API and tool-runner
 permission gating) and v1.58.0 (MCP Tunnels). Endpoint count went 116 → 131 (`.stats.yml:1`).
 
-**The decisive measurement.** The three files carrying the managed-agents session schema —
-`betasessionevent.go`, `betasession.go`, `betasessionthread.go` — are **byte-identical** across the
-two versions (`cmp`). The event taxonomy, the ID prefixes, and every session field this repo mirrors
-are therefore unchanged by construction, not by inspection.
+**The decisive measurement.** Every SDK file carrying managed-agents schema this repo mirrors is
+**byte-identical** across the two versions (`cmp`): `betasessionevent.go`, `betasession.go`,
+`betasessionthread.go`, and — because a session's shape reaches past those three —
+`betasessionresource.go` (the `Resources` union this repo emits at `internal/api/sessions.go:35`),
+`betasessionthreadevent.go`, `betaagentversion.go`, `betaenvironment.go`, `betaenvironmentwork.go`.
+The event taxonomy, the ID prefixes, and every session field this repo mirrors are therefore
+unchanged by construction, not by inspection. The first three alone would *not* have been sufficient
+proof, which is why the list is enumerated here.
 
 **The three questions #120 asked, answered.**
 
@@ -640,15 +646,33 @@ v1.56.0 mentions surviving in CHANGELOG.md and archived `docs/plan/04` are histo
 what was true when those PRs landed and were deliberately left alone.
 
 **Evidence.** `make verify` green at total statement coverage **91.92%** (including the Docker and
-K8s sandbox suites). Every SDK symbol the repo references still exists with an identical shape —
-enumerated from the non-test import sites (`internal/provider/anthropic/anthropic.go` and
-`internal/worker/{client,lease,toolexec}.go`; `internal/worker/{lease,toolexec}_test.go` import the
-SDK too, and the compile-and-test pass covers what they reference), and proven transitively by the
-clean build and full suite at v1.58.0. No code change was required in this repo.
+K8s sandbox suites). Every SDK request type, response field, JSON tag, service method, option,
+paginator, SSE helper and error decoder this repo uses is unchanged: the defining file of each is
+among the byte-identical set, enumerated from the non-test import sites
+(`internal/provider/anthropic/anthropic.go`, `internal/worker/{client,lease,toolexec}.go`;
+`internal/worker/{lease,toolexec}_test.go` import the SDK too, and the compile-and-test pass covers
+what they reference). One shape *did* change and is called out rather than smoothed over:
+`sdk.Client`'s embedded `BetaService` gained `Dreams` and `Tunnels` fields (`beta.go:20`), so the
+struct layout differs even though no call site's behavior does. "No code change required" is exact;
+"zero runtime difference" would not be — the two new services are constructed at client init, and
+the version-identifying `User-Agent` / `X-Stainless-Package-Version` headers change value.
 
-**Process note.** `issue-triage` returned `needs_plan: true`, on CLAUDE.md's "wire-schema
-verification" trigger. No plan file was authored: a plan is a forward-looking decomposition across
-PRs, and this work is a single PR whose entire deliverable *is* the verification outcome, which the
-trigger exists to make sure nobody improvises. Creating and archiving a plan in one commit would
-record that outcome in a file whose status says the work has not started. The outcome is recorded
-here instead, which is what CLAUDE.md reserves this file for.
+**Process note — a rejected decision that was itself wrong, and got reversed in review.**
+`issue-triage` returned `needs_plan: true` on the wire-schema-verification trigger. The
+implementation initially declined to author a plan, reasoning that a plan is a forward-looking
+decomposition across PRs while this is a single PR whose entire deliverable *is* the verification
+outcome, so a plan created and archived in one commit would record that outcome in a file whose
+status says the work had not started.
+
+That reasoning was wrong, and is kept here because the failure mode is worth recognizing next time.
+`.claude/agents/issue-triage.md`'s judgment criteria say the wire-schema trigger fires
+"**unconditionally**, however well-scoped the issue already looks: the resolution itself belongs in a
+plan, never improvised mid-implementation" — a rule written precisely to defeat the "but this case is
+small" argument, which is the argument that was made. The lifecycle objection was also false: a plan
+may land directly as `in-progress` (CLAUDE.md's plan bullet says so), which is what
+[05_sdk-bump-1.58.0.md](./plan/05_sdk-bump-1.58.0.md) does.
+
+Worth noting for anyone weighing reviewer disagreement by count: two of the three review passes
+(the verifier and the Claude-side reviewer) examined this decision and endorsed it as defensible.
+Only the Codex pass called it a blocking finding, and the Codex pass was right — it was the one that
+quoted the governing sentence instead of reasoning from the rule's purpose.
