@@ -1,9 +1,15 @@
 ---
-status: in-progress
+status: archived
 issue: "#120"
 ---
 
 # Bump anthropic-sdk-go v1.56.0 → v1.58.0
+
+> Archived 2026-07-20: completed. Delivered in PR
+> [#131](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/131); the verification outcome
+> is in [docs/HISTORY.md](../HISTORY.md) § "anthropic-sdk-go v1.58.0 bump (#120)", the narrative in
+> CHANGELOG.md. **Everything below describes the state of the repository *before* that PR** — read it
+> as the argument for doing the verification, not as a description of the result.
 
 The plan for [#120](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/120).
 
