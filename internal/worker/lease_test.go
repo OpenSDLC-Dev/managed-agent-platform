@@ -17,6 +17,7 @@ import (
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -259,6 +260,9 @@ func TestWorkerToolSpanParentsOnEnqueueTrace(t *testing.T) {
 	}
 	if got := toolSpan.Parent().SpanID(); got != sc.SpanID() {
 		t.Errorf("tool_exec parent span id = %s, want the enqueue span %s", got, sc.SpanID())
+	}
+	if got := toolSpan.Status().Code; got != codes.Unset {
+		t.Errorf("clean run's span status = %v, want unset", got)
 	}
 }
 
