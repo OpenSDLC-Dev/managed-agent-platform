@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 issue: "#27"
 ---
 
