@@ -1,6 +1,7 @@
 package provider_test
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -68,6 +69,75 @@ func TestRedactorString(t *testing.T) {
 			cfg:  provider.Config{BaseURL: "https://user:pw-secret-999@gw.internal/%zz"},
 			in:   `parse "https://user:pw-secret-999@gw.internal/%zz/v1/chat/completions": invalid URL escape "%zz"`,
 			want: `parse "https://user:[redacted]@gw.internal/%zz/v1/chat/completions": invalid URL escape "%zz"`,
+		},
+		{
+			// net/http derives an Authorization: Basic header from userinfo, so
+			// an auth-echoing endpoint quotes the credential base64-encoded.
+			name: "base_url credential echoed as basic auth",
+			cfg:  provider.Config{BaseURL: "https://gw-user:pw-secret-999@gateway.internal"},
+			in:   "rejected " + base64.StdEncoding.EncodeToString([]byte("gw-user:pw-secret-999")),
+			want: "rejected [redacted]",
+		},
+		{
+			// url.Parse reads this as scheme-plus-opaque, so it yields no
+			// userinfo at all and only the textual scan can find the password.
+			name: "schemeless base_url still yields its password",
+			cfg:  provider.Config{BaseURL: "user:pw-secret-777@gw.internal"},
+			in:   `Post "user:pw-secret-777@gw.internal/v1/chat/completions": unsupported protocol scheme`,
+			want: `Post "user:[redacted]@gw.internal/v1/chat/completions": unsupported protocol scheme`,
+		},
+		{
+			// The authority ends at the query, so nothing here is a credential.
+			name: "at-sign in a query is not userinfo",
+			cfg:  provider.Config{BaseURL: "https://gateway.internal:8080?x@y"},
+			in:   "no capacity at 8080?x on gateway.internal",
+			want: "no capacity at 8080?x on gateway.internal",
+		},
+		{
+			// No password means the username is the credential, not an
+			// identifier standing beside one.
+			name: "userinfo with no password is itself the credential",
+			cfg:  provider.Config{BaseURL: "http://token-secret-42@gw.internal"},
+			in:   `Post "http://token-secret-42@gw.internal/v1/chat/completions": dial refused`,
+			want: `Post "http://[redacted]@gw.internal/v1/chat/completions": dial refused`,
+		},
+		{
+			name: "credential in a base_url query parameter",
+			cfg:  provider.Config{BaseURL: "https://gw.internal?api_key=query-secret&pool=alpha"},
+			in:   `Get "https://gw.internal?api_key=query-secret&pool=alpha": dial refused`,
+			want: `Get "https://gw.internal?api_key=[redacted]&pool=alpha": dial refused`,
+		},
+		{
+			// A custom auth header name matches none of the canonical spellings.
+			name: "custom auth header names",
+			cfg: provider.Config{Headers: map[string]string{
+				"X-Auth": "gw-secret-456", "X-Signature": "sig-789", "X-Credential": "cred-abc",
+			}},
+			in:   "rejected gw-secret-456 sig-789 cred-abc",
+			want: "rejected [redacted] [redacted] [redacted]",
+		},
+		{
+			// Splitting on any space would register "alpha" and blank it out of
+			// every diagnostic naming the pool.
+			name: "a non-scheme value with a space is not split",
+			cfg:  provider.Config{Headers: map[string]string{"X-Route-Key": "pool alpha"}},
+			in:   "no capacity in alpha",
+			want: "no capacity in alpha",
+		},
+		{
+			// An endpoint quoting the header back normalized drops the extra
+			// space a hand-written value carries.
+			name: "bearer token registered without surrounding whitespace",
+			cfg:  provider.Config{Headers: map[string]string{"Authorization": "Bearer  gw-secret"}},
+			in:   "endpoint saw gw-secret",
+			want: "endpoint saw [redacted]",
+		},
+		{
+			// A cookie on a model endpoint carries a session credential.
+			name: "cookie header value",
+			cfg:  provider.Config{Headers: map[string]string{"Cookie": "session=abc-123-def"}},
+			in:   "rejected session=abc-123-def",
+			want: "rejected [redacted]",
 		},
 		{
 			name: "base_url with no userinfo",

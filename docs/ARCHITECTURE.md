@@ -331,8 +331,10 @@ four binaries, loopback-bound control plane, optional Jaeger profile).
   quote an endpoint (`internal/provider/redact.go`), so an endpoint echoing the request's
   auth header back cannot land the key in a `session.error` event, which is append-only
   and re-served to clients. Matching is verbatim against the configured value in each
-  form it can render (decoded, percent-encoded, as written), which is exact for a naive
-  echo and by design does not chase a credential an endpoint deliberately transforms.
+  form it is known to reach an error in — decoded, percent-encoded, base64 in a derived
+  `Authorization: Basic`, and as written — and by design does not chase a credential an
+  endpoint re-encodes into some form of its own. A model's *successful* output is a
+  trusted boundary and is never redacted: it is the content the session exists to record.
   `provider.Config` has no redacting `String`, so it must not be formatted whole.
 - **A session is not a context window.** The harness may replay, slice, or rewind the
   event log before feeding the model; context strategy is never baked into an

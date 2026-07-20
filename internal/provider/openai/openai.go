@@ -122,7 +122,9 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 		if len(quoted) > quotedBodyLimit {
 			quoted = quoted[:quotedBodyLimit]
 		}
-		return nil, fmt.Errorf("openai endpoint returned %s: %s", resp.Status, quoted)
+		// The status line is endpoint-controlled too: HTTP/1 lets a server put
+		// any text after the code.
+		return nil, fmt.Errorf("openai endpoint returned %s: %s", p.redact.String(resp.Status), quoted)
 	}
 	return &stream{body: resp.Body, r: bufio.NewReader(resp.Body), redact: p.redact}, nil
 }
@@ -402,7 +404,9 @@ func (s *stream) Next() bool {
 		}
 		data, status, err := s.readData()
 		if err != nil {
-			s.err = err
+			// Endpoint-controlled: an HTTP/2 GOAWAY carries server debug data
+			// into the body-read error.
+			s.err = s.redact.Error(err)
 			return false
 		}
 		switch status {

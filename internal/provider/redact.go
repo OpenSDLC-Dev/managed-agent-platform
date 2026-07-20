@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/base64"
 	"net/url"
 	"strings"
 )
@@ -33,7 +34,7 @@ func NewRedactor(cfg Config) Redactor {
 	r.add(cfg.APIKey)
 	r.addBaseURLSecrets(cfg.BaseURL)
 	for name, value := range cfg.Headers {
-		if isAuthHeader(name) {
+		if isCredentialName(name) {
 			r.add(value)
 		}
 	}
@@ -44,22 +45,47 @@ func NewRedactor(cfg Config) Redactor {
 // needs no cooperation from the endpoint at all: the Anthropic SDK formats the
 // request URL into every API error with String(), not Redacted().
 //
-// All three renderings are registered, because a password reaches an error in
+// Every rendering is registered, because a password reaches an error in
 // whichever one the failure produced: decoded, as url.Parse stores it and as a
 // body echo would quote it; re-encoded, as url.URL.String() prints it — a
 // password containing '@', '/', '%' or a space, all of which RFC 3986 requires
-// be escaped in userinfo, renders nothing like the decoded form; and exactly as
-// written in configuration, which is the only form available when base_url does
-// not parse at all, itself an error that quotes the string back.
+// be escaped in userinfo, renders nothing like the decoded form; base64, as
+// net/http sends it in an Authorization: Basic header an endpoint may echo
+// back; and exactly as written in configuration, which is the only form
+// available when base_url does not parse at all, itself an error that quotes
+// the string back.
 //
 // The username is deliberately not registered. It identifies rather than
 // authenticates, and masking it would cost a diagnostic to hide nothing.
 func (r *Redactor) addBaseURLSecrets(baseURL string) {
-	if u, err := url.Parse(baseURL); err == nil && u.User != nil {
-		if pw, ok := u.User.Password(); ok {
-			r.add(pw)
-			if _, encoded, found := strings.Cut(u.User.String(), ":"); found {
-				r.add(encoded)
+	if u, err := url.Parse(baseURL); err == nil {
+		if u.User != nil {
+			if pw, ok := u.User.Password(); ok {
+				r.add(pw)
+				if _, encoded, found := strings.Cut(u.User.String(), ":"); found {
+					r.add(encoded)
+				}
+				// net/http turns userinfo into an Authorization: Basic header
+				// whenever the request carries none — always, under the
+				// anthropic protocol, which authenticates with x-api-key
+				// instead. An endpoint echoing that header back quotes the
+				// credential base64-encoded, which no rendering of the URL
+				// matches.
+				r.add(base64.StdEncoding.EncodeToString([]byte(u.User.Username() + ":" + pw)))
+			} else {
+				// With no password the username is not an identifier standing
+				// beside a credential — it is the credential, the
+				// token-as-userinfo convention.
+				r.add(u.User.Username())
+			}
+		}
+		// Some gateways take the key as a query parameter instead; a transport
+		// error quotes the whole URL, query included.
+		for name, values := range u.Query() {
+			if isCredentialName(name) {
+				for _, value := range values {
+					r.add(value)
+				}
 			}
 		}
 	}
@@ -70,11 +96,17 @@ func (r *Redactor) addBaseURLSecrets(baseURL string) {
 // found without parsing — url.Parse rejects a malformed URL outright, and the
 // error for one quotes the text it could not parse.
 func rawUserinfoPassword(baseURL string) string {
-	_, rest, ok := strings.Cut(baseURL, "://")
-	if !ok {
-		return ""
+	// A base_url with no scheme is malformed too, and url.Parse reads it as
+	// scheme-plus-opaque rather than userinfo, so it reaches here intact.
+	authority := baseURL
+	if _, rest, ok := strings.Cut(baseURL, "://"); ok {
+		authority = rest
 	}
-	authority, _, _ := strings.Cut(rest, "/")
+	// The authority ends at whichever delimiter comes first; stopping only at
+	// "/" would swallow a query into the candidate secret.
+	authority, _, _ = strings.Cut(authority, "/")
+	authority, _, _ = strings.Cut(authority, "?")
+	authority, _, _ = strings.Cut(authority, "#")
 	// Userinfo ends at the last "@": an unescaped "@" in a malformed password
 	// would otherwise cut the secret short.
 	at := strings.LastIndex(authority, "@")
@@ -91,36 +123,61 @@ func rawUserinfoPassword(baseURL string) string {
 // add registers one secret, plus the token alone when the value carries an auth
 // scheme ("Bearer <token>"): an endpoint may echo the whole header or only the
 // token, and matching is by substring, so the narrowest form must be registered
-// too. An empty secret is skipped — replacing "" would insert the marker
-// between every character of the message.
+// too. The token is trimmed because an endpoint quoting the header back
+// normalized would drop whitespace a hand-written value carries.
+//
+// Only a known scheme splits the value. Splitting on any space would register
+// the second word of a value that is not a credential pair at all — a routing
+// tag like "pool alpha" would put "alpha" in the secret set and blank it out of
+// every diagnostic mentioning the pool.
+//
+// An empty secret is skipped: replacing "" would insert the marker between
+// every character of the message.
 func (r *Redactor) add(secret string) {
 	if secret == "" {
 		return
 	}
 	r.secrets = append(r.secrets, secret)
-	if _, token, ok := strings.Cut(secret, " "); ok && token != "" {
-		r.secrets = append(r.secrets, token)
+	scheme, token, ok := strings.Cut(secret, " ")
+	if !ok {
+		return
+	}
+	switch strings.ToLower(scheme) {
+	case "bearer", "basic", "digest", "token":
+		if token = strings.TrimSpace(token); token != "" {
+			r.secrets = append(r.secrets, token)
+		}
 	}
 }
 
-// isAuthHeader reports whether a configured header carries a credential. Only
-// those values join the secret set, because Headers also carries routing
-// metadata: redacting "x-gateway-route: llm-pool-7" out of "no capacity in pool
-// llm-pool-7" would destroy the diagnostic the quoted body exists to provide.
-// Headers must be covered at all because they are an auth channel by
-// construction — the openai adapter applies them after setting Authorization,
-// so an entry can replace the api_key outright.
-func isAuthHeader(name string) bool {
-	n := strings.ToLower(name)
+// isCredentialName reports whether a configured header or query parameter of
+// this name carries a credential. Only those values join the secret set,
+// because Headers also carries routing metadata: redacting
+// "x-gateway-route: llm-pool-7" out of "no capacity in pool llm-pool-7" would
+// destroy the diagnostic the quoted body exists to provide. Headers must be
+// covered at all because they are an auth channel by construction — the openai
+// adapter applies them after setting Authorization, so an entry can replace the
+// api_key outright.
+//
+// A "-key" suffix classifies deliberately: it catches "x-tenant-key" at the
+// cost of masking an "idempotency-key" that was never secret. Over-redaction
+// costs a diagnostic and is noticed; under-redaction writes a credential into
+// an append-only log and is not.
+func isCredentialName(name string) bool {
+	// Underscores so a query parameter ("api_key", "access_token") is judged by
+	// the same rules as the header spelling.
+	n := strings.ReplaceAll(strings.ToLower(name), "_", "-")
 	switch n {
-	// "apikey" without a separator is Kong's key-auth default and Supabase's
-	// convention, and matches none of the substring rules below; "cookie" on a
-	// model endpoint carries a session credential, never a diagnostic.
-	case "authorization", "proxy-authorization", "x-api-key", "api-key", "apikey", "cookie":
+	// Neither matches a rule below: "apikey" carries no separator (Kong's
+	// key-auth default, Supabase's convention), and a cookie on a model
+	// endpoint carries a session credential, never a diagnostic.
+	case "apikey", "cookie":
 		return true
 	}
-	return strings.Contains(n, "token") || strings.Contains(n, "secret") ||
-		strings.Contains(n, "password") || strings.HasSuffix(n, "-key")
+	return strings.Contains(n, "auth") || strings.Contains(n, "token") ||
+		strings.Contains(n, "secret") || strings.Contains(n, "password") ||
+		strings.Contains(n, "credential") || strings.Contains(n, "signature") ||
+		strings.HasSuffix(n, "-key")
 }
 
 // String replaces every configured credential in s. Everything else — the

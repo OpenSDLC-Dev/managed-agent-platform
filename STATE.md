@@ -24,9 +24,14 @@ the model credential into an error that lands in an append-only `session.error` 
 - [x] Docs corrected: `docs/ARCHITECTURE.md`'s security invariant claimed this redaction already
       existed (false when written); both integration-test comments and `evals/report_test.go`'s
       "cannot reach an error" premise updated.
-- [x] `make verify` green (coverage 91.83%); verifier PASS with findings.
+- [x] `make verify` green; two verifier passes, both PASS with findings, all addressed.
 - [x] Review round: a `base_url` password is stored decoded but printed re-encoded, so it leaked in
-      full unless URL-safe — the original test fixture was, which is why it passed. All three
-      renderings now registered, the quoted body over-read so truncation cannot sever a secret,
-      and `apikey` added to the auth-header names. Each gap has a test that fails without it.
+      full unless URL-safe — the original test fixture was, which is why it passed. Re-verification
+      then found a fourth rendering: `net/http` derives `Authorization: Basic` from userinfo, so an
+      auth-echoing endpoint quotes the credential base64-encoded. Every rendering is now registered,
+      the quoted body over-read so truncation cannot sever a secret. Each gap fails without its fix.
+- [x] External reviewer round: custom auth header names, a username-only userinfo, and an
+      endpoint-controlled `resp.Status` all leaked; splitting a header value on any space
+      over-redacted a routing tag. Two residuals documented as deliberate (a key re-encoded by
+      Go's HTML-escaping JSON encoder; a model's own successful output).
 - [ ] PR open, CI green, review threads settled.

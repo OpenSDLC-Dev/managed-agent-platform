@@ -2,6 +2,7 @@ package anthropic_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -43,11 +44,13 @@ func (f *fakeServer) handler(w http.ResponseWriter, r *http.Request) {
 	if f.status != 0 {
 		msg := "bad key"
 		if f.echoKey {
-			key := r.Header.Get("x-api-key")
+			// Both auth headers are echoed: userinfo in base_url reaches the
+			// endpoint as Authorization: Basic, not as x-api-key.
+			key := strings.TrimSpace(r.Header.Get("x-api-key") + " " + r.Header.Get("Authorization"))
 			if key == "" {
 				// Without this the handler would echo "", the body would carry
 				// no credential, and a leak assertion would pass vacuously.
-				f.t.Fatal("echoKey: request carried no x-api-key header to echo")
+				f.t.Fatal("echoKey: request carried no credential header to echo")
 			}
 			// The body must stay valid JSON: the SDK only keeps a response body
 			// it could parse, so an HTML echo would never reach the error text
@@ -438,6 +441,45 @@ func TestErrorNeverQuotesBaseURLCredentials(t *testing.T) {
 			t.Errorf("%s: redaction destroyed the diagnostic: %q", tc.name, err)
 		}
 		srv.Close()
+	}
+}
+
+// net/http derives an Authorization: Basic header from base_url's userinfo
+// whenever the request carries none — always here, since the Anthropic protocol
+// authenticates with x-api-key. So an endpoint that echoes its auth header back
+// quotes the credential base64-encoded, in none of the forms the URL renders.
+func TestErrorNeverQuotesBaseURLCredentialsAsBasicAuth(t *testing.T) {
+	const user, password = "gw-user", "pw-secret-999"
+	f := &fakeServer{t: t, status: http.StatusUnauthorized, echoKey: true}
+	srv := httptest.NewServer(http.HandlerFunc(f.handler))
+	t.Cleanup(srv.Close)
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	u.User = url.UserPassword(user, password)
+
+	p, err := anthropic.New(provider.Config{
+		Protocol: "anthropic",
+		Model:    "upstream-model",
+		BaseURL:  u.String(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = generateErr(t, p)
+	if err == nil {
+		t.Fatal("401 upstream produced no error")
+	}
+	basic := base64.StdEncoding.EncodeToString([]byte(user + ":" + password))
+	if !strings.Contains(f.gotHead.Get("Authorization"), basic) {
+		t.Fatalf("precondition: request did not carry basic auth, got %q", f.gotHead.Get("Authorization"))
+	}
+	if strings.Contains(err.Error(), basic) {
+		t.Errorf("error quotes the base64 credential back: %q", err)
+	}
+	if strings.Contains(err.Error(), password) {
+		t.Errorf("error quotes the credential back: %q", err)
 	}
 }
 

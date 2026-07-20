@@ -63,7 +63,40 @@ copy of an entry here.
   `url.Parse` cannot help with by definition — is covered too. The quoted body is read one secret
   longer than it is quoted, because truncating at the cap could sever a credential and leave its
   head unmatched. And `isAuthHeader` now knows `apikey` (Kong's key-auth default, Supabase's
-  convention), which matched none of its substring rules.
+  convention) and `cookie`, which matched none of its substring rules.
+
+  A second verification pass then found a fourth rendering, by the same reasoning and with the same
+  consequence: `net/http` derives an `Authorization: Basic` header from `base_url`'s userinfo
+  whenever the request carries none — which is always under the anthropic protocol, since it
+  authenticates with `x-api-key` — so an endpoint echoing its auth header back quotes the
+  credential **base64-encoded**, matching no rendering of the URL. That form is registered too, and
+  the same pass closed a schemeless `base_url` (which `url.Parse` reads as scheme-plus-opaque, so
+  only the textual scan can reach its password) and an over-redaction where an `@` in a query was
+  mistaken for userinfo. The lesson generalises past this change: a credential is not one string
+  but every encoding the stack renders it in, and a test fixture chosen for readability — a
+  URL-safe password, a payload that does not straddle the cap — is precisely the one that cannot
+  see the gap.
+
+  An independent external reviewer, reading the first commit only, reproduced those same
+  conclusions and added four more. Three were leaks: a custom auth header name (`X-Auth`,
+  `X-Signature`, `X-Credential`) matched none of the canonical spellings; userinfo carrying a
+  *username and no password* — the token-as-userinfo convention — registered nothing, since the
+  username is only an identifier when a password stands beside it; and `resp.Status`, which HTTP/1
+  lets a server fill with arbitrary text, was interpolated unredacted next to the body that was
+  not. The fourth was over-redaction this change had introduced: splitting a header value on any
+  space registered the second word of a value that is not a credential pair at all, so
+  `x-route-key: "pool alpha"` blanked "alpha" out of every diagnostic naming the pool. Splitting
+  now requires a known auth scheme, which also normalises the whitespace an echoed header loses.
+  A `base_url` query credential (`?api_key=…`, a pattern `evals/report_test.go` already guarded
+  against) and the body-read error that carries an HTTP/2 GOAWAY's server debug data are covered
+  too.
+
+  Two residuals are deliberate, not oversights. A credential containing `<`, `>` or `&` survives
+  Go's HTML-escaping JSON encoder as `<…`, which no verbatim match sees — chasing arbitrary
+  re-encodings is the speculative pattern-matching this design rejected, and it buys nothing
+  against an endpoint that transforms deliberately. And a model that emits the key in its own
+  *successful* output is not an error path at all: model output is a trusted boundary here, and
+  redacting it would corrupt the very content the session exists to record.
 
   `docs/ARCHITECTURE.md`'s security invariants already claimed provider errors redacted the key;
   that sentence was false when written and is now true, minus the half about config printouts, which
