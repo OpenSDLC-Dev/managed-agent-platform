@@ -5,10 +5,17 @@ issue: "#27"
 
 # Work Stop returns 204 No Content
 
+> Archived 2026-07-20: completed. Delivered in PR
+> [#122](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/122); the progress summary is
+> in [docs/HISTORY.md](../HISTORY.md) § "Work Stop 204 (plan 04)", the narrative in CHANGELOG.md.
+> **Everything below describes the state of the repository *before* that PR** — in particular, the
+> registry entry it calls wrong has since been replaced, so read it as the argument for the change
+> rather than as a description of the code.
+
 The plan for [#27](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/27). It needs a
 plan file rather than direct tasks because it **reverses a CONFIRMED entry in
-[docs/DIVERGENCES.md](../DIVERGENCES.md)**: the registry currently asserts that `200` + a
-`BetaSelfHostedWork` body is the reference wire behavior for
+[docs/DIVERGENCES.md](../DIVERGENCES.md)**: at the time of writing the registry asserted that `200`
++ a `BetaSelfHostedWork` body is the reference wire behavior for
 `POST /v1/environments/{environment_id}/work/{work_id}/stop`. Settling a wire-schema question that
 the repo has already answered the other way is exactly the case CLAUDE.md says must not be
 improvised mid-implementation.
