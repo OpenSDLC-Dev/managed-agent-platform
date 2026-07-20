@@ -218,6 +218,52 @@ Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https
 
 ---
 
+## Work Stop 204 (plan 04) — archived 2026-07-20
+
+[docs/plan/04_work-stop-204.md](./plan/04_work-stop-204.md), delivered in one PR (**#122**;
+narrative in CHANGELOG § [Unreleased]). Recorded here is only what the changelog cannot hold — how
+a *confirmed* registry entry came to be wrong, and what the review round changed about the answer.
+
+**A CONFIRMED divergence that was backwards, and the inference that made it so.** The registry
+asserted 200 + a JSON work object as the reference contract, reasoning that the generated
+`Work.Stop` is typed `*BetaSelfHostedWork` and that driving the SDK against a 204/empty-body server
+makes its decoder error. The measurement was real and reproducible; the inference was not. It
+measured the *client* and concluded something about the *service* — while the same pinned SDK ships
+a helper whose comment exists precisely to say the server sends 204 anyway, worked around with
+`WithResponseBodyInto` because only Go's decoder is strict. The lesson generalizes past this
+endpoint: a client-side workaround shipped by the reference SDK is evidence *for* the behavior it
+works around, and "confirmed" in this registry has never meant "re-derivable from the artifact that
+confirmed it."
+
+**Evaluated and rejected — keeping 200 + JSON as a leniency divergence.** Adversarial review argued
+it seriously: 200 + JSON satisfies a strict superset of clients (measured — the generated method
+decodes it, the bypassing helper and CLI tolerate either), so 204 breaks a consumer for no
+compatibility gain. Rejected because the "extra" consumer is one already broken against Anthropic's
+own service: the old shape preserved compatibility with *us*, not with the reference, and code
+developed against it would fail on contact with the real endpoint — the migration trap a drop-in
+self-hostable platform exists to avoid.
+
+**What the review round corrected.** Two reviewer findings changed the answer's framing rather than
+its substance, and one was a plain error of ours. CLAUDE.md ranks *public docs* above the reference
+checkouts, and the published Stop Work reference documents a `BetaSelfHostedWork` return — the plan
+had claimed the typed schema ranked first. So the entry is now recorded as a deliberate divergence
+*from the published spec* toward the deployed service, not waved through as "no divergence", and
+left open for a recording (#78) to close. What breaks the tie is that the published reference,
+`api.md`, and the generated signature are one witness rather than three — all downstream of the
+OpenAPI document the erratum names as wrong. The compatibility break is now stated outright instead
+of glossed. Separately, the plan's aside that the empty-poll response might follow Stop to 204 had
+the evidence backwards: the poller calls `Work.Poll` with no bypass and its empty-queue branch needs
+a decoded body, so `200` + `null` stands.
+
+**Verification.** The mutation check is the load-bearing evidence: removing the worker's bypass
+fails `TestWorkerForceStopAcceptsNoContent` with the SDK's quoted error string verbatim. Asserting
+work state alone cannot catch a missing bypass — the stop still succeeds server-side, and the only
+damage is a fictional `worker: force-stop failed` on every clean finish. The verifier additionally
+drove the real `ant beta:environments:work stop`, built from the reference checkout, against the
+204 server: exit 0 for both graceful and forced stop.
+
+---
+
 ## Docs restructure (plan 03) — archived 2026-07-18
 
 [docs/plan/03_docs-restructure.md](./plan/03_docs-restructure.md), delivered complete in
