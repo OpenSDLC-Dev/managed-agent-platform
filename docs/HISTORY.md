@@ -587,10 +587,15 @@ are therefore unchanged by construction, not by inspection.
 
 - *Do the changed `betaagent.go` / `betamessage.go` / `betasession*.go` types alter a shape
   `internal/domain` or `internal/api` mirrors?* **No.** `betaagent.go:1288`, `betamessage.go` and
-  `betamessagebatch.go` changed in **doc comments only** — no field, type, or enum moved. The one
-  semantic nugget is a relaxed bound on a custom tool's `Description` (1–1024 → 1–4096 characters),
-  which costs this repo nothing: `internal/api/wire.go:244` only requires the description be
-  non-empty and never enforced a length bound to relax.
+  `betamessagebatch.go` changed in **doc comments only** — no field, type, or enum moved (proven by
+  diffing the three with comment and blank lines stripped: empty). Two of those comments did shift
+  meaning, and neither reaches this repo. A custom tool's `Description` bound relaxed from 1–1024 to
+  1–4096 characters (`betaagent.go:1288`), which costs nothing because `internal/api/wire.go:244`
+  only requires the description be non-empty and never enforced a length bound to relax; and
+  `betamessage.go:4850-4853` re-words model fallbacks ("the **four** override fields … **replace**
+  the corresponding top-level field" → "The override fields … **set** the corresponding parameter"),
+  alongside a fuller `speed` description — both on model-fallback and speed surfaces this repo does
+  not implement.
 - *Does `shared/constant/constants.go` add stop reasons or event types the taxonomy should carry?*
   **No.** It adds exactly three constants — `Tunnel`, `TunnelCertificate`, `TunnelToken`
   (`constants.go:206-208`) — belonging to the new tunnels product, not to the `{domain}.{action}`
@@ -635,9 +640,11 @@ v1.56.0 mentions surviving in CHANGELOG.md and archived `docs/plan/04` are histo
 what was true when those PRs landed and were deliberately left alone.
 
 **Evidence.** `make verify` green at total statement coverage **91.92%** (including the Docker and
-K8s sandbox suites). All 30 SDK symbols the repo references — enumerated from the only four import
-sites, `internal/provider/anthropic/anthropic.go` and `internal/worker/{client,lease,toolexec}.go` —
-still exist with identical shapes. No code change was required in this repo.
+K8s sandbox suites). Every SDK symbol the repo references still exists with an identical shape —
+enumerated from the non-test import sites (`internal/provider/anthropic/anthropic.go` and
+`internal/worker/{client,lease,toolexec}.go`; `internal/worker/{lease,toolexec}_test.go` import the
+SDK too, and the compile-and-test pass covers what they reference), and proven transitively by the
+clean build and full suite at v1.58.0. No code change was required in this repo.
 
 **Process note.** `issue-triage` returned `needs_plan: true`, on CLAUDE.md's "wire-schema
 verification" trigger. No plan file was authored: a plan is a forward-looking decomposition across

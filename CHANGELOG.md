@@ -737,28 +737,22 @@ copy of an entry here.
 
 - **`anthropic-sdk-go` pinned at v1.58.0**, up from v1.56.0
   ([#120](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/120)). Two lines of
-  `go.mod`/`go.sum`, no transitive dependency churn, and **no code change anywhere in the repo** —
-  but the pinned SDK is this project's authoritative typed wire schema, so the bump was treated as a
-  wire-schema event and the contract was diffed rather than assumed. The three files carrying the
-  managed-agents session schema (`betasessionevent.go`, `betasession.go`, `betasessionthread.go`)
-  are **byte-identical** between the two versions, so the event taxonomy, the ID prefixes, and every
-  session field this repo mirrors are unchanged by construction. What did change in the range —
-  upstream v1.57.0's "dreaming" API and v1.58.0's MCP Tunnels — is new product surface this repo does
-  not implement (`/v1/dreams`, `/v1/tunnels`, plus a `googlecloud/` auth package), reaching
-  `shared/constant/constants.go` as exactly three tunnel constants and no new stop reason. The
-  remaining diffs in `betaagent.go` / `betamessage.go` / `betamessagebatch.go` are doc comments only;
-  the single semantic one relaxes a custom tool's `Description` bound to 1–4096 characters, which
-  costs nothing here because `internal/api/wire.go` only requires it be non-empty.
+  `go.mod`/`go.sum`, no transitive dependency churn (the SDK's own `go.mod` is byte-identical across
+  the two versions), and **no code change anywhere in the repo**. The pinned SDK is this project's
+  authoritative typed wire schema, so the bump was treated as a wire-schema event and the contract
+  was diffed rather than assumed: it did not move. What upstream added in the range — v1.57.0's
+  "dreaming" API and v1.58.0's MCP Tunnels — is product surface this repo does not implement, and no
+  new DIVERGENCES entry was warranted.
 
   The bump also moved the **live** pinned-version label, which three docs state as the standard
   wire-compat is judged against: `.claude/agents/verifier.md`'s wire-compatibility rung,
-  `docs/REFERENCE_PROJECTS.md`'s caveat, and the Stop Work entry in `docs/DIVERGENCES.md`. Every
-  file:line that entry cites was re-read at v1.58.0 instead of assumed — `poller.go:439-465`,
-  `worker_test.go:118-120`, and `api.md:656-673` all still say what the entry quotes them saying, so
-  only the version label changed. The v1.56.0 mentions left standing in this file and in archived
-  `docs/plan/04` are historical records of what was true when those PRs landed. No new DIVERGENCES
-  entry was warranted; that judgment, the per-question findings, and the decisions rejected along the
-  way are in [docs/HISTORY.md](./docs/HISTORY.md) § "anthropic-sdk-go v1.58.0 bump (#120)".
+  `docs/REFERENCE_PROJECTS.md`'s caveat, and the Stop Work entry in `docs/DIVERGENCES.md` — whose
+  cited file:line evidence was re-read at v1.58.0 rather than assumed and still holds, so only the
+  label changed. The v1.56.0 mentions left standing in this file and in archived `docs/plan/04` are
+  historical records of what was true when those PRs landed. The measurements behind "it did not
+  move", the answers to the three questions the issue posed, and the decisions rejected along the way
+  are the verification record in [docs/HISTORY.md](./docs/HISTORY.md) § "anthropic-sdk-go v1.58.0
+  bump (#120)".
 
 - **STATE.md is now a pure active-work tracker** (docs only; plan 03, PR B). Two sections — Active
   work (the current plan or issue) and Tasks (its checklist with progress and evidence links) — under
