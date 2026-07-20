@@ -381,37 +381,63 @@ func TestStreamErrorEventNeverQuotesTheCredential(t *testing.T) {
 	if strings.Contains(err.Error(), testAPIKey) {
 		t.Errorf("stream error quotes the credential back: %q", err)
 	}
+	if !strings.Contains(err.Error(), "llm-pool-7") {
+		t.Errorf("redaction destroyed the diagnostic: %q", err)
+	}
 }
 
 // A credential in base_url's userinfo needs no cooperation from the endpoint
 // at all: the SDK formats the request URL into every API error with String(),
 // not Redacted().
+//
+// The passwords are chosen for how they *render*, which is the whole
+// difficulty: url.Parse stores a password decoded while String() re-encodes it,
+// so a password made only of URL-safe characters is the one case where the two
+// forms coincide — testing just that would pass while every password needing an
+// escape leaked.
 func TestErrorNeverQuotesBaseURLCredentials(t *testing.T) {
-	const password = "pw-secret-456"
-	f := &fakeServer{t: t, status: http.StatusInternalServerError}
-	srv := httptest.NewServer(http.HandlerFunc(f.handler))
-	t.Cleanup(srv.Close)
-	u, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
+	passwords := []struct {
+		name     string
+		password string
+	}{
+		{"url-safe, renders unchanged", "pw-secret-456"},
+		{"needs escaping, renders encoded", "p@ss-w0rd"},
+		{"partly escaped, renders in a third form", "a/b+c=d"},
 	}
-	u.User = url.UserPassword("gateway-user", password)
+	for _, tc := range passwords {
+		f := &fakeServer{t: t, status: http.StatusInternalServerError}
+		srv := httptest.NewServer(http.HandlerFunc(f.handler))
+		u, err := url.Parse(srv.URL)
+		if err != nil {
+			t.Fatalf("%s: parse server URL: %v", tc.name, err)
+		}
+		u.User = url.UserPassword("gateway-user", tc.password)
 
-	p, err := anthropic.New(provider.Config{
-		Protocol: "anthropic",
-		Model:    "upstream-model",
-		BaseURL:  u.String(),
-		APIKey:   testAPIKey,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	err = generateErr(t, p)
-	if err == nil {
-		t.Fatal("500 upstream produced no error")
-	}
-	if strings.Contains(err.Error(), password) {
-		t.Errorf("error quotes the base_url credential back: %q", err)
+		p, err := anthropic.New(provider.Config{
+			Protocol: "anthropic",
+			Model:    "upstream-model",
+			BaseURL:  u.String(),
+			APIKey:   testAPIKey,
+		})
+		if err != nil {
+			t.Fatalf("%s: New: %v", tc.name, err)
+		}
+		err = generateErr(t, p)
+		if err == nil {
+			t.Fatalf("%s: 500 upstream produced no error", tc.name)
+		}
+		// Both renderings must be gone: the error carries the encoded form, but
+		// a body echo would carry the decoded one.
+		if strings.Contains(err.Error(), tc.password) {
+			t.Errorf("%s: error quotes the base_url credential back: %q", tc.name, err)
+		}
+		if encoded := strings.TrimPrefix(u.User.String(), "gateway-user:"); strings.Contains(err.Error(), encoded) {
+			t.Errorf("%s: error quotes the encoded base_url credential back: %q", tc.name, err)
+		}
+		if !strings.Contains(err.Error(), "gateway-user") {
+			t.Errorf("%s: redaction destroyed the diagnostic: %q", tc.name, err)
+		}
+		srv.Close()
 	}
 }
 

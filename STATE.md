@@ -24,5 +24,9 @@ the model credential into an error that lands in an append-only `session.error` 
 - [x] Docs corrected: `docs/ARCHITECTURE.md`'s security invariant claimed this redaction already
       existed (false when written); both integration-test comments and `evals/report_test.go`'s
       "cannot reach an error" premise updated.
-- [ ] `make verify`, verifier, dual review.
+- [x] `make verify` green (coverage 91.83%); verifier PASS with findings.
+- [x] Review round: a `base_url` password is stored decoded but printed re-encoded, so it leaked in
+      full unless URL-safe — the original test fixture was, which is why it passed. All three
+      renderings now registered, the quoted body over-read so truncation cannot sever a secret,
+      and `apikey` added to the auth-header names. Each gap has a test that fails without it.
 - [ ] PR open, CI green, review threads settled.

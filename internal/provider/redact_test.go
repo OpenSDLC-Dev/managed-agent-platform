@@ -35,6 +35,55 @@ func TestRedactorString(t *testing.T) {
 			want: `POST "https://user:[redacted]@gateway.internal/v1/messages": 500`,
 		},
 		{
+			// url.Parse stores the password decoded, but url.URL.String() — how
+			// the SDK prints the request URL — re-encodes it. Registering only
+			// the decoded form matches nothing for a password containing any of
+			// the characters userinfo must escape.
+			name: "base_url password rendered percent-encoded",
+			cfg:  provider.Config{BaseURL: "https://gw:p%40ss-w0rd@gateway.internal"},
+			in:   `POST "https://gw:p%40ss-w0rd@gateway.internal/v1/messages": 500`,
+			want: `POST "https://gw:[redacted]@gateway.internal/v1/messages": 500`,
+		},
+		{
+			// The same password quoted decoded, as a body echo would show it.
+			name: "base_url password echoed decoded",
+			cfg:  provider.Config{BaseURL: "https://gw:p%40ss-w0rd@gateway.internal"},
+			in:   `{"message":"credential p@ss-w0rd rejected"}`,
+			want: `{"message":"credential [redacted] rejected"}`,
+		},
+		{
+			// A password whose configured escapes are not all required in
+			// userinfo renders in a third form again: url.Parse decodes %2F,
+			// %2B and %3D, String() re-escapes only the "/".
+			name: "base_url password re-encoded differently than written",
+			cfg:  provider.Config{BaseURL: "https://gw:a%2Fb%2Bc%3Dd@gateway.internal"},
+			in:   `POST "https://gw:a%2Fb+c=d@gateway.internal/v1/messages": 500`,
+			want: `POST "https://gw:[redacted]@gateway.internal/v1/messages": 500`,
+		},
+		{
+			// url.Parse rejects this outright, so the password is only
+			// reachable textually — and an unparsable base_url is itself an
+			// error that quotes the string back.
+			name: "unparsable base_url still yields its password",
+			cfg:  provider.Config{BaseURL: "https://user:pw-secret-999@gw.internal/%zz"},
+			in:   `parse "https://user:pw-secret-999@gw.internal/%zz/v1/chat/completions": invalid URL escape "%zz"`,
+			want: `parse "https://user:[redacted]@gw.internal/%zz/v1/chat/completions": invalid URL escape "%zz"`,
+		},
+		{
+			name: "base_url with no userinfo",
+			cfg:  provider.Config{BaseURL: "https://gateway.internal/v1"},
+			in:   "no capacity at gateway.internal",
+			want: "no capacity at gateway.internal",
+		},
+		{
+			// Kong's key-auth default and Supabase's convention; it matches
+			// none of the substring rules.
+			name: "apikey header without a separator",
+			cfg:  provider.Config{Headers: map[string]string{"apikey": "kong-cred-9"}},
+			in:   "key kong-cred-9 rejected",
+			want: "key [redacted] rejected",
+		},
+		{
 			name: "auth header value, whole and token alone",
 			cfg:  provider.Config{Headers: map[string]string{"Authorization": "Bearer gw-token-xyz"}},
 			in:   "sent Bearer gw-token-xyz, endpoint saw gw-token-xyz",
@@ -73,6 +122,21 @@ func TestRedactorString(t *testing.T) {
 		if got := provider.NewRedactor(tc.cfg).String(tc.in); got != tc.want {
 			t.Errorf("%s: String(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestRedactorLongest(t *testing.T) {
+	// A caller quoting a bounded prefix of a body over-reads by this much, so
+	// it must cover the longest secret, not the first one registered.
+	r := provider.NewRedactor(provider.Config{
+		APIKey:  "short",
+		Headers: map[string]string{"authorization": "Bearer a-much-longer-token"},
+	})
+	if got, want := r.Longest(), len("Bearer a-much-longer-token"); got != want {
+		t.Errorf("Longest() = %d, want %d", got, want)
+	}
+	if got := provider.NewRedactor(provider.Config{}).Longest(); got != 0 {
+		t.Errorf("Longest() with no secrets = %d, want 0", got)
 	}
 }
 

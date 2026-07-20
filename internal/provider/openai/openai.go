@@ -34,6 +34,9 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
+// quotedBodyLimit bounds how much of a failing response body an error quotes.
+const quotedBodyLimit = 4096
+
 // New constructs the adapter from configuration alone.
 func New(cfg provider.Config) (provider.Provider, error) {
 	if cfg.BaseURL == "" {
@@ -84,8 +87,10 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(raw))
 	if err != nil {
-		// A URL parse failure quotes the endpoint back, and base_url may carry
-		// a credential; net/http only strips one from an error it builds itself.
+		// A URL parse failure quotes the endpoint back verbatim, and base_url
+		// may carry a credential; net/http strips one only from an error it
+		// builds itself. The redactor finds an unparsable base_url's password
+		// textually for exactly this case.
 		return nil, p.redact.Error(err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -107,8 +112,17 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 		// misconfiguration — but an endpoint that echoes the request's
 		// Authorization header into it must not get the credential into an
 		// error the platform persists as a session.error event.
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("openai endpoint returned %s: %s", resp.Status, p.redact.String(strings.TrimSpace(string(msg))))
+		//
+		// The read overshoots the quote budget by the longest secret so that a
+		// credential straddling it is still matched whole; the redacted text is
+		// then cut back. Reading exactly the budget would leave the head of a
+		// key in the message, matching nothing.
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, quotedBodyLimit+int64(p.redact.Longest())))
+		quoted := p.redact.String(strings.TrimSpace(string(msg)))
+		if len(quoted) > quotedBodyLimit {
+			quoted = quoted[:quotedBodyLimit]
+		}
+		return nil, fmt.Errorf("openai endpoint returned %s: %s", resp.Status, quoted)
 	}
 	return &stream{body: resp.Body, r: bufio.NewReader(resp.Body), redact: p.redact}, nil
 }

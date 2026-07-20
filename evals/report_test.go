@@ -108,8 +108,7 @@ func endpointHost(baseURL string) string {
 // of which get pasted into issues. The API key is header-only, and the adapters
 // now redact it from anything an endpoint echoes back, but it is scrubbed here
 // too as defence in depth — this suite must not depend on that. Every non-empty
-// piece is
-// replaced before any artifact is written (see scrub); artifacts are rendered
+// piece is replaced before any artifact is written (see scrub); artifacts are rendered
 // without HTML escaping so an "&" in a multi-parameter query stays literal and
 // the raw substring still matches.
 //

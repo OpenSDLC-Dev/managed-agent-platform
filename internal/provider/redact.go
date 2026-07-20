@@ -27,23 +27,65 @@ const redactedMarker = "[redacted]"
 // was a bare value with no scheme prefix and no header name beside it.
 type Redactor struct{ secrets []string }
 
-// NewRedactor collects every credential reachable from cfg.
+// NewRedactor collects the credentials cfg carries.
 func NewRedactor(cfg Config) Redactor {
 	var r Redactor
 	r.add(cfg.APIKey)
-	// A credential in base_url's userinfo needs no cooperation from the
-	// endpoint at all: the Anthropic SDK formats the request URL into every API
-	// error with String(), which keeps the password, rather than Redacted().
-	if u, err := url.Parse(cfg.BaseURL); err == nil && u.User != nil {
-		pw, _ := u.User.Password()
-		r.add(pw)
-	}
+	r.addBaseURLSecrets(cfg.BaseURL)
 	for name, value := range cfg.Headers {
 		if isAuthHeader(name) {
 			r.add(value)
 		}
 	}
 	return r
+}
+
+// addBaseURLSecrets registers a credential carried in base_url's userinfo. It
+// needs no cooperation from the endpoint at all: the Anthropic SDK formats the
+// request URL into every API error with String(), not Redacted().
+//
+// All three renderings are registered, because a password reaches an error in
+// whichever one the failure produced: decoded, as url.Parse stores it and as a
+// body echo would quote it; re-encoded, as url.URL.String() prints it — a
+// password containing '@', '/', '%' or a space, all of which RFC 3986 requires
+// be escaped in userinfo, renders nothing like the decoded form; and exactly as
+// written in configuration, which is the only form available when base_url does
+// not parse at all, itself an error that quotes the string back.
+//
+// The username is deliberately not registered. It identifies rather than
+// authenticates, and masking it would cost a diagnostic to hide nothing.
+func (r *Redactor) addBaseURLSecrets(baseURL string) {
+	if u, err := url.Parse(baseURL); err == nil && u.User != nil {
+		if pw, ok := u.User.Password(); ok {
+			r.add(pw)
+			if _, encoded, found := strings.Cut(u.User.String(), ":"); found {
+				r.add(encoded)
+			}
+		}
+	}
+	r.add(rawUserinfoPassword(baseURL))
+}
+
+// rawUserinfoPassword returns the password as written in a URL's authority,
+// found without parsing — url.Parse rejects a malformed URL outright, and the
+// error for one quotes the text it could not parse.
+func rawUserinfoPassword(baseURL string) string {
+	_, rest, ok := strings.Cut(baseURL, "://")
+	if !ok {
+		return ""
+	}
+	authority, _, _ := strings.Cut(rest, "/")
+	// Userinfo ends at the last "@": an unescaped "@" in a malformed password
+	// would otherwise cut the secret short.
+	at := strings.LastIndex(authority, "@")
+	if at < 0 {
+		return ""
+	}
+	_, password, ok := strings.Cut(authority[:at], ":")
+	if !ok {
+		return ""
+	}
+	return password
 }
 
 // add registers one secret, plus the token alone when the value carries an auth
@@ -71,7 +113,10 @@ func (r *Redactor) add(secret string) {
 func isAuthHeader(name string) bool {
 	n := strings.ToLower(name)
 	switch n {
-	case "authorization", "proxy-authorization", "x-api-key", "api-key":
+	// "apikey" without a separator is Kong's key-auth default and Supabase's
+	// convention, and matches none of the substring rules below; "cookie" on a
+	// model endpoint carries a session credential, never a diagnostic.
+	case "authorization", "proxy-authorization", "x-api-key", "api-key", "apikey", "cookie":
 		return true
 	}
 	return strings.Contains(n, "token") || strings.Contains(n, "secret") ||
@@ -86,6 +131,20 @@ func (r Redactor) String(s string) string {
 		s = strings.ReplaceAll(s, secret, redactedMarker)
 	}
 	return s
+}
+
+// Longest reports the length of the longest registered secret, so a caller that
+// quotes only a bounded prefix of a response body can over-read by that much: a
+// credential straddling the cap would otherwise be cut in half and survive
+// redaction as an unmatched fragment.
+func (r Redactor) Longest() int {
+	n := 0
+	for _, secret := range r.secrets {
+		if len(secret) > n {
+			n = len(secret)
+		}
+	}
+	return n
 }
 
 // Error returns err with its message redacted, keeping the original reachable

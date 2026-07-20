@@ -52,6 +52,19 @@ copy of an entry here.
   brain's only `errors.As` is for its own `infraError`), but retry logic reading an upstream status
   is the obvious next caller, and it should not have to choose between the status and a safe message.
 
+  Review hardened three gaps in the redaction itself, each demonstrated rather than argued. A
+  `base_url` password is stored **decoded** by `url.Parse` but printed **re-encoded** by
+  `url.URL.String()`, so registering one form matched neither the other nor, for a password whose
+  configured escapes are not all required in userinfo, the form it was written in — every password
+  containing a character RFC 3986 makes escape it (`@`, `/`, `%`, a space — precisely what a
+  generated password contains) leaked in full, and the original regression test passed only because
+  its fixture was URL-safe. All three renderings are now registered, the last found textually so
+  that an *unparsable* `base_url` — whose parse error quotes the string back, and which
+  `url.Parse` cannot help with by definition — is covered too. The quoted body is read one secret
+  longer than it is quoted, because truncating at the cap could sever a credential and leave its
+  head unmatched. And `isAuthHeader` now knows `apikey` (Kong's key-auth default, Supabase's
+  convention), which matched none of its substring rules.
+
   `docs/ARCHITECTURE.md`'s security invariants already claimed provider errors redacted the key;
   that sentence was false when written and is now true, minus the half about config printouts, which
   `provider.Config` still does not implement and the text no longer claims. Left alone deliberately:
