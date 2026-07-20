@@ -34,6 +34,9 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
+// quotedBodyLimit bounds how much of a failing response body an error quotes.
+const quotedBodyLimit = 4096
+
 // New constructs the adapter from configuration alone.
 func New(cfg provider.Config) (provider.Provider, error) {
 	if cfg.BaseURL == "" {
@@ -48,6 +51,7 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		model:    cfg.Model,
 		headers:  cfg.Headers,
 		client:   http.DefaultClient,
+		redact:   provider.NewRedactor(cfg),
 	}, nil
 }
 
@@ -57,6 +61,7 @@ type openaiProvider struct {
 	model    string
 	headers  map[string]string
 	client   *http.Client
+	redact   provider.Redactor
 }
 
 func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (provider.Stream, error) {
@@ -82,7 +87,11 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(raw))
 	if err != nil {
-		return nil, err
+		// A URL parse failure quotes the endpoint back verbatim, and base_url
+		// may carry a credential; net/http strips one only from an error it
+		// builds itself. The redactor finds an unparsable base_url's password
+		// textually for exactly this case.
+		return nil, p.redact.Error(err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
@@ -95,14 +104,29 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, p.redact.Error(err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("openai endpoint returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+		// The body is quoted because the status alone rarely explains a gateway
+		// misconfiguration — but an endpoint that echoes the request's
+		// Authorization header into it must not get the credential into an
+		// error the platform persists as a session.error event.
+		//
+		// The read overshoots the quote budget by the longest secret so that a
+		// credential straddling it is still matched whole; the redacted text is
+		// then cut back. Reading exactly the budget would leave the head of a
+		// key in the message, matching nothing.
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, quotedBodyLimit+int64(p.redact.Longest())))
+		quoted := p.redact.String(strings.TrimSpace(string(msg)))
+		if len(quoted) > quotedBodyLimit {
+			quoted = quoted[:quotedBodyLimit]
+		}
+		// The status line is endpoint-controlled too: HTTP/1 lets a server put
+		// any text after the code.
+		return nil, fmt.Errorf("openai endpoint returned %s: %s", p.redact.String(resp.Status), quoted)
 	}
-	return &stream{body: resp.Body, r: bufio.NewReader(resp.Body)}, nil
+	return &stream{body: resp.Body, r: bufio.NewReader(resp.Body), redact: p.redact}, nil
 }
 
 // --- outgoing request shapes (Anthropic-native -> OpenAI Chat Completions) ---
@@ -323,8 +347,9 @@ func convertTools(tools []json.RawMessage) ([]chatTool, error) {
 // --- incoming stream translation (OpenAI SSE -> provider chunks) ---
 
 type stream struct {
-	body io.ReadCloser
-	r    *bufio.Reader
+	body   io.ReadCloser
+	r      *bufio.Reader
+	redact provider.Redactor
 
 	pending []provider.Chunk
 	cur     provider.Chunk
@@ -379,7 +404,9 @@ func (s *stream) Next() bool {
 		}
 		data, status, err := s.readData()
 		if err != nil {
-			s.err = err
+			// Endpoint-controlled: an HTTP/2 GOAWAY carries server debug data
+			// into the body-read error.
+			s.err = s.redact.Error(err)
 			return false
 		}
 		switch status {
@@ -499,7 +526,9 @@ func (s *stream) process(payload string) error {
 		return fmt.Errorf("openai stream frame: %w", err)
 	}
 	if fr.Error != nil {
-		return fmt.Errorf("openai stream error: %s", fr.Error.Message)
+		// Endpoint-supplied text under HTTP 200: the same credential echo as
+		// the non-200 path, on the route an operator is least likely to test.
+		return fmt.Errorf("openai stream error: %s", s.redact.String(fr.Error.Message))
 	}
 	if fr.Usage != nil {
 		// prompt_tokens counts cached tokens too; split the cached subset out so

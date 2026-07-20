@@ -15,6 +15,94 @@ copy of an entry here.
 
 ### Fixed
 
+- **Provider adapter errors could quote a credential back from the endpoint's response body**
+  ([#83](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/83)) — both adapters quote
+  what a failing endpoint said about itself, because the status alone rarely explains a gateway
+  misconfiguration. An endpoint that echoes the request's auth header into that diagnostic body —
+  some gateways do on a 401 — therefore put the model credential into the error. That error is not
+  merely logged: a failed turn becomes a `session.error` event, which is **append-only** in Postgres
+  and re-served to API clients on every list and every SSE replay, so a leaked key could not be
+  edited back out. (It reaches neither `slog` nor the OTel span; the fix is not a logging matter.)
+
+  The issue named two sites; there were five. The openai adapter also embeds an endpoint-supplied
+  mid-stream error frame, and the anthropic stream surfaces an upstream failure from `Err()` after
+  `Next()` — **both under HTTP 200**, the route an operator is least likely to exercise, and the
+  anthropic one returns `nil` from `Generate`, so a fix applied only where the issue pointed would
+  have passed its own test and leaked in production. The fifth needs no cooperation from the
+  endpoint at all: the SDK formats the request URL into every API error with `String()` rather than
+  `Redacted()`, so a credential in `base_url`'s userinfo leaks on any upstream failure.
+
+  Redaction matches the configured secret **by exact value, never by token shape**. The observed
+  anthropic echo was a bare value with no `Bearer` prefix and no header name beside it — the
+  Anthropic protocol sends `x-api-key` — so the shape-matcher the issue floated would have missed
+  the very leak it was filed for, and a `base_url` may point at any gateway, proxy, or self-hosted
+  model (principle 4), whose token format is unknowable. The adapter holds the secret, so it does
+  not have to guess: `provider.NewRedactor` collects the api key, a `base_url` userinfo password,
+  and the values of auth-named headers (plus the token alone from a `Bearer <token>` value, since an
+  endpoint may echo either form). Header values are covered because the openai adapter applies
+  configured headers *after* setting `Authorization`, which makes them an auth channel by
+  construction; non-auth headers are deliberately left alone so that redaction cannot mangle the
+  diagnostic it exists to protect — `x-gateway-route: llm-pool-7` still reads back out of "no
+  capacity in pool llm-pool-7". Everything but the secret survives: status line, error type, the
+  endpoint's own message, the request id.
+
+  `Redactor.Error` wraps rather than reformats. `fmt.Errorf("%w", err)` was not an option — `%w`
+  re-renders the wrapped message, which *is* the leak — so the redacted error overrides `Error()`
+  and keeps the original reachable through `Unwrap`. Nothing unwraps a provider error today (the
+  brain's only `errors.As` is for its own `infraError`), but retry logic reading an upstream status
+  is the obvious next caller, and it should not have to choose between the status and a safe message.
+
+  Review hardened three gaps in the redaction itself, each demonstrated rather than argued. A
+  `base_url` password is stored **decoded** by `url.Parse` but printed **re-encoded** by
+  `url.URL.String()`, so registering one form matched neither the other nor, for a password whose
+  configured escapes are not all required in userinfo, the form it was written in — every password
+  containing a character RFC 3986 makes escape it (`@`, `/`, `%`, a space — precisely what a
+  generated password contains) leaked in full, and the original regression test passed only because
+  its fixture was URL-safe. All three renderings are now registered, the last found textually so
+  that an *unparsable* `base_url` — whose parse error quotes the string back, and which
+  `url.Parse` cannot help with by definition — is covered too. The quoted body is read one secret
+  longer than it is quoted, because truncating at the cap could sever a credential and leave its
+  head unmatched. And `isAuthHeader` now knows `apikey` (Kong's key-auth default, Supabase's
+  convention) and `cookie`, which matched none of its substring rules.
+
+  A second verification pass then found a fourth rendering, by the same reasoning and with the same
+  consequence: `net/http` derives an `Authorization: Basic` header from `base_url`'s userinfo
+  whenever the request carries none — which is always under the anthropic protocol, since it
+  authenticates with `x-api-key` — so an endpoint echoing its auth header back quotes the
+  credential **base64-encoded**, matching no rendering of the URL. That form is registered too, and
+  the same pass closed a schemeless `base_url` (which `url.Parse` reads as scheme-plus-opaque, so
+  only the textual scan can reach its password) and an over-redaction where an `@` in a query was
+  mistaken for userinfo. The lesson generalises past this change: a credential is not one string
+  but every encoding the stack renders it in, and a test fixture chosen for readability — a
+  URL-safe password, a payload that does not straddle the cap — is precisely the one that cannot
+  see the gap.
+
+  An independent external reviewer, reading the first commit only, reproduced those same
+  conclusions and added four more. Three were leaks: a custom auth header name (`X-Auth`,
+  `X-Signature`, `X-Credential`) matched none of the canonical spellings; userinfo carrying a
+  *username and no password* — the token-as-userinfo convention — registered nothing, since the
+  username is only an identifier when a password stands beside it; and `resp.Status`, which HTTP/1
+  lets a server fill with arbitrary text, was interpolated unredacted next to the body that was
+  not. The fourth was over-redaction this change had introduced: splitting a header value on any
+  space registered the second word of a value that is not a credential pair at all, so
+  `x-route-key: "pool alpha"` blanked "alpha" out of every diagnostic naming the pool. Splitting
+  now requires a known auth scheme, which also normalises the whitespace an echoed header loses.
+  A `base_url` query credential (`?api_key=…`, a pattern `evals/report_test.go` already guarded
+  against) and the body-read error that carries an HTTP/2 GOAWAY's server debug data are covered
+  too.
+
+  Two residuals are deliberate, not oversights. A credential containing `<`, `>` or `&` survives
+  Go's HTML-escaping JSON encoder as `<…`, which no verbatim match sees — chasing arbitrary
+  re-encodings is the speculative pattern-matching this design rejected, and it buys nothing
+  against an endpoint that transforms deliberately. And a model that emits the key in its own
+  *successful* output is not an error path at all: model output is a trusted boundary here, and
+  redacting it would corrupt the very content the session exists to record.
+
+  `docs/ARCHITECTURE.md`'s security invariants already claimed provider errors redacted the key;
+  that sentence was false when written and is now true, minus the half about config printouts, which
+  `provider.Config` still does not implement and the text no longer claims. Left alone deliberately:
+  the anthropic path quotes an **unbounded** body (the SDK reads it with a bare `io.ReadAll`) where
+  openai caps at 4 KiB — a payload-size concern, not a credential one.
 - **A client-supplied model string could grow the brain's provider cache without bound**
   ([#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88)) — `provider.Registry`
   cached each constructed provider under the *agent's* model string (`r.cache[model] = p`). Under a
