@@ -128,6 +128,13 @@ copy of an entry here.
   says so in an object full of zeroes still counts as having answered. `turnResult.usage` became a
   pointer and `streamUsage` now returns it unchanged.
 
+  Presence needs a stronger test than the decoder's own, which the Codex review caught: the SDK
+  marks a field valid whenever it was present and parsed, *whatever its JSON kind*, so an endpoint
+  answering `"usage": "bad"` or `"usage": []` set the flag and produced a zeroed reading — the same
+  false zero, reached by a differently non-compliant gateway. Measured, not assumed: a probe against
+  the real adapter returned a non-nil zeroed usage for a string, an array and a number, and nil only
+  for an absent or null field. The anthropic adapter now requires the field to be an actual object.
+
   Two settlement behaviors are deliberately *not* made nil-aware. The wire
   `span.model_request_end` event still carries a `model_usage` object, zeroes and all, because the
   schema wants one whether or not a model ever produced one; and the session's cumulative usage is

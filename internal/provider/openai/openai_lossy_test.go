@@ -419,6 +419,31 @@ func TestNoUsageFrameReportsNoUsage(t *testing.T) {
 	}
 }
 
+// The mirror of the case above: a usage frame that reports zeroes is a reading
+// like any other. Only silence yields nil, so a turn that genuinely spent
+// nothing still lands in the token metric.
+func TestZeroedUsageFrameIsStillAReading(t *testing.T) {
+	f := &fakeServer{sse: []string{
+		`{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+	u := chunks[len(chunks)-1].Usage
+	if u == nil {
+		t.Fatal("usage = nil, want a zeroed reading: the endpoint sent a usage frame")
+	}
+	if u.InputTokens != 0 || u.OutputTokens != 0 {
+		t.Errorf("usage = %+v, want zeroes", u)
+	}
+}
+
 // The deprecated function_call streaming format is rejected loudly rather than
 // silently losing the tool call.
 func TestLegacyFunctionCallRejected(t *testing.T) {

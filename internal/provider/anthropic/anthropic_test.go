@@ -742,6 +742,65 @@ func TestGenerateReportsAnEmptyUsageObjectAsAReading(t *testing.T) {
 	}
 }
 
+// Usage reported only on message_delta is still a reading: an endpoint may
+// omit it from message_start and send the totals at the end. This is the case
+// that exercises the delta-side presence check on its own.
+func TestGenerateAcceptsUsageReportedOnlyOnTheDelta(t *testing.T) {
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_12","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":13,"output_tokens":5}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+	done := chunks[len(chunks)-1]
+	if done.Usage == nil {
+		t.Fatal("usage = nil, want a reading: message_delta carried one")
+	}
+	if done.Usage.InputTokens != 13 || done.Usage.OutputTokens != 5 {
+		t.Errorf("usage = %+v, want input=13 output=5", done.Usage)
+	}
+}
+
+// A usage field that is not an object is not a reading. The SDK decoder marks
+// any present, parseable field valid whatever its JSON kind, so without a kind
+// check these would each land as a zeroed reading — the same false zero as #90
+// itself, reached by a different malformed endpoint.
+func TestGenerateRejectsAUsageFieldThatIsNotAnObject(t *testing.T) {
+	for _, tc := range []struct{ name, usage string }{
+		{"string", `"bad"`},
+		{"array", `[]`},
+		{"number", `0`},
+		{"null", `null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeServer{sse: []string{
+				`{"type":"message_start","message":{"id":"msg_11","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":` + tc.usage + `}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":` + tc.usage + `}`,
+				`{"type":"message_stop"}`,
+			}}
+			p := start(t, f)
+			stream, err := p.Generate(context.Background(), provider.Request{
+				Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+			})
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			chunks := collect(t, stream)
+			done := chunks[len(chunks)-1]
+			if done.Usage != nil {
+				t.Errorf("usage = %+v, want nil: %s is not a usage object", done.Usage, tc.usage)
+			}
+		})
+	}
+}
+
 func TestConfigValidation(t *testing.T) {
 	if _, err := anthropic.New(provider.Config{Model: "m"}); err == nil {
 		t.Error("missing base_url should error — no silent api.anthropic.com fallback")

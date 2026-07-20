@@ -9,12 +9,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
+	"github.com/anthropics/anthropic-sdk-go/packages/respjson"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 )
 
@@ -150,6 +152,17 @@ type stream struct {
 	done       bool
 }
 
+// reportedUsage reports whether a usage field arrived as an actual usage
+// object. Presence alone is too weak a test: the decoder marks a field valid
+// whenever it was present and parsed, whatever its JSON kind, so an endpoint
+// answering `"usage": "bad"` or `"usage": []` would otherwise be taken for a
+// reading of zero — the exact false zero this distinction exists to remove
+// (#90). An empty object still counts: the endpoint answered, and zeroes are
+// its answer.
+func reportedUsage(f respjson.Field) bool {
+	return f.Valid() && strings.HasPrefix(strings.TrimSpace(f.Raw()), "{")
+}
+
 func (s *stream) Chunk() provider.Chunk { return s.cur }
 func (s *stream) Err() error            { return s.err }
 func (s *stream) Close() error          { return s.events.Close() }
@@ -162,7 +175,7 @@ func (s *stream) Next() bool {
 		ev := s.events.Current()
 		switch ev.Type {
 		case "message_start":
-			if ev.Message.JSON.Usage.Valid() {
+			if reportedUsage(ev.Message.JSON.Usage) {
 				s.sawUsage = true
 				u := ev.Message.Usage
 				s.usage.InputTokens = u.InputTokens
@@ -236,7 +249,7 @@ func (s *stream) Next() bool {
 			if r := string(ev.Delta.StopReason); r != "" {
 				s.stopReason = r
 			}
-			if ev.JSON.Usage.Valid() {
+			if reportedUsage(ev.JSON.Usage) {
 				s.sawUsage = true
 			}
 			// Cumulative counters override the message_start snapshot when
