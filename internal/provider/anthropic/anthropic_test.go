@@ -636,6 +636,42 @@ func TestGenerateUsageSurvivesSparseDeltas(t *testing.T) {
 	}
 }
 
+func TestGenerateKeepsOutputTokensReportedOnlyOnMessageStart(t *testing.T) {
+	// The official Messages API puts a partial output count on message_start
+	// and supersedes it from message_delta, but design principle 4 obliges
+	// this adapter to work against any endpoint speaking Messages. A gateway
+	// that reports its whole reading up front and then closes with a
+	// stop-reason-only message_delta must keep its output count: dropping it
+	// reports a real reading as zero, not as no reading (#128).
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_10","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":31,"output_tokens":64,"cache_creation_input_tokens":2,"cache_read_input_tokens":3}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+	done := chunks[len(chunks)-1]
+	if done.Kind != provider.KindDone || done.StopReason != "end_turn" {
+		t.Fatalf("done = %+v", done)
+	}
+	if done.Usage == nil {
+		t.Fatal("done carried no usage, but message_start reported one")
+	}
+	u := done.Usage
+	if u.InputTokens != 31 || u.OutputTokens != 64 || u.CacheCreationInputTokens != 2 || u.CacheReadInputTokens != 3 {
+		t.Errorf("usage = %+v, want the whole message_start reading carried through (in 31 / out 64 / create 2 / read 3)", *u)
+	}
+}
+
 func TestGenerateStartBlockInputPreservesBigIntegers(t *testing.T) {
 	// The start-block seed passes through as raw bytes: re-encoding a
 	// decoded value would round 9007199254740993 through float64.

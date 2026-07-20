@@ -258,6 +258,36 @@ func TestFinishReasonMapping(t *testing.T) {
 	}
 }
 
+// The OpenAI-side twin of the anthropic adapter's start-only-usage contract
+// (#128): a gateway that reports its reading on an early frame instead of the
+// trailing include_usage frame must keep it — the frames that follow carry no
+// usage object, and they must not zero what was already reported.
+func TestGenerateKeepsUsageReportedBeforeTheFinalFrame(t *testing.T) {
+	f := &fakeServer{sse: []string{
+		`{"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"usage":{"prompt_tokens":31,"completion_tokens":64,"total_tokens":95}}`,
+		`{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+	done := chunks[len(chunks)-1]
+	if done.Kind != provider.KindDone || done.StopReason != "end_turn" {
+		t.Fatalf("done = %+v", done)
+	}
+	if done.Usage == nil {
+		t.Fatal("done carried no usage, but an early frame reported one")
+	}
+	if done.Usage.InputTokens != 31 || done.Usage.OutputTokens != 64 {
+		t.Errorf("usage = %+v, want in=31 out=64 carried through from the early frame", *done.Usage)
+	}
+}
+
 // String content (not a block array) must convert too.
 func TestStringContentMessage(t *testing.T) {
 	f := &fakeServer{sse: []string{

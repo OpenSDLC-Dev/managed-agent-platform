@@ -181,6 +181,12 @@ func (s *stream) Next() bool {
 				s.usage.InputTokens = u.InputTokens
 				s.usage.CacheCreationInputTokens = u.CacheCreationInputTokens
 				s.usage.CacheReadInputTokens = u.CacheReadInputTokens
+				// The official API's output count here is partial and the final
+				// message_delta supersedes it, so taking it costs nothing there.
+				// An endpoint that reports its whole reading up front and closes
+				// with a stop-reason-only message_delta is the case this exists
+				// for: without it that turn reports zero output tokens (#128).
+				s.usage.OutputTokens = u.OutputTokens
 			}
 
 		case "content_block_start":
