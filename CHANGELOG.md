@@ -102,6 +102,39 @@ copy of an entry here.
 
 ### Fixed
 
+- **U+0000 in any non-metadata text field was still a 500**
+  ([#114](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/114)) — #73 closed this bug
+  class for `metadata` by hoisting a guard into the two shared metadata parsers, and said so: the
+  same defect remained one field over, on the very same handlers. Every sibling string reached
+  Postgres with no content validation, so a well-formed request carrying the escape became a server
+  fault at insert time — agent `name`, `model`, `system`, `description`, a custom tool's `name`, an
+  MCP server's `url`, a skill's `skill_id`; environment `name`, `description`,
+  `config.packages.*[]`, `config.networking.allowed_hosts[]`; session `title`. The two mechanisms
+  are #73's: a `text` bind rejects the 0x00 byte (`SQLSTATE 22021`) and a `jsonb` bind rejects the
+  escape (`22P05`), and neither error is an `apiError`, so `writeError` mapped both to a 500
+  `api_error`.
+
+  The guard moves to `decodeObject` — the one decode every JSON body passes through — and walks the
+  whole decoded body, keys and values alike, naming the offending path (`config.packages.npm[0]`) so
+  a client can find the value. It sits there rather than on `stringField`/`requiredString` for two
+  reasons. The unstorable byte is a property of the request, not of any one field, so a per-field
+  guard is a list that the next field added to the wire silently falls off — which is exactly how
+  this issue came to exist. And the nested raw-JSON payloads never reach `stringField` at all: the
+  agent spec's `tools`/`mcp_servers`/`skills` entries and the environment config's package lists and
+  `allowed_hosts` are parsed straight out of raw JSON, so a per-field check would have missed them
+  even if every field parser had one. With the walk in place the metadata-specific
+  `rejectMetadataNUL` is unreachable and is removed; `parseMetadata` and `splitMetadataPatch` are
+  now covered by the same chokepoint, and `TestMetadataRejectsNUL` still pins all fifteen
+  metadata surfaces at a 400. The behaviour it registered is unchanged, so the existing
+  docs/DIVERGENCES.md INFERRED entry is widened rather than duplicated.
+
+  `TestStringFieldsRejectNUL` pins seventeen field-and-endpoint pairs at a wire-shaped 400 whose
+  message names the field; it failed 17/17 against real Postgres before the change, reproducing the
+  issue's table (`22021` on the text binds, `22P05` on the jsonb binds). Machine-generated content
+  is unaffected: the only other body-bearing surfaces are the events append endpoint, which
+  `internal/events` has always guarded the same way, and the work-item metadata patch, guarded since
+  #73.
+
 - **A model endpoint that reported no usage was recorded as one that spent nothing**
   ([#90](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/90)) — `provider.Chunk.Usage`
   is a `*domain.ModelUsage`, which reads as "nil means the endpoint reported nothing", but neither
