@@ -218,6 +218,48 @@ Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https
 
 ---
 
+## Work Stop 204 (plan 04) — archived 2026-07-20
+
+[docs/plan/04_work-stop-204.md](./plan/04_work-stop-204.md), delivered in one PR (**#122**). The
+change and the reasoning behind it are the CHANGELOG § [Unreleased] entry; recorded here is only
+what a changelog cannot hold.
+
+**The generalizable lesson: "confirmed" did not mean re-derivable.** The registry's entry was not a
+guess — it was CONFIRMED, and the measurement behind it reproduces to this day. What it lacked was a
+check that the thing measured was the thing claimed. Two rules fall out, both wider than this
+endpoint: a client-side workaround shipped by the reference SDK is evidence *for* the behavior it
+works around, never against it; and a CONFIRMED entry earns re-derivation whenever the change under
+review depends on it, because the artifact that confirmed it may never have supported it.
+
+**Evaluated and rejected — keeping 200 + JSON as a deliberate leniency divergence.** Adversarial
+review made the case seriously, and it was measured rather than asserted: 200 + JSON satisfies a
+strict superset of clients (the generated method decodes it; the bypassing helper and the `ant` CLI
+tolerate either shape). Rejected because "superset of clients" is the wrong objective for a
+compatibility layer — the extra consumer it buys is one already broken against Anthropic's own
+service, so the leniency bought compatibility with this platform rather than with the reference. Two
+reviewers reached this position independently and both were overruled on that ground; recorded here
+because the argument is a good one and will recur the next time a divergence looks harmlessly
+permissive.
+
+**What the review round corrected — including an error of ours.** CLAUDE.md ranks *public docs*
+above the reference checkouts, and the plan asserted the typed schema ranked first. That was simply
+wrong, and it mattered: the top-ranked source disagrees with the change. The conclusion survived
+(the spec-side witnesses are one witness, not three), but the framing had to change from "not a
+divergence" to a deliberate divergence from the published spec, left open for a recording (#78) to
+close, with the compatibility break stated rather than glossed. Separately, the plan's aside that
+the empty-poll response might follow Stop to 204 had its evidence backwards — the poller calls
+`Work.Poll` with no bypass and its empty-queue branch needs a decoded body — so `200` + `null`
+stands. Both corrections came from reviewers reading the primary sources rather than the plan.
+
+**Why the mutation check was the load-bearing evidence.** Asserting the resulting work state cannot
+catch a missing decoder bypass: the stop succeeds server-side either way, and the only damage is a
+fictional `worker: force-stop failed` on every clean finish — invisible to a suite that checks the
+database. Only removing the bypass and watching `TestWorkerForceStopAcceptsNoContent` fail with the
+SDK's quoted error string proves the test constrains anything. A green suite was not evidence here;
+a red one was.
+
+---
+
 ## Docs restructure (plan 03) — archived 2026-07-18
 
 [docs/plan/03_docs-restructure.md](./plan/03_docs-restructure.md), delivered complete in
@@ -381,3 +423,58 @@ syntax errors as "caught", and a mutation pattern indented with two tabs matched
 subqueries as a suffix of the three-tab one, so an occurrence-0 edit silently hit
 `ValidateToolResults` twice while `ValidateToolConfirmations` was never mutated at all. Every verdict
 above is from the corrected harness, which vets the build and distinguishes the two sites explicitly.
+
+## Provider credential redaction (#83) — review-hardening record (2026-07-20)
+
+What [CHANGELOG.md](../CHANGELOG.md)'s entry describes as one coherent redaction arrived through
+three review rounds, each of which found the previous round's fix incomplete in the same way. The
+record is kept because the *pattern* is reusable and the CHANGELOG cannot hold it: every gap was a
+rendering of the credential nobody had thought to enumerate, and two of them were hidden by test
+fixtures chosen for readability.
+
+**Round 1 — verifier, after the first commit.** Confirmed the five leak paths closed and every test
+failing-first, then found three residuals. An unparsable `base_url` leaked its password because
+`NewRedactor`'s own `url.Parse` failed, so the site's comment claimed a coverage it did not have and
+both of its blocks were unexecuted by any test. `isAuthHeader` missed `apikey` — no separator, so
+none of the substring rules matched — which is Kong's key-auth default and Supabase's convention.
+And the 4 KiB quote cap could sever a credential mid-token: demonstrated leaving 8 characters of the
+key in the message, matching no registered secret.
+
+**Round 2 — Claude review panel, six lenses with three adversarial refuters per finding.** Seventeen
+findings were refuted under verification; three survived, all the same defect found independently by
+three lenses, with 3/3 refuters failing to refute it and an end-to-end reproduction attached:
+`url.Parse` stores a `base_url` password decoded while `url.URL.String()` re-encodes it, so
+registering the decoded form matched nothing for any password containing a character RFC 3986
+requires be escaped in userinfo. **The regression test passed only because its fixture,
+`pw-secret-456`, was URL-safe — the single class of password for which the two renderings
+coincide.** Re-verification then found a fourth rendering by the same reasoning: `net/http` derives
+an `Authorization: Basic` header from userinfo whenever the request carries none, which is always
+under the anthropic protocol, so an auth-echoing endpoint quotes the credential base64-encoded.
+
+**Round 3 — external reviewer (Codex `gpt-5.6-sol`), reading only the first commit.** Independently
+reproduced the same conclusions and added four. Three were leaks: custom auth header names
+(`X-Auth`, `X-Signature`, `X-Credential`); userinfo carrying a username and no password, the
+token-as-userinfo convention, where the username *is* the credential rather than an identifier
+standing beside one; and `resp.Status`, which HTTP/1 lets a server fill with arbitrary text, being
+interpolated unredacted beside the body that was not. The fourth was an over-redaction the fix had
+itself introduced: splitting a header value on any space registered the second word of a value that
+is not a credential pair, so `x-route-key: "pool alpha"` blanked "alpha" out of every diagnostic
+naming the pool — the opposite of the carve-out's purpose.
+
+**Decisions evaluated and rejected.** Shape-matching `Bearer`/`Authorization`-looking tokens, which
+the issue floated, was rejected on evidence: the observed anthropic echo was a bare value with no
+scheme prefix and no header name beside it, so a shape matcher would have missed the very leak the
+issue was filed for, and `base_url` may point at any gateway whose token format is unknowable.
+Chasing a credential re-encoded by Go's HTML-escaping JSON encoder was rejected as the same
+speculative pattern-matching, and buys nothing against an endpoint that transforms deliberately.
+Redacting a model's *successful* output was rejected as a category error — model output is a trusted
+boundary, and scrubbing it would corrupt the content the session exists to record. Redacting a
+`base_url` **username** when a password stands beside it was rejected because a username identifies
+rather than authenticates, and masking it costs a diagnostic to hide nothing.
+
+**Method note, worth repeating.** Two tests in this change passed against the unfixed code before
+being corrected: the base_url fixture above, and a truncation test whose padding arithmetic left
+only 3 characters of the key inside the quote budget while its assertion checked runs of 5 or more.
+Both looked like coverage. The habit that caught them — and that the next change should copy — is to
+overlay new test files onto a `git archive` of the *previous* commit and confirm each fails **for
+the intended reason**, not on a nil error, a panic, or a build failure.

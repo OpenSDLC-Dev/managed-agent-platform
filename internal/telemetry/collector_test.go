@@ -43,9 +43,20 @@ type fakeMetricService struct {
 	collectormetrics.UnimplementedMetricsServiceServer
 	mu      sync.Mutex
 	metrics []*metricspb.ResourceMetrics
+	// stall, when non-nil, blocks every export until it is closed or the
+	// caller's context ends — a collector that is up and accepting connections
+	// but not answering, which is what exhausts a shared shutdown deadline.
+	stall chan struct{}
 }
 
-func (s *fakeMetricService) Export(_ context.Context, req *collectormetrics.ExportMetricsServiceRequest) (*collectormetrics.ExportMetricsServiceResponse, error) {
+func (s *fakeMetricService) Export(ctx context.Context, req *collectormetrics.ExportMetricsServiceRequest) (*collectormetrics.ExportMetricsServiceResponse, error) {
+	if s.stall != nil {
+		select {
+		case <-s.stall:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.metrics = append(s.metrics, req.GetResourceMetrics()...)
@@ -79,6 +90,16 @@ func startFakeCollector(t *testing.T) *fakeCollector {
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	return c
+}
+
+// stallMetrics makes the collector accept metric exports and never answer them,
+// for the duration of one test. Used to prove the shutdown drains logs before
+// spending its deadline on anything else.
+func (c *fakeCollector) stallMetrics(t *testing.T) {
+	t.Helper()
+	stall := make(chan struct{})
+	c.metrics.stall = stall
+	t.Cleanup(func() { close(stall) })
 }
 
 // spanNames flattens every received span name across resource/scope nesting.

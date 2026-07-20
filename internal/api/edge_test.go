@@ -135,6 +135,79 @@ func TestUpdateValidationEdgeCases(t *testing.T) {
 	}
 }
 
+// TestMetadataRejectsNUL sweeps every metadata-accepting endpoint for U+0000.
+// It is well-formed JSON (the \u0000 escape) but Postgres cannot store it in a
+// jsonb value, nor bind it in the text[] of delete keys the work patch uses, so
+// without a guard a well-formed request becomes a 500 at insert time. The guard
+// lives in the two shared parsers (parseMetadata and splitMetadataPatch), and
+// this sweep is what keeps the endpoints from drifting apart — it is the same
+// rejection internal/events already applies to inbound event payloads.
+//
+// Keys are rejected alongside values, and a delete key alongside an upsert: a
+// NUL is unstorable wherever it appears, and on the Go-side merge a NUL delete
+// key would otherwise be silently accepted as a no-op while the identical patch
+// against the work endpoint's SQL-side merge failed.
+func TestMetadataRejectsNUL(t *testing.T) {
+	s := newTestServer(t)
+	agent := createAgent(t, s, map[string]any{"name": "nul", "model": "m"})
+	agentID := agent["id"].(string)
+	env := createEnvironment(t, s, map[string]any{"name": "nul-env"})
+	envID := env["id"].(string)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	sessID := sess["id"].(string)
+
+	const workKey = "ek-nul"
+	workEnvID, workSessionID := selfHostedWorker(t, s, workKey)
+	workID := s.enqueueAndPoll(t, workEnvID, workSessionID, workKey)
+
+	var (
+		nulValue  = map[string]any{"k": "a\x00b"}
+		nulKey    = map[string]any{"a\x00b": "v"}
+		nulDelete = map[string]any{"a\x00b": nil}
+	)
+
+	for name, tc := range map[string]struct {
+		path string
+		body any
+	}{
+		"agent create value":    {"/v1/agents", map[string]any{"name": "x", "model": "m", "metadata": nulValue}},
+		"agent create key":      {"/v1/agents", map[string]any{"name": "x", "model": "m", "metadata": nulKey}},
+		"agent update value":    {"/v1/agents/" + agentID, map[string]any{"version": 1, "metadata": nulValue}},
+		"agent update delete":   {"/v1/agents/" + agentID, map[string]any{"version": 1, "metadata": nulDelete}},
+		"env create value":      {"/v1/environments", map[string]any{"name": "x", "metadata": nulValue}},
+		"env create key":        {"/v1/environments", map[string]any{"name": "x", "metadata": nulKey}},
+		"env update value":      {"/v1/environments/" + envID, map[string]any{"metadata": nulValue}},
+		"env update delete":     {"/v1/environments/" + envID, map[string]any{"metadata": nulDelete}},
+		"session create value":  {"/v1/sessions", map[string]any{"agent": agentID, "environment_id": envID, "metadata": nulValue}},
+		"session create key":    {"/v1/sessions", map[string]any{"agent": agentID, "environment_id": envID, "metadata": nulKey}},
+		"session update value":  {"/v1/sessions/" + sessID, map[string]any{"metadata": nulValue}},
+		"session update delete": {"/v1/sessions/" + sessID, map[string]any{"metadata": nulDelete}},
+	} {
+		status, res := s.do(http.MethodPost, tc.path, tc.body)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400 (%v)", name, status, res)
+			continue
+		}
+		wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	}
+
+	// The work patch is the same parser behind worker auth (Bearer environment
+	// key), and the only endpoint whose merge happens in SQL.
+	workPath := "/v1/environments/" + workEnvID + "/work/" + workID
+	for name, body := range map[string]any{
+		"work value":  map[string]any{"metadata": nulValue},
+		"work key":    map[string]any{"metadata": nulKey},
+		"work delete": map[string]any{"metadata": nulDelete},
+	} {
+		res, obj, raw := s.workReq(t, http.MethodPost, workPath, workKey, body)
+		if res.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400 (%s)", name, res.StatusCode, raw)
+			continue
+		}
+		wantErr(t, res.StatusCode, obj, http.StatusBadRequest, "invalid_request_error")
+	}
+}
+
 // TestNullFieldLeniency: the reference treats explicit null as "clear" (or
 // "absent") for optional fields; none of these may error.
 func TestNullFieldLeniency(t *testing.T) {

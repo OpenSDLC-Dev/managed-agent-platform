@@ -482,36 +482,55 @@ func TestWorkHeartbeatClaimsLeaseAndExtends(t *testing.T) {
 	wantErr(t, res.StatusCode, body, http.StatusPreconditionFailed, "invalid_request_error")
 }
 
-// TestWorkStopGracefulThenForce pins POST .../work/{work_id}/stop: it returns
-// 200 + the updated BetaSelfHostedWork (not an empty 204 — that breaks the SDK's
-// typed decoder), a graceful stop moves the item to stopping, re-stopping a
-// stopping item is 409, and force escalates it to stopped.
+// TestWorkStopGracefulThenForce pins POST .../work/{work_id}/stop: success is a
+// bodiless 204 with no JSON Content-Type — the reference service sends no body
+// even though the generated SDK method is typed *BetaSelfHostedWork, which is
+// exactly why its work poller bypasses the strict decoder (anthropic-sdk-go
+// lib/environments/poller.go, stopWork). The resulting state is read back with
+// GET: a graceful stop moves the item to stopping, re-stopping a stopping item
+// is 409, and force escalates it to stopped.
 func TestWorkStopGracefulThenForce(t *testing.T) {
 	s := newTestServer(t)
 	const key = "ek-stop"
 	envID, sessionID := selfHostedWorker(t, s, key)
 	workID := s.enqueueAndPoll(t, envID, sessionID, key)
 	stop := "/v1/environments/" + envID + "/work/" + workID + "/stop"
+	get := "/v1/environments/" + envID + "/work/" + workID
 
-	res, body, raw := s.workReq(t, http.MethodPost, stop, key, nil)
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("graceful stop status = %d, want 200 (body %q)", res.StatusCode, raw)
-	}
+	wantNoContent(t, s, stop, key, nil)
+	_, body, _ := s.workReq(t, http.MethodGet, get, key, nil)
 	if body["type"] != "work" || body["state"] != "stopping" || body["stop_requested_at"] == nil {
-		t.Errorf("graceful stop returned %v, want a work object in state stopping", body)
+		t.Errorf("after graceful stop GET returned %v, want a work object in state stopping", body)
 	}
 
-	// Re-graceful-stopping a stopping item is a conflict.
-	res, body, _ = s.workReq(t, http.MethodPost, stop, key, nil)
+	// Re-graceful-stopping a stopping item is a conflict — errors keep the JSON envelope.
+	res, body, _ := s.workReq(t, http.MethodPost, stop, key, nil)
 	wantErr(t, res.StatusCode, body, http.StatusConflict, "invalid_request_error")
 
-	// force escalates stopping → stopped, returning the updated work object.
-	res, body, raw = s.workReq(t, http.MethodPost, stop, key, map[string]any{"force": true})
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("force stop status = %d, want 200 (body %q)", res.StatusCode, raw)
-	}
+	// force escalates stopping → stopped, again with no response body.
+	wantNoContent(t, s, stop, key, map[string]any{"force": true})
+	_, body, _ = s.workReq(t, http.MethodGet, get, key, nil)
 	if body["state"] != "stopped" || body["stopped_at"] == nil {
-		t.Errorf("force stop returned %v, want stopped with stopped_at", body)
+		t.Errorf("after force stop GET returned %v, want stopped with stopped_at", body)
+	}
+}
+
+// wantNoContent posts a stop and asserts the wire's success shape: 204, zero
+// body bytes, and no Content-Type header at all (not merely a non-JSON one) —
+// the strict Go decoder in the reference SDK keys off exactly that absence.
+func wantNoContent(t *testing.T, s *tserver, path, key string, reqBody map[string]any) {
+	t.Helper()
+	res, _, raw := s.workReq(t, http.MethodPost, path, key, reqBody)
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("stop status = %d, want 204 (body %q)", res.StatusCode, raw)
+	}
+	if len(raw) != 0 {
+		t.Errorf("stop returned %d body bytes (%q), want an empty body", len(raw), raw)
+	}
+	// Check the header map directly: Header.Get returns "" for an absent header
+	// and for a present-but-empty one alike, so it cannot prove absence.
+	if ct, ok := res.Header["Content-Type"]; ok {
+		t.Errorf("stop set Content-Type %q, want the header absent entirely", ct)
 	}
 }
 

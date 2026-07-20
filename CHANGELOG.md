@@ -102,6 +102,238 @@ copy of an entry here.
 
 ### Fixed
 
+- **Provider adapter errors could quote a credential back from the endpoint's response body**
+  ([#83](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/83)) — both adapters quote
+  what a failing endpoint said about itself, because the status alone rarely explains a gateway
+  misconfiguration. An endpoint that echoes the request's auth header into that diagnostic body —
+  some gateways do on a 401 — therefore put the model credential into the error. That error is not
+  merely logged: a failed turn becomes a `session.error` event, which is **append-only** in Postgres
+  and re-served to API clients on every list and every SSE replay, so a leaked key could not be
+  edited back out. (It reaches neither `slog` nor the OTel span; the fix is not a logging matter.)
+
+  The issue named two sites; there were five. The openai adapter also embeds an endpoint-supplied
+  mid-stream error frame, and the anthropic stream surfaces an upstream failure from `Err()` after
+  `Next()` — **both under HTTP 200**, the route an operator is least likely to exercise, and the
+  anthropic one returns `nil` from `Generate`, so a fix applied only where the issue pointed would
+  have passed its own test and leaked in production. The fifth needs no cooperation from the
+  endpoint at all: the SDK formats the request URL into every API error with `String()` rather than
+  `Redacted()`, so a credential in `base_url`'s userinfo leaks on any upstream failure.
+
+  Redaction matches the configured secret **by exact value, never by token shape**. The observed
+  anthropic echo was a bare value with no `Bearer` prefix and no header name beside it — the
+  Anthropic protocol sends `x-api-key` — so the shape-matcher the issue floated would have missed
+  the very leak it was filed for, and a `base_url` may point at any gateway, proxy, or self-hosted
+  model (principle 4), whose token format is unknowable. The adapter holds the secret, so it does
+  not have to guess: `provider.NewRedactor` collects the api key, a `base_url` userinfo password,
+  and the values of auth-named headers (plus the token alone from a `Bearer <token>` value, since an
+  endpoint may echo either form). Header values are covered because the openai adapter applies
+  configured headers *after* setting `Authorization`, which makes them an auth channel by
+  construction; non-auth headers are deliberately left alone so that redaction cannot mangle the
+  diagnostic it exists to protect — `x-gateway-route: llm-pool-7` still reads back out of "no
+  capacity in pool llm-pool-7". Everything but the secret survives: status line, error type, the
+  endpoint's own message, the request id.
+
+  `Redactor.Error` wraps rather than reformats. `fmt.Errorf("%w", err)` was not an option — `%w`
+  re-renders the wrapped message, which *is* the leak — so the redacted error overrides `Error()`
+  and keeps the original reachable through `Unwrap`. Nothing unwraps a provider error today (the
+  brain's only `errors.As` is for its own `infraError`), but retry logic reading an upstream status
+  is the obvious next caller, and it should not have to choose between the status and a safe message.
+
+  A configured credential is not one string but every encoding the stack renders it in, so all of
+  them are registered. `url.Parse` stores a `base_url` password **decoded** while `url.URL.String()`
+  prints it **re-encoded**, and `net/http` derives an `Authorization: Basic` header from userinfo
+  whenever the request carries none — always, under the anthropic protocol — so the decoded,
+  percent-encoded, base64 and as-written forms all join the secret set. Registering one alone left
+  every password containing a character RFC 3986 requires be escaped in userinfo (`@`, `/`, `%`, a
+  space — what a generated password is made of) leaking in full. The as-written form is found
+  textually, which is the only way to reach an *unparsable* or schemeless `base_url`, whose own
+  error quotes it back. The quoted body is read one secret longer than it is quoted, so truncating
+  at the cap cannot sever a credential and leave its head matching nothing. `isCredentialName`
+  covers the spellings a canonical list misses (`apikey`, `x-auth`, `x-signature`, `x-credential`)
+  and a `base_url` query credential; splitting a header value requires a known auth scheme, so a
+  routing tag like `x-route-key: "pool alpha"` keeps its second word out of the secret set.
+
+  How each of those gaps was found — three review rounds, what each demonstrated, and the test
+  fixtures that hid two of them — is [docs/HISTORY.md](./docs/HISTORY.md) § "Provider credential
+  redaction (#83) — review-hardening record".
+
+  Two residuals are deliberate, not oversights. A credential containing `<`, `>` or `&` survives
+  Go's HTML-escaping JSON encoder as `<…`, which no verbatim match sees — chasing arbitrary
+  re-encodings is the speculative pattern-matching this design rejected, and it buys nothing
+  against an endpoint that transforms deliberately. And a model that emits the key in its own
+  *successful* output is not an error path at all: model output is a trusted boundary here, and
+  redacting it would corrupt the very content the session exists to record.
+
+  `docs/ARCHITECTURE.md`'s security invariants already claimed provider errors redacted the key;
+  that sentence was false when written and is now true, minus the half about config printouts, which
+  `provider.Config` still does not implement and the text no longer claims. Left alone deliberately:
+  the anthropic path quotes an **unbounded** body (the SDK reads it with a bare `io.ReadAll`) where
+  openai caps at 4 KiB — a payload-size concern, not a credential one.
+- **A client-supplied model string could grow the brain's provider cache without bound**
+  ([#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88)) — `provider.Registry`
+  cached each constructed provider under the *agent's* model string (`r.cache[model] = p`). Under a
+  `"*"` default route any string a client puts on `POST /v1/agents` routes successfully, so that map
+  was keyed by client input and grew for the life of the brain process. The issue reports only the
+  metric consequence of that pass-through; this is a second consequence of the same trigger, and it
+  is not confined to the pass-through: the cache write did not depend on which branch `route()`
+  took, so a `"*"` route that *does* set `upstream_model` retained one byte-identical provider per
+  distinct string too. A fix that merely skipped the cache on the pass-through path would have left
+  half of it in place.
+
+  The cache is deleted rather than re-keyed. Bounding it by route would have worked, but the cache
+  was buying almost nothing to begin with: both adapters share `http.DefaultClient` (the anthropic
+  one because `option.WithoutEnvironmentDefaults()` sends `sdk.NewClient` down the branch that never
+  clones `http.DefaultTransport`), so no connection pool, TLS session cache, or goroutine is
+  per-instance — the source proves the resource sharing, and a development-machine probe put
+  construction at roughly half a microsecond against a model round trip of hundreds of
+  milliseconds. Deleting it makes the growth structurally impossible instead of policy-avoided, and
+  since the registry owns copies of everything it is given and writes them only in `NewRegistry`
+  (the factory table is now copied too, as each route's headers already were), its mutex goes with
+  it — the per-turn path now takes no process-global lock at all. An LRU or size cap was
+  rejected for the same reason plus a worse one: under a flood of distinct strings a cap poisons
+  permanently and an LRU thrashes to a zero hit rate, so both pay for a data structure that buys
+  nothing exactly when it is needed. The cheapness the design now rests on is stated as an invariant
+  on `provider.Factory` and cross-referenced from the anthropic adapter, where a future
+  security-motivated edit would otherwise flip the cost model silently.
+  `TestRegistryRetainsNothingPerModelString` and
+  `TestRegistryDefaultRouteWithUpstreamModelIgnoresClientString` pin both halves.
+
+  **The metric half of #88 is deliberately unchanged** (no behavior change). The same pass-through
+  makes the client's string the `gen_ai.request.model` attribute on
+  `gen_ai.client.operation.duration` and `gen_ai.client.token.usage`, and metric attributes are
+  aggregation keys — so a `"*"` route with no `upstream_model` means client-controlled series
+  cardinality. Recording the attribute is what the convention asks for, and the two guards
+  considered both cost more than they save: validating agent model strings against configured routes
+  would break the pass-through that exists precisely so unknown-to-us names work (and would need
+  `internal/api`, which knows nothing of routes, to learn them), while omitting or placeholdering
+  the label would destroy it in the default deployment — the one where it is most informative. The
+  exposure needs an untrusted caller able to supply a model string — by creating an agent, or by
+  creating or updating a session with an `agent_with_overrides` block — which v1's single-tenant
+  management key does not grant, and an operator who configures a pass-through has already agreed
+  to forward arbitrary strings to their own gateway. It is therefore recorded as an operator
+  responsibility everywhere the operator makes the choice:
+  [`deploy/compose/README.md`](./deploy/compose/README.md) and, on the Helm side, both the
+  `modelProviders` values documentation and the chart README's install walkthrough.
+- **Work Stop answered 200 + a JSON work object where the reference answers a bodiless 204**
+  ([#27](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/27)) —
+  `POST /v1/environments/{environment_id}/work/{work_id}/stop` now returns `204 No Content`: zero
+  body bytes, no `Content-Type`. Callers that want the resulting state read it back through
+  `GET …/work/{work_id}`. Errors keep the JSON envelope unchanged, including the `409` for a stop
+  that is already past the transition it asks for.
+
+  The old shape was not an oversight but a documented, *confirmed* divergence, and it was wrong for
+  an instructive reason. The reasoning on record ran: the generated `Work.Stop` is typed
+  `*BetaSelfHostedWork`, and pointing the SDK at a 204/empty-body server makes its decoder error —
+  therefore 204 could not be the wire contract. The measurement was sound; the inference was not.
+  It measured the *client* and concluded something about the *service*. The pinned SDK settles the
+  question in the opposite direction, in its own work poller's prose: "Today the server returns 204
+  with no body / no Content-Type, and the strict Go decoder errors … for what is actually a
+  successful call" — a Go-only strictness (TypeScript and Python decode 204 natively) worked around
+  with `WithResponseBodyInto`, under a `TODO` asking for the *spec* to stop declaring a body "that
+  the server never sends". A client workaround shipped by the reference SDK is evidence *for* the
+  204, not against it.
+
+  The published spec does say otherwise — the public Stop Work reference documents a
+  `BetaSelfHostedWork` return, as do `api.md` and the generated signature — so this is a deliberate
+  divergence from the spec in favour of the deployed service, recorded as such in
+  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) and left open for a recording against a real endpoint
+  to close. The three spec-side witnesses are one witness: docs, `api.md` and the method signature
+  are all generated from the OpenAPI document the erratum names as wrong.
+
+  **This is a compatibility break, for one caller:** code that drove the generated `Work.Stop`
+  against *this platform's* old 200 + JSON response, and any hand-written consumer of that body, now
+  gets a decoder error. It is worth taking because the same code already fails against Anthropic's
+  own service — the old shape preserved compatibility with us, not with the reference, and code
+  developed against it would break on contact with the real thing. Every client that exists in the
+  wild is unaffected: the SDK's worker and poller apply the body bypass, and the real `ant` CLI binds
+  `*[]byte` for every work command (verified by driving the real CLI against a local server: both
+  graceful and forced stop exit 0).
+
+  This platform's own BYOC worker was the one real casualty, and it is fixed in the same change.
+  `internal/worker`'s `forceStop` called the generated method with no bypass, so against a 204 every
+  *successful* force-stop would decode-error past the `409` guard and log `worker: force-stop
+  failed` on the happy path — a warning that is pure fiction, invisible to a test suite asserting
+  database state. It now applies the same `WithResponseBodyInto` rebinding the reference's own
+  poller does, for the same reason. The regression test asserts the *absence* of that warning
+  against a real in-process control plane; removing the bypass reproduces the SDK's quoted error
+  string verbatim.
+
+- **Every binary's fatal-exit log reached stderr but never the collector**
+  ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)) — the one line that says
+  why a process died was the only one the OTLP backend never received. Each `main()` logged it after
+  `run()` returned, by which point `run()`'s deferred telemetry shutdown had stopped the log
+  processor: `sdk/log`'s `BatchProcessor.OnEmit` returns without enqueueing once `Shutdown` has set
+  its stopped flag, and does so silently — no error, no dropped-record counter — while the fan-out's
+  console half went on printing. So `DATABASE_URL is required`, or a `store.Open` failure, reached
+  stderr and never landed beside the traces it explains. `ForceFlush` is gated by the same flag,
+  leaving no after-the-fact rescue.
+
+  Resequencing the log alone would not have been enough. The obvious repair — a named `err` return
+  logged from inside the existing defer — reaches only errors raised after `telemetry.Init`, because
+  before it that defer has not been registered: every environment-validation failure, and in the
+  executor and worker a sandbox backend that will not construct, is returned *earlier* and would
+  have been logged nowhere at all, which is worse than the defect. So `Init` moves ahead of the body
+  too, and the whole shape — init, body, fatal log, flush — becomes one function, `telemetry.Run`,
+  which each `main()` calls with a service name and its `run`. That moves the ordering from a
+  convention four binaries re-implemented into one place a test can reach, which is the point:
+  `cmd/` is outside the coverage denominator by design, and this regression arrived with the log
+  bridge precisely because nothing there could test it. `telemetry.Run` is covered against the
+  in-process OTLP collector the bridge suite already had — restore the old ordering and the
+  collector receives nothing at all. It is worth being exact about the guarantee, though: `Init`
+  stays exported for the suite's own use, so a binary that went back to calling it directly would
+  reintroduce the defect with the telemetry tests still green. What stops that is review, not the
+  compiler.
+
+  A `context.Canceled` body error is still a clean exit rather than a fatal log, and the predicate
+  now lives in one place instead of three. That does change the controlplane, which alone among the
+  four never had the guard: `store.Open` wraps its ping with `%w`, so a SIGTERM arriving while the
+  process is still connecting to Postgres used to exit 1 having logged
+  `store: connect: context canceled`, and now exits 0 silently. The other three have always behaved
+  that way, and a process that stopped because it was asked to is not a failure. The flush runs on a
+  fresh `context.Background()` rather than the process context, and a test pins that choice: on a
+  signal-driven exit the process context is already cancelled, and `BatchProcessor.Shutdown` skips
+  its final queue flush outright when its shutdown context is done — which would put the fatal record
+  straight back where this defect had it, on the console and nowhere else.
+
+  The exit flush also drains logs first now, ahead of traces and metrics. All three providers shut
+  down on one deadline in argument order, and the fatal record is by construction the last thing
+  queued before it — so with logs draining last, a collector that accepts them but stalls on metrics
+  spent the whole budget elsewhere and left `BatchProcessor.Shutdown` to return on `ctx.Done` without
+  draining its queue, losing precisely the record this entry is about. A meter provider exports
+  unconditionally at `Shutdown` once a reader is registered, so a service that recorded no
+  instruments was exposed too. Traces and metrics are the telemetry a dying process can afford to
+  lose; the line saying why it died is not.
+
+  One cost is deliberate. Because `Init` now precedes the environment validation, a misconfigured
+  process pointed at an *unreachable* collector spends the exporter's connection timeout on the way
+  out — about eleven seconds against a blackholed endpoint, where it used to fail in milliseconds.
+  Exit stays bounded, a reachable or unconfigured collector is unaffected, and what the wait buys is
+  the class of failure this entry is about.
+
+- **Metadata carrying U+0000 was a 500, or a silent no-op, instead of a 400**
+  ([#73](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/73)) — `\u0000` is a
+  well-formed JSON escape that Postgres cannot store, and the metadata parsers only checked that a
+  value decoded as a string. So a well-formed request became a server fault at insert time on every
+  metadata-accepting endpoint: agent, environment, and session create and update, and the work-item
+  metadata patch. The break had two mechanisms, not one — a NUL in a key or an upserted value hit
+  the `jsonb` bind (`SQLSTATE 22P05`, unsupported Unicode escape sequence), while a NUL in a *delete*
+  key on the work patch hit the `text[]` bind of `(metadata || $3::jsonb) - $4::text[]`
+  (`SQLSTATE 22021`, invalid byte sequence for encoding UTF8) — and neither error is an `apiError`,
+  so `writeError` mapped both to a 500 `api_error`.
+  A NUL delete key against agents, environments, or sessions was worse than a 500: their merge runs
+  in Go, so the unstorable key was deleted from a map, never reached SQL, and the request returned
+  **200** — the identical patch that 500s against the work endpoint. The guard is now hoisted into
+  the two shared parsers, `parseMetadata` and `splitMetadataPatch`, which between them back every
+  one of those endpoints, so the rejection cannot drift apart per-endpoint again; it covers keys as
+  well as values, and delete keys as well as upserts, which is what closes the 200/500 asymmetry.
+  This is the same rule `internal/events` already applied to inbound event payloads; one
+  docs/DIVERGENCES.md INFERRED entry now covers both guards, since rejecting a delete key turns a
+  previously-200 request into a 400 and the reference's own behaviour is undecidable from the typed
+  schema. A shared sweep in `internal/api/edge_test.go` pins all fifteen endpoint-and-position
+  combinations at a wire-shaped 400. NUL in non-metadata text fields (name, title, system,
+  description, package names) is the same bug class one field over and remains open — out of scope
+  here, tracked separately.
+
 - **The K8s sandbox could kill a command on its deadline and report it as not timed out**
   ([#95](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/95),
   [#110](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/110)) — the deadline was

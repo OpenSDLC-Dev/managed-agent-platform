@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -22,7 +23,14 @@ type fakeServer struct {
 	gotHead http.Header
 	status  int
 	errBody string
+	// echoAuth makes the error body quote the request's Authorization header
+	// back, the way some gateways do on a 401 (see TestUpstreamError...).
+	echoAuth bool
 }
+
+// testAPIKey is the credential start() configures the adapter with, so a test
+// can assert an error never quotes it.
+const testAPIKey = "sk-test-123"
 
 func (f *fakeServer) handler(w http.ResponseWriter, r *http.Request) {
 	f.t.Helper()
@@ -34,9 +42,19 @@ func (f *fakeServer) handler(w http.ResponseWriter, r *http.Request) {
 		f.t.Errorf("decode request body: %v", err)
 	}
 	if f.status != 0 {
+		body := f.errBody
+		if f.echoAuth {
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				// Without this the handler would echo "", the body would carry
+				// no credential, and a leak assertion would pass vacuously.
+				f.t.Fatal("echoAuth: request carried no Authorization header to echo")
+			}
+			body = `{"error":{"message":"rejected credential ` + auth + `","type":"invalid_request_error"}}`
+		}
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(f.status)
-		_, _ = w.Write([]byte(f.errBody))
+		_, _ = w.Write([]byte(body))
 		return
 	}
 	w.Header().Set("content-type", "text/event-stream")
@@ -57,7 +75,7 @@ func start(t *testing.T, f *fakeServer) provider.Provider {
 		Protocol: "openai",
 		Model:    "gpt-4o-mini",
 		BaseURL:  srv.URL,
-		APIKey:   "sk-test-123",
+		APIKey:   testAPIKey,
 		Headers:  map[string]string{"x-gateway-route": "llm-pool-7"},
 	})
 	if err != nil {
@@ -278,6 +296,114 @@ func TestUpstreamError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Generate against a 401 should return an error")
+	}
+}
+
+// A gateway that echoes the request's Authorization header into its own
+// diagnostic body must not get the credential into the returned error: that
+// error becomes a session.error event, which is append-only in Postgres and
+// re-served to API clients on every read. The quoted body is what makes a
+// misconfiguration diagnosable, so the rest of it must survive.
+func TestUpstreamErrorNeverQuotesTheCredential(t *testing.T) {
+	f := &fakeServer{status: http.StatusUnauthorized, echoAuth: true}
+	p := start(t, f)
+	_, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err == nil {
+		t.Fatal("Generate against a 401 should return an error")
+	}
+	if strings.Contains(err.Error(), testAPIKey) {
+		t.Errorf("error quotes the credential back: %q", err)
+	}
+	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "rejected credential") {
+		t.Errorf("redaction destroyed the diagnostic: %q", err)
+	}
+}
+
+// The error quotes only a bounded prefix of the body, so a credential sitting
+// across that boundary would be cut in half and survive redaction as a
+// still-revealing fragment.
+func TestUpstreamErrorTruncationCannotSplitTheCredential(t *testing.T) {
+	// Place the echoed key so that it straddles the 4096-byte quote budget with
+	// most of it inside: reading exactly the budget would leave those leading
+	// characters in the message, matching no registered secret.
+	const budget = 4096
+	const inside = 8
+	head := `{"error":{"message":"pad `
+	f := &fakeServer{
+		status:  http.StatusUnauthorized,
+		errBody: head + strings.Repeat("x", budget-len(head)-inside) + testAPIKey + `"}}`,
+	}
+	p := start(t, f)
+	_, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err == nil {
+		t.Fatal("Generate against a 401 should return an error")
+	}
+	if strings.Contains(err.Error(), testAPIKey) {
+		t.Errorf("error quotes the credential back: %q", err)
+	}
+	// A truncated key is still a leak: assert no leading run of it survives.
+	for n := len(testAPIKey); n > 3; n-- {
+		if strings.Contains(err.Error(), testAPIKey[:n]) {
+			t.Errorf("error quotes a %d-character prefix of the credential: %q", n, err)
+			break
+		}
+	}
+}
+
+// An unparsable base_url is quoted back by the parse error itself, so a
+// credential in its userinfo leaks with no endpoint involved at all — and it is
+// the one case the redactor cannot reach by parsing the URL.
+func TestRequestConstructionErrorNeverQuotesBaseURLCredentials(t *testing.T) {
+	const password = "pw-secret-999"
+	p, err := openai.New(provider.Config{
+		Protocol: "openai",
+		Model:    "gpt-4o-mini",
+		BaseURL:  "https://user:" + password + "@gw.internal/%zz",
+		APIKey:   testAPIKey,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err == nil {
+		t.Fatal("an unparsable base_url should fail the request")
+	}
+	if strings.Contains(err.Error(), password) {
+		t.Errorf("error quotes the base_url credential back: %q", err)
+	}
+}
+
+// The same leak arrives under HTTP 200 through a mid-stream error frame — the
+// path an operator is least likely to exercise, and unbounded in length.
+func TestStreamErrorFrameNeverQuotesTheCredential(t *testing.T) {
+	f := &fakeServer{sse: []string{
+		`{"error":{"message":"upstream rejected Bearer ` + testAPIKey + ` for pool llm-pool-7"}}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	defer stream.Close()
+	for stream.Next() {
+	}
+	err = stream.Err()
+	if err == nil {
+		t.Fatal("an error frame should fail the stream")
+	}
+	if strings.Contains(err.Error(), testAPIKey) {
+		t.Errorf("stream error quotes the credential back: %q", err)
+	}
+	if !strings.Contains(err.Error(), "llm-pool-7") {
+		t.Errorf("redaction destroyed the diagnostic: %q", err)
 	}
 }
 
