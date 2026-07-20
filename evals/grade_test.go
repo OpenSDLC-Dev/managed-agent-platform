@@ -930,11 +930,15 @@ func EvaluatedPermissionAsk(name string, class Class) Grader {
 //
 // It is vacuous when nothing was confirmed, when the model never made the call
 // the task described, and when no matching call was confirmed. The last one is
-// the subtle case, and it is safe here because the sibling graders own it: a
-// gated call that ran without being stopped reds EvaluatedPermissionAsk, which
-// checks every call to the tool. Blaming the platform here instead would misread
-// the harness giving up on a model that re-pauses past maxConfirmRounds
-// (harness_test.go) as a bridge fault.
+// the subtle case, and it is safe only because sibling graders own that window
+// task by task — a general claim that "EvaluatedPermissionAsk covers it" is not
+// true, since that grader checks the permission *stamp* and not that a
+// suspension happened. In perm-allow the gated call must produce its file
+// (FileLines) and carry the stamp; in perm-deny the seeded file must be
+// *unchanged* (FileLines, Platform), so an unconfirmed append that actually runs
+// reds there, and the stamp is checked too. Blaming the platform here instead
+// would misread the harness giving up on a model that re-pauses past
+// maxConfirmRounds (harness_test.go) as a bridge fault.
 //
 // The one thing it asserts about confirmations it does not grade: each must name
 // an agent.tool_use that is on the log. The harness confirms whatever event id

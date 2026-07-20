@@ -26,5 +26,5 @@ single-PR work, confined to `evals/`).
       substitution into `(*Trial).fill`.
 - [x] Reviews settled: Codex, `/code-review` and the verifier all landed findings; the confirmed
       ones share a shape — a grader no mutation of itself could catch. Re-verified at the final
-      state: `make verify` green, live eval 10/10, 16 mutation probes with 15 killed (the survivor,
-      `FileLines` filling its path, is unit-untestable and pinned by the live run — see the PR).
+      state: `make verify` green, live eval 10/10, 17 mutation probes with 16 killed — the last by
+      a live run. The survivor is an equivalent mutant, not a gap; the PR says which and why.

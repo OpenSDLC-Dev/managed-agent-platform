@@ -333,6 +333,11 @@ func permDeny() Task {
 		Graders: []Grader{
 			ToolCalledWith("bash", []string{"APPEND_{{NONCE}}"}, Model),
 			RequiresActionRaised(Platform),
+			// The stamp, as in perm-allow. It is the half of "this call went
+			// through the gate" that ConfirmedResult cannot see: a call the bridge
+			// ran without stopping is invisible to a grader keyed on confirmations,
+			// and the deny path needs that covered as much as the allow path does.
+			EvaluatedPermissionAsk("bash", Platform),
 			ConfirmedResult("bash", []string{"APPEND_{{NONCE}}"}, true, "DENY_{{NONCE}}", Platform),
 			FileLines("notes.txt", []string{"ORIGINAL_{{NONCE}}"}, Platform),
 			FinalMessageHas("DENIED:{{NONCE}}", Either),
