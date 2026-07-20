@@ -21,9 +21,10 @@ single-PR work, confined to `evals/`).
 - [x] `ConfirmedResult` joins the expected tool/input → its confirmation → its result, and reds a
       confirmation naming no `agent.tool_use`. Any-match like `CallResult`, so a retry after an
       error is not a Platform red.
-- [x] Live `make eval`: 10/10 green (`MiniMax-M3`). The first run caught a real defect — a token
-      substituted on the prompt side but not in the grader — now closed by folding every
-      substitution into `(*Trial).fill`.
+- [x] Live `make eval` (`MiniMax-M3`): 10/10, over five runs in which **no Platform grader ever
+      fired** — the two reds were a Model and an Either finding, which is the invariant working.
+      An early run caught a real defect — a token substituted on the prompt side but not in the
+      grader — closed by folding every substitution into `(*Trial).fill`.
 - [x] Reviews settled: Codex, `/code-review` and the verifier all landed findings; the confirmed
       ones share a shape — a grader no mutation of itself could catch. Re-verified at the final
       state: `make verify` green, live eval 10/10, 17 mutation probes with 16 killed — the last by
