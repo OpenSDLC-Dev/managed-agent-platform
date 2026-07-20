@@ -52,7 +52,13 @@ brain:
   # No other keys — the loader rejects unknown fields. Contains api_key, so it is stored
   # in a Secret. REQUIRED (at least one route). base_url is the API ROOT — the adapter
   # appends the protocol path (/v1/messages or /v1/chat/completions), so omit a trailing
-  # /v1. Example:
+  # /v1. Leaving upstream_model unset passes the agent's own model string through to the
+  # endpoint AND into the gen_ai.request.model metric attribute; since metric attributes
+  # are aggregation keys, a "*" route without upstream_model lets whoever can supply a
+  # model string — via agent creation, or via a session's agent_with_overrides on create
+  # or update — control your metrics backend's series count. Deliberate — set
+  # upstream_model or use per-model routes if any of those paths is untrusted (#88).
+  # Example:
   #   modelProviders:
   #     - model: "*"
   #       protocol: anthropic

@@ -103,6 +103,51 @@ copy of an entry here.
   `provider.Config` still does not implement and the text no longer claims. Left alone deliberately:
   the anthropic path quotes an **unbounded** body (the SDK reads it with a bare `io.ReadAll`) where
   openai caps at 4 KiB — a payload-size concern, not a credential one.
+- **A client-supplied model string could grow the brain's provider cache without bound**
+  ([#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88)) — `provider.Registry`
+  cached each constructed provider under the *agent's* model string (`r.cache[model] = p`). Under a
+  `"*"` default route any string a client puts on `POST /v1/agents` routes successfully, so that map
+  was keyed by client input and grew for the life of the brain process. The issue reports only the
+  metric consequence of that pass-through; this is a second consequence of the same trigger, and it
+  is not confined to the pass-through: the cache write did not depend on which branch `route()`
+  took, so a `"*"` route that *does* set `upstream_model` retained one byte-identical provider per
+  distinct string too. A fix that merely skipped the cache on the pass-through path would have left
+  half of it in place.
+
+  The cache is deleted rather than re-keyed. Bounding it by route would have worked, but the cache
+  was buying almost nothing to begin with: both adapters share `http.DefaultClient` (the anthropic
+  one because `option.WithoutEnvironmentDefaults()` sends `sdk.NewClient` down the branch that never
+  clones `http.DefaultTransport`), so no connection pool, TLS session cache, or goroutine is
+  per-instance — the source proves the resource sharing, and a development-machine probe put
+  construction at roughly half a microsecond against a model round trip of hundreds of
+  milliseconds. Deleting it makes the growth structurally impossible instead of policy-avoided, and
+  since the registry owns copies of everything it is given and writes them only in `NewRegistry`
+  (the factory table is now copied too, as each route's headers already were), its mutex goes with
+  it — the per-turn path now takes no process-global lock at all. An LRU or size cap was
+  rejected for the same reason plus a worse one: under a flood of distinct strings a cap poisons
+  permanently and an LRU thrashes to a zero hit rate, so both pay for a data structure that buys
+  nothing exactly when it is needed. The cheapness the design now rests on is stated as an invariant
+  on `provider.Factory` and cross-referenced from the anthropic adapter, where a future
+  security-motivated edit would otherwise flip the cost model silently.
+  `TestRegistryRetainsNothingPerModelString` and
+  `TestRegistryDefaultRouteWithUpstreamModelIgnoresClientString` pin both halves.
+
+  **The metric half of #88 is deliberately unchanged** (no behavior change). The same pass-through
+  makes the client's string the `gen_ai.request.model` attribute on
+  `gen_ai.client.operation.duration` and `gen_ai.client.token.usage`, and metric attributes are
+  aggregation keys — so a `"*"` route with no `upstream_model` means client-controlled series
+  cardinality. Recording the attribute is what the convention asks for, and the two guards
+  considered both cost more than they save: validating agent model strings against configured routes
+  would break the pass-through that exists precisely so unknown-to-us names work (and would need
+  `internal/api`, which knows nothing of routes, to learn them), while omitting or placeholdering
+  the label would destroy it in the default deployment — the one where it is most informative. The
+  exposure needs an untrusted caller able to supply a model string — by creating an agent, or by
+  creating or updating a session with an `agent_with_overrides` block — which v1's single-tenant
+  management key does not grant, and an operator who configures a pass-through has already agreed
+  to forward arbitrary strings to their own gateway. It is therefore recorded as an operator
+  responsibility everywhere the operator makes the choice:
+  [`deploy/compose/README.md`](./deploy/compose/README.md) and, on the Helm side, both the
+  `modelProviders` values documentation and the chart README's install walkthrough.
 
 - **Every binary's fatal-exit log reached stderr but never the collector**
   ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)) — the one line that says
