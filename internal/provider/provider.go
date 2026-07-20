@@ -63,8 +63,14 @@ type Chunk struct {
 
 	ToolUse *ToolUse // KindToolUse only
 
-	StopReason string             // KindDone only: end_turn | tool_use | max_tokens | …
-	Usage      *domain.ModelUsage // KindDone only
+	StopReason string // KindDone only: end_turn | tool_use | max_tokens | …
+	// Usage is KindDone only, and nil means the endpoint reported none —
+	// not that it reported zeroes. An adapter must send nil when no usage
+	// object arrived on the wire: an OpenAI-compatible gateway that ignores
+	// stream_options.include_usage would otherwise be indistinguishable from
+	// a model that ran for free, and the token metric would record it as one
+	// (#90).
+	Usage *domain.ModelUsage
 }
 
 // ToolUse is a complete tool call emitted by the model.

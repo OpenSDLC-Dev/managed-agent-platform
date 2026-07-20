@@ -60,10 +60,11 @@ type ModelRequest struct {
 	sessionID domain.ID
 	startID   domain.ID
 	span      trace.Span
-	usage     domain.ModelUsage // recorded by EndEvent for Finish's attributes
-	// hasUsage records whether EndEvent ran. A turn that died before reporting
-	// usage has none, and emitting a pair of zeroes for it would dilute the
-	// token histogram with readings no model ever produced.
+	usage     domain.ModelUsage // recorded by ModelDone for Finish's attributes
+	// hasUsage records whether ModelDone was given a reading. A turn that died
+	// before reporting usage has none, and neither has one whose endpoint
+	// reported none (#90); emitting a pair of zeroes for either would dilute
+	// the token histogram with readings no model ever produced.
 	hasUsage bool
 	backend  Backend
 	started  time.Time

@@ -102,6 +102,47 @@ copy of an entry here.
 
 ### Fixed
 
+- **A model endpoint that reported no usage was recorded as one that spent nothing**
+  ([#90](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/90)) — `provider.Chunk.Usage`
+  is a `*domain.ModelUsage`, which reads as "nil means the endpoint reported nothing", but neither
+  adapter ever used it that way: both took the address of a local value on their final chunk, so a
+  stream that carried no usage object at all yielded a non-nil pointer to a zero struct. The
+  distinction died there, and everything downstream inherited a fact nobody had established.
+
+  What made it more than cosmetic is that a consumer was already built to honor the distinction.
+  `ModelRequest.ModelDone` takes a pointer precisely so a turn with no reading records no
+  `gen_ai.client.token.usage` data point rather than a zero one — a zero reading and no reading are
+  different facts, and only the first belongs in a histogram. But the absence could not reach it:
+  the brain's `streamUsage` returned `&turn.usage`, the address of a value field, so it was
+  non-nil for every turn that completed. An OpenAI-compatible gateway that ignores
+  `stream_options.include_usage` therefore produced successful turns recording 0 input / 0 output
+  tokens, as though the model were free — exactly the non-compliant-endpoint case CLAUDE.md
+  principle 4 obliges the adapters to handle, silently mis-reported.
+
+  Fixed across all three layers, because any subset is inert: fixing only the brain leaves adapters
+  that never send nil, and fixing only the adapters leaves a brain that flattens it. Both adapters
+  now track whether a usage object actually arrived and send `Usage: nil` when none did. Presence is
+  judged by the wire, not by the counters — the anthropic adapter asks the SDK decoder's field
+  metadata (`respjson.Field.Valid()`) on `message_start` and `message_delta`, the openai adapter
+  reuses its existing per-frame `fr.Usage != nil` — so an endpoint that genuinely spent nothing and
+  says so in an object full of zeroes still counts as having answered. `turnResult.usage` became a
+  pointer and `streamUsage` now returns it unchanged.
+
+  Presence needs a stronger test than the decoder's own, which the Codex review caught: the SDK
+  marks a field valid whenever it was present and parsed, *whatever its JSON kind*, so an endpoint
+  answering `"usage": "bad"` or `"usage": []` set the flag and produced a zeroed reading — the same
+  false zero, reached by a differently non-compliant gateway. Measured, not assumed: a probe against
+  the real adapter returned a non-nil zeroed usage for a string, an array and a number, and nil only
+  for an absent or null field. The anthropic adapter now requires the field to be an actual object.
+
+  Two settlement behaviors are deliberately *not* made nil-aware. The wire
+  `span.model_request_end` event still carries a `model_usage` object, zeroes and all, because the
+  schema wants one whether or not a model ever produced one; and the session's cumulative usage is
+  still folded, because skipping the fold would also skip the session row's `updated_at` bump and
+  change the resource on the wire. Only the metric distinguishes. Anthropic-protocol endpoints were
+  not affected in practice — the Messages API always reports usage — but the adapter had the same
+  shape, and it is fixed too.
+
 - **Provider adapter errors could quote a credential back from the endpoint's response body**
   ([#83](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/83)) — both adapters quote
   what a failing endpoint said about itself, because the status alone rarely explains a gateway

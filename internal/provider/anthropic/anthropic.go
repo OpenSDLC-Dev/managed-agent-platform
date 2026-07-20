@@ -9,12 +9,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	sdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
+	"github.com/anthropics/anthropic-sdk-go/packages/respjson"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 )
 
@@ -139,9 +141,26 @@ type stream struct {
 	toolSeed  json.RawMessage // complete input carried on content_block_start
 	inTool    bool
 
-	usage      domain.ModelUsage
+	usage domain.ModelUsage
+	// sawUsage records that a usage object actually arrived on the wire, so
+	// the done chunk can say "the endpoint reported none" rather than report
+	// zeroes (#90). Presence is judged by the decoder's field metadata, not
+	// by the counters: an endpoint that genuinely spent nothing sends an
+	// object full of zeroes, and that is a reading like any other.
+	sawUsage   bool
 	stopReason string
 	done       bool
+}
+
+// reportedUsage reports whether a usage field arrived as an actual usage
+// object. Presence alone is too weak a test: the decoder marks a field valid
+// whenever it was present and parsed, whatever its JSON kind, so an endpoint
+// answering `"usage": "bad"` or `"usage": []` would otherwise be taken for a
+// reading of zero — the exact false zero this distinction exists to remove
+// (#90). An empty object still counts: the endpoint answered, and zeroes are
+// its answer.
+func reportedUsage(f respjson.Field) bool {
+	return f.Valid() && strings.HasPrefix(strings.TrimSpace(f.Raw()), "{")
 }
 
 func (s *stream) Chunk() provider.Chunk { return s.cur }
@@ -156,10 +175,13 @@ func (s *stream) Next() bool {
 		ev := s.events.Current()
 		switch ev.Type {
 		case "message_start":
-			u := ev.Message.Usage
-			s.usage.InputTokens = u.InputTokens
-			s.usage.CacheCreationInputTokens = u.CacheCreationInputTokens
-			s.usage.CacheReadInputTokens = u.CacheReadInputTokens
+			if reportedUsage(ev.Message.JSON.Usage) {
+				s.sawUsage = true
+				u := ev.Message.Usage
+				s.usage.InputTokens = u.InputTokens
+				s.usage.CacheCreationInputTokens = u.CacheCreationInputTokens
+				s.usage.CacheReadInputTokens = u.CacheReadInputTokens
+			}
 
 		case "content_block_start":
 			if ev.ContentBlock.Type == "tool_use" {
@@ -227,6 +249,9 @@ func (s *stream) Next() bool {
 			if r := string(ev.Delta.StopReason); r != "" {
 				s.stopReason = r
 			}
+			if reportedUsage(ev.JSON.Usage) {
+				s.sawUsage = true
+			}
 			// Cumulative counters override the message_start snapshot when
 			// the endpoint reports them here; a frame without usage must
 			// not zero what an earlier frame already reported.
@@ -256,8 +281,12 @@ func (s *stream) Next() bool {
 				return false
 			}
 			s.done = true
-			usage := s.usage
-			s.cur = provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: &usage}
+			var usage *domain.ModelUsage
+			if s.sawUsage {
+				u := s.usage
+				usage = &u
+			}
+			s.cur = provider.Chunk{Kind: provider.KindDone, StopReason: s.stopReason, Usage: usage}
 			return true
 		}
 	}
