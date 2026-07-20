@@ -52,44 +52,23 @@ copy of an entry here.
   brain's only `errors.As` is for its own `infraError`), but retry logic reading an upstream status
   is the obvious next caller, and it should not have to choose between the status and a safe message.
 
-  Review hardened three gaps in the redaction itself, each demonstrated rather than argued. A
-  `base_url` password is stored **decoded** by `url.Parse` but printed **re-encoded** by
-  `url.URL.String()`, so registering one form matched neither the other nor, for a password whose
-  configured escapes are not all required in userinfo, the form it was written in — every password
-  containing a character RFC 3986 makes escape it (`@`, `/`, `%`, a space — precisely what a
-  generated password contains) leaked in full, and the original regression test passed only because
-  its fixture was URL-safe. All three renderings are now registered, the last found textually so
-  that an *unparsable* `base_url` — whose parse error quotes the string back, and which
-  `url.Parse` cannot help with by definition — is covered too. The quoted body is read one secret
-  longer than it is quoted, because truncating at the cap could sever a credential and leave its
-  head unmatched. And `isAuthHeader` now knows `apikey` (Kong's key-auth default, Supabase's
-  convention) and `cookie`, which matched none of its substring rules.
+  A configured credential is not one string but every encoding the stack renders it in, so all of
+  them are registered. `url.Parse` stores a `base_url` password **decoded** while `url.URL.String()`
+  prints it **re-encoded**, and `net/http` derives an `Authorization: Basic` header from userinfo
+  whenever the request carries none — always, under the anthropic protocol — so the decoded,
+  percent-encoded, base64 and as-written forms all join the secret set. Registering one alone left
+  every password containing a character RFC 3986 requires be escaped in userinfo (`@`, `/`, `%`, a
+  space — what a generated password is made of) leaking in full. The as-written form is found
+  textually, which is the only way to reach an *unparsable* or schemeless `base_url`, whose own
+  error quotes it back. The quoted body is read one secret longer than it is quoted, so truncating
+  at the cap cannot sever a credential and leave its head matching nothing. `isCredentialName`
+  covers the spellings a canonical list misses (`apikey`, `x-auth`, `x-signature`, `x-credential`)
+  and a `base_url` query credential; splitting a header value requires a known auth scheme, so a
+  routing tag like `x-route-key: "pool alpha"` keeps its second word out of the secret set.
 
-  A second verification pass then found a fourth rendering, by the same reasoning and with the same
-  consequence: `net/http` derives an `Authorization: Basic` header from `base_url`'s userinfo
-  whenever the request carries none — which is always under the anthropic protocol, since it
-  authenticates with `x-api-key` — so an endpoint echoing its auth header back quotes the
-  credential **base64-encoded**, matching no rendering of the URL. That form is registered too, and
-  the same pass closed a schemeless `base_url` (which `url.Parse` reads as scheme-plus-opaque, so
-  only the textual scan can reach its password) and an over-redaction where an `@` in a query was
-  mistaken for userinfo. The lesson generalises past this change: a credential is not one string
-  but every encoding the stack renders it in, and a test fixture chosen for readability — a
-  URL-safe password, a payload that does not straddle the cap — is precisely the one that cannot
-  see the gap.
-
-  An independent external reviewer, reading the first commit only, reproduced those same
-  conclusions and added four more. Three were leaks: a custom auth header name (`X-Auth`,
-  `X-Signature`, `X-Credential`) matched none of the canonical spellings; userinfo carrying a
-  *username and no password* — the token-as-userinfo convention — registered nothing, since the
-  username is only an identifier when a password stands beside it; and `resp.Status`, which HTTP/1
-  lets a server fill with arbitrary text, was interpolated unredacted next to the body that was
-  not. The fourth was over-redaction this change had introduced: splitting a header value on any
-  space registered the second word of a value that is not a credential pair at all, so
-  `x-route-key: "pool alpha"` blanked "alpha" out of every diagnostic naming the pool. Splitting
-  now requires a known auth scheme, which also normalises the whitespace an echoed header loses.
-  A `base_url` query credential (`?api_key=…`, a pattern `evals/report_test.go` already guarded
-  against) and the body-read error that carries an HTTP/2 GOAWAY's server debug data are covered
-  too.
+  How each of those gaps was found — three review rounds, what each demonstrated, and the test
+  fixtures that hid two of them — is [docs/HISTORY.md](./docs/HISTORY.md) § "Provider credential
+  redaction (#83) — review-hardening record".
 
   Two residuals are deliberate, not oversights. A credential containing `<`, `>` or `&` survives
   Go's HTML-escaping JSON encoder as `<…`, which no verbatim match sees — chasing arbitrary
