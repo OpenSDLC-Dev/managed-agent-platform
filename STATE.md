@@ -23,7 +23,8 @@ was recorded as having produced zero output tokens. No plan file: single-PR scop
       identical numbers for official-API streams. Both raised one `docs/ARCHITECTURE.md`
       imprecision, now fixed.
 - [ ] Codex reviewer — **stalled, not run**: account usage limit, resets 2026-07-25.
-- [ ] PR green on CI.
+- [x] PR [#133](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/133) green on CI (ci,
+      coverage, helm, compose, CodeQL). Draft until the Codex pass runs.
 
 **Coordination:** [#130](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/130) (#90) is
 open and wraps the same `message_start` block in a `reportedUsage` check. Whichever lands second
