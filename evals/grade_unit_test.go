@@ -539,33 +539,47 @@ func TestConfirmedResult(t *testing.T) {
 		t.Error("a confirmation naming no tool_use on the log should fail")
 	}
 
-	// The same dangling confirmation, but alongside a graded call that was
-	// confirmed and answered properly. This is what isolates the join: with the
-	// dangling check removed the trial above still reds through the "none of them
-	// for the graded call" branch, so only a transcript where the graded call IS
-	// resolved can tell the two apart.
+	// The transcript that isolates the dangling-name join, and the only one that
+	// can: the dangling confirmation is itself well-formed — it has a result — and
+	// it sits beside a graded call that was confirmed and answered correctly. Every
+	// other branch is therefore satisfied, so deleting the join is the only way
+	// this can pass. (An earlier version of this case gave the dangling
+	// confirmation no result, and a mutant with the join removed still red it
+	// through a different branch — the test asserted the right outcome for the
+	// wrong reason, which two reviewers caught by mutation and this fixes.)
 	danglingBeside := trialWith([]map[string]any{
 		gatedCall("sevt_1", appended),
 		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
 		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": true,
 			"content": textBlocks("not approved: DENY_n0")},
 		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_span"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_span", "is_error": true,
+			"content": textBlocks("not approved: DENY_n0")},
 	})
 	if err := deny.Check(t, danglingBeside); err == nil {
 		t.Error("a confirmation naming no tool_use should fail even when the graded call resolved cleanly")
 	}
 
-	// A confirmation for a real but different call, while the call the task means
-	// went through ungated: the bridge stopped the wrong thing.
-	wrongCall := trialWith([]map[string]any{
-		gatedCall("sevt_1", appended),
+	// The bridge stopped some other call and the graded one went through
+	// unconfirmed. This grader stays quiet — blaming the platform here would
+	// misread the harness giving up on a model that re-pauses past
+	// maxConfirmRounds — and the sibling that owns the case reds instead: a gated
+	// call that ran without being stopped carries no "ask" stamp. The pair is
+	// asserted together, because the vacuity above is only safe if the sibling
+	// really does fire.
+	ungatedRun := []map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "sevt_1", "evaluated_permission": "allow",
+			"input": map[string]any{"command": appended}},
 		gatedCall("sevt_2", "ls /workspace"),
 		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_2"},
 		{"type": "agent.tool_result", "tool_use_id": "sevt_2", "is_error": true,
 			"content": textBlocks("not approved: DENY_n0")},
-	})
-	if err := deny.Check(t, wrongCall); err == nil {
-		t.Error("a confirmation for another call should not satisfy the graded one")
+	}
+	if err := deny.Check(t, trialWith(ungatedRun)); err != nil {
+		t.Errorf("a graded call nobody confirmed should pass vacuously: %v", err)
+	}
+	if err := EvaluatedPermissionAsk("bash", Platform).Check(t, trialWith(ungatedRun)); err == nil {
+		t.Error("the sibling grader must red on the ungated call ConfirmedResult declines to blame")
 	}
 
 	// The result is for a DIFFERENT tool_use_id than the confirmation named — the
@@ -600,22 +614,22 @@ func TestConfirmedResult(t *testing.T) {
 		t.Error("a confirmation with no tool_use_id should fail")
 	}
 
-	// The graded call is answered correctly, but ANOTHER confirmed call's result
-	// dropped its is_error flag. Narrowing to the task's own call decides which
-	// result is graded for content, not which confirmations have to resolve — a
-	// malformed answer to any confirmed call is still the platform's.
-	siblingMalformed := trialWith([]map[string]any{
+	// A verifying retry: the model repeats a command carrying the same marker and
+	// that one errors. One confirmed call satisfying the claim is enough, so this
+	// passes — requiring every matching call to satisfy it made a correct platform
+	// red whenever the model checked its own work.
+	verifiedAfter := trialWith([]map[string]any{
 		gatedCall("sevt_1", appended),
-		gatedCall("sevt_2", "cat /workspace/notes.txt"),
-		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_2"},
-		{"type": "agent.tool_result", "tool_use_id": "sevt_2",
-			"content": textBlocks("not approved: DENY_n0")},
 		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_1"},
 		{"type": "agent.tool_result", "tool_use_id": "sevt_1", "is_error": true,
 			"content": textBlocks("not approved: DENY_n0")},
+		gatedCall("sevt_2", "grep APPEND_n0 /workspace/notes.txt"),
+		{"type": "user.tool_confirmation", "result": "deny", "tool_use_id": "sevt_2"},
+		{"type": "agent.tool_result", "tool_use_id": "sevt_2", "is_error": true,
+			"content": textBlocks("no such thing")},
 	})
-	if err := deny.Check(t, siblingMalformed); err == nil {
-		t.Error("a confirmed call whose result dropped is_error should fail even when the graded call is fine")
+	if err := deny.Check(t, verifiedAfter); err != nil {
+		t.Errorf("one confirmed call satisfying the claim should be enough: %v", err)
 	}
 
 	// The denial produced a success result: the deny did not block.
@@ -859,6 +873,32 @@ func TestCallResult(t *testing.T) {
 		t.Error("a result missing is_error must fail even when a later matching call is well-formed")
 	}
 
+	// A call that never came back is not gradeable, but it must not excuse its
+	// siblings: the resultless call is skipped, and the one that did come back
+	// with the wrong content still reds.
+	danglingThenBad := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_2",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+		{"type": "agent.tool_result", "tool_use_id": "toolu_2", "is_error": false,
+			"content": textBlocks("")},
+	})
+	if err := g.Check(t, danglingThenBad); err == nil {
+		t.Error("a call with no result must not excuse a sibling whose result is wrong")
+	}
+
+	// When no matching call came back at all there is nothing to judge, and
+	// blaming the platform for a verdict it was never given is exactly the
+	// vacuous-red this branch avoids.
+	allDangling := trialWith([]map[string]any{
+		{"type": "agent.tool_use", "name": "bash", "id": "toolu_1",
+			"input": map[string]any{"command": "cat /workspace/mark.txt"}},
+	})
+	if err := g.Check(t, allDangling); err != nil {
+		t.Errorf("a matching call with no result at all should pass vacuously: %v", err)
+	}
+
 	// An empty marker list grades any call to the tool — needle-search's glob.
 	anyGlob := CallResult("glob", nil, false, "/workspace/src/util/helpers.go", Either)
 	globbed := trialWith([]map[string]any{
@@ -917,10 +957,12 @@ func TestGlobPathList(t *testing.T) {
 	if err := g.Check(t, globResult("", false)); err == nil {
 		t.Error("a glob success with no content should fail glob-path-list")
 	}
-	// Every record is checked, not just the first — a shape regression that
-	// mangles the tail would otherwise sail through.
-	if err := g.Check(t, globResult("/workspace/good.go\nrelative.go", false)); err == nil {
-		t.Error("a relative path after a good one should fail glob-path-list")
+	// Only the first record is checked, and that is the tool's contract talking:
+	// search.go is NUL-delimited end to end because a filename may legally carry a
+	// newline, so a later "line" can be the tail of a perfectly good path. A
+	// per-line check would red the platform for correct output.
+	if err := g.Check(t, globResult("/workspace/od\nd name.go\n/workspace/b.go", false)); err != nil {
+		t.Errorf("a path containing a newline is legal glob output, not a shape regression: %v", err)
 	}
 	// A result with no is_error flag is malformed, not an implicit failure to skip.
 	noFlag := trialWith([]map[string]any{
@@ -978,6 +1020,19 @@ func TestNotInToolTraffic(t *testing.T) {
 	})
 	if err := g.Check(t, inKey); err == nil {
 		t.Error("a token carried as an input key should fail")
+	}
+
+	// And the converse, which is why both spellings are read rather than only the
+	// encoded one: json.Marshal HTML-escapes & < >, so a token carrying any of
+	// them is on the log in plain sight and absent from the encoding. The nonces
+	// this grader is used with today are hex, but a grader that could be defeated
+	// by the choice of token is not a witness.
+	escaped := NotInToolTraffic("tom&jerry", Either)
+	inValue := trialWith([]map[string]any{
+		bashUse("echo tom&jerry > /workspace/note.txt"),
+	})
+	if err := escaped.Check(t, inValue); err == nil {
+		t.Error("a token whose JSON encoding is escaped should still be found in the decoded input")
 	}
 }
 

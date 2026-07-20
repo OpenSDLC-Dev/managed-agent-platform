@@ -50,7 +50,7 @@ copy of an entry here.
   reference code and staying off disk is a convenience, not a prohibition.
 
   **`glob` was invocation-only.** Its output is now graded in the two halves that can be told
-  apart: `GlobPathList` (Platform) holds every successful result to one absolute path per line, or
+  apart: `GlobPathList` (Platform) holds every successful result to an absolute first record, or
   the tool's own `no matches`, whatever pattern the model chose — so a leaked mtime prefix or a
   relative path reds; and "the seeded file is among them" stays Either, because which paths come
   back is the pattern's business and the pattern is the model's. Pinning the whole list instead
@@ -61,9 +61,10 @@ copy of an entry here.
   only forward from the confirmation could not see a gate that named the wrong event in
   `requires_action`: the harness confirms whatever id it was given, so the platform would answer
   that id and look consistent — the grader now reds a confirmation naming no `agent.tool_use` on
-  the log. Vacuity is conditioned on the log, not on the markers (no confirmations at all, or a
-  model that called something else entirely), so narrowing to the intended call cannot turn a real
-  bridge fault into a pass. `EvaluatedPermissionAsk` likewise now checks every call to the gated
+  the log, and that check runs before the markers narrow anything. Where the markers do narrow, the
+  grader goes vacuous, and the pairing is what keeps that honest: `ToolCalledWith` (Model) owns "the
+  model never made the instructed call", so a Platform-class silence here always sits beside a
+  Model-class red. `EvaluatedPermissionAsk` likewise now checks every call to the gated
   tool rather than only the first.
 
   Markers are matched against the **decoded** tool input rather than its JSON encoding:
@@ -75,13 +76,18 @@ copy of an entry here.
   now gated on the premises they rest on — the model ran the instructed export carrying this
   trial's nonce, and wrote the file with a bash call that read the variable back — via `OnlyIf`,
   whose predicate is `ToolCalledWith`'s over the same finder, so the window where a Platform check
-  falls silent is exactly the window where the Model check beside it reds. `ConfirmedResult`
-  requires *every* confirmation to resolve to a well-formed result, not only the one the markers
-  select, so narrowing to the task's own call decides which result is graded for content and never
-  which faults are visible. `CallResult` treats a missing `is_error` as terminal rather than
-  something a later retry forgives. `GlobPathList` rejects a success with no content (glob says
-  `no matches` for an empty list, so that shape is a dropped content block) and a result missing
-  `is_error`, and checks every record rather than the first. `NotInToolTraffic` reads the encoded
+  falls silent is exactly the window where the Model check beside it reds. `ConfirmedResult` grades
+  a confirmed call the way `CallResult` grades a called one — one satisfying call is enough, so a
+  model that confirms, sees an error and retries is not a Platform fault; an earlier draft demanded
+  *every* confirmation resolve well and turned exactly that into a red. `CallResult` treats a
+  missing `is_error` as terminal rather than something a later retry forgives, and skips a call
+  that never came back instead of letting it excuse a sibling whose result was wrong.
+  `GlobPathList` rejects a success with no content (glob says `no matches` for an empty list, so
+  that shape is a dropped content block) and a result missing `is_error`. It checks only the first
+  record, and that is the tool's contract talking: `search.go` is NUL-delimited end to end
+  precisely because a filename may legally contain a newline, so a later "line" can be the tail of
+  a perfectly good path and a per-line check would red the platform for correct output.
+  `NotInToolTraffic` reads the encoded
   input as well as the decoded values, so a token hidden in an object key still reds. The file
   graders substitute tokens into their *path*, which `Seed` already did — an asymmetry that would
   have red the platform for a file sitting exactly where it belonged.

@@ -124,8 +124,16 @@ func shellState() Task {
 	// Two markers for the export rather than the literal `export MARK={{NONCE}}`,
 	// so the benign quoted spellings (`export MARK="…"`, `export MARK='…'`) still
 	// count as having done it.
+	//
+	// The write marker is the double-quoted `"$MARK"` the prompt spells, not a
+	// bare `$MARK`: single quotes are the one spelling that changes the answer.
+	// `echo '$MARK' > mark.txt` writes the six literal bytes `$MARK` however
+	// healthy the shell snapshot is, so a premise that accepted it would hand a
+	// correct platform a Platform red on the file check. Requiring the expanding
+	// spelling puts that trial where it belongs: the premise fails, this check
+	// goes quiet, and BashCommandWith reds it as the Model miss it is.
 	exportMarkers := []string{"export MARK", "{{NONCE}}"}
-	writeMarkers := []string{"$MARK", "mark.txt"}
+	writeMarkers := []string{`"$MARK"`, "mark.txt"}
 	catMarkers := []string{"cat /workspace/mark.txt"}
 	exported := calledWith("bash", exportMarkers...)
 	wrote := calledWith("bash", writeMarkers...)
@@ -406,6 +414,13 @@ func exitCode() Task {
 // a replacement container is an empty one. That makes it the clean Platform
 // signal the file-contents check cannot be.
 //
+// It is seeded outside /workspace, and the nonce is in its name. Both guard the
+// same thing: this is a Platform-class check, so the model must not be able to
+// red it by ordinary tidying. A sentinel sitting in the working directory is one
+// `rm -rf /workspace/*` away from reporting a container that was never replaced
+// as a platform fault — and a model has no reason to go looking in /tmp for a
+// nonce'd name it was never told.
+//
 // Classing: the two user.message events are ours to post, so fewer than two on
 // the log is unambiguously an event-log fault (Platform), as is the seeded file
 // going missing. The journal contents, the turn-two tool_use and the recalled
@@ -414,9 +429,10 @@ func exitCode() Task {
 // Model-or-Platform (Either).
 func journalMultiturn() Task {
 	const provenance = "PROVENANCE_{{NONCE}}\n"
+	const provenancePath = "/tmp/provenance-{{NONCE}}.txt"
 	return Task{
 		ID:    "journal-multiturn",
-		Seeds: []Seed{{Path: "provenance.txt", Content: provenance}},
+		Seeds: []Seed{{Path: provenancePath, Content: provenance}},
 		Turns: []Turn{
 			{Message: "Create /workspace/journal.txt with a single first line reading exactly: " +
 				"entry-one-{{NONCE}}. My reference code for this session is {{RECALL}}; there is no " +
@@ -427,7 +443,7 @@ func journalMultiturn() Task {
 		},
 		Graders: []Grader{
 			FileLines("journal.txt", []string{"entry-one-{{NONCE}}", "entry-two-{{NONCE}}"}, Either),
-			FileEquals("provenance.txt", provenance, Platform),
+			FileEquals(provenancePath, provenance, Platform),
 			EventCountAtLeast("user.message", 2, Platform),
 			EventAfterUserMessage("agent.tool_use", 2, Either),
 			FinalMessageHas("{{RECALL}}", Either),

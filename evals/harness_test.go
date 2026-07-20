@@ -378,23 +378,38 @@ func reap(sessionID string) {
 // token, for the one task that needs a value the model can only have from its
 // replayed context (see journalMultiturn).
 //
-// An unset Recall leaves {{RECALL}} standing rather than substituting the empty
-// string, and that is deliberate: every consumer of a filled string is a
+// An unset token leaves its placeholder standing rather than substituting the
+// empty string, and that is deliberate: every consumer of a filled string is a
 // substring check, and `strings.Contains(anything, "")` is true, so an empty
-// substitution would green a recall assertion against any text at all. The
-// placeholder left standing at least fails closed for a grader-only trial, where
-// nothing put the literal in front of the model.
+// substitution would green an assertion against any text at all. The placeholder
+// left standing at least fails closed for a grader-only trial, where nothing put
+// the literal in front of the model.
 //
 // It is a backstop, not the guarantee: runTrial sets both tokens unconditionally
-// (a trial that reached a prompt has a real recall token), and if one ever did
-// not, the literal would go out in the prompt and could come back in the reply.
-// The guarantee is that the harness always fills both.
+// (a trial that reached a prompt has real ones), and if one ever did not, the
+// literal would go out in the prompt and could come back in the reply. The
+// guarantee is that the harness always fills both.
 func (tr *Trial) fill(s string) string {
-	out := strings.ReplaceAll(s, "{{NONCE}}", tr.Nonce)
-	if tr.Recall == "" {
-		return out
+	out := s
+	if tr.Nonce != "" {
+		out = strings.ReplaceAll(out, "{{NONCE}}", tr.Nonce)
 	}
-	return strings.ReplaceAll(out, "{{RECALL}}", tr.Recall)
+	if tr.Recall != "" {
+		out = strings.ReplaceAll(out, "{{RECALL}}", tr.Recall)
+	}
+	return out
+}
+
+// fillAll fills every string in a marker list. Markers are task-authored text
+// like any prompt or expectation, so they go through the one substituter too —
+// a marker carrying a token that stayed literal would match nothing and silently
+// turn its grader vacuous, or, for a negative grader, always-pass.
+func (tr *Trial) fillAll(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = tr.fill(s)
+	}
+	return out
 }
 
 func newNonce(t *testing.T) string {

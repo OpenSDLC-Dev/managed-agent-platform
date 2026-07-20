@@ -19,10 +19,12 @@ single-PR work, confined to `evals/`).
 - [x] `glob` output graded: `GlobPathList` (Platform, pattern-independent) plus the seeded path
       (Either).
 - [x] `ConfirmedResult` joins the expected tool/input → its confirmation → its result, and reds a
-      confirmation naming no `agent.tool_use`.
+      confirmation naming no `agent.tool_use`. Any-match like `CallResult`, so a retry after an
+      error is not a Platform red.
 - [x] Live `make eval`: 10/10 green (`MiniMax-M3`). The first run caught a real defect — a token
       substituted on the prompt side but not in the grader — now closed by folding every
       substitution into `(*Trial).fill`.
-- [x] Verifier: PASS with findings; Codex + a Claude-side adversarial pass. Every confirmed
-      finding was a grader that could not be caught by a mutation of itself — all now fixed and
-      mutation-verified. (`/code-review` proper is user-invocable only; see the PR.)
+- [x] Reviews settled: Codex, `/code-review` and the verifier all landed findings; the confirmed
+      ones share a shape — a grader no mutation of itself could catch. Re-verified at the final
+      state: `make verify` green, live eval 10/10, 16 mutation probes with 15 killed (the survivor,
+      `FileLines` filling its path, is unit-untestable and pinned by the live run — see the PR).
