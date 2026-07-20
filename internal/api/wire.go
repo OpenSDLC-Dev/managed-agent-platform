@@ -18,6 +18,10 @@ import (
 // documents, not payloads.
 const maxBodyBytes = 4 << 20
 
+// nulEscape is the six bytes of the JSON escape for U+0000, spelled as a byte
+// slice so no editor or tool can rewrite the sequence into the byte it denotes.
+var nulEscape = []byte{'\\', 'u', '0', '0', '0', '0'}
+
 // decodeObject reads the request body as a single JSON object, keyed by raw
 // field so handlers can distinguish omitted / null / value — the reference
 // updates are patches where that distinction is semantic.
@@ -54,18 +58,39 @@ func decodeObject(r *http.Request) (map[string]json.RawMessage, error) {
 // work endpoint's metadata deletes use — so letting it through turns a
 // well-formed request into a 500 at insert time.
 //
-// The guard sits here, on the one decode every JSON body passes through, rather
-// than on the individual field parsers: the unstorable byte is a property of the
-// request, not of any one field, and the nested raw-JSON payloads (the agent
-// spec's tools/mcp_servers/skills, the environment config's package lists and
-// allowed_hosts) never reach stringField at all. One chokepoint is also what
+// The guard sits here, on the decode every JSON *object* body passes through,
+// rather than on the individual field parsers: the unstorable byte is a property
+// of the request, not of any one field, and the nested raw-JSON payloads (the
+// agent spec's tools/mcp_servers/skills, the environment config's package lists
+// and allowed_hosts) never reach stringField at all. One chokepoint is also what
 // keeps the endpoints from diverging — the Go-side metadata merge behind
 // agents/environments/sessions would otherwise drop an unstorable delete key as
 // a silent no-op while the identical patch against the work endpoint's SQL-side
 // merge failed. internal/events applies the same rule to inbound event payloads.
+//
+// Two body reads are deliberately not covered, neither of which can reach
+// Postgres: parseStopForce reads the stop body's single bool directly, and the
+// archive/ack/heartbeat handlers read no body at all. Path IDs and query
+// parameters are a separate surface carrying the same defect — see #135.
 func rejectNULBody(raw []byte) error {
+	// A raw 0x00 byte in a JSON string is itself invalid JSON, so the object
+	// decode above has already rejected it: the six-byte escape is the only way
+	// a NUL survives into a decoded string. Its absence therefore proves the
+	// body clean without a second parse, which on the events endpoint — the one
+	// carrying megabyte tool output — is the difference between ~14ms and ~0.04ms.
+	if !bytes.Contains(raw, nulEscape) {
+		return nil
+	}
+	// UseNumber keeps number literals as their source text. Decoding into the
+	// default float64 would reject an out-of-range literal such as 1e400 — legal
+	// JSON that Postgres stores happily, and that reaches here through any
+	// passthrough field (a custom tool's input_schema, the environment config) —
+	// turning a working request into a 400 on a body this guard should only ever
+	// have inspected. json.Number is a distinct type, so the walk ignores it.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return errInvalid("request body must be a JSON object")
 	}
 	return rejectNUL(v, "")

@@ -114,9 +114,9 @@ copy of an entry here.
   escape (`22P05`), and neither error is an `apiError`, so `writeError` mapped both to a 500
   `api_error`.
 
-  The guard moves to `decodeObject` — the one decode every JSON body passes through — and walks the
-  whole decoded body, keys and values alike, naming the offending path (`config.packages.npm[0]`) so
-  a client can find the value. It sits there rather than on `stringField`/`requiredString` for two
+  The guard moves to `decodeObject` — the decode every JSON *object* body passes through — and walks
+  the whole decoded body, keys and values alike, naming the offending path (`config.packages.npm[0]`)
+  so a client can find the value. It sits there rather than on `stringField`/`requiredString` for two
   reasons. The unstorable byte is a property of the request, not of any one field, so a per-field
   guard is a list that the next field added to the wire silently falls off — which is exactly how
   this issue came to exist. And the nested raw-JSON payloads never reach `stringField` at all: the
@@ -128,12 +128,28 @@ copy of an entry here.
   metadata surfaces at a 400. The behaviour it registered is unchanged, so the existing
   docs/DIVERGENCES.md INFERRED entry is widened rather than duplicated.
 
-  `TestStringFieldsRejectNUL` pins seventeen field-and-endpoint pairs at a wire-shaped 400 whose
-  message names the field; it failed 17/17 against real Postgres before the change, reproducing the
-  issue's table (`22021` on the text binds, `22P05` on the jsonb binds). Machine-generated content
-  is unaffected: the only other body-bearing surfaces are the events append endpoint, which
-  `internal/events` has always guarded the same way, and the work-item metadata patch, guarded since
-  #73.
+  Inspecting a body a second time is a chance to break one, and review caught it doing so: a plain
+  `any` decode turns every number into a `float64`, so a literal outside its range — the `1e400` a
+  JSON Schema may legitimately carry in a passthrough `input_schema`, which Postgres stores without
+  complaint — failed that decode and became a 400 on a request with nothing wrong with it. The
+  second decode now uses `UseNumber`, which keeps a number as its source text and is invisible to
+  the walk, and `TestNULGuardKeepsOutOfRangeNumbers` pins both halves: the number alone is still
+  accepted, and a body carrying the number *and* a NUL is still rejected for the NUL, by name.
+  The walk itself is skipped outright unless the raw body contains the six-byte `\u0000` escape,
+  which is exact rather than heuristic — a bare `0x00` inside a JSON string is a syntax error the
+  first decode already rejects, so the escape is the only route by which U+0000 reaches a decoded
+  string. That keeps the cost off the events endpoint, the one path carrying megabyte tool output.
+
+  `TestStringFieldsRejectNUL` pins eighteen field-and-endpoint pairs at a wire-shaped 400 whose
+  message names the field; the seventeen that predate it failed 17/17 against real Postgres before
+  the change, reproducing the issue's table (`22021` on the text binds, `22P05` on the jsonb binds).
+  Machine-generated content is unaffected: of the remaining body-bearing surfaces, the events append
+  endpoint has always been guarded the same way by `internal/events`, the work-item metadata patch
+  since #73, and the work-item stop body is read by `parseStopForce` without `decodeObject` — it
+  carries a single bool, so no string reaches storage. The scope is request bodies. A NUL in a path
+  id or a query parameter is the same bug class on a surface that never sees a body decode, still a
+  500, and wants id-format validation rather than this walk; filed as
+  [#135](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/135).
 
 - **A model endpoint that reported no usage was recorded as one that spent nothing**
   ([#90](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/90)) — `provider.Chunk.Usage`

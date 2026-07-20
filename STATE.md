@@ -10,16 +10,19 @@ closed for `metadata`. Plan-less: single-PR scope, no new wire shape.
 
 ## Tasks
 
-- [x] Reproduce — 17 field-and-endpoint pairs 500 against real Postgres (`SQLSTATE 22021` on the
-      `text` binds, `22P05` on the `jsonb` binds), covering the issue's table plus the nested
-      `tools`/`mcp_servers`/`skills` and `allowed_hosts` cases. Evidence: `TestStringFieldsRejectNUL`
-      failing 17/17 before the fix.
+- [x] Reproduce — 17 field-and-endpoint pairs 500 against real Postgres (`SQLSTATE 22021` text
+      binds, `22P05` jsonb binds), the issue's table plus the nested `tools`/`mcp_servers`/`skills`
+      and `allowed_hosts` cases. Evidence: `TestStringFieldsRejectNUL` failing 17/17 pre-fix.
 - [x] Move the guard to `decodeObject` (`internal/api/wire.go`) as a walk over the whole decoded
-      body, keys and values alike, naming the offending path — a per-field check on
-      `stringField`/`requiredString` would miss the nested raw-JSON payloads. `rejectMetadataNUL` is
-      unreachable under it and is removed.
-- [x] Pin it with `TestStringFieldsRejectNUL` (`internal/api/edge_test.go`), green, with
+      body, naming the offending path — a per-field check on `stringField`/`requiredString` would
+      miss the nested raw-JSON payloads. `rejectMetadataNUL` is unreachable under it, so it goes.
+- [x] Pin it with `TestStringFieldsRejectNUL` (`internal/api/edge_test.go`), with
       `TestMetadataRejectsNUL` still green over its fifteen metadata surfaces.
 - [x] CHANGELOG entry; widen the existing docs/DIVERGENCES.md INFERRED entry — the registered
-      behaviour is unchanged, only its scope. `make verify` green, coverage 91.89%.
-- [ ] Verifier PASS, dual review, PR green, threads settled, squash merge.
+      behaviour is unchanged, only its scope.
+- [x] Verifier PASS; review findings applied — the second decode now uses `UseNumber` (a plain
+      `any` decode rejected out-of-range literals like `1e400`, turning a working request into a
+      400; pinned by `TestNULGuardKeepsOutOfRangeNumbers`), the walk is gated on the raw escape,
+      and the "every JSON body" wording is scoped to bodies that are JSON objects. Path/query NUL
+      is the same class on a surface with no body decode — filed as #135.
+- [ ] PR green, threads settled, squash merge. Codex reviewer unavailable (quota exhausted).

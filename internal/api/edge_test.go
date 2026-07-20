@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -268,6 +269,11 @@ func TestStringFieldsRejectNUL(t *testing.T) {
 			"agent": agentID, "environment_id": envID, "title": nul,
 		}, "title"},
 		"session update title": {"/v1/sessions/" + sessID, map[string]any{"title": nul}, "title"},
+
+		// A NUL in a *top-level* key has no field path to quote, so the message
+		// names the body itself — and must not echo the key, which would put the
+		// rejected byte back into the response.
+		"top-level key": {"/v1/agents", map[string]any{"name": "x", "model": "m", nul: "v"}, "the request body"},
 	} {
 		status, res := s.do(http.MethodPost, tc.path, tc.body)
 		if status != http.StatusBadRequest {
@@ -280,6 +286,41 @@ func TestStringFieldsRejectNUL(t *testing.T) {
 		if !strings.Contains(msg, "U+0000") || !strings.Contains(msg, tc.field) {
 			t.Errorf("%s: message = %q, want it to name %q and U+0000", name, msg, tc.field)
 		}
+	}
+}
+
+// TestNULGuardKeepsOutOfRangeNumbers pins the one way this guard could have made
+// a working request fail. It inspects the body by decoding it a second time, and
+// a plain `any` decode turns every number into a float64 — so a literal outside
+// float64 range, such as the 1e400 a JSON Schema may legitimately carry in a
+// passthrough field, would have failed that decode and become a 400 on a body
+// with nothing wrong with it. Postgres stores the value fine, so the only correct
+// answer is to store it. Both halves matter: the number alone must still be
+// accepted, and a body carrying the number *and* a NUL must still be rejected for
+// the NUL, naming the field rather than blaming the body's shape.
+func TestNULGuardKeepsOutOfRangeNumbers(t *testing.T) {
+	s := newTestServer(t)
+	schema := map[string]any{"type": "object", "maximum": json.RawMessage("1e400")}
+	tool := func(name string) any {
+		return map[string]any{"type": "custom", "name": name, "description": "d", "input_schema": schema}
+	}
+
+	// Status only, not the parsed body: the response echoes the spec back, and
+	// this test client decodes into float64 — the very decode the fix had to stop
+	// doing server-side, here demonstrating the hazard from the other end.
+	if status, res := s.do(http.MethodPost, "/v1/agents", map[string]any{
+		"name": "big-number", "model": "m", "tools": []any{tool("t")},
+	}); status != http.StatusOK {
+		t.Fatalf("agent create with an out-of-range number literal: status %d, body %v", status, res)
+	}
+
+	status, res := s.do(http.MethodPost, "/v1/agents", map[string]any{
+		"name": "big-number-nul", "model": "m", "tools": []any{tool("a\x00b")},
+	})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	inner, _ := res["error"].(map[string]any)
+	if msg, _ := inner["message"].(string); !strings.Contains(msg, "tools[0].name") {
+		t.Errorf("message = %q, want it to name tools[0].name", msg)
 	}
 }
 
