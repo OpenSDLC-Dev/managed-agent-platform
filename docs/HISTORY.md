@@ -478,3 +478,90 @@ only 3 characters of the key inside the quote budget while its assertion checked
 Both looked like coverage. The habit that caught them — and that the next change should copy — is to
 overlay new test files onto a `git archive` of the *previous* commit and confirm each fails **for
 the intended reason**, not on a nil error, a panic, or a build failure.
+
+---
+
+## Eval grader rigor (#99) — review-hardening record (2026-07-20)
+
+[CHANGELOG.md](../CHANGELOG.md)'s entry says what changed. Kept here is what a changelog
+structurally cannot hold: the acceptance evidence, and the two occasions on which a
+confidently-argued claim of mine was refuted by someone checking it.
+
+**The meta-defect three reviewers converged on.** Codex, `/code-review` and the verifier
+worked independently and every confirmed finding had the same shape: **a grader whose own
+behavior no mutation of itself could catch.** Deleting `ConfirmedResult`'s
+dangling-confirmation join, or reverting `EvaluatedPermissionAsk` to first-call-only, left
+the whole unit suite green. A grader that cannot fail when broken is not a test, and the
+suite had several. Mutation testing became the acceptance bar for the rest of the work: a
+behavior counts as pinned only when breaking it reds a test that *names* that behavior.
+
+**Mutation matrix at the final state** — 17 probes, 16 killed (15 by the unit tier, 1 by a
+live run), each run in a throwaway `tar`/`git archive` copy, never the checkout. Killed:
+`ConfirmedResult`'s dangling-name join, its empty-`tool_use_id` reject and its content
+check; `CallResult`'s terminal missing-`is_error` and its resultless-sibling skip;
+`GlobPathList`'s empty-success reject, missing-`is_error` reject and absolute-path check;
+`NotInToolTraffic`'s encoded scan, decoded scan and tool-result scan; `OnlyIf`'s
+every-premise semantics; `fill`'s `{{RECALL}}` substitution; `EvaluatedPermissionAsk`'s
+every-call sweep; `toolCallsWith`'s marker filling and its decoded-input matching.
+
+**The one survivor, and why it is not a gap.** `FileLines` filling tokens into its *path*
+survives everything. The reason is not a missing test: every `FileLines` call site passes a
+token-free literal path, and the one tokened path is graded by `FileEquals` — so `fill` is
+the identity there and the mutant is **equivalent** on the current task set, unkillable by
+any run. The code stays as correct defensive symmetry with `Seed` and `FileEquals`. The
+claim that *is* provable was proved by running it: mutating `FileEquals`'s path fill reds
+`journal-multiturn` live with `file-equals:/tmp/provenance-{{NONCE}}.txt: sandbox: no such
+file`. Recording an equivalent mutant as an equivalent mutant, rather than as a killed one,
+is the point of the entry.
+
+**Live acceptance: five runs, and the pattern beats the score.** Across five `make eval`
+runs against a real endpoint (MiniMax-M3) at successive revisions — 10/10, 9/10, 10/10,
+then after merging `main` 9/10, 10/10 — **no Platform-class grader fired even once.** The
+two reds were `journal-multiturn`'s `file-lines` (Either: the model wrote turn 1 without a
+trailing newline, so the appended line concatenated) and `perm-deny`'s `tool-called-with`
+(Model, with zero tool calls: the model never ran the instructed command). That pattern,
+not any single 10/10, is the evidence the classing works — a live model wandering produces
+Model and Either reds, never a Platform red. Reporting the two 9/10 runs rather than
+re-rolling to a clean sweep is part of the record.
+
+**Two defects the live suite found that no reviewer did.** Substitution was split across
+two helpers, so a grader searched for a literal `{{RECALL}}` while the model had said the
+code back correctly — a token live on one side of a check and literal on the other is not a
+bug a unit test written against the same misunderstanding will catch, so the two spellings
+were merged into `(*Trial).fill` rather than documented. And the recall prompt called the
+token a "code word" and forbade writing it anywhere, at which the model **refused** turn
+two, reading the pair as a secret and the request to repeat it as an attempt to extract it
+— the same trap `view-range` already avoids by not calling its marker a SECRET. A prompt
+that sounds like a confidentiality rule tests the model's refusal reflex, not the platform.
+
+**Two of my own claims were wrong, and neither was caught by me.** The verifier refuted a
+mutation-verification claim I had made about `ConfirmedResult`'s dangling join: my probe
+predated a structural check I later added, so by the time I reported it the mutation
+survived for a different reason than the one I had tested. It also refuted my statement
+that the `FileLines` survivor was "pinned by the live suite" — it is an equivalent mutant,
+as above. Separately, a finding *I* raised in self-review — that `OnlyIf`'s premise and
+`BashCommandWith` could disagree and open a window where neither grader fires — was refuted
+against the source: `BashCommandWith`'s matched set is a **subset** of the premise's, so it
+passing implies the premise holds. The direction of my concern was backwards. The habit
+worth copying is the one CLAUDE.md already states and this change kept proving: verify
+every finding, including your own, against the source before acting on it.
+
+**A reviewer disagreement resolved by the user, not by argument.** Codex asked for
+`ConfirmedResult` to grade *every* confirmed call; `/code-review` demonstrated that exactly
+that strictness is a false-red generator, since the toolset gates every tool and a model
+that writes a file then verifies it with a second marker-carrying command earns a second
+confirmed result — a verification exiting non-zero would fail the trial with the platform
+behaving perfectly. The two reviewers wanted opposite things, which is a decision and not a
+defect, so it went to the user, who chose the simplification. `ConfirmedResult` now grades a
+confirmed call the way `CallResult` grades a called one: one satisfying call is enough,
+with the dangling-name join #99 asked for kept and run *before* the markers narrow anything.
+
+**The vacuity argument needed a task-by-task check, not a general one.** `ConfirmedResult`
+goes vacuous when no *matching* call was confirmed, and its comment justified that by
+naming `EvaluatedPermissionAsk` as the sibling owning the window. The verifier found that
+`perm-deny` — the only task where `ConfirmedResult` is Platform-class — did not deploy that
+grader at all, and that the stamp it checks is not proof a suspension happened anyway. The
+fix was both halves: `perm-deny` gained `EvaluatedPermissionAsk("bash", Platform)`, and the
+comment now names each task's real owner of the window (in `perm-deny`, the seeded file
+staying unchanged). A safety argument that holds "in general" but not in the one place the
+grader is Platform-class is not a safety argument.

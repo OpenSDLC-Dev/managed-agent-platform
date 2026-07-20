@@ -10,7 +10,7 @@ phase 1: an end-to-end **eval suite** that drives the whole stack against a real
 endpoint, plus the ten regression tasks it runs. Phase 1 is delivered — all ten tasks run
 10/10 green live via `make eval`; the delivery narrative lives in
 [HISTORY.md](../HISTORY.md) and [CHANGELOG.md](../../CHANGELOG.md), and the leftovers are
-issues (#96, #99, and phase 1.5 on #30).
+issues (#96 and phase 1.5 on #30; #99 closed the grader-rigor gaps).
 
 ## Why
 
