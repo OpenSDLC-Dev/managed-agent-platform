@@ -102,6 +102,27 @@ copy of an entry here.
 
 ### Fixed
 
+- **The anthropic adapter dropped the output token count an endpoint reported on `message_start`**
+  ([#128](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/128)) — the `message_start`
+  branch copied three of the four counters and never read `output_tokens`. Against the official
+  Messages API that is harmless: `message_start` carries a partial output count that the closing
+  `message_delta` supersedes with the cumulative total, which the adapter already took. But design
+  principle 4 obliges the adapter to work against *any* endpoint speaking Anthropic Messages, and a
+  gateway that reports its whole reading up front and then closes with a stop-reason-only
+  `message_delta` produced a done chunk saying `output_tokens: 0` — an undercount that reached both
+  the `gen_ai.client.token.usage` histogram and the session's cumulative usage. `message_start` now
+  seeds all four counters (inside the same `reportedUsage` presence check #90 added); `message_delta`
+  still overrides them, and its existing `> 0` guard means a sparse closing frame cannot zero what
+  the start already reported.
+
+  Distinct from [#90](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/90), and not
+  fixed by it: such a stream *does* carry a usage object, so it was reported as a reading of zero
+  rather than as no reading at all — a real report partially dropped, not silence misreported. Both
+  adapters now pin the invariant with a contract test. The openai adapter already held it (it takes
+  usage from whichever frame carries one, and its per-frame `fr.Usage != nil` check means later
+  frames without usage cannot zero an earlier reading), so its test is a regression guard rather
+  than a fix; it was written first and passed unchanged.
+
 - **A model endpoint that reported no usage was recorded as one that spent nothing**
   ([#90](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/90)) — `provider.Chunk.Usage`
   is a `*domain.ModelUsage`, which reads as "nil means the endpoint reported nothing", but neither
