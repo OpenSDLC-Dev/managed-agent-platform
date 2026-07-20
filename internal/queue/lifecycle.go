@@ -199,8 +199,9 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 	return nil, ErrHeartbeatMismatch
 }
 
-// Stop stops a work item and returns the updated item (the wire Stop responds
-// with the BetaSelfHostedWork, like ack/heartbeat — not an empty 204). force
+// Stop stops a work item and returns the updated item, which the wire never
+// carries: Stop answers a bodiless 204, unlike ack/heartbeat, so the API handler
+// discards it and only this package's state-machine tests read it. force
 // stops any not-yet-stopped item immediately (→ stopped); a graceful stop moves
 // a live (queued/starting/active) item to stopping so the worker can wind down.
 // Stopping an item that is already past the requested transition (e.g.

@@ -218,6 +218,48 @@ Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https
 
 ---
 
+## Work Stop 204 (plan 04) — archived 2026-07-20
+
+[docs/plan/04_work-stop-204.md](./plan/04_work-stop-204.md), delivered in one PR (**#122**). The
+change and the reasoning behind it are the CHANGELOG § [Unreleased] entry; recorded here is only
+what a changelog cannot hold.
+
+**The generalizable lesson: "confirmed" did not mean re-derivable.** The registry's entry was not a
+guess — it was CONFIRMED, and the measurement behind it reproduces to this day. What it lacked was a
+check that the thing measured was the thing claimed. Two rules fall out, both wider than this
+endpoint: a client-side workaround shipped by the reference SDK is evidence *for* the behavior it
+works around, never against it; and a CONFIRMED entry earns re-derivation whenever the change under
+review depends on it, because the artifact that confirmed it may never have supported it.
+
+**Evaluated and rejected — keeping 200 + JSON as a deliberate leniency divergence.** Adversarial
+review made the case seriously, and it was measured rather than asserted: 200 + JSON satisfies a
+strict superset of clients (the generated method decodes it; the bypassing helper and the `ant` CLI
+tolerate either shape). Rejected because "superset of clients" is the wrong objective for a
+compatibility layer — the extra consumer it buys is one already broken against Anthropic's own
+service, so the leniency bought compatibility with this platform rather than with the reference. Two
+reviewers reached this position independently and both were overruled on that ground; recorded here
+because the argument is a good one and will recur the next time a divergence looks harmlessly
+permissive.
+
+**What the review round corrected — including an error of ours.** CLAUDE.md ranks *public docs*
+above the reference checkouts, and the plan asserted the typed schema ranked first. That was simply
+wrong, and it mattered: the top-ranked source disagrees with the change. The conclusion survived
+(the spec-side witnesses are one witness, not three), but the framing had to change from "not a
+divergence" to a deliberate divergence from the published spec, left open for a recording (#78) to
+close, with the compatibility break stated rather than glossed. Separately, the plan's aside that
+the empty-poll response might follow Stop to 204 had its evidence backwards — the poller calls
+`Work.Poll` with no bypass and its empty-queue branch needs a decoded body — so `200` + `null`
+stands. Both corrections came from reviewers reading the primary sources rather than the plan.
+
+**Why the mutation check was the load-bearing evidence.** Asserting the resulting work state cannot
+catch a missing decoder bypass: the stop succeeds server-side either way, and the only damage is a
+fictional `worker: force-stop failed` on every clean finish — invisible to a suite that checks the
+database. Only removing the bypass and watching `TestWorkerForceStopAcceptsNoContent` fail with the
+SDK's quoted error string proves the test constrains anything. A green suite was not evidence here;
+a red one was.
+
+---
+
 ## Docs restructure (plan 03) — archived 2026-07-18
 
 [docs/plan/03_docs-restructure.md](./plan/03_docs-restructure.md), delivered complete in

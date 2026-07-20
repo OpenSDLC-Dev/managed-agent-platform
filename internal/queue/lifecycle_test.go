@@ -149,7 +149,8 @@ func TestStopForceAndGraceful(t *testing.T) {
 		t.Fatal(err)
 	}
 	w, _ := q.Poll(ctx, env, time.Minute)
-	// Stop returns the updated item (the wire responds with the work object, not 204).
+	// Stop returns the updated item to in-process callers; the wire answers 204,
+	// so the API handler discards it.
 	stopped, err := q.Stop(ctx, env, w.ID, false)
 	if err != nil {
 		t.Fatalf("graceful stop: %v", err)

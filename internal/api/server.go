@@ -86,7 +86,7 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}", s.handle(s.updateWork)) // metadata patch
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/ack", s.handle(s.ackWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/heartbeat", s.handle(s.heartbeatWork))
-	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/stop", s.handle(s.stopWork))
+	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/stop", s.handleNoContent(s.stopWork))
 	// Method-less 405 fallbacks. No explicit ".../work/poll" or ".../work/stats"
 	// entry: it would be ambiguous against "GET .../work/{work_id}" (more specific
 	// in path, less in method — neither dominates, so the mux panics). The
@@ -245,8 +245,9 @@ func methodNotAllowed(r *http.Request) *apiError {
 }
 
 // handle adapts a typed handler to http.HandlerFunc: JSON out, error envelope
-// on failure. The reference returns 200 for every successful call, including
-// creates.
+// on failure. The reference returns 200 for every successful call it answers
+// with a body, including creates; the bodiless exception is Stop, which uses
+// handleNoContent.
 func (s *server) handle(fn func(*http.Request) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		v, err := fn(r)
@@ -255,6 +256,18 @@ func (s *server) handle(fn func(*http.Request) (any, error)) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, v)
+	}
+}
+
+// handleNoContent adapts a typed handler whose success carries no body: the
+// same error envelope as handle, but a bodiless 204 instead of 200 + JSON.
+func (s *server) handleNoContent(fn func(*http.Request) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := fn(r); err != nil {
+			writeError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
