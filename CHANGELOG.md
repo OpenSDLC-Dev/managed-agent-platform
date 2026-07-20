@@ -735,6 +735,25 @@ copy of an entry here.
 
 ### Changed
 
+- **`anthropic-sdk-go` pinned at v1.58.0**, up from v1.56.0
+  ([#120](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/120)). Two lines of
+  `go.mod`/`go.sum`, no transitive dependency churn (the SDK's own `go.mod` is byte-identical across
+  the two versions), and **no code change anywhere in the repo**. The pinned SDK is this project's
+  authoritative typed wire schema, so the bump was treated as a wire-schema event and the contract
+  was diffed rather than assumed: it did not move. What upstream added in the range — v1.57.0's
+  "dreaming" API and v1.58.0's MCP Tunnels — is product surface this repo does not implement, and no
+  new DIVERGENCES entry was warranted.
+
+  The bump also moved the **live** pinned-version label, which three docs state as the standard
+  wire-compat is judged against: `.claude/agents/verifier.md`'s wire-compatibility rung,
+  `docs/REFERENCE_PROJECTS.md`'s caveat, and the Stop Work entry in `docs/DIVERGENCES.md` — whose
+  cited file:line evidence was re-read at v1.58.0 rather than assumed and still holds, so only the
+  label changed. The v1.56.0 mentions left standing in this file and in archived `docs/plan/04` are
+  historical records of what was true when those PRs landed. The measurements behind "it did not
+  move", the answers to the three questions the issue posed, and the decisions rejected along the way
+  are the verification record in [docs/HISTORY.md](./docs/HISTORY.md) § "anthropic-sdk-go v1.58.0
+  bump (#120)".
+
 - **STATE.md is now a pure active-work tracker** (docs only; plan 03, PR B). Two sections — Active
   work (the current plan or issue) and Tasks (its checklist with progress and evidence links) — under
   a ~30-line budget, replacing the snapshot / "Where things live" / environment-notes structure. What

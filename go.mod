@@ -3,7 +3,7 @@ module github.com/OpenSDLC-Dev/managed-agent-platform
 go 1.26.0
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.56.0
+	github.com/anthropics/anthropic-sdk-go v1.58.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jackc/puddle/v2 v2.2.2
 	go.opentelemetry.io/contrib/bridges/otelslog v0.19.0

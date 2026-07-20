@@ -565,3 +565,114 @@ fix was both halves: `perm-deny` gained `EvaluatedPermissionAsk("bash", Platform
 comment now names each task's real owner of the window (in `perm-deny`, the seeded file
 staying unchanged). A safety argument that holds "in general" but not in the one place the
 grader is Platform-class is not a safety argument.
+---
+
+## anthropic-sdk-go v1.58.0 bump (#120) — wire-schema verification record (2026-07-20)
+
+The bump itself is two lines of `go.mod`/`go.sum`. It is recorded here because CLAUDE.md makes the
+pinned SDK this project's **authoritative typed wire schema**, so a minor-version bump is a
+wire-schema event whose *outcome* has to be auditable even when — as here — the outcome is that
+no field or enum drifted and no code change became necessary. Without this record the next bump has
+to redo the same diff to learn that. (Stated that precisely rather than as "contract-neutral": one
+documented bound *did* widen — see the custom tool `Description` below — it simply lands where this
+repo enforces nothing.)
+
+**What the range contains.** Two upstream releases: v1.57.0 (a "dreaming" API and tool-runner
+permission gating) and v1.58.0 (MCP Tunnels). Endpoint count went 116 → 131 (`.stats.yml:1`).
+
+**The decisive measurement.** Every SDK file carrying managed-agents schema this repo mirrors is
+**byte-identical** across the two versions (`cmp`): `betasessionevent.go`, `betasession.go`,
+`betasessionthread.go`, and — because a session's shape reaches past those three —
+`betasessionresource.go` (the `Resources` union this repo emits at `internal/api/sessions.go:35`),
+`betasessionthreadevent.go`, `betaagentversion.go`, `betaenvironment.go`, `betaenvironmentwork.go`.
+The event taxonomy, the ID prefixes, and every session field this repo mirrors are therefore
+unchanged by construction, not by inspection. The first three alone would *not* have been sufficient
+proof, which is why the list is enumerated here.
+
+**The three questions #120 asked, answered.**
+
+- *Do the changed `betaagent.go` / `betamessage.go` / `betasession*.go` types alter a shape
+  `internal/domain` or `internal/api` mirrors?* **No.** `betaagent.go:1288`, `betamessage.go` and
+  `betamessagebatch.go` changed in **doc comments only** — no field, type, or enum moved (proven by
+  diffing the three with comment and blank lines stripped: empty). Two of those comments did shift
+  meaning, and neither reaches this repo. A custom tool's `Description` bound relaxed from 1–1024 to
+  1–4096 characters (`betaagent.go:1288`), which costs nothing because `internal/api/wire.go:244`
+  only requires the description be non-empty and never enforced a length bound to relax; and
+  `betamessage.go:4850-4853` re-words model fallbacks ("the **four** override fields … **replace**
+  the corresponding top-level field" → "The override fields … **set** the corresponding parameter"),
+  alongside a fuller `speed` description — both on model-fallback and speed surfaces this repo does
+  not implement.
+- *Does `shared/constant/constants.go` add stop reasons or event types the taxonomy should carry?*
+  **No.** It adds exactly three constants — `Tunnel`, `TunnelCertificate`, `TunnelToken`
+  (`constants.go:206-208`) — belonging to the new tunnels product, not to the `{domain}.{action}`
+  session taxonomy. No new stop reason. The remainder of that file's diff is gofmt realignment.
+- *Do the new `betatunnel*` / `betadream` surfaces imply behavior worth a DIVERGENCES entry?*
+  **No, and this was decided rather than skipped** — see below.
+
+**Decisions evaluated and rejected.**
+
+*A docs/DIVERGENCES.md entry for the tunnels/dreams surfaces* was rejected. The registry records
+deliberate divergences from reference behavior and inferences about behavior not yet confirmed;
+`/v1/tunnels` and `/v1/dreams` are neither. They are reference **product areas this repo has not
+built**, and logging those would grow the registry into a mirror of everything upstream ships — work
+the GitHub backlog already owns. A divergence needs two implementations that disagree; here there is
+only one.
+
+*Adopting the v1.57.0 tool-runner permission gating* was rejected as a non-change, and the reason is
+worth keeping: that rewrite gates dispatch on `evaluated_permission`, holds `ask` calls for
+`user.tool_confirmation`, and fails closed on an unrecognized permission — which is the SDK's
+**client-side helper** catching up to behavior this repo already implements **server-side**
+(`internal/brain/brain.go:391` stamps the field, `internal/events/toolflow.go:199-260` gates results
+and validates confirmations, `internal/api/events.go:83,124,226` drives the `requires_action`
+round-trip). The enums agree exactly: SDK `betasessionevent.go:1013-1015` (`allow`/`ask`/`deny`)
+versus `internal/domain/agent.go:49-51`. The SDK's fail-closed rule is a client concern; this repo is
+the authority *emitting* the field and only ever emits `allow` or `ask`. Read as convergence
+evidence, not as a gap.
+
+Likewise the `betasessionutil.go:45,66-70` accumulator fix — keep canonical `agent.message` events
+(valid `processed_at`), drop only unreconciled previews — relies on precisely the distinction this
+repo already maintains (`internal/api/events.go:583-585` emits `processed_at` null-until-processed;
+the brain mints a preview-reserved message id).
+
+**Citation durability.** The bump moved the live pinned-version label in three places —
+`.claude/agents/verifier.md`, `docs/REFERENCE_PROJECTS.md`, and the Stop Work entry in
+docs/DIVERGENCES.md — and every file:line that entry cites was re-read at v1.58.0 rather than
+assumed: `lib/environments/poller.go:439-465` (the 204 / `WithResponseBodyInto` comment) and
+`worker_test.go:118-120` (`WriteHeader(http.StatusNoContent)`) hold verbatim — `diff -rq` shows the
+whole `lib/` tree identical between versions. `api.md` **did** change, so `api.md:656-673` was
+checked rather than trusted: the work-resource section did not shift, and those lines are
+byte-identical across both versions, still declaring the `BetaSelfHostedWork` return on Stop. The
+v1.56.0 mentions surviving in CHANGELOG.md and archived `docs/plan/04` are historical records of
+what was true when those PRs landed and were deliberately left alone.
+
+**Evidence.** `make verify` green at total statement coverage **91.92%** (including the Docker and
+K8s sandbox suites). Every SDK request type, response field, JSON tag, service method, option,
+paginator, SSE helper and error decoder this repo uses is unchanged: the defining file of each is
+among the byte-identical set, enumerated from the non-test import sites
+(`internal/provider/anthropic/anthropic.go`, `internal/worker/{client,lease,toolexec}.go`;
+`internal/worker/{lease,toolexec}_test.go` import the SDK too, and the compile-and-test pass covers
+what they reference). One shape *did* change and is called out rather than smoothed over:
+`sdk.Client`'s embedded `BetaService` gained `Dreams` and `Tunnels` fields (`beta.go:20`), so the
+struct layout differs even though no call site's behavior does. "No code change required" is exact;
+"zero runtime difference" would not be — the two new services are constructed at client init, and
+the version-identifying `User-Agent` / `X-Stainless-Package-Version` headers change value.
+
+**Process note — a rejected decision that was itself wrong, and got reversed in review.**
+`issue-triage` returned `needs_plan: true` on the wire-schema-verification trigger. The
+implementation initially declined to author a plan, reasoning that a plan is a forward-looking
+decomposition across PRs while this is a single PR whose entire deliverable *is* the verification
+outcome, so a plan created and archived in one commit would record that outcome in a file whose
+status says the work had not started.
+
+That reasoning was wrong, and is kept here because the failure mode is worth recognizing next time.
+`.claude/agents/issue-triage.md`'s judgment criteria say the wire-schema trigger fires
+"**unconditionally**, however well-scoped the issue already looks: the resolution itself belongs in a
+plan, never improvised mid-implementation" — a rule written precisely to defeat the "but this case is
+small" argument, which is the argument that was made. The lifecycle objection was also false: a plan
+may land directly as `in-progress` (CLAUDE.md's plan bullet says so), which is what
+[05_sdk-bump-1.58.0.md](./plan/05_sdk-bump-1.58.0.md) does.
+
+Worth noting for anyone weighing reviewer disagreement by count: two of the three review passes
+(the verifier and the Claude-side reviewer) examined this decision and endorsed it as defensible.
+Only the Codex pass called it a blocking finding, and the Codex pass was right — it was the one that
+quoted the governing sentence instead of reasoning from the rule's purpose.

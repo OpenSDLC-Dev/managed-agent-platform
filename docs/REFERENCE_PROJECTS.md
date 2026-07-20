@@ -36,5 +36,5 @@ foundation; where it conflicts with the Anthropic model, it loses by rule.
 
 The SDK and CLI checkouts track the API's tip and contain post-plan surface
 (`agent.thread_*` events, memory-store betas). Wire-compat is judged against the SDK
-version pinned in `go.mod` (v1.56.0); new surface in a checkout is not an invitation to
+version pinned in `go.mod` (v1.58.0); new surface in a checkout is not an invitation to
 build ahead of the backlog.
