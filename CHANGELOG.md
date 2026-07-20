@@ -60,6 +60,49 @@ copy of an entry here.
   responsibility everywhere the operator makes the choice:
   [`deploy/compose/README.md`](./deploy/compose/README.md) and, on the Helm side, both the
   `modelProviders` values documentation and the chart README's install walkthrough.
+- **Work Stop answered 200 + a JSON work object where the reference answers a bodiless 204**
+  ([#27](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/27)) —
+  `POST /v1/environments/{environment_id}/work/{work_id}/stop` now returns `204 No Content`: zero
+  body bytes, no `Content-Type`. Callers that want the resulting state read it back through
+  `GET …/work/{work_id}`. Errors keep the JSON envelope unchanged, including the `409` for a stop
+  that is already past the transition it asks for.
+
+  The old shape was not an oversight but a documented, *confirmed* divergence, and it was wrong for
+  an instructive reason. The reasoning on record ran: the generated `Work.Stop` is typed
+  `*BetaSelfHostedWork`, and pointing the SDK at a 204/empty-body server makes its decoder error —
+  therefore 204 could not be the wire contract. The measurement was sound; the inference was not.
+  It measured the *client* and concluded something about the *service*. The pinned SDK settles the
+  question in the opposite direction, in its own work poller's prose: "Today the server returns 204
+  with no body / no Content-Type, and the strict Go decoder errors … for what is actually a
+  successful call" — a Go-only strictness (TypeScript and Python decode 204 natively) worked around
+  with `WithResponseBodyInto`, under a `TODO` asking for the *spec* to stop declaring a body "that
+  the server never sends". A client workaround shipped by the reference SDK is evidence *for* the
+  204, not against it.
+
+  The published spec does say otherwise — the public Stop Work reference documents a
+  `BetaSelfHostedWork` return, as do `api.md` and the generated signature — so this is a deliberate
+  divergence from the spec in favour of the deployed service, recorded as such in
+  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) and left open for a recording against a real endpoint
+  to close. The three spec-side witnesses are one witness: docs, `api.md` and the method signature
+  are all generated from the OpenAPI document the erratum names as wrong.
+
+  **This is a compatibility break, for one caller:** code that drove the generated `Work.Stop`
+  against *this platform's* old 200 + JSON response, and any hand-written consumer of that body, now
+  gets a decoder error. It is worth taking because the same code already fails against Anthropic's
+  own service — the old shape preserved compatibility with us, not with the reference, and code
+  developed against it would break on contact with the real thing. Every client that exists in the
+  wild is unaffected: the SDK's worker and poller apply the body bypass, and the real `ant` CLI binds
+  `*[]byte` for every work command (verified by driving the real CLI against a local server: both
+  graceful and forced stop exit 0).
+
+  This platform's own BYOC worker was the one real casualty, and it is fixed in the same change.
+  `internal/worker`'s `forceStop` called the generated method with no bypass, so against a 204 every
+  *successful* force-stop would decode-error past the `409` guard and log `worker: force-stop
+  failed` on the happy path — a warning that is pure fiction, invisible to a test suite asserting
+  database state. It now applies the same `WithResponseBodyInto` rebinding the reference's own
+  poller does, for the same reason. The regression test asserts the *absence* of that warning
+  against a real in-process control plane; removing the bypass reproduces the SDK's quoted error
+  string verbatim.
 
 - **Every binary's fatal-exit log reached stderr but never the collector**
   ([#93](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/93)) — the one line that says

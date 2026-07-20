@@ -328,25 +328,26 @@ func (s *server) heartbeatWork(r *http.Request) (any, error) {
 	}, nil
 }
 
-// stopWork stops a work item (POST .../work/{work_id}/stop) and returns the
-// updated item. The wire Stop responds with the BetaSelfHostedWork (the SDK
-// types it `*BetaSelfHostedWork`), not an empty 204 — a 204 breaks the SDK's
-// typed decoder. An already-stopped item is 409, which the reference worker
-// ignores.
-func (s *server) stopWork(r *http.Request) (any, error) {
+// stopWork stops a work item (POST .../work/{work_id}/stop). Success is a
+// bodiless 204: the reference service sends no body here even though the
+// generated SDK method is typed `*BetaSelfHostedWork`, which is why the SDK's
+// own work poller rebinds the response destination to bypass its strict decoder
+// (anthropic-sdk-go lib/environments/poller.go, stopWork). A caller that needs
+// the resulting state reads it back with GET .../work/{work_id}. An
+// already-stopped item is 409, which the reference worker ignores.
+func (s *server) stopWork(r *http.Request) error {
 	envID, workID, err := s.workScope(r)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	force, err := parseStopForce(r)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	w, err := s.queue.Stop(r.Context(), envID, workID, force)
-	if err != nil {
-		return nil, mapWorkErr(err)
+	if _, err := s.queue.Stop(r.Context(), envID, workID, force); err != nil {
+		return mapWorkErr(err)
 	}
-	return toWire(w), nil
+	return nil
 }
 
 // heartbeatTTL reads desired_ttl_seconds (default 30, clamped to
