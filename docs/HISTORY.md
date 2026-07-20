@@ -565,3 +565,83 @@ fix was both halves: `perm-deny` gained `EvaluatedPermissionAsk("bash", Platform
 comment now names each task's real owner of the window (in `perm-deny`, the seeded file
 staying unchanged). A safety argument that holds "in general" but not in the one place the
 grader is Platform-class is not a safety argument.
+---
+
+## anthropic-sdk-go v1.58.0 bump (#120) — wire-schema verification record (2026-07-20)
+
+The bump itself is two lines of `go.mod`/`go.sum`. It is recorded here because CLAUDE.md makes the
+pinned SDK this project's **authoritative typed wire schema**, so a minor-version bump is a
+wire-schema event whose *outcome* has to be auditable even when — as here — the outcome is that
+nothing in the contract moved. Without this record the next bump has to redo the same diff to learn
+that v1.56.0 → v1.58.0 was contract-neutral.
+
+**What the range contains.** Two upstream releases: v1.57.0 (a "dreaming" API and tool-runner
+permission gating) and v1.58.0 (MCP Tunnels). Endpoint count went 116 → 131 (`.stats.yml:1`).
+
+**The decisive measurement.** The three files carrying the managed-agents session schema —
+`betasessionevent.go`, `betasession.go`, `betasessionthread.go` — are **byte-identical** across the
+two versions (`cmp`). The event taxonomy, the ID prefixes, and every session field this repo mirrors
+are therefore unchanged by construction, not by inspection.
+
+**The three questions #120 asked, answered.**
+
+- *Do the changed `betaagent.go` / `betamessage.go` / `betasession*.go` types alter a shape
+  `internal/domain` or `internal/api` mirrors?* **No.** `betaagent.go:1288`, `betamessage.go` and
+  `betamessagebatch.go` changed in **doc comments only** — no field, type, or enum moved. The one
+  semantic nugget is a relaxed bound on a custom tool's `Description` (1–1024 → 1–4096 characters),
+  which costs this repo nothing: `internal/api/wire.go:244` only requires the description be
+  non-empty and never enforced a length bound to relax.
+- *Does `shared/constant/constants.go` add stop reasons or event types the taxonomy should carry?*
+  **No.** It adds exactly three constants — `Tunnel`, `TunnelCertificate`, `TunnelToken`
+  (`constants.go:206-208`) — belonging to the new tunnels product, not to the `{domain}.{action}`
+  session taxonomy. No new stop reason. The remainder of that file's diff is gofmt realignment.
+- *Do the new `betatunnel*` / `betadream` surfaces imply behavior worth a DIVERGENCES entry?*
+  **No, and this was decided rather than skipped** — see below.
+
+**Decisions evaluated and rejected.**
+
+*A docs/DIVERGENCES.md entry for the tunnels/dreams surfaces* was rejected. The registry records
+deliberate divergences from reference behavior and inferences about behavior not yet confirmed;
+`/v1/tunnels` and `/v1/dreams` are neither. They are reference **product areas this repo has not
+built**, and logging those would grow the registry into a mirror of everything upstream ships — work
+the GitHub backlog already owns. A divergence needs two implementations that disagree; here there is
+only one.
+
+*Adopting the v1.57.0 tool-runner permission gating* was rejected as a non-change, and the reason is
+worth keeping: that rewrite gates dispatch on `evaluated_permission`, holds `ask` calls for
+`user.tool_confirmation`, and fails closed on an unrecognized permission — which is the SDK's
+**client-side helper** catching up to behavior this repo already implements **server-side**
+(`internal/brain/brain.go:391` stamps the field, `internal/events/toolflow.go:199-260` gates results
+and validates confirmations, `internal/api/events.go:83,124,226` drives the `requires_action`
+round-trip). The enums agree exactly: SDK `betasessionevent.go:1013-1015` (`allow`/`ask`/`deny`)
+versus `internal/domain/agent.go:49-51`. The SDK's fail-closed rule is a client concern; this repo is
+the authority *emitting* the field and only ever emits `allow` or `ask`. Read as convergence
+evidence, not as a gap.
+
+Likewise the `betasessionutil.go:45,66-70` accumulator fix — keep canonical `agent.message` events
+(valid `processed_at`), drop only unreconciled previews — relies on precisely the distinction this
+repo already maintains (`internal/api/events.go:583-585` emits `processed_at` null-until-processed;
+the brain mints a preview-reserved message id).
+
+**Citation durability.** The bump moved the live pinned-version label in three places —
+`.claude/agents/verifier.md`, `docs/REFERENCE_PROJECTS.md`, and the Stop Work entry in
+docs/DIVERGENCES.md — and every file:line that entry cites was re-read at v1.58.0 rather than
+assumed: `lib/environments/poller.go:439-465` (the 204 / `WithResponseBodyInto` comment) and
+`worker_test.go:118-120` (`WriteHeader(http.StatusNoContent)`) hold verbatim — `diff -rq` shows the
+whole `lib/` tree identical between versions. `api.md` **did** change, so `api.md:656-673` was
+checked rather than trusted: the work-resource section did not shift, and those lines are
+byte-identical across both versions, still declaring the `BetaSelfHostedWork` return on Stop. The
+v1.56.0 mentions surviving in CHANGELOG.md and archived `docs/plan/04` are historical records of
+what was true when those PRs landed and were deliberately left alone.
+
+**Evidence.** `make verify` green at total statement coverage **91.92%** (including the Docker and
+K8s sandbox suites). All 30 SDK symbols the repo references — enumerated from the only four import
+sites, `internal/provider/anthropic/anthropic.go` and `internal/worker/{client,lease,toolexec}.go` —
+still exist with identical shapes. No code change was required in this repo.
+
+**Process note.** `issue-triage` returned `needs_plan: true`, on CLAUDE.md's "wire-schema
+verification" trigger. No plan file was authored: a plan is a forward-looking decomposition across
+PRs, and this work is a single PR whose entire deliverable *is* the verification outcome, which the
+trigger exists to make sure nobody improvises. Creating and archiving a plan in one commit would
+record that outcome in a file whose status says the work has not started. The outcome is recorded
+here instead, which is what CLAUDE.md reserves this file for.
