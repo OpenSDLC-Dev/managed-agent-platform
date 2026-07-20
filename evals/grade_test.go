@@ -17,7 +17,7 @@ import (
 // from the drift this suite exists to detect, and none of these tasks needs one —
 // they are engineered so that correct behavior leaves a mechanical trace.
 //
-// The trick that makes that possible is the nonce (see subst): prompts demand an
+// The trick that makes that possible is the nonce (see fill): prompts demand an
 // exact token that only this trial's agent could know, so an exact-match check
 // tests the agent rather than the grader's generosity.
 
@@ -167,8 +167,11 @@ func corePack(task Task) []Grader {
 	}}
 }
 
-// FileLines asserts a sandbox file's exact lines, in order. Each want entry may
-// carry {{NONCE}}.
+// FileLines asserts a sandbox file's exact lines, in order. The path and each
+// want entry may carry the trial's tokens — the path because Seed substitutes
+// into its own, and a grader reading the literal-braced name while the seed
+// wrote the filled one would red the platform for a file that is exactly where
+// it should be.
 //
 // Lines rather than bytes, because the one byte these tasks cannot pin is the
 // trailing newline: a model that prints line by line emits one and a model that
@@ -182,14 +185,14 @@ func FileLines(path string, want []string, class Class) Grader {
 		Name:  "file-lines:" + path,
 		Class: class,
 		Check: func(t *testing.T, tr *Trial) error {
-			raw, err := tr.readFile(t, path)
+			raw, err := tr.readFile(t, tr.fill(path))
 			if err != nil {
 				return fmt.Errorf("read %s: %w", path, err)
 			}
 			got := splitLines(string(raw))
 			w := make([]string, len(want))
 			for i, s := range want {
-				w[i] = subst(s, tr.Nonce)
+				w[i] = tr.fill(s)
 			}
 			if !slices.Equal(got, w) {
 				return fmt.Errorf("%s has %d line(s) %q, want %d line(s) %q",
@@ -218,7 +221,7 @@ func FinalMessageHas(sub string, class Class) Grader {
 		Name:  "final-message-has:" + sub,
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
-			want := subst(sub, tr.Nonce)
+			want := tr.fill(sub)
 			got := finalMessage(tr)
 			if !strings.Contains(got, want) {
 				return fmt.Errorf("final agent.message = %q, want it to contain %q", got, want)
@@ -277,30 +280,6 @@ func NoToolUse(class Class) Grader {
 	}
 }
 
-// ToolResultContains asserts some non-error tool_result carries sub.
-//
-// It is how a task proves a value came from the sandbox rather than from the
-// model's imagination: the nonce it looks for exists only in a file the agent
-// had to actually read.
-func ToolResultContains(sub string, class Class) Grader {
-	return Grader{
-		Name:  "tool-result-contains:" + sub,
-		Class: class,
-		Check: func(_ *testing.T, tr *Trial) error {
-			want := subst(sub, tr.Nonce)
-			for _, ev := range eventsOfType(tr, "agent.tool_result") {
-				if !okResult(ev) {
-					continue
-				}
-				if strings.Contains(textOf(ev), want) {
-					return nil
-				}
-			}
-			return fmt.Errorf("no successful tool_result contains %q", want)
-		},
-	}
-}
-
 // ToolResultOK asserts at least one tool call actually succeeded — the guard
 // against a trial that "used tools" by failing at them n times and then
 // narrating a plausible answer.
@@ -333,7 +312,7 @@ func SeparateBashCalls(markers ...string) Grader {
 		Class: Model,
 		Check: func(_ *testing.T, tr *Trial) error {
 			for _, cmd := range bashCommands(tr) {
-				if containsAll(cmd, markers) {
+				if containsAll(cmd, tr.fillAll(markers)) {
 					return fmt.Errorf("one bash call did all of %v in a single command (%q); "+
 						"the task needs them in separate calls to exercise cross-call state", markers, cmd)
 				}
@@ -358,7 +337,7 @@ func BashCommandWith(markers ...string) Grader {
 		Class: Model,
 		Check: func(_ *testing.T, tr *Trial) error {
 			for _, cmd := range bashCommands(tr) {
-				if containsAll(cmd, markers) {
+				if containsAll(cmd, tr.fillAll(markers)) {
 					return nil
 				}
 			}
@@ -428,11 +407,11 @@ func FileEquals(path, content string, class Class) Grader {
 		Name:  "file-equals:" + path,
 		Class: class,
 		Check: func(t *testing.T, tr *Trial) error {
-			raw, err := tr.readFile(t, path)
+			raw, err := tr.readFile(t, tr.fill(path))
 			if err != nil {
 				return fmt.Errorf("read %s: %w", path, err)
 			}
-			want := subst(content, tr.Nonce)
+			want := tr.fill(content)
 			if string(raw) != want {
 				return fmt.Errorf("%s = %q, want exactly %q", path, string(raw), want)
 			}
@@ -449,11 +428,11 @@ func FileMatches(path, pattern string, class Class) Grader {
 		Name:  "file-matches:" + path,
 		Class: class,
 		Check: func(t *testing.T, tr *Trial) error {
-			raw, err := tr.readFile(t, path)
+			raw, err := tr.readFile(t, tr.fill(path))
 			if err != nil {
 				return fmt.Errorf("read %s: %w", path, err)
 			}
-			re, err := regexp.Compile(subst(pattern, tr.Nonce))
+			re, err := regexp.Compile(tr.fill(pattern))
 			if err != nil {
 				return fmt.Errorf("bad pattern %q: %w", pattern, err)
 			}
@@ -499,8 +478,8 @@ func ToolCallResult(name, inputSub string, wantErr bool, contentSub string, clas
 		Name:  fmt.Sprintf("tool-call-result:%s:%s", name, inputSub),
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
-			wantIn := subst(inputSub, tr.Nonce)
-			wantContent := subst(contentSub, tr.Nonce)
+			wantIn := tr.fill(inputSub)
+			wantContent := tr.fill(contentSub)
 			for _, use := range eventsOfType(tr, "agent.tool_use") {
 				if use["name"] != name || !strings.Contains(inputJSON(use), wantIn) {
 					continue
@@ -528,6 +507,292 @@ func ToolCallResult(name, inputSub string, wantErr bool, contentSub string, clas
 			return fmt.Errorf("no %s call whose input contains %q", name, wantIn)
 		},
 	}
+}
+
+// ToolCalledWith asserts the model called name with every marker in its input.
+// It is the Model half of a P/M pair: it owns "the model never made the call",
+// which is what lets the Platform-class CallResult beside it stay vacuous on
+// that miss instead of blaming the platform for it.
+//
+// Markers are matched against the decoded input (see inputText), so a marker may
+// carry a redirect, a quote or a newline — the things a bash command is made of.
+func ToolCalledWith(name string, markers []string, class Class) Grader {
+	return Grader{
+		Name:  fmt.Sprintf("tool-called-with:%s:%s", name, strings.Join(markers, "|")),
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			if len(toolCallsWith(tr, name, markers)) > 0 {
+				return nil
+			}
+			return fmt.Errorf("no %s call whose input carries all of %q", name, markers)
+		},
+	}
+}
+
+// CallResult grades the result of a call the model actually made: among the
+// calls to name whose input carries every marker (an empty marker list means any
+// call to that tool), at least one must have a joined result whose is_error
+// matches wantErr and whose content carries sub ("" skips the content check).
+//
+// It is VACUOUS when no such call exists, and that is the whole point: paired
+// with a Model-class ToolCalledWith (or a tool-use floor) that owns the miss,
+// the only way it reds is a call that happened and a result that came back
+// wrong — so it can be Platform without firing on model non-compliance. Where
+// ToolCallResult requires the call and therefore folds the two failures into
+// Either, this splits them.
+//
+// One satisfying call is enough rather than all of them, because how many times
+// a model reaches for a tool is its business: a first attempt with a different
+// pattern, a retry after a typo. The claim is that the platform demonstrated the
+// behavior on the call that asked for it.
+func CallResult(name string, markers []string, wantErr bool, sub string, class Class) Grader {
+	return Grader{
+		Name:  fmt.Sprintf("call-result:%s:%s", name, strings.Join(markers, "|")),
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			uses := toolCallsWith(tr, name, markers)
+			if len(uses) == 0 {
+				return nil
+			}
+			want := tr.fill(sub)
+			var last error
+			graded := 0
+			for _, use := range uses {
+				id, _ := use["id"].(string)
+				res := resultFor(tr, id)
+				if res == nil {
+					// The call never came back. That gap is ToolResultOK's to
+					// report; from here the call is simply not gradeable, so
+					// move on rather than letting it excuse the siblings.
+					continue
+				}
+				graded++
+				gotErr, present := isErrorFlag(res)
+				if !present {
+					// Terminal, not "try the next call": a later well-formed result
+					// says nothing about this one, and letting a retry erase a
+					// dropped wire field is the vacuous pass the flag check exists
+					// to close.
+					return fmt.Errorf("call %s: result carries no is_error flag (%q)", id, textOf(res))
+				}
+				switch {
+				case gotErr != wantErr:
+					last = fmt.Errorf("call %s: result is_error=%v, want %v (%q)",
+						id, gotErr, wantErr, textOf(res))
+				case want != "" && !strings.Contains(textOf(res), want):
+					last = fmt.Errorf("call %s: result %q lacks %q", id, textOf(res), want)
+				default:
+					return nil
+				}
+			}
+			if graded == 0 {
+				return nil
+			}
+			return fmt.Errorf("none of the %d %s call(s) carrying %q produced the expected result; last: %w",
+				len(uses), name, markers, last)
+		},
+	}
+}
+
+// GlobPathList asserts every successful glob result opens the way the tool's
+// contract says it does: an absolute path, or its own "no matches".
+//
+// It is the half of glob's output that does not depend on which pattern the
+// model chose, which is what makes it a clean Platform check — a result whose
+// records are mangled (the mtime prefix leaking through, a NUL split gone
+// wrong, a relative path) reds here whatever the model asked for. Which paths
+// come back does depend on the pattern, so "the seeded file is among them" is a
+// separate, Either-class CallResult.
+//
+// Vacuous when the model never called glob: the task's tool-use floor owns that.
+func GlobPathList(class Class) Grader {
+	return Grader{
+		Name:  "glob-path-list",
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			for _, use := range eventsOfType(tr, "agent.tool_use") {
+				if use["name"] != "glob" {
+					continue
+				}
+				id, _ := use["id"].(string)
+				res := resultFor(tr, id)
+				if res == nil {
+					// The core pack's tool-results-joined grader owns the missing
+					// answer; there is no list to shape-check here.
+					continue
+				}
+				gotErr, present := isErrorFlag(res)
+				if !present {
+					return fmt.Errorf("glob call %s: result carries no is_error flag (%q)", id, textOf(res))
+				}
+				if gotErr {
+					// A failed glob is the model's pattern or a real tool error;
+					// either way there is no path list to shape-check.
+					continue
+				}
+				out := textOf(res)
+				if out == "no matches" {
+					continue
+				}
+				// An empty success is not an empty list — glob says "no matches"
+				// for that. Nothing here is the shape of a dropped content block,
+				// and a grader that walked zero lines would accept it silently.
+				lines := splitLines(out)
+				if len(lines) == 0 {
+					return fmt.Errorf("glob call %s succeeded with no content, want a path list or %q",
+						id, "no matches")
+				}
+				// The first record only, deliberately. Every regression this can
+				// see shows up there — a leaked `<mtime> ` stat prefix, a relative
+				// path, an error string returned as a success — and the tool's own
+				// contract forbids asserting more: search.go is NUL-delimited end
+				// to end precisely because a filename may legally contain a
+				// newline, so a later "line" can be the tail of a legitimate path
+				// and a per-line check would red the platform for output that is
+				// exactly right.
+				if !strings.HasPrefix(lines[0], "/") {
+					return fmt.Errorf("glob call %s returned %q, whose first record %q is not an absolute path",
+						id, out, lines[0])
+				}
+			}
+			return nil
+		},
+	}
+}
+
+// NotInToolTraffic asserts a token never crossed the sandbox boundary — it
+// appears in no tool input and in no tool result.
+//
+// journal-multiturn uses it to keep its recall token honest: the token proves
+// event replay only for as long as the filesystem is not a second way to know
+// it, so a model that writes it down (or reads it back) must red rather than
+// quietly turn a replay test into a persistence test.
+func NotInToolTraffic(sub string, class Class) Grader {
+	return Grader{
+		Name:  "not-in-tool-traffic:" + sub,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			want := tr.fill(sub)
+			for _, ev := range eventsOfType(tr, "agent.tool_use") {
+				// The encoded input as well as the decoded values: this grader is
+				// the one that must find the token wherever it is, including a
+				// place inputText does not look (an object key, a non-string
+				// value). Everywhere else the decoded form is what a marker should
+				// match; here breadth wins over precision.
+				if strings.Contains(inputText(ev), want) || strings.Contains(inputJSON(ev), want) {
+					return fmt.Errorf("%v tool call carries %q in its input, so the token is on disk, "+
+						"not only in the replayed context", ev["name"], want)
+				}
+			}
+			for _, ev := range eventsOfType(tr, "agent.tool_result") {
+				if strings.Contains(textOf(ev), want) {
+					return fmt.Errorf("a tool_result carries %q, so the token came back out of the sandbox", want)
+				}
+			}
+			return nil
+		},
+	}
+}
+
+// OnlyIf makes a grader vacuous unless every premise holds — the mechanism
+// behind a Platform-class claim that is only the platform's *given* that the
+// model did as it was asked.
+//
+// CallResult builds its own premise in (the call it grades must have happened),
+// which covers a claim about that call's result. This is for the other shape: a
+// claim about an artifact, whose premise is some earlier call the grader does
+// not otherwise look at. shell-state is the case — mark.txt holds the nonce only
+// if the model exported it and then wrote it with the variable, and a trial that
+// skipped either step is a Model miss, not a broken shell snapshot.
+//
+// The grader keeps its name and class, so a gated check reports exactly as it
+// did before; what changes is when it speaks.
+func OnlyIf(g Grader, premises ...func(*Trial) bool) Grader {
+	return Grader{
+		Name:  g.Name,
+		Class: g.Class,
+		Check: func(t *testing.T, tr *Trial) error {
+			for _, holds := range premises {
+				if !holds(tr) {
+					return nil
+				}
+			}
+			return g.Check(t, tr)
+		},
+	}
+}
+
+// calledWith is OnlyIf's premise: the model called name with every marker in its
+// input. It is ToolCalledWith's condition over the same finder, deliberately —
+// pair the two on the same markers and the Platform grader goes vacuous exactly
+// when the Model grader beside it reds, so the two can never disagree about
+// whether the instructed call happened. A premise that matched a narrower set
+// than the Model grader it is paired with would open a window where neither
+// fires, which is the one thing a gate must not do.
+func calledWith(name string, markers ...string) func(*Trial) bool {
+	return func(tr *Trial) bool { return len(toolCallsWith(tr, name, markers)) > 0 }
+}
+
+// toolCallsWith returns every agent.tool_use of the named tool whose decoded
+// input carries all markers, in log order. An empty marker list matches every
+// call to that tool.
+func toolCallsWith(tr *Trial, name string, markers []string) []map[string]any {
+	want := tr.fillAll(markers)
+	var out []map[string]any
+	for _, use := range eventsOfType(tr, "agent.tool_use") {
+		if use["name"] != name {
+			continue
+		}
+		if containsAll(inputText(use), want) {
+			out = append(out, use)
+		}
+	}
+	return out
+}
+
+// inputText joins the string values of a tool_use's input, one per line, in key
+// order.
+//
+// It matches a marker against what the model actually wrote, where inputJSON
+// matches the encoding of it — and json.Marshal HTML-escapes <, > and & and
+// spells a newline \n, so a marker carrying a redirect or a heredoc could never
+// match there. A newline between values keeps a single-line marker from
+// straddling two fields and matching a pair of them that no one wrote together.
+func inputText(ev map[string]any) string {
+	var b strings.Builder
+	var walk func(v any)
+	walk = func(v any) {
+		switch t := v.(type) {
+		case string:
+			b.WriteString(t)
+			b.WriteByte('\n')
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		case map[string]any:
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			slices.Sort(keys)
+			for _, k := range keys {
+				walk(t[k])
+			}
+		}
+	}
+	walk(ev["input"])
+	return b.String()
+}
+
+// toolUseByID returns the agent.tool_use with this event id, or nil.
+func toolUseByID(tr *Trial, id string) map[string]any {
+	for _, use := range eventsOfType(tr, "agent.tool_use") {
+		if use["id"] == id {
+			return use
+		}
+	}
+	return nil
 }
 
 // EventAfterUserMessage asserts an event of evType appears after the nth
@@ -583,7 +848,7 @@ func EventCountAtLeast(evType string, n int, class Class) Grader {
 // stopped a tool before it ran.
 //
 // It fires only once a gated tool was actually called. A turn with no tool_use
-// had nothing to gate, and a Model-class grader (the task's ToolUseAtLeast) owns
+// had nothing to gate, and a Model-class grader (the task's ToolCalledWith) owns
 // "the model never called the tool" — so a Platform failure here means one thing:
 // a gated call the bridge failed to suspend.
 func RequiresActionRaised(class Class) Grader {
@@ -622,6 +887,11 @@ func RequiresActionRaised(class Class) Grader {
 // Like RequiresActionRaised it fires only when the tool was actually called: no
 // call means nothing to check (a Model grader owns the skip), and a Platform
 // failure means the tool ran without the "ask" the gate should have stamped.
+//
+// Every call is checked, not just the first. The toolset gates by name, so a
+// second call to the same tool that came back unstamped is the same defect as a
+// first one — and a gate that only held for the opening call is exactly the
+// shape a first-call-only assertion would miss.
 func EvaluatedPermissionAsk(name string, class Class) Grader {
 	return Grader{
 		Name:  "evaluated-permission-ask:" + name,
@@ -631,35 +901,61 @@ func EvaluatedPermissionAsk(name string, class Class) Grader {
 				if ev["name"] != name {
 					continue
 				}
-				if ev["evaluated_permission"] == "ask" {
-					return nil
+				if ev["evaluated_permission"] != "ask" {
+					return fmt.Errorf("%s tool_use %v evaluated_permission = %v, want ask",
+						name, ev["id"], ev["evaluated_permission"])
 				}
-				return fmt.Errorf("%s tool_use evaluated_permission = %v, want ask",
-					name, ev["evaluated_permission"])
 			}
 			return nil
 		},
 	}
 }
 
-// ConfirmedResult asserts that the call a confirmation released produced the
-// expected result, sequenced after the confirmation. It correlates by
-// tool_use_id — the confirmation names the gated call, and only that call's
-// result counts, so a result for some other call cannot satisfy it — and checks
-// the result's is_error against wantErr and its content against contentSub (nonce
-// substituted; "" skips the content check). Reading position in the log is sound:
-// the list endpoint returns events in commit order.
+// ConfirmedResult is the join issue #99 asked for: the call the task means
+// (name plus markers in its decoded input), to *its* confirmation, to *that*
+// call's result — which must carry is_error == wantErr and contain contentSub
+// ("" skips the content check), sequenced after the confirmation. Reading
+// position in the log is sound: the list endpoint returns events in commit
+// order. Correlating from the confirmation forward instead, as this once did,
+// grades whichever call the bridge happened to stop rather than the one the task
+// gated.
 //
-// It passes when no confirmation is on the log: a turn that gated nothing has no
-// bridge outcome to grade, and a Model grader owns "the model never called the
-// gated tool". So a Platform failure here means one thing — a confirmation
-// happened and the platform's result for it was wrong, mis-sequenced, or missing.
-func ConfirmedResult(wantErr bool, contentSub string, class Class) Grader {
+// One confirmed call satisfying the claim is enough, matching CallResult. An
+// earlier revision required every confirmed matching call to satisfy it, and
+// that was a false-red generator on a paid live suite: the toolset gates every
+// tool, so a model that writes the file and then *verifies* it with a second
+// command carrying the same marker gets a second confirmed result, and a
+// verification that exits non-zero would have failed the trial with the platform
+// behaving perfectly.
+//
+// It is vacuous when nothing was confirmed, when the model never made the call
+// the task described, and when no matching call was confirmed. The last one is
+// the subtle case, and it is safe only because sibling graders own that window
+// task by task — a general claim that "EvaluatedPermissionAsk covers it" is not
+// true, since that grader checks the permission *stamp* and not that a
+// suspension happened. In perm-allow the gated call must produce its file
+// (FileLines) and carry the stamp; in perm-deny the seeded file must be
+// *unchanged* (FileLines, Platform), so an unconfirmed append that actually runs
+// reds there, and the stamp is checked too. Blaming the platform here instead
+// would misread the harness giving up on a model that re-pauses past
+// maxConfirmRounds (harness_test.go) as a bridge fault.
+//
+// The one thing it asserts about confirmations it does not grade: each must name
+// an agent.tool_use that is on the log. The harness confirms whatever event id
+// requires_action listed (see driveToIdle), so a gate that named some other
+// event arrives here as a confirmation pointing at nothing — and correlating
+// forward could never see it, because the platform would answer the id it was
+// handed and look consistent.
+func ConfirmedResult(name string, markers []string, wantErr bool, contentSub string, class Class) Grader {
 	return Grader{
-		Name:  "confirmed-result",
+		Name:  fmt.Sprintf("confirmed-result:%s:%s", name, strings.Join(markers, "|")),
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
-			wantContent := subst(contentSub, tr.Nonce)
+			// Where each confirmed call's confirmation sits, and the check that it
+			// names a real call. First occurrence wins: the harness confirms an id
+			// once, and grading a duplicate against its own later index would
+			// demand a second result nobody promised.
+			confirmedAt := map[string]int{}
 			for i, ev := range tr.Events {
 				if ev["type"] != "user.tool_confirmation" {
 					continue
@@ -668,30 +964,64 @@ func ConfirmedResult(wantErr bool, contentSub string, class Class) Grader {
 				if tid == "" {
 					return fmt.Errorf("user.tool_confirmation carries no tool_use_id")
 				}
-				for _, later := range tr.Events[i+1:] {
-					if later["type"] != "agent.tool_result" || later["tool_use_id"] != tid {
-						continue
-					}
-					gotErr, present := isErrorFlag(later)
-					if !present {
-						return fmt.Errorf("result for confirmed %s carries no is_error flag (content %q)",
-							tid, textOf(later))
-					}
-					if gotErr != wantErr {
-						return fmt.Errorf("result for confirmed %s: is_error=%v, want %v (content %q)",
-							tid, gotErr, wantErr, textOf(later))
-					}
-					if wantContent != "" && !strings.Contains(textOf(later), wantContent) {
-						return fmt.Errorf("result for confirmed %s does not contain %q (got %q)",
-							tid, wantContent, textOf(later))
-					}
+				if toolUseByID(tr, tid) == nil {
+					return fmt.Errorf("user.tool_confirmation names %s, which is no agent.tool_use on the log: "+
+						"the gate asked about an event that is not the call it stopped", tid)
+				}
+				if _, seen := confirmedAt[tid]; !seen {
+					confirmedAt[tid] = i
+				}
+			}
+			if len(confirmedAt) == 0 {
+				return nil
+			}
+
+			wantContent := tr.fill(contentSub)
+			var last error
+			for _, use := range toolCallsWith(tr, name, markers) {
+				id, _ := use["id"].(string)
+				at, ok := confirmedAt[id]
+				if !ok {
+					continue
+				}
+				res := resultAfter(tr, at, id)
+				if res == nil {
+					last = fmt.Errorf("no agent.tool_result for confirmed %s after its confirmation", id)
+					continue
+				}
+				gotErr, present := isErrorFlag(res)
+				if !present {
+					// Terminal, like CallResult's: a later well-formed result says
+					// nothing about this one, and letting a retry erase a dropped
+					// wire field is the vacuous pass the flag check exists to close.
+					return fmt.Errorf("result for confirmed %s carries no is_error flag (content %q)",
+						id, textOf(res))
+				}
+				switch {
+				case gotErr != wantErr:
+					last = fmt.Errorf("result for confirmed %s: is_error=%v, want %v (content %q)",
+						id, gotErr, wantErr, textOf(res))
+				case wantContent != "" && !strings.Contains(textOf(res), wantContent):
+					last = fmt.Errorf("result for confirmed %s does not contain %q (got %q)",
+						id, wantContent, textOf(res))
+				default:
 					return nil
 				}
-				return fmt.Errorf("no agent.tool_result for confirmed %s after its confirmation", tid)
 			}
-			return nil
+			return last
 		},
 	}
+}
+
+// resultAfter returns the first agent.tool_result for a tool_use id committed
+// after position at, or nil.
+func resultAfter(tr *Trial, at int, id string) map[string]any {
+	for _, ev := range tr.Events[at+1:] {
+		if ev["type"] == "agent.tool_result" && ev["tool_use_id"] == id {
+			return ev
+		}
+	}
+	return nil
 }
 
 // ReadRangeRequested asserts the model asked to read exactly line..line of path
@@ -733,7 +1063,7 @@ func ReadRangeBytes(path string, line int, want string, class Class) Grader {
 			if !okResult(res) {
 				return fmt.Errorf("read of %s line %d errored or malformed: %q", path, line, textOf(res))
 			}
-			if got, wantText := textOf(res), subst(want, tr.Nonce); got != wantText {
+			if got, wantText := textOf(res), tr.fill(want); got != wantText {
 				return fmt.Errorf("read %s view_range [%d,%d] returned %q, want %q",
 					path, line, line, got, wantText)
 			}

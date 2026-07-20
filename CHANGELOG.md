@@ -13,6 +13,93 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Eval grader rigor: the four P/M/E precision and coverage-depth gaps left open by #98**
+  ([#99](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/99)) — the suite's
+  invariant is that *a Platform-class finding fires only on a genuine platform fault, and no
+  grader passes vacuously on a missing field*. #98 established it for tasks 4–10; these are the
+  four places it did not yet hold.
+
+  **Tasks 1–3 predate the thesis.** `fib-quickstart` reds Platform when the model writes a wrong
+  Fibonacci script, and `shell-state` reds Platform when the model skips the final `cat` and the
+  nonce never round-trips. The first is now Either on both artifact checks (the numbers are the
+  model's arithmetic; what is unambiguously ours on that transcript — every `tool_use` answered
+  exactly once, usage accounted, the idle on the stream — the core pack already owns). The second
+  splits into the pair the other tasks use: `ToolCalledWith` (Model) requires the instructed
+  command, and `CallResult` (Platform) grades *that call's own result*, vacuous when the model
+  never made it. Its marker is the whole command rather than `cat` plus the path, because
+  `cat > /workspace/mark.txt <<EOF` carries both of those and is a write, whose empty stdout would
+  have red the platform for a round trip nobody asked for.
+
+  **`journal-multiturn` could not tell replay from persistence.** The file holding both lines is
+  consistent with a model reconstructing turn 1's line from its replayed context, and persisted
+  storage can equally mask a broken replay. It now carries one witness for each, chosen so neither
+  can stand in for the other: a code word stated only in turn 1 (`{{RECALL}}`, a *second* per-trial
+  token — the nonce is in turn 2's own prompt, so a token derived from it could be spelled by a
+  model that had lost turn 1 entirely) which turn 2 must repeat, with `NotInToolTraffic` reding if
+  the model writes it down or reads it back; and a file seeded before turn 1 that the model is
+  never told about, asserted byte-for-byte at grading. Nothing the model does can restore the
+  seeded file, so a container recreated anywhere between the seed and the grade reds — the clean
+  Platform signal the journal contents cannot be. The recall prompt's wording is load-bearing: an
+  earlier draft called the token a "code word" and forbade writing it to a file or running any
+  command containing it, and a live run refused turn two outright, reading the pair as a secret
+  and the request to repeat it as an attempt to extract it. It is the trap `view-range` already
+  avoids by not calling its marker a SECRET — a prompt that sounds like a confidentiality rule
+  tests the model's refusal reflex, not the platform — so the token is now the user's own
+  reference code and staying off disk is a convenience, not a prohibition.
+
+  **`glob` was invocation-only.** Its output is now graded in the two halves that can be told
+  apart: `GlobPathList` (Platform) holds every successful result to an absolute first record, or
+  the tool's own `no matches`, whatever pattern the model chose — so a leaked mtime prefix or a
+  relative path reds; and "the seeded file is among them" stays Either, because which paths come
+  back is the pattern's business and the pattern is the model's. Pinning the whole list instead
+  would mean dictating the pattern in the prompt, which is the one thing these prompts do not do.
+
+  **`ConfirmedResult` graded the first confirmation of any tool.** It now joins the call the task
+  means (tool name plus markers in its input) to *its* confirmation to *its* result. Correlating
+  only forward from the confirmation could not see a gate that named the wrong event in
+  `requires_action`: the harness confirms whatever id it was given, so the platform would answer
+  that id and look consistent — the grader now reds a confirmation naming no `agent.tool_use` on
+  the log, and that check runs before the markers narrow anything. Where the markers do narrow, the
+  grader goes vacuous, and the pairing is what keeps that honest: `ToolCalledWith` (Model) owns "the
+  model never made the instructed call", so a Platform-class silence here always sits beside a
+  Model-class red. `EvaluatedPermissionAsk` likewise now checks every call to the gated
+  tool rather than only the first.
+
+  Markers are matched against the **decoded** tool input rather than its JSON encoding:
+  `json.Marshal` HTML-escapes `<`, `>` and `&`, so a marker carrying a redirect — `echo GATED_… >
+  /workspace/gated.txt`, the permission tasks' own command — could never have matched. `ToolCallResult`
+  keeps its existing first-match semantics and signature untouched; the new graders are separate.
+
+  Review hardening, on top of the four gaps themselves. `shell-state`'s two Platform claims are
+  now gated on the premises they rest on — the model ran the instructed export carrying this
+  trial's nonce, and wrote the file with a bash call that read the variable back — via `OnlyIf`,
+  whose predicate is `ToolCalledWith`'s over the same finder, so the window where a Platform check
+  falls silent is exactly the window where the Model check beside it reds. `ConfirmedResult` grades
+  a confirmed call the way `CallResult` grades a called one — one satisfying call is enough, so a
+  model that confirms, sees an error and retries is not a Platform fault; an earlier draft demanded
+  *every* confirmation resolve well and turned exactly that into a red. `CallResult` treats a
+  missing `is_error` as terminal rather than something a later retry forgives, and skips a call
+  that never came back instead of letting it excuse a sibling whose result was wrong.
+  `GlobPathList` rejects a success with no content (glob says `no matches` for an empty list, so
+  that shape is a dropped content block) and a result missing `is_error`. It checks only the first
+  record, and that is the tool's contract talking: `search.go` is NUL-delimited end to end
+  precisely because a filename may legally contain a newline, so a later "line" can be the tail of
+  a perfectly good path and a per-line check would red the platform for correct output.
+  `NotInToolTraffic` reads the encoded
+  input as well as the decoded values, so a token hidden in an object key still reds. The file
+  graders substitute tokens into their *path*, which `Seed` already did — an asymmetry that would
+  have red the platform for a file sitting exactly where it belonged.
+
+  Substitution is now one function, `(*Trial).fill`, through which every string a task author
+  writes passes — prompts, seeds and grader expectations alike. The first cut of this change kept
+  the nonce on its own helper and taught only the graders that needed it about `{{RECALL}}`, and
+  the live suite found the hole on the first run: the model repeated the code word correctly and
+  the grader red anyway, still looking for the literal placeholder. A token live on one side of a
+  check and literal on the other is not a bug a unit test written against the same misunderstanding
+  will catch, so the two spellings are gone rather than documented.
+
 ### Fixed
 
 - **Provider adapter errors could quote a credential back from the endpoint's response body**

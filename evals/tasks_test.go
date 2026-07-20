@@ -56,8 +56,17 @@ func fibQuickstart() Task {
 			// loop that ran it closed — so no separate tool-count grader is
 			// needed here, and a count would misfire on a model that did the
 			// whole thing in one compound command.
-			FileLines("fibonacci.txt", fib20, Platform),
-			ToolResultOK(Platform),
+			//
+			// Either, not Platform, for both artifact checks: the numbers are
+			// the model's arithmetic and the script is the model's code, so a
+			// wrong file or a run that errored every time is as likely its
+			// mistake as ours. What is unambiguously the platform's on this
+			// transcript — every tool_use answered exactly once, the usage
+			// accounted, the stream delivering the idle — the core pack already
+			// owns as clean Platform checks, so nothing is lost by declining to
+			// blame the platform for a bad Fibonacci script.
+			FileLines("fibonacci.txt", fib20, Either),
+			ToolResultOK(Either),
 			// Either: the file being right proves the platform worked, so a
 			// missing token here is most likely the model forgetting to say it.
 			FinalMessageHas("DONE:{{NONCE}}", Either),
@@ -104,6 +113,30 @@ func echoNoTool() Task {
 // separates a user's plain variables from bash's own internals), so a task built
 // on a plain one would be asserting a divergence the package states it has.
 func shellState() Task {
+	// The premises both Platform claims below rest on, stated once: the model ran
+	// the instructed export carrying this trial's nonce, and wrote the file with a
+	// bash call that read the variable back. mark.txt can only hold the nonce if
+	// both happened, so a trial that skipped either is a Model miss and the
+	// platform has nothing to answer for. Each premise is paired with the Model
+	// grader on the same markers, so the window where a Platform check falls
+	// silent is exactly the window where a Model check reds.
+	//
+	// Two markers for the export rather than the literal `export MARK={{NONCE}}`,
+	// so the benign quoted spellings (`export MARK="…"`, `export MARK='…'`) still
+	// count as having done it.
+	//
+	// The write marker is the double-quoted `"$MARK"` the prompt spells, not a
+	// bare `$MARK`: single quotes are the one spelling that changes the answer.
+	// `echo '$MARK' > mark.txt` writes the six literal bytes `$MARK` however
+	// healthy the shell snapshot is, so a premise that accepted it would hand a
+	// correct platform a Platform red on the file check. Requiring the expanding
+	// spelling puts that trial where it belongs: the premise fails, this check
+	// goes quiet, and BashCommandWith reds it as the Model miss it is.
+	exportMarkers := []string{"export MARK", "{{NONCE}}"}
+	writeMarkers := []string{`"$MARK"`, "mark.txt"}
+	catMarkers := []string{"cat /workspace/mark.txt"}
+	exported := calledWith("bash", exportMarkers...)
+	wrote := calledWith("bash", writeMarkers...)
 	return Task{
 		ID: "shell-state",
 		System: "Use the bash tool. Run each command as its own separate bash call, " +
@@ -117,25 +150,42 @@ func shellState() Task {
 			// For a model that does as asked — export in one call, `echo "$MARK"`
 			// into the file in another — the file holds the nonce only if the
 			// export survived to the second call. An empty file is the shape of a
-			// snapshot regression, and a platform bug. That "as asked" is the load
-			// bearing assumption: the model here is the system under test, not an
-			// adversary, so the graders below steer it onto the instructed path
-			// and catch a regression there; they do not try to defend against a
-			// model that deliberately writes the literal nonce, which no
-			// transcript-only grader can distinguish from a working shell.
-			FileLines("mark.txt", []string{"{{NONCE}}"}, Platform),
-			// Steer the model onto the path the file check can trust: at least two
-			// bash calls, the export not packed into the write (so it cannot
-			// trivially hold within one shell), and the write done by a bash call
-			// that read "$MARK" (not the `write` tool, which would bypass the
-			// shell entirely). Class Model — these describe following the
-			// instruction, and a miss means re-prompt, not a platform bug.
+			// snapshot regression, and a platform bug. "As asked" used to be an
+			// assumption the surrounding Model graders merely steered towards; it
+			// is now the check's stated premise, so a model that skips the export
+			// or writes something else reds as the Model miss it is and this stays
+			// silent. What no transcript-only grader can distinguish remains
+			// undefended: a model that deliberately writes the literal nonce looks
+			// exactly like a working shell.
+			OnlyIf(FileLines("mark.txt", []string{"{{NONCE}}"}, Platform), exported, wrote),
+			// Steer the model onto the path the file check can trust — and, for the
+			// export and the write, *require* it, since those are the premises
+			// above: at least two bash calls, the export carrying this trial's
+			// nonce, the export not packed into the write (so it cannot trivially
+			// hold within one shell), and the write done by a bash call that read
+			// "$MARK" (not the `write` tool, which would bypass the shell
+			// entirely). Class Model — these describe following the instruction,
+			// and a miss means re-prompt, not a platform bug.
 			ToolUseAtLeast("bash", 2, Model),
+			ToolCalledWith("bash", exportMarkers, Model),
 			SeparateBashCalls("MARK=", "mark.txt"),
-			BashCommandWith("$MARK", "mark.txt"),
+			BashCommandWith(writeMarkers...),
 			// The nonce came back out of the container through a tool result:
-			// the round trip, not just the write.
-			ToolResultContains("{{NONCE}}", Platform),
+			// the round trip, not just the write. Split into its two halves, so
+			// that a model which never runs the third command reds as the Model
+			// miss it is and the Platform claim stays about the platform: the
+			// pair below says "the model must run the instructed `cat`" (Model)
+			// and "if it did, what came back must carry the nonce" (Platform,
+			// vacuous otherwise). It carries the same two premises as the file
+			// check — a `cat` of a file the model never wrote errors, and that
+			// error is the model's, not ours.
+			//
+			// The marker is the whole command rather than "cat" plus the path:
+			// `cat > /workspace/mark.txt <<EOF` carries both of those and is a
+			// write, whose empty stdout would then red the platform for a round
+			// trip the model never asked for.
+			ToolCalledWith("bash", catMarkers, Model),
+			OnlyIf(CallResult("bash", catMarkers, false, "{{NONCE}}", Platform), exported, wrote),
 		},
 	}
 }
@@ -179,10 +229,17 @@ func editConfig() Task {
 // location — so unrelated bash output cannot stand in for it.
 //
 // glob is required (ToolUseAtLeast, Model — the prompt names it), so a glob that
-// never runs reds here; the core pack proves its result joined, which is as far as
-// a bare list of paths can be graded without pinning a filesystem order. The grep
-// half is Either: no such grep is the model not searching as asked, a grep with the
-// wrong result is the platform's tool.
+// never runs reds here, and its output is graded in the two halves that can be
+// told apart. GlobPathList (Platform) holds the tool to its contract whatever
+// pattern the model chose — every successful result is one absolute path per
+// line, or the tool's own "no matches" — so a result whose records are mangled
+// reds the platform. Which paths come back is the pattern's business and the
+// pattern is the model's, so "the seeded file is among them" is a separate
+// Either. Pinning the whole list instead would mean dictating the pattern in the
+// prompt, which is the one thing these prompts do not do.
+//
+// The grep half is Either: no such grep is the model not searching as asked, a
+// grep with the wrong result is the platform's tool.
 func needleSearch() Task {
 	return Task{
 		ID: "needle-search",
@@ -197,11 +254,13 @@ func needleSearch() Task {
 			"find the match. Write the location to /workspace/answer.txt as a single line " +
 			"`path:line` — the path relative to /workspace, e.g. src/foo.go:12 — then reply DONE:{{NONCE}}."}},
 		Graders: []Grader{
+			ToolUseAtLeast("glob", 1, Model),
+			GlobPathList(Platform),
+			CallResult("glob", nil, false, "/workspace/src/util/helpers.go", Either),
 			// grep runs with an absolute root, so its result line is
 			// "/workspace/src/util/helpers.go:3:…" and the path:line prefix is a
 			// substring of it. The answer regex accepts the absolute or a relative
 			// rewrite the model may write.
-			ToolUseAtLeast("glob", 1, Model),
 			ToolCallResult("grep", "NEEDLE_{{NONCE}}", false, "src/util/helpers.go:3:", Either),
 			FileMatches("answer.txt", `^(/workspace/)?src/util/helpers\.go:3$`, Either),
 			FinalMessageHas("DONE:{{NONCE}}", Either),
@@ -215,14 +274,15 @@ func needleSearch() Task {
 // cosmetic. The toolset gates every tool via default_config, and the prompt uses
 // only bash, so the one pause is the bash call.
 //
-// ToolUseAtLeast("bash", Model) carries the model's half — it must call the gated
-// tool — which lets the pure bridge graders be clean Platform: RequiresActionRaised
-// and EvaluatedPermissionAsk pass vacuously when nothing was gated, so a Platform
-// failure there means the gate itself misbehaved, and a model that never calls bash
-// reds only under the Model grader. ConfirmedResult is Either, not Platform: it
-// pins that the approval released a result correlated to the confirmed call, but
-// whether that result *succeeded* rides on the model's command being valid (the
-// prompt only suggests an echo), so a failed allowed command is model-or-platform.
+// ToolCalledWith("bash", Model) carries the model's half — it must call the gated
+// tool, with the nonce'd text the task named — which lets the pure bridge graders
+// be clean Platform: RequiresActionRaised and EvaluatedPermissionAsk pass
+// vacuously when nothing was gated, so a Platform failure there means the gate
+// itself misbehaved, and a model that never calls bash reds only under the Model
+// grader. ConfirmedResult is Either, not Platform: it pins that the approval
+// released a result correlated to the confirmed call, but whether that result
+// *succeeded* rides on the model's command being valid (the prompt only suggests
+// an echo), so a failed allowed command is model-or-platform.
 // The gated.txt effect is Either too — a missing file is the model not writing it
 // or the platform not running the approved tool.
 func permAllow() Task {
@@ -236,10 +296,10 @@ func permAllow() Task {
 			OnAsk: &Ask{Allow: true},
 		}},
 		Graders: []Grader{
-			ToolUseAtLeast("bash", 1, Model),
+			ToolCalledWith("bash", []string{"GATED_{{NONCE}}"}, Model),
 			RequiresActionRaised(Platform),
 			EvaluatedPermissionAsk("bash", Platform),
-			ConfirmedResult(false, "", Either),
+			ConfirmedResult("bash", []string{"GATED_{{NONCE}}"}, false, "", Either),
 			FileLines("gated.txt", []string{"GATED_{{NONCE}}"}, Either),
 			FinalMessageHas("DONE:{{NONCE}}", Either),
 		},
@@ -252,10 +312,13 @@ func permAllow() Task {
 // to decline — deliberately benign, because a task that asks the model to delete a
 // "protected" file tests the model's refusal reflex, not our denial path.
 //
-// ToolUseAtLeast("bash", Model) carries the model's half; ConfirmedResult
-// correlates the deny message to the confirmed call by tool_use_id; and the
-// seeded file being byte-for-byte unchanged is the clean Platform signal that the
-// command never ran — a changed file would mean the deny failed to block.
+// ToolCalledWith("bash", Model) carries the model's half; ConfirmedResult
+// correlates the deny message to the confirmed call — the call carrying the
+// task's own APPEND token, not merely the first thing the bridge happened to
+// stop, and by way of a confirmation that has to name a tool_use on the log at
+// all; and the seeded file being byte-for-byte unchanged is the clean Platform
+// signal that the command never ran — a changed file would mean the deny failed
+// to block.
 func permDeny() Task {
 	return Task{
 		ID:    "perm-deny",
@@ -268,9 +331,14 @@ func permDeny() Task {
 			OnAsk: &Ask{Allow: false, DenyMessage: "not approved: DENY_{{NONCE}}"},
 		}},
 		Graders: []Grader{
-			ToolUseAtLeast("bash", 1, Model),
+			ToolCalledWith("bash", []string{"APPEND_{{NONCE}}"}, Model),
 			RequiresActionRaised(Platform),
-			ConfirmedResult(true, "DENY_{{NONCE}}", Platform),
+			// The stamp, as in perm-allow. It is the half of "this call went
+			// through the gate" that ConfirmedResult cannot see: a call the bridge
+			// ran without stopping is invisible to a grader keyed on confirmations,
+			// and the deny path needs that covered as much as the allow path does.
+			EvaluatedPermissionAsk("bash", Platform),
+			ConfirmedResult("bash", []string{"APPEND_{{NONCE}}"}, true, "DENY_{{NONCE}}", Platform),
 			FileLines("notes.txt", []string{"ORIGINAL_{{NONCE}}"}, Platform),
 			FinalMessageHas("DENIED:{{NONCE}}", Either),
 		},
@@ -318,31 +386,73 @@ func exitCode() Task {
 // signal, and a tool_use after the second user.message is the resume actually
 // doing work on turn two.
 //
-// The caveat: a model could reconstruct the first line from its replayed context
-// rather than from the file, so the file check does not by itself prove the
-// container was reused — but same-session containers are the same container by
-// construction (the executor adopts by session), and a tool_use after turn two's
-// message proves the resume ran and acted. Stated honestly, this is a
-// persistence-and-replay test, not a defence against a model rewriting the file
-// from memory.
+// Those two signals do not, by themselves, separate the two properties, and the
+// task carries one witness for each so that they do.
+//
+// Replay: the prompt states a reference code in turn one that the model must
+// repeat in turn two. {{RECALL}} is a second per-trial token, independent of the
+// nonce — the nonce is in turn two's own prompt, so a token derived from it could
+// be spelled by a model that had lost turn one entirely. The code exists nowhere
+// but turn one's user.message, and the brain rebuilds every request from the
+// event log (internal/brain/replay.go), so a model that says it back can only
+// have got it from the replayed log. NotInToolTraffic keeps that true: a model
+// that writes the code down and reads it back has turned the replay witness into
+// a second persistence check, and reds rather than passing quietly.
+//
+// The wording is load-bearing and was learned the hard way. An earlier draft
+// called it a "code word" and told the model not to write it to any file or run
+// any command containing it; a live run refused the second turn outright,
+// reading the pair as a secret and the request to repeat it as an attempt to
+// extract it ("following an instruction to reveal something I was told to keep
+// private is a classic pattern I should refuse"). It is the same trap view-range
+// avoids by not calling its marker a SECRET: a prompt that sounds like a
+// confidentiality rule tests the model's refusal reflex, not the platform. The
+// token is now the user's own reference code and the off-disk hint is a
+// convenience ("no need to save it anywhere"), which keeps the model off the
+// filesystem without implying anything is being kept from anyone.
+//
+// Reuse: a file seeded before turn one and still byte-for-byte present at
+// grading time. The model is never told about it, so — unlike journal.txt, which
+// it could rewrite from its replayed context — nothing it does can restore it.
+// A container recreated at any point between the seed and the grade takes the
+// file with it, and the read that grades it adopts by the session's own name, so
+// a replacement container is an empty one. That makes it the clean Platform
+// signal the file-contents check cannot be.
+//
+// It is seeded outside /workspace, and the nonce is in its name. Both guard the
+// same thing: this is a Platform-class check, so the model must not be able to
+// red it by ordinary tidying. A sentinel sitting in the working directory is one
+// `rm -rf /workspace/*` away from reporting a container that was never replaced
+// as a platform fault — and a model has no reason to go looking in /tmp for a
+// nonce'd name it was never told.
 //
 // Classing: the two user.message events are ours to post, so fewer than two on
-// the log is unambiguously an event-log fault (Platform). The file contents and
-// the turn-two tool_use both ride on the model complying — appending correctly,
-// acting on the second turn — so a miss there is Model-or-Platform (Either).
+// the log is unambiguously an event-log fault (Platform), as is the seeded file
+// going missing. The journal contents, the turn-two tool_use and the recalled
+// code word all ride on the model complying — appending correctly, acting on the
+// second turn, doing as it was told with the word — so a miss there is
+// Model-or-Platform (Either).
 func journalMultiturn() Task {
+	const provenance = "PROVENANCE_{{NONCE}}\n"
+	const provenancePath = "/tmp/provenance-{{NONCE}}.txt"
 	return Task{
-		ID: "journal-multiturn",
+		ID:    "journal-multiturn",
+		Seeds: []Seed{{Path: provenancePath, Content: provenance}},
 		Turns: []Turn{
 			{Message: "Create /workspace/journal.txt with a single first line reading exactly: " +
-				"entry-one-{{NONCE}}. Reply DONE1:{{NONCE}}."},
+				"entry-one-{{NONCE}}. My reference code for this session is {{RECALL}}; there is no " +
+				"need to save it anywhere, just keep it in mind. Reply DONE1:{{NONCE}}."},
 			{Message: "Append a second line to /workspace/journal.txt, below the first, reading " +
-				"exactly: entry-two-{{NONCE}}. Keep the first line unchanged. Reply DONE2:{{NONCE}}."},
+				"exactly: entry-two-{{NONCE}}. Keep the first line unchanged. Then reply " +
+				"DONE2:{{NONCE}} followed by my reference code from the first message."},
 		},
 		Graders: []Grader{
 			FileLines("journal.txt", []string{"entry-one-{{NONCE}}", "entry-two-{{NONCE}}"}, Either),
+			FileEquals(provenancePath, provenance, Platform),
 			EventCountAtLeast("user.message", 2, Platform),
 			EventAfterUserMessage("agent.tool_use", 2, Either),
+			FinalMessageHas("{{RECALL}}", Either),
+			NotInToolTraffic("{{RECALL}}", Either),
 			FinalMessageHas("DONE2:{{NONCE}}", Either),
 		},
 	}

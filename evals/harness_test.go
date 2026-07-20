@@ -59,7 +59,8 @@ type Seed struct {
 	Content string
 }
 
-// Turn is one user message. {{NONCE}} is substituted into Message.
+// Turn is one user message. Both per-trial tokens ({{NONCE}} and {{RECALL}})
+// are substituted into Message; see fill.
 type Turn struct {
 	Message string
 	// OnAsk answers a confirmation pause. Nil means the turn expects none; a
@@ -80,8 +81,15 @@ type Ask struct {
 // the stream delivered them — so a grader asserts on the product's output and
 // not on the harness's interpretation of it.
 type Trial struct {
-	Task      Task
-	Nonce     string
+	Task  Task
+	Nonce string
+	// Recall is a second per-trial token, independent of Nonce. A task that
+	// needs a value the model can only have from its replayed context states it
+	// in one turn as {{RECALL}} and is asked for it in a later one; deriving it
+	// from the nonce would not do, because the nonce is in every turn's prompt
+	// and a model could spell the derivation without ever having seen the
+	// earlier message.
+	Recall    string
 	SessionID string
 	// Events is the whole transcript, read back through the list endpoint
 	// after the last turn.
@@ -109,9 +117,9 @@ type Trial struct {
 func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 	t.Helper()
 	nonce := newNonce(t)
-	tr := &Trial{Task: task, Nonce: nonce, stack: s}
+	tr := &Trial{Task: task, Nonce: nonce, Recall: newNonce(t), stack: s}
 
-	agentID := s.createAgent(t, agentBody(task, s.model, nonce))
+	agentID := s.createAgent(t, agentBody(task, s.model, tr))
 	envID := s.createEnvironment(t, "eval-"+task.ID)
 	tr.SessionID = s.createSession(t, agentID, envID)
 	rec.Session = tr.SessionID
@@ -136,8 +144,8 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 
 	start := time.Now()
 	for i, turn := range task.Turns {
-		s.sendEvents(t, tr.SessionID, userMessage(subst(turn.Message, nonce)))
-		idle := s.driveToIdle(t, stream, tr.SessionID, turn, nonce, i, len(task.Turns))
+		s.sendEvents(t, tr.SessionID, userMessage(tr.fill(turn.Message)))
+		idle := s.driveToIdle(t, stream, turn, tr, i, len(task.Turns))
 		tr.Idles = append(tr.Idles, idle)
 		// An unresolved pause (driveToIdle returning a requires_action idle) leaves
 		// the session wedged on a confirmation we won't give. Stop driving and let
@@ -170,7 +178,7 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 // would instead misread a platform gating regression as a forgotten test OnAsk,
 // or a re-pausing model as a platform abort, and skip P/M/E classing entirely.
 // Only a stream that never produces an idle (the turn-wide deadline) is fatal.
-func (s *stack) driveToIdle(t *testing.T, stream *sseStream, sessionID string, turn Turn, nonce string, turnIdx, turns int) map[string]any {
+func (s *stack) driveToIdle(t *testing.T, stream *sseStream, turn Turn, tr *Trial, turnIdx, turns int) map[string]any {
 	t.Helper()
 	// Every gated call answered so far this turn. The API re-idles after a
 	// partial confirmation with only the *remaining* ids, so a requires_action
@@ -187,7 +195,7 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, sessionID string, t
 	for {
 		idle, err := stream.awaitIdle(time.Until(deadline))
 		if err != nil {
-			t.Fatalf("turn %d of %d: %v (session %s)", turnIdx+1, turns, err, sessionID)
+			t.Fatalf("turn %d of %d: %v (session %s)", turnIdx+1, turns, err, tr.SessionID)
 		}
 		if stopReasonType(idle) != "requires_action" {
 			return idle
@@ -219,10 +227,10 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, sessionID string, t
 				continue
 			}
 			answered[eid] = true
-			confirmations = append(confirmations, toolConfirmation(eid, turn.OnAsk, nonce))
+			confirmations = append(confirmations, toolConfirmation(eid, turn.OnAsk, tr))
 		}
 		if len(confirmations) > 0 {
-			s.sendEvents(t, sessionID, confirmations...)
+			s.sendEvents(t, tr.SessionID, confirmations...)
 		}
 	}
 }
@@ -231,7 +239,7 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, sessionID string, t
 // MODEL_ID: the registry's single route sends MODEL_ID upstream whatever the
 // agent says, so any other string here would be a fiction the transcript then
 // records, naming a model the endpoint never saw.
-func agentBody(task Task, model, nonce string) map[string]any {
+func agentBody(task Task, model string, tr *Trial) map[string]any {
 	tools := task.Tools
 	if tools == nil {
 		// The bare agent toolset, whose default permission policy runs every
@@ -245,7 +253,7 @@ func agentBody(task Task, model, nonce string) map[string]any {
 		"tools": tools,
 	}
 	if task.System != "" {
-		body["system"] = subst(task.System, nonce)
+		body["system"] = tr.fill(task.System)
 	}
 	return body
 }
@@ -254,7 +262,7 @@ func agentBody(task Task, model, nonce string) map[string]any {
 // event id requires_action listed (the id the API's blocking-set query
 // recognizes), and a denial carries a message the platform echoes back as the
 // synthesized error result.
-func toolConfirmation(toolUseID string, ask *Ask, nonce string) map[string]any {
+func toolConfirmation(toolUseID string, ask *Ask, tr *Trial) map[string]any {
 	ev := map[string]any{"type": "user.tool_confirmation", "tool_use_id": toolUseID}
 	if ask.Allow {
 		ev["result"] = "allow"
@@ -263,7 +271,7 @@ func toolConfirmation(toolUseID string, ask *Ask, nonce string) map[string]any {
 	ev["result"] = "deny"
 	if ask.DenyMessage != "" {
 		// deny_message is rejected with an allow, so it is set only here.
-		ev["deny_message"] = subst(ask.DenyMessage, nonce)
+		ev["deny_message"] = tr.fill(ask.DenyMessage)
 	}
 	return ev
 }
@@ -309,11 +317,11 @@ func (tr *Trial) seed(t *testing.T, seeds []Seed) {
 		t.Fatalf("provision the sandbox to seed it: %v", err)
 	}
 	for _, sd := range seeds {
-		path := subst(sd.Path, tr.Nonce)
+		path := tr.fill(sd.Path)
 		if !strings.HasPrefix(path, "/") {
 			path = sandbox.DefaultWorkdir + "/" + path
 		}
-		if err := sb.WriteFile(ctx, path, []byte(subst(sd.Content, tr.Nonce))); err != nil {
+		if err := sb.WriteFile(ctx, path, []byte(tr.fill(sd.Content))); err != nil {
 			t.Fatalf("seed %s: %v", path, err)
 		}
 	}
@@ -353,14 +361,56 @@ func reap(sessionID string) {
 	_ = exec.Command("docker", "rm", "--force", "--volumes", containerName(sessionID)).Run()
 }
 
-// subst fills the per-trial nonce into a prompt or seed.
+// fill substitutes this trial's tokens into a prompt, a seed or an expectation.
+// It is the ONE substituter: every string a task author writes goes through it,
+// prompts and grader expectations alike, so a token can never be live on one
+// side of a check and literal on the other. (An earlier revision of this file
+// left the nonce on its own helper and taught only the graders that needed it
+// about {{RECALL}}; the live suite caught the result immediately — the model
+// said the code word back and the grader, still looking for the unsubstituted
+// placeholder, red anyway.)
 //
-// Every trial gets a fresh one, and it is what makes a final-message assertion
-// mean anything: a task whose expected answer is a constant could be passed by
-// a model that had seen the task before, by a cached response, or by a harness
-// bug that replayed an earlier session. A random token demanded by this trial's
-// prompt can only come from this trial's agent.
-func subst(s, nonce string) string { return strings.ReplaceAll(s, "{{NONCE}}", nonce) }
+// Every trial gets a fresh {{NONCE}}, and it is what makes a final-message
+// assertion mean anything: a task whose expected answer is a constant could be
+// passed by a model that had seen the task before, by a cached response, or by a
+// harness bug that replayed an earlier session. A random token demanded by this
+// trial's prompt can only come from this trial's agent. {{RECALL}} is the second
+// token, for the one task that needs a value the model can only have from its
+// replayed context (see journalMultiturn).
+//
+// An unset token leaves its placeholder standing rather than substituting the
+// empty string, and that is deliberate: every consumer of a filled string is a
+// substring check, and `strings.Contains(anything, "")` is true, so an empty
+// substitution would green an assertion against any text at all. The placeholder
+// left standing at least fails closed for a grader-only trial, where nothing put
+// the literal in front of the model.
+//
+// It is a backstop, not the guarantee: runTrial sets both tokens unconditionally
+// (a trial that reached a prompt has real ones), and if one ever did not, the
+// literal would go out in the prompt and could come back in the reply. The
+// guarantee is that the harness always fills both.
+func (tr *Trial) fill(s string) string {
+	out := s
+	if tr.Nonce != "" {
+		out = strings.ReplaceAll(out, "{{NONCE}}", tr.Nonce)
+	}
+	if tr.Recall != "" {
+		out = strings.ReplaceAll(out, "{{RECALL}}", tr.Recall)
+	}
+	return out
+}
+
+// fillAll fills every string in a marker list. Markers are task-authored text
+// like any prompt or expectation, so they go through the one substituter too —
+// a marker carrying a token that stayed literal would match nothing and silently
+// turn its grader vacuous, or, for a negative grader, always-pass.
+func (tr *Trial) fillAll(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = tr.fill(s)
+	}
+	return out
+}
 
 func newNonce(t *testing.T) string {
 	t.Helper()
