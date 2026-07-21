@@ -26,10 +26,18 @@ copy of an entry here.
   version GET, `/content` download, all under the environment key, whose dual-auth lane now
   serves the skill read+download routes (mutations and the collection list stay
   management-only). Extraction enforces the reference guards (escape refusal, 10k members,
-  1 GiB decompressed — `skills.Extract`, shared by both halves); per-skill failure is logged
-  and skipped, never fatal; a sentinel file records the resolved set so re-entrant
-  provisioning skips rewriting unchanged skills. The reference's published **500 skills per
-  session** cap now binds at agent create and session overrides. Observability:
+  1 GiB decompressed — `skills.Extract`, shared by both halves), and each archive is read from
+  storage under the same byte cap (`skills.ReadArchive`) so a corrupt or oversized object cannot
+  OOM either half; per-skill failure is logged and skipped, never fatal; a `.materialized`
+  sentinel records the resolved `{skill_id: version}` set so re-entrant provisioning skips
+  rewriting unchanged skills. Because the sandbox workdir is agent-writable the skip is sound
+  against a rewritten marker: the marker stores no directory, and the presence probe follows a
+  directory recomputed from trusted metadata plus an exact bijection against the resolved set, so
+  a forged marker can neither redirect the probe nor mask a missing skill. The reference's
+  published **500 skills per session** cap now binds at agent create and session overrides.
+  A skill's `latest_version` advances only to a numerically newer version on create (versions are
+  minted before the parent row is locked, so out-of-order concurrent creates must not roll it
+  back) and recomputes to the numerically greatest survivor on version delete. Observability:
   `skills_materialize` child span, `skills.materialized` counter{outcome} and
   `skills.materialize.duration` histogram under each half's own meter scope, a log line per
   skipped skill.

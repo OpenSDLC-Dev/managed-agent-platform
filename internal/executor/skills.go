@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"path"
 	"regexp"
@@ -59,22 +58,32 @@ func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, si
 	defer func() { recordSkillsMaterializeDuration(ctx, time.Since(start)) }()
 
 	// Resolve every reference first: the sentinel records a resolved set, so
-	// the skip decision needs the whole picture before any write.
-	order := make([]string, 0, len(refs))
-	resolved := map[string]string{}
+	// the skip decision needs the whole picture before any write. Each entry's
+	// target directory is derived from the version row's TRUSTED name here, so
+	// the skip probe can never be redirected by an agent-rewritten marker.
+	resolved := make([]skills.Resolved, 0, len(refs))
+	seen := map[string]bool{}
 	misses := 0
 	for _, ref := range refs {
-		if _, dup := resolved[ref.SkillID]; dup {
+		if seen[ref.SkillID] {
 			continue
 		}
+		seen[ref.SkillID] = true
 		version, err := e.resolveSkillVersion(ctx, ref)
 		if err != nil {
 			e.skipSkill(ctx, sid, ref.SkillID, ref.Version, err)
 			misses++
 			continue
 		}
-		order = append(order, ref.SkillID)
-		resolved[ref.SkillID] = version
+		name, err := e.skillName(ctx, ref.SkillID, version)
+		if err != nil {
+			e.skipSkill(ctx, sid, ref.SkillID, version, err)
+			misses++
+			continue
+		}
+		resolved = append(resolved, skills.Resolved{
+			ID: ref.SkillID, Version: version, Dir: skills.TargetDir(name, ref.SkillID),
+		})
 	}
 	span.SetAttributes(attribute.Int("skills.referenced", len(refs)))
 
@@ -94,17 +103,15 @@ func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, si
 		}
 	}
 
-	var landed []skills.SentinelEntry
-	for _, id := range order {
-		version := resolved[id]
-		dir, err := e.materializeSkill(ctx, sb, workdir, id, version)
-		if err != nil {
-			e.skipSkill(ctx, sid, id, version, err)
+	var landed []skills.Resolved
+	for _, r := range resolved {
+		if err := e.materializeSkill(ctx, sb, workdir, r); err != nil {
+			e.skipSkill(ctx, sid, r.ID, r.Version, err)
 			continue
 		}
-		landed = append(landed, skills.SentinelEntry{ID: id, Version: version, Dir: dir})
+		landed = append(landed, r)
 		recordSkillMaterialized(ctx, skillOutcomeOK)
-		slog.InfoContext(ctx, "skill materialized", "session_id", sid, "skill_id", id, "version", version)
+		slog.InfoContext(ctx, "skill materialized", "session_id", sid, "skill_id", r.ID, "version", r.Version)
 	}
 	span.SetAttributes(attribute.Int("skills.materialized", len(landed)))
 	// The sentinel records only what landed: a partial pass re-runs next time.
@@ -147,10 +154,11 @@ func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (strin
 	return *latest, nil
 }
 
-// materializeSkill extracts one skill version's archive into the sandbox at
-// {workdir}/skills/{name}/, name chosen the reference way (the version's
-// name, skill id as fallback), and returns the directory it landed in.
-func (e *Executor) materializeSkill(ctx context.Context, sb sandbox.Sandbox, workdir, skillID, version string) (string, error) {
+// skillName reads a version row's materialization name from trusted storage.
+// It is also the existence check for an already-concrete (all-digits) version,
+// which resolveSkillVersion does not verify: a missing row is a dangling
+// reference, surfaced as errSkillNotFound and skipped.
+func (e *Executor) skillName(ctx context.Context, skillID, version string) (string, error) {
 	var name string
 	err := e.pool.QueryRow(ctx,
 		`SELECT name FROM skill_versions WHERE skill_id = $1 AND version = $2`,
@@ -161,28 +169,35 @@ func (e *Executor) materializeSkill(ctx context.Context, sb sandbox.Sandbox, wor
 	if err != nil {
 		return "", err
 	}
-	rc, _, err := e.blobs.Get(ctx, skills.BlobKey(skillID, version))
+	return name, nil
+}
+
+// materializeSkill extracts one already-resolved skill version's archive into
+// the sandbox at {workdir}/skills/{r.Dir}/. The archive is read under a byte
+// cap (skills.ReadArchive) so a corrupt or oversized stored object cannot OOM
+// the executor.
+func (e *Executor) materializeSkill(ctx context.Context, sb sandbox.Sandbox, workdir string, r skills.Resolved) error {
+	rc, size, err := e.blobs.Get(ctx, skills.BlobKey(r.ID, r.Version))
 	if errors.Is(err, blob.ErrNotFound) {
-		return "", fmt.Errorf("%w: archive missing from object storage", errSkillNotFound)
+		return fmt.Errorf("%w: archive missing from object storage", errSkillNotFound)
 	}
 	if err != nil {
-		return "", err
+		return err
 	}
-	data, err := io.ReadAll(rc)
+	data, err := skills.ReadArchive(rc, size)
 	rc.Close()
 	if err != nil {
-		return "", err
+		return err
 	}
 	files, err := skills.Extract(data)
 	if err != nil {
-		return "", err
+		return err
 	}
-	dir := skills.TargetDir(name, skillID)
-	root := path.Join(workdir, "skills", dir)
+	root := path.Join(workdir, "skills", r.Dir)
 	for _, f := range files {
 		if err := sb.WriteFile(ctx, path.Join(root, f.Path), f.Data); err != nil {
-			return "", err
+			return err
 		}
 	}
-	return dir, nil
+	return nil
 }

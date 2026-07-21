@@ -122,29 +122,42 @@ func TestTargetDir(t *testing.T) {
 }
 
 func TestSentinel(t *testing.T) {
-	a := Sentinel([]SentinelEntry{
+	a := Sentinel([]Resolved{
 		{ID: "pdf", Version: "20260101", Dir: "pdf"},
 		{ID: "skill_x", Version: "175917", Dir: "notes"},
 	})
-	b := Sentinel([]SentinelEntry{
+	b := Sentinel([]Resolved{
 		{ID: "skill_x", Version: "175917", Dir: "notes"},
 		{ID: "pdf", Version: "20260101", Dir: "pdf"},
 	})
 	if !bytes.Equal(a, b) {
 		t.Errorf("sentinel is not order-independent: %s vs %s", a, b)
 	}
-	c := Sentinel([]SentinelEntry{
+	c := Sentinel([]Resolved{
 		{ID: "pdf", Version: "20260102", Dir: "pdf"},
 		{ID: "skill_x", Version: "175917", Dir: "notes"},
 	})
 	if bytes.Equal(a, c) {
 		t.Error("sentinel ignores version changes")
 	}
-	if !bytes.Equal(Sentinel(nil), Sentinel([]SentinelEntry{})) {
+	// The directory is deliberately NOT part of the marker: two sets that
+	// differ only by landing directory encode identically, because the
+	// directory is recomputed from trusted metadata, never read back.
+	d := Sentinel([]Resolved{
+		{ID: "pdf", Version: "20260101", Dir: "elsewhere"},
+		{ID: "skill_x", Version: "175917", Dir: "notes"},
+	})
+	if !bytes.Equal(a, d) {
+		t.Error("sentinel bytes depend on the directory")
+	}
+	if bytes.Contains(a, []byte("directory")) || bytes.Contains(a, []byte("notes")) {
+		t.Errorf("marker records a directory: %s", a)
+	}
+	if !bytes.Equal(Sentinel(nil), Sentinel([]Resolved{})) {
 		t.Error("nil and empty sets differ")
 	}
 	entries, ok := ParseSentinel(a)
-	if !ok || len(entries) != 2 || entries[0].ID != "pdf" || entries[1].Dir != "notes" {
+	if !ok || len(entries) != 2 || entries[0].ID != "pdf" || entries[1].Version != "175917" {
 		t.Errorf("ParseSentinel = %v %v", entries, ok)
 	}
 	if _, ok := ParseSentinel([]byte("not json")); ok {
@@ -160,38 +173,110 @@ func TestSentinelMatches(t *testing.T) {
 		}
 		return nil, errors.New("no such file")
 	}
-	data := Sentinel([]SentinelEntry{{ID: "skill_x", Version: "100", Dir: "notes"}})
-	resolved := map[string]string{"skill_x": "100"}
+	data := Sentinel([]Resolved{{ID: "skill_x", Version: "100", Dir: "notes"}})
+	rs := []Resolved{{ID: "skill_x", Version: "100", Dir: "notes"}}
 
-	if !SentinelMatches(context.Background(), read, "/ws", data, resolved) {
+	if !SentinelMatches(context.Background(), read, "/ws", data, rs) {
 		t.Error("intact tree did not match")
 	}
 	// The workdir is agent-writable: a deleted skill tree must void the
 	// sentinel even though the marker bytes still match.
 	delete(files, "/ws/skills/notes/SKILL.md")
-	if SentinelMatches(context.Background(), read, "/ws", data, resolved) {
+	if SentinelMatches(context.Background(), read, "/ws", data, rs) {
 		t.Error("matched with the skill tree gone")
 	}
 	files["/ws/skills/notes/SKILL.md"] = "x"
 	if SentinelMatches(context.Background(), read, "/ws", data,
-		map[string]string{"skill_x": "200"}) {
+		[]Resolved{{ID: "skill_x", Version: "200", Dir: "notes"}}) {
 		t.Error("matched a version change")
 	}
 	if SentinelMatches(context.Background(), read, "/ws", data,
-		map[string]string{"skill_x": "100", "extra": "1"}) {
+		[]Resolved{{ID: "skill_x", Version: "100", Dir: "notes"}, {ID: "extra", Version: "1", Dir: "extra"}}) {
 		t.Error("matched with an extra resolved skill")
 	}
-	if SentinelMatches(context.Background(), read, "/ws", []byte("junk"), resolved) {
+	if SentinelMatches(context.Background(), read, "/ws", []byte("junk"), rs) {
 		t.Error("matched an unparsable sentinel")
 	}
-	// A pre-upgrade marker (no "directory" field) parses with an empty Dir,
-	// so its probe path collapses to a nonexistent {workdir}/skills/SKILL.md
-	// and re-materialization is forced — upgrade safety without a rejection.
-	oldFormat := []byte(`[{"skill_id":"skill_x","version":"100"}]`)
-	if entries, ok := ParseSentinel(oldFormat); !ok || len(entries) != 1 || entries[0].Dir != "" {
-		t.Errorf("pre-upgrade marker did not parse to an empty Dir: %v %v", entries, ok)
+
+	// The probe follows the TRUSTED directory in rs, not anything the marker
+	// carries: point rs at a directory with no SKILL.md and the skip is voided
+	// even though the marker's {id, version} still matches. This is the trust
+	// boundary — an agent that rewrote the marker cannot redirect the probe.
+	if SentinelMatches(context.Background(), read, "/ws", data,
+		[]Resolved{{ID: "skill_x", Version: "100", Dir: "decoy"}}) {
+		t.Error("matched against a directory with no SKILL.md")
 	}
-	if SentinelMatches(context.Background(), read, "/ws", oldFormat, resolved) {
-		t.Error("matched a pre-upgrade directory-less marker")
+	files["/ws/skills/decoy/SKILL.md"] = "x"
+	if !SentinelMatches(context.Background(), read, "/ws", data,
+		[]Resolved{{ID: "skill_x", Version: "100", Dir: "decoy"}}) {
+		t.Error("probe did not follow the trusted directory")
+	}
+
+	// Bijection: a forged marker cannot mask a missing skill. A duplicated id,
+	// a zero-value entry, or an unknown id — each keeps len equal to rs but
+	// breaks the exact one-to-one mapping, so the skip is voided.
+	two := []Resolved{
+		{ID: "skill_x", Version: "100", Dir: "notes"},
+		{ID: "skill_y", Version: "100", Dir: "notes"},
+	}
+	dupMarker := []byte(`[{"skill_id":"skill_x","version":"100"},{"skill_id":"skill_x","version":"100"}]`)
+	if SentinelMatches(context.Background(), read, "/ws", dupMarker, two) {
+		t.Error("matched a marker with a duplicated id against two distinct skills")
+	}
+	unknownMarker := []byte(`[{"skill_id":"skill_z","version":"100"}]`)
+	if SentinelMatches(context.Background(), read, "/ws", unknownMarker, rs) {
+		t.Error("matched a marker naming an unresolved skill")
+	}
+	emptyMarker := []byte(`[{}]`)
+	if SentinelMatches(context.Background(), read, "/ws", emptyMarker, rs) {
+		t.Error("matched a zero-value marker entry")
+	}
+	// A caller that passes a non-deduplicated set gets a safe (no-skip) answer.
+	if SentinelMatches(context.Background(), read, "/ws", dupMarker,
+		[]Resolved{{ID: "skill_x", Version: "100", Dir: "notes"}, {ID: "skill_x", Version: "100", Dir: "notes"}}) {
+		t.Error("matched against a duplicated resolved set")
+	}
+
+	// An older marker that still carries a "directory" field parses cleanly —
+	// the field is ignored — and matches, because the probe uses the trusted
+	// directory regardless. Upgrade is seamless and still sound.
+	legacy := []byte(`[{"skill_id":"skill_x","version":"100","directory":"notes"}]`)
+	if !SentinelMatches(context.Background(), read, "/ws", legacy, rs) {
+		t.Error("a legacy directory-bearing marker did not match")
+	}
+}
+
+func TestReadArchive(t *testing.T) {
+	body := []byte("PK\x03\x04 pretend archive bytes")
+
+	// A correct size hint reads the whole stream.
+	got, err := ReadArchive(bytes.NewReader(body), int64(len(body)))
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("ReadArchive(correct hint) = %q, %v", got, err)
+	}
+	// An unknown (0) hint still reads everything.
+	got, err = ReadArchive(bytes.NewReader(body), 0)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("ReadArchive(no hint) = %q, %v", got, err)
+	}
+	// A lying oversized hint does not change the bytes returned.
+	got, err = ReadArchive(bytes.NewReader(body), 1<<40)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("ReadArchive(lying hint) = %q, %v", got, err)
+	}
+
+	// The cap is enforced on bytes actually read, tested through the limited
+	// core with a small ceiling so the test need not build a gigabyte.
+	small := []byte(strings.Repeat("a", 100))
+	if _, err := readArchiveLimited(bytes.NewReader(small), 0, 50); err == nil {
+		t.Error("byte cap not enforced")
+	}
+	// A lying small hint cannot smuggle content past the cap — the cap wins.
+	if _, err := readArchiveLimited(bytes.NewReader(small), 10, 50); err == nil {
+		t.Error("byte cap bypassed via a low hint")
+	}
+	// Exactly at the cap is allowed.
+	if out, err := readArchiveLimited(bytes.NewReader(small), 0, 100); err != nil || len(out) != 100 {
+		t.Errorf("readArchiveLimited(at cap) = %d bytes, %v", len(out), err)
 	}
 }

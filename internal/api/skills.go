@@ -416,8 +416,17 @@ func (s *server) insertSkillVersion(ctx context.Context, id, vid, version string
 		vid, id, version, bundle.Name, bundle.Description, bundle.Directory).Scan(&createdAt); err != nil {
 		return time.Time{}, err
 	}
+	// latest_version advances only to a numerically newer version (length-then-
+	// lexical, matching the importer and the worker's numericGreater). The
+	// version is minted before the FOR UPDATE lock above, so two concurrent
+	// creates can serialize in the opposite order to their mint times; an
+	// unconditional assignment would let the loser's older version clobber the
+	// winner's newer latest_version.
 	if _, err := tx.Exec(ctx,
-		`UPDATE skills SET latest_version = $2, updated_at = now() WHERE id = $1`,
+		`UPDATE skills SET latest_version = $2, updated_at = now()
+		 WHERE id = $1 AND (latest_version IS NULL
+		   OR length($2::text) > length(latest_version)
+		   OR (length($2::text) = length(latest_version) AND $2 > latest_version))`,
 		id, version); err != nil {
 		return time.Time{}, err
 	}
@@ -576,10 +585,14 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 	if tag.RowsAffected() == 0 {
 		return nil, errNotFound("skill %s version %s not found", id, version)
 	}
+	// The new latest_version is the numerically greatest remaining version
+	// (length-then-lexical, the rule used everywhere else), not merely the
+	// most-recently-created — the two can diverge for imported or backfilled
+	// versions. NULL when none remain.
 	if _, err := tx.Exec(ctx,
 		`UPDATE skills SET latest_version = (
 		    SELECT version FROM skill_versions WHERE skill_id = $1
-		    ORDER BY created_at DESC, id DESC LIMIT 1
+		    ORDER BY length(version) DESC, version DESC LIMIT 1
 		 ), updated_at = now() WHERE id = $1`, id); err != nil {
 		return nil, err
 	}

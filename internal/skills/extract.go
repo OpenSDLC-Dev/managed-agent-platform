@@ -25,6 +25,39 @@ const ExtractMaxBytes = 1 << 30
 // set so re-entrant sandbox provisioning skips rewriting unchanged skills.
 const SentinelName = ".materialized"
 
+// MaxArchiveBytes caps how many bytes a materializer reads from an object-store
+// stream before handing the archive to Extract. It matches the decompressed
+// cap: a canonical zip never exceeds its own decompressed size, so a stored
+// object larger than this is malformed or hostile and Extract would reject it
+// anyway. Bounding the read keeps a corrupt or oversized object from OOMing the
+// executor/worker via an unbounded io.ReadAll.
+const MaxArchiveBytes = ExtractMaxBytes
+
+// ReadArchive reads a skill archive from an object-store stream, refusing more
+// than MaxArchiveBytes so a hostile or corrupt object cannot exhaust memory.
+// sizeHint is the store's reported length (Content-Length / object size, 0 or
+// negative when unknown): it only sizes the initial buffer, never relaxes the
+// cap. The cap is enforced on bytes actually read, so a lying hint cannot beat
+// it.
+func ReadArchive(r io.Reader, sizeHint int64) ([]byte, error) {
+	return readArchiveLimited(r, sizeHint, MaxArchiveBytes)
+}
+
+func readArchiveLimited(r io.Reader, sizeHint, maxBytes int64) ([]byte, error) {
+	buf := bytes.NewBuffer(nil)
+	if sizeHint > 0 && sizeHint <= maxBytes {
+		buf.Grow(int(sizeHint))
+	}
+	n, err := buf.ReadFrom(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read skill archive: %v", err)
+	}
+	if n > maxBytes {
+		return nil, fmt.Errorf("skill archive exceeds %d bytes", maxBytes)
+	}
+	return buf.Bytes(), nil
+}
+
 // BlobKey is the object-store key for a skill version's archive — the one
 // layout the API's upload/download, the importer, and the executor's
 // materialization all share.
@@ -139,61 +172,85 @@ func TargetDir(name, skillID string) string {
 	return name
 }
 
-// SentinelEntry is one materialized skill as the marker file records it: the
-// resolved reference plus the directory it landed in, so a later skip
-// decision can re-probe the tree without resolving names again.
-type SentinelEntry struct {
+// Resolved is a skill the caller intends to materialize: its id, the concrete
+// version resolved at use time, and the directory it lands in. Dir is
+// TargetDir of the version's name derived from TRUSTED metadata (the DB row
+// or the version object), never from the marker — so the skip's presence
+// probe cannot be redirected by an agent that rewrites the marker.
+type Resolved struct {
+	ID      string
+	Version string
+	Dir     string
+}
+
+// markerEntry is one skill as the marker file records it: {skill_id, version}
+// only. The directory is deliberately NOT recorded — it is recomputed from
+// trusted metadata on the next pass, so a marker an agent tool rewrote cannot
+// point the presence probe at a decoy directory.
+type markerEntry struct {
 	ID      string `json:"skill_id"`
 	Version string `json:"version"`
-	Dir     string `json:"directory"`
 }
 
 // Sentinel canonically encodes the materialized set for the marker file:
-// sorted JSON, so equal sets always produce equal bytes regardless of order.
-func Sentinel(entries []SentinelEntry) []byte {
-	sorted := make([]SentinelEntry, len(entries))
-	copy(sorted, entries)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
-	b, _ := json.Marshal(sorted)
+// sorted {skill_id, version} JSON, so equal sets always produce equal bytes.
+func Sentinel(rs []Resolved) []byte {
+	entries := make([]markerEntry, len(rs))
+	for i, r := range rs {
+		entries[i] = markerEntry{ID: r.ID, Version: r.Version}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
+	b, _ := json.Marshal(entries)
 	return b
 }
 
 // ParseSentinel decodes a marker file; ok is false only for bytes that are
-// not a JSON array of entries, which a caller treats as "materialize". A
-// pre-upgrade marker (entries without a "directory" field) parses cleanly
-// with ok=true and an empty Dir — upgrade safety comes not from rejecting it
-// here but from SentinelMatches' presence probe, whose path collapses to a
-// nonexistent {workdir}/skills/SKILL.md for an empty Dir and so forces
-// re-materialization. Do not special-case an empty Dir on the strength of
-// this ok value.
-func ParseSentinel(data []byte) ([]SentinelEntry, bool) {
-	var entries []SentinelEntry
+// not a JSON array of {skill_id, version} entries (an unreadable or older
+// marker), which a caller treats as "materialize".
+func ParseSentinel(data []byte) ([]markerEntry, bool) {
+	var entries []markerEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil, false
 	}
 	return entries, true
 }
 
-// SentinelMatches reports whether a stored marker proves the resolved
-// {skill_id: version} set is already fully materialized. The sandbox workdir
-// is agent-writable, so the marker bytes alone cannot be trusted — a tool
-// call may have deleted a skill tree while leaving the marker intact — and
-// every recorded directory must still carry its SKILL.md (canonical archives
-// always place one at the root). In-place content edits are deliberately not
-// re-checked: presence is the tractable probe, and the residual is recorded
-// in docs/DIVERGENCES.md. read is the sandbox's ReadFile, passed as a
-// function so this package needs no sandbox dependency.
+// SentinelMatches reports whether the marker proves the resolved set rs is
+// already fully materialized. It is sound against an agent-writable marker:
+//   - the probe directory is rs[i].Dir (trusted metadata), never the marker;
+//   - the marker's {id, version} set must be an EXACT bijection with rs (same
+//     length, each rs id present exactly once with its version), so a forged,
+//     duplicated, or zero-value entry cannot mask a missing skill;
+//   - every resolved directory must still hold its SKILL.md (canonical
+//     archives place one at the root).
+//
+// An in-place content edit of a materialized file is deliberately not detected
+// — presence is the tractable proxy, the residual is recorded in
+// docs/DIVERGENCES.md. read is the sandbox's ReadFile, passed as a function so
+// this package needs no sandbox dependency. rs must be deduplicated by id.
 func SentinelMatches(ctx context.Context, read func(context.Context, string) ([]byte, error),
-	workdir string, data []byte, resolved map[string]string) bool {
+	workdir string, data []byte, rs []Resolved) bool {
 	entries, ok := ParseSentinel(data)
-	if !ok || len(entries) != len(resolved) {
+	if !ok || len(entries) != len(rs) {
 		return false
 	}
+	want := make(map[string]string, len(rs))
+	for _, r := range rs {
+		if _, dup := want[r.ID]; dup {
+			return false // a deduped set is the caller's contract; be safe
+		}
+		want[r.ID] = r.Version
+	}
+	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		if resolved[e.ID] != e.Version {
+		v, known := want[e.ID]
+		if !known || seen[e.ID] || v != e.Version {
 			return false
 		}
-		if _, err := read(ctx, path.Join(workdir, "skills", e.Dir, skillMDName)); err != nil {
+		seen[e.ID] = true
+	}
+	for _, r := range rs {
+		if _, err := read(ctx, path.Join(workdir, "skills", r.Dir, skillMDName)); err != nil {
 			return false
 		}
 	}

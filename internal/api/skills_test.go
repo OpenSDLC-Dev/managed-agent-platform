@@ -524,6 +524,81 @@ func TestSkillVersionDeleteRecomputesLatest(t *testing.T) {
 	}
 }
 
+// TestSkillVersionCreateDoesNotRollBackLatest pins the create path's guard:
+// versions are minted before the parent row is locked, so two concurrent
+// creates can commit in the opposite order to their mint times. latest_version
+// must only ever advance to a numerically newer version — a late-committing
+// older create must not clobber a newer one. Simulated by planting a newer
+// latest_version, then creating a version whose fresh (older) mint is
+// numerically smaller.
+func TestSkillVersionCreateDoesNotRollBackLatest(t *testing.T) {
+	s := newTestServer(t)
+	created := s.createSkill(t)
+	id, _ := created["id"].(string)
+
+	// A concurrent create already advanced latest_version to a same-length but
+	// numerically greater value than any epoch-micros mint (16 nines > 17xx…).
+	const newer = "9999999999999999"
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE skills SET latest_version = $2 WHERE id = $1`, id, newer); err != nil {
+		t.Fatalf("plant newer latest_version: %v", err)
+	}
+
+	ct, form := skillForm(t, nil, []upFile{{name: "financial-skill/SKILL.md", content: testSkillMD}})
+	status, obj := s.doForm("POST", "/v1/skills/"+id+"/versions", ct, form)
+	if status != http.StatusOK {
+		t.Fatalf("create version: %d %v", status, obj)
+	}
+	if v, _ := obj["version"].(string); v >= newer {
+		t.Fatalf("minted version %q is not older than the planted %q; test assumption broken", v, newer)
+	}
+	// The older mint landed as a row but did not roll latest_version back.
+	status, skill := s.do("GET", "/v1/skills/"+id, nil)
+	if status != http.StatusOK || skill["latest_version"] != newer {
+		t.Errorf("after creating an older version, latest_version = %v, want unchanged %q",
+			skill["latest_version"], newer)
+	}
+}
+
+// TestSkillVersionDeleteLatestIsNumericMax pins the delete recompute: the new
+// latest_version is the numerically greatest surviving version (length-then-
+// lexical), not merely the most-recently-created row — the two diverge for
+// imported or backfilled versions. Two extra versions are planted directly so
+// created_at order is the opposite of numeric order, then the API-created
+// version is deleted to trigger the recompute over the survivors.
+func TestSkillVersionDeleteLatestIsNumericMax(t *testing.T) {
+	s := newTestServer(t)
+	ctx := t.Context()
+	created := s.createSkill(t)
+	id, _ := created["id"].(string)
+	v1, _ := created["latest_version"].(string) // 16-digit epoch, created now
+
+	seed := func(vid, version, ago string) {
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO skill_versions (id, skill_id, version, name, description, directory, created_at)
+			 VALUES ($1, $2, $3, 'M2', '', 'M2', now() - $4::interval)`,
+			vid, id, version, ago); err != nil {
+			t.Fatalf("seed version %s: %v", version, err)
+		}
+	}
+	// The numerically largest (20 digits) is the EARLIEST created; the most
+	// recently created survivor (16 digits) is numerically smaller.
+	seed("skillver_m2big", "99999999999999999999", "2 hours")
+	seed("skillver_m2recent", "1700000000000000", "1 minute")
+
+	status, del := s.do("DELETE", "/v1/skills/"+id+"/versions/"+v1, nil)
+	if status != http.StatusOK || del["type"] != "skill_version_deleted" {
+		t.Fatalf("delete version: %d %v", status, del)
+	}
+	// created_at DESC would pick "1700000000000000"; numeric order must pick the
+	// 20-digit value.
+	status, skill := s.do("GET", "/v1/skills/"+id, nil)
+	if status != http.StatusOK || skill["latest_version"] != "99999999999999999999" {
+		t.Errorf("after delete, latest_version = %v, want numeric max %q",
+			skill["latest_version"], "99999999999999999999")
+	}
+}
+
 func TestSkillDeleteRequiresVersionsGone(t *testing.T) {
 	s := newTestServer(t)
 	created := s.createSkill(t)
