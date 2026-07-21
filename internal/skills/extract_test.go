@@ -184,4 +184,14 @@ func TestSentinelMatches(t *testing.T) {
 	if SentinelMatches(context.Background(), read, "/ws", []byte("junk"), resolved) {
 		t.Error("matched an unparsable sentinel")
 	}
+	// A pre-upgrade marker (no "directory" field) parses with an empty Dir,
+	// so its probe path collapses to a nonexistent {workdir}/skills/SKILL.md
+	// and re-materialization is forced — upgrade safety without a rejection.
+	oldFormat := []byte(`[{"skill_id":"skill_x","version":"100"}]`)
+	if entries, ok := ParseSentinel(oldFormat); !ok || len(entries) != 1 || entries[0].Dir != "" {
+		t.Errorf("pre-upgrade marker did not parse to an empty Dir: %v %v", entries, ok)
+	}
+	if SentinelMatches(context.Background(), read, "/ws", oldFormat, resolved) {
+		t.Error("matched a pre-upgrade directory-less marker")
+	}
 }

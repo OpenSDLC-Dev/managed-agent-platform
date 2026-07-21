@@ -158,8 +158,14 @@ func Sentinel(entries []SentinelEntry) []byte {
 	return b
 }
 
-// ParseSentinel decodes a marker file; ok is false for anything unreadable
-// (including a pre-upgrade format), which a caller treats as "materialize".
+// ParseSentinel decodes a marker file; ok is false only for bytes that are
+// not a JSON array of entries, which a caller treats as "materialize". A
+// pre-upgrade marker (entries without a "directory" field) parses cleanly
+// with ok=true and an empty Dir — upgrade safety comes not from rejecting it
+// here but from SentinelMatches' presence probe, whose path collapses to a
+// nonexistent {workdir}/skills/SKILL.md for an empty Dir and so forces
+// re-materialization. Do not special-case an empty Dir on the strength of
+// this ok value.
 func ParseSentinel(data []byte) ([]SentinelEntry, bool) {
 	var entries []SentinelEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
