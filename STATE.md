@@ -18,8 +18,11 @@ execution, per [docs/plan/06_skills.md](./docs/plan/06_skills.md) (in-progress s
       forms), nine endpoints, per-resource list limits, upload/download logs+metrics; CI compose
       round-trip (E2E-1); real `ant beta:skills` acceptance passed (docs/HISTORY.md, 2026-07-21).
       PR [#146](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/146).
-- [ ] Slice 3 — anthropic prebuilt import: run-once importer, date versions, self-authored CI
-      fixtures (license red lines per plan).
+- [x] Slice 3 — anthropic prebuilt import: `controlplane -import-anthropic-skills`, date
+      versions from the checkout's commit date, idempotent, self-authored CI fixtures;
+      acceptance passed — real checkout imported, `ant beta:skills list --source anthropic`
+      shows the four document skills (docs/HISTORY.md, 2026-07-22). PR
+      [#147](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/147).
 - [ ] Slice 4 — runtime materialization: env-key lane for skills reads, executor post-Provision
       + worker twin, 500-cap validation; `ant beta:worker` transcript.
 - [ ] Slice 5 — brain Level-1 injection, evals E2E task, remaining DIVERGENCES entries, docs
