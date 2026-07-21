@@ -49,6 +49,7 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- include "map.commonEnv" . | nindent 12 }}
+            {{- include "map.blobEnv" . | nindent 12 }}
           {{- with .Values.executor.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

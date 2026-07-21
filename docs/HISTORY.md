@@ -33,6 +33,16 @@ recorded nowhere else.
 
 ---
 
+## Skills slice-4 acceptance — materialization on both halves, real model + real `ant beta:worker` (run 2026-07-22) — ✅ passed
+
+The skills plan's slice-4 acceptance, both deployment points.
+
+**Cloud half — full compose stack, real model.** `docker compose up` (controlplane + brain + executor + Postgres + MinIO; brain routed to a real Anthropic-protocol gateway). A fixture skill uploaded via the loose-files form; an agent with `tools:[agent_toolset_20260401]` + `skills:[{type:custom, skill_id}]`; a session posted `user.message` "Run exactly this bash command and show me its output: cat skills/alpha-notes/SKILL.md". The model emitted `agent.tool_use bash {"command":"cat skills/alpha-notes/SKILL.md"}`; the executor provisioned the Docker sandbox, logged `skill materialized session_id=… skill_id=… version=1784657206256533`, and the `agent.tool_result` carried the SKILL.md content **byte-exact**; the model's closing `agent.message` quoted it and the session went idle with a clean stop. Registry → resolution (`latest` → concrete) → blob fetch → sandbox write → bash read, one unbroken chain.
+
+**BYOC half (E2E-3) — the real `ant beta:worker`, whose SDK internals run SetupSkills.** Against a locally-run controlplane (disposable Postgres + MinIO): a `self_hosted` environment with a minted key, the same fixture skill, an agent referencing it at `latest`, and a session suspended on `bash cat skills/alpha-notes/SKILL.md`. The unmodified `ant beta:worker poll --base-url … --environment-key …` claimed the item and its log shows the reference worker's own materialization against this platform: `downloaded skill … skill_id=skill_jzp3zwh12qjx7rankcz9jgyj version=1784656902111009 dest=…/skills/alpha-notes` — the SDK resolved the `latest` alias by listing versions, fetched the version object, downloaded `/content`, and extracted onto its workdir, all through the new environment-key dual-auth lane; then `executing tool … tool=bash` and a posted `user.tool_result` (`is_error:false`) carrying the exact SKILL.md text. A second suspended command (`cat skills/alpha-notes/reference.md`) round-tripped the same way. No CLI or SDK accommodation anywhere.
+
+---
+
 ## Skills slice-3 acceptance — real anthropics/skills checkout imported, listed by `ant` (run 2026-07-22) — ✅ passed
 
 The skills plan's slice-3 acceptance: the run-once operator import against a **real, fresh clone of github.com/anthropics/skills** (cloned to a scratch directory — never into this repo, per the license red lines).

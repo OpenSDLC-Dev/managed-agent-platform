@@ -107,6 +107,19 @@ services:
       DOCKER_HOST: unix:///var/run/docker.sock
       # Base image for the per-session sandbox containers the executor launches.
       EXECUTOR_IMAGE: ${EXECUTOR_IMAGE:-debian:stable-slim}
+      # Skill archives come from the same bundled MinIO the controlplane
+      # writes; unset BLOB_ENDPOINT and the executor skips materialization.
+      BLOB_ENDPOINT: minio:9000
+      BLOB_ACCESS_KEY: ${MINIO_ROOT_USER:-map}
+      BLOB_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-map-blob-dev}
+      BLOB_BUCKET: map-blob
+      BLOB_TLS: "false"
+    # An explicit depends_on replaces the anchor's, so postgres is restated.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
       # The docker sandbox backend drives the host daemon to run sibling sandbox
       # containers. Local-dev convenience; the production path uses the k8s backend.

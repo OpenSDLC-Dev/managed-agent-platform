@@ -41,7 +41,6 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
@@ -111,7 +110,7 @@ func run(ctx context.Context) error {
 
 	// Object storage for skill archives is optional: without it the platform
 	// runs and the storage-backed skill routes report the absence.
-	blobs, err := openBlobStore(ctx)
+	blobs, err := s3.FromEnv(ctx)
 	if err != nil {
 		return err
 	}
@@ -142,32 +141,10 @@ func run(ctx context.Context) error {
 	return srv.Shutdown(shutdownCtx)
 }
 
-// openBlobStore builds the metrics-wrapped S3 store from BLOB_* env, or
-// (nil, nil) when BLOB_ENDPOINT is unset.
-func openBlobStore(ctx context.Context) (blob.Store, error) {
-	endpoint := os.Getenv("BLOB_ENDPOINT")
-	if endpoint == "" {
-		return nil, nil
-	}
-	s3store, err := s3.New(ctx, s3.Config{
-		Endpoint:  endpoint,
-		AccessKey: os.Getenv("BLOB_ACCESS_KEY"),
-		SecretKey: os.Getenv("BLOB_SECRET_KEY"),
-		Bucket:    os.Getenv("BLOB_BUCKET"),
-		Region:    os.Getenv("BLOB_REGION"),
-		TLS:       os.Getenv("BLOB_TLS") == "true",
-	})
-	if err != nil {
-		return nil, err
-	}
-	slog.Info("object storage configured", "endpoint", endpoint, "bucket", os.Getenv("BLOB_BUCKET"))
-	return blob.WithMetrics(s3store), nil
-}
-
 // runImport is the run-once operator import: validate + land the named skill
 // directories from the checkout, report the summary, exit.
 func runImport(ctx context.Context, dsn string) error {
-	blobs, err := openBlobStore(ctx)
+	blobs, err := s3.FromEnv(ctx)
 	if err != nil {
 		return err
 	}

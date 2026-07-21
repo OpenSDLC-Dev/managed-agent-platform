@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/executor"
@@ -65,7 +66,10 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 	// NewHandler builds its own event log, broker and queue over the pool, so
 	// the harness cannot accidentally hand it a different one than the loops
 	// use. No object store: the eval stack exercises no skills yet.
-	srv := httptest.NewServer(api.NewHandler(pool, nil))
+	// One in-memory blob store shared by the API (skill uploads) and the
+	// executor (materialization), so eval tasks can exercise skills end to end.
+	blobs := blobtest.Mem()
+	srv := httptest.NewServer(api.NewHandler(pool, blobs))
 	t.Cleanup(srv.Close)
 
 	// One default route. Config.Model is the id the *endpoint* receives, so it
@@ -113,7 +117,7 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 		}).Run(loopCtx)
 	})
 	execDone := runLoop(func() error {
-		return executor.New(pool, events.NewLog(pool), queue.New(pool), sbx, executor.Config{
+		return executor.New(pool, events.NewLog(pool), queue.New(pool), sbx, blobs, executor.Config{
 			Image: evalImage,
 			// Workdir left empty, which resolves to sandbox.DefaultWorkdir on
 			// both this executor and the file tools it runs, so a relative path

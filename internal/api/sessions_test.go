@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -147,6 +148,17 @@ func TestSessionCreatePinsAgentVersionAndSupportsOverrides(t *testing.T) {
 	if base["system"] != "v2 system" {
 		t.Errorf("base agent mutated by overrides: %v", base["system"])
 	}
+
+	// A skills override is capped at 500 like the agent's own list.
+	many := make([]any, 501)
+	for i := range many {
+		many[i] = map[string]any{"type": "custom", "skill_id": fmt.Sprintf("skill_%022d", i)}
+	}
+	status, obj := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent":          map[string]any{"type": "agent_with_overrides", "id": agentID, "skills": many},
+		"environment_id": envID,
+	})
+	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
 
 	// system:null explicitly clears the system prompt (SDK-documented).
 	cleared := createSession(t, s, map[string]any{

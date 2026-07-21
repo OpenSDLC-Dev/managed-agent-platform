@@ -88,6 +88,18 @@ func TestImportAnthropicSkills(t *testing.T) {
 	if status != http.StatusOK || len(listData(t, versions)) != 2 {
 		t.Errorf("versions after both imports: %v", versions)
 	}
+
+	// Backfilling an older date lands the version but never regresses
+	// latest_version — "latest" stays the numerically newest, the same rule
+	// the reference worker applies client-side over the versions list.
+	sum, err = api.ImportAnthropicSkills(ctx, s.pool, s.blobs, importDirs("alpha-notes"), "20251231")
+	if err != nil || len(sum.Imported) != 1 {
+		t.Fatalf("older backfill: %v %+v", err, sum)
+	}
+	status, skill = s.do("GET", "/v1/skills/alpha-notes", nil)
+	if status != http.StatusOK || skill["latest_version"] != "20260102" {
+		t.Errorf("older backfill regressed latest_version: %v", skill)
+	}
 }
 
 func TestImportAnthropicSkillsFailures(t *testing.T) {

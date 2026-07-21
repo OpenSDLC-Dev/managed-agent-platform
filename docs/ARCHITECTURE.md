@@ -79,9 +79,10 @@ platform's own executor, just deployed elsewhere.
    off the Postgres queue (`FOR UPDATE SKIP LOCKED`, lease + reclaim); for a
    `self_hosted` environment a BYOC worker claims the same kind of item over the wire
    work API (`poll`/`ack`/`heartbeat`/`stop`, lease expiry, dead-worker reclaim) — the
-   same pull semantics at two deployment points. Either runs the tool in the session's
-   sandbox and posts the result event (`agent.tool_result` platform-managed,
-   `user.tool_result` self-hosted).
+   same pull semantics at two deployment points. Either materializes the agent's
+   skills into the freshly provisioned sandbox (`{workdir}/skills/<name>/`, versions
+   resolved at use time, per-skill failure tolerated), runs the tool, and posts the
+   result event (`agent.tool_result` platform-managed, `user.tool_result` self-hosted).
 5. The commit that appends the result also enqueues the next `model_turn` — only once
    every tool use in the turn is answered. A brain claims it (brains wake by polling the
    queue; Postgres LISTEN/NOTIFY serves the SSE fan-out, not the brain), replays, and
@@ -151,7 +152,7 @@ state-machine triggers, auth, and the work API.
 
 | File | Contents |
 |---|---|
-| `server.go` | Route table (Go 1.22 method patterns) + `NewHandler`. **Updates are `POST /v1/{resource}/{id}`, not PATCH** (SDK is authoritative). Envelope-shaped 404/405 fallbacks. `?beta=true` and `anthropic-*` headers accepted and ignored. Per-request OTel server span continuing the caller's `traceparent`. |
+| `server.go` | Route table (Go 1.22 method patterns) + `NewHandler`. **Updates are `POST /v1/{resource}/{id}`, not PATCH** (SDK is authoritative). Envelope-shaped 404/405 fallbacks. `?beta=true` and `anthropic-*` headers accepted and ignored. Per-request OTel server span continuing the caller's `traceparent`. Auth dispatch runs before the router on the escaped path: work routes take the environment Bearer key; the session-events subtree, the bare session GET, and the skill read+download routes (`isSkillReadPath`) are dual-auth (worker Bearer or management `x-api-key` — the worker materializes skills over its environment key); everything else is management-only. |
 | `auth.go` | `x-api-key` middleware against `api_keys` (SHA-256 hash only); `EnsureAPIKey` gives **rotation-by-restart** semantics: ensuring a new key under a name revokes the previous ones, so a leaked `CONTROLPLANE_API_KEY` dies on rotation. Authenticated key ID becomes the audit-only `sessions.created_by`. |
 | `envauth.go` | Environment-key auth: `EnsureEnvironmentKey` — one live worker credential per environment, hash-only, revoke-others-on-re-mint — plus the `Authorization: Bearer` resolution and session-scope middlewares that confine a worker to its own environment. |
 | `errors.go` | Wire error envelope `{"type":"error","request_id":…,"error":{type,message}}` + `request-id` header on every response. Version conflicts are `invalid_request_error` with HTTP 409 (the reference SDK has no dedicated conflict type); oversize bodies (>4 MiB) are 413 `request_too_large`. |
@@ -263,8 +264,10 @@ The `tool_exec` consumer — the platform-managed half of the pull protocol.
 
 | File | Contents |
 |---|---|
-| `executor.go` | `Run` polls the queue; `step` claims the oldest `tool_exec` item (reclaiming an expired lease) and `process` runs it: load the session's egress policy, provision the sandbox (idempotent per session), gather the session's **unanswered** tool uses, run them, and commit the results, the resume, and the item's fate together. The append's `Then` — under the session row lock — enqueues a `model_turn` **only when every tool use is answered** (`events.HasUnansweredToolUse`, the same full-set gate the control plane uses for client results), and completes the item only when every tool actually ran. |
+| `executor.go` | `Run` polls the queue; `step` claims the oldest `tool_exec` item (reclaiming an expired lease) and `process` runs it: load the session's egress policy, provision the sandbox (idempotent per session), materialize the agent's skills into it (`skills.go`), gather the session's **unanswered** tool uses, run them, and commit the results, the resume, and the item's fate together. The append's `Then` — under the session row lock — enqueues a `model_turn` **only when every tool use is answered** (`events.HasUnansweredToolUse`, the same full-set gate the control plane uses for client results), and completes the item only when every tool actually ran. |
 | `toolwork.go` | `unansweredToolUses` diffs the session's `agent.tool_use` events against the answering `agent.tool_result` / `user.tool_result` events already on the log, oldest first — the work this item must run, and the reclaim ledger. The lease keeper (`keepLease`) renews the claim at TTL/3 while tools run and cancels the work context if it ever loses the lease, mirroring the brain's; the renewed lease is the proof the settling commit uses. |
+| `skills.go` | `materializeSkills` — the platform half of skills runtime distribution: read the session snapshot's `skills[]`, resolve each version at use time (digits verbatim; `latest` against `skills.latest_version`), fetch the archive from object storage (`blob.Store`, nil skips with a log), extract under the reference guards (`skills.Extract`), and `WriteFile` into `{workdir}/skills/<name>/`. Per-skill failure logs and skips (`not_found` vs `failed` outcomes); a `.materialized` sentinel skips rewriting an unchanged resolved set; only the session read is fatal. Child span `skills_materialize`. |
+| `telemetry.go` | The executor's meter scope: `skills.materialized` counter{outcome} + `skills.materialize.duration` histogram, per-call meter resolution, ids in logs never in labels. |
 
 ### internal/worker
 
@@ -275,7 +278,9 @@ database.
 |---|---|
 | `client.go` | The SDK client a worker authenticates to the control plane with — environment key as `Authorization: Bearer`. |
 | `lease.go` | The lease loop: poll with `block_ms`/`Anthropic-Worker-ID`, ack, session-liveness gate, `traceparent` extraction from the poll response headers. A finished item is force-stopped only while this worker still exclusively owns the lease, and a dead session's item is force-stopped unconditionally (nothing live to disrupt); a fault or an observed lease loss leaves the item live for the queue's reclaim instead — force-stop is terminal, and no reclaim recovers a stopped item. The heartbeat goroutine starts **before** the liveness check and the run — the reference's ordering, because every moment between the ack and the first heartbeat is a window the control plane sees no liveness signal in; the cadence is derived from the response TTL (`ttl/2`, clamped `[1s, 30s]`), and `desired_ttl_seconds` is not sent, per the reference. |
-| `toolexec.go` | `RunSessionTools`, the tool-exec driver: diff unanswered `agent.tool_use` over the wire, run each in a local sandbox via the shared `toolset.Runner`, post `user.tool_result` per tool as each completes. |
+| `toolexec.go` | `RunSessionTools`, the tool-exec driver: diff unanswered `agent.tool_use` over the wire, provision lazily, run `SetupSkills`, then run each tool in a local sandbox via the shared `toolset.Runner`, posting `user.tool_result` per tool as each completes. |
+| `skills.go` | `SetupSkills` — the wire-only twin of the executor's materialization and of the reference SDK's SetupSkills: session GET with the environment key, alias resolution by listing versions and picking the newest numeric client-side, version GET for the directory name, `/content` download, extraction under the same guards, sandbox writes, same sentinel and per-skill tolerance. No database, no blob store — skill bytes always stream through the control plane. |
+| `telemetry.go` | The worker's meter scope mirroring the executor's `skills.materialized` / `skills.materialize.duration` instruments — same materialization, two deployment points, distinguished by scope. |
 
 Two cross-package notes travel with the worker. The "answered" diff — an
 `agent.tool_result` **or** `user.tool_result` answers an `agent.tool_use` — is expressed
@@ -325,14 +330,16 @@ the BYOC worker stays wire-only and receives blob bytes through the control plan
 
 ### internal/skills
 
-Skill-upload validation and normalization (docs/plan/06_skills.md): both `/v1/skills`
-upload forms and the coming operator import funnel through one package, so the
-skills-guide's published rules cannot drift between entry points. Every returned error
-is upload-caused and safe to echo as a 400.
+Skill-upload validation, normalization, and archive extraction
+(docs/plan/06_skills.md): both `/v1/skills` upload forms, the operator import, and both
+materialization halves funnel through one package, so the skills-guide's rules and the
+reference extraction guards cannot drift between entry points. Every error returned by
+the upload paths is upload-caused and safe to echo as a 400.
 
 | File | Contents |
 |---|---|
 | `skills.go` | `FromFiles` (loose path-qualified parts → deterministic canonical zip: sorted entries, no timestamps) and `FromZip` (a valid archive is stored verbatim — the download endpoint streams it unmodified), both returning a `Bundle` (name/description/directory + archive). Validation: SKILL.md YAML frontmatter at the directory root (name ≤64 chars lowercase/digits/hyphens, no reserved words; description non-empty ≤1024 runes, no XML tags; unknown keys tolerated), directory-vs-name match (case- and underscore-insensitive), path hygiene (no escapes, path-qualified under one top directory), 30 MB total / 10k member caps. `IsZip` — the magic-byte form detection. |
+| `extract.go` | The materialization side: `Extract` opens a stored archive with the reference worker's guards (escape refusal, 10k members, 1 GiB decompressed — actual bytes counted, declared sizes untrusted; zip only, since the platform serves canonical zips) and strips the single top-level wrapper; `TargetDir` (the version's name, skill id fallback); `Sentinel` (canonical resolved-set encoding for the idempotence marker); `BlobKey` (the one `skills/{id}/{version}.zip` layout). |
 
 ### Test support and cmd/
 
@@ -411,8 +418,10 @@ token-usage counters and the cache-token breakdown in `internal/events/metrics.g
 session-status transition counts and approval (HITL) wait in
 `internal/events/statusmetric.go`/`approvalmetric.go` (both recorded **after** the
 transaction commits, so a rolled-back transition counts nothing), time-to-first-token
-measured from the work claim in `internal/brain/telemetry.go`, and tool-run duration in
-`internal/toolset/telemetry.go`. Queue `depth`/`pending`/`workers_polling` are OTLP
+measured from the work claim in `internal/brain/telemetry.go`, tool-run duration in
+`internal/toolset/telemetry.go`, and skills-materialization outcomes/duration in
+`internal/executor/telemetry.go` and `internal/worker/telemetry.go` (same instrument
+names, two scopes). Queue `depth`/`pending`/`workers_polling` are OTLP
 observable gauges (`internal/queue/metrics.go`) sampling the same work-stats view the API
 serves — registered once by the control plane, reported per self_hosted environment. A
 configured OTLP endpoint bridges
