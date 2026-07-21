@@ -79,3 +79,42 @@ func TestIDString(t *testing.T) {
 		t.Errorf("String() = %q, want %q", got, "agent_abc")
 	}
 }
+
+func TestIDValid(t *testing.T) {
+	// Every prefix NewID emits is Valid, and the session_ alt spelling too.
+	for _, prefix := range []string{
+		PrefixAgent, PrefixEnvironment, PrefixSession, PrefixEvent, PrefixWork,
+		PrefixVault, PrefixResource, PrefixDeployment, PrefixDeploymentRun,
+		PrefixFile, PrefixSkill, altSessionPrefix,
+	} {
+		id := ID(prefix + "_" + idEncoding.EncodeToString(make([]byte, idRandomBytes)))
+		if !id.Valid() {
+			t.Errorf("%q should be Valid", id)
+		}
+	}
+	if !NewID(PrefixAgent).Valid() {
+		t.Errorf("NewID output must be Valid")
+	}
+
+	// Invalid: bad structure, unknown prefix, out-of-alphabet, and the unstorable
+	// bytes (U+0000, invalid UTF-8) that would otherwise reach a bind parameter.
+	invalid := map[string]ID{
+		"empty":             "",
+		"no underscore":     "agentabc",
+		"empty token":       "agent_",
+		"unknown prefix":    "foo_23456",
+		"out-of-alphabet i": "agent_missing",
+		"out-of-alphabet o": "work_nope",
+		"uppercase":         "agent_ABCDE",
+		"hyphen":            "agent_ab-cd",
+		"underscore token":  "agent_ab_cd",
+		"nul byte":          ID("agent_\x00"),
+		"nul mid-token":     ID("agent_ab\x00cd"),
+		"invalid utf-8":     ID("agent_\x80"),
+	}
+	for name, id := range invalid {
+		if id.Valid() {
+			t.Errorf("%s: %q should be invalid", name, id)
+		}
+	}
+}

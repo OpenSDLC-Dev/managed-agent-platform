@@ -136,6 +136,14 @@ func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http
 		// session, so the handler 404s either way (see splitSession).
 		id, _, _ := splitSession(r.URL.Path)
 		sid := normalizeSessionID(id)
+		// A malformed session id (an unstorable byte, a wrong prefix/alphabet)
+		// cannot name a stored session; reject it on shape here, before it binds
+		// into this ownership lookup as a 500 — the same 404 an absent or
+		// other-environment session gets, so a worker still cannot probe ids.
+		if err := checkID(sid, "session"); err != nil {
+			writeError(w, r, err)
+			return
+		}
 		var sessEnv string
 		err := pool.QueryRow(r.Context(),
 			`SELECT environment_id FROM sessions WHERE id = $1`, sid).Scan(&sessEnv)

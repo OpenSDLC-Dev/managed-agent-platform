@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
@@ -138,6 +139,40 @@ func fieldPath(path string) string {
 		return "the request body"
 	}
 	return path
+}
+
+// checkID rejects a malformed path id with the 404 an unknown id already gets.
+// Path IDs and id-shaped query parameters are the separate surface rejectNULBody
+// flags: http.ServeMux decodes %00 into a real NUL in PathValue / URL.Query, and
+// — like any non-alphabet or invalid-UTF-8 byte — it binds straight into
+// Postgres and fails as a 500 (SQLSTATE 22021). A server-minted id never carries
+// such a byte, so validating the id's shape before it reaches a bind parameter
+// closes the whole class. resource names the resource in the wire message, so a
+// malformed id is indistinguishable from a merely-absent one (see #135).
+func checkID(id, resource string) error {
+	if !domain.ID(id).Valid() {
+		return errNotFound("%s %s not found", resource, id)
+	}
+	return nil
+}
+
+// checkWorkID is checkID for the work API, whose not-found message omits the id
+// (matching mapWorkErr's ErrWorkNotFound) so a worker cannot tell a malformed
+// work_id from an item it is not allowed to see.
+func checkWorkID(id domain.ID) error {
+	if !id.Valid() {
+		return errNotFound("work item not found")
+	}
+	return nil
+}
+
+// storableText reports whether s can be stored as Postgres text: valid UTF-8
+// with no U+0000. An id-shaped query value is validated with domain.ID.Valid
+// instead; this covers a free-form filter such as the event types[] list, whose
+// members are compared against stored event names — an unknown-but-storable
+// value filters to empty, so only the unstorable byte is rejected (with a 400).
+func storableText(s string) bool {
+	return utf8.ValidString(s) && !strings.ContainsRune(s, 0)
 }
 
 // rejectUnknownKeys mirrors the reference API's strict parameter validation:
