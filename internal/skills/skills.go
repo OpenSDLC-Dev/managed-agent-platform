@@ -282,9 +282,11 @@ func parseFrontmatter(md []byte) (name, description string, err error) {
 }
 
 // frontmatterBlock returns the YAML between the opening --- line and the
-// closing --- line (which may sit at EOF without a trailing newline).
+// closing --- line (which may sit at EOF without a trailing newline). A
+// leading UTF-8 BOM is tolerated — some Windows editors emit one, and it is
+// not a reason to reject an otherwise-valid SKILL.md.
 func frontmatterBlock(md []byte) ([]byte, bool) {
-	s := string(md)
+	s := strings.TrimPrefix(string(md), "\ufeff")
 	line, rest, ok := strings.Cut(s, "\n")
 	if !ok || strings.TrimRight(line, "\r") != "---" {
 		return nil, false

@@ -13,8 +13,8 @@ const apiMeterName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/ap
 
 // Skill registry instruments (docs/plan/06_skills.md observability table).
 // Attribute cardinality is bounded: outcome only — skill ids belong in logs
-// and span attributes, never in metric labels. Exported so the telemetry
-// contract tests can assert the exact names.
+// and span attributes, never in metric labels. Exported so skillsmetric_test.go
+// can assert the exact names and labels.
 const (
 	MetricSkillUploads       = "skills.uploads"
 	MetricSkillUploadBytes   = "skills.upload.bytes"

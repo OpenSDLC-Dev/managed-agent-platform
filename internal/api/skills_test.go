@@ -3,7 +3,9 @@ package api_test
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -14,6 +16,8 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 )
 
 const testSkillMD = `---
@@ -565,6 +569,49 @@ func TestSkillsUnavailableWithoutObjectStorage(t *testing.T) {
 	status, obj = s.do("GET", "/v1/skills", nil)
 	if status != http.StatusOK {
 		t.Errorf("list without object storage: %d %v", status, obj)
+	}
+}
+
+// failingStore errors every Put — the probe for the claim-row → put → commit
+// ordering: a storage failure must never leave a committed row behind.
+type failingStore struct{ blob.Store }
+
+func (failingStore) Put(context.Context, string, io.Reader, int64, string) error {
+	return errors.New("storage down")
+}
+
+func TestFailedPutCommitsNoRows(t *testing.T) {
+	pool := newPoolWithKey(t)
+	working := blobtest.Mem()
+	okSrv := httptest.NewServer(api.NewHandler(pool, working))
+	t.Cleanup(okSrv.Close)
+	badSrv := httptest.NewServer(api.NewHandler(pool, failingStore{working}))
+	t.Cleanup(badSrv.Close)
+	ok := &tserver{t: t, url: okSrv.URL, pool: pool, blobs: working}
+	bad := &tserver{t: t, url: badSrv.URL, pool: pool, blobs: working}
+
+	// Skill create against the failing store: 500, and no skill exists.
+	ct, body := skillForm(t, nil, []upFile{{name: "financial-skill/SKILL.md", content: testSkillMD}})
+	status, obj := bad.doForm("POST", "/v1/skills", ct, body)
+	wantErr(t, status, obj, http.StatusInternalServerError, "api_error")
+	if status, list := ok.do("GET", "/v1/skills", nil); status != http.StatusOK || len(listData(t, list)) != 0 {
+		t.Fatalf("after failed create: %d %v, want an empty list", status, list)
+	}
+
+	// Version create against the failing store: 500, and the skill's version
+	// set and latest_version are untouched.
+	created := ok.createSkill(t)
+	id, _ := created["id"].(string)
+	v1, _ := created["latest_version"].(string)
+	ct, body = skillForm(t, nil, []upFile{{name: "financial-skill/SKILL.md", content: testSkillMD}})
+	status, obj = bad.doForm("POST", "/v1/skills/"+id+"/versions", ct, body)
+	wantErr(t, status, obj, http.StatusInternalServerError, "api_error")
+	status, versions := ok.do("GET", "/v1/skills/"+id+"/versions", nil)
+	if status != http.StatusOK || len(listData(t, versions)) != 1 {
+		t.Errorf("after failed version create: %d %v, want only the original version", status, versions)
+	}
+	if _, skill := ok.do("GET", "/v1/skills/"+id, nil); skill["latest_version"] != v1 {
+		t.Errorf("latest_version = %v, want unchanged %q", skill["latest_version"], v1)
 	}
 }
 

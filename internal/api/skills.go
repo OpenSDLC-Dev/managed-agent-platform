@@ -146,14 +146,8 @@ func (s *server) createSkill(r *http.Request) (any, error) {
 
 	id := domain.NewID(domain.PrefixSkill).String()
 	version := mintSkillVersion()
-	key := skillBlobKey(id, version)
-	if err := s.blobs.Put(ctx, key, bytes.NewReader(bundle.Zip), int64(len(bundle.Zip)), "application/zip"); err != nil {
-		recordSkillUpload(ctx, skillOutcomeError, 0)
-		return nil, fmt.Errorf("store skill archive: %w", err)
-	}
 	created, err := s.insertSkill(ctx, id, displayTitle, version, bundle)
 	if err != nil {
-		s.deleteOrphanedObject(ctx, key)
 		if isUniqueViolation(err, "skills_custom_display_title_uq") {
 			recordSkillUpload(ctx, skillOutcomeInvalid, 0)
 			return nil, errInvalid("display_title %q is already used by another custom skill", displayTitle)
@@ -167,7 +161,12 @@ func (s *server) createSkill(r *http.Request) (any, error) {
 	return renderSkill(id, displayTitle, &version, "custom", created, created), nil
 }
 
-// insertSkill lands the skill row and its first version in one transaction.
+// insertSkill lands the skill row, its first version, and the archive in one
+// transaction: rows first (a display_title conflict rejects before any
+// storage traffic), the blob put before commit (the object exists before the
+// rows become visible — a version row can never dangle), commit last. The
+// only orphan window is a failed commit after a successful put, cleaned
+// best-effort.
 func (s *server) insertSkill(ctx context.Context, id, displayTitle, version string, bundle *skills.Bundle) (time.Time, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -188,7 +187,15 @@ func (s *server) insertSkill(ctx context.Context, id, displayTitle, version stri
 		bundle.Name, bundle.Description, bundle.Directory); err != nil {
 		return time.Time{}, err
 	}
-	return createdAt, tx.Commit(ctx)
+	key := skillBlobKey(id, version)
+	if err := s.blobs.Put(ctx, key, bytes.NewReader(bundle.Zip), int64(len(bundle.Zip)), "application/zip"); err != nil {
+		return time.Time{}, fmt.Errorf("store skill archive: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.deleteOrphanedObject(ctx, key)
+		return time.Time{}, err
+	}
+	return createdAt, nil
 }
 
 func (s *server) getSkill(r *http.Request) (any, error) {
@@ -233,7 +240,7 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 		query += fmt.Sprintf(` AND source = $%d`, len(args))
 	}
 	if page.cur != nil {
-		if page.cur.versioned || page.cur.dir != dirNext {
+		if page.cur.versioned || page.cur.seqKeyed || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)
@@ -349,21 +356,17 @@ func (s *server) createSkillVersion(r *http.Request) (any, error) {
 
 	version := mintSkillVersion()
 	vid := domain.NewID(domain.PrefixSkillVersion).String()
-	key := skillBlobKey(id, version)
-	if err := s.blobs.Put(ctx, key, bytes.NewReader(bundle.Zip), int64(len(bundle.Zip)), "application/zip"); err != nil {
-		recordSkillUpload(ctx, skillOutcomeError, 0)
-		return nil, fmt.Errorf("store skill archive: %w", err)
-	}
-	createdAt, err := s.insertSkillVersion(ctx, id, vid, version, bundle.Name, bundle.Description, bundle.Directory)
+	createdAt, err := s.insertSkillVersion(ctx, id, vid, version, bundle)
 	if err != nil {
-		recordSkillUpload(ctx, skillOutcomeError, 0)
-		s.deleteOrphanedObject(ctx, key)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errNotFound("skill %s not found", id)
 		}
 		if isUniqueViolation(err, "skill_versions_skill_id_version_key") {
+			// The row was claimed before any storage traffic, so a
+			// same-microsecond loser cannot touch the winner's archive.
 			return nil, errConflict("a version with the same identifier was minted concurrently; retry")
 		}
+		recordSkillUpload(ctx, skillOutcomeError, 0)
 		return nil, err
 	}
 	recordSkillUpload(ctx, skillOutcomeOK, int64(len(bundle.Zip)))
@@ -376,14 +379,18 @@ func (s *server) createSkillVersion(r *http.Request) (any, error) {
 	}, nil
 }
 
-func (s *server) insertSkillVersion(ctx context.Context, id, vid, version, name, description, directory string) (time.Time, error) {
+// insertSkillVersion lands the version row and its archive with the same
+// ordering as insertSkill: parent row locked (serializing the latest_version
+// maintenance against concurrent creates and deletes), row claimed before the
+// blob put — so a same-microsecond version collision 409s without any storage
+// traffic and can never overwrite or delete the winner's archive — put before
+// commit, commit last.
+func (s *server) insertSkillVersion(ctx context.Context, id, vid, version string, bundle *skills.Bundle) (time.Time, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return time.Time{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// Lock the parent row: the latest_version update below must serialize
-	// against concurrent version creates and deletes.
 	var have string
 	if err := tx.QueryRow(ctx, `SELECT id FROM skills WHERE id = $1 FOR UPDATE`, id).Scan(&have); err != nil {
 		return time.Time{}, err // pgx.ErrNoRows when the skill vanished
@@ -392,7 +399,7 @@ func (s *server) insertSkillVersion(ctx context.Context, id, vid, version, name,
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory)
 		 VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at`,
-		vid, id, version, name, description, directory).Scan(&createdAt); err != nil {
+		vid, id, version, bundle.Name, bundle.Description, bundle.Directory).Scan(&createdAt); err != nil {
 		return time.Time{}, err
 	}
 	if _, err := tx.Exec(ctx,
@@ -400,7 +407,15 @@ func (s *server) insertSkillVersion(ctx context.Context, id, vid, version, name,
 		id, version); err != nil {
 		return time.Time{}, err
 	}
-	return createdAt, tx.Commit(ctx)
+	key := skillBlobKey(id, version)
+	if err := s.blobs.Put(ctx, key, bytes.NewReader(bundle.Zip), int64(len(bundle.Zip)), "application/zip"); err != nil {
+		return time.Time{}, fmt.Errorf("store skill archive: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.deleteOrphanedObject(ctx, key)
+		return time.Time{}, err
+	}
+	return createdAt, nil
 }
 
 func (s *server) listSkillVersions(r *http.Request) (any, error) {
@@ -427,7 +442,7 @@ func (s *server) listSkillVersions(r *http.Request) (any, error) {
 	query := `SELECT id, version, name, description, directory, created_at FROM skill_versions WHERE skill_id = $1`
 	args := []any{id}
 	if page.cur != nil {
-		if page.cur.versioned || page.cur.dir != dirNext {
+		if page.cur.versioned || page.cur.seqKeyed || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)
@@ -524,6 +539,18 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Lock the parent row before touching versions, mirroring
+	// insertSkillVersion: without it, a delete blocked behind a concurrent
+	// version create would recompute latest_version on a pre-create snapshot
+	// (READ COMMITTED evaluates the subquery against the statement snapshot)
+	// and could blank latest_version while a live version exists.
+	var have string
+	if err := tx.QueryRow(ctx, `SELECT id FROM skills WHERE id = $1 FOR UPDATE`, id).Scan(&have); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errNotFound("skill %s version %s not found", id, version)
+		}
+		return nil, err
+	}
 	tag, err := tx.Exec(ctx,
 		`DELETE FROM skill_versions WHERE skill_id = $1 AND version = $2`, id, version)
 	if err != nil {

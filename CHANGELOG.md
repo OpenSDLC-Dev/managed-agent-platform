@@ -29,8 +29,11 @@ copy of an entry here.
   (`skill_deleted` echoes the skill id, `skill_version_deleted` the version timestamp) and delete
   order (skill delete 400s until every version is gone, FK-backed) reproduced; skills-list
   `source` filter and the versions list's 1000 cap; archives at `skills/{id}/{version}.zip` via
-  `internal/blob` (put-before-transaction, best-effort orphan cleanup), streamed back unmodified
-  by the download endpoint. Migration `0007_skills.sql`; upload/download slog + `skills.uploads`/
+  `internal/blob` — rows are claimed and the archive stored inside one transaction (put before
+  commit), so a version row can never dangle, a storage failure commits nothing, and a
+  same-microsecond version collision 409s without touching the winner's object; the only orphan
+  window is a failed commit after a successful put, cleaned best-effort — streamed back
+  unmodified by the download endpoint. Migration `0007_skills.sql`; upload/download slog + `skills.uploads`/
   `skills.upload.bytes`/`skills.download.bytes` metrics (bounded labels); `blobtest.Mem`, an
   in-memory `blob.Store` passing the shared contract suite, backs the API tests. Deployment wiring
   end-to-end: the controlplane reads `BLOB_*` env (compose points it at the bundled MinIO; the

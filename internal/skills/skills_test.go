@@ -164,6 +164,7 @@ func TestFrontmatterValidation(t *testing.T) {
 		"UnknownKeysTolerated": {"---\nname: a\ndescription: d\nallowed-tools: [bash]\nextra: 1\n---\n", true},
 		"CRLFLineEndings":      {"---\r\nname: a\r\ndescription: d\r\n---\r\nbody\r\n", true},
 		"NoBody":               {"---\nname: a\ndescription: d\n---", true},
+		"LeadingBOM":           {"\ufeff---\nname: a\ndescription: d\n---\n", true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
