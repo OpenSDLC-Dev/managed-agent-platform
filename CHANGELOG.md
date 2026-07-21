@@ -15,6 +15,20 @@ copy of an entry here.
 
 ### Changed
 
+- **Test infrastructure: the three private Docker-Postgres harnesses fold into `internal/pgtest`**
+  ([#69](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/69)) — `internal/store`,
+  `internal/api`, and `internal/events` predate the shared harness and each carried a private,
+  near-identical copy of its container plumbing (docker run, port resolution, readiness wait,
+  fresh-database creation). All three now wire `TestMain` through `pgtest.Main` and take their
+  databases from the shared package; the private copies are deleted. `internal/pgtest` gains
+  `FreshDB` — a bare, un-migrated DSN for the store suite, which exercises `store.Open`/`Migrate`
+  itself — and `NewPool` now composes it. The events suite keeps its package-local fixtures
+  (`newSession`, `newPoolFromDSN`, `swapTracerProvider`, in `fixtures_test.go`): they are fixture
+  shape, not container plumbing, and the shared `NewSession` writes a richer session row
+  (`status 'idle'`, full resolved agent) than the event-log tests were written against. No
+  behavior change; the coverage gate is unaffected (`internal/pgtest` sits outside the
+  denominator).
+
 - **Eval grader rigor: the four P/M/E precision and coverage-depth gaps left open by #98**
   ([#99](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/99)) — the suite's
   invariant is that *a Platform-class finding fires only on a genuine platform fault, and no

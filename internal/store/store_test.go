@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -12,8 +13,13 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
 
 const (
 	pgUniqueViolation     = "23505"
@@ -55,7 +61,7 @@ func seedSessionChain(t *testing.T, pool *pgxpool.Pool) {
 }
 
 func TestOpenMigratesFreshDatabase(t *testing.T) {
-	pool := open(t, freshDB(t))
+	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()
 
 	rows, err := pool.Query(ctx,
@@ -90,7 +96,7 @@ func TestOpenMigratesFreshDatabase(t *testing.T) {
 }
 
 func TestMigrateIsIdempotent(t *testing.T) {
-	pool := open(t, freshDB(t))
+	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()
 
 	if err := store.Migrate(ctx, pool); err != nil {
@@ -109,7 +115,7 @@ func TestConcurrentMigratorsDoNotConflict(t *testing.T) {
 	// Several binaries (controlplane, brain, executor) may Open the same
 	// database at startup simultaneously; the advisory lock must serialize
 	// them onto one successful migration run.
-	dsn := freshDB(t)
+	dsn := pgtest.FreshDB(t)
 	const n = 4
 	errs := make([]error, n)
 	var wg sync.WaitGroup
@@ -133,7 +139,7 @@ func TestConcurrentMigratorsDoNotConflict(t *testing.T) {
 }
 
 func TestEventSeqUniquePerSession(t *testing.T) {
-	pool := open(t, freshDB(t))
+	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()
 	seedSessionChain(t, pool)
 
@@ -160,7 +166,7 @@ func TestEventSeqUniquePerSession(t *testing.T) {
 }
 
 func TestEnumCheckConstraints(t *testing.T) {
-	pool := open(t, freshDB(t))
+	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()
 	seedSessionChain(t, pool)
 
@@ -217,7 +223,7 @@ func TestEnumCheckConstraints(t *testing.T) {
 }
 
 func TestEnvironmentConfigIsRequired(t *testing.T) {
-	pool := open(t, freshDB(t))
+	pool := open(t, pgtest.FreshDB(t))
 	// The wire's environment config union always carries a type; a row
 	// without a config cannot round-trip, so the column has no default.
 	_, err := pool.Exec(context.Background(),
@@ -229,7 +235,7 @@ func TestEnvironmentConfigIsRequired(t *testing.T) {
 }
 
 func TestSessionRequiresAgentVersionSnapshot(t *testing.T) {
-	pool := open(t, freshDB(t))
+	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()
 	seedSessionChain(t, pool)
 
@@ -245,7 +251,7 @@ func TestSessionRequiresAgentVersionSnapshot(t *testing.T) {
 }
 
 func TestWireRequiredTextColumnsNeverNull(t *testing.T) {
-	pool := open(t, freshDB(t))
+	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()
 	seedSessionChain(t, pool)
 
@@ -262,7 +268,7 @@ func TestWireRequiredTextColumnsNeverNull(t *testing.T) {
 }
 
 func TestWorkItemsSessionIndexExists(t *testing.T) {
-	pool := open(t, freshDB(t))
+	pool := open(t, pgtest.FreshDB(t))
 	// work_items.session_id cascades on session delete; without an index
 	// every session delete seq-scans the queue.
 	var exists bool
@@ -276,7 +282,7 @@ func TestWorkItemsSessionIndexExists(t *testing.T) {
 }
 
 func TestTenancyColumnsHaveSingleTenantDefaults(t *testing.T) {
-	pool := open(t, freshDB(t))
+	pool := open(t, pgtest.FreshDB(t))
 	ctx := context.Background()
 	seedSessionChain(t, pool)
 
@@ -308,7 +314,7 @@ func TestMigrateSurfacesFailures(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("canceled context", func(t *testing.T) {
-		pool := open(t, freshDB(t))
+		pool := open(t, pgtest.FreshDB(t))
 		canceled, cancel := context.WithCancel(ctx)
 		cancel()
 		if err := store.Migrate(canceled, pool); err == nil {
@@ -317,7 +323,7 @@ func TestMigrateSurfacesFailures(t *testing.T) {
 	})
 
 	t.Run("broken schema_migrations table", func(t *testing.T) {
-		pool := rawPool(t, freshDB(t))
+		pool := rawPool(t, pgtest.FreshDB(t))
 		if _, err := pool.Exec(ctx, `CREATE TABLE schema_migrations (wrong text)`); err != nil {
 			t.Fatalf("corrupt table: %v", err)
 		}
@@ -327,7 +333,7 @@ func TestMigrateSurfacesFailures(t *testing.T) {
 	})
 
 	t.Run("conflicting object rolls back atomically", func(t *testing.T) {
-		dsn := freshDB(t)
+		dsn := pgtest.FreshDB(t)
 		pool := rawPool(t, dsn)
 		if _, err := pool.Exec(ctx, `CREATE TABLE agents (id integer)`); err != nil {
 			t.Fatalf("conflicting table: %v", err)
@@ -353,7 +359,7 @@ func TestMigrateSurfacesFailures(t *testing.T) {
 	})
 
 	t.Run("recording failure rolls back", func(t *testing.T) {
-		pool := rawPool(t, freshDB(t))
+		pool := rawPool(t, pgtest.FreshDB(t))
 		// version column present, but the insert violates applied_at's
 		// NOT NULL because this variant has no default.
 		if _, err := pool.Exec(ctx,

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 func TestAuthRejectsMissingAndWrongKeys(t *testing.T) {
@@ -90,11 +90,7 @@ func TestUnknownRouteAndMethodReturnErrorEnvelope(t *testing.T) {
 
 func TestEnsureAPIKeyIsIdempotentAndStoresOnlyHashes(t *testing.T) {
 	ctx := context.Background()
-	pool, err := store.Open(ctx, freshDB(t))
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	defer pool.Close()
+	pool := pgtest.NewPool(t)
 
 	if err := api.EnsureAPIKey(ctx, pool, "boot", "secret-key-value"); err != nil {
 		t.Fatalf("first EnsureAPIKey: %v", err)
