@@ -21,7 +21,9 @@ var ErrNotFound = errors.New("blob: object not found")
 // "/" separators are conventional namespacing, not directories.
 type Store interface {
 	// Put stores exactly size bytes from r at key, overwriting any existing
-	// object. contentType is stored as object metadata for HTTP consumers.
+	// object: a reader with fewer bytes than size is an error, and bytes
+	// beyond size are never read. contentType is stored as object metadata
+	// for HTTP consumers.
 	Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error
 
 	// Get returns the object's bytes and size. A missing key is ErrNotFound

@@ -56,7 +56,8 @@ jobs:
       - name: existingSecret path renders (chart creates no Secret)
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" \
-            --set postgresql.enabled=false --set existingSecret=my-preexisting)"
+            --set postgresql.enabled=false --set minio.enabled=false \
+            --set existingSecret=my-preexisting)"
           echo "$out" | grep -q 'name: my-preexisting' || { echo "expected Deployments to reference existingSecret" >&2; exit 1; }
           echo "$out" | grep -q '^kind: Secret' && { echo "chart must not create a Secret when existingSecret is set" >&2; exit 1; }
           echo "ok: existingSecret path"

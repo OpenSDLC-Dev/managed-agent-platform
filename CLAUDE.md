@@ -86,7 +86,7 @@ make verify               # the whole Go gate: build + crossbuild + vet + fmt-ch
 make build crossbuild     # host build + linux/arm cross-compile of ./internal/... (worker portability)
 make vet fmt-check        # lint
 make test cover-gate      # go test -count=1 with the coverage profile, then the ≥90% gate
-docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres(+Jaeger)
+docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres+MinIO(+Jaeger)
 ```
 
 CI (`.github/workflows/ci.yml`) invokes the same targets, so the gate cannot drift between the docs, the verifier, and the merge check. The coverage gate is **total statement coverage ≥ 90%** over the **logic packages** under `./internal/...` — deliberately outside the denominator: `cmd/` main glue and the test-support packages (`internal/pgtest`, `internal/sandbox/sandboxtest`, `internal/modeltest`, `internal/blob/blobtest`), whose uncovered statements are the branches that fire only when a suite fails or a live tier is misconfigured. `make test` needs Docker (store/API/sandbox suites) and a Kubernetes cluster (the K8s sandbox contract test; a local kind cluster works) — a missing daemon or cluster is a hard failure, not a skip.

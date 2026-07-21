@@ -127,6 +127,8 @@ minio:
   storageClassName: ""  # empty uses the cluster default StorageClass
   resources: {}
   # MinIO listens on the standard 9000; not configurable for the bundled instance.
+  # The bundled instance serves plain HTTP inside the cluster (blob-tls=false),
+  # like the bundled Postgres; use externalObjectStorage with tls for TLS.
 
 # -- External S3-compatible object storage, used when minio.enabled is false.
 # endpoint is host:port (no scheme; tls picks the scheme). Leaving endpoint

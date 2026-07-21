@@ -111,6 +111,46 @@ func TestNewRejectsMalformedEndpoint(t *testing.T) {
 	}
 }
 
+func TestPutShortReaderErrors(t *testing.T) {
+	// The contract promises "exactly size bytes": a reader that runs dry
+	// before size must be an error, never a silently truncated object.
+	s := newStore(t)
+	err := s.Put(context.Background(), "short", strings.NewReader("abc"), 10, "")
+	if err == nil {
+		t.Fatal("put with a short reader succeeded")
+	}
+}
+
+func TestPutPersistsContentType(t *testing.T) {
+	// The Store interface never reads content-type back — it exists for HTTP
+	// consumers — so pin the persistence here with a raw client Stat, or the
+	// impl could drop it and every test would stay green.
+	tgt := blobtest.FreshTarget(t)
+	cfg := s3.Config{Endpoint: tgt.Endpoint, AccessKey: tgt.AccessKey,
+		SecretKey: tgt.SecretKey, Bucket: tgt.Bucket}
+	ctx := context.Background()
+	s, err := s3.New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("s3.New: %v", err)
+	}
+	if err := s.Put(ctx, "typed", strings.NewReader("zip!"), 4, "application/zip"); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	raw, err := minio.New(tgt.Endpoint, &minio.Options{
+		Creds: credentials.NewStaticV4(tgt.AccessKey, tgt.SecretKey, ""),
+	})
+	if err != nil {
+		t.Fatalf("raw client: %v", err)
+	}
+	info, err := raw.StatObject(ctx, tgt.Bucket, "typed", minio.StatObjectOptions{})
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.ContentType != "application/zip" {
+		t.Errorf("stored content-type = %q, want %q", info.ContentType, "application/zip")
+	}
+}
+
 func TestEmptyKeyOpsSurfaceErrors(t *testing.T) {
 	// The contract types keys as non-empty; the backend must turn a violation
 	// into an error, and never into blob.ErrNotFound (absence of an object
