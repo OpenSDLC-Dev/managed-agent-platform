@@ -7,14 +7,19 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const testKey = "map-test-key-0123456789"
+
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
 
 // tserver is a running control-plane handler over a fresh database.
 type tserver struct {
@@ -26,11 +31,7 @@ type tserver struct {
 func newTestServer(t *testing.T) *tserver {
 	t.Helper()
 	ctx := context.Background()
-	pool, err := store.Open(ctx, freshDB(t))
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	pool := pgtest.NewPool(t)
 	if err := api.EnsureAPIKey(ctx, pool, "test", testKey); err != nil {
 		t.Fatalf("EnsureAPIKey: %v", err)
 	}

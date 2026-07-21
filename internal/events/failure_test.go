@@ -8,13 +8,14 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 // Infrastructure failure paths: the log and broker must fail loudly (or heal)
 // rather than corrupt the sequence or hang subscribers.
 
 func TestLogFailurePaths(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -68,7 +69,7 @@ func TestLogFailurePaths(t *testing.T) {
 }
 
 func TestClosedPoolFailurePaths(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -104,7 +105,7 @@ func TestClosedPoolFailurePaths(t *testing.T) {
 }
 
 func TestBrokerSurvivesGarbageNotify(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	broker := events.NewBroker(pool)
 	sid := newSession(t, pool)
@@ -126,7 +127,7 @@ func TestBrokerSurvivesGarbageNotify(t *testing.T) {
 }
 
 func TestBrokerReconnectsAfterConnectionLoss(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	broker := events.NewBroker(pool)
 	sid := newSession(t, pool)
@@ -155,7 +156,7 @@ func TestBrokerReconnectsAfterConnectionLoss(t *testing.T) {
 }
 
 func TestBrokerReadyHonorsContext(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	broker := events.NewBroker(pool)
 
 	// No subscribers → no listener → Ready can only end with the context.

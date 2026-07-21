@@ -10,6 +10,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 func text(s string) json.RawMessage {
@@ -17,7 +18,7 @@ func text(s string) json.RawMessage {
 }
 
 func TestAppendAllocatesSeqAndDefaults(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -61,7 +62,7 @@ func TestAppendAllocatesSeqAndDefaults(t *testing.T) {
 }
 
 func TestAppendCallerSuppliedIDAndProcessedAt(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	now := time.Now().UTC().Truncate(time.Microsecond)
@@ -94,7 +95,7 @@ func TestAppendCallerSuppliedIDAndProcessedAt(t *testing.T) {
 }
 
 func TestAppendSessionErrors(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -113,7 +114,7 @@ func TestAppendSessionErrors(t *testing.T) {
 }
 
 func TestAppendRejectsStreamOnlyAndEmpty(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -129,7 +130,7 @@ func TestAppendRejectsStreamOnlyAndEmpty(t *testing.T) {
 }
 
 func TestAppendConcurrentSeqIntegrity(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	other := newSession(t, pool)
@@ -187,7 +188,7 @@ func TestAppendConcurrentSeqIntegrity(t *testing.T) {
 }
 
 func TestListFiltersAndKeyset(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()

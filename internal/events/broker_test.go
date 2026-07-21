@@ -9,6 +9,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 const waitTimeout = 10 * time.Second
@@ -62,7 +63,7 @@ func drainWakes(sub *events.Subscription) {
 }
 
 func TestSubscribeWakesOnAppend(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	broker := events.NewBroker(pool)
 	sid := newSession(t, pool)
@@ -77,7 +78,7 @@ func TestSubscribeWakesOnAppend(t *testing.T) {
 }
 
 func TestFrameFanoutIsPerSession(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	broker := events.NewBroker(pool)
 	sid := newSession(t, pool)
@@ -108,7 +109,7 @@ func TestFrameFanoutIsPerSession(t *testing.T) {
 }
 
 func TestPreviewStartAndDeltas(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	broker := events.NewBroker(pool)
 	sid := newSession(t, pool)
@@ -173,7 +174,7 @@ func TestPreviewStartAndDeltas(t *testing.T) {
 }
 
 func TestPreviewRules(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -191,7 +192,7 @@ func TestPreviewRules(t *testing.T) {
 }
 
 func TestDeltaChunksLongText(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	broker := events.NewBroker(pool)
 	sid := newSession(t, pool)
@@ -233,7 +234,7 @@ func TestDeltaChunksLongText(t *testing.T) {
 }
 
 func TestBrokerCrossPoolAndResubscribe(t *testing.T) {
-	poolA := newPool(t)
+	poolA := pgtest.NewPool(t)
 	broker := events.NewBroker(poolA)
 	sid := newSession(t, poolA)
 

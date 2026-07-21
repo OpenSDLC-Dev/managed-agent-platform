@@ -4,8 +4,18 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+[#69](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/69) — fold the three private
+Docker-Postgres test harness copies (`internal/store`, `internal/api`, `internal/events`) into the
+shared `internal/pgtest`. Triage: single-PR, no plan file. Test infrastructure only, no behavior
+change.
 
 ## Tasks
 
-None.
+- [x] `internal/pgtest` gains `FreshDB` (bare un-migrated DSN, for the store suite's own
+      `Open`/`Migrate` tests); `NewPool` composes it.
+- [x] store/api/events wire `TestMain` through `pgtest.Main`; the private copies are deleted.
+      events keeps its package-local fixtures (`fixtures_test.go`) — fixture shape, not container
+      plumbing, and shaped differently from the shared `NewSession`.
+- [x] Affected suites green locally: store/api/events/queue against Docker Postgres,
+      `go test -count=1` all ok.
+- [ ] `make verify` + verifier subagent, dual review, PR, CI green, squash merge.

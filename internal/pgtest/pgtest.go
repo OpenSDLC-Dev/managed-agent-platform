@@ -1,9 +1,9 @@
 // Package pgtest is test support: it starts one Dockerized Postgres per test
-// binary and hands out freshly-migrated databases, the same pattern the
-// store/events/api suites carry privately. New packages use this shared copy;
-// production code must never import it. A missing Docker daemon is a hard
-// failure, not a skip: skipped contract tests would silently hollow out the
-// coverage gate.
+// binary and hands out fresh databases — migrated pools via NewPool, or bare
+// DSNs via FreshDB for suites that exercise store.Open/Migrate themselves.
+// Every Postgres-backed suite uses it; production code must never import it.
+// A missing Docker daemon is a hard failure, not a skip: skipped contract
+// tests would silently hollow out the coverage gate.
 package pgtest
 
 import (
@@ -96,22 +96,29 @@ func waitReady(dsn string, timeout time.Duration) error {
 	}
 }
 
-// NewPool creates a fresh database in the shared container, migrates it, and
-// returns a pool closed at test end.
-func NewPool(t *testing.T) *pgxpool.Pool {
+// FreshDB creates a new empty database in the shared container and returns
+// its DSN, un-migrated, so a suite can exercise store.Open/Migrate itself
+// from a clean slate.
+func FreshDB(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, adminDSN)
 	if err != nil {
 		t.Fatalf("connect admin: %v", err)
 	}
+	defer conn.Close(ctx)
 	name := fmt.Sprintf("pgtest_%d", dbCounter.Add(1))
 	if _, err := conn.Exec(ctx, "CREATE DATABASE "+name); err != nil {
 		t.Fatalf("create database %s: %v", name, err)
 	}
-	_ = conn.Close(ctx)
+	return strings.TrimSuffix(adminDSN, "/postgres") + "/" + name
+}
 
-	pool, err := store.Open(ctx, strings.TrimSuffix(adminDSN, "/postgres")+"/"+name)
+// NewPool creates a fresh database in the shared container, migrates it, and
+// returns a pool closed at test end.
+func NewPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool, err := store.Open(context.Background(), FreshDB(t))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
