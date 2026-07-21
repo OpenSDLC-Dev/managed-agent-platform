@@ -15,6 +15,9 @@ brain:
       api_key: ci-placeholder-secret
 postgresql:
   password: "ciPlaceholderPgPass"
+minio:
+  rootUser: "ci-placeholder"
+  rootPassword: "ciPlaceholderMinio"
 otlp:
   endpoint: "otel-collector.observability:4317"
   insecure: true

@@ -64,15 +64,16 @@ internal/
   worker/     # BYOC worker — the customer-hosted twin of executor/, wire-only
   toolset/    # the built-in tools (agent_toolset_20260401)
   sandbox/    # Sandbox/Provider iface + docker/ + k8s/ + backend selection + shell/
+  blob/       # object-storage seam: Store iface + s3/ (S3-compatible via minio-go)
   queue/      # work queue (Postgres FOR UPDATE SKIP LOCKED; redis optional later)
   telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
   store/      # Postgres schema/migrations, reserved multi-tenant columns
 deploy/{helm,compose}
 ```
 
-(Plus test-support: `internal/{pgtest,modeltest}`, `internal/sandbox/sandboxtest`, and the top-level `evals/` live suite. There is no `internal/mcp` or `internal/policy`: no MCP client is built yet, and permission policy lives across `domain`/`toolset`/`brain`/`api`.) What each package's files actually do: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) → "Package reference".
+(Plus test-support: `internal/{pgtest,modeltest}`, `internal/sandbox/sandboxtest`, `internal/blob/blobtest`, and the top-level `evals/` live suite. There is no `internal/mcp` or `internal/policy`: no MCP client is built yet, and permission policy lives across `domain`/`toolset`/`brain`/`api`.) What each package's files actually do: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) → "Package reference".
 
-Primary deps: `github.com/anthropics/anthropic-sdk-go`, `go.opentelemetry.io/otel` (+ OTLP), `github.com/jackc/pgx`. Neither `github.com/modelcontextprotocol/go-sdk` (no MCP client yet) nor `google.golang.org/adk/v2` is a dependency.
+Primary deps: `github.com/anthropics/anthropic-sdk-go`, `go.opentelemetry.io/otel` (+ OTLP), `github.com/jackc/pgx`, `github.com/minio/minio-go` (S3-compatible blob storage). Neither `github.com/modelcontextprotocol/go-sdk` (no MCP client yet) nor `google.golang.org/adk/v2` is a dependency.
 
 ## Development
 
@@ -85,10 +86,10 @@ make verify               # the whole Go gate: build + crossbuild + vet + fmt-ch
 make build crossbuild     # host build + linux/arm cross-compile of ./internal/... (worker portability)
 make vet fmt-check        # lint
 make test cover-gate      # go test -count=1 with the coverage profile, then the ≥90% gate
-docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres(+Jaeger)
+docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres+MinIO(+Jaeger)
 ```
 
-CI (`.github/workflows/ci.yml`) invokes the same targets, so the gate cannot drift between the docs, the verifier, and the merge check. The coverage gate is **total statement coverage ≥ 90%** over the **logic packages** under `./internal/...` — deliberately outside the denominator: `cmd/` main glue and the test-support packages (`internal/pgtest`, `internal/sandbox/sandboxtest`, `internal/modeltest`), whose uncovered statements are the branches that fire only when a suite fails or a live tier is misconfigured. `make test` needs Docker (store/API/sandbox suites) and a Kubernetes cluster (the K8s sandbox contract test; a local kind cluster works) — a missing daemon or cluster is a hard failure, not a skip.
+CI (`.github/workflows/ci.yml`) invokes the same targets, so the gate cannot drift between the docs, the verifier, and the merge check. The coverage gate is **total statement coverage ≥ 90%** over the **logic packages** under `./internal/...` — deliberately outside the denominator: `cmd/` main glue and the test-support packages (`internal/pgtest`, `internal/sandbox/sandboxtest`, `internal/modeltest`, `internal/blob/blobtest`), whose uncovered statements are the branches that fire only when a suite fails or a live tier is misconfigured. `make test` needs Docker (store/API/sandbox suites) and a Kubernetes cluster (the K8s sandbox contract test; a local kind cluster works) — a missing daemon or cluster is a hard failure, not a skip.
 
 `.env` (gitignored) holds the model endpoint for real end-to-end integration verification: `MODEL_PROTOCOL` (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID`. Never commit real credentials. `internal/modeltest` reads them for the tiers that call a real endpoint, and owns their opt-in contract: the file supplies configuration, an environment variable supplies consent (`RUN_LIVE_MODEL_TESTS=1` for the provider live-contract tests, `RUN_EVALS=1` for the eval suite being built), and once opted in, missing configuration fails rather than skips. So `make test` never spends money, and a rotted credential never masquerades as a green build. The tiers, and the eval system built on them, were planned in [docs/plan/02_evals-system.md](./docs/plan/02_evals-system.md).
 

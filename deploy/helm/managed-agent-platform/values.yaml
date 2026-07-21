@@ -107,9 +107,45 @@ postgresql:
 externalDatabase:
   url: ""
 
+# -- In-cluster MinIO: S3-compatible object storage for skill archives
+# (docs/plan/06_skills.md). Same shape and rationale as the bundled Postgres —
+# a hand-written single-node StatefulSet, deliberately not a subchart (air-gap
+# self-hosting must not require pulling an external chart), fine for dev/POC;
+# production should disable it and point externalObjectStorage at storage with
+# its own backup/upgrade lifecycle. The platform speaks plain S3 — any
+# compatible store works.
+minio:
+  enabled: true
+  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+  # -- REQUIRED when minio.enabled: the chart does NOT auto-generate credentials,
+  # for the same GitOps-render-stability reason as postgresql.password. MinIO
+  # requires a rootPassword of at least 8 characters.
+  rootUser: ""
+  rootPassword: ""
+  bucket: map-blob
+  storage: 8Gi
+  storageClassName: ""  # empty uses the cluster default StorageClass
+  resources: {}
+  # MinIO listens on the standard 9000; not configurable for the bundled instance.
+  # The bundled instance serves plain HTTP inside the cluster (blob-tls=false),
+  # like the bundled Postgres; use externalObjectStorage with tls for TLS.
+
+# -- External S3-compatible object storage, used when minio.enabled is false.
+# endpoint is host:port (no scheme; tls picks the scheme). Leaving endpoint
+# empty with minio disabled deploys without object storage: the platform runs,
+# skills features are unavailable.
+externalObjectStorage:
+  endpoint: ""
+  accessKey: ""
+  secretKey: ""
+  bucket: ""
+  region: ""
+  tls: true
+
 # -- Reference a pre-created Secret instead of letting the chart create one. When
 # set, the chart creates NO Secret and every process reads credentials from this
 # one, which must carry keys: controlplane-api-key, model-providers.json,
-# database-url. Incompatible with postgresql.enabled (bring your own DB in this
-# mode) — the chart fails the render if both are set.
+# database-url (plus the blob-* keys if object storage is in use). Incompatible
+# with postgresql.enabled and minio.enabled (bring your own backing services in
+# this mode) — the chart fails the render otherwise.
 existingSecret: ""
