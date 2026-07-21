@@ -35,14 +35,16 @@ existing stance (DIVERGENCES.md "anthropic-version / anthropic-beta headers").
 | `DELETE /v1/skills/{skill_id}` | 400 until every version is deleted; response `{id, type:"skill_deleted"}` |
 | `POST /v1/skills/{skill_id}/versions` | multipart; **no** `display_title` field |
 | `GET /v1/skills/{skill_id}/versions` | cursor list; `?limit=` max **1000** (differs from the skills list's 100) |
-| `GET/DELETE .../versions/{version}` | `{version}` slot takes **only** the epoch-timestamp string — never the object id, never `latest` |
+| `GET/DELETE .../versions/{version}` | `{version}` slot is documented as the epoch-timestamp string only — `latest` is rejected there; whether the object id is also tolerated is unrecorded (see the recording checklist) — implement timestamp-only |
 | `GET .../versions/{version}/content` | archive download; client sends `Accept: application/binary` |
 
 ### Objects
 
 Skill: `{id, created_at, updated_at, display_title, latest_version, source
-("custom"|"anthropic"), type:"skill"}` — timestamps are ISO **strings** on this surface
-(betaskill.go:117-158), unlike the managed-agents resources. Skill version: `{id,
+("custom"|"anthropic"), type:"skill"}` — timestamps are typed as plain ISO-8601
+**strings** in the SDK on this surface (betaskill.go:117-158); the wire format is the
+same ISO string the managed-agents resources emit, only the SDK's Go typing differs
+(`string` here vs `time.Time` there). Skill version: `{id,
 created_at, description, directory, name, skill_id, type:"skill_version", version}` —
 `name`/`description` extracted from SKILL.md frontmatter, `directory` from the uploaded
 filenames, `version` a server-minted Unix-epoch-microseconds string
@@ -65,28 +67,36 @@ entry"):
    top-level entry (detected by magic bytes here; detection method is an inference).
 
 `directory` is *extracted* from the upload (common root segment, or the zip's top entry),
-then validated against SKILL.md's `name` case- and underscore-insensitively. Validation:
-SKILL.md at the directory root; `name` ≤64 chars, lowercase/digits/hyphens only, no XML
+then validated against SKILL.md's `name` case- and underscore-insensitively. Validation
+(per the skills-guide): SKILL.md at the directory root; `name` ≤64 chars,
+lowercase/digits/hyphens only, no XML
 tags, no reserved words "anthropic"/"claude"; `description` non-empty ≤1024 chars, no XML
 tags; total ≤30 MB; unknown frontmatter keys tolerated. `display_title` defaults from
 `name` and must be unique among the workspace's custom skills. The `ant` CLI can only
 emit the zip form (it basenames every part filename — anthropic-cli
-pkg/cmd/flagoptions.go:577), which makes it the canonical compatibility probe.
+pkg/cmd/flagoptions.go, `openFileUpload`), which makes it the canonical compatibility
+probe.
 
 ### Pagination
 
 `pagination.PageCursor`: envelope `{data, next_page}`, `?page=` token — exactly the
 shape `internal/api/page.go` already produces; `listAgents` is the handler template. The
 only friction is the versions list's documented max limit of 1000 vs `maxLimit = 100`;
-the limit becomes a per-resource parameter.
+the versions list reuses `page.go`'s existing per-resource mechanism (`parsePageMax`,
+as the session-events list already does with `maxEventLimit = 1000`).
 
 ### Agent references and runtime semantics
 
 - `skills[]` entries are a discriminated union `{type: "anthropic"|"custom", skill_id,
   version?}`. Anthropic skill_ids are short names (`xlsx`, `pptx`, `docx`, `pdf`) with
-  date-based versions; custom ids are `skill_`-tagged. Docs mark `version` "Custom
-  skills only". Up to **500 skills per session**. Skills are not session-updatable
-  (matches the existing tools/mcp_servers-only update rule).
+  date-based versions; custom ids are `skill_`-tagged. The managed-agents docs' field
+  table marks `version` "Custom skills only", but the pinned SDK gives **both** variants
+  the same optional `Version` ("Version to pin. Defaults to latest if omitted." —
+  betaagent.go:1123-1124, 1178-1179) and both resolved response types require it — so
+  validation accepts `version` on both types (as `parseSkills` already does); the
+  docs-vs-SDK discrepancy is recorded with slice 2's inferences. Up to **500 skills per
+  session**, counted across every agent (managed-agents/skills docs). Skills are not
+  session-updatable (matches the existing tools/mcp_servers-only update rule).
 - **`"latest"` persists verbatim.** The reference does *not* resolve versions at
   agent/session create: docs say an omitted version "Defaults to `latest` when omitted"
   and the create examples pass the literal; the SDK's own worker resolves the alias to a
@@ -170,10 +180,10 @@ with code; the listed DIVERGENCES.md entries land in the slice that creates the 
 1. **Blob store foundation** — `internal/blob` interface + `blob/s3` (minio-go);
    contract suite + MinIO test-container harness (test-support package excluded from the
    coverage denominator like `pgtest`); compose MinIO service; helm `minio.yaml` +
-   `externalObjectStorage` + secret/values/README updates; blob op metrics. *This plan
-   file and the DIVERGENCES.md skills-entry correction land here (already landed if you
-   are reading this on `main`).* Acceptance: contract suite green against a real MinIO
-   container; compose smoke still green.
+   `externalObjectStorage` + secret/values/README updates; blob op metrics. *(The plan
+   itself and the DIVERGENCES.md skills-entry correction land in their own docs PR ahead
+   of this slice.)* Acceptance: contract suite green against a real MinIO container;
+   compose smoke still green.
 2. **Skills registry API** — migration `0007_skills.sql` (`skills` + `skill_versions`,
    the standard org/workspace/project columns, partial-unique `display_title` for
    custom, `latest_version` maintained transactionally); `skillver_` prefix in
@@ -238,12 +248,13 @@ labels** (unbounded — ids go in logs and span attributes); labels are bounded
 
 Slice 2: zip-form detection by magic bytes; `anonymous_file`/flat-basename rejection;
 upload error shapes; download response headers; `display_title` uniqueness case
-handling; version list limit 1000. Slice 3: operator-import provisioning of
-anthropic-source skills and date-version minting (deliberate divergence — the reference
-hosts these itself). Slice 4: no create-time existence validation; materialization
-timing (sandbox provision, not session create). Slice 5: the Level-1 injection template;
-no wire skill-lifecycle events. Already carried by slice 1's PR: the corrected
-"latest"-normalization entry.
+handling; the docs-vs-SDK discrepancy on anthropic-skill `version` (docs field table
+says custom-only, the SDK carries it on both variants). Slice 3: operator-import
+provisioning of anthropic-source skills and date-version minting (deliberate divergence
+— the reference hosts these itself). Slice 4: no create-time existence validation;
+materialization timing (sandbox provision, not session create). Slice 5: the Level-1
+injection template; no wire skill-lifecycle events. Already carried by the plan's own
+docs PR: the corrected "latest"-normalization entry.
 
 ## Recording checklist (deferred until credentials exist)
 
