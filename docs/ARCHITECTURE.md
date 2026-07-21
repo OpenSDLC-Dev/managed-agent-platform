@@ -352,6 +352,11 @@ four binaries, loopback-bound control plane, optional Jaeger profile).
   host filesystem access; the toolset does no lexical path confinement that a `bash`
   call could walk around, because the container itself is the wall.
 
+How these invariants divide between what the platform enforces and what a self-hosting
+operator must configure — sandbox image hardening, capability drops, non-root execution,
+read-only rootfs, egress policy, environment-key rotation — is
+[docs/self-hosted-security.md](./self-hosted-security.md).
+
 ## Observability
 
 OpenTelemetry is built in, not bolted on. Trace context propagates as W3C `traceparent`

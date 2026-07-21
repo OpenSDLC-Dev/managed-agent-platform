@@ -13,6 +13,25 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Added
+
+- **Self-hosted shared-responsibility security model** ([docs/self-hosted-security.md](./docs/self-hosted-security.md))
+  ([#49](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/49)) — a new
+  operator-facing doc that draws the line between what the platform enforces in code and
+  what a self-hosting operator must configure. It covers the six dimensions the security
+  seam names — sandbox image hardening, dropping Linux capabilities, non-root execution,
+  read-only rootfs, egress restriction, and environment-key rotation — plus host/runtime
+  isolation and the single-tenant Docker-daemon trust assumption. Deliberately honest
+  about the current split: the platform enforces credential isolation, scoped/hashed
+  auth, no-ServiceAccount-token sandbox pods, and fail-closed `limited` egress, while
+  capability drops, non-root, read-only rootfs, and default-case egress policy are
+  operator-owned at the runtime layer today (the sandbox sets no `securityContext`), each
+  cross-linked to its tracking issue ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43),
+  [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
+  [#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50)). Linked from
+  README.md and cross-referenced from docs/ARCHITECTURE.md's Security invariants section.
+  Documentation only — no code or wire change.
+
 ### Changed
 
 - **Test infrastructure: the three private Docker-Postgres harnesses fold into `internal/pgtest`**
