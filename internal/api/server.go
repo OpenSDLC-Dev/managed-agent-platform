@@ -133,12 +133,13 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store) http.Handler {
 // dispatchAuth picks the auth scheme by path and runs it before the router, so
 // no request reaches a handler — or a ServeMux redirect — unauthenticated. Work
 // API paths take the Authorization: Bearer environment key; the session events
-// subtree is dual-auth (a worker's Bearer key or the management x-api-key);
-// everything else takes the management x-api-key.
+// subtree and the skill read routes are dual-auth (a worker's Bearer key or the
+// management x-api-key); everything else takes the management x-api-key.
 func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	work := requireEnvironmentKey(pool, next)
 	mgmt := requireAPIKey(pool, next)
 	sessionEvents := dispatchSessionEventsAuth(pool, next)
+	skillReads := dualAuth(requireEnvironmentKey(pool, next), mgmt)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Classify on the escaped path, splitting only on real '/' — the segment
 		// structure ServeMux routes on (an encoded %2F stays within one segment).
@@ -160,9 +161,24 @@ func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			work.ServeHTTP(w, r)
 		case isSessionEventsPath(p), r.Method == http.MethodGet && isBareSessionPath(p):
 			sessionEvents.ServeHTTP(w, r)
+		case r.Method == http.MethodGet && isSkillReadPath(p):
+			skillReads.ServeHTTP(w, r)
 		default:
 			mgmt.ServeHTTP(w, r)
 		}
+	})
+}
+
+// dualAuth picks between a worker's environment-key lane and management auth
+// by the rule dispatchSessionEventsAuth documents: the env lane only when a
+// Bearer is present AND no non-empty x-api-key is; otherwise management.
+func dualAuth(env, mgmt http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := bearerToken(r); ok && r.Header.Get("x-api-key") == "" {
+			env.ServeHTTP(w, r)
+			return
+		}
+		mgmt.ServeHTTP(w, r)
 	})
 }
 
@@ -181,15 +197,7 @@ func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 // environment. Mutating session CRUD (create/update/delete/archive/list) is not
 // routed here, so the environment key never reaches it.
 func dispatchSessionEventsAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
-	env := requireEnvironmentKeyForSession(pool, next)
-	mgmt := requireAPIKey(pool, next)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := bearerToken(r); ok && r.Header.Get("x-api-key") == "" {
-			env.ServeHTTP(w, r)
-			return
-		}
-		mgmt.ServeHTTP(w, r)
-	})
+	return dualAuth(requireEnvironmentKeyForSession(pool, next), requireAPIKey(pool, next))
 }
 
 // isWorkPath reports whether p is under a work API route:
@@ -241,6 +249,40 @@ func splitSession(p string) (id, sub string, ok bool) {
 func isSessionEventsPath(p string) bool {
 	_, sub, ok := splitSession(p)
 	return ok && (sub == "events" || sub == "events/stream")
+}
+
+// isSkillReadPath reports whether p is a skill read route: /v1/skills/{id},
+// its versions list, a version get, or the /content download. A GET on these
+// is what the reference worker's SetupSkills performs with its environment
+// key (resolve "latest" over the versions list → version get → download), so
+// they join the dual-auth set; skills are workspace-global resources every
+// environment's sandboxes consume, so a valid key from any environment may
+// read them — there is no per-environment scoping to enforce. The collection
+// list /v1/skills and every mutation stay management-only. Like the other
+// predicates this sees the escaped path, so a %2F can never smuggle a skills
+// segment past the router's view.
+func isSkillReadPath(p string) bool {
+	const prefix = "/v1/skills/"
+	if !strings.HasPrefix(p, prefix) {
+		return false
+	}
+	segs := strings.Split(p[len(prefix):], "/")
+	for _, s := range segs {
+		if s == "" {
+			return false
+		}
+	}
+	switch len(segs) {
+	case 1: // {id}
+		return true
+	case 2: // {id}/versions
+		return segs[1] == "versions"
+	case 3: // {id}/versions/{version}
+		return segs[1] == "versions"
+	case 4: // {id}/versions/{version}/content
+		return segs[1] == "versions" && segs[3] == "content"
+	}
+	return false
 }
 
 // isBareSessionPath reports whether p is exactly /v1/sessions/{id} — a single

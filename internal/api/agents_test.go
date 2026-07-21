@@ -170,6 +170,17 @@ func TestAgentCreateModelObjectAndFullConfig(t *testing.T) {
 		t.Errorf(`omitted skill version = %v, want "latest"`, entry["version"])
 	}
 
+	// At most 500 skills per session (the reference's published cap); a v1
+	// session resolves exactly one agent, so the cap binds at the skills list.
+	many := make([]any, 501)
+	for i := range many {
+		many[i] = map[string]any{"type": "custom", "skill_id": fmt.Sprintf("skill_%022d", i)}
+	}
+	status, obj := s.do(http.MethodPost, "/v1/agents", map[string]any{
+		"name": "too-many", "model": "m", "skills": many,
+	})
+	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+
 	// The stored resource survives a GET unchanged.
 	status, got := s.do(http.MethodGet, "/v1/agents/"+res["id"].(string), nil)
 	if status != http.StatusOK {

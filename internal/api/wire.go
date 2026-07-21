@@ -379,14 +379,23 @@ func parseMCPServers(raw json.RawMessage) ([]json.RawMessage, error) {
 	return items, nil
 }
 
+// maxSkillsPerSession is the reference's published cap, counted across every
+// agent — a v1 session resolves exactly one agent, so it binds on that
+// agent's skills[] (base spec and session override alike).
+const maxSkillsPerSession = 500
+
 // parseSkills validates skills[]: {type:"anthropic"|"custom", skill_id,
 // version?}. The response-side skill carries a required version, and the
 // reference defaults an omitted one to the latest — we normalize to the
-// literal "latest" (nothing resolves skill versions yet).
+// literal "latest"; resolution happens at use time (materialization,
+// injection), never at create.
 func parseSkills(raw json.RawMessage) ([]json.RawMessage, error) {
 	items, err := rawList(raw, "skills")
 	if err != nil {
 		return nil, err
+	}
+	if len(items) > maxSkillsPerSession {
+		return nil, errInvalid("skills lists at most %d entries per session", maxSkillsPerSession)
 	}
 	for i, item := range items {
 		var probe struct {

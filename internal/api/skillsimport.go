@@ -119,8 +119,15 @@ func importSkillDir(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, d
 		bundle.Name, bundle.Description, bundle.Directory); err != nil {
 		return name, err
 	}
+	// latest_version follows the numerically newest version (length-then-
+	// lexical over digit strings — the reference worker's own "latest" rule),
+	// so backfilling an older date never regresses it and both execution
+	// halves resolve the alias identically.
 	if _, err := tx.Exec(ctx,
-		`UPDATE skills SET latest_version = $2, updated_at = now() WHERE id = $1`,
+		`UPDATE skills SET latest_version = $2, updated_at = now()
+		 WHERE id = $1 AND (latest_version IS NULL
+		   OR length($2::text) > length(latest_version)
+		   OR (length($2::text) = length(latest_version) AND $2 > latest_version))`,
 		name, version); err != nil {
 		return name, err
 	}

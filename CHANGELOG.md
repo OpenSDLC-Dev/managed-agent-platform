@@ -15,6 +15,25 @@ copy of an entry here.
 
 ### Added
 
+- **Skills runtime materialization (skills plan, slice 4)**
+  ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — a session's
+  `agent.skills[]` now materialize into the sandbox at `{workdir}/skills/<name>/` before its
+  tools run, on both deployment points. The **executor** (platform half) resolves versions at
+  use time (`latest` against the registry's `latest_version`), reads archives from object
+  storage (new `BLOB_*` env on the executor; compose/helm wired), and writes files through the
+  sandbox seam; the **worker** (BYOC half) is the wire-only twin of the reference SDK's
+  SetupSkills — session GET, alias resolution over the versions list (newest numeric wins),
+  version GET, `/content` download, all under the environment key, whose dual-auth lane now
+  serves the skill read+download routes (mutations and the collection list stay
+  management-only). Extraction enforces the reference guards (escape refusal, 10k members,
+  1 GiB decompressed — `skills.Extract`, shared by both halves); per-skill failure is logged
+  and skipped, never fatal; a sentinel file records the resolved set so re-entrant
+  provisioning skips rewriting unchanged skills. The reference's published **500 skills per
+  session** cap now binds at agent create and session overrides. Observability:
+  `skills_materialize` child span, `skills.materialized` counter{outcome} and
+  `skills.materialize.duration` histogram under each half's own meter scope, a log line per
+  skipped skill.
+
 - **Anthropic prebuilt skills: the run-once operator import (skills plan, slice 3)**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — `controlplane
   -import-anthropic-skills <checkout>` imports skill directories from a local checkout of

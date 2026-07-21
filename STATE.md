@@ -23,7 +23,9 @@ execution, per [docs/plan/06_skills.md](./docs/plan/06_skills.md) (in-progress s
       acceptance passed — real checkout imported, `ant beta:skills list --source anthropic`
       shows the four document skills (docs/HISTORY.md, 2026-07-22). PR
       [#147](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/147).
-- [ ] Slice 4 — runtime materialization: env-key lane for skills reads, executor post-Provision
-      + worker twin, 500-cap validation; `ant beta:worker` transcript.
+- [x] Slice 4 — runtime materialization: skill reads join the env-key dual-auth lane; executor
+      post-Provision materialization (blob-sourced, sentinel idempotence) + wire-only worker
+      SetupSkills twin, shared `skills.Extract` guards; 500-cap at agent create/overrides;
+      spans+metrics both halves. PR #148.
 - [ ] Slice 5 — brain Level-1 injection, evals E2E task, remaining DIVERGENCES entries, docs
       closure, archive the plan, close #54.

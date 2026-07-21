@@ -86,9 +86,10 @@ func checkSkillVersion(v string) error {
 	return nil
 }
 
-// skillBlobKey is the object-storage key layout documented in internal/blob.
+// skillBlobKey is the object-storage key layout documented in internal/blob,
+// shared with the executor's materialization via skills.BlobKey.
 func skillBlobKey(skillID, version string) string {
-	return "skills/" + skillID + "/" + version + ".zip"
+	return skills.BlobKey(skillID, version)
 }
 
 // errSkillsUnavailable answers the storage-backed skill routes on a

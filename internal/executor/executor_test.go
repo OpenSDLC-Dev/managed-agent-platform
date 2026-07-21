@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
@@ -120,6 +121,7 @@ type harness struct {
 	queue *queue.Queue
 	exec  *Executor
 	prov  *fakeProvider
+	blobs *blobtest.MemStore
 	sid   domain.ID
 	envID domain.ID
 }
@@ -149,9 +151,9 @@ func newHarnessWith(t *testing.T, provider sandbox.Provider, cfg Config) *harnes
 	}
 	h := &harness{
 		pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
-		sid: sid, envID: envID,
+		blobs: blobtest.Mem(), sid: sid, envID: envID,
 	}
-	h.exec = New(pool, h.log, h.queue, provider, cfg)
+	h.exec = New(pool, h.log, h.queue, provider, h.blobs, cfg)
 	return h
 }
 

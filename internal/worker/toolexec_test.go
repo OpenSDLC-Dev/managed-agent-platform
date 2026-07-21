@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
@@ -89,6 +90,7 @@ type harness struct {
 	pool      *pgxpool.Pool
 	log       *events.Log
 	prov      *fakeProvider
+	blobs     *blobtest.MemStore
 	client    sdk.Client
 	run       func() error
 	serverURL string
@@ -120,7 +122,8 @@ func newHarnessWrapped(t *testing.T, sb *fakeSandbox, wrap func(http.Handler) ht
 	if err := api.EnsureEnvironmentKey(ctx, pool, envID.String(), workerKey); err != nil {
 		t.Fatalf("ensure env key: %v", err)
 	}
-	var handler http.Handler = api.NewHandler(pool, nil)
+	blobs := blobtest.Mem()
+	var handler http.Handler = api.NewHandler(pool, blobs)
 	if wrap != nil {
 		handler = wrap(handler)
 	}
@@ -130,7 +133,7 @@ func newHarnessWrapped(t *testing.T, sb *fakeSandbox, wrap func(http.Handler) ht
 	prov := &fakeProvider{sb: sb}
 	client := NewClient(srv.URL, workerKey)
 	return &harness{
-		pool: pool, log: events.NewLog(pool), prov: prov, client: client, serverURL: srv.URL, sid: sid, envID: envID,
+		pool: pool, log: events.NewLog(pool), prov: prov, blobs: blobs, client: client, serverURL: srv.URL, sid: sid, envID: envID,
 		run: func() error {
 			return RunSessionTools(ctx, client, prov, sid.String(), ToolExecConfig{})
 		},

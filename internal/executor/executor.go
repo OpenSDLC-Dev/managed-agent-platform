@@ -31,6 +31,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -80,14 +81,17 @@ type Executor struct {
 	log      *events.Log
 	queue    *queue.Queue
 	provider sandbox.Provider
-	cfg      Config
+	// blobs sources skill archives for materialization; nil (a storage-less
+	// deploy) skips materialization with a log line, never a fault.
+	blobs blob.Store
+	cfg   Config
 	// onFault, when set, receives every per-item fault. Left nil in production
 	// (the queue's reclaim is the recovery); tests set it to observe faults.
 	onFault func(*queue.Item, error)
 }
 
-func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.Provider, cfg Config) *Executor {
-	return &Executor{pool: pool, log: log, queue: q, provider: provider, cfg: cfg.withDefaults()}
+func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.Provider, blobs blob.Store, cfg Config) *Executor {
+	return &Executor{pool: pool, log: log, queue: q, provider: provider, blobs: blobs, cfg: cfg.withDefaults()}
 }
 
 // Run polls until the context is cancelled. It claims one tool_exec item at a
@@ -175,7 +179,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// re-running its tools each lease period; this mirrors the brain's
 	// claimLiveSession. Loading the egress policy under the same lock keeps it
 	// to one round trip.
-	net, live, err := e.sessionForRun(ctx, item)
+	net, skillRefs, live, err := e.sessionForRun(ctx, item)
 	if err != nil || !live {
 		return err
 	}
@@ -187,7 +191,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// losing the lease cancels the work.
 	kctx, keeper := e.keepLease(ctx, item)
 
-	results, faultErr, runErr := e.provisionAndRun(kctx, item, net)
+	results, faultErr, runErr := e.provisionAndRun(kctx, item, net, skillRefs)
 	if kerr := keeper.close(); kerr != nil {
 		// The lease is gone — another executor may already own this item.
 		// Nothing of ours may commit; the results we ran are re-derived on the
@@ -242,7 +246,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 // append, the first backend fault a tool hit (nil if every tool ran), and a
 // setup error from provisioning or reading the log — which stops the item with
 // nothing committed, distinct from a tool fault, which commits what did run.
-func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, net domain.Networking) ([]events.NewEvent, error, error) {
+func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, net domain.Networking, refs []skillRef) ([]events.NewEvent, error, error) {
 	sb, err := e.provider.Provision(ctx, sandbox.Spec{
 		SessionID:  item.SessionID,
 		Image:      e.cfg.Image,
@@ -252,6 +256,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, net do
 	if err != nil {
 		return nil, nil, fmt.Errorf("provision sandbox: %w", err)
 	}
+	e.materializeSkills(ctx, sb, item.SessionID, refs)
 	uses, err := e.unansweredToolUses(ctx, item.SessionID)
 	if err != nil {
 		return nil, nil, err
@@ -310,47 +315,56 @@ func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, erro
 	return events.NewEvent{Type: domain.EventAgentToolResult, Payload: payload}, nil
 }
 
-// sessionForRun loads the session's egress policy under its row lock and
-// reports whether the session is still live for tool execution. A session that
-// is not running, or has been archived, is stale: its tool_exec item is
-// completed here and false is returned, so a dead session cannot reclaim-loop
-// (every append the run would make is rejected). A session that no longer
-// exists took its cascade-deleted work item with it, so there is nothing to
-// drain. Mirrors the brain's claimLiveSession.
-func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (domain.Networking, bool, error) {
+// sessionForRun loads the session's egress policy and its snapshot's skills
+// references under its row lock, and reports whether the session is still
+// live for tool execution. A session that is not running, or has been
+// archived, is stale: its tool_exec item is completed here and false is
+// returned, so a dead session cannot reclaim-loop (every append the run would
+// make is rejected). A session that no longer exists took its cascade-deleted
+// work item with it, so there is nothing to drain. Mirrors the brain's
+// claimLiveSession. Reading skills here keeps the run to one session read —
+// a second, later read would add a transient-failure point that faults the
+// whole item.
+func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (domain.Networking, []skillRef, bool, error) {
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
-		return domain.Networking{}, false, err
+		return domain.Networking{}, nil, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var status string
 	var archivedAt *time.Time
-	var configJSON []byte
+	var configJSON, agentJSON []byte
 	err = tx.QueryRow(ctx,
-		`SELECT s.status, s.archived_at, e.config
+		`SELECT s.status, s.archived_at, e.config, s.resolved_agent
 		   FROM sessions s JOIN environments e ON e.id = s.environment_id
 		  WHERE s.id = $1 FOR UPDATE OF s`,
-		item.SessionID.String()).Scan(&status, &archivedAt, &configJSON)
+		item.SessionID.String()).Scan(&status, &archivedAt, &configJSON, &agentJSON)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Networking{}, false, nil
+		return domain.Networking{}, nil, false, nil
 	}
 	if err != nil {
-		return domain.Networking{}, false, err
+		return domain.Networking{}, nil, false, err
 	}
 
 	if status != string(domain.SessionRunning) || archivedAt != nil {
 		if err := e.queue.Complete(ctx, tx, item); err != nil {
-			return domain.Networking{}, false, err
+			return domain.Networking{}, nil, false, err
 		}
-		return domain.Networking{}, false, tx.Commit(ctx)
+		return domain.Networking{}, nil, false, tx.Commit(ctx)
 	}
 
 	var cfg domain.EnvironmentConfig
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {
-		return domain.Networking{}, false, err
+		return domain.Networking{}, nil, false, err
 	}
-	return cfg.Networking, true, tx.Commit(ctx)
+	var agent struct {
+		Skills []skillRef `json:"skills"`
+	}
+	if err := json.Unmarshal(agentJSON, &agent); err != nil {
+		return domain.Networking{}, nil, false, err
+	}
+	return cfg.Networking, agent.Skills, true, tx.Commit(ctx)
 }
 
 // report is where per-item faults surface. The queue's reclaim is the recovery
