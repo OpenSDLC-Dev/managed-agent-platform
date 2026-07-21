@@ -121,6 +121,17 @@ func TestMaterializesSkills(t *testing.T) {
 	if got := sb.files["/workspace/skills/research-notes/SKILL.md"]; got != "# v2" {
 		t.Errorf("latest bump not rematerialized: %q", got)
 	}
+
+	// The workdir is agent-writable: a tool call deleting a skill tree while
+	// the marker survives must not be trusted — the next pass restores it.
+	delete(sb.files, "/workspace/skills/research-notes/SKILL.md")
+	h.suspend(t, writeUse("out4.txt", "fourth"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("fourth step: %v", err)
+	}
+	if got := sb.files["/workspace/skills/research-notes/SKILL.md"]; got != "# v2" {
+		t.Errorf("deleted skill not restored: %q", got)
+	}
 }
 
 func TestMaterializeToleratesPerSkillFailure(t *testing.T) {

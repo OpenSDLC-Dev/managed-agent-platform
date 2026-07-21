@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -86,27 +85,32 @@ func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sa
 	if workdir == "" {
 		workdir = sandbox.DefaultWorkdir
 	}
+	// The skip needs the marker to match the resolved set AND the recorded
+	// trees to still hold their SKILL.md — the workdir is agent-writable, so
+	// a tool call may have deleted skills the marker still claims.
 	sentinelPath := path.Join(workdir, "skills", skills.SentinelName)
 	if misses == 0 {
-		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil && bytes.Equal(prev, skills.Sentinel(resolved)) {
+		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil &&
+			skills.SentinelMatches(ctx, sb.ReadFile, workdir, prev, resolved) {
 			span.SetAttributes(attribute.Bool("skills.unchanged", true))
 			return nil
 		}
 	}
 
-	succeeded := map[string]string{}
+	var landed []skills.SentinelEntry
 	for _, id := range order {
 		version := resolved[id]
-		if err := materializeSkill(ctx, client, sb, workdir, id, version); err != nil {
+		dir, err := materializeSkill(ctx, client, sb, workdir, id, version)
+		if err != nil {
 			skipSkill(ctx, sessionID, id, version, err)
 			continue
 		}
-		succeeded[id] = version
+		landed = append(landed, skills.SentinelEntry{ID: id, Version: version, Dir: dir})
 		recordSkillMaterialized(ctx, skillOutcomeOK)
 		slog.InfoContext(ctx, "skill materialized", "session_id", sessionID, "skill_id", id, "version", version)
 	}
-	span.SetAttributes(attribute.Int("skills.materialized", len(succeeded)))
-	if err := sb.WriteFile(ctx, sentinelPath, skills.Sentinel(succeeded)); err != nil {
+	span.SetAttributes(attribute.Int("skills.materialized", len(landed)))
+	if err := sb.WriteFile(ctx, sentinelPath, skills.Sentinel(landed)); err != nil {
 		slog.WarnContext(ctx, "skills sentinel not written", "session_id", sessionID, "err", err)
 	}
 	return nil
@@ -160,30 +164,31 @@ func numericGreater(a, b string) bool {
 }
 
 // materializeSkill lands one skill version: version GET (for the directory
-// name), download, extract, write.
-func materializeSkill(ctx context.Context, client sdk.Client, sb sandbox.Sandbox, workdir, skillID, version string) error {
+// name), download, extract, write. Returns the directory it landed in.
+func materializeSkill(ctx context.Context, client sdk.Client, sb sandbox.Sandbox, workdir, skillID, version string) (string, error) {
 	v, err := client.Beta.Skills.Versions.Get(ctx, version, sdk.BetaSkillVersionGetParams{SkillID: skillID})
 	if err != nil {
-		return err
+		return "", err
 	}
 	resp, err := client.Beta.Skills.Versions.Download(ctx, version, sdk.BetaSkillVersionDownloadParams{SkillID: skillID})
 	if err != nil {
-		return err
+		return "", err
 	}
 	data, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil {
-		return err
+		return "", err
 	}
 	files, err := skills.Extract(data)
 	if err != nil {
-		return err
+		return "", err
 	}
-	dir := path.Join(workdir, "skills", skills.TargetDir(v.Name, skillID))
+	dir := skills.TargetDir(v.Name, skillID)
+	root := path.Join(workdir, "skills", dir)
 	for _, f := range files {
-		if err := sb.WriteFile(ctx, path.Join(dir, f.Path), f.Data); err != nil {
-			return err
+		if err := sb.WriteFile(ctx, path.Join(root, f.Path), f.Data); err != nil {
+			return "", err
 		}
 	}
-	return nil
+	return dir, nil
 }

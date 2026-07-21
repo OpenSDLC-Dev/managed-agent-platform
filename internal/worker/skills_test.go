@@ -106,6 +106,17 @@ func TestSetupSkillsOverTheWire(t *testing.T) {
 	if got := sb.files["/workspace/skills/wire-notes/SKILL.md"]; got != "mutated" {
 		t.Errorf("unchanged set was rewritten: %q", got)
 	}
+
+	// The workdir is agent-writable: a tool call deleting a skill tree while
+	// the marker survives must not be trusted — the next pass restores it.
+	delete(sb.files, "/workspace/skills/wire-notes/SKILL.md")
+	h.suspend(t, writeUse("out3.txt", "thrice"))
+	if err := h.run(); err != nil {
+		t.Fatalf("third run: %v", err)
+	}
+	if got := sb.files["/workspace/skills/wire-notes/SKILL.md"]; got != "# wire" {
+		t.Errorf("deleted skill not restored: %q", got)
+	}
 }
 
 func TestSetupSkillsTolerance(t *testing.T) {

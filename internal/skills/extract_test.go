@@ -3,6 +3,8 @@ package skills
 import (
 	"archive/zip"
 	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -120,16 +122,66 @@ func TestTargetDir(t *testing.T) {
 }
 
 func TestSentinel(t *testing.T) {
-	a := Sentinel(map[string]string{"pdf": "20260101", "skill_x": "175917"})
-	b := Sentinel(map[string]string{"skill_x": "175917", "pdf": "20260101"})
+	a := Sentinel([]SentinelEntry{
+		{ID: "pdf", Version: "20260101", Dir: "pdf"},
+		{ID: "skill_x", Version: "175917", Dir: "notes"},
+	})
+	b := Sentinel([]SentinelEntry{
+		{ID: "skill_x", Version: "175917", Dir: "notes"},
+		{ID: "pdf", Version: "20260101", Dir: "pdf"},
+	})
 	if !bytes.Equal(a, b) {
 		t.Errorf("sentinel is not order-independent: %s vs %s", a, b)
 	}
-	c := Sentinel(map[string]string{"pdf": "20260102", "skill_x": "175917"})
+	c := Sentinel([]SentinelEntry{
+		{ID: "pdf", Version: "20260102", Dir: "pdf"},
+		{ID: "skill_x", Version: "175917", Dir: "notes"},
+	})
 	if bytes.Equal(a, c) {
 		t.Error("sentinel ignores version changes")
 	}
-	if !bytes.Equal(Sentinel(nil), Sentinel(map[string]string{})) {
+	if !bytes.Equal(Sentinel(nil), Sentinel([]SentinelEntry{})) {
 		t.Error("nil and empty sets differ")
+	}
+	entries, ok := ParseSentinel(a)
+	if !ok || len(entries) != 2 || entries[0].ID != "pdf" || entries[1].Dir != "notes" {
+		t.Errorf("ParseSentinel = %v %v", entries, ok)
+	}
+	if _, ok := ParseSentinel([]byte("not json")); ok {
+		t.Error("ParseSentinel accepted garbage")
+	}
+}
+
+func TestSentinelMatches(t *testing.T) {
+	files := map[string]string{"/ws/skills/notes/SKILL.md": "x"}
+	read := func(_ context.Context, p string) ([]byte, error) {
+		if data, ok := files[p]; ok {
+			return []byte(data), nil
+		}
+		return nil, errors.New("no such file")
+	}
+	data := Sentinel([]SentinelEntry{{ID: "skill_x", Version: "100", Dir: "notes"}})
+	resolved := map[string]string{"skill_x": "100"}
+
+	if !SentinelMatches(context.Background(), read, "/ws", data, resolved) {
+		t.Error("intact tree did not match")
+	}
+	// The workdir is agent-writable: a deleted skill tree must void the
+	// sentinel even though the marker bytes still match.
+	delete(files, "/ws/skills/notes/SKILL.md")
+	if SentinelMatches(context.Background(), read, "/ws", data, resolved) {
+		t.Error("matched with the skill tree gone")
+	}
+	files["/ws/skills/notes/SKILL.md"] = "x"
+	if SentinelMatches(context.Background(), read, "/ws", data,
+		map[string]string{"skill_x": "200"}) {
+		t.Error("matched a version change")
+	}
+	if SentinelMatches(context.Background(), read, "/ws", data,
+		map[string]string{"skill_x": "100", "extra": "1"}) {
+		t.Error("matched with an extra resolved skill")
+	}
+	if SentinelMatches(context.Background(), read, "/ws", []byte("junk"), resolved) {
+		t.Error("matched an unparsable sentinel")
 	}
 }

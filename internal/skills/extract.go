@@ -3,9 +3,11 @@ package skills
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -137,23 +139,57 @@ func TargetDir(name, skillID string) string {
 	return name
 }
 
-// Sentinel canonically encodes a resolved {skill_id: version} set for the
-// materialization marker file: sorted JSON, so equal sets always produce
-// equal bytes regardless of map order.
-func Sentinel(resolved map[string]string) []byte {
-	ids := make([]string, 0, len(resolved))
-	for id := range resolved {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	type entry struct {
-		ID      string `json:"skill_id"`
-		Version string `json:"version"`
-	}
-	entries := make([]entry, 0, len(ids))
-	for _, id := range ids {
-		entries = append(entries, entry{ID: id, Version: resolved[id]})
-	}
-	b, _ := json.Marshal(entries)
+// SentinelEntry is one materialized skill as the marker file records it: the
+// resolved reference plus the directory it landed in, so a later skip
+// decision can re-probe the tree without resolving names again.
+type SentinelEntry struct {
+	ID      string `json:"skill_id"`
+	Version string `json:"version"`
+	Dir     string `json:"directory"`
+}
+
+// Sentinel canonically encodes the materialized set for the marker file:
+// sorted JSON, so equal sets always produce equal bytes regardless of order.
+func Sentinel(entries []SentinelEntry) []byte {
+	sorted := make([]SentinelEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	b, _ := json.Marshal(sorted)
 	return b
+}
+
+// ParseSentinel decodes a marker file; ok is false for anything unreadable
+// (including a pre-upgrade format), which a caller treats as "materialize".
+func ParseSentinel(data []byte) ([]SentinelEntry, bool) {
+	var entries []SentinelEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, false
+	}
+	return entries, true
+}
+
+// SentinelMatches reports whether a stored marker proves the resolved
+// {skill_id: version} set is already fully materialized. The sandbox workdir
+// is agent-writable, so the marker bytes alone cannot be trusted — a tool
+// call may have deleted a skill tree while leaving the marker intact — and
+// every recorded directory must still carry its SKILL.md (canonical archives
+// always place one at the root). In-place content edits are deliberately not
+// re-checked: presence is the tractable probe, and the residual is recorded
+// in docs/DIVERGENCES.md. read is the sandbox's ReadFile, passed as a
+// function so this package needs no sandbox dependency.
+func SentinelMatches(ctx context.Context, read func(context.Context, string) ([]byte, error),
+	workdir string, data []byte, resolved map[string]string) bool {
+	entries, ok := ParseSentinel(data)
+	if !ok || len(entries) != len(resolved) {
+		return false
+	}
+	for _, e := range entries {
+		if resolved[e.ID] != e.Version {
+			return false
+		}
+		if _, err := read(ctx, path.Join(workdir, "skills", e.Dir, skillMDName)); err != nil {
+			return false
+		}
+	}
+	return true
 }
