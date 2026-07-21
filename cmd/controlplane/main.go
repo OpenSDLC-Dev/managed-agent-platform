@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
@@ -58,6 +59,13 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 	if err := api.EnsureAPIKey(ctx, pool, "bootstrap", bootKey); err != nil {
+		return err
+	}
+	// The queue depth/pending/workers_polling gauges sample the /work/stats view
+	// this process already serves. telemetry.Run installed the meter provider
+	// before run, so the global provider is live here; a disabled telemetry
+	// config leaves a no-op provider and the registration is harmless.
+	if err := queue.New(pool).RegisterMetrics(); err != nil {
 		return err
 	}
 

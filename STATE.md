@@ -4,8 +4,22 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+[#44](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/44) — emit the OTLP business
+metrics Component 6 lists that #89 did not: TTFT, cache-token breakdown, session-status counts,
+approval (HITL) wait, and queue depth/pending/workers_polling. No plan file: single-PR scope, no
+wire-schema surface (issue-triage judged `needs_plan: false`).
 
 ## Tasks
 
-None.
+- [x] `model.time_to_first_token` (brain), start boundary = work claim; no reading when a turn
+      streams no content. TDD, `internal/brain`.
+- [x] `model.cache.token.usage` (events) splits cache creation/read alongside the convention's
+      merged `gen_ai.client.token.usage`. TDD, `internal/events`.
+- [x] `session.status.transitions` (events) counted post-commit at each SetStatus commit site
+      (AppendWith, brain settle/commitUnderLock, API send). Tested in events/brain/api.
+- [x] `approval.wait.duration` (events, API-driven) measured in-DB from the requires_action idle.
+      Tested via the confirmation harness in `internal/api`.
+- [x] `queue.depth`/`pending`/`workers_polling` observable gauges over `Queue.Stats`, self_hosted
+      only, registered in `cmd/controlplane`. Mutation-checked, `internal/queue`.
+- [x] Telemetry contract test asserts every business metric name reaches an OTLP collector.
+- [ ] `make verify` green; verifier subagent PASS; dual review (Codex + Claude); PR opened.

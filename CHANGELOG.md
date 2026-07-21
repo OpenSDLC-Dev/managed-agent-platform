@@ -13,6 +13,45 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Added
+
+- **OTLP business metrics: TTFT, cache-token breakdown, session-status counts, approval wait, queue gauges**
+  ([#44](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/44)) — [#89](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/89)
+  emitted the execution-chain half of the plan's Component 6 (model-request and tool-execution
+  latency, token usage, provider error rate as an `error.type` on the duration histogram); this
+  completes the list. Every instrument follows the same rule #89 set — recorded at the point that
+  already owns the fact, so a metric can never drift from the log or the span beside it.
+
+  - **`model.time_to_first_token`** (brain) measures from the brain claiming the model turn — replay
+    and request assembly are latency the user feels — to the first content the model streams. The
+    start boundary is the work claim, per the plan's "work received → first token"; a turn that
+    streams no content (straight to a tool call) records nothing, the absent-is-not-zero rule the
+    token histogram already follows.
+  - **`model.cache.token.usage`** (events) records prompt cache tokens split into `creation` and
+    `read`. `gen_ai.client.token.usage` deliberately folds these into its input reading because the
+    convention's `gen_ai.token.type` has no cache bucket; the breakdown a long-horizon agent's cost
+    story needs lives in a platform-native instrument alongside it, not by corrupting the convention
+    — the same reason `tool.execution.duration` is not a `gen_ai.*` metric.
+  - **`session.status.transitions`** (events) counts status changes, keyed by the status entered.
+    The status column moves in one place (`AppendInTx`) but commits in several, so the count is
+    recorded at each commit site — `AppendWith`, the brain's `settle`/`commitUnderLock`, the API's
+    send handler — and only *after* the commit: a transition that rolled back on a lost lease or
+    aborted settle did not happen, and counting the attempt would inflate the metric on exactly the
+    infra churn an operator is reading.
+  - **`approval.wait.duration`** (events, recorded by the API) measures how long a session sat on a
+    `requires_action` gate before a confirmation cleared it. The interval spans a suspension the
+    brain wrote and a confirmation the API commits, so it is measured where both ends are known —
+    in the database (`clock_timestamp()` minus the requires_action idle event's `created_at`) so
+    both ends read one clock — and recorded after the resuming transaction commits.
+  - **`queue.depth` / `queue.pending` / `queue.workers_polling`** (queue) are the `/work/stats`
+    numbers as OTLP observable gauges, per self_hosted environment, sampled through a callback the
+    control plane registers once at startup. Cloud environments are left out — the executor claims
+    rather than polls, so `workers_polling` is meaningless there.
+
+  A telemetry contract test drives every business metric name through the real OTLP exporter to an
+  in-process collector, mirroring the existing traces test, so the export path — not only the
+  in-process manual readers each package already asserts values against — is covered.
+
 ### Changed
 
 - **Eval grader rigor: the four P/M/E precision and coverage-depth gaps left open by #98**
