@@ -70,9 +70,11 @@ func TestQueueStatsGaugesObserveStats(t *testing.T) {
 	prev := otel.GetMeterProvider()
 	otel.SetMeterProvider(mp)
 	t.Cleanup(func() { otel.SetMeterProvider(prev) })
-	if err := q.RegisterMetrics(); err != nil {
+	reg, err := q.RegisterMetrics()
+	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
+	t.Cleanup(func() { _ = reg.Unregister() })
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {

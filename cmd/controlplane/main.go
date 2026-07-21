@@ -65,9 +65,14 @@ func run(ctx context.Context) error {
 	// this process already serves. telemetry.Run installed the meter provider
 	// before run, so the global provider is live here; a disabled telemetry
 	// config leaves a no-op provider and the registration is harmless.
-	if err := queue.New(pool).RegisterMetrics(); err != nil {
+	reg, err := queue.New(pool).RegisterMetrics()
+	if err != nil {
 		return err
 	}
+	// Deferred after pool.Close above, so it fires first (LIFO): the meter
+	// provider's exit flush does a final collection, and the gauge callback must
+	// be gone before pool.Close shuts the pool it would query.
+	defer func() { _ = reg.Unregister() }()
 
 	srv := &http.Server{
 		Addr:    addr,

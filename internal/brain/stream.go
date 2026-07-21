@@ -75,8 +75,9 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 		switch c.Kind {
 		case provider.KindThinkingDelta:
 			// Thinking is the first content a reasoning model streams, so it is
-			// the first token whenever it comes before any text.
-			if turn.firstTokenAt.IsZero() {
+			// the first token whenever it comes before any text. Guarded on content
+			// like the text path below: a content-free thinking delta is not a token.
+			if turn.firstTokenAt.IsZero() && c.Text != "" {
 				turn.firstTokenAt = time.Now()
 			}
 			// The preview is start-only (agent.thinking carries no content);

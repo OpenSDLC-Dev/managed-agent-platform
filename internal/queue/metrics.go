@@ -38,28 +38,33 @@ const meterName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue
 // environment values (the stats are global to the database), so a dashboard must
 // read the gauge as last/max across instances, not a sum — the standard caveat
 // for a gauge sampled from shared state. v1 is single-replica.
-func (q *Queue) RegisterMetrics() error {
+//
+// The returned Registration must be Unregister-ed before the pool it reads is
+// closed: the meter provider's shutdown does a final collection, and a callback
+// that outlived the pool would query a closed pool (a benign but noisy error and
+// a dropped final sample). The control plane unregisters ahead of pool.Close.
+func (q *Queue) RegisterMetrics() (metric.Registration, error) {
 	meter := otel.GetMeterProvider().Meter(meterName)
 	depth, err := meter.Int64ObservableGauge(MetricQueueDepth,
 		metric.WithUnit("{item}"),
 		metric.WithDescription("Queued work items with no live poll reservation, per self_hosted environment."))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pending, err := meter.Int64ObservableGauge(MetricQueuePending,
 		metric.WithUnit("{item}"),
 		metric.WithDescription("Queued work items with a live poll reservation, per self_hosted environment."))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	workers, err := meter.Int64ObservableGauge(MetricQueueWorkersPolling,
 		metric.WithUnit("{worker}"),
 		metric.WithDescription("Distinct workers polling within the window, per self_hosted environment."))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	_, err = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+	return meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		envIDs, err := q.selfHostedEnvIDs(ctx)
 		if err != nil {
 			return err
@@ -76,7 +81,6 @@ func (q *Queue) RegisterMetrics() error {
 		}
 		return nil
 	}, depth, pending, workers)
-	return err
 }
 
 // selfHostedEnvIDs lists the environments whose queue the gauges report on: the

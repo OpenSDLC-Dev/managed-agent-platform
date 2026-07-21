@@ -142,13 +142,15 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// The previous claimant died mid-turn. Surface the recovery on the
 		// log before replaying, with the lease asserted in the same
 		// transaction: a claimant that already lost the item must not flip
-		// a session another brain has since settled.
-		running := domain.SessionRunning
+		// a session another brain has since settled. No SetStatus: claimLiveSession
+		// admitted this turn only because the session is already running, so the
+		// column moves nothing here — and counting a running→running no-op as a
+		// session.status.transitions event would inflate the metric on exactly the
+		// reclaim churn an operator reads it to find.
 		if _, err := b.log.AppendWith(ctx, sid, []events.NewEvent{
 			{Type: domain.EventSessionStatusRescheduled},
 			{Type: domain.EventSessionStatusRunning},
 		}, events.AppendOptions{
-			SetStatus: &running,
 			Then: func(ctx context.Context, tx pgx.Tx) error {
 				return b.queue.Assert(ctx, tx, item)
 			},
