@@ -7,6 +7,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -97,6 +98,67 @@ func suspendViaBrain(t *testing.T, s *tserver) (sessionID, askID string) {
 		t.Fatalf("tool_use evaluated_permission = %v, want ask", use["evaluated_permission"])
 	}
 	return sessionID, ids[0].(string)
+}
+
+// suspendViaBrainTwoAsks is suspendViaBrain with two ask-gated tool calls, so a
+// single confirmation leaves the gate still raised — the partial-confirmation
+// path. It returns the session id and both gated tool_use event ids in log order.
+func suspendViaBrainTwoAsks(t *testing.T, s *tserver) (sessionID string, askIDs []string) {
+	t.Helper()
+	agent := createAgent(t, s, map[string]any{
+		"name": "gated2", "model": "claude-opus-4-8",
+		"tools": []any{map[string]any{
+			"type":           "agent_toolset_20260401",
+			"default_config": map[string]any{"permission_policy": map[string]any{"type": "always_ask"}},
+		}},
+	})
+	env := createEnvironment(t, s, map[string]any{"name": "e2", "config": map[string]any{"type": "self_hosted"}})
+	session := createSession(t, s, map[string]any{"agent": agent["id"], "environment_id": env["id"]})
+	sessionID = session["id"].(string)
+
+	sendEvents(t, s, sessionID, userMessage("do two things"))
+	b := newScriptedBrain(t, s.pool, []provider.Chunk{
+		{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: "toolu_a", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+		{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: "toolu_b", Name: "bash", Input: json.RawMessage(`{"command":"pwd"}`)}},
+		{Kind: provider.KindDone, StopReason: "tool_use",
+			Usage: &domain.ModelUsage{InputTokens: 6, OutputTokens: 3}},
+	})
+	if found, err := b.RunOnce(context.Background()); err != nil || !found {
+		t.Fatalf("brain RunOnce: found=%v err=%v", found, err)
+	}
+	idle := lastEventOfType(t, s, sessionID, "session.status_idle")
+	stop, _ := idle["stop_reason"].(map[string]any)
+	ids, _ := stop["event_ids"].([]any)
+	if stop == nil || stop["type"] != "requires_action" || len(ids) != 2 {
+		t.Fatalf("stop_reason = %v, want requires_action with two event ids", idle["stop_reason"])
+	}
+	return sessionID, []string{ids[0].(string), ids[1].(string)}
+}
+
+// A confirmation that resolves only one of two gated tools leaves the gate raised
+// and the session idle, so it is not a resume: it records neither an approval
+// wait (the gate did not clear) nor a status transition (the session did not
+// move). collectMetrics is installed AFTER the suspension so only the partial
+// confirmation's recordings — which must be none — are captured.
+func TestPartialConfirmationRecordsNoMetrics(t *testing.T) {
+	s := newTestServer(t)
+	sessionID, askIDs := suspendViaBrainTwoAsks(t, s)
+
+	collect := collectMetrics(t)
+	sendEvents(t, s, sessionID, confirm(askIDs[0], "allow", nil))
+	if got := s.sessionStatus(sessionID); got != "idle" {
+		t.Fatalf("status after partial confirm = %q, want idle (one ask still gated)", got)
+	}
+
+	rm := collect()
+	if pts := apiFloatPoints(t, rm, events.MetricApprovalWait); len(pts) != 0 {
+		t.Errorf("recorded %d approval wait point(s) on a partial confirmation, want 0", len(pts))
+	}
+	if got := apiStatusCount(t, rm, "running"); got != 0 {
+		t.Errorf("recorded %d running transition(s) on a partial confirmation, want 0", got)
+	}
 }
 
 func TestConfirmationClosedLoopAllow(t *testing.T) {

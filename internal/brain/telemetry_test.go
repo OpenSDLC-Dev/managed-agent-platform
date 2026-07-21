@@ -3,8 +3,12 @@ package brain_test
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -112,5 +116,166 @@ func TestATurnWhoseEndpointReportedNoUsageRecordsNoTokens(t *testing.T) {
 
 	if pts := tokenPoints(t, collect()); len(pts) != 0 {
 		t.Errorf("recorded %d token data point(s), want none: the endpoint reported no usage", len(pts))
+	}
+}
+
+// floatPoints returns a float histogram's data points by name.
+func floatPoints(t *testing.T, rm metricdata.ResourceMetrics, name string) []metricdata.HistogramDataPoint[float64] {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			h, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("%s is %T, want a float64 histogram", name, m.Data)
+			}
+			return h.DataPoints
+		}
+	}
+	return nil
+}
+
+// Time to first token is the platform's responsiveness signal, and it is a brain
+// fact: the clock starts when the brain claims the work — replay and request
+// assembly are latency the user feels — and stops at the first content the model
+// streams. Nothing else in the turn observes both boundaries, so this is the
+// wiring's own test that the two are captured and recorded.
+func TestATurnRecordsTimeToFirstToken(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		textChunk(0, "hi"),
+		done("end_turn", 25),
+	}}, nil)
+	h.wake(t, "hello")
+	h.runOnce(t)
+
+	pts := floatPoints(t, collect(), brain.MetricTimeToFirstToken)
+	if len(pts) != 1 {
+		t.Fatalf("%s points = %d, want 1", brain.MetricTimeToFirstToken, len(pts))
+	}
+	if pts[0].Sum <= 0 {
+		t.Errorf("time to first token = %vs, want positive (claim precedes the first token)", pts[0].Sum)
+	}
+	got := map[string]string{}
+	for _, kv := range pts[0].Attributes.ToSlice() {
+		got[string(kv.Key)] = kv.Value.Emit()
+	}
+	if got["gen_ai.provider.name"] != "fake" {
+		t.Errorf("provider attr = %q, want fake", got["gen_ai.provider.name"])
+	}
+}
+
+// A turn that streams no content — the model went straight to a tool call — has
+// no first token to measure. Recording zero would report an instant response that
+// never happened, so the metric stays silent, the same absent-is-not-zero rule
+// the token histogram follows.
+func TestATurnWithNoStreamedContentRecordsNoTimeToFirstToken(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		toolUseChunk("tu_1", "bash"),
+		done("tool_use", 5),
+	}}, nil)
+	h.wake(t, "run something")
+	h.runOnce(t)
+
+	if pts := floatPoints(t, collect(), brain.MetricTimeToFirstToken); len(pts) != 0 {
+		t.Errorf("recorded %d first-token point(s) for a turn that streamed no content, want 0", len(pts))
+	}
+}
+
+// brainStatusCount reads the session.status.transitions counter for one status.
+func brainStatusCount(t *testing.T, rm metricdata.ResourceMetrics, status string) int64 {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != events.MetricSessionStatus {
+				continue
+			}
+			s, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("%s is %T, want an int64 sum", events.MetricSessionStatus, m.Data)
+			}
+			for _, dp := range s.DataPoints {
+				for _, kv := range dp.Attributes.ToSlice() {
+					if string(kv.Key) == "session.status" && kv.Value.Emit() == status {
+						return dp.Value
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// The brain drives real status transitions the events unit test cannot: a turn
+// that settles moves the session running→idle from inside a brain-owned
+// transaction (not the AppendWith wrapper), so this proves that commit site
+// records too, and only after it commits.
+func TestASettledTurnRecordsSessionStatusTransitions(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		textChunk(0, "hi"),
+		done("end_turn", 5),
+	}}, nil)
+	h.wake(t, "hello") // idle→running, via the harness's AppendWith
+	h.runOnce(t)       // running→idle, via the brain's own settle commit
+
+	rm := collect()
+	if got := brainStatusCount(t, rm, "running"); got < 1 {
+		t.Errorf("running transitions = %d, want at least 1 (the wake)", got)
+	}
+	if got := brainStatusCount(t, rm, "idle"); got != 1 {
+		t.Errorf("idle transitions = %d, want 1 (the settle)", got)
+	}
+}
+
+// A reclaim re-enters running on the log (status_rescheduled + status_running)
+// but the session is already running, so it moves no column and must count no
+// transition — otherwise crash-recovery churn inflates the very metric an
+// operator reads to spot it. The wake's one running is all that is counted.
+func TestReclaimRecoveryRecordsNoRunningTransition(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		textChunk(0, "recovered"),
+		done("end_turn", 1),
+	}}, nil)
+	h.wake(t, "hi") // idle→running, records running = 1
+
+	// A previous brain claimed the turn and died: claim with a tiny lease and let
+	// it expire, so this run reclaims it.
+	item, err := h.queue.Claim(context.Background(), queue.ModelTurn, 30*time.Millisecond)
+	if err != nil || item == nil {
+		t.Fatalf("pre-claim: %+v %v", item, err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	h.runOnce(t) // reclaim recovery (no SetStatus) then settle idle
+
+	if got := brainStatusCount(t, collect(), "running"); got != 1 {
+		t.Errorf("running transitions = %d, want 1 — the reclaim's running re-entry is a no-op and must not count", got)
+	}
+}
+
+// A reasoning model streams thinking before any text, so the first thinking delta
+// is the first token. This exercises the thinking-delta stamp path (the TTFT tests
+// above use text/tool-only streams).
+func TestTimeToFirstTokenStampsFirstThinkingDelta(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		{Kind: provider.KindThinkingDelta, Index: 0, Text: "hmm"},
+		textChunk(1, "answer"),
+		done("end_turn", 3),
+	}}, nil)
+	h.wake(t, "think then answer")
+	h.runOnce(t)
+
+	if pts := floatPoints(t, collect(), brain.MetricTimeToFirstToken); len(pts) != 1 {
+		t.Fatalf("%s points = %d, want 1 (the thinking delta is the first token)", brain.MetricTimeToFirstToken, len(pts))
 	}
 }
