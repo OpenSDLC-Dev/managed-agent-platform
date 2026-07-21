@@ -39,6 +39,8 @@ Two security invariants, adopted from the reference design:
 1. **Credentials never reach the sandbox.** Repos are cloned with a token the sandbox never sees; tool credentials are injected at egress.
 2. **A session is not a context window.** The harness may replay, slice, or rewind the event log before feeding the model, so context strategy is never baked into an irreversible compaction.
 
+Self-hosting means you own the infrastructure these run on. The **[self-hosted shared-responsibility model](./docs/self-hosted-security.md)** draws the line: what the platform enforces in code (credential isolation, scoped auth, fail-closed egress) versus what you configure (sandbox image hardening, capability drops, egress policy, environment-key rotation).
+
 ## Roadmap
 
 v1 delivered the core loop: `create agent → create environment → create session → send a message → the model calls a tool → an executor runs it in a sandbox → results stream back over SSE → a human approves a gated tool → the session goes idle`.

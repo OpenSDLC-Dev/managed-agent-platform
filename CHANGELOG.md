@@ -32,17 +32,61 @@ copy of an entry here.
   round-trip, opt-in evals task, real `ant beta:worker` transcript) and OTel logs/metrics at
   every link. Five PR slices; implementation starts with the blob store foundation.
 
-### Fixed
+- **OTLP business metrics: TTFT, cache-token breakdown, session-status counts, approval wait, queue gauges**
+  ([#44](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/44)) — [#89](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/89)
+  emitted the execution-chain half of the plan's Component 6 (model-request and tool-execution
+  latency, token usage, provider error rate as an `error.type` on the duration histogram); this
+  completes the list. Every instrument follows the same rule #89 set — recorded at the point that
+  already owns the fact, so a metric can never drift from the log or the span beside it.
 
-- **docs/DIVERGENCES.md: the skill-version entry claimed the reference resolves `"latest"`
-  at create — it does not**
-  ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the managed-agents
-  docs default an omitted version to the literal `latest` and the reference's own worker
-  resolves the alias only at materialization time (anthropic-sdk-go
-  tools/agenttoolset/skills.go:123-146), so this platform's `parseSkills` normalization
-  matches the reference rather than diverging from it. The entry is corrected in place with
-  the reversal kept auditable; the remaining divergence it records is deferral (no skills
-  API/storage/execution yet), plus the still-unrecorded literal echoed by GET.
+  - **`model.time_to_first_token`** (brain) measures from the brain claiming the model turn — replay
+    and request assembly are latency the user feels — to the first content the model streams. The
+    start boundary is the work claim, per the plan's "work received → first token"; a turn that
+    streams no content (straight to a tool call) records nothing, the absent-is-not-zero rule the
+    token histogram already follows.
+  - **`model.cache.token.usage`** (events) records prompt cache tokens split into `creation` and
+    `read`. `gen_ai.client.token.usage` deliberately folds these into its input reading because the
+    convention's `gen_ai.token.type` has no cache bucket; the breakdown a long-horizon agent's cost
+    story needs lives in a platform-native instrument alongside it, not by corrupting the convention
+    — the same reason `tool.execution.duration` is not a `gen_ai.*` metric.
+  - **`session.status.transitions`** (events) counts status changes, keyed by the status entered.
+    The status column moves in one place (`AppendInTx`) but commits in several, so the count is
+    recorded at each commit site — `AppendWith`, the brain's `settle`/`commitUnderLock`, the API's
+    send handler — and only *after* the commit: a transition that rolled back on a lost lease or
+    aborted settle did not happen, and counting the attempt would inflate the metric on exactly the
+    infra churn an operator is reading.
+  - **`approval.wait.duration`** (events, recorded by the API) measures how long a session sat on a
+    `requires_action` gate before a confirmation cleared it. The interval spans a suspension the
+    brain wrote and a confirmation the API commits, so it is measured where both ends are known —
+    in the database (`clock_timestamp()` minus the requires_action idle event's `created_at`) so
+    both ends read one clock — and recorded after the resuming transaction commits. A gate
+    resolved across several confirmation batches records only the final segment: each partial
+    confirmation re-raises `requires_action`, and the measurement runs from the most recent one.
+  - **`queue.depth` / `queue.pending` / `queue.workers_polling`** (queue) are the `/work/stats`
+    numbers as OTLP observable gauges, per self_hosted environment, sampled through a callback the
+    control plane registers once at startup. Cloud environments are left out — the executor claims
+    rather than polls, so `workers_polling` is meaningless there.
+
+  A telemetry contract test drives every business metric name through the real OTLP exporter to an
+  in-process collector, mirroring the existing traces test, so the export path — not only the
+  in-process manual readers each package already asserts values against — is covered.
+
+- **Self-hosted shared-responsibility security model** ([docs/self-hosted-security.md](./docs/self-hosted-security.md))
+  ([#49](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/49)) — a new
+  operator-facing doc that draws the line between what the platform enforces in code and
+  what a self-hosting operator must configure. It covers the six dimensions the security
+  seam names — sandbox image hardening, dropping Linux capabilities, non-root execution,
+  read-only rootfs, egress restriction, and environment-key rotation — plus host/runtime
+  isolation and the single-tenant Docker-daemon trust assumption. Deliberately honest
+  about the current split: the platform enforces credential isolation, scoped/hashed
+  auth, no-ServiceAccount-token sandbox pods, and fail-closed `limited` egress, while
+  capability drops, non-root, read-only rootfs, and default-case egress policy are
+  operator-owned at the runtime layer today (the sandbox sets no `securityContext`), each
+  cross-linked to its tracking issue ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43),
+  [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
+  [#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50)). Linked from
+  README.md and cross-referenced from docs/ARCHITECTURE.md's Security invariants section.
+  Documentation only — no code or wire change.
 
 ### Changed
 
@@ -147,6 +191,16 @@ copy of an entry here.
   will catch, so the two spellings are gone rather than documented.
 
 ### Fixed
+
+- **docs/DIVERGENCES.md: the skill-version entry claimed the reference resolves `"latest"`
+  at create — it does not**
+  ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the managed-agents
+  docs default an omitted version to the literal `latest` and the reference's own worker
+  resolves the alias only at materialization time (anthropic-sdk-go
+  tools/agenttoolset/skills.go:123-146), so this platform's `parseSkills` normalization
+  matches the reference rather than diverging from it. The entry is corrected in place with
+  the reversal kept auditable; the remaining divergence it records is deferral (no skills
+  API/storage/execution yet), plus the still-unrecorded literal echoed by GET.
 
 - **A NUL — or any unstorable byte — in a path ID or query parameter was a 500**
   ([#135](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/135)) — #114 closed the

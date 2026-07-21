@@ -92,6 +92,12 @@ func (l *Log) AppendWith(ctx context.Context, sessionID domain.ID, evs []NewEven
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	// After the commit, never before: a status change that rolled back did not
+	// happen. AppendInTx writes the column but the caller commits it, so the
+	// count belongs here, at the self-committing wrapper's own commit.
+	if opts.SetStatus != nil {
+		RecordSessionStatus(ctx, *opts.SetStatus)
+	}
 	return out, nil
 }
 

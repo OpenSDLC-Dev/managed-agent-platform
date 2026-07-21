@@ -6,11 +6,20 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	genaiconv "go.opentelemetry.io/otel/semconv/v1.41.0/genaiconv"
 )
 
 // meterName is this package's OTel instrumentation scope.
 const meterName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+
+// MetricCacheTokenUsage is the platform-native instrument recording prompt cache
+// tokens split by cache operation. gen_ai.client.token.usage folds these into its
+// input reading because the convention's gen_ai.token.type has no cache bucket; a
+// long-horizon agent's cache hit rate is worth seeing on its own, so this metric
+// carries the breakdown the convention cannot. It is exported so the telemetry
+// contract test can assert this exact name reaches an OTLP collector.
+const MetricCacheTokenUsage = "model.cache.token.usage"
 
 // errorTypeCommit marks a turn whose model call was fine but whose settlement
 // never landed — the trace already says so; the metric should too, and it is a
@@ -76,4 +85,27 @@ func (m *ModelRequest) recordMetrics(ctx context.Context, isError bool, commitEr
 	input := m.usage.InputTokens + m.usage.CacheReadInputTokens + m.usage.CacheCreationInputTokens
 	tok.Record(ctx, input, genaiconv.OperationNameChat, provider, genaiconv.TokenTypeInput, model)
 	tok.Record(ctx, m.usage.OutputTokens, genaiconv.OperationNameChat, provider, genaiconv.TokenTypeOutput, model)
+
+	// The cache breakdown the convention folds away. Its own name, not a
+	// gen_ai.* one: gen_ai.token.type has no cache bucket, so an operator who
+	// wants the split — a long-horizon agent's cache hit rate is its cost story
+	// — reads it here instead. Recorded whenever usage is present, zeroes and
+	// all: a real reading of "no cache this turn" is a fact, unlike the absent
+	// reading the guard above already dropped.
+	cache, err := meter.Int64Histogram(MetricCacheTokenUsage,
+		metric.WithUnit("{token}"),
+		metric.WithDescription("Prompt cache tokens per model request, split by cache operation."))
+	if err != nil {
+		return
+	}
+	cacheAttrs := func(op string) metric.MeasurementOption {
+		return metric.WithAttributes(
+			attribute.String("gen_ai.operation.name", "chat"),
+			attribute.String("gen_ai.provider.name", m.backend.Provider),
+			attribute.String("gen_ai.request.model", m.backend.Model),
+			attribute.String("cache.token.type", op),
+		)
+	}
+	cache.Record(ctx, m.usage.CacheCreationInputTokens, cacheAttrs("creation"))
+	cache.Record(ctx, m.usage.CacheReadInputTokens, cacheAttrs("read"))
 }

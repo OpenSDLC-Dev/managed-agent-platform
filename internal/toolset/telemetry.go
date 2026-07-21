@@ -13,15 +13,17 @@ import (
 // meterName is this package's OTel instrumentation scope.
 const meterName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 
-// toolDurationName is deliberately not one of OTel's gen_ai.* metrics. Those
+// MetricToolDuration is deliberately not one of OTel's gen_ai.* metrics. Those
 // describe a client's call to a GenAI provider and require gen_ai.provider.name;
 // running bash in a container is not that, and inventing a provider value to
 // satisfy the convention would make the metric lie about what it measured. So
 // the name is the platform's own, following OTel's naming rules (dotted,
 // lowercase, unit in the Unit field rather than the name), while the attributes
 // reuse the semconv keys that genuinely apply — gen_ai.tool.name is the same
-// tool the model named, and error.type is the standard failure dimension.
-const toolDurationName = "tool.execution.duration"
+// tool the model named, and error.type is the standard failure dimension. It is
+// exported so the telemetry contract test can assert this name reaches an OTLP
+// collector.
+const MetricToolDuration = "tool.execution.duration"
 
 // errorTypeTool marks a failure the model can read and recover from — a missing
 // file, a nonzero exit. It is deliberately distinct from a backend fault, which
@@ -37,7 +39,7 @@ const errorTypeTool = "tool_error"
 // after the first call, and untestable besides.
 func recordToolRun(ctx context.Context, name string, d time.Duration, res Result, err error) {
 	hist, herr := otel.GetMeterProvider().Meter(meterName).Float64Histogram(
-		toolDurationName,
+		MetricToolDuration,
 		metric.WithDescription("Duration of one built-in tool call, measured in the sandbox."),
 		metric.WithUnit("s"),
 	)

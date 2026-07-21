@@ -181,6 +181,79 @@ func TestModelRequestCountsCachedTokensAsInput(t *testing.T) {
 	}
 }
 
+// The gen_ai token metric deliberately folds cache tokens into input, because the
+// convention's gen_ai.token.type has no cache bucket (see the test above). But an
+// operator still needs the cache breakdown — a long-horizon agent lives and dies
+// by its cache hit rate — so a platform-native instrument records cache_creation
+// and cache_read separately, alongside the convention's metric rather than
+// corrupting it. The name is the platform's own precisely because no gen_ai.*
+// bucket fits, the same reason tool.execution.duration is not a gen_ai metric.
+func TestModelRequestRecordsCacheTokenBreakdown(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	ctx := context.Background()
+	collect := collectMetrics(t)
+
+	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	usage := domain.ModelUsage{
+		InputTokens:              30,
+		CacheReadInputTokens:     9000,
+		CacheCreationInputTokens: 700,
+		OutputTokens:             12,
+	}
+	mr.ModelDone(&usage)
+	if _, err := mr.EndEvent(false, usage); err != nil {
+		t.Fatalf("end event: %v", err)
+	}
+	mr.Finish(ctx, false, nil)
+
+	cache := intPoints(collect(), events.MetricCacheTokenUsage)
+	if len(cache) != 2 {
+		t.Fatalf("%s points = %d, want 2 (creation and read)", events.MetricCacheTokenUsage, len(cache))
+	}
+	byType := map[string]int64{}
+	model := map[string]string{}
+	for i := range cache {
+		byType[attrValue(cache, i, "cache.token.type")] = cache[i].Sum
+		model[attrValue(cache, i, "cache.token.type")] = attrValue(cache, i, "gen_ai.request.model")
+	}
+	if byType["creation"] != 700 {
+		t.Errorf("cache creation tokens = %d, want 700", byType["creation"])
+	}
+	if byType["read"] != 9000 {
+		t.Errorf("cache read tokens = %d, want 9000", byType["read"])
+	}
+	if model["read"] != "claude-x" {
+		t.Errorf("cache read point model attr = %q, want claude-x", model["read"])
+	}
+}
+
+// A turn whose endpoint reported no usage records no cache breakdown either —
+// the same absent-is-not-zero rule the token histogram follows (#90). Zero-valued
+// cache points would report caching that never happened.
+func TestModelRequestRecordsNoCacheTokensWithoutUsage(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	ctx := context.Background()
+	collect := collectMetrics(t)
+
+	_, mr, err := log.StartModelRequest(ctx, sid, events.Backend{Provider: "anthropic", Model: "claude-x"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// No ModelDone reading: the endpoint said nothing about usage.
+	mr.Finish(ctx, true, nil)
+
+	if pts := intPoints(collect(), events.MetricCacheTokenUsage); len(pts) != 0 {
+		t.Errorf("recorded %d cache token point(s) on a turn with no usage, want 0", len(pts))
+	}
+}
+
 // A turn that failed is the one worth finding in a dashboard, so it must be
 // distinguishable — and it has no usage to report, which must not surface as a
 // pair of zero-token readings diluting the real ones.
