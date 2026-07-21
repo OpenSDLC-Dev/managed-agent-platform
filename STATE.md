@@ -24,4 +24,5 @@ on the free-form `types[]` filter. No plan file: single-PR scope (issue-triage `
       91.81% (≥90% gate).
 - [x] Verifier (pinned) PASS; two independent Claude reviewers, no blockers (Codex unavailable —
       account usage limit, resets 2026-07-25; second Claude reviewer stood in, per PR #133).
-- [ ] PR opened, CI green, threads settled, squash-merge.
+- [x] Draft PR [#139](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/139) opened.
+- [ ] CI green, review threads settled, mark ready, squash-merge.
