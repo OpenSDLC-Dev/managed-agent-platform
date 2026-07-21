@@ -4,8 +4,20 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+[#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54) — skills distribution +
+execution, per [docs/plan/06_skills.md](./docs/plan/06_skills.md) (approved; this PR lands the
+plan and the DIVERGENCES.md correction it carries — implementation starts with slice 1).
 
 ## Tasks
 
-None.
+- [ ] Slice 1 — blob store foundation: `internal/blob` + `blob/s3` (minio-go) + contract
+      suite/MinIO test harness; compose MinIO; helm `minio.yaml` + `externalObjectStorage`.
+- [ ] Slice 2 — `/v1/skills` registry: migration 0007, `skillver_` ids, multipart create (both
+      forms), nine endpoints, per-resource list limits; CI compose skills round-trip;
+      `ant beta:skills` transcript.
+- [ ] Slice 3 — anthropic prebuilt import: run-once importer, date versions, self-authored CI
+      fixtures (license red lines per plan).
+- [ ] Slice 4 — runtime materialization: env-key lane for skills reads, executor post-Provision
+      + worker twin, 500-cap validation; `ant beta:worker` transcript.
+- [ ] Slice 5 — brain Level-1 injection, evals E2E task, remaining DIVERGENCES entries, docs
+      closure, archive the plan, close #54.

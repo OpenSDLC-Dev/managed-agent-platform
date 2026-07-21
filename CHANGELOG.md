@@ -13,6 +13,37 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Added
+
+- **Skills plan approved: docs/plan/06_skills.md**
+  ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the design for
+  lifting the reserved skills seam into the full feature, settled against the pinned SDK, the
+  `ant` CLI source, and the public docs (no live recording — everything recording-only is
+  pre-listed as DIVERGENCES.md inferences). Decisions: a wire-compatible `/v1/skills` +
+  versions registry (multipart `files[]` create in both documented forms, canonical-zip
+  storage, zip download) over a new S3-compatible `internal/blob` store (minio-go; helm gains
+  a bundled single-node MinIO following the chart's Postgres precedent, compose bundles
+  MinIO); anthropic prebuilt skills provisioned by an operator-run import from a local
+  github.com/anthropics/skills checkout (content never vendored — the document skills are
+  source-available, not open source); `"latest"` kept verbatim in snapshots and resolved at
+  use time, matching the reference; materialization into `{workdir}/skills/<name>/` by the
+  executor post-Provision and a wire-only worker twin behind the env-key auth lane; brain-side
+  Level-1 metadata injection (inferred template); three-tier end-to-end acceptance (CI compose
+  round-trip, opt-in evals task, real `ant beta:worker` transcript) and OTel logs/metrics at
+  every link. Five PR slices; implementation starts with the blob store foundation.
+
+### Fixed
+
+- **docs/DIVERGENCES.md: the skill-version entry claimed the reference resolves `"latest"`
+  at create — it does not**
+  ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the managed-agents
+  docs default an omitted version to the literal `latest` and the reference's own worker
+  resolves the alias only at materialization time (anthropic-sdk-go
+  tools/agenttoolset/skills.go:123-146), so this platform's `parseSkills` normalization
+  matches the reference rather than diverging from it. The entry is corrected in place with
+  the reversal kept auditable; the remaining divergence it records is deferral (no skills
+  API/storage/execution yet), plus the still-unrecorded literal echoed by GET.
+
 ### Changed
 
 - **Test infrastructure: the three private Docker-Postgres harnesses fold into `internal/pgtest`**
