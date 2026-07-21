@@ -23,7 +23,8 @@ copy of an entry here.
   databases from the shared package; the private copies are deleted. `internal/pgtest` gains
   `FreshDB` — a bare, un-migrated DSN for the store suite, which exercises `store.Open`/`Migrate`
   itself — and `NewPool` now composes it. The events suite keeps its package-local fixtures
-  (`newSession`, `newPoolFromDSN`, `swapTracerProvider`, in `fixtures_test.go`): they are fixture
+  (`newSession`/`newSessionKind`, `newPoolFromDSN`, `swapTracerProvider`, in
+  `fixtures_test.go`): they are fixture
   shape, not container plumbing, and the shared `NewSession` writes a richer session row
   (`status 'idle'`, full resolved agent) than the event-log tests were written against. No
   behavior change; the coverage gate is unaffected (`internal/pgtest` sits outside the
