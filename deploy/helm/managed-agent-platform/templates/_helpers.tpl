@@ -85,6 +85,24 @@ inside a container's `env:` list. Call with the root context.
 {{- end }}
 {{- end -}}
 
+{{/*
+The BLOB_* env entries for processes that reach object storage (today the
+controlplane; the executor joins with skills materialization). Every key is
+optional: a chart Secret rendered without blob-* keys — or an existingSecret
+that never carried them — deploys the platform without object storage, and
+the controlplane serves with skills unavailable instead of crash-looping.
+*/}}
+{{- define "map.blobEnv" -}}
+{{- range $var, $key := dict "BLOB_ENDPOINT" "blob-endpoint" "BLOB_ACCESS_KEY" "blob-access-key" "BLOB_SECRET_KEY" "blob-secret-key" "BLOB_BUCKET" "blob-bucket" "BLOB_REGION" "blob-region" "BLOB_TLS" "blob-tls" }}
+- name: {{ $var }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "map.secretName" $ }}
+      key: {{ $key }}
+      optional: true
+{{- end }}
+{{- end -}}
+
 {{/* imagePullSecrets block, rendered under a podSpec. */}}
 {{- define "map.imagePullSecrets" -}}
 {{- with .Values.imagePullSecrets }}

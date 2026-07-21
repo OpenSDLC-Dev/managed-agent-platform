@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -24,11 +25,15 @@ type server struct {
 	log    *events.Log
 	broker *events.Broker
 	queue  *queue.Queue
+	blobs  blob.Store
 }
 
 // NewHandler assembles the control-plane HTTP surface over the given pool.
-func NewHandler(pool *pgxpool.Pool) http.Handler {
-	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool)}
+// blobs is the object store backing skill archives; nil deploys without
+// object storage — everything serves except the storage-backed skill routes,
+// which answer with a configuration error.
+func NewHandler(pool *pgxpool.Pool, blobs blob.Store) http.Handler {
+	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /v1/agents", s.handle(s.createAgent))
@@ -56,6 +61,16 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.handle(s.listSessionEvents))
 	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", s.streamSessionEvents)
 
+	mux.HandleFunc("POST /v1/skills", s.handle(s.createSkill))
+	mux.HandleFunc("GET /v1/skills", s.handle(s.listSkills))
+	mux.HandleFunc("GET /v1/skills/{id}", s.handle(s.getSkill))
+	mux.HandleFunc("DELETE /v1/skills/{id}", s.handle(s.deleteSkill))
+	mux.HandleFunc("POST /v1/skills/{id}/versions", s.handle(s.createSkillVersion))
+	mux.HandleFunc("GET /v1/skills/{id}/versions", s.handle(s.listSkillVersions))
+	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}", s.handle(s.getSkillVersion))
+	mux.HandleFunc("DELETE /v1/skills/{id}/versions/{version}", s.handle(s.deleteSkillVersion))
+	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}/content", s.downloadSkillVersion) // streams the archive; not a typed handler
+
 	// The mux's built-in 404/405 write plain text; clients expect the wire
 	// error envelope, so register explicit fallbacks: "/" for unknown paths
 	// and a method-less pattern per route for unsupported methods.
@@ -67,6 +82,8 @@ func NewHandler(pool *pgxpool.Pool) http.Handler {
 		"/v1/environments", "/v1/environments/{id}", "/v1/environments/{id}/archive",
 		"/v1/sessions", "/v1/sessions/{id}", "/v1/sessions/{id}/archive",
 		"/v1/sessions/{id}/events", "/v1/sessions/{id}/events/stream",
+		"/v1/skills", "/v1/skills/{id}", "/v1/skills/{id}/versions",
+		"/v1/skills/{id}/versions/{version}", "/v1/skills/{id}/versions/{version}/content",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, methodNotAllowed(r))

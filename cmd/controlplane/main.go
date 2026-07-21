@@ -6,6 +6,13 @@
 //	CONTROLPLANE_API_KEY  bootstrap management API key (required); seeded
 //	                      (hashed) into api_keys at startup. Changing it and
 //	                      restarting revokes the previous bootstrap key.
+//	BLOB_ENDPOINT         S3-compatible object storage host:port for skill
+//	                      archives; empty deploys without object storage
+//	                      (the skills upload/download routes report it)
+//	BLOB_ACCESS_KEY / BLOB_SECRET_KEY / BLOB_BUCKET  credentials and bucket,
+//	                      required with BLOB_ENDPOINT
+//	BLOB_REGION           optional bucket region
+//	BLOB_TLS              "true" for https to the endpoint (default plain)
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
 //	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
 package main
@@ -21,6 +28,8 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
@@ -74,9 +83,30 @@ func run(ctx context.Context) error {
 	// be gone before pool.Close shuts the pool it would query.
 	defer func() { _ = reg.Unregister() }()
 
+	// Object storage for skill archives is optional: without it the platform
+	// runs and the storage-backed skill routes report the absence.
+	var blobs blob.Store
+	if endpoint := os.Getenv("BLOB_ENDPOINT"); endpoint != "" {
+		s3store, err := s3.New(ctx, s3.Config{
+			Endpoint:  endpoint,
+			AccessKey: os.Getenv("BLOB_ACCESS_KEY"),
+			SecretKey: os.Getenv("BLOB_SECRET_KEY"),
+			Bucket:    os.Getenv("BLOB_BUCKET"),
+			Region:    os.Getenv("BLOB_REGION"),
+			TLS:       os.Getenv("BLOB_TLS") == "true",
+		})
+		if err != nil {
+			return err
+		}
+		blobs = blob.WithMetrics(s3store)
+		slog.Info("object storage configured", "endpoint", endpoint, "bucket", os.Getenv("BLOB_BUCKET"))
+	} else {
+		slog.Info("object storage not configured; skills are unavailable")
+	}
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: api.NewHandler(pool),
+		Handler: api.NewHandler(pool, blobs),
 		// Slow-client bounds: auth runs inside the handler, so unauthenticated
 		// connections must not be able to sit open indefinitely.
 		ReadHeaderTimeout: 10 * time.Second,

@@ -2,8 +2,8 @@
 
 Brings up the platform's three server processes — **controlplane**, **brain**,
 **executor** — against a bundled Postgres and a bundled MinIO (S3-compatible
-object storage for skill archives; the app services start consuming it with the
-skills registry, docs/plan/06_skills.md), so you can drive the API with the real
+object storage where the controlplane stores skill archives — the `/v1/skills`
+registry, docs/plan/06_skills.md), so you can drive the API with the real
 `ant` CLI or the Anthropic SDKs on your laptop. It's the compose companion to the
 [Helm chart](../helm); same binaries (built from the repo-root `Dockerfile`),
 wired for local use.
@@ -55,6 +55,7 @@ and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 | `CONTROLPLANE_BIND` | Interface the port binds to (default `127.0.0.1`). Set `0.0.0.0` — with a real key — to expose on the LAN. |
 | `MODEL_PROVIDERS_FILE` | Brain routing file to mount (default `model-providers.example.json`). Set to your copy to use a real endpoint. |
 | `EXECUTOR_IMAGE` | Base image for per-session sandbox containers (default `debian:stable-slim`). |
+| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | Credentials for the bundled MinIO (defaults `map` / `map-blob-dev`; the password needs ≥ 8 characters). The controlplane's `BLOB_*` wiring follows them automatically. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector for traces, metrics **and logs**; empty disables telemetry export entirely. Set to `jaeger:4317` with the observability profile — but note Jaeger ingests **traces only**, so each failed log-export batch prints one `Unimplemented … LogsService` line to stderr. Point at a collector that takes all three (an OTel Collector, Grafana Alloy) to silence it. |
 
 The **model routing** file (mounted into the brain at

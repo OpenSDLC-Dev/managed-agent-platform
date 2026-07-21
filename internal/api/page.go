@@ -81,8 +81,11 @@ func parsePageMax(q url.Values, max int) (pageParams, error) {
 		// A time cursor embeds a resource id; a crafted one carrying an unstorable
 		// byte would otherwise bind into the keyset comparison as a 500. A
 		// server-issued cursor's id is always valid, and the seq/version cursors
-		// carry no id (c.id == ""). See #135.
-		if c.id != "" && !domain.ID(c.id).Valid() {
+		// carry no id (c.id == ""). See #135. The storableText fallback exists for
+		// the skills list: the imported anthropic catalog's ids are short names
+		// ("xlsx"), not prefixed ids, and #135's actual invariant is that no
+		// unstorable byte reaches a bind parameter.
+		if c.id != "" && !domain.ID(c.id).Valid() && !storableText(c.id) {
 			return p, errInvalid("invalid page cursor")
 		}
 		p.cur = c

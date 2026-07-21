@@ -9,7 +9,7 @@ func TestNewIDCarriesPrefix(t *testing.T) {
 	cases := []string{
 		PrefixAgent, PrefixEnvironment, PrefixSession, PrefixEvent, PrefixWork,
 		PrefixVault, PrefixResource, PrefixDeployment, PrefixDeploymentRun,
-		PrefixFile, PrefixSkill,
+		PrefixFile, PrefixSkill, PrefixSkillVersion,
 	}
 	for _, prefix := range cases {
 		id := NewID(prefix)
@@ -85,7 +85,7 @@ func TestIDValid(t *testing.T) {
 	for _, prefix := range []string{
 		PrefixAgent, PrefixEnvironment, PrefixSession, PrefixEvent, PrefixWork,
 		PrefixVault, PrefixResource, PrefixDeployment, PrefixDeploymentRun,
-		PrefixFile, PrefixSkill, altSessionPrefix,
+		PrefixFile, PrefixSkill, PrefixSkillVersion, altSessionPrefix,
 	} {
 		id := ID(prefix + "_" + idEncoding.EncodeToString(make([]byte, idRandomBytes)))
 		if !id.Valid() {

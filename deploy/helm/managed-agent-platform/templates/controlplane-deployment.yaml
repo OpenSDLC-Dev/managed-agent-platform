@@ -38,6 +38,7 @@ spec:
                   name: {{ include "map.secretName" . }}
                   key: controlplane-api-key
             {{- include "map.commonEnv" . | nindent 12 }}
+            {{- include "map.blobEnv" . | nindent 12 }}
           readinessProbe:
             tcpSocket:
               port: http

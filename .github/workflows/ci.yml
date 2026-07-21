@@ -91,7 +91,7 @@ jobs:
         run: docker compose build controlplane
       - name: control plane serves and the brain loads its config
         run: |
-          docker compose up -d postgres controlplane brain
+          docker compose up -d postgres minio controlplane brain
           key="$(grep '^CONTROLPLANE_API_KEY=' .env | cut -d= -f2-)"
           for i in $(seq 1 30); do
             code="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" http://localhost:8080/v1/agents || true)"
@@ -112,6 +112,39 @@ jobs:
           done
           [ -n "$brain_ok" ] || { echo "brain did not start cleanly" >&2; docker compose logs brain >&2; exit 1; }
           echo "ok: authed 200, unauthed 401, brain loaded its config"
+      # E2E-1 (docs/plan/06_skills.md): the wire-only skills round-trip against
+      # the bundled MinIO — upload both forms, list, download and byte-compare,
+      # and prove the delete order (skill delete 400s until versions are gone).
+      - name: skills registry round-trip (E2E-1)
+        run: |
+          key="$(grep '^CONTROLPLANE_API_KEY=' .env | cut -d= -f2-)"
+          base=http://localhost:8080/v1/skills
+          workdir="$(mktemp -d)"
+          mkdir -p "$workdir/demo-skill"
+          printf -- '---\nname: demo-skill\ndescription: A CI fixture skill.\n---\n# Demo\n' > "$workdir/demo-skill/SKILL.md"
+          (cd "$workdir" && zip -qr skill.zip demo-skill)
+          created="$(curl -sf -H "x-api-key: $key" -F 'files[]=@'"$workdir"'/skill.zip' "$base")"
+          id="$(echo "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+          ver="$(echo "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["latest_version"])')"
+          echo "created $id version $ver"
+          curl -sf -H "x-api-key: $key" "$base?source=custom" | grep -q "$id"
+          curl -sf -H "x-api-key: $key" "$base/$id" > /dev/null
+          # Second version via the loose path-qualified form.
+          v2="$(curl -sf -H "x-api-key: $key" -F 'files[]=@'"$workdir"'/demo-skill/SKILL.md;filename=demo-skill/SKILL.md' "$base/$id/versions" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          n="$(curl -sf -H "x-api-key: $key" "$base/$id/versions" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["data"]))')"
+          [ "$n" = "2" ] || { echo "expected 2 versions, got $n" >&2; exit 1; }
+          # The download streams the stored archive unmodified.
+          curl -sf -H "x-api-key: $key" "$base/$id/versions/$ver/content" -o "$workdir/down.zip"
+          cmp "$workdir/skill.zip" "$workdir/down.zip"
+          code="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "x-api-key: $key" "$base/$id")"
+          [ "$code" = "400" ] || { echo "expected 400 deleting a skill with versions, got $code" >&2; exit 1; }
+          curl -sf -X DELETE -H "x-api-key: $key" "$base/$id/versions/$ver" > /dev/null
+          curl -sf -X DELETE -H "x-api-key: $key" "$base/$id/versions/$v2" > /dev/null
+          curl -sf -X DELETE -H "x-api-key: $key" "$base/$id" > /dev/null
+          code="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" "$base/$id")"
+          [ "$code" = "404" ] || { echo "expected 404 after delete, got $code" >&2; exit 1; }
+          echo "ok: upload (zip + loose), list, download byte-compare, ordered delete"
       - name: tear down
         if: always()
         run: docker compose down -v

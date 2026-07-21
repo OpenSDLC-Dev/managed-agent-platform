@@ -43,9 +43,9 @@ services:
 
   minio:
     # Object storage for the skills registry (docs/plan/06_skills.md): skill
-    # archives live here, not in Postgres. The app services start consuming it
-    # with the skills registry slice; until then the service just runs. Same
-    # pinned release as the helm default and the blobtest contract harness.
+    # archives live here, not in Postgres. The controlplane consumes it via
+    # the BLOB_* env below. Same pinned release as the helm default and the
+    # blobtest contract harness.
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data
     environment:
@@ -67,6 +67,17 @@ services:
       <<: *app-env
       CONTROLPLANE_API_KEY: ${CONTROLPLANE_API_KEY:?set CONTROLPLANE_API_KEY in .env}
       CONTROLPLANE_ADDR: ":8080"
+      # Skill archives go to the bundled MinIO (plain HTTP inside the network).
+      BLOB_ENDPOINT: minio:9000
+      BLOB_ACCESS_KEY: ${MINIO_ROOT_USER:-map}
+      BLOB_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-map-blob-dev}
+      BLOB_BUCKET: map-blob
+      BLOB_TLS: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     ports:
       # Bound to loopback by default: the committed CONTROLPLANE_API_KEY is a
       # well-known placeholder, so the API must not be reachable from the LAN.

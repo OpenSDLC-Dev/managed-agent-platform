@@ -13,10 +13,11 @@ execution, per [docs/plan/06_skills.md](./docs/plan/06_skills.md) (in-progress s
       contract suite/MinIO harness (all green vs a real container, blob coverage 95.0%);
       compose MinIO; helm `minio.yaml` + `externalObjectStorage` + render guards.
       `make verify` green (total coverage ~91.7%, gate ≥90%). PR
-      [#145](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/145) (draft).
-- [ ] Slice 2 — `/v1/skills` registry: migration 0007, `skillver_` ids, multipart create (both
-      forms), nine endpoints, per-resource list limits; CI compose skills round-trip;
-      `ant beta:skills` transcript.
+      [#145](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/145) (merged).
+- [x] Slice 2 — `/v1/skills` registry: migration 0007, `skillver_` ids, multipart create (both
+      forms), nine endpoints, per-resource list limits, upload/download logs+metrics; CI compose
+      round-trip (E2E-1); real `ant beta:skills` acceptance passed (docs/HISTORY.md, 2026-07-21).
+      PR [#146](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/146).
 - [ ] Slice 3 — anthropic prebuilt import: run-once importer, date versions, self-authored CI
       fixtures (license red lines per plan).
 - [ ] Slice 4 — runtime materialization: env-key lane for skills reads, executor post-Provision
