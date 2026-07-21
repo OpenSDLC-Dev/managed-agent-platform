@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -181,5 +182,52 @@ func TestATurnWithNoStreamedContentRecordsNoTimeToFirstToken(t *testing.T) {
 
 	if pts := floatPoints(t, collect(), brain.MetricTimeToFirstToken); len(pts) != 0 {
 		t.Errorf("recorded %d first-token point(s) for a turn that streamed no content, want 0", len(pts))
+	}
+}
+
+// brainStatusCount reads the session.status.transitions counter for one status.
+func brainStatusCount(t *testing.T, rm metricdata.ResourceMetrics, status string) int64 {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != events.MetricSessionStatus {
+				continue
+			}
+			s, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("%s is %T, want an int64 sum", events.MetricSessionStatus, m.Data)
+			}
+			for _, dp := range s.DataPoints {
+				for _, kv := range dp.Attributes.ToSlice() {
+					if string(kv.Key) == "session.status" && kv.Value.Emit() == status {
+						return dp.Value
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// The brain drives real status transitions the events unit test cannot: a turn
+// that settles moves the session running→idle from inside a brain-owned
+// transaction (not the AppendWith wrapper), so this proves that commit site
+// records too, and only after it commits.
+func TestASettledTurnRecordsSessionStatusTransitions(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		textChunk(0, "hi"),
+		done("end_turn", 5),
+	}}, nil)
+	h.wake(t, "hello") // idle→running, via the harness's AppendWith
+	h.runOnce(t)       // running→idle, via the brain's own settle commit
+
+	rm := collect()
+	if got := brainStatusCount(t, rm, "running"); got < 1 {
+		t.Errorf("running transitions = %d, want at least 1 (the wake)", got)
+	}
+	if got := brainStatusCount(t, rm, "idle"); got != 1 {
+		t.Errorf("idle transitions = %d, want 1 (the settle)", got)
 	}
 }

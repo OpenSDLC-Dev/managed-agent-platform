@@ -107,6 +107,10 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	}
 	batch := newEvents
 	var opts events.AppendOptions
+	// Set when this batch clears the last requires_action gate: the seconds the
+	// session waited on the human, measured in the database so both ends read one
+	// clock, and recorded only after the resuming transaction commits.
+	var approvalWaitSeconds *float64
 	enqueueTurn := func(ctx context.Context, tx pgx.Tx) error {
 		_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), queue.ModelTurn)
 		return err
@@ -157,6 +161,24 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
 		running := domain.SessionRunning
 		opts.SetStatus = &running
+		// How long the gate held: the elapsed since the suspension that raised it —
+		// the most recent requires_action idle. Measured under the same row lock the
+		// resume commits under, so it reads a consistent log, and in the database so
+		// both ends read one clock.
+		var secs float64
+		err = tx.QueryRow(ctx,
+			`SELECT EXTRACT(EPOCH FROM (clock_timestamp() - created_at))
+			 FROM events
+			 WHERE session_id = $1 AND type = $2
+			   AND payload->'stop_reason'->>'type' = 'requires_action'
+			 ORDER BY seq DESC LIMIT 1`,
+			id, string(domain.EventSessionStatusIdle)).Scan(&secs)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		if err == nil {
+			approvalWaitSeconds = &secs
+		}
 		// Resume the right work. The executor runs only platform built-ins, so a
 		// tool_exec is enqueued only when an allowed one is still unanswered
 		// (denials are already answered). If the only remaining unanswered tools
@@ -208,6 +230,15 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+	// After the commit: a status change that rolled back did not happen. This is
+	// the production idle→running transition (a user.message waking a session, a
+	// confirmation clearing the last gate).
+	if opts.SetStatus != nil {
+		events.RecordSessionStatus(ctx, *opts.SetStatus)
+	}
+	if approvalWaitSeconds != nil {
+		events.RecordApprovalWait(ctx, *approvalWaitSeconds)
 	}
 
 	// The response echoes the posted events only, not the platform's

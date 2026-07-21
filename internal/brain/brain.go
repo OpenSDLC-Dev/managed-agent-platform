@@ -570,7 +570,13 @@ func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, wat
 	if _, err := b.log.AppendInTx(ctx, tx, sid, batch, opts); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if opts.SetStatus != nil {
+		events.RecordSessionStatus(ctx, *opts.SetStatus)
+	}
+	return nil
 }
 
 // commitUnderLock commits a batch and its options with the session row
@@ -588,7 +594,13 @@ func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID, batch []even
 	if _, err := b.log.AppendInTx(ctx, tx, sid, batch, opts); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if opts.SetStatus != nil {
+		events.RecordSessionStatus(ctx, *opts.SetStatus)
+	}
+	return nil
 }
 
 // failTurn records a model-side or deterministic failure on the log. If no
