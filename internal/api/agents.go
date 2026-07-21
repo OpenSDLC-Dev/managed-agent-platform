@@ -154,6 +154,9 @@ func (s *server) createAgent(r *http.Request) (any, error) {
 func (s *server) getAgent(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if err := checkID(id, "agent"); err != nil {
+		return nil, err
+	}
 	if v := r.URL.Query().Get("version"); v != "" {
 		version, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || version < 1 {
@@ -244,6 +247,9 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	var expected int64
 	if err := json.Unmarshal(rawVersion, &expected); err != nil {
 		return nil, errInvalid("version must be an integer")
+	}
+	if err := checkID(id, "agent"); err != nil {
+		return nil, err
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -416,6 +422,9 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 func (s *server) listAgentVersions(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if err := checkID(id, "agent"); err != nil {
+		return nil, err
+	}
 	page, err := parsePage(r.URL.Query())
 	if err != nil {
 		return nil, err
@@ -500,6 +509,9 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 func (s *server) archiveAgent(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if err := checkID(id, "agent"); err != nil {
+		return nil, err
+	}
 	var (
 		name                 string
 		version              int64

@@ -292,6 +292,9 @@ type environmentRow struct {
 func (s *server) getEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if err := checkID(id, "environment"); err != nil {
+		return nil, err
+	}
 	var row environmentRow
 	err := s.pool.QueryRow(ctx,
 		`SELECT name, description, config, metadata, created_at, updated_at, archived_at
@@ -323,6 +326,9 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if err := parseScope(obj); err != nil {
+		return nil, err
+	}
+	if err := checkID(id, "environment"); err != nil {
 		return nil, err
 	}
 
@@ -482,6 +488,9 @@ func (s *server) listEnvironments(r *http.Request) (any, error) {
 func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if err := checkID(id, "environment"); err != nil {
+		return nil, err
+	}
 	var row environmentRow
 	err := s.pool.QueryRow(ctx,
 		`UPDATE environments SET
@@ -508,6 +517,9 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	if err := checkID(id, "environment"); err != nil {
+		return nil, err
+	}
 	tag, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`, id)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation

@@ -465,6 +465,9 @@ func numberEqual(a, b json.Number) bool {
 func (s *server) getSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
+	if err := checkID(id, "session"); err != nil {
+		return nil, err
+	}
 	row, err := scanSession(s.pool.QueryRow(ctx,
 		`SELECT `+sessionColumns+` FROM sessions WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -489,6 +492,9 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	if raw, ok := obj["vault_ids"]; ok && !isNull(raw) {
 		// The reference server rejects this too ("Not yet supported").
 		return nil, errInvalid("vault_ids updates are not yet supported")
+	}
+	if err := checkID(id, "session"); err != nil {
+		return nil, err
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -647,6 +653,12 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 		query += ` AND archived_at IS NULL`
 	}
 	if agentID := q.Get("agent_id"); agentID != "" {
+		// A malformed agent_id can never name a stored agent; reject it on shape
+		// (a valid but absent one still filters to an empty page) so an unstorable
+		// byte does not reach the bind parameter as a 500. See #135.
+		if !domain.ID(agentID).Valid() {
+			return nil, errInvalid("agent_id must be a valid agent id")
+		}
 		args = append(args, agentID)
 		query += fmt.Sprintf(` AND agent_id = $%d`, len(args))
 	}
@@ -746,6 +758,9 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 func (s *server) archiveSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
+	if err := checkID(id, "session"); err != nil {
+		return nil, err
+	}
 	row, err := scanSession(s.pool.QueryRow(ctx,
 		`UPDATE sessions SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
@@ -763,6 +778,9 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 func (s *server) deleteSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
+	if err := checkID(id, "session"); err != nil {
+		return nil, err
+	}
 	tag, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id)
 	if err != nil {
 		return nil, err

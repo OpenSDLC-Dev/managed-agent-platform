@@ -249,6 +249,9 @@ func (s *server) getWork(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkWorkID(workID); err != nil {
+		return nil, err
+	}
 	w, err := s.queue.GetWork(r.Context(), envID, workID)
 	if err != nil {
 		return nil, mapWorkErr(err)
@@ -283,6 +286,11 @@ func (s *server) updateWork(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// After the body is validated, so an empty/bad patch is still the 400 the
+	// reference returns before an item lookup (a malformed work_id is a 404).
+	if err := checkWorkID(workID); err != nil {
+		return nil, err
+	}
 	w, err := s.queue.UpdateMetadata(r.Context(), envID, workID, upserts, deletes)
 	if err != nil {
 		return nil, mapWorkErr(err)
@@ -297,6 +305,9 @@ func (s *server) ackWork(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkWorkID(workID); err != nil {
+		return nil, err
+	}
 	w, err := s.queue.Ack(r.Context(), envID, workID)
 	if err != nil {
 		return nil, mapWorkErr(err)
@@ -309,6 +320,9 @@ func (s *server) ackWork(r *http.Request) (any, error) {
 func (s *server) heartbeatWork(r *http.Request) (any, error) {
 	envID, workID, err := s.workScope(r)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkWorkID(workID); err != nil {
 		return nil, err
 	}
 	expected := r.URL.Query().Get("expected_last_heartbeat")
@@ -338,6 +352,9 @@ func (s *server) heartbeatWork(r *http.Request) (any, error) {
 func (s *server) stopWork(r *http.Request) error {
 	envID, workID, err := s.workScope(r)
 	if err != nil {
+		return err
+	}
+	if err := checkWorkID(workID); err != nil {
 		return err
 	}
 	force, err := parseStopForce(r)

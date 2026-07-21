@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
 // The managed-agents lists paginate with an opaque cursor: the response
@@ -75,6 +77,13 @@ func parsePageMax(q url.Values, max int) (pageParams, error) {
 		c, err := decodeCursor(s)
 		if err != nil {
 			return p, err
+		}
+		// A time cursor embeds a resource id; a crafted one carrying an unstorable
+		// byte would otherwise bind into the keyset comparison as a 500. A
+		// server-issued cursor's id is always valid, and the seq/version cursors
+		// carry no id (c.id == ""). See #135.
+		if c.id != "" && !domain.ID(c.id).Valid() {
+			return p, errInvalid("invalid page cursor")
 		}
 		p.cur = c
 	}
