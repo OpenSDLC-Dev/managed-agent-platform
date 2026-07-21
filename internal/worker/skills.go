@@ -191,7 +191,7 @@ func materializeSkill(ctx context.Context, client sdk.Client, sb sandbox.Sandbox
 	if err != nil {
 		return err
 	}
-	data, err := skills.ReadArchive(resp.Body, resp.ContentLength)
+	data, err := skills.ReadArchive(resp.Body)
 	resp.Body.Close()
 	if err != nil {
 		return err

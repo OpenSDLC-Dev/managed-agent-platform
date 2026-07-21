@@ -177,14 +177,14 @@ func (e *Executor) skillName(ctx context.Context, skillID, version string) (stri
 // cap (skills.ReadArchive) so a corrupt or oversized stored object cannot OOM
 // the executor.
 func (e *Executor) materializeSkill(ctx context.Context, sb sandbox.Sandbox, workdir string, r skills.Resolved) error {
-	rc, size, err := e.blobs.Get(ctx, skills.BlobKey(r.ID, r.Version))
+	rc, _, err := e.blobs.Get(ctx, skills.BlobKey(r.ID, r.Version))
 	if errors.Is(err, blob.ErrNotFound) {
 		return fmt.Errorf("%w: archive missing from object storage", errSkillNotFound)
 	}
 	if err != nil {
 		return err
 	}
-	data, err := skills.ReadArchive(rc, size)
+	data, err := skills.ReadArchive(rc)
 	rc.Close()
 	if err != nil {
 		return err

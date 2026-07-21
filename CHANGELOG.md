@@ -30,11 +30,15 @@ copy of an entry here.
   storage under the same byte cap (`skills.ReadArchive`) so a corrupt or oversized object cannot
   OOM either half; per-skill failure is logged and skipped, never fatal; a `.materialized`
   sentinel records the resolved `{skill_id: version}` set so re-entrant provisioning skips
-  rewriting unchanged skills. Because the sandbox workdir is agent-writable the skip is sound
-  against a rewritten marker: the marker stores no directory, and the presence probe follows a
-  directory recomputed from trusted metadata plus an exact bijection against the resolved set, so
-  a forged marker can neither redirect the probe nor mask a missing skill. The reference's
-  published **500 skills per session** cap now binds at agent create and session overrides.
+  rewriting unchanged skills. Because the sandbox workdir is agent-writable the marker is never
+  trusted for anything load-bearing: it stores no directory, the presence probe follows a
+  directory recomputed from trusted metadata, and an exact bijection against the resolved set
+  means a forged/duplicated/zero-value marker entry cannot redirect the probe or mask a skill
+  absent from its directory. Content-level tampering behind a present SKILL.md (an in-place edit,
+  or forging the marker version to suppress an in-session upgrade) is an accepted residual, the
+  same class the reference clobbers only by re-extracting every pass — documented in
+  docs/DIVERGENCES.md. The reference's published **500 skills per session** cap now binds at
+  agent create and session overrides.
   A skill's `latest_version` advances only to a numerically newer version on create (versions are
   minted before the parent row is locked, so out-of-order concurrent creates must not roll it
   back) and recomputes to the numerically greatest survivor on version delete. Observability:

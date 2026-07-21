@@ -248,35 +248,32 @@ func TestSentinelMatches(t *testing.T) {
 
 func TestReadArchive(t *testing.T) {
 	body := []byte("PK\x03\x04 pretend archive bytes")
-
-	// A correct size hint reads the whole stream.
-	got, err := ReadArchive(bytes.NewReader(body), int64(len(body)))
+	got, err := ReadArchive(bytes.NewReader(body))
 	if err != nil || !bytes.Equal(got, body) {
-		t.Fatalf("ReadArchive(correct hint) = %q, %v", got, err)
+		t.Fatalf("ReadArchive = %q, %v", got, err)
 	}
-	// An unknown (0) hint still reads everything.
-	got, err = ReadArchive(bytes.NewReader(body), 0)
-	if err != nil || !bytes.Equal(got, body) {
-		t.Fatalf("ReadArchive(no hint) = %q, %v", got, err)
-	}
-	// A lying oversized hint does not change the bytes returned.
-	got, err = ReadArchive(bytes.NewReader(body), 1<<40)
-	if err != nil || !bytes.Equal(got, body) {
-		t.Fatalf("ReadArchive(lying hint) = %q, %v", got, err)
+	if got, err := ReadArchive(bytes.NewReader(nil)); err != nil || len(got) != 0 {
+		t.Fatalf("ReadArchive(empty) = %q, %v", got, err)
 	}
 
 	// The cap is enforced on bytes actually read, tested through the limited
 	// core with a small ceiling so the test need not build a gigabyte.
 	small := []byte(strings.Repeat("a", 100))
-	if _, err := readArchiveLimited(bytes.NewReader(small), 0, 50); err == nil {
-		t.Error("byte cap not enforced")
+	// Just under the cap: read whole.
+	if out, err := readArchiveLimited(bytes.NewReader(small), 200); err != nil || len(out) != 100 {
+		t.Errorf("readArchiveLimited(under cap) = %d bytes, %v", len(out), err)
 	}
-	// A lying small hint cannot smuggle content past the cap — the cap wins.
-	if _, err := readArchiveLimited(bytes.NewReader(small), 10, 50); err == nil {
-		t.Error("byte cap bypassed via a low hint")
-	}
-	// Exactly at the cap is allowed.
-	if out, err := readArchiveLimited(bytes.NewReader(small), 0, 100); err != nil || len(out) != 100 {
+	// Exactly at the cap is allowed and the returned bytes are complete — this
+	// is the boundary the buffer-growth bug lived at (a full-to-cap buffer must
+	// not force an over-cap regrow before the EOF/overflow check).
+	if out, err := readArchiveLimited(bytes.NewReader(small), 100); err != nil || len(out) != 100 {
 		t.Errorf("readArchiveLimited(at cap) = %d bytes, %v", len(out), err)
+	}
+	// One byte over the cap is refused via the overflow probe.
+	if _, err := readArchiveLimited(bytes.NewReader(small), 99); err == nil {
+		t.Error("byte cap not enforced at one-over")
+	}
+	if _, err := readArchiveLimited(bytes.NewReader(small), 50); err == nil {
+		t.Error("byte cap not enforced")
 	}
 }

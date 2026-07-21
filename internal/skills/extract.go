@@ -35,27 +35,31 @@ const MaxArchiveBytes = ExtractMaxBytes
 
 // ReadArchive reads a skill archive from an object-store stream, refusing more
 // than MaxArchiveBytes so a hostile or corrupt object cannot exhaust memory.
-// sizeHint is the store's reported length (Content-Length / object size, 0 or
-// negative when unknown): it only sizes the initial buffer, never relaxes the
-// cap. The cap is enforced on bytes actually read, so a lying hint cannot beat
-// it.
-func ReadArchive(r io.Reader, sizeHint int64) ([]byte, error) {
-	return readArchiveLimited(r, sizeHint, MaxArchiveBytes)
+// The store's reported length is deliberately NOT used to pre-size the buffer:
+// it is untrusted, and a large hint would let a tiny hostile stream provoke a
+// huge eager allocation. The cap is enforced on bytes actually read.
+func ReadArchive(r io.Reader) ([]byte, error) {
+	return readArchiveLimited(r, MaxArchiveBytes)
 }
 
-func readArchiveLimited(r io.Reader, sizeHint, maxBytes int64) ([]byte, error) {
-	buf := bytes.NewBuffer(nil)
-	if sizeHint > 0 && sizeHint <= maxBytes {
-		buf.Grow(int(sizeHint))
-	}
-	n, err := buf.ReadFrom(io.LimitReader(r, maxBytes+1))
+// readArchiveLimited reads at most maxBytes via io.ReadAll over a capped reader,
+// then probes one more byte to detect an oversized stream. It deliberately does
+// NOT use bytes.Buffer.ReadFrom: that grows the buffer *before* the read which
+// returns EOF, so a stream filling the buffer to maxBytes forces a final grow
+// to ~2*maxBytes — a bytes.ErrTooLarge panic on 32-bit (the linux/arm worker
+// target) and a needless multi-gigabyte spike on 64-bit, right at the cap. The
+// overflow probe reads from the raw reader, not through the LimitReader, so the
+// cap on the buffered bytes and the "is there more?" test stay independent.
+func readArchiveLimited(r io.Reader, maxBytes int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read skill archive: %v", err)
 	}
-	if n > maxBytes {
+	var probe [1]byte
+	if n, _ := io.ReadFull(r, probe[:]); n > 0 {
 		return nil, fmt.Errorf("skill archive exceeds %d bytes", maxBytes)
 	}
-	return buf.Bytes(), nil
+	return data, nil
 }
 
 // BlobKey is the object-store key for a skill version's archive — the one
@@ -216,18 +220,25 @@ func ParseSentinel(data []byte) ([]markerEntry, bool) {
 }
 
 // SentinelMatches reports whether the marker proves the resolved set rs is
-// already fully materialized. It is sound against an agent-writable marker:
-//   - the probe directory is rs[i].Dir (trusted metadata), never the marker;
+// already fully materialized. Against an agent-writable marker it holds these:
+//   - the probe directory is rs[i].Dir (trusted metadata), never the marker,
+//     so a rewritten marker cannot redirect the probe at a decoy directory;
 //   - the marker's {id, version} set must be an EXACT bijection with rs (same
 //     length, each rs id present exactly once with its version), so a forged,
-//     duplicated, or zero-value entry cannot mask a missing skill;
+//     duplicated, or zero-value entry cannot mask a skill that is absent from
+//     its directory;
 //   - every resolved directory must still hold its SKILL.md (canonical
-//     archives place one at the root).
+//     archives place one at the root), so a deleted tree self-heals next pass.
 //
-// An in-place content edit of a materialized file is deliberately not detected
-// — presence is the tractable proxy, the residual is recorded in
-// docs/DIVERGENCES.md. read is the sandbox's ReadFile, passed as a function so
-// this package needs no sandbox dependency. rs must be deduplicated by id.
+// It is NOT a soundness proof against a fully hostile agent: the SKILL.md probe
+// tests presence, not content, so an agent that both forges the marker's
+// version and leaves an older version's files in place (the landing directory
+// is the skill name, shared across a skill's versions) can suppress an upgrade
+// — the same tampering class as an in-place content edit, and equally beyond a
+// presence probe. Both residuals are recorded in docs/DIVERGENCES.md; closing
+// them would mean abandoning the skip and re-extracting every pass, as the
+// reference does. read is the sandbox's ReadFile, passed as a function so this
+// package needs no sandbox dependency. rs must be deduplicated by id.
 func SentinelMatches(ctx context.Context, read func(context.Context, string) ([]byte, error),
 	workdir string, data []byte, rs []Resolved) bool {
 	entries, ok := ParseSentinel(data)
