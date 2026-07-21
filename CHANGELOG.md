@@ -42,7 +42,9 @@ copy of an entry here.
     `requires_action` gate before a confirmation cleared it. The interval spans a suspension the
     brain wrote and a confirmation the API commits, so it is measured where both ends are known —
     in the database (`clock_timestamp()` minus the requires_action idle event's `created_at`) so
-    both ends read one clock — and recorded after the resuming transaction commits.
+    both ends read one clock — and recorded after the resuming transaction commits. A gate
+    resolved across several confirmation batches records only the final segment: each partial
+    confirmation re-raises `requires_action`, and the measurement runs from the most recent one.
   - **`queue.depth` / `queue.pending` / `queue.workers_polling`** (queue) are the `/work/stats`
     numbers as OTLP observable gauges, per self_hosted environment, sampled through a callback the
     control plane registers once at startup. Cloud environments are left out — the executor claims

@@ -2,6 +2,7 @@ package events_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -89,5 +90,34 @@ func TestAppendWithoutStatusChangeRecordsNoTransition(t *testing.T) {
 
 	if got := statusPointCount(collect()); got != 0 {
 		t.Errorf("recorded %d status transition point(s) for an append with no status change, want 0", got)
+	}
+}
+
+// Recording is gated on the append succeeding: a rejected append — here on an
+// archived session, refused before the status write is even reached — counts no
+// transition. The full post-commit guarantee also covers a commit that fails
+// after a successful AppendInTx, which needs fault injection to exercise and is
+// left to reading; this pins the reachable half, that a failed append never
+// counts.
+func TestFailedAppendRecordsNoStatusTransition(t *testing.T) {
+	pool := newPool(t)
+	log := events.NewLog(pool)
+	sid := newSession(t, pool)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET archived_at = now() WHERE id = $1`, sid.String()); err != nil {
+		t.Fatalf("archive session: %v", err)
+	}
+	collect := collectMetrics(t)
+
+	running := domain.SessionRunning
+	_, err := log.AppendWith(ctx, sid, []events.NewEvent{
+		{Type: domain.EventSessionStatusRunning},
+	}, events.AppendOptions{SetStatus: &running})
+	if !errors.Is(err, events.ErrSessionArchived) {
+		t.Fatalf("append on archived session: err = %v, want ErrSessionArchived", err)
+	}
+
+	if got := statusPointCount(collect()); got != 0 {
+		t.Errorf("recorded %d transition(s) for an append that never committed, want 0", got)
 	}
 }
