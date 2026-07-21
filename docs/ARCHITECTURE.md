@@ -304,15 +304,31 @@ Postgres schema + migrations.
 | `migrate.go` | `Migrate`: embedded-FS migrations in filename order, one transaction for the whole run (all-or-nothing), `pg_advisory_xact_lock` so concurrently starting binaries don't race, versions recorded in `schema_migrations`. |
 | `store.go` | `Open(ctx, dsn)`: pool + ping + migrate; the single startup entry point for every database-backed binary (the BYOC worker is deliberately database-free). |
 
+### internal/blob
+
+The object-storage seam (docs/plan/06_skills.md): opaque bytes at string keys, behind
+the one interface every backend must satisfy. First consumer is the skills registry
+(archives at `skills/{skill_id}/{version}.zip`); the key namespace leaves room for the
+deferred Files API to share the store. Only controlplane and executor ever touch it —
+the BYOC worker stays wire-only and receives blob bytes through the control plane.
+
+| File | Contents |
+|---|---|
+| `blob.go` | `Store` — `Put(ctx, key, r, size, contentType)` / `Get` (missing key is `ErrNotFound` at call time, never deferred to the first read; returns size for HTTP streaming) / `Delete` (idempotent: a retried delete converges). |
+| `telemetry.go` | `WithMetrics` decorator at the interface seam: `blob.op.duration` histogram by bounded `blob.op`/`outcome` (`ok`/`not_found`/`error`) and `blob.op.bytes` by op — never a key in a metric label (cardinality); instruments resolved per call (the toolset rule), telemetry failure never fails a storage call. |
+| `s3/s3.go` | The S3-compatible backend on minio-go — plain S3 wire only, no MinIO-specific APIs, so MinIO/AWS S3/Ceph RGW are interchangeable. `New` validates config, connects, and ensures the bucket (racing creators both succeed via the `BucketAlreadyOwnedByYou`/`BucketAlreadyExists` codes); `Get` calls `Stat` to force the lazy request so absence surfaces as `ErrNotFound` at `Get`, and only object absence maps there — auth failures and a vanished bucket stay real errors. |
+| `blobtest/` | Test support: one Dockerized MinIO per test binary (`Main`, pinned to the same image release as compose and the chart), per-test fresh-bucket `Target`s, and `Run` — the shared contract suite every backend must pass (round-trip, overwrite, `ErrNotFound`, idempotent delete, empty object, namespaced keys, 5 MiB payload), run against the S3 backend both bare and through the metrics decorator. |
+
 ### Test support and cmd/
 
 `internal/pgtest` starts one Dockerized Postgres per test binary and hands out fresh
 databases — migrated pools via `NewPool`, or bare un-migrated DSNs via `FreshDB` for
 suites that exercise `store.Open`/`Migrate` themselves (a missing Docker daemon is a
-hard failure, never a skip).
+hard failure, never a skip). `internal/blob/blobtest` is its MinIO twin for the blob
+seam (see above).
 `internal/modeltest` owns the live-tier opt-in contract: `.env` supplies configuration,
 `RUN_LIVE_MODEL_TESTS`/`RUN_EVALS` supply consent, and opted-in-but-misconfigured fails
-rather than skips (`TierEnabled` serves `TestMain` callers). Both are deliberately
+rather than skips (`TierEnabled` serves `TestMain` callers). All three are deliberately
 outside the coverage-gate denominator, as is `cmd/`.
 
 The four `cmd/` binaries are env-config plus wiring: `controlplane` (serves the REST API;
@@ -324,9 +340,12 @@ The four `cmd/` binaries are env-config plus wiring: `controlplane` (serves the 
 required; no `DATABASE_URL` by design).
 
 `deploy/helm/managed-agent-platform` is the chart (controlplane + brain + executor with
-the k8s sandbox backend, optional inline Postgres, OTLP values);
+the k8s sandbox backend, optional inline Postgres and MinIO — both hand-written
+templates, not subcharts, per the air-gap rule — with `externalDatabase` /
+`externalObjectStorage` for BYO, OTLP values);
 `deploy/compose/docker-compose.yml` is the local stack (one multi-stage image for all
-four binaries, loopback-bound control plane, optional Jaeger profile).
+four binaries, bundled Postgres + MinIO, loopback-bound control plane, optional Jaeger
+profile).
 
 ## Security invariants
 

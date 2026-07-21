@@ -1,7 +1,9 @@
 # Local development stack (docker compose)
 
 Brings up the platform's three server processes — **controlplane**, **brain**,
-**executor** — against a bundled Postgres, so you can drive the API with the real
+**executor** — against a bundled Postgres and a bundled MinIO (S3-compatible
+object storage for skill archives; the app services start consuming it with the
+skills registry, docs/plan/06_skills.md), so you can drive the API with the real
 `ant` CLI or the Anthropic SDKs on your laptop. It's the compose companion to the
 [Helm chart](../helm); same binaries (built from the repo-root `Dockerfile`),
 wired for local use.

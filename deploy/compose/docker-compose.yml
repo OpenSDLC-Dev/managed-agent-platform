@@ -1,5 +1,6 @@
 # Local development stack: the three server processes (controlplane + brain +
-# executor) against a Postgres, with an optional Jaeger for traces. This is the
+# executor) against a Postgres and a MinIO (object storage for skill archives),
+# with an optional Jaeger for traces. This is the
 # compose companion to deploy/helm — the same binaries, wired for a laptop.
 # Quick start and configuration: see deploy/compose/README.md.
 #
@@ -39,6 +40,25 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
+
+  minio:
+    # Object storage for the skills registry (docs/plan/06_skills.md): skill
+    # archives live here, not in Postgres. The app services start consuming it
+    # with the skills registry slice; until then the service just runs. Same
+    # pinned release as the helm default and the blobtest contract harness.
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-map}
+      # MinIO requires a root password of at least 8 characters.
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-map-blob-dev}
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - miniodata:/data
 
   controlplane:
     <<: *app
@@ -92,3 +112,4 @@ services:
 
 volumes:
   pgdata:
+  miniodata:

@@ -15,6 +15,27 @@ copy of an entry here.
 
 ### Added
 
+- **Object storage: `internal/blob` + the S3 backend + bundled MinIO (skills plan, slice 1)**
+  ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the platform's
+  first binary-payload store, built as the seam docs/plan/06_skills.md designed before any
+  consumer exists (the skills registry lands next and plugs into it). `internal/blob` defines
+  the three-method `Store` contract — `Put` size-exact, `Get` returning `ErrNotFound` at call
+  time (never deferred to the first read) plus the size HTTP streaming needs, `Delete`
+  idempotent so a crashed-and-retried delete converges — and a `WithMetrics` decorator at the
+  interface seam (`blob.op.duration` by bounded op/outcome, `blob.op.bytes` by op; keys never
+  become metric labels). `internal/blob/s3` is the one backend, on minio-go and deliberately
+  plain S3 wire — MinIO, AWS S3, or Ceph RGW interchangeably — with bucket ensure-on-construct
+  (racing creators both succeed) and a hard rule pinned by tests: only object absence maps to
+  `ErrNotFound`; bad credentials or a vanished bucket stay loud errors. The shared contract
+  suite lives in `internal/blob/blobtest` (a Dockerized-MinIO twin of `pgtest`, outside the
+  coverage denominator like its siblings) and runs the backend both bare and through the
+  metrics decorator. Deployment follows the chart's own Postgres precedent: a hand-written
+  single-node MinIO StatefulSet (`minio.enabled` default true, explicit root credentials
+  required for GitOps render stability, never a subchart — air-gap rule) with
+  `externalObjectStorage` for BYO S3, and a MinIO service in the compose stack — all pinned to
+  the same image release the contract harness tests against. App wiring arrives with the
+  skills registry slice.
+
 - **Skills plan approved: docs/plan/06_skills.md**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the design for
   lifting the reserved skills seam into the full feature, settled against the pinned SDK, the

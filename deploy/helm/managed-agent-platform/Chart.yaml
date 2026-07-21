@@ -3,8 +3,8 @@ name: managed-agent-platform
 description: >-
   Self-hostable platform for long-horizon agents — the control plane, the brain
   pool, and the platform executor (with the in-cluster Kubernetes sandbox
-  backend), plus an optional in-cluster Postgres. Wire-compatible with Anthropic
-  Claude Managed Agents.
+  backend), plus an optional in-cluster Postgres and MinIO. Wire-compatible with
+  Anthropic Claude Managed Agents.
 type: application
 # version is the chart version; appVersion is the default image tag (see values.yaml).
 version: 0.1.0

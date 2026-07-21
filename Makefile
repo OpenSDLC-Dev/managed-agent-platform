@@ -50,7 +50,8 @@ fmt-check:
 	fi
 
 # Coverage denominator: logic packages only. internal/pgtest,
-# internal/sandbox/sandboxtest and internal/modeltest are test support —
+# internal/sandbox/sandboxtest, internal/modeltest and internal/blob/blobtest
+# are test support —
 # packages solely because a test in another package must import them. What is
 # uncovered in them are the branches no unit test can reach: the ones that fire
 # when a suite fails, when a live tier is misconfigured, or only under the
@@ -58,7 +59,7 @@ fmt-check:
 # gate, exactly as cmd/ main glue would.
 test:
 	@set -euo pipefail; \
-	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|sandboxtest|modeltest)$$' | paste -sd, -)"; \
+	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|sandboxtest|modeltest|blobtest)$$' | paste -sd, -)"; \
 	set -x; \
 	go test -count=1 -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
 

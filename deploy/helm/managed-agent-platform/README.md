@@ -8,7 +8,15 @@ Deploys the platform's three server processes into a Kubernetes namespace:
 | **brain** | Deployment | independently | the model-turn orchestration pool |
 | **executor** | Deployment + RBAC | independently | runs tools in a per-session **Kubernetes sandbox Pod** |
 
-An optional in-cluster **Postgres** (StatefulSet) is included for a batteries-included install.
+An optional in-cluster **Postgres** (StatefulSet) is included for a batteries-included
+install, and likewise an optional in-cluster **MinIO** (StatefulSet) — S3-compatible
+object storage for skill archives (consumed by the skills registry as
+docs/plan/06_skills.md lands). Both follow the same rule: bundled single-node
+instances for dev/POC, hand-written templates rather than subcharts (air-gap
+self-hosting must not require pulling an external chart), and a production
+recommendation to disable them and point `externalDatabase` /
+`externalObjectStorage` at services with their own backup and upgrade lifecycle.
+The platform speaks plain S3 — any compatible store (AWS S3, Ceph RGW, …) works.
 
 The **BYOC worker is deliberately not in this chart** — it runs on the customer's own
 compute, outside the platform cluster, and reaches the control plane only over the wire.
@@ -27,7 +35,9 @@ compute, outside the platform cluster, and reaches the control plane only over t
 ## Install
 
 Minimum required values: a bootstrap API key, at least one model provider, and — with
-the bundled Postgres — a database password.
+the bundled Postgres and MinIO — a database password and MinIO root credentials
+(neither is auto-generated: a generated credential is unstable under
+`helm template`/GitOps; MinIO requires a root password of at least 8 characters).
 
 ```bash
 helm install map ./deploy/helm/managed-agent-platform \
@@ -37,6 +47,8 @@ helm install map ./deploy/helm/managed-agent-platform \
   --set image.tag=0.1.0 \
   --set controlplane.apiKey=$(openssl rand -hex 24) \
   --set postgresql.password=$(openssl rand -hex 24) \
+  --set minio.rootUser=map \
+  --set minio.rootPassword=$(openssl rand -hex 24) \
   --set-json 'brain.modelProviders=[{"model":"*","protocol":"anthropic","base_url":"https://gateway.internal","api_key":"sk-..."}]'
 ```
 

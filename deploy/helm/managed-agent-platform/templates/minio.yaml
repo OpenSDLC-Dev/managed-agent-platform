@@ -1,0 +1,81 @@
+{{- if .Values.minio.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "map.fullname" . }}-minio
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  # Headless: {fullname}-minio resolves straight to the pod, which is the host
+  # in the blob-endpoint the chart's Secret carries.
+  clusterIP: None
+  selector:
+    {{- include "map.selectorLabels" (dict "ctx" . "component" "minio") | nindent 4 }}
+  ports:
+    - name: http
+      port: 9000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "map.fullname" . }}-minio
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  serviceName: {{ include "map.fullname" . }}-minio
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "minio") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "map.labels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      containers:
+        - name: minio
+          image: {{ .Values.minio.image | quote }}
+          args: ["server", "/data"]
+          ports:
+            - name: http
+              containerPort: 9000
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "map.secretName" . }}
+                  key: blob-access-key
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "map.secretName" . }}
+                  key: blob-secret-key
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          {{- with .Values.minio.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.minio.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.minio.storage | quote }}
+{{- end -}}
