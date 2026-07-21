@@ -51,7 +51,7 @@ Progress is tracked in:
 - **[GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues)** — the backlog and open questions.
 - **[STATE.md](./STATE.md)** — the active work and its task progress. The as-built system is [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md); acceptance and decision records are [docs/HISTORY.md](./docs/HISTORY.md).
 
-Deferred past v1 (seams reserved, not implemented — each tracked as an issue): secret vaults and egress credential injection, scheduled deployments, memory stores, multi-agent threads, skills, and multi-tenant RBAC/SSO.
+Deferred past v1 (seams reserved, not implemented — each tracked as an issue): secret vaults and egress credential injection, scheduled deployments, memory stores, multi-agent threads, and multi-tenant RBAC/SSO. Skills left that list and are in active development ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)): the `/v1/skills` registry over object storage has landed; sandbox materialization and prompt injection are in progress.
 
 ## Development
 

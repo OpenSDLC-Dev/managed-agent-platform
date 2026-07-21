@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -21,23 +22,33 @@ func TestMain(m *testing.M) {
 	os.Exit(pgtest.Main(m))
 }
 
-// tserver is a running control-plane handler over a fresh database.
+// tserver is a running control-plane handler over a fresh database and an
+// in-memory object store (the S3 backend has its own contract suite).
 type tserver struct {
-	t    *testing.T
-	url  string
-	pool *pgxpool.Pool
+	t     *testing.T
+	url   string
+	pool  *pgxpool.Pool
+	blobs *blobtest.MemStore
+}
+
+// newPoolWithKey is the database half of newTestServer, for tests that
+// assemble their own handler.
+func newPoolWithKey(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool := pgtest.NewPool(t)
+	if err := api.EnsureAPIKey(context.Background(), pool, "test", testKey); err != nil {
+		t.Fatalf("EnsureAPIKey: %v", err)
+	}
+	return pool
 }
 
 func newTestServer(t *testing.T) *tserver {
 	t.Helper()
-	ctx := context.Background()
-	pool := pgtest.NewPool(t)
-	if err := api.EnsureAPIKey(ctx, pool, "test", testKey); err != nil {
-		t.Fatalf("EnsureAPIKey: %v", err)
-	}
-	srv := httptest.NewServer(api.NewHandler(pool))
+	pool := newPoolWithKey(t)
+	blobs := blobtest.Mem()
+	srv := httptest.NewServer(api.NewHandler(pool, blobs))
 	t.Cleanup(srv.Close)
-	return &tserver{t: t, url: srv.URL, pool: pool}
+	return &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs}
 }
 
 // do issues a request with the test API key. body may be nil, a raw string

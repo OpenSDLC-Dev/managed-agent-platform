@@ -62,10 +62,10 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 		t.Fatalf("seed the management key: %v", err)
 	}
 
-	// NewHandler takes only the pool — it builds its own event log, broker and
-	// queue, so the harness cannot accidentally hand it a different one than
-	// the loops use.
-	srv := httptest.NewServer(api.NewHandler(pool))
+	// NewHandler builds its own event log, broker and queue over the pool, so
+	// the harness cannot accidentally hand it a different one than the loops
+	// use. No object store: the eval stack exercises no skills yet.
+	srv := httptest.NewServer(api.NewHandler(pool, nil))
 	t.Cleanup(srv.Close)
 
 	// One default route. Config.Model is the id the *endpoint* receives, so it

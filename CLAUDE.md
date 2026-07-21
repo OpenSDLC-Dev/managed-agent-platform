@@ -65,6 +65,7 @@ internal/
   toolset/    # the built-in tools (agent_toolset_20260401)
   sandbox/    # Sandbox/Provider iface + docker/ + k8s/ + backend selection + shell/
   blob/       # object-storage seam: Store iface + s3/ (S3-compatible via minio-go)
+  skills/     # skill-upload validation + canonical-zip normalization (SKILL.md frontmatter)
   queue/      # work queue (Postgres FOR UPDATE SKIP LOCKED; redis optional later)
   telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
   store/      # Postgres schema/migrations, reserved multi-tenant columns

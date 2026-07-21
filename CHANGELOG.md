@@ -15,6 +15,31 @@ copy of an entry here.
 
 ### Added
 
+- **Skills registry: the wire-compatible `/v1/skills` API over object storage (skills plan, slice 2)**
+  ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — all nine reference
+  endpoints (skill create/get/list/delete, version create/get/list/delete, archive download),
+  shaped field-for-field against the pinned SDK's `betaskill.go`/`betaskillversion.go`: multipart
+  `files[]` upload in both reference forms — loose path-qualified files or a single zip archive
+  (magic-byte detection; Go's `Part.FileName` basenames paths, so the raw `Content-Disposition`
+  filename is parsed instead) — normalized by the new `internal/skills` package into one
+  canonical archive with SKILL.md frontmatter validation (name/description rules, size and
+  member caps, directory-vs-name match) shared with the coming operator import; server-minted
+  epoch-microsecond versions with `skillver_` ids (new `internal/domain` prefix); `latest_version`
+  maintained transactionally and recomputed on version delete; the wire's delete asymmetry
+  (`skill_deleted` echoes the skill id, `skill_version_deleted` the version timestamp) and delete
+  order (skill delete 400s until every version is gone, FK-backed) reproduced; skills-list
+  `source` filter and the versions list's 1000 cap; archives at `skills/{id}/{version}.zip` via
+  `internal/blob` (put-before-transaction, best-effort orphan cleanup), streamed back unmodified
+  by the download endpoint. Migration `0007_skills.sql`; upload/download slog + `skills.uploads`/
+  `skills.upload.bytes`/`skills.download.bytes` metrics (bounded labels); `blobtest.Mem`, an
+  in-memory `blob.Store` passing the shared contract suite, backs the API tests. Deployment wiring
+  end-to-end: the controlplane reads `BLOB_*` env (compose points it at the bundled MinIO; the
+  chart injects optional `blob-*` Secret keys, so a storage-less deploy keeps serving with the
+  skills upload routes reporting the absence), and the CI compose job now runs the E2E-1
+  round-trip — upload both forms, list, download and byte-compare, ordered delete — against
+  real MinIO. Inferences (detection method, error shapes, download headers, `display_title`
+  rules) recorded in docs/DIVERGENCES.md.
+
 - **Object storage: `internal/blob` + the S3 backend + bundled MinIO (skills plan, slice 1)**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the platform's
   first binary-payload store, built as the seam docs/plan/06_skills.md designed before any

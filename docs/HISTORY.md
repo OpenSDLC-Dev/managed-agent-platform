@@ -33,6 +33,16 @@ recorded nowhere else.
 
 ---
 
+## Skills slice-2 acceptance — real `ant beta:skills` against the registry (run 2026-07-21) — ✅ passed
+
+The skills plan's slice-2 acceptance (docs/plan/06_skills.md): the **real `ant` CLI** (built from the local checkout) driving the new `/v1/skills` registry, zip form — the only form the CLI can emit, since it basenames every part filename, which makes it the canonical compatibility probe.
+
+**Setup.** Disposable Postgres + MinIO containers, `cmd/controlplane` run locally with `BLOB_*` pointed at the MinIO, a fixture skill (`financial-skill/{SKILL.md,reference.md}`) zipped locally.
+
+**Flow exercised, all against `--base-url` with unmodified CLI commands.** `beta:skills create --file financial-skill.zip` → the Skill object (`skill_` id, `display_title` defaulted from the frontmatter name, epoch-microsecond `latest_version`, `source:"custom"`); `beta:skills list` / `retrieve` echo it; `beta:skills:versions create` mints a second version (`skillver_` id, name/description/directory extracted from SKILL.md) and `latest_version` follows; `beta:skills:versions list --limit 10` returns both, newest first; `beta:skills:versions download` streams the archive **byte-identical** to the uploaded zip (`cmp` clean); `beta:skills delete` with versions still present is the wire's `400 invalid_request_error`; both `beta:skills:versions delete` calls echo the **version timestamp** as the deleted id (`skill_version_deleted` — the reference's asymmetry); the final `beta:skills delete` returns `skill_deleted` and a retrieve after it the enveloped `404 not_found_error`. No CLI flag, path, or field needed any accommodation.
+
+---
+
 ## Slice-8 acceptance — real `ant beta:worker` end to end (run 2026-07-16) — ✅ passed
 
 The plan's slice-8 acceptance, deferred until the local stack existed, has now been run and **passed**.

@@ -29,6 +29,7 @@ const (
 	PrefixDeploymentRun = "drun"
 	PrefixFile          = "file"
 	PrefixSkill         = "skill"
+	PrefixSkillVersion  = "skillver"
 )
 
 // altSessionPrefix is accepted on input for wire compatibility: some Anthropic
@@ -50,7 +51,8 @@ var idEncoding = base32.NewEncoding(idAlphabet).WithPadding(base32.NoPadding)
 var knownPrefixes = map[string]bool{
 	PrefixAgent: true, PrefixEnvironment: true, PrefixSession: true, PrefixEvent: true,
 	PrefixWork: true, PrefixVault: true, PrefixResource: true, PrefixDeployment: true,
-	PrefixDeploymentRun: true, PrefixFile: true, PrefixSkill: true, altSessionPrefix: true,
+	PrefixDeploymentRun: true, PrefixFile: true, PrefixSkill: true, PrefixSkillVersion: true,
+	altSessionPrefix: true,
 }
 
 const idRandomBytes = 15

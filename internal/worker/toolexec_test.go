@@ -120,7 +120,7 @@ func newHarnessWrapped(t *testing.T, sb *fakeSandbox, wrap func(http.Handler) ht
 	if err := api.EnsureEnvironmentKey(ctx, pool, envID.String(), workerKey); err != nil {
 		t.Fatalf("ensure env key: %v", err)
 	}
-	var handler http.Handler = api.NewHandler(pool)
+	var handler http.Handler = api.NewHandler(pool, nil)
 	if wrap != nil {
 		handler = wrap(handler)
 	}
