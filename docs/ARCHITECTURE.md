@@ -302,8 +302,10 @@ Postgres schema + migrations.
 
 ### Test support and cmd/
 
-`internal/pgtest` starts one Dockerized Postgres per test binary and hands out
-freshly-migrated databases (a missing Docker daemon is a hard failure, never a skip).
+`internal/pgtest` starts one Dockerized Postgres per test binary and hands out fresh
+databases — migrated pools via `NewPool`, or bare un-migrated DSNs via `FreshDB` for
+suites that exercise `store.Open`/`Migrate` themselves (a missing Docker daemon is a
+hard failure, never a skip).
 `internal/modeltest` owns the live-tier opt-in contract: `.env` supplies configuration,
 `RUN_LIVE_MODEL_TESTS`/`RUN_EVALS` supply consent, and opted-in-but-misconfigured fails
 rather than skips (`TierEnabled` serves `TestMain` callers). Both are deliberately
