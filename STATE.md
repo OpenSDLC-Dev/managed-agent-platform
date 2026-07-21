@@ -22,4 +22,7 @@ wire-schema surface (issue-triage judged `needs_plan: false`).
 - [x] `queue.depth`/`pending`/`workers_polling` observable gauges over `Queue.Stats`, self_hosted
       only, registered in `cmd/controlplane`. Mutation-checked, `internal/queue`.
 - [x] Telemetry contract test asserts every business metric name reaches an OTLP collector.
-- [ ] `make verify` green; verifier subagent PASS; dual review (Codex + Claude); PR opened.
+- [x] `make verify` green (91.67%); verifier PASS; two Claude reviewers, no blockers (Codex over
+      quota to 2026-07-25, second Claude reviewer stood in). PR
+      [#144](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/144) (draft).
+- [ ] CI green, then mark ready and squash-merge.
