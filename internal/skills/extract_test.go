@@ -256,6 +256,13 @@ func TestReadArchive(t *testing.T) {
 		t.Fatalf("ReadArchive(empty) = %q, %v", got, err)
 	}
 
+	// A stream larger than the 64 KiB initial buffer but under the cap exercises
+	// the clamped-doubling grow loop and must round-trip whole.
+	big := []byte(strings.Repeat("z", 200<<10))
+	if out, err := readArchiveLimited(bytes.NewReader(big), 1<<20); err != nil || len(out) != len(big) {
+		t.Errorf("readArchiveLimited(grow) = %d bytes, %v", len(out), err)
+	}
+
 	// The cap is enforced on bytes actually read, tested through the limited
 	// core with a small ceiling so the test need not build a gigabyte.
 	small := []byte(strings.Repeat("a", 100))

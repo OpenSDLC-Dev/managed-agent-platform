@@ -27,8 +27,10 @@ copy of an entry here.
   serves the skill read+download routes (mutations and the collection list stay
   management-only). Extraction enforces the reference guards (escape refusal, 10k members,
   1 GiB decompressed — `skills.Extract`, shared by both halves), and each archive is read from
-  storage under the same byte cap (`skills.ReadArchive`) so a corrupt or oversized object cannot
-  OOM either half; per-skill failure is logged and skipped, never fatal; a `.materialized`
+  storage under a compressed-size cap (`skills.ReadArchive`, above the 30 MB upload limit but far
+  below the decompressed ceiling) into a hard-clamped buffer so a corrupt or oversized object is
+  refused without a gigabyte-scale allocation; per-skill failure is logged and skipped, never
+  fatal; a `.materialized`
   sentinel records the resolved `{skill_id: version}` set so re-entrant provisioning skips
   rewriting unchanged skills. Because the sandbox workdir is agent-writable the marker is never
   trusted for anything load-bearing: it stores no directory, the presence probe follows a

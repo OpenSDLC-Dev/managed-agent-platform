@@ -25,13 +25,17 @@ const ExtractMaxBytes = 1 << 30
 // set so re-entrant sandbox provisioning skips rewriting unchanged skills.
 const SentinelName = ".materialized"
 
-// MaxArchiveBytes caps how many bytes a materializer reads from an object-store
-// stream before handing the archive to Extract. It matches the decompressed
-// cap: a canonical zip never exceeds its own decompressed size, so a stored
-// object larger than this is malformed or hostile and Extract would reject it
-// anyway. Bounding the read keeps a corrupt or oversized object from OOMing the
-// executor/worker via an unbounded io.ReadAll.
-const MaxArchiveBytes = ExtractMaxBytes
+// MaxArchiveBytes caps how many *compressed* bytes a materializer reads from an
+// object-store stream before handing the archive to Extract. It is set well
+// above the platform's upload limit (MaxTotalBytes, 30 MB) but far below
+// ExtractMaxBytes: a canonical zip is built from at most MaxTotalBytes of
+// validated content, so its compressed form fits comfortably here, while a
+// stored object larger than this is malformed or hostile and is refused before
+// it can consume memory — Extract's own decompressed cap then guards what a
+// valid archive expands to. Capping the *read* at a realistic archive size (not
+// the gigabyte decompressed ceiling) is what keeps refusing a hostile object
+// from ever needing a gigabyte-scale allocation.
+const MaxArchiveBytes = 64 << 20
 
 // ReadArchive reads a skill archive from an object-store stream, refusing more
 // than MaxArchiveBytes so a hostile or corrupt object cannot exhaust memory.
@@ -42,24 +46,53 @@ func ReadArchive(r io.Reader) ([]byte, error) {
 	return readArchiveLimited(r, MaxArchiveBytes)
 }
 
-// readArchiveLimited reads at most maxBytes via io.ReadAll over a capped reader,
-// then probes one more byte to detect an oversized stream. It deliberately does
-// NOT use bytes.Buffer.ReadFrom: that grows the buffer *before* the read which
-// returns EOF, so a stream filling the buffer to maxBytes forces a final grow
-// to ~2*maxBytes — a bytes.ErrTooLarge panic on 32-bit (the linux/arm worker
-// target) and a needless multi-gigabyte spike on 64-bit, right at the cap. The
-// overflow probe reads from the raw reader, not through the LimitReader, so the
-// cap on the buffered bytes and the "is there more?" test stay independent.
+// readArchiveLimited reads the stream into one contiguous buffer whose capacity
+// is grown by doubling but hard-clamped at maxBytes, then probes one more byte
+// to detect an oversized object. Growing the buffer ourselves — rather than via
+// io.ReadAll or bytes.Buffer.ReadFrom — is deliberate: both of those overshoot
+// to ~2x the cap at the boundary (bytes.Buffer.ReadFrom grows *before* the read
+// that returns EOF; io.ReadAll retains growing chunks and reallocates), which
+// is a needless multi-hundred-MB spike here and would be a gigabyte spike or a
+// 32-bit panic under a larger cap. The clamp means the buffer never allocates
+// past maxBytes, and a hostile object is refused via the probe without reading
+// the rest of the stream. The probe reads from the raw reader so the cap on the
+// buffered bytes and the "is there more?" test stay independent.
 func readArchiveLimited(r io.Reader, maxBytes int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxBytes))
-	if err != nil {
-		return nil, fmt.Errorf("read skill archive: %v", err)
+	if maxBytes < 1 {
+		maxBytes = 1
 	}
-	var probe [1]byte
-	if n, _ := io.ReadFull(r, probe[:]); n > 0 {
-		return nil, fmt.Errorf("skill archive exceeds %d bytes", maxBytes)
+	const initialCap = 64 << 10
+	c := int64(initialCap)
+	if c > maxBytes {
+		c = maxBytes
 	}
-	return data, nil
+	buf := make([]byte, 0, c)
+	for {
+		if len(buf) == cap(buf) {
+			if int64(cap(buf)) >= maxBytes {
+				var probe [1]byte
+				if n, _ := io.ReadFull(r, probe[:]); n > 0 {
+					return nil, fmt.Errorf("skill archive exceeds %d bytes", maxBytes)
+				}
+				return buf, nil
+			}
+			next := int64(cap(buf)) * 2
+			if next > maxBytes {
+				next = maxBytes
+			}
+			grown := make([]byte, len(buf), next)
+			copy(grown, buf)
+			buf = grown
+		}
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err == io.EOF {
+			return buf, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read skill archive: %v", err)
+		}
+	}
 }
 
 // BlobKey is the object-store key for a skill version's archive — the one
