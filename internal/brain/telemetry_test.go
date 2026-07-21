@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -112,5 +113,73 @@ func TestATurnWhoseEndpointReportedNoUsageRecordsNoTokens(t *testing.T) {
 
 	if pts := tokenPoints(t, collect()); len(pts) != 0 {
 		t.Errorf("recorded %d token data point(s), want none: the endpoint reported no usage", len(pts))
+	}
+}
+
+// floatPoints returns a float histogram's data points by name.
+func floatPoints(t *testing.T, rm metricdata.ResourceMetrics, name string) []metricdata.HistogramDataPoint[float64] {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			h, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("%s is %T, want a float64 histogram", name, m.Data)
+			}
+			return h.DataPoints
+		}
+	}
+	return nil
+}
+
+// Time to first token is the platform's responsiveness signal, and it is a brain
+// fact: the clock starts when the brain claims the work — replay and request
+// assembly are latency the user feels — and stops at the first content the model
+// streams. Nothing else in the turn observes both boundaries, so this is the
+// wiring's own test that the two are captured and recorded.
+func TestATurnRecordsTimeToFirstToken(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		textChunk(0, "hi"),
+		done("end_turn", 25),
+	}}, nil)
+	h.wake(t, "hello")
+	h.runOnce(t)
+
+	pts := floatPoints(t, collect(), brain.MetricTimeToFirstToken)
+	if len(pts) != 1 {
+		t.Fatalf("%s points = %d, want 1", brain.MetricTimeToFirstToken, len(pts))
+	}
+	if pts[0].Sum <= 0 {
+		t.Errorf("time to first token = %vs, want positive (claim precedes the first token)", pts[0].Sum)
+	}
+	got := map[string]string{}
+	for _, kv := range pts[0].Attributes.ToSlice() {
+		got[string(kv.Key)] = kv.Value.Emit()
+	}
+	if got["gen_ai.provider.name"] != "fake" {
+		t.Errorf("provider attr = %q, want fake", got["gen_ai.provider.name"])
+	}
+}
+
+// A turn that streams no content — the model went straight to a tool call — has
+// no first token to measure. Recording zero would report an instant response that
+// never happened, so the metric stays silent, the same absent-is-not-zero rule
+// the token histogram follows.
+func TestATurnWithNoStreamedContentRecordsNoTimeToFirstToken(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		toolUseChunk("tu_1", "bash"),
+		done("tool_use", 5),
+	}}, nil)
+	h.wake(t, "run something")
+	h.runOnce(t)
+
+	if pts := floatPoints(t, collect(), brain.MetricTimeToFirstToken); len(pts) != 0 {
+		t.Errorf("recorded %d first-token point(s) for a turn that streamed no content, want 0", len(pts))
 	}
 }

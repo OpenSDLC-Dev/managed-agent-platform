@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -25,6 +26,11 @@ type turnResult struct {
 	// the token metric (#90). A turn that never reached its done chunk also
 	// leaves this nil.
 	usage *domain.ModelUsage
+	// firstTokenAt is when the first content delta — thinking or text —
+	// arrived from the model, the stop side of the time-to-first-token
+	// measurement. Zero for a turn that streamed no content (a straight-to-tool
+	// call, an empty stream): there is no first token, so none is recorded.
+	firstTokenAt time.Time
 }
 
 // streamTurn drives one provider stream, broadcasting message previews as
@@ -68,6 +74,11 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 		c := stream.Chunk()
 		switch c.Kind {
 		case provider.KindThinkingDelta:
+			// Thinking is the first content a reasoning model streams, so it is
+			// the first token whenever it comes before any text.
+			if turn.firstTokenAt.IsZero() {
+				turn.firstTokenAt = time.Now()
+			}
 			// The preview is start-only (agent.thinking carries no content);
 			// one event per thinking block — a delta on a new provider block
 			// index closes the previous block's event and opens the next.
@@ -95,6 +106,12 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 			// no preview is opened for an event that will never land.
 			if c.Text == "" {
 				continue
+			}
+			// The first non-empty text delta is the first token when no thinking
+			// preceded it. Stamped after the empty-delta guard so a block that
+			// streams only empty deltas does not count as content.
+			if turn.firstTokenAt.IsZero() {
+				turn.firstTokenAt = time.Now()
 			}
 			if msgPreview == nil {
 				msgPreview, err = b.log.StartPreview(ctx, sid, domain.EventAgentMessage)

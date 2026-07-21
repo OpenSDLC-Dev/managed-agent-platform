@@ -90,7 +90,11 @@ func (b *Brain) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil || item == nil {
 		return false, err
 	}
-	if err := b.runTurn(ctx, item); err != nil {
+	// The claim is the start of time-to-first-token: replay and request assembly
+	// are latency the user feels, so the clock starts here, not at the provider
+	// call.
+	claimedAt := time.Now()
+	if err := b.runTurn(ctx, item, claimedAt); err != nil {
 		// Infra failure or a lost lease: the item is left to its lease —
 		// expiry hands it to another brain. The turn's output never commits
 		// on these paths (settlement carries the lease proof in the same
@@ -126,7 +130,7 @@ func streamUsage(turn *turnResult) *domain.ModelUsage {
 	return turn.usage
 }
 
-func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
+func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Time) error {
 	sid := item.SessionID
 
 	agentJSON, live, err := b.claimLiveSession(ctx, item)
@@ -195,6 +199,13 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item) error {
 	// goes with it: what the model spent is a fact of the call, and a turn that
 	// streamed an answer and then lost its lease still cost real tokens.
 	span.ModelDone(streamUsage(turn))
+	// Time to first token, recorded whenever the model streamed content — even
+	// if the turn later failed, the first token is a real fact once it arrived.
+	// A turn that streamed nothing leaves firstTokenAt zero and records no
+	// reading, the same absent-is-not-zero rule the token metric follows.
+	if turn != nil && !turn.firstTokenAt.IsZero() {
+		recordTTFT(sctx, events.Backend{Provider: desc.Protocol, Model: desc.Model}, turn.firstTokenAt.Sub(claimedAt))
+	}
 	if err := keeper.close(); err != nil {
 		// The lease is gone or unmaintainable: another brain may own the
 		// turn already. Nothing of ours may commit — abandon quietly.
