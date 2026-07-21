@@ -3,10 +3,12 @@ package brain_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -229,5 +231,51 @@ func TestASettledTurnRecordsSessionStatusTransitions(t *testing.T) {
 	}
 	if got := brainStatusCount(t, rm, "idle"); got != 1 {
 		t.Errorf("idle transitions = %d, want 1 (the settle)", got)
+	}
+}
+
+// A reclaim re-enters running on the log (status_rescheduled + status_running)
+// but the session is already running, so it moves no column and must count no
+// transition — otherwise crash-recovery churn inflates the very metric an
+// operator reads to spot it. The wake's one running is all that is counted.
+func TestReclaimRecoveryRecordsNoRunningTransition(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		textChunk(0, "recovered"),
+		done("end_turn", 1),
+	}}, nil)
+	h.wake(t, "hi") // idle→running, records running = 1
+
+	// A previous brain claimed the turn and died: claim with a tiny lease and let
+	// it expire, so this run reclaims it.
+	item, err := h.queue.Claim(context.Background(), queue.ModelTurn, 30*time.Millisecond)
+	if err != nil || item == nil {
+		t.Fatalf("pre-claim: %+v %v", item, err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	h.runOnce(t) // reclaim recovery (no SetStatus) then settle idle
+
+	if got := brainStatusCount(t, collect(), "running"); got != 1 {
+		t.Errorf("running transitions = %d, want 1 — the reclaim's running re-entry is a no-op and must not count", got)
+	}
+}
+
+// A reasoning model streams thinking before any text, so the first thinking delta
+// is the first token. This exercises the thinking-delta stamp path (the TTFT tests
+// above use text/tool-only streams).
+func TestTimeToFirstTokenStampsFirstThinkingDelta(t *testing.T) {
+	collect := collectBrainMetrics(t)
+
+	h := newHarness(t, [][]provider.Chunk{{
+		{Kind: provider.KindThinkingDelta, Index: 0, Text: "hmm"},
+		textChunk(1, "answer"),
+		done("end_turn", 3),
+	}}, nil)
+	h.wake(t, "think then answer")
+	h.runOnce(t)
+
+	if pts := floatPoints(t, collect(), brain.MetricTimeToFirstToken); len(pts) != 1 {
+		t.Fatalf("%s points = %d, want 1 (the thinking delta is the first token)", brain.MetricTimeToFirstToken, len(pts))
 	}
 }
