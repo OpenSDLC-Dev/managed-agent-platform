@@ -67,14 +67,11 @@ func readArchiveLimited(r io.Reader, maxBytes int64) ([]byte, error) {
 		c = maxBytes
 	}
 	buf := make([]byte, 0, c)
+	empty := 0
 	for {
 		if len(buf) == cap(buf) {
 			if int64(cap(buf)) >= maxBytes {
-				var probe [1]byte
-				if n, _ := io.ReadFull(r, probe[:]); n > 0 {
-					return nil, fmt.Errorf("skill archive exceeds %d bytes", maxBytes)
-				}
-				return buf, nil
+				return probeOverCap(r, buf, maxBytes)
 			}
 			next := int64(cap(buf)) * 2
 			if next > maxBytes {
@@ -86,11 +83,49 @@ func readArchiveLimited(r io.Reader, maxBytes int64) ([]byte, error) {
 		}
 		n, err := r.Read(buf[len(buf):cap(buf)])
 		buf = buf[:len(buf)+n]
-		if err == io.EOF {
+		switch {
+		case err == io.EOF:
 			return buf, nil
-		}
-		if err != nil {
+		case err != nil:
 			return nil, fmt.Errorf("read skill archive: %v", err)
+		case n > 0:
+			empty = 0
+		default:
+			// A reader that returns (0, nil) is discouraged but permitted; a
+			// broken one that does so forever must not pin the goroutine.
+			empty++
+			if empty >= maxEmptyReads {
+				return nil, fmt.Errorf("read skill archive: %w", io.ErrNoProgress)
+			}
+		}
+	}
+}
+
+// maxEmptyReads bounds consecutive no-progress (0-byte, nil-error) reads before
+// a Reader is declared broken — the same guard bufio applies.
+const maxEmptyReads = 100
+
+// probeOverCap reports whether the reader still holds a byte past a buffer
+// already filled to the cap; any byte means the object exceeds maxBytes. Like
+// the main loop it bounds no-progress reads so a broken reader cannot hang it,
+// and it reads only one byte at a time so the buffer never grows past the cap.
+func probeOverCap(r io.Reader, buf []byte, maxBytes int64) ([]byte, error) {
+	var b [1]byte
+	for empty := 0; ; {
+		n, err := r.Read(b[:])
+		if n > 0 {
+			return nil, fmt.Errorf("skill archive exceeds %d bytes", maxBytes)
+		}
+		switch {
+		case err == io.EOF:
+			return buf, nil
+		case err != nil:
+			return nil, fmt.Errorf("read skill archive: %v", err)
+		default:
+			empty++
+			if empty >= maxEmptyReads {
+				return nil, fmt.Errorf("read skill archive: %w", io.ErrNoProgress)
+			}
 		}
 	}
 }

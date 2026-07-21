@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -283,4 +284,35 @@ func TestReadArchive(t *testing.T) {
 	if _, err := readArchiveLimited(bytes.NewReader(small), 50); err == nil {
 		t.Error("byte cap not enforced")
 	}
+
+	// A broken reader that returns (0, nil) forever must be refused, not hung —
+	// both while filling the buffer and while probing past a full one. The
+	// no-progress guard is bounded, so a wrong guard would make these hang and
+	// trip the test timeout rather than pass silently.
+	if _, err := readArchiveLimited(&stallReader{}, 1<<20); !errors.Is(err, io.ErrNoProgress) {
+		t.Errorf("stall while filling = %v, want ErrNoProgress", err)
+	}
+	// data fills the buffer to the cap, then the reader stalls under the probe.
+	if _, err := readArchiveLimited(&stallReader{data: small}, 100); !errors.Is(err, io.ErrNoProgress) {
+		t.Errorf("stall under probe = %v, want ErrNoProgress", err)
+	}
+}
+
+// stallReader yields data once (in one chunk), then returns (0, nil) forever —
+// the discouraged-but-legal broken reader the no-progress guard defends against.
+type stallReader struct {
+	data []byte
+	done bool
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	if !s.done && len(s.data) > 0 {
+		n := copy(p, s.data)
+		s.data = s.data[n:]
+		if len(s.data) == 0 {
+			s.done = true
+		}
+		return n, nil
+	}
+	return 0, nil
 }
