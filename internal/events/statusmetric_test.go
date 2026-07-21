@@ -7,6 +7,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
@@ -55,7 +56,7 @@ func statusPointCount(rm metricdata.ResourceMetrics) int {
 // self-committing wrapper the recovery path and the test harness use — records
 // after its own commit.
 func TestAppendWithRecordsSessionStatusTransition(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -76,7 +77,7 @@ func TestAppendWithRecordsSessionStatusTransition(t *testing.T) {
 // An append that changes no status counts nothing: the metric measures
 // transitions, not writes to the log.
 func TestAppendWithoutStatusChangeRecordsNoTransition(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -100,7 +101,7 @@ func TestAppendWithoutStatusChangeRecordsNoTransition(t *testing.T) {
 // left to reading; this pins the reachable half, that a failed append never
 // counts.
 func TestFailedAppendRecordsNoStatusTransition(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()

@@ -39,6 +39,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkID(id, "session"); err != nil {
+		return nil, err
+	}
 
 	// The whole send is one transaction: the session row lock is taken up
 	// front (FOR UPDATE OF s) so the state-machine decision — flip to
@@ -306,6 +309,9 @@ func denyToolResults(evs []events.NewEvent) ([]events.NewEvent, []string, error)
 func (s *server) listSessionEvents(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
+	if err := checkID(id, "session"); err != nil {
+		return nil, err
+	}
 	q := r.URL.Query()
 
 	page, err := parsePageMax(q, maxEventLimit)
@@ -333,7 +339,16 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 		query.Desc = page.cur.seqDesc
 		query.AfterSeq = &page.cur.seq
 	}
-	query.Types = listParam(q, "types")
+	types := listParam(q, "types")
+	for _, ty := range types {
+		// types[] is a free-form filter (an unknown-but-storable value filters to
+		// empty, see the test), so only the unstorable byte is rejected — before it
+		// binds into the type = ANY(...) text[] and fails as a 500. See #135.
+		if !storableText(ty) {
+			return nil, errInvalid(`types values must not contain U+0000 or invalid UTF-8`)
+		}
+	}
+	query.Types = types
 	for key, dst := range map[string]**time.Time{
 		"created_at[gt]": &query.CreatedGT, "created_at[gte]": &query.CreatedGTE,
 		"created_at[lt]": &query.CreatedLT, "created_at[lte]": &query.CreatedLTE,
@@ -383,6 +398,10 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 func (s *server) streamSessionEvents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
+	if err := checkID(id, "session"); err != nil {
+		writeError(w, r, err)
+		return
+	}
 	q := r.URL.Query()
 
 	previews := make(map[string]bool)

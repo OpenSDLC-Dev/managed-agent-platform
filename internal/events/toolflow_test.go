@@ -10,6 +10,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 // Direct coverage for toolflow.go — the checks the control plane runs over an
@@ -164,7 +165,7 @@ func TestToolConfirmationRefs(t *testing.T) {
 }
 
 func TestHasUnansweredToolUse(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	ctx := context.Background()
 
@@ -347,7 +348,7 @@ func TestHasUnansweredToolUse(t *testing.T) {
 // else, so a remainder of client-executed tools has no platform work and
 // enqueuing a tool_exec for it would provision a sandbox for nothing.
 func TestHasUnansweredPlatformToolUse(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	ctx := context.Background()
 	sid := newSession(t, pool)
@@ -385,7 +386,7 @@ func TestHasUnansweredPlatformToolUse(t *testing.T) {
 }
 
 func TestValidateToolResults(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	ctx := context.Background()
 
@@ -667,7 +668,7 @@ func TestValidateToolResults(t *testing.T) {
 }
 
 func TestValidateToolConfirmations(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	ctx := context.Background()
 
@@ -805,7 +806,7 @@ func TestValidateToolConfirmations(t *testing.T) {
 }
 
 func TestUnconfirmedAskEvents(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	ctx := context.Background()
 
@@ -935,7 +936,7 @@ func TestUnconfirmedAskEvents(t *testing.T) {
 // exactly this — it validates a batch against the log under the session row
 // lock, in the same transaction that will append it.
 func TestToolflowChecksSeeCallerTransaction(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	ctx := context.Background()
 	sid := newSession(t, pool)
@@ -982,7 +983,7 @@ func TestToolflowChecksSeeCallerTransaction(t *testing.T) {
 // (toolflow.go:278), which a closed pool cannot reach because it fails at
 // Query first.
 func TestToolflowQueryErrorsAreWrapped(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	ctx := context.Background()
 	sid := newSession(t, pool)

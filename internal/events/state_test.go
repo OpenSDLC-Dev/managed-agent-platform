@@ -8,6 +8,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -24,7 +25,7 @@ func sessionStatus(t *testing.T, pool *pgxpool.Pool, id domain.ID) string {
 
 func TestAppendWithFlipsStatusAtomically(t *testing.T) {
 	ctx := context.Background()
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sessionID := newSession(t, pool)
 
@@ -49,7 +50,7 @@ func TestAppendWithFlipsStatusAtomically(t *testing.T) {
 
 func TestAppendWithThenErrorRollsEverythingBack(t *testing.T) {
 	ctx := context.Background()
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sessionID := newSession(t, pool)
 
@@ -80,7 +81,7 @@ func TestAppendWithThenErrorRollsEverythingBack(t *testing.T) {
 
 func TestAppendWithThenSeesTheAppend(t *testing.T) {
 	ctx := context.Background()
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sessionID := newSession(t, pool)
 
@@ -103,7 +104,7 @@ func TestAppendWithThenSeesTheAppend(t *testing.T) {
 
 func TestAppendWithAddUsageAccumulates(t *testing.T) {
 	ctx := context.Background()
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sessionID := newSession(t, pool)
 
@@ -140,7 +141,7 @@ func TestAppendWithAddUsageAccumulates(t *testing.T) {
 
 func TestAppendWithMarkProcessedStampsOnlyConsumedInbound(t *testing.T) {
 	ctx := context.Background()
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sessionID := newSession(t, pool)
 

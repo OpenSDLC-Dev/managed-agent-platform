@@ -54,7 +54,39 @@ copy of an entry here.
   in-process collector, mirroring the existing traces test, so the export path — not only the
   in-process manual readers each package already asserts values against — is covered.
 
+- **Self-hosted shared-responsibility security model** ([docs/self-hosted-security.md](./docs/self-hosted-security.md))
+  ([#49](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/49)) — a new
+  operator-facing doc that draws the line between what the platform enforces in code and
+  what a self-hosting operator must configure. It covers the six dimensions the security
+  seam names — sandbox image hardening, dropping Linux capabilities, non-root execution,
+  read-only rootfs, egress restriction, and environment-key rotation — plus host/runtime
+  isolation and the single-tenant Docker-daemon trust assumption. Deliberately honest
+  about the current split: the platform enforces credential isolation, scoped/hashed
+  auth, no-ServiceAccount-token sandbox pods, and fail-closed `limited` egress, while
+  capability drops, non-root, read-only rootfs, and default-case egress policy are
+  operator-owned at the runtime layer today (the sandbox sets no `securityContext`), each
+  cross-linked to its tracking issue ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43),
+  [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
+  [#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50)). Linked from
+  README.md and cross-referenced from docs/ARCHITECTURE.md's Security invariants section.
+  Documentation only — no code or wire change.
+
 ### Changed
+
+- **Test infrastructure: the three private Docker-Postgres harnesses fold into `internal/pgtest`**
+  ([#69](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/69)) — `internal/store`,
+  `internal/api`, and `internal/events` predate the shared harness and each carried a private,
+  near-identical copy of its container plumbing (docker run, port resolution, readiness wait,
+  fresh-database creation). All three now wire `TestMain` through `pgtest.Main` and take their
+  databases from the shared package; the private copies are deleted. `internal/pgtest` gains
+  `FreshDB` — a bare, un-migrated DSN for the store suite, which exercises `store.Open`/`Migrate`
+  itself — and `NewPool` now composes it. The events suite keeps its package-local fixtures
+  (`newSession`/`newSessionKind`, `newPoolFromDSN`, `swapTracerProvider`, in
+  `fixtures_test.go`): they are fixture
+  shape, not container plumbing, and the shared `NewSession` writes a richer session row
+  (`status 'idle'`, full resolved agent) than the event-log tests were written against. No
+  behavior change; the coverage gate is unaffected (`internal/pgtest` sits outside the
+  denominator).
 
 - **Eval grader rigor: the four P/M/E precision and coverage-depth gaps left open by #98**
   ([#99](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/99)) — the suite's
@@ -142,6 +174,40 @@ copy of an entry here.
   will catch, so the two spellings are gone rather than documented.
 
 ### Fixed
+
+- **A NUL — or any unstorable byte — in a path ID or query parameter was a 500**
+  ([#135](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/135)) — #114 closed the
+  U+0000-is-a-500 class for request *bodies* and named the surface it left open: path IDs and query
+  parameters never pass through a body decode. Go's `http.ServeMux` percent-decodes `%00` into a real
+  NUL before the handler runs, so the byte reached `PathValue` / `URL.Query` intact, bound straight
+  into Postgres, and failed with `SQLSTATE 22021` — not an `apiError`, so `writeError` mapped it to a
+  500, the same shape #73 and #114 fixed one surface at a time. Invalid UTF-8 (a percent-decoded
+  `%80`) and every other byte Postgres text cannot hold share the defect.
+
+  The fix is **ID-format validation**, not another byte walk. A server-minted id is a known prefix
+  (`agent_`, `env_`, `sesn_` / `session_`, `work_`, …) plus a Crockford-base32 token, so
+  `domain.ID.Valid` rejects on shape anything that cannot name a stored row — a wrong prefix, an
+  out-of-alphabet character, or an unstorable byte — before it becomes a bind parameter, closing NUL
+  as a side effect and every other unstorable byte with it. It is applied at each site in the shape an
+  absent id already carries: a **404** on a path id (the agents / environments / sessions / events
+  handlers, the work API's `{work_id}`, and the worker session-read auth lane in
+  `requireEnvironmentKeyForSession`, which binds the session id before the handler), and a **400** on
+  an id-shaped query filter (`agent_id`) and the `page` cursor's decoded id. A malformed id is now
+  indistinguishable from a merely-absent one, which is what the 404 already promised. The work
+  `{work_id}` guard runs *after* the metadata body is validated, so `POST …/work/poll` with an empty
+  body is still the 400 `TestWorkPollRejectsWrongMethodAndPath` pins — a 404 only with a valid one.
+
+  The one free-form list filter, event `types[]`, is not an id and is deliberately not enum-validated:
+  an unknown-but-storable type filters to empty (the established behaviour, pinned by the `user.bogus`
+  case), so it rejects only the unstorable byte — U+0000 or invalid UTF-8 — with a 400, before it
+  binds into the `type = ANY(...)` text array.
+
+  `TestPathAndQueryRejectNUL` sweeps every path-id and query surface across management and Bearer
+  auth (a percent-decoded `%00`, plus `%80` for the invalid-UTF-8 arm); each was a 500 against real
+  Postgres before the change — the work heartbeat a 412, from its optimistic-concurrency path — and
+  each now returns the wire 404 or 400. `TestIDValid` pins `domain.ID.Valid` across every resource
+  prefix and the malformed classes. The existing docs/DIVERGENCES.md INFERRED entry is widened to
+  cover the new surfaces rather than duplicated.
 
 - **The BYOC worker's `tool_exec` span never recorded an error status**
   ([#87](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/87)) — `internal/worker/lease.go`

@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -209,6 +210,112 @@ func TestMetadataRejectsNUL(t *testing.T) {
 		}
 		wantErr(t, res.StatusCode, obj, http.StatusBadRequest, "invalid_request_error")
 	}
+}
+
+// TestPathAndQueryRejectNUL is the body sweeps' companion for the surface #114
+// left open: path IDs and id-shaped query parameters. Go's http.ServeMux
+// percent-decodes %00 into a real NUL in PathValue / URL.Query, so without a
+// shape guard the byte binds straight into Postgres and fails with SQLSTATE
+// 22021 — a 500. Every affected surface must instead return the wire error an
+// unknown or absent id already gets: a 404 on a path id (or work item), a 400 on
+// an id-shaped query filter, the page cursor, or the free-form types[] filter.
+// See #135.
+func TestPathAndQueryRejectNUL(t *testing.T) {
+	s := newTestServer(t)
+	agent := createAgent(t, s, map[string]any{"name": "nul-id", "model": "m"})
+	agentID := agent["id"].(string)
+	env := createEnvironment(t, s, map[string]any{"name": "nul-id-env"})
+	envID := env["id"].(string)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	sessID := sess["id"].(string)
+
+	// nul is a percent-encoded U+0000 the mux decodes into a real NUL byte in the
+	// PathValue / query value the handler reads.
+	const nul = "%00"
+
+	// Path ids → 404 not_found_error (the shape an unknown id already returns).
+	for name, tc := range map[string]struct {
+		method, path string
+		body         any
+	}{
+		"agent get":       {http.MethodGet, "/v1/agents/agent_" + nul, nil},
+		"agent update":    {http.MethodPost, "/v1/agents/agent_" + nul, map[string]any{"version": 1}},
+		"agent versions":  {http.MethodGet, "/v1/agents/agent_" + nul + "/versions", nil},
+		"agent archive":   {http.MethodPost, "/v1/agents/agent_" + nul + "/archive", nil},
+		"env get":         {http.MethodGet, "/v1/environments/env_" + nul, nil},
+		"env update":      {http.MethodPost, "/v1/environments/env_" + nul, map[string]any{"name": "x"}},
+		"env delete":      {http.MethodDelete, "/v1/environments/env_" + nul, nil},
+		"env archive":     {http.MethodPost, "/v1/environments/env_" + nul + "/archive", nil},
+		"session get":     {http.MethodGet, "/v1/sessions/sesn_" + nul, nil},
+		"session update":  {http.MethodPost, "/v1/sessions/sesn_" + nul, map[string]any{"title": "x"}},
+		"session delete":  {http.MethodDelete, "/v1/sessions/sesn_" + nul, nil},
+		"session archive": {http.MethodPost, "/v1/sessions/sesn_" + nul + "/archive", nil},
+		"events send":     {http.MethodPost, "/v1/sessions/sesn_" + nul + "/events", map[string]any{"events": []any{}}},
+		"events list":     {http.MethodGet, "/v1/sessions/sesn_" + nul + "/events", nil},
+		"events stream":   {http.MethodGet, "/v1/sessions/sesn_" + nul + "/events/stream", nil},
+		// Invalid UTF-8 (a percent-decoded %80) is unstorable the same way, and the
+		// alphabet check rejects it on shape too.
+		"agent get invalid utf-8": {http.MethodGet, "/v1/agents/agent_%80", nil},
+	} {
+		status, res := s.do(tc.method, tc.path, tc.body)
+		if status != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404 (%v)", name, status, res)
+			continue
+		}
+		wantErr(t, status, res, http.StatusNotFound, "not_found_error")
+	}
+
+	// Id-shaped query filters, the page cursor, and the free-form types[] filter
+	// → 400 invalid_request_error. The cursor carries the NUL in its decoded id.
+	nulCursor := base64.RawURLEncoding.EncodeToString([]byte("k1|n|t|1|sesn_\x00"))
+	for name, path := range map[string]string{
+		"agent_id filter":            "/v1/sessions?agent_id=agent_" + nul,
+		"page cursor id":             "/v1/sessions?page=" + nulCursor,
+		"types filter":               "/v1/sessions/" + sessID + "/events?types[]=user." + nul,
+		"types filter invalid utf-8": "/v1/sessions/" + sessID + "/events?types[]=user.%80",
+	} {
+		status, res := s.do(http.MethodGet, path, nil)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400 (%v)", name, status, res)
+			continue
+		}
+		wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	}
+
+	// The work API (Bearer environment-key auth): a NUL work_id is the 404 an
+	// unknown item gets at every work-item endpoint. Body validation still runs
+	// first, so the metadata patch reaches its malformed work_id (a 404) only with
+	// a valid body — the same order TestWorkPollRejectsWrongMethodAndPath pins.
+	const key = "ek-nul-idsweep"
+	workEnvID, _ := selfHostedWorker(t, s, key)
+	workNULID := "/v1/environments/" + workEnvID + "/work/work_" + nul
+	for name, tc := range map[string]struct {
+		method, path string
+		body         any
+	}{
+		"work get":       {http.MethodGet, workNULID, nil},
+		"work update":    {http.MethodPost, workNULID, map[string]any{"metadata": map[string]any{"k": "v"}}},
+		"work ack":       {http.MethodPost, workNULID + "/ack", nil},
+		"work heartbeat": {http.MethodPost, workNULID + "/heartbeat?expected_last_heartbeat=x", nil},
+		"work stop":      {http.MethodPost, workNULID + "/stop", nil},
+	} {
+		res, obj, raw := s.workReq(t, tc.method, tc.path, key, tc.body)
+		if res.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404 (%s)", name, res.StatusCode, raw)
+			continue
+		}
+		wantErr(t, res.StatusCode, obj, http.StatusNotFound, "not_found_error")
+	}
+
+	// The worker's session read (GET /v1/sessions/{id}) is dual-auth: with a
+	// Bearer key it runs through requireEnvironmentKeyForSession, which binds the
+	// id before the handler — a NUL there must be the same 404, never a 500.
+	res := s.doRaw(http.MethodGet, "/v1/sessions/sesn_"+nul, nil,
+		map[string]string{"Authorization": "Bearer " + key})
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("worker session read: status %d, want 404", res.StatusCode)
+	}
+	res.Body.Close()
 }
 
 // TestStringFieldsRejectNUL is the metadata sweep's twin for every other

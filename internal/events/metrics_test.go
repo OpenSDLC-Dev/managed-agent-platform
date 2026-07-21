@@ -8,6 +8,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -70,7 +71,7 @@ func attrValue(set []metricdata.HistogramDataPoint[int64], i int, key string) st
 // conventions rather than ours: a turn IS a client call to a GenAI provider,
 // which is exactly what those instruments describe.
 func TestModelRequestRecordsGenAIMetrics(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -139,7 +140,7 @@ func TestModelRequestRecordsGenAIMetrics(t *testing.T) {
 // case, and reporting only the fresh remainder would under-report the prompt by
 // an order of magnitude in the very metric the evals read to explain a trial.
 func TestModelRequestCountsCachedTokensAsInput(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -188,7 +189,7 @@ func TestModelRequestCountsCachedTokensAsInput(t *testing.T) {
 // corrupting it. The name is the platform's own precisely because no gen_ai.*
 // bucket fits, the same reason tool.execution.duration is not a gen_ai metric.
 func TestModelRequestRecordsCacheTokenBreakdown(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -235,7 +236,7 @@ func TestModelRequestRecordsCacheTokenBreakdown(t *testing.T) {
 // the same absent-is-not-zero rule the token histogram follows (#90). Zero-valued
 // cache points would report caching that never happened.
 func TestModelRequestRecordsNoCacheTokensWithoutUsage(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -264,7 +265,7 @@ func TestModelRequestRecordsNoCacheTokensWithoutUsage(t *testing.T) {
 // at all is an ordering the brain never uses while a span is live, so asserting
 // on it would leave this gate untested on the only path it exists for.
 func TestModelRequestRecordsFailureWithoutTokens(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -311,7 +312,7 @@ func TestModelRequestRecordsFailureWithoutTokens(t *testing.T) {
 // exactly the paths that already cost money for nothing. The reported usage is
 // a fact of the model's call, so it is stamped where that call ends.
 func TestModelRequestRecordsUsageEvenWhenTheTurnNeverSettles(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -347,7 +348,7 @@ func TestModelRequestRecordsUsageEvenWhenTheTurnNeverSettles(t *testing.T) {
 // instrument, and would do it only on the paths that settle, leaving the metric
 // inconsistent with itself. ModelDone stops the clock at the real boundary.
 func TestModelRequestDurationExcludesSettlement(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
@@ -379,7 +380,7 @@ func TestModelRequestDurationExcludesSettlement(t *testing.T) {
 // boundary. It still has a duration worth recording — the attempt — so the
 // measure must fall back to the request's own elapsed rather than report zero.
 func TestModelRequestDurationFallsBackWhenTheStreamNeverEnded(t *testing.T) {
-	pool := newPool(t)
+	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	sid := newSession(t, pool)
 	ctx := context.Background()
