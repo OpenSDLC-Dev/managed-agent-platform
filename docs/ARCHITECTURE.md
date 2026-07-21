@@ -167,6 +167,7 @@ state-machine triggers, auth, and the work API.
 | `skills.go` | The nine `/v1/skills` handlers over `internal/blob` + `internal/skills`, shaped against the SDK's `betaskill.go`/`betaskillversion.go`: create mints a `skill_` id + epoch-microsecond version and lands rows-then-blob-put inside one transaction (row claimed before storage traffic, put before commit — a version row can never dangle, and a same-microsecond collision 409s without touching the winner's archive; a failed commit's object is cleaned best-effort); `latest_version` maintained transactionally (parent row locked on version create **and** delete — the delete-side lock keeps a recompute blocked behind a concurrent create from reading a pre-create snapshot); the delete order (skill delete 400s until versions are gone, FK-backed) and delete-response asymmetry (`skill_deleted` echoes the skill id, `skill_version_deleted` the version timestamp) reproduced; the `{version}` slot is timestamp-only (aliases rejected 400); path ids accept `skill_` ids **or** catalog short names (`xlsx`); `/content` streams the archive (Content-Type application/zip + Content-Length). A nil blob store (storage-less deploy) answers the storage-backed routes with a configuration error while reads keep serving. |
 | `skillsupload.go` | The multipart decode path beside the JSON-only `decodeObject`, with its own 32 MiB budget (413 via `MaxBytesReader`): one `files[]` part per file plus `display_title` on the create form only; unknown fields rejected like unknown JSON keys; the raw `Content-Disposition` filename is parsed directly because `Part.FileName` basenames away the path qualification the loose-files form is defined by; zip-vs-loose is decided by magic bytes on a single part. |
 | `skillsmetrics.go` | The registry's instruments (per-call meter resolution, telemetry never fails a request): `skills.uploads` counter by bounded outcome, `skills.upload.bytes` / `skills.download.bytes` histograms — skill ids stay in logs, never in metric labels. |
+| `skillsimport.go` | `ImportAnthropicSkills` — the run-once operator import behind `controlplane -import-anthropic-skills`: reads on-disk skill directories (regular files only, upload caps enforced during the walk), validates each via `internal/skills` exactly like an upload, and lands `source='anthropic'` rows (short-name id = the SKILL.md name, date-based version) with the registry's transaction ordering. Idempotent per (skill, version); per-directory failures log and skip; the checkout's content never enters the repo (license red lines — CI uses the self-authored fixtures in `testdata/skillsimport`). |
 
 ### internal/events
 
@@ -347,7 +348,9 @@ outside the coverage-gate denominator, as is `cmd/`.
 
 The four `cmd/` binaries are env-config plus wiring: `controlplane` (serves the REST API;
 `CONTROLPLANE_ADDR` / `DATABASE_URL` / `CONTROLPLANE_API_KEY` + optional `BLOB_*` object
-storage for skill archives — absent, the platform serves with skills unavailable — + OTel), `brain`
+storage for skill archives — absent, the platform serves with skills unavailable — + OTel;
+`-import-anthropic-skills <checkout>` flips it into the run-once operator import, which needs
+only `DATABASE_URL` + `BLOB_*` and exits instead of serving), `brain`
 (`DATABASE_URL` + `MODEL_PROVIDERS_PATH` + lease/poll tunables + OTel), `executor`
 (`DATABASE_URL` + `EXECUTOR_IMAGE`/`EXECUTOR_WORKDIR` + `SANDBOX_BACKEND` selection —
 `docker` default, `k8s` — via `internal/sandbox/backend` + OTel), and `worker`

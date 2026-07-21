@@ -15,6 +15,23 @@ copy of an entry here.
 
 ### Added
 
+- **Anthropic prebuilt skills: the run-once operator import (skills plan, slice 3)**
+  ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — `controlplane
+  -import-anthropic-skills <checkout>` imports skill directories from a local checkout of
+  github.com/anthropics/skills (default `docx,pdf,pptx,xlsx` under `<checkout>/skills`, the reference
+  catalog's four document skills; `-import-skills` overrides) as `source='anthropic'` skills with the
+  catalog's short-name ids and a date-based version — the checkout's last commit date
+  (`YYYYMMDD`, via git; `-import-version` overrides). Each directory is validated **exactly like
+  an upload** (`internal/skills` — the four real document skills pass unchanged) and landed with
+  the registry's transaction ordering (rows claimed, archive put, commit last); idempotent per
+  (skill, version), a re-run skips without touching storage; per-directory failures are logged
+  and skipped with a failing exit. The import mode needs `DATABASE_URL` + `BLOB_*` only — no
+  `CONTROLPLANE_API_KEY`, no server. **License red lines hold**: the reference document skills
+  are source-available, not open source — their content is read at the operator's machine and
+  never enters this Apache-2.0 repo; CI exercises self-authored fixture skills
+  (`internal/api/testdata/skillsimport`). The `mode` of provisioning is a deliberate divergence
+  (the reference hosts its catalog itself) recorded in docs/DIVERGENCES.md.
+
 - **Skills registry: the wire-compatible `/v1/skills` API over object storage (skills plan, slice 2)**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — all nine reference
   endpoints (skill create/get/list/delete, version create/get/list/delete, archive download),

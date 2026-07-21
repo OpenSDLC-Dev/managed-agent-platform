@@ -33,6 +33,14 @@ recorded nowhere else.
 
 ---
 
+## Skills slice-3 acceptance — real anthropics/skills checkout imported, listed by `ant` (run 2026-07-22) — ✅ passed
+
+The skills plan's slice-3 acceptance: the run-once operator import against a **real, fresh clone of github.com/anthropics/skills** (cloned to a scratch directory — never into this repo, per the license red lines).
+
+**Flow.** Disposable Postgres + MinIO; `go run ./cmd/controlplane -import-anthropic-skills <clone>` with only `DATABASE_URL` + `BLOB_*` set → all four document skills imported at version `20260716` — the clone's last commit date, resolved via git with no flag; the four real SKILL.mds passed the upload validation **unchanged** (descriptions 437–948 runes, under the 1024 cap). An immediate re-run reported `imported 0, skipped 4, failed 0` — idempotence over the same version, no storage traffic. The server was then started on the same database and the **real `ant` CLI** confirmed the catalog: `beta:skills list --source anthropic` returned `xlsx / pptx / pdf / docx`, each `latest_version 20260716`, `source anthropic`; `beta:skills:versions download --skill-id xlsx --version 20260716` streamed a real zip (PK magic) through the short-name id path — the id shape the slice-2 API was built to accept ahead of this slice.
+
+---
+
 ## Skills slice-2 acceptance — real `ant beta:skills` against the registry (run 2026-07-21) — ✅ passed
 
 The skills plan's slice-2 acceptance (docs/plan/06_skills.md): the **real `ant` CLI** (built from the local checkout) driving the new `/v1/skills` registry, zip form — the only form the CLI can emit, since it basenames every part filename, which makes it the canonical compatibility probe.

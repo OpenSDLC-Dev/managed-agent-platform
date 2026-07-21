@@ -15,15 +15,28 @@
 //	BLOB_TLS              "true" for https to the endpoint (default plain)
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
 //	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
+//
+// Run-once operator import (docs/plan/06_skills.md slice 3): with
+// -import-anthropic-skills pointing at a local checkout of
+// github.com/anthropics/skills, the binary imports the -import-skills
+// directories as anthropic-source skills (validated exactly like uploads,
+// date-based version from the checkout's last commit unless -import-version
+// overrides) and exits instead of serving. Needs DATABASE_URL and the BLOB_*
+// object storage; CONTROLPLANE_API_KEY is not required in this mode.
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,7 +48,17 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
 
+var (
+	importCheckout = flag.String("import-anthropic-skills", "",
+		"run-once mode: path to a local checkout of github.com/anthropics/skills; import the -import-skills directories, then exit")
+	importVersion = flag.String("import-version", "",
+		"date version for the import (digits, YYYYMMDD; default: the checkout's last commit date via git)")
+	importSkills = flag.String("import-skills", "docx,pdf,pptx,xlsx",
+		"comma-separated skill directory names under <checkout>/skills to import")
+)
+
 func main() {
+	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -52,6 +75,9 @@ func run(ctx context.Context) error {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return errors.New("DATABASE_URL is required")
+	}
+	if *importCheckout != "" {
+		return runImport(ctx, dsn)
 	}
 	bootKey := os.Getenv("CONTROLPLANE_API_KEY")
 	if bootKey == "" {
@@ -85,22 +111,11 @@ func run(ctx context.Context) error {
 
 	// Object storage for skill archives is optional: without it the platform
 	// runs and the storage-backed skill routes report the absence.
-	var blobs blob.Store
-	if endpoint := os.Getenv("BLOB_ENDPOINT"); endpoint != "" {
-		s3store, err := s3.New(ctx, s3.Config{
-			Endpoint:  endpoint,
-			AccessKey: os.Getenv("BLOB_ACCESS_KEY"),
-			SecretKey: os.Getenv("BLOB_SECRET_KEY"),
-			Bucket:    os.Getenv("BLOB_BUCKET"),
-			Region:    os.Getenv("BLOB_REGION"),
-			TLS:       os.Getenv("BLOB_TLS") == "true",
-		})
-		if err != nil {
-			return err
-		}
-		blobs = blob.WithMetrics(s3store)
-		slog.Info("object storage configured", "endpoint", endpoint, "bucket", os.Getenv("BLOB_BUCKET"))
-	} else {
+	blobs, err := openBlobStore(ctx)
+	if err != nil {
+		return err
+	}
+	if blobs == nil {
 		slog.Info("object storage not configured; skills are unavailable")
 	}
 
@@ -125,4 +140,73 @@ func run(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// openBlobStore builds the metrics-wrapped S3 store from BLOB_* env, or
+// (nil, nil) when BLOB_ENDPOINT is unset.
+func openBlobStore(ctx context.Context) (blob.Store, error) {
+	endpoint := os.Getenv("BLOB_ENDPOINT")
+	if endpoint == "" {
+		return nil, nil
+	}
+	s3store, err := s3.New(ctx, s3.Config{
+		Endpoint:  endpoint,
+		AccessKey: os.Getenv("BLOB_ACCESS_KEY"),
+		SecretKey: os.Getenv("BLOB_SECRET_KEY"),
+		Bucket:    os.Getenv("BLOB_BUCKET"),
+		Region:    os.Getenv("BLOB_REGION"),
+		TLS:       os.Getenv("BLOB_TLS") == "true",
+	})
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("object storage configured", "endpoint", endpoint, "bucket", os.Getenv("BLOB_BUCKET"))
+	return blob.WithMetrics(s3store), nil
+}
+
+// runImport is the run-once operator import: validate + land the named skill
+// directories from the checkout, report the summary, exit.
+func runImport(ctx context.Context, dsn string) error {
+	blobs, err := openBlobStore(ctx)
+	if err != nil {
+		return err
+	}
+	if blobs == nil {
+		return errors.New("the import needs object storage: set BLOB_ENDPOINT (and its BLOB_* companions)")
+	}
+	version := *importVersion
+	if version == "" {
+		if version, err = checkoutCommitDate(ctx, *importCheckout); err != nil {
+			return fmt.Errorf("resolve the checkout's commit date (pass -import-version to override): %w", err)
+		}
+	}
+	var dirs []string
+	for _, name := range strings.Split(*importSkills, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			dirs = append(dirs, filepath.Join(*importCheckout, "skills", name))
+		}
+	}
+	if len(dirs) == 0 {
+		return errors.New("-import-skills named no directories")
+	}
+	pool, err := store.Open(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	sum, err := api.ImportAnthropicSkills(ctx, pool, blobs, dirs, version)
+	fmt.Printf("imported %d, skipped %d, failed %d (version %s)\n",
+		len(sum.Imported), len(sum.Skipped), len(sum.Failed), version)
+	return err
+}
+
+// checkoutCommitDate reads the checkout's last commit date as the default
+// YYYYMMDD import version.
+func checkoutCommitDate(ctx context.Context, checkout string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", checkout,
+		"log", "-1", "--format=%cd", "--date=format:%Y%m%d").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
