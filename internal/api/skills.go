@@ -295,6 +295,19 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	if err := checkSkillID(id); err != nil {
 		return nil, err
 	}
+	// The imported anthropic catalog is not API-manageable (its versions
+	// already refuse create); an accidental DELETE must not empty it.
+	var source string
+	err := s.pool.QueryRow(ctx, `SELECT source FROM skills WHERE id = $1`, id).Scan(&source)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound("skill %s not found", id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if source != "custom" {
+		return nil, errInvalid("anthropic skills are managed by the platform, not this API")
+	}
 	var versions int
 	if err := s.pool.QueryRow(ctx,
 		`SELECT count(*) FROM skill_versions WHERE skill_id = $1`, id).Scan(&versions); err != nil {
@@ -544,12 +557,15 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 	// version create would recompute latest_version on a pre-create snapshot
 	// (READ COMMITTED evaluates the subquery against the statement snapshot)
 	// and could blank latest_version while a live version exists.
-	var have string
-	if err := tx.QueryRow(ctx, `SELECT id FROM skills WHERE id = $1 FOR UPDATE`, id).Scan(&have); err != nil {
+	var source string
+	if err := tx.QueryRow(ctx, `SELECT source FROM skills WHERE id = $1 FOR UPDATE`, id).Scan(&source); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errNotFound("skill %s version %s not found", id, version)
 		}
 		return nil, err
+	}
+	if source != "custom" {
+		return nil, errInvalid("versions of anthropic skills are managed by the platform, not this API")
 	}
 	tag, err := tx.Exec(ctx,
 		`DELETE FROM skill_versions WHERE skill_id = $1 AND version = $2`, id, version)

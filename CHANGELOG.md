@@ -26,7 +26,8 @@ copy of an entry here.
   the registry's transaction ordering (rows claimed, archive put, commit last); idempotent per
   (skill, version), a re-run skips without touching storage; per-directory failures are logged
   and skipped with a failing exit. The import mode needs `DATABASE_URL` + `BLOB_*` only — no
-  `CONTROLPLANE_API_KEY`, no server. **License red lines hold**: the reference document skills
+  `CONTROLPLANE_API_KEY`, no server. Imported skills are not API-manageable: version create
+  (slice 2) and now skill/version `DELETE` refuse `source='anthropic'` rows with a 400. **License red lines hold**: the reference document skills
   are source-available, not open source — their content is read at the operator's machine and
   never enters this Apache-2.0 repo; CI exercises self-authored fixture skills
   (`internal/api/testdata/skillsimport`). The `mode` of provisioning is a deliberate divergence

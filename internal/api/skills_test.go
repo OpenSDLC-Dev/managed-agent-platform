@@ -411,6 +411,17 @@ func TestSkillVersionCreateAndLatestTracking(t *testing.T) {
 	status, obj = s.doForm("POST", "/v1/skills/xlsx/versions", ct, body)
 	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
 
+	// Neither are deletes: the imported catalog cannot be removed through the
+	// management API (rerunning the importer is the operator's path back, so an
+	// accidental DELETE must not empty the catalog).
+	status, obj = s.do("DELETE", "/v1/skills/xlsx/versions/20250929", nil)
+	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+	status, obj = s.do("DELETE", "/v1/skills/xlsx", nil)
+	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+	if status, skill := s.do("GET", "/v1/skills/xlsx", nil); status != http.StatusOK || skill["latest_version"] != "20250929" {
+		t.Errorf("anthropic skill after refused deletes = %d %v", status, skill)
+	}
+
 	// Unknown skill 404s before any upload processing.
 	ct, body = skillForm(t, nil, []upFile{{name: "financial-skill/SKILL.md", content: testSkillMD}})
 	status, obj = s.doForm("POST", "/v1/skills/skill_0000000000000000000000ok/versions", ct, body)
