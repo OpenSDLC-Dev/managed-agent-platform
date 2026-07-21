@@ -4,25 +4,20 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[#44](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/44) — emit the OTLP business
-metrics Component 6 lists that #89 did not: TTFT, cache-token breakdown, session-status counts,
-approval (HITL) wait, and queue depth/pending/workers_polling. No plan file: single-PR scope, no
-wire-schema surface (issue-triage judged `needs_plan: false`).
+[#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54) — skills distribution +
+execution, per [docs/plan/06_skills.md](./docs/plan/06_skills.md) (approved; this PR lands the
+plan and the DIVERGENCES.md correction it carries — implementation starts with slice 1).
 
 ## Tasks
 
-- [x] `model.time_to_first_token` (brain), start boundary = work claim; no reading when a turn
-      streams no content. TDD, `internal/brain`.
-- [x] `model.cache.token.usage` (events) splits cache creation/read alongside the convention's
-      merged `gen_ai.client.token.usage`. TDD, `internal/events`.
-- [x] `session.status.transitions` (events) counted post-commit at each SetStatus commit site
-      (AppendWith, brain settle/commitUnderLock, API send). Tested in events/brain/api.
-- [x] `approval.wait.duration` (events, API-driven) measured in-DB from the requires_action idle.
-      Tested via the confirmation harness in `internal/api`.
-- [x] `queue.depth`/`pending`/`workers_polling` observable gauges over `Queue.Stats`, self_hosted
-      only, registered in `cmd/controlplane`. Mutation-checked, `internal/queue`.
-- [x] Telemetry contract test asserts every business metric name reaches an OTLP collector.
-- [x] `make verify` green (91.67%); verifier PASS; two Claude reviewers, no blockers (Codex over
-      quota to 2026-07-25, second Claude reviewer stood in). PR
-      [#144](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/144) (draft).
-- [ ] CI green, then mark ready and squash-merge.
+- [ ] Slice 1 — blob store foundation: `internal/blob` + `blob/s3` (minio-go) + contract
+      suite/MinIO test harness; compose MinIO; helm `minio.yaml` + `externalObjectStorage`.
+- [ ] Slice 2 — `/v1/skills` registry: migration 0007, `skillver_` ids, multipart create (both
+      forms), nine endpoints, per-resource list limits; CI compose skills round-trip;
+      `ant beta:skills` transcript.
+- [ ] Slice 3 — anthropic prebuilt import: run-once importer, date versions, self-authored CI
+      fixtures (license red lines per plan).
+- [ ] Slice 4 — runtime materialization: env-key lane for skills reads, executor post-Provision
+      + worker twin, 500-cap validation; `ant beta:worker` transcript.
+- [ ] Slice 5 — brain Level-1 injection, evals E2E task, remaining DIVERGENCES entries, docs
+      closure, archive the plan, close #54.
