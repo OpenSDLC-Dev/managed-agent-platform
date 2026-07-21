@@ -19,6 +19,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -259,7 +260,16 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 			attribute.String("session.id", work.Data.ID),
 			attribute.String("work.id", work.ID),
 		))
-	outcome := w.runItem(runCtx, work)
+	outcome, fault := w.runItem(runCtx, work)
+	if fault != nil {
+		// Mirror the platform executor (internal/executor/executor.go): only the
+		// platform's own faults — the control plane unreachable for the liveness
+		// check, a tool backend fault — mark the span errored, so the red span is
+		// the one an operator opens to find why the tools never ran. A tool-level
+		// failure the model recovers from and an ordinary cancellation leave it
+		// unset; runItem already reduced those to a nil fault (see reclaimFault).
+		span.SetStatus(codes.Error, fault.Error())
+	}
 	span.End()
 
 	cancel()
@@ -284,8 +294,12 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 	}
 }
 
-// runItem does the item's work and reports what to do with it (see itemOutcome).
-func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) itemOutcome {
+// runItem does the item's work and reports what to do with it (see itemOutcome),
+// alongside the platform fault to record on the tool_exec span — nil for a clean
+// run, a drain, and a reclaim caused by cancellation; non-nil only for the
+// platform's own faults (see reclaimFault). handleItem sets the span's status
+// from it.
+func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) (itemOutcome, error) {
 	sessionID := work.Data.ID
 	live, err := w.sessionLive(ctx, sessionID)
 	if err != nil {
@@ -294,7 +308,7 @@ func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) item
 		// session's work terminally.
 		slog.ErrorContext(ctx, "worker: session liveness check failed, leaving item for reclaim",
 			"session", sessionID, "work", work.ID, "err", err)
-		return outcomeReclaim
+		return outcomeReclaim, reclaimFault(ctx, err)
 	}
 	if !live {
 		// A session that is not running or has been archived is stale: run
@@ -303,7 +317,7 @@ func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) item
 		// is the worker's equivalent of the executor's sessionForRun drain — the
 		// executor completes the item under the DB lock; the worker force-stops.
 		slog.InfoContext(ctx, "worker: session not live, draining work item", "session", sessionID, "work", work.ID)
-		return outcomeDrain
+		return outcomeDrain, nil
 	}
 	if err := RunSessionTools(ctx, w.client, w.provider, sessionID, ToolExecConfig{
 		Image:      w.cfg.Image,
@@ -315,9 +329,39 @@ func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) item
 		// executor's partial-fault semantics — do not force-stop it terminally.
 		slog.ErrorContext(ctx, "worker: session tools did not complete, leaving item for reclaim",
 			"session", sessionID, "work", work.ID, "err", err)
-		return outcomeReclaim
+		return outcomeReclaim, reclaimFault(ctx, err)
 	}
-	return outcomeComplete
+	return outcomeComplete, nil
+}
+
+// reclaimFault classifies why an item is being left for reclaim, so handleItem
+// records only the platform's own faults on the tool_exec span. A genuine fault
+// — the control plane unreachable for the liveness check, a tool backend fault —
+// is returned to be recorded, reddening the span an operator opens to find why
+// the tools never ran. An ordinary cancellation is not a fault and reduces to
+// nil: the heartbeat gives the lease up (a second worker reclaims) or the worker
+// is shutting down, and the in-flight run unwinds with its context cancelled;
+// erroring the span for that would redden a trace view on routine teardown.
+//
+// It classifies on the ambient context state (ctx.Err()), not the error's own
+// kind, so a run cancelled through a provider that does not preserve
+// context.Canceled in its error chain is still recognised as teardown. The cost
+// is a narrow, self-healing bias toward under-reporting: a genuine fault that
+// races an unrelated cancellation reduces to nil, but that path is outcomeReclaim,
+// so the item is reclaimed and re-run and a persistent fault reddens next pass.
+// The reverse — a cancellation reddening the span — cannot happen: a
+// cancellation-caused error implies ctx.Err() != nil.
+//
+// This mirrors the executor's rule that only platform faults error the span,
+// with one deliberate divergence: the executor reddens its span when its lease
+// keeper loses the lease (internal/executor/executor.go), whereas for the worker
+// a lost lease *is* the heartbeat cancelling the run — its designed teardown
+// path — so reddening it would light up a trace on routine lease handoff.
+func reclaimFault(ctx context.Context, err error) error {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
 
 // hbResult reports how the heartbeat loop ended, so handleItem can decide
