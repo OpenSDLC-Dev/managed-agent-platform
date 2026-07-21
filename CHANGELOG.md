@@ -102,6 +102,33 @@ copy of an entry here.
 
 ### Fixed
 
+- **The BYOC worker's `tool_exec` span never recorded an error status**
+  ([#87](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/87)) — `internal/worker/lease.go`
+  opened the `tool_exec` span around `runItem` and ended it unconditionally, so a worker whose
+  sandbox was unreachable — leaving the session's tools unanswered for reclaim — exported a span
+  indistinguishable from a clean tool run. The platform executor already gave *its* `tool_exec`
+  span an error status on a platform fault (#30's `feat/otel-execution-signals`); the two
+  deployment points agreed on trace parenting but disagreed here.
+
+  The obstacle was that the worker's `runItem` returned only an `itemOutcome`, whose
+  `outcomeReclaim` conflates three situations — liveness unknown, tools faulted with work
+  unanswered, and the run cancelled — and a cancellation is not a fault, so mapping the outcome
+  straight to `codes.Error` would over-report. `runItem` now also returns the platform fault to
+  record (nil for a clean run, a drain, or a cancellation), classified by a new `reclaimFault`
+  helper: a genuine fault (control plane unreachable for the liveness check, a tool backend fault)
+  surfaces, while an error observed under a cancelled context — or a `context.Canceled` error —
+  reduces to nil, because the worker's heartbeat cancels the in-flight run as its designed
+  lease-loss path. `handleItem` sets `codes.Error` with a description only when a fault is present.
+
+  The rule now matches the executor's — the platform's own faults redden the span, a tool-level
+  failure the model recovers from (a missing file, a nonzero exit) leaves it unset — with the
+  worker-specific addition that an ordinary cancellation also stays unset. Worker-side span tests
+  now assert each case (backend fault, tool-level failure, cancellation, clean run), mirroring the
+  executor's in `internal/executor/telemetry_test.go`. No wire shape changes: this is internal
+  OTel status parity between the two deployment points. Lifting the shared `Start` into one helper
+  is deferred until both spans' scopes are reconciled (the executor's now also covers its results
+  commit), as [#87](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/87) notes.
+
 - **U+0000 in any non-metadata text field was still a 500**
   ([#114](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/114)) — #73 closed this bug
   class for `metadata` by hoisting a guard into the two shared metadata parsers, and said so: the
