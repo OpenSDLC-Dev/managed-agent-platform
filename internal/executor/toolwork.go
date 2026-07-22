@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 // toolUse is one platform tool call the executor must run: the tool-use event's
@@ -68,62 +66,4 @@ func (e *Executor) unansweredToolUses(ctx context.Context, sid domain.ID) ([]too
 		out = append(out, toolUse{id: u.ID, name: body.Name, input: body.Input})
 	}
 	return out, nil
-}
-
-// leaseKeeper renews a claimed item's lease on a timer while its tools run, so a
-// long tool call cannot let the lease lapse and hand the item to a second
-// executor mid-run. It mirrors the brain's: each renewal is bounded by the
-// lease it is racing, so a stalled database cannot hang the item behind an
-// unreturnable Extend, and losing the lease cancels the work context.
-type leaseKeeper struct {
-	cancel context.CancelFunc
-	quit   chan struct{}
-	done   chan struct{}
-	failed error
-}
-
-func (e *Executor) keepLease(ctx context.Context, item *queue.Item) (context.Context, *leaseKeeper) {
-	kctx, cancel := context.WithCancel(ctx)
-	k := &leaseKeeper{cancel: cancel, quit: make(chan struct{}), done: make(chan struct{})}
-	ttl := e.cfg.LeaseTTL
-	// Renew at a third of the lease. Guard the degenerate case: a sub-3ns TTL
-	// (operator misconfiguration — a lease that short is unusable anyway) would
-	// otherwise make the interval zero and panic time.NewTicker.
-	interval := ttl / 3
-	if interval <= 0 {
-		interval = ttl
-	}
-	go func() {
-		defer close(k.done)
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		for {
-			select {
-			case <-k.quit:
-				return
-			case <-kctx.Done():
-				return
-			case <-t.C:
-				ectx, ecancel := context.WithTimeout(kctx, ttl-ttl/3)
-				err := e.queue.Extend(ectx, item, ttl)
-				ecancel()
-				if err != nil {
-					k.failed = err
-					k.cancel()
-					return
-				}
-			}
-		}
-	}()
-	return kctx, k
-}
-
-// close stops the keeper and reports the first extension failure. The goroutine
-// has exited when close returns, so the item's lease value is stable again for
-// the settling append to use as its ownership proof.
-func (k *leaseKeeper) close() error {
-	close(k.quit)
-	<-k.done
-	k.cancel()
-	return k.failed
 }
