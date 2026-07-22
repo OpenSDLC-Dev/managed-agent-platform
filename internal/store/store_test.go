@@ -30,7 +30,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 7
+const wantMigrations = 8
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -80,7 +80,7 @@ func TestOpenMigratesFreshDatabase(t *testing.T) {
 	for _, want := range []string{
 		"schema_migrations", "agents", "agent_versions", "environments",
 		"sessions", "events", "work_items", "api_keys", "environment_keys",
-		"skills", "skill_versions",
+		"skills", "skill_versions", "files",
 	} {
 		if !slices.Contains(tables, want) {
 			t.Errorf("table %q missing after migration; have %v", want, tables)

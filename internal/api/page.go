@@ -260,3 +260,16 @@ type biPageJSON struct {
 	NextPage *string `json:"next_page"`
 	PrevPage *string `json:"prev_page"`
 }
+
+// filePageJSON is the classic Files API list envelope — {data, has_more,
+// first_id, last_id} (anthropic-sdk-go packages/pagination Page[T]). The Files
+// API predates the managed-agents next_page cursor convention and paginates by
+// bare object id (after_id / before_id) instead of an opaque keyset cursor, so
+// it gets its own envelope alongside pageJSON. first_id/last_id are the first
+// and last ids of the returned page (nullable — null on an empty page).
+type filePageJSON struct {
+	Data    []any   `json:"data"`
+	HasMore bool    `json:"has_more"`
+	FirstID *string `json:"first_id"`
+	LastID  *string `json:"last_id"`
+}

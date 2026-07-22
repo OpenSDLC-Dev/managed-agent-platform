@@ -4,8 +4,11 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+[#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55) — Files API, per [docs/plan/08_files.md](./docs/plan/08_files.md) (in-progress). The Files half only; git/repo mounting stays deferred on #55.
 
 ## Tasks
 
-None.
+- [x] **Slice 1 — the `/v1/files` registry** (upload/list/get/download/delete + migration `0008`). — [PR #156](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/156).
+- [ ] Slice 2 — session `resources[]` (`type: "file"`) + the five `sesrsc_` sub-endpoints.
+- [ ] Slice 3 — executor materialization + streaming sandbox write + brain injection + `file-answer` eval.
+- [ ] Slice 4 — BYOC worker + session-scoped env-key content lane; archive.
