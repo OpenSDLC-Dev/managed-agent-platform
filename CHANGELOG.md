@@ -28,9 +28,10 @@ copy of an entry here.
   `skills.injected` and `skills.block_chars` attributes. The exact reference template is captured
   by no source — the block format and placement are inferred (docs/DIVERGENCES.md). This closes
   the skills chain end to end (registry → resolution → materialization → injection → model use),
-  proven by the new opt-in eval task `skill-answer` (plan E2E-2): a self-authored skill whose
-  answer file the task cannot be solved without, graded on the model reading the materialized
-  SKILL.md and returning the secret. The skills plan is archived.
+  exercised by the new opt-in eval task `skill-answer` (plan E2E-2): a self-authored skill whose
+  answer file the task cannot be solved without, and whose turn names neither the skill nor a
+  path — so the injected Level-1 metadata is the discovery mechanism — graded on the model
+  reading the materialized SKILL.md and returning the secret. The skills plan is archived.
 
 - **Skills runtime materialization (skills plan, slice 4)**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — a session's

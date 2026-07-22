@@ -4,11 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** The skills feature ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54),
-[docs/plan/06_skills.md](./docs/plan/06_skills.md)) landed across slices 1–5 and the plan is
-archived — delivery record in [CHANGELOG.md](./CHANGELOG.md) and
-[docs/HISTORY.md](./docs/HISTORY.md). Backlog is the GitHub issue tracker.
+None.
 
 ## Tasks
 
-_None in flight._
+None.

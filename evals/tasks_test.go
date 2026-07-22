@@ -37,9 +37,20 @@ func tasks() []Task {
 // is uploaded to the registry, referenced by the agent at "latest", injected as
 // Level-1 metadata by the brain, and materialized into the sandbox by the
 // executor. The passphrase lives only in the skill's answer file, reachable only
-// by following the injected SKILL.md — so a correct final answer proves every
-// link (registry → resolution → materialization → injection → the model acting
-// on it), not just the model's own knowledge.
+// by following the SKILL.md — so a correct final answer exercises every link
+// (registry → resolution → materialization → injection → the model acting on it),
+// not the model's own knowledge.
+//
+// The turn names no skill and no path: it asks only for the passphrase. The
+// injected Level-1 block ("eval-secret - Reveals this task's secret passphrase
+// (skills/eval-secret/SKILL.md)") is the only thing that reveals a skill can
+// answer and where it lives, so injection is the discovery mechanism under test —
+// a prompt that announced the skill would let the model succeed by exploring the
+// filesystem even if injection regressed. Perfect isolation is impossible
+// (materialization is a prerequisite for reading, so the files are always
+// discoverable by an ls/glob), which is why both graders are Either: a right
+// answer is strong platform evidence, and the transcript (did it read via the
+// injected path?) is the arbiter on a miss.
 func skillAnswer() Task {
 	return Task{
 		ID: "skill-answer",
@@ -53,8 +64,8 @@ func skillAnswer() Task {
 				"answer.txt": "The secret passphrase is {{RECALL}}.",
 			},
 		}},
-		Turns: []Turn{{Message: "A skill is available to you. Follow its instructions to find " +
-			"this task's secret passphrase, then reply with exactly the passphrase and nothing else."}},
+		Turns: []Turn{{Message: "What is this task's secret passphrase? " +
+			"Reply with exactly the passphrase and nothing else."}},
 		Graders: []Grader{
 			// Either for both: the passphrase is reachable only through the
 			// materialized skill, so a right answer is unambiguous platform

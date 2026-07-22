@@ -78,6 +78,7 @@ func TestResolveSkillsBlock(t *testing.T) {
 		ref(t, "skill_a", "100"),       // duplicate id -> deduped, not double-injected
 		ref(t, "skill_b", "latest"),    // alias resolved against latest_version
 		ref(t, "skill_gone", "latest"), // dangling -> miss
+		ref(t, "", "100"),              // empty id -> miss
 		json.RawMessage(`not json`),    // malformed -> miss
 	}}}
 
@@ -85,8 +86,8 @@ func TestResolveSkillsBlock(t *testing.T) {
 	if injected != 2 {
 		t.Errorf("injected = %d, want 2", injected)
 	}
-	if misses != 2 {
-		t.Errorf("misses = %d, want 2 (dangling + malformed)", misses)
+	if misses != 3 {
+		t.Errorf("misses = %d, want 3 (dangling + empty id + malformed)", misses)
 	}
 	if !strings.Contains(block, "alpha - Alpha skill (skills/alpha/SKILL.md)") {
 		t.Errorf("block missing skill_a: %q", block)

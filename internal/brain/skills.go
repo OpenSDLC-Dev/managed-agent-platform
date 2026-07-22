@@ -64,7 +64,15 @@ func (b *Brain) resolveSkillsBlock(ctx context.Context, agent domain.ResolvedAge
 			misses++
 			continue
 		}
-		if ref.SkillID == "" || seen[ref.SkillID] {
+		if ref.SkillID == "" {
+			// A reference with no id cannot resolve — like a malformed one, it is
+			// a logged miss, not a silent drop (the API rejects it, so this is
+			// defensive; the counted-miss invariant still holds here).
+			slog.WarnContext(ctx, "skill reference not injected", "version", ref.Version)
+			misses++
+			continue
+		}
+		if seen[ref.SkillID] {
 			continue
 		}
 		seen[ref.SkillID] = true

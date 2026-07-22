@@ -51,7 +51,7 @@ Progress is tracked in:
 - **[GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues)** — the backlog and open questions.
 - **[STATE.md](./STATE.md)** — the active work and its task progress. The as-built system is [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md); acceptance and decision records are [docs/HISTORY.md](./docs/HISTORY.md).
 
-Deferred past v1 (seams reserved, not implemented — each tracked as an issue): secret vaults and egress credential injection, scheduled deployments, memory stores, multi-agent threads, and multi-tenant RBAC/SSO. Skills ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) are complete: the `/v1/skills` registry over object storage, the anthropic prebuilt-skills import, sandbox materialization on both execution halves, and Level-1 metadata injection into the system prompt by the brain — the whole chain proven end to end by the `skill-answer` eval.
+Deferred past v1 (seams reserved, not implemented — each tracked as an issue): secret vaults and egress credential injection, scheduled deployments, memory stores, multi-agent threads, and multi-tenant RBAC/SSO. Skills ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) are complete: the `/v1/skills` registry over object storage, the anthropic prebuilt-skills import, sandbox materialization on both execution halves, and Level-1 metadata injection into the system prompt by the brain — the whole chain exercised end to end by the `skill-answer` eval, whose passphrase lives only in the materialized skill file so a correct answer requires every link.
 
 ## Development
 
@@ -82,7 +82,7 @@ itself when its credentials rot is not a safety net.
 | Unit & contract | — | logic, wire shapes, scripted provider streams |
 | Dependency integration | — | real Postgres, Docker, and Kubernetes (hard-fail without them) |
 | Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn against your endpoint, through the adapter whose protocol it speaks (the other adapter's test skips) |
-| Live-system evals | `RUN_EVALS=1` (`make eval`) | whole sessions: API → brain → real model → sandbox → SSE, deterministically graded. [Ten regression tasks](./docs/plan/02_evals-system.md) spanning the built-in toolset, permission allow/deny, and single- and multi-turn; results land in `evals/artifacts/` |
+| Live-system evals | `RUN_EVALS=1` (`make eval`) | whole sessions: API → brain → real model → sandbox → SSE, deterministically graded. [Eleven regression tasks](./docs/plan/02_evals-system.md) spanning the built-in toolset, permission allow/deny, single- and multi-turn, and skill injection; results land in `evals/artifacts/` |
 
 Configure the endpoint once in a gitignored repo-root `.env` — `MODEL_PROTOCOL`
 (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID` — and the live tiers
