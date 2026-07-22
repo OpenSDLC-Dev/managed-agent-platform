@@ -42,7 +42,7 @@ func tasks() []Task {
 // not the model's own knowledge.
 //
 // The turn names no skill and no path: it asks only for the passphrase. The
-// injected Level-1 block ("eval-secret - Reveals this task's secret passphrase
+// injected Level-1 block ("eval-secret - Reveals this task's secret passphrase.
 // (skills/eval-secret/SKILL.md)") is the only thing that reveals a skill can
 // answer and where it lives, so injection is the discovery mechanism under test —
 // a prompt that announced the skill would let the model succeed by exploring the
