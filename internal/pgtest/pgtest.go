@@ -49,7 +49,11 @@ func Main(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, "docker run printed no container ID")
 		return 1
 	}
-	defer func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() }()
+	// -v reaps the anonymous volume the Postgres image declares (VOLUME
+	// /var/lib/postgresql/data). The --rm above does not cover it: auto-remove
+	// only fires when the container exits on its own, not when this force-removes
+	// it mid-run, so without -v every test binary leaks one volume per run.
+	defer func() { _ = exec.Command("docker", "rm", "-f", "-v", containerID).Run() }()
 
 	port, err := hostPort(containerID)
 	if err != nil {
