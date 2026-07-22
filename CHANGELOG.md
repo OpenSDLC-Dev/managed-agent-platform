@@ -17,7 +17,7 @@ copy of an entry here.
 
 - **Files plan drafted: docs/plan/08_files.md**
   ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — the design
-  for lifting the Files half of #55 out of its reserved seam, settled against the public
+  for lifting the Files half of #55 out of its reserved seam, drafted against the public
   Files docs, the pinned SDK (v1.58.0), and the `ant` CLI source (no live recording —
   everything recording-only is pre-listed as DIVERGENCES.md inferences per slice). Scope:
   the `/v1/files` registry over the existing `internal/blob` store (`files/{file_id}`

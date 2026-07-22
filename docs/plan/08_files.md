@@ -35,7 +35,7 @@ with its slice.
 
 | Endpoint | Notes |
 |---|---|
-| `POST /v1/files` | `multipart/form-data`, exactly one file part named **`file`** (BetaFileUploadParams betafile.go:274-279; apiform falls back to the `json` tag for the part name, internal/apiform/tag.go:23-27). Filename comes from the part's `Content-Disposition` — the SDK defaults to `anonymous_file` for anonymous readers (encoder.go:372-399), the CLI sends the path basename with a `mime.TypeByExtension` part Content-Type (anthropic-cli flagoptions.go:568-582). Public-docs validation: filename 1–255 chars, forbidden `< > : " | ? * \ / ` and control chars 0–31 → 400 "Invalid filename"; > 500 MB → 413. Returns `FileMetadata`. |
+| `POST /v1/files` | `multipart/form-data` with a required file part named **`file`** (BetaFileUploadParams betafile.go:274-279; apiform falls back to the `json` tag for the part name, internal/apiform/tag.go:23-27). Whether the reference rejects extra, unknown, or duplicate parts is **not** established by the SDK — we parse strictly (one `file` part, anything else 400, the skills-upload precedent) and record that strictness as an inference (slice 1). Filename comes from the part's `Content-Disposition` — the SDK defaults to `anonymous_file` for anonymous readers (encoder.go:372-399), the CLI sends the path basename with a `mime.TypeByExtension` part Content-Type (anthropic-cli flagoptions.go:568-582). Public-docs validation: filename 1–255 chars, forbidden `< > : " | ? * \ / ` and control chars 0–31 → 400 "Invalid filename"; > 500 MB → 413. Returns `FileMetadata`. |
 | `GET /v1/files` | Classic `Page` envelope `{data, has_more, first_id, last_id}` (pagination.go:21-34 — **not** the `next_page` cursor our other lists use). Query: `after_id`, `before_id`, `limit` (1–1000, default 20), `scope_id` (filter by scoping resource, e.g. a session ID) — betafile.go:229-246. |
 | `GET /v1/files/{file_id}` | `FileMetadata`. |
 | `GET /v1/files/{file_id}/content` | Binary stream; the SDK sends `Accept: application/binary` (betafile.go:95). Public docs: **uploaded files are not downloadable** — only files created by skills or the code-execution tool (`downloadable: true`); downloading an uploaded file returns **400**. The CLI derives the local filename from `Content-Disposition: …; filename=…` and falls back to `file-*` temp names without it (anthropic-cli cmdutil.go:433-457). |
@@ -93,10 +93,19 @@ slice 4 gives it a wire-only fetch path and records the divergence.
    this. Same transaction ordering as `insertSkill` (internal/api/skills.go:171-200): row
    claimed in the tx, blob put before commit, failed-commit orphan cleaned best-effort, GC
    a non-goal. Files are immutable — no update endpoint, no versions.
-2. **Hard delete only.** `DELETE` removes the row and the object (blob delete is
-   idempotent). Deleting a file some session still references is allowed; later
-   materialization tolerates `not_found` per-resource, the skills precedent
-   (internal/executor/skills.go:124-132).
+2. **Hard delete only, dangling references tolerated by design.** `DELETE` removes the
+   row and the object (blob delete is idempotent). Deleting a file some session still
+   references is allowed, and a create/add existence check racing a concurrent delete can
+   commit a reference to a just-deleted file — both land in the same accepted state: a
+   dangling resource whose materialization records `not_found` per-resource and moves on,
+   the skills precedent (internal/executor/skills.go:124-132), observable in the
+   `files.materialized` counter and the `files_materialize` span, and visible to the agent
+   as an absent path. Considered and rejected: a separate `session_resources` table with
+   `ON DELETE RESTRICT` — it would make `DELETE /v1/files/{id}` fail for referenced files
+   (a wire behavior the reference nowhere documents), add a table the path-scoped
+   sub-endpoints don't need, and still not stop the sandbox-side gap (a file deleted after
+   materialization already succeeded). Whether the reference restricts or tolerates this
+   is on the recording checklist.
 3. **Reference-faithful download semantics.** Uploads are `downloadable: false`; a
    management-key `GET …/content` on such a file returns the reference's 400. Bytes still
    reach sandboxes: the executor reads the blob store directly, and the BYOC worker (slice
@@ -134,9 +143,13 @@ slice 4 gives it a wire-only fetch path and records the divergence.
    `resources[]` → `Files.Download` on the env-key lane → `sb.WriteFile`). Brain: a
    Level-1-style "Mounted files" block (mount path, filename, mime type, size) appended
    after the skills block at request assembly — format inferred, exactly like the skills
-   line-67 entry — so the agent can find mounts outside the workdir. A 500 MB mount
-   transits executor/worker memory (`Sandbox.WriteFile` takes `[]byte`); accepted for now
-   and noted in ARCHITECTURE — a streaming write seam is future work if it bites.
+   line-67 entry — so the agent can find mounts outside the workdir. Because a mount can
+   legitimately be 500 MB and `Sandbox.WriteFile` takes `[]byte`, slice 3 extends the
+   sandbox seam with a **streaming write counterpart** (an `io.Reader` + size signature,
+   landed through `sandboxtest` so the docker and k8s backends both satisfy it — docker's
+   CopyToContainer and a k8s exec-with-stdin both stream naturally); blob `Get` and the
+   SDK's `Files.Download` already return streaming readers, so a mount never fully
+   buffers in the executor or the worker.
 8. **Two pagination envelopes.** `/v1/files` gets the classic `Page` shape — a new
    id-cursor envelope in `internal/api/page.go` alongside `pageJSON` — ordered newest-first
    (`created_at` desc, id tiebreak; ordering is unrecorded, flagged as an inference), with
@@ -153,15 +166,19 @@ slice 4 gives it a wire-only fetch path and records the divergence.
     predicate to `dispatchAuth` (internal/api/server.go:159-168) admitting **only**
     `GET /v1/files/{id}/content` to the environment-key dual-auth lane — narrower than
     skills' full read set — and the download handler skips the downloadable gate for that
-    lane. Like skills, the lane is workspace-global (any environment key can fetch any
-    file's content); recorded with the auth-scope inference, mirroring the skills line-66
-    entry.
+    lane. Unlike skills (whose env lane is deliberately workspace-global — skills are
+    shared assets), file content can be sensitive, so the env lane is **session-scoped**:
+    the download handler authorizes an environment key only for a file referenced by the
+    `resources[]` of a session in that environment (one jsonb containment lookup —
+    `resources @> '[{"file_id": …}]'` filtered on `environment_id`). A leaked environment
+    key never becomes a workspace-wide file-exfiltration credential. Recorded with the
+    auth-scope entry in slice 4 (the reference has no worker file lane at all).
 
 **Non-goals:** git/repo mounting (`github_repository` — stays on #55), memory-store
 resources, session-produced output files (nothing sets `scope`/`downloadable: true`;
 `scope_id` filtering works but matches nothing until that feature exists), storage
-quotas, streaming sandbox writes, file content blocks in session events, resource
-unmounting (deleting a `sesrsc_` never reaches into a live sandbox).
+quotas, file content blocks in session events, resource unmounting (deleting a `sesrsc_`
+never reaches into a live sandbox).
 
 ## Slices
 
@@ -192,9 +209,12 @@ its own docs PR; STATE.md is claimed when implementation starts.)*
    **Acceptance:** `ant beta:sessions create --resource '{file_id: …, type: file}'`
    round-trips with a rendered `sesrsc_` resource; all five
    `ant beta:sessions:resources` subcommands behave per the table above.
-3. **Executor materialization + brain injection + eval.** `sessionForRun` also selects
-   `resources` (internal/executor/executor.go:328-368); `internal/executor/files.go`
-   materializes mounts (sentinel + re-probe, per-resource tolerance, metrics + span);
+3. **Executor materialization + brain injection + eval.** The sandbox seam gains the
+   streaming write counterpart to `WriteFile` (decision 7), with a `sandboxtest` contract
+   case both backends must pass; `sessionForRun` also selects `resources`
+   (internal/executor/executor.go:328-368); `internal/executor/files.go` materializes
+   mounts by streaming blob → sandbox (sentinel + re-probe, per-resource tolerance,
+   metrics + span);
    brain renders the "Mounted files" block into `buildRequest` alongside the skills block
    (internal/brain/brain.go:175-184); new `file-answer` eval mirroring `skill-answer` —
    the passphrase lives only in an uploaded file mounted at the default path, so a correct
@@ -202,7 +222,8 @@ its own docs PR; STATE.md is claimed when implementation starts.)*
    **Acceptance:** E2E-2 — `RUN_EVALS=1` `file-answer` passes against a real model
    endpoint; platform-half chain proven.
 4. **BYOC worker + env-key content lane; archive.** `isFileReadPath` dual-auth lane for
-   `GET /v1/files/{id}/content` with the lane-aware downloadable bypass;
+   `GET /v1/files/{id}/content` with the lane-aware downloadable bypass and the
+   session-scoped authorization check (decision 10);
    `internal/worker/files.go` wire-only twin with the same sentinel and metrics; E2E-3
    manual acceptance (worker on the host materializes a mount; transcript to
    docs/HISTORY.md); README/ARCHITECTURE updates for the landed feature; archive this
@@ -238,15 +259,17 @@ span attributes and logs.
 ## Inferences and divergences to record, by slice
 
 Slice 1 — DIVERGENCES.md entries: **CONFIRMED** — org-storage quota not enforced
-(decision 4); **INFERRED** — list ordering newest-first and cursor direction; filename
-edge cases (missing/`anonymous_file` parts, the exact 400 messages); download response
-headers (`Content-Disposition` presence); upload part Content-Type → `mime_type`
-fallback.
+(decision 4); **INFERRED** — list ordering newest-first and cursor direction; strict
+multipart parsing (extra, unknown, or duplicate parts rejected — the SDK proves only the
+required `file` part); filename edge cases (missing/`anonymous_file` parts, the exact 400
+messages); download response headers (`Content-Disposition` presence); upload part
+Content-Type → `mime_type` fallback.
 
 Slice 2 — **CONFIRMED** — the line-28 create-rejection entry carved down (file resources
 now accepted; `github_repository`/`memory_store` still rejected); **INFERRED** — file
 existence validated at create/add; duplicate-mount-path rejection; resource mutations on
-running/terminated sessions; deletion does not unmount; the update (token-rotation)
+running/terminated sessions; deletion does not unmount; deleting a still-referenced file
+tolerated (the dangling-reference state of decision 2); the update (token-rotation)
 error shape for file resources.
 
 Slice 3 — **INFERRED** — the "Mounted files" block format and placement (the skills
@@ -254,8 +277,8 @@ line-67 twin); sentinel idempotence instead of re-materializing every item (exte
 skills line-32 analysis to file mounts).
 
 Slice 4 — **CONFIRMED/INFERRED** — file-content reads on the environment-key lane with
-the downloadable bypass (the reference worker has no file path at all; auth scope is
-workspace-global like the skills line-66 entry).
+the downloadable bypass, session-scoped per decision 10 (the reference worker has no file
+path at all, so the lane itself and its auth scope are ours to define and record).
 
 ## Recording checklist (deferred until credentials exist)
 
@@ -263,8 +286,11 @@ Each lands cross-linked from its DIVERGENCES.md entry when a real `ant` recordin
 possible:
 
 - `GET /v1/files` result ordering and empty-page `first_id`/`last_id` rendering.
-- Upload with a missing/pathological filename part; duplicate filename uploads; the
-  exact invalid-filename and 413 error messages.
+- Upload with a missing/pathological filename part; duplicate filename uploads; extra,
+  unknown, or duplicate multipart parts; the exact invalid-filename and 413 error
+  messages.
+- `DELETE /v1/files/{id}` on a file still referenced by a session's `resources[]` —
+  restricted or tolerated, and what later materialization does.
 - Whether create-time `resources[]` validates file existence, and the error shape.
 - Resource add/delete on a running or terminated session; whether deletion unmounts.
 - The update (token-rotation) error for a `file` resource.
