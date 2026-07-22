@@ -44,6 +44,12 @@ type Task struct {
 	// adopts that same container when it runs the first tool. {{NONCE}} is
 	// substituted into Path and Content.
 	Seeds []Seed
+	// Skills are self-authored fixture skills uploaded to the registry before
+	// the agent is created; the agent's skills[] references each at "latest",
+	// so the brain injects its metadata and the executor materializes it into
+	// skills/<Name>/ before the first tool runs. Exercises the whole skills
+	// chain — registry, resolution, materialization, Level-1 injection.
+	Skills []SkillFixture
 	// Turns are the user messages, sent one at a time; each waits for the
 	// session to go idle before the next is sent.
 	Turns []Turn
@@ -74,6 +80,19 @@ type Turn struct {
 type Ask struct {
 	Allow       bool
 	DenyMessage string
+}
+
+// SkillFixture is one skill a task uploads. Name is the SKILL.md frontmatter
+// name, which is also the materialization directory (skills/<Name>/) and the
+// path the Level-1 block points the model at. Body is the SKILL.md content
+// after the generated frontmatter; Files are the other files shipped in the
+// skill (e.g. an answer file the task cannot be solved without). {{NONCE}} and
+// {{RECALL}} are substituted into Body and every Files value.
+type SkillFixture struct {
+	Name        string
+	Description string
+	Body        string
+	Files       map[string]string
 }
 
 // Trial is one execution of a Task: everything a grader is allowed to look at.
@@ -119,7 +138,19 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 	nonce := newNonce(t)
 	tr := &Trial{Task: task, Nonce: nonce, Recall: newNonce(t), stack: s}
 
-	agentID := s.createAgent(t, agentBody(task, s.model, tr))
+	// Skills are uploaded before the agent is created so it can reference them
+	// at "latest": the brain resolves and injects their metadata each turn, and
+	// the executor materializes them into the session's sandbox.
+	var skillRefs []any
+	for _, sf := range task.Skills {
+		sid := s.uploadSkill(t, sf, tr)
+		// Uploaded fixtures are source='custom'; the agent skills[] entry's type
+		// names that source category (not the literal "skill").
+		skillRefs = append(skillRefs, map[string]any{
+			"type": "custom", "skill_id": sid, "version": "latest",
+		})
+	}
+	agentID := s.createAgent(t, agentBody(task, s.model, tr, skillRefs))
 	envID := s.createEnvironment(t, "eval-"+task.ID)
 	tr.SessionID = s.createSession(t, agentID, envID)
 	rec.Session = tr.SessionID
@@ -239,7 +270,7 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, turn Turn, tr *Tria
 // MODEL_ID: the registry's single route sends MODEL_ID upstream whatever the
 // agent says, so any other string here would be a fiction the transcript then
 // records, naming a model the endpoint never saw.
-func agentBody(task Task, model string, tr *Trial) map[string]any {
+func agentBody(task Task, model string, tr *Trial, skills []any) map[string]any {
 	tools := task.Tools
 	if tools == nil {
 		// The bare agent toolset, whose default permission policy runs every
@@ -254,6 +285,9 @@ func agentBody(task Task, model string, tr *Trial) map[string]any {
 	}
 	if task.System != "" {
 		body["system"] = tr.fill(task.System)
+	}
+	if len(skills) > 0 {
+		body["skills"] = skills
 	}
 	return body
 }

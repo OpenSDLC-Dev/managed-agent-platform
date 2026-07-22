@@ -29,7 +29,41 @@ func tasks() []Task {
 	return []Task{
 		fibQuickstart(), echoNoTool(), shellState(),
 		editConfig(), needleSearch(), permAllow(), permDeny(),
-		exitCode(), journalMultiturn(), viewRange(),
+		exitCode(), journalMultiturn(), viewRange(), skillAnswer(),
+	}
+}
+
+// skillAnswer is the skills chain end to end (plan E2E-2): a self-authored skill
+// is uploaded to the registry, referenced by the agent at "latest", injected as
+// Level-1 metadata by the brain, and materialized into the sandbox by the
+// executor. The passphrase lives only in the skill's answer file, reachable only
+// by following the injected SKILL.md — so a correct final answer proves every
+// link (registry → resolution → materialization → injection → the model acting
+// on it), not just the model's own knowledge.
+func skillAnswer() Task {
+	return Task{
+		ID: "skill-answer",
+		Skills: []SkillFixture{{
+			Name:        "eval-secret",
+			Description: "Reveals this task's secret passphrase.",
+			Body: "This task has a secret passphrase. It is written in the file answer.txt " +
+				"beside this SKILL.md (skills/eval-secret/answer.txt). Read that file and " +
+				"report the passphrase exactly as written.",
+			Files: map[string]string{
+				"answer.txt": "The secret passphrase is {{RECALL}}.",
+			},
+		}},
+		Turns: []Turn{{Message: "A skill is available to you. Follow its instructions to find " +
+			"this task's secret passphrase, then reply with exactly the passphrase and nothing else."}},
+		Graders: []Grader{
+			// Either for both: the passphrase is reachable only through the
+			// materialized skill, so a right answer is unambiguous platform
+			// evidence — but a missing one is as likely the model declining to use
+			// the skill as a broken chain, and the transcript (did it read the
+			// file?) is what separates them, which the read grader records.
+			ReadsSkillFile("eval-secret", "SKILL.md", Either),
+			FinalMessageHas("{{RECALL}}", Either),
+		},
 	}
 }
 
