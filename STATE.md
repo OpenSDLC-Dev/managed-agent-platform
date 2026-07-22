@@ -4,28 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54) — skills distribution +
-execution, per [docs/plan/06_skills.md](./docs/plan/06_skills.md) (in-progress since slice 1).
+None.
 
 ## Tasks
 
-- [x] Slice 1 — blob store foundation: `internal/blob` + `blob/s3` (minio-go) + blobtest
-      contract suite/MinIO harness (all green vs a real container, blob coverage 95.0%);
-      compose MinIO; helm `minio.yaml` + `externalObjectStorage` + render guards.
-      `make verify` green (total coverage ~91.7%, gate ≥90%). PR
-      [#145](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/145) (merged).
-- [x] Slice 2 — `/v1/skills` registry: migration 0007, `skillver_` ids, multipart create (both
-      forms), nine endpoints, per-resource list limits, upload/download logs+metrics; CI compose
-      round-trip (E2E-1); real `ant beta:skills` acceptance passed (docs/HISTORY.md, 2026-07-21).
-      PR [#146](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/146).
-- [x] Slice 3 — anthropic prebuilt import: `controlplane -import-anthropic-skills`, date
-      versions from the checkout's commit date, idempotent, self-authored CI fixtures;
-      acceptance passed — real checkout imported, `ant beta:skills list --source anthropic`
-      shows the four document skills (docs/HISTORY.md, 2026-07-22). PR
-      [#147](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/147).
-- [x] Slice 4 — runtime materialization: skill reads join the env-key dual-auth lane; executor
-      post-Provision materialization (blob-sourced, sentinel idempotence) + wire-only worker
-      SetupSkills twin, shared `skills.Extract` guards; 500-cap at agent create/overrides;
-      spans+metrics both halves. PR #148.
-- [ ] Slice 5 — brain Level-1 injection, evals E2E task, remaining DIVERGENCES entries, docs
-      closure, archive the plan, close #54.
+None.

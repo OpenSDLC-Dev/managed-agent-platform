@@ -3,6 +3,7 @@ package toolset
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
@@ -150,6 +151,9 @@ func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 	if err := json.Unmarshal(raw, &e); err != nil {
 		return nil, fmt.Errorf("agent_toolset_20260401: %w", err)
 	}
+	if err := rejectUnknownToolsetKeys(raw); err != nil {
+		return nil, err
+	}
 
 	enabled := true
 	var defaultPolicy *policyConfig
@@ -206,6 +210,104 @@ func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 		out = append(out, resolved{def: d, policy: policy})
 	}
 	return out, nil
+}
+
+// rejectUnknownToolsetKeys fails on any key outside the pinned agent_toolset_20260401
+// wire schema — at the toolset object and every nested default_config, configs[]
+// entry, and permission_policy. encoding/json silently drops unknown object keys,
+// so without this a misspelled permission_policy (the issue's permission_polciy) is
+// discarded, PermissionPolicy stays nil, and the tool resolves to the always_allow
+// default rather than the intended gate — a fail-open at the human-in-the-loop
+// boundary (issue #26). It is eager, not lazy like policyType: a malformed stored
+// object is the defect, so a typo on a disabled tool — a latent fail-open that
+// activates when the tool is enabled — is rejected too. Errors name the field's
+// path so a client can find the typo. It runs after resolveToolset's typed
+// unmarshal, so every object it revisits has already parsed as the right JSON shape.
+//
+// The accepted keys are anthropic-sdk-go v1.58.0's request (*Params) types in
+// betaagent.go: BetaManagedAgentsAgentToolset20260401Params (type/configs/
+// default_config), AgentToolsetDefaultConfigParams (enabled/permission_policy),
+// AgentToolConfigParams (name/enabled/permission_policy), and the always_allow/
+// always_ask policy params (type only).
+func rejectUnknownToolsetKeys(raw json.RawMessage) error {
+	top, ok := jsonObject(raw)
+	if !ok {
+		return nil // not an object: the typed unmarshal already reported it
+	}
+	if err := rejectKeysOutside(top, "", "type", "configs", "default_config"); err != nil {
+		return err
+	}
+	if dc, ok := jsonObject(top["default_config"]); ok {
+		if err := rejectConfigKeys(dc, "default_config", false); err != nil {
+			return err
+		}
+	}
+	for i, item := range jsonArray(top["configs"]) {
+		if c, ok := jsonObject(item); ok {
+			if err := rejectConfigKeys(c, fmt.Sprintf("configs[%d]", i), true); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// rejectConfigKeys checks a default_config or configs[] object and its nested
+// permission_policy. perTool adds "name", accepted only on a configs[] entry.
+func rejectConfigKeys(obj map[string]json.RawMessage, path string, perTool bool) error {
+	allowed := []string{"enabled", "permission_policy"}
+	if perTool {
+		allowed = append(allowed, "name")
+	}
+	if err := rejectKeysOutside(obj, path, allowed...); err != nil {
+		return err
+	}
+	if pp, ok := jsonObject(obj["permission_policy"]); ok {
+		return rejectKeysOutside(pp, path+".permission_policy", "type")
+	}
+	return nil
+}
+
+// rejectKeysOutside fails on the first key of obj not in allowed, naming its path
+// (the toolset object itself for the empty path).
+func rejectKeysOutside(obj map[string]json.RawMessage, path string, allowed ...string) error {
+	for k := range obj {
+		if slices.Contains(allowed, k) {
+			continue
+		}
+		if path == "" {
+			return fmt.Errorf("agent_toolset_20260401: unknown field %q", k)
+		}
+		return fmt.Errorf("agent_toolset_20260401: unknown field %q in %s", k, path)
+	}
+	return nil
+}
+
+// jsonObject decodes raw as a JSON object, reporting false for null, a non-object,
+// or absent input — the cases resolveToolset's typed unmarshal has already accepted
+// or rejected, so they carry no unknown-key check of their own.
+func jsonObject(raw json.RawMessage) (map[string]json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
+		return nil, false
+	}
+	return m, true
+}
+
+// jsonArray decodes raw as a JSON array, returning nil for null / non-array /
+// absent input (again already handled by the typed unmarshal).
+func jsonArray(raw json.RawMessage) []json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var a []json.RawMessage
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil
+	}
+	return a
 }
 
 // policyType validates a permission_policy's type against the wire enum. An

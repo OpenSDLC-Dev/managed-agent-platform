@@ -33,6 +33,14 @@ recorded nowhere else.
 
 ---
 
+## Skills slice-5 acceptance — Level-1 injection, the full chain end to end (run 2026-07-22) — ✅ passed
+
+The skills plan's slice-5 acceptance (plan E2E-2), against a real model: the opt-in eval task `skill-answer` (`RUN_EVALS=1 go test ./evals -run TestEvals/skill-answer`). The harness uploads a self-authored fixture skill through the public multipart endpoint — a SKILL.md whose instructions point at an `answer.txt` beside it, the answer being a per-trial `{{RECALL}}` token the prompt never contains — creates an agent referencing it at `latest`, and drives one turn that asks only for the passphrase, naming neither the skill nor a path — so the injected Level-1 metadata is the model's only route to learning a skill can answer and where it lives (the discovery mechanism under test; a turn that announced the skill would let the model succeed by exploring the filesystem even if injection regressed). The run log shows `skill created skill_id=… version=…` then `skill materialized session_id=… skill_id=… version=…`, and both graders passed: the transcript carries a tool call reading `skills/eval-secret/SKILL.md` (the agent found and followed the injected Level-1 metadata), and the final `agent.message` contains the `{{RECALL}}` passphrase — reachable **only** through the materialized answer file. Registry → brain resolution + Level-1 injection → executor materialization → the model acting on it, one unbroken chain exercised by a value the model could not otherwise know. (The turn was strengthened after CodeRabbit review to name no skill or path; the re-run above is green.)
+
+## Skills plan — archived 2026-07-22, all five slices delivered
+
+docs/plan/06_skills.md (issue #54) is archived complete. Slice 1: `internal/blob` + `blob/s3` (minio-go) + contract suite, compose/helm object storage (PR #145). Slice 2: the wire-compatible `/v1/skills` registry over object storage, migration 0007, `skillver_` ids, both upload forms, nine endpoints, E2E-1 compose round-trip + real `ant beta:skills` acceptance (PR #146). Slice 3: the run-once anthropic prebuilt-skills importer, date versions, idempotent, self-authored CI fixtures, real-checkout acceptance (PR #147). Slice 4: runtime materialization on both execution halves (executor blob-sourced + wire-only worker SetupSkills twin), the env-key dual-auth read lane, sentinel idempotence, the 500-skills cap, real-model + real `ant beta:worker` acceptance (PR #148, hardened across four Codex review rounds — the sentinel trust boundary, `latest_version` numeric-max concurrency, a hard-bounded archive read). Slice 5: brain Level-1 injection with the `skills.resolve.misses` metric, the E2E-2 eval, and docs closure (PR #152, hardened after a Codex + Claude/Opus + verifier review round — the resolve-miss counter is flushed before the turn's early-return paths so a logged miss always counts, the `model_request` span's `skills.injected`/`skills.block_chars` gained assertions, and the `ReadsSkillFile` eval grader was tightened to a real file read). Deliberate divergences and inferences are in docs/DIVERGENCES.md; the as-built system in docs/ARCHITECTURE.md.
+
 ## Skills slice-4 acceptance — materialization on both halves, real model + real `ant beta:worker` (run 2026-07-22) — ✅ passed
 
 The skills plan's slice-4 acceptance, both deployment points.
@@ -243,6 +251,37 @@ The first test that drives a whole session the way a customer does — public RE
 Prompts are written the way the docs tell a user to write them — a prompt tuned until only our platform's quirks satisfy it stops being a regression test. Two that a refusal-prone live model (MiniMax-M3) balked at were reworded to exercise the platform rather than trip a safety reflex: `perm-deny`'s "delete a file in a `protected` directory" became a benign append the reviewer declines, and `view-range`'s "SECRET" marker copied "to another file" — which the model read as exfiltration — became a plain marker copied to a file. All ten run 10/10 green live.
 
 Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/96), needs repo `MODEL_*` secrets), `tool_choice`/`disable_parallel_tool_use` for phase 1.5 (on #30), and production sandbox reaping ([#64](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/64)). The harness reaps its own containers at stack teardown.
+
+---
+
+## Reject unknown agent_toolset fields (plan 07) — archived 2026-07-22
+
+[docs/plan/07_reject-unknown-toolset-fields.md](./plan/07_reject-unknown-toolset-fields.md),
+delivered in one PR (**#151**) for [#26](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/26).
+The change and its reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a
+changelog cannot hold.
+
+**Why this was a plan, not a straight fix.** The trigger was wire-schema verification: the accepted
+keys of every `agent_toolset_20260401` object had to be pinned from `anthropic-sdk-go` v1.58.0's
+request (`*Params`) types before the strict check could be written, not improvised from the bug
+report. The plan's field table is that pinned artifact; the verifier and both reviewers re-derived it
+field-for-field against the SDK tag and confirmed no divergence — `DIVERGENCES.md` INFERRED #59
+(the `always_allow` default for a genuinely omitted policy) is untouched, because the fix only stops a
+*misspelling* from being read as an omission.
+
+**The eager/lazy split was the load-bearing design decision.** Unknown-*key* rejection is eager —
+it fires regardless of a tool's enable state, because a typo'd `permission_policy` on a disabled tool
+is a latent fail-open that activates the moment the tool is enabled. That is deliberately distinct
+from the pre-existing *lazy* validation of a policy's *value* (checked only for live tools), and the
+two coexist without conflict because they inspect different things: `TestPoliciesValidatesLazily`
+uses correctly-spelled keys with bogus values and stays green.
+
+**Governance — a parallel drive-by fix leaves STATE.md alone.** #26 landed while the skills plan
+(#54) legitimately owned STATE.md's single-focus tracker. Rather than evict in-flight tracking or
+dual-track, this plan was authored and archived within its one delivering PR; the narrative lives in
+CHANGELOG, so STATE.md never needed to name #26. Both the verifier and the Claude reviewer confirmed
+this is only defensible *because* the plan lands `archived` (not left `in-progress` with nothing left
+to do).
 
 ---
 

@@ -33,6 +33,24 @@ copy of an entry here.
   held to them. Protocol-specific tests (wire request shape, credential redaction, the OpenAI
   lossy conversions and `finish_reason` mapping) stay per-package. `providertest` joins the
   coverage-gate's test-support exclusions.
+- **Level-1 skill injection into the system prompt (skills plan, slice 5 — closes the plan)**
+  ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the brain now
+  injects each session agent's `skills[]` as Level-1 metadata. At request-assembly time
+  `buildRequest` receives a resolved block that the brain builds from the store: per skill it
+  resolves the version (a digit string verbatim, else `latest` against `latest_version`), reads
+  `name`/`description` from the resolved version, and renders a lead line plus one
+  `name - description (skills/<dir>/SKILL.md)` bullet per skill, `<dir>` matching the
+  materialization directory. The block is placed after the agent's own system prompt and before
+  any runtime `system.message` text. An unresolvable reference is a logged miss counted by the
+  new `skills.resolve.misses` counter, never fatal to the turn; the `model_request` span gains
+  `skills.injected` and `skills.block_chars` attributes. The exact reference template is captured
+  by no source — the block format and placement are inferred (docs/DIVERGENCES.md). This closes
+  the skills chain end to end (registry → resolution → materialization → injection → model use),
+  exercised by the new opt-in eval task `skill-answer` (plan E2E-2): a self-authored skill whose
+  answer file the task cannot be solved without, and whose turn names neither the skill nor a
+  path — so the injected Level-1 metadata is the discovery mechanism — graded on the model
+  reading the materialized SKILL.md and returning the secret. The skills plan is archived.
+
 - **Skills runtime materialization (skills plan, slice 4)**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — a session's
   `agent.skills[]` now materialize into the sandbox at `{workdir}/skills/<name>/` before its
@@ -324,6 +342,23 @@ copy of an entry here.
   will catch, so the two spellings are gone rather than documented.
 
 ### Fixed
+
+- **A misspelled `permission_policy` key in an agent toolset silently fell back to `always_allow`**
+  ([#26](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/26)) — an
+  `agent_toolset_20260401` config was decoded with a plain `json.Unmarshal`, which drops unknown
+  object keys, so a typo such as `permission_polciy` was discarded, `PermissionPolicy` stayed nil,
+  and the tool resolved to the `always_allow` default. An operator who wrote `always_ask` to require
+  human confirmation instead got automatic execution — a fail-open at the human-in-the-loop approval
+  boundary. `internal/toolset` now rejects any key outside the pinned wire schema (anthropic-sdk-go
+  v1.58.0) at the toolset object and every nested `default_config`, `configs[]`, and
+  `permission_policy`, naming the offending field's path. The check runs inside `resolveToolset`, so
+  all three API paths that accept a tools array (agent create/update, session create `agent_with_overrides`,
+  session update `agent.tools` patch) return a 400 `invalid_request_error` before the malformed
+  toolset is stored, and the brain is fail-closed when it resolves the toolset. It is **eager** — a
+  typo on a *disabled* tool is a latent fail-open that activates when the tool is enabled, so it is
+  rejected too — and orthogonal to the existing **lazy** validation of a policy's *value*. A
+  genuinely omitted `permission_policy` still uses the documented default, so the `always_allow`
+  default (docs/DIVERGENCES.md, INFERRED #59) is unchanged.
 
 - **The Docker test harnesses leaked one anonymous volume per test binary on every run** — both
   `internal/pgtest` (Postgres, `postgres:16-alpine`, `VOLUME /var/lib/postgresql/data`) and

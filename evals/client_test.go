@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -72,6 +73,57 @@ func (s *stack) do(t *testing.T, method, path string, body any) map[string]any {
 		t.Fatalf("%s %s: response is not a JSON object: %s", method, path, raw)
 	}
 	return obj
+}
+
+// uploadSkill uploads one fixture skill through the public multipart endpoint —
+// the same loose-files form an `ant beta:skills create` sends — and returns the
+// skill id. SKILL.md is generated from the fixture's name/description; Body and
+// every extra file are shipped as their own files[] part, path-qualified under
+// the skill directory so the server's canonical-zip normalization places them
+// under one top-level dir. {{NONCE}}/{{RECALL}} are filled from the trial.
+func (s *stack) uploadSkill(t *testing.T, sf SkillFixture, tr *Trial) string {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	part := func(path, content string) {
+		w, err := mw.CreateFormFile("files[]", sf.Name+"/"+path)
+		if err != nil {
+			t.Fatalf("multipart part %s: %v", path, err)
+		}
+		if _, err := io.WriteString(w, tr.fill(content)); err != nil {
+			t.Fatalf("write part %s: %v", path, err)
+		}
+	}
+	part("SKILL.md", fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n%s\n", sf.Name, sf.Description, sf.Body))
+	for path, content := range sf.Files {
+		part(path, content)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), restTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url+"/v1/skills", &buf)
+	if err != nil {
+		t.Fatalf("new upload request: %v", err)
+	}
+	req.Header.Set("x-api-key", evalKey)
+	req.Header.Set("content-type", mw.FormDataContentType())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("upload skill %s: %v", sf.Name, err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("upload skill %s: status %d, body %s", sf.Name, res.StatusCode, raw)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("upload skill %s: response is not a JSON object: %s", sf.Name, raw)
+	}
+	return id(t, obj, "upload skill")
 }
 
 // id pulls a resource id out of a create response.
