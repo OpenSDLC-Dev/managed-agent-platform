@@ -15,21 +15,27 @@ copy of an entry here.
 
 ### Added
 
-- **Files plan drafted: docs/plan/08_files.md**
-  ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — the design
-  for lifting the Files half of #55 out of its reserved seam, drafted against the public
-  Files docs, the pinned SDK (v1.58.0), and the `ant` CLI source (no live recording —
-  everything recording-only is pre-listed as DIVERGENCES.md inferences per slice). Scope:
-  the `/v1/files` registry over the existing `internal/blob` store (`files/{file_id}`
-  namespace, hard delete — the issue comment's `archived_at` claim is corrected in the
-  plan: the reference has no file archival), session `resources[]` accepting
-  `type: "file"` mounts stored in the reserved `sessions.resources` jsonb column plus the
-  five `sesrsc_` sub-endpoints, and materialization mirroring the skills three-point
-  pattern (executor blob-direct, BYOC worker wire-only over an environment-key content
-  lane, brain Level-1 "Mounted files" injection). Uploads follow the reference's
-  `downloadable: false` semantics (download → 400); git/repo mounting stays deferred on
-  #55. Four PR slices; the plan lands as a draft for discussion, so STATE.md stays
-  unclaimed until implementation starts.
+- **Files API — the `/v1/files` registry (Files plan, slice 1)**
+  ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — the
+  wire-compatible `/v1/files` upload/list/get-metadata/download/delete registry over the
+  existing `internal/blob` store, shaped against the pinned SDK's `betafile.go` (v1.58.0).
+  Upload is `multipart/form-data` with one `file` part, filename validation (1–255 chars,
+  no `<>:"|?*\/` or control chars) and a 500 MB cap (413); metadata rows land row-then-
+  blob-put in one transaction (object exists before the row is visible, failed-commit
+  orphan cleaned best-effort) at blob key `files/{file_id}` — the second consumer of the
+  namespace `internal/blob` reserved. The list uses the reference's classic `Page`
+  envelope (`{data, has_more, first_id, last_id}`, `after_id`/`before_id`/`limit`≤1000/
+  `scope_id`), newest-first. Uploads are `downloadable:false` and download returns the
+  reference's 400 — only skill/tool-produced files (none yet) stream; delete is a hard
+  delete (the reference has no file archival, correcting #55's `archived_at` comment). The
+  registry is exercised end to end over a real Postgres and blob store, with structured
+  logging and `files.uploads`/`files.upload.bytes`/`files.download.bytes` metrics on every
+  link. Also lands the plan **docs/plan/08_files.md** (`in-progress`), settled against the
+  public Files docs, the pinned SDK, and the `ant` CLI source (no live recording —
+  recording-only behavior is pre-listed as DIVERGENCES.md inferences per slice). Remaining
+  slices: session `resources[]` (`type: "file"`) + `sesrsc_` sub-endpoints, executor/brain
+  materialization, and the BYOC worker with a session-scoped env-key content lane. Git/repo
+  mounting stays deferred on #55.
 - **Shared provider contract suite**
   ([#48](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/48)) — the two
   model-provider adapters (`internal/provider/anthropic`, `internal/provider/openai`) now

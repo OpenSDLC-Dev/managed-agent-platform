@@ -71,6 +71,12 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store) http.Handler {
 	mux.HandleFunc("DELETE /v1/skills/{id}/versions/{version}", s.handle(s.deleteSkillVersion))
 	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}/content", s.downloadSkillVersion) // streams the archive; not a typed handler
 
+	mux.HandleFunc("POST /v1/files", s.handle(s.createFile))
+	mux.HandleFunc("GET /v1/files", s.handle(s.listFiles))
+	mux.HandleFunc("GET /v1/files/{id}", s.handle(s.getFile))
+	mux.HandleFunc("DELETE /v1/files/{id}", s.handle(s.deleteFile))
+	mux.HandleFunc("GET /v1/files/{id}/content", s.downloadFile) // streams the object; not a typed handler
+
 	// The mux's built-in 404/405 write plain text; clients expect the wire
 	// error envelope, so register explicit fallbacks: "/" for unknown paths
 	// and a method-less pattern per route for unsupported methods.
@@ -84,6 +90,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store) http.Handler {
 		"/v1/sessions/{id}/events", "/v1/sessions/{id}/events/stream",
 		"/v1/skills", "/v1/skills/{id}", "/v1/skills/{id}/versions",
 		"/v1/skills/{id}/versions/{version}", "/v1/skills/{id}/versions/{version}/content",
+		"/v1/files", "/v1/files/{id}", "/v1/files/{id}/content",
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, methodNotAllowed(r))

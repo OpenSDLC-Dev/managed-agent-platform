@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 issue: "#55"
 ---
 
@@ -92,7 +92,11 @@ slice 4 gives it a wire-only fetch path and records the divergence.
    the second consumer of the namespace `internal/blob/blob.go:5-7` reserved for exactly
    this. Same transaction ordering as `insertSkill` (internal/api/skills.go:171-200): row
    claimed in the tx, blob put before commit, failed-commit orphan cleaned best-effort, GC
-   a non-goal. Files are immutable — no update endpoint, no versions.
+   a non-goal. Files are immutable — no update endpoint, no versions. Like the skills
+   registry (which has no `domain.Skill`), the wire shape and validation are api-local
+   (`fileJSON` in `api/files.go`, mirroring `skillJSON`) — the registry is metadata-only,
+   so no `domain.File` type is introduced; slices 3–4 extract only the shared blob-key
+   helper if the executor/worker need it.
 2. **Hard delete only, dangling references tolerated by design.** `DELETE` removes the
    row and the object (blob delete is idempotent). Deleting a file some session still
    references is allowed, and a create/add existence check racing a concurrent delete can
@@ -184,21 +188,31 @@ never reaches into a live sandbox).
 
 Each slice is one PR through the full ritual (verifier, reviews, CI, squash). Docs move
 with code; the DIVERGENCES.md entries listed in "Inferences and divergences to record"
-land in the slice that creates the behavior. *(The plan itself lands ahead of slice 1 in
-its own docs PR; STATE.md is claimed when implementation starts.)*
+land in the slice that creates the behavior. The plan and slice 1 land together (this is
+the plan's first landing PR, so it lands `in-progress`). **Two standing requirements on
+every slice** (user directive, 2026-07-23): (a) it ships an end-to-end integration test
+exercising the real chain the slice adds — the Go suite's `pgtest` + blob-store harness
+for the API slices, the eval suite for the model chain, and the CI `ant`-CLI E2E — not
+only unit tests; (b) every load-bearing link emits structured logging (`slog` with the
+request/session/file ids) **and** OTel metrics/spans, mirroring the density already in
+`internal/api/skills.go`.
 
 1. **The `/v1/files` registry.** Migration `internal/store/migrations/0008_files.sql`
-   (bump `wantMigrations` to 8, internal/store/store_test.go:33); `domain.File` +
-   wire render; `internal/api/files.go` + `filesupload.go` + `filesmetrics.go`: upload
-   (multipart parse mirroring `parseSkillUpload`, one `file` part, filename/size
-   validation, `downloadable: false`, tx row-then-blob-put), list (new `Page` envelope +
-   `after_id`/`before_id`/`limit`/`scope_id`), get-metadata, download (400 gate; the
-   streaming path behind it reuses the `downloadSkillVersion` shape,
-   internal/api/skills.go:613-662, plus `Content-Disposition`), delete (row + blob,
-   `file_deleted`); routes + 405-fallback entries in `server.go`.
-   **Acceptance:** `ant beta:files upload/list/retrieve-metadata/delete` round-trip
-   against the local server; `ant beta:files download` returns the reference's 400;
-   `make verify` green.
+   (bump `wantMigrations` to 8, internal/store/store_test.go:33); `internal/api/files.go`
+   (`fileJSON` wire shape mirroring `skillJSON`, no `domain.File`) + `filesupload.go` +
+   `filesmetrics.go`: upload (multipart parse mirroring `parseSkillUpload`, one `file`
+   part, filename/size validation, `downloadable: false`, tx row-then-blob-put), list
+   (new classic `Page` envelope + `after_id`/`before_id`/`limit`/`scope_id`), get-metadata,
+   download (400 gate; the streaming path behind it reuses the `downloadSkillVersion`
+   shape, internal/api/skills.go:613-662, plus `Content-Disposition`), delete (row + blob,
+   `file_deleted`); routes + 405-fallback entries in `server.go`. `slog` on
+   create/delete/download + orphan/interrupt warnings, and the `files.*` upload/download
+   metrics — the `skills.go` logging + metrics density carried over.
+   **Acceptance:** an end-to-end integration test (real Postgres via `pgtest` + blob
+   store) covering upload → get → list (pagination + `scope_id`) → download-400 →
+   downloadable-file streaming → delete; `ant beta:files upload/list/retrieve-metadata/
+   delete` round-trip against the local server and `ant beta:files download` returns the
+   reference's 400 (CI E2E); `make verify` green.
 2. **Session `resources[]` + sub-resource endpoints.** Typed union parsing replaces the
    `resources` `rejectUnsupportedList` call (file accepted, other types "not supported
    yet"); `sesrsc_` minting, mount-path defaulting/validation, existence check; jsonb
@@ -211,7 +225,8 @@ its own docs PR; STATE.md is claimed when implementation starts.)*
    `ant beta:sessions:resources` subcommands behave per the table above.
 3. **Executor materialization + brain injection + eval.** The sandbox seam gains the
    streaming write counterpart to `WriteFile` (decision 7), with a `sandboxtest` contract
-   case both backends must pass; `sessionForRun` also selects `resources`
+   case both backends must pass; `slog` + the `files_materialize` span/metrics on the
+   materialization pass; `sessionForRun` also selects `resources`
    (internal/executor/executor.go:328-368); `internal/executor/files.go` materializes
    mounts by streaming blob → sandbox (sentinel + re-probe, per-resource tolerance,
    metrics + span);
@@ -246,11 +261,13 @@ its own docs PR; STATE.md is claimed when implementation starts.)*
 ## Observability
 
 Cardinality rule as everywhere: outcome-only metric labels; file and resource IDs go to
-span attributes and logs.
+span attributes and **structured logs** (`slog.*Context`, so the request-id and trace
+context ride along) — never metric labels. Every row below carries both metrics/spans and
+`slog` at its link, per the user's logging+metrics directive.
 
 | Link | Instrumentation |
 |---|---|
-| API upload/download/delete | `files.uploads` (counter, `outcome` ∈ ok\|invalid\|error), `files.upload.bytes`, `files.download.bytes` (histograms, "By") on the api meter; request span from `withTracing` as today |
+| API upload/download/delete | `files.uploads` (counter, `outcome` ∈ ok\|invalid\|error), `files.upload.bytes`, `files.download.bytes` (histograms, "By") on the api meter; request span from `withTracing` as today; `slog` on create (`file_id`, `filename`, `bytes`), delete, rejected-upload, download, and orphan/interrupt warnings — the `skills.go` pattern |
 | Blob traffic | existing `blob.op.duration` / `blob.op.bytes` via `WithMetrics` |
 | Executor materialization | `files_materialize` span (`files.referenced`, `files.materialized`, `files.unchanged`); `files.materialized` counter (`outcome` ∈ ok\|not_found\|failed), `files.materialize.duration` |
 | Worker materialization | identical names on the worker meter (the skills twin-name precedent) |
