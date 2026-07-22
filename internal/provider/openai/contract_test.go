@@ -74,7 +74,7 @@ func startHangingOpenAI(t *testing.T) provider.Provider {
 		}
 		w.Header().Set("content-type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "data: "+`{"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+		_, _ = fmt.Fprint(w, "data: "+`{"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
 		fl.Flush()
 		// Block until the client disconnects (its context cancel) or a safety
 		// timeout, so the turn never completes on its own.
