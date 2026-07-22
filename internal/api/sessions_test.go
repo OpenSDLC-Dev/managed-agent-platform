@@ -59,6 +59,11 @@ func TestSessionToolsetRejectsUnknownField(t *testing.T) {
 		"environment_id": envID,
 	})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	// The rejected session was not stored.
+	_, list := s.do(http.MethodGet, "/v1/sessions", nil)
+	if entries := listData(t, list); len(entries) != 0 {
+		t.Errorf("sessions after rejected create = %d, want 0 (not persisted)", len(entries))
+	}
 
 	// Session update, via the agent.tools patch on an existing session.
 	id := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
