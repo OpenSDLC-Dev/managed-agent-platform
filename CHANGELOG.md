@@ -15,6 +15,21 @@ copy of an entry here.
 
 ### Added
 
+- **Files plan drafted: docs/plan/08_files.md**
+  ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — the design
+  for lifting the Files half of #55 out of its reserved seam, settled against the public
+  Files docs, the pinned SDK (v1.58.0), and the `ant` CLI source (no live recording —
+  everything recording-only is pre-listed as DIVERGENCES.md inferences per slice). Scope:
+  the `/v1/files` registry over the existing `internal/blob` store (`files/{file_id}`
+  namespace, hard delete — the issue comment's `archived_at` claim is corrected in the
+  plan: the reference has no file archival), session `resources[]` accepting
+  `type: "file"` mounts stored in the reserved `sessions.resources` jsonb column plus the
+  five `sesrsc_` sub-endpoints, and materialization mirroring the skills three-point
+  pattern (executor blob-direct, BYOC worker wire-only over an environment-key content
+  lane, brain Level-1 "Mounted files" injection). Uploads follow the reference's
+  `downloadable: false` semantics (download → 400); git/repo mounting stays deferred on
+  #55. Four PR slices; the plan lands as a draft for discussion, so STATE.md stays
+  unclaimed until implementation starts.
 - **Shared provider contract suite**
   ([#48](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/48)) — the two
   model-provider adapters (`internal/provider/anthropic`, `internal/provider/openai`) now
