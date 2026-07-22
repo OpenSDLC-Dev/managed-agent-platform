@@ -176,6 +176,11 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// block at request-assembly time (plan design decision 5). Best-effort — an
 	// unresolvable reference is a logged miss, not a failed turn.
 	skillsBlock, skillsInjected, skillsMisses := b.resolveSkillsBlock(ctx, agent)
+	// Count the misses now, before any early return below (a replay error, an
+	// unrouted model, a failed span start) can abandon them: a resolve miss is a
+	// fact of request assembly, independent of whether the turn later fails for
+	// an unrelated reason. The span attributes wait for the span (below).
+	recordResolveMisses(ctx, skillsMisses)
 	req, watermark, err := buildRequest(agent, history, skillsBlock)
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err))
@@ -197,13 +202,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	if err != nil {
 		return fmt.Errorf("span start: %w", err)
 	}
-	// Record the injection on the model_request span (bounded ints, no skill_id)
-	// and count any misses.
+	// Record the injection on the model_request span (bounded ints, no skill_id);
+	// the miss counter was already flushed above, before the early returns.
 	span.SetAttributes(
 		attribute.Int("skills.injected", skillsInjected),
 		attribute.Int("skills.block_chars", len(skillsBlock)),
 	)
-	recordResolveMisses(sctx, skillsMisses)
 
 	kctx, keeper := b.keepLease(sctx, item)
 	turn, streamErr := b.streamTurn(kctx, sid, p, req)

@@ -372,10 +372,13 @@ func bashCommands(tr *Trial) []string {
 	return cmds
 }
 
-// ReadsSkillFile passes when some tool call referenced skills/<name>/<file> —
-// evidence the agent followed the injected Level-1 metadata to the materialized
-// skill. It scans every tool_use input (a bash command, a read path, whatever)
-// for the path, so it stays agnostic to which tool the model reached for.
+// ReadsSkillFile passes when the agent read skills/<name>/<file> through a
+// file-reading tool — the built-in read tool whose file_path names it, or a bash
+// command that references it — evidence the agent followed the injected Level-1
+// metadata to the materialized skill. Keying on read/bash (not any tool_use
+// input) keeps a stray mention of the path in an unrelated argument — a write,
+// edit, glob, or grep input — from passing; the task's recall-secret grader is
+// the load-bearing proof that the file was truly read, this corroborates it.
 func ReadsSkillFile(name, file string, class Class) Grader {
 	path := "skills/" + name + "/" + file
 	return Grader{
@@ -383,12 +386,19 @@ func ReadsSkillFile(name, file string, class Class) Grader {
 		Class: class,
 		Check: func(_ *testing.T, tr *Trial) error {
 			for _, use := range eventsOfType(tr, "agent.tool_use") {
-				raw, err := json.Marshal(use["input"])
-				if err == nil && strings.Contains(string(raw), path) {
-					return nil
+				input, _ := use["input"].(map[string]any)
+				switch use["name"] {
+				case "read":
+					if fp, _ := input["file_path"].(string); strings.Contains(fp, path) {
+						return nil
+					}
+				case "bash":
+					if cmd, _ := input["command"].(string); strings.Contains(cmd, path) {
+						return nil
+					}
 				}
 			}
-			return fmt.Errorf("no tool call referenced %s: the agent never read the materialized skill", path)
+			return fmt.Errorf("no read or bash tool call read %s: the agent never read the materialized skill", path)
 		},
 	}
 }
