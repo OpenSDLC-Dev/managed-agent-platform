@@ -246,6 +246,37 @@ Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https
 
 ---
 
+## Reject unknown agent_toolset fields (plan 07) — archived 2026-07-22
+
+[docs/plan/07_reject-unknown-toolset-fields.md](./plan/07_reject-unknown-toolset-fields.md),
+delivered in one PR (**#151**) for [#26](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/26).
+The change and its reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a
+changelog cannot hold.
+
+**Why this was a plan, not a straight fix.** The trigger was wire-schema verification: the accepted
+keys of every `agent_toolset_20260401` object had to be pinned from `anthropic-sdk-go` v1.58.0's
+request (`*Params`) types before the strict check could be written, not improvised from the bug
+report. The plan's field table is that pinned artifact; the verifier and both reviewers re-derived it
+field-for-field against the SDK tag and confirmed no divergence — `DIVERGENCES.md` INFERRED #59
+(the `always_allow` default for a genuinely omitted policy) is untouched, because the fix only stops a
+*misspelling* from being read as an omission.
+
+**The eager/lazy split was the load-bearing design decision.** Unknown-*key* rejection is eager —
+it fires regardless of a tool's enable state, because a typo'd `permission_policy` on a disabled tool
+is a latent fail-open that activates the moment the tool is enabled. That is deliberately distinct
+from the pre-existing *lazy* validation of a policy's *value* (checked only for live tools), and the
+two coexist without conflict because they inspect different things: `TestPoliciesValidatesLazily`
+uses correctly-spelled keys with bogus values and stays green.
+
+**Governance — a parallel drive-by fix leaves STATE.md alone.** #26 landed while the skills plan
+(#54) legitimately owned STATE.md's single-focus tracker. Rather than evict in-flight tracking or
+dual-track, this plan was authored and archived within its one delivering PR; the narrative lives in
+CHANGELOG, so STATE.md never needed to name #26. Both the verifier and the Claude reviewer confirmed
+this is only defensible *because* the plan lands `archived` (not left `in-progress` with nothing left
+to do).
+
+---
+
 ## Work Stop 204 (plan 04) — archived 2026-07-20
 
 [docs/plan/04_work-stop-204.md](./plan/04_work-stop-204.md), delivered in one PR (**#122**). The
