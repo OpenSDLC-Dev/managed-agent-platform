@@ -113,7 +113,7 @@ func Run(t *testing.T, b Backend) {
 		if doneCount != 1 {
 			t.Errorf("done chunks = %d, want exactly one", doneCount)
 		}
-		done := chunks[len(chunks)-1]
+		done := lastChunk(t, chunks)
 		if done.Kind != provider.KindDone {
 			t.Fatalf("last chunk = %+v, want a done chunk to terminate the turn", done)
 		}
@@ -157,7 +157,7 @@ func Run(t *testing.T, b Backend) {
 		// The input arrived across multiple wire frames (Backend.Turn's
 		// contract) and must reassemble to the whole object.
 		assertJSONEqual(t, string(tu.Input), `{"command":"ls -la /tmp"}`)
-		done := chunks[len(chunks)-1]
+		done := lastChunk(t, chunks)
 		if done.Kind != provider.KindDone || done.StopReason != "tool_use" {
 			t.Errorf("done = %+v, want stop_reason tool_use whenever the turn made a tool call", done)
 		}
@@ -207,7 +207,7 @@ func Run(t *testing.T, b Backend) {
 		if err != nil {
 			t.Fatalf("stream error: %v", err)
 		}
-		done := chunks[len(chunks)-1]
+		done := lastChunk(t, chunks)
 		if done.Kind != provider.KindDone {
 			t.Fatalf("last chunk = %+v, want done", done)
 		}
@@ -228,7 +228,7 @@ func Run(t *testing.T, b Backend) {
 		if err != nil {
 			t.Fatalf("stream error: %v", err)
 		}
-		done := chunks[len(chunks)-1]
+		done := lastChunk(t, chunks)
 		if done.Usage == nil {
 			t.Fatal("usage = nil, want a zeroed reading: the upstream sent a usage object (#90)")
 		}
@@ -316,6 +316,17 @@ func Run(t *testing.T, b Backend) {
 			t.Errorf("Close blocked %s on a hung upstream — it must not drain a stream that never completed", elapsed)
 		}
 	})
+}
+
+// lastChunk returns the final chunk of a drained turn. A turn that produced no
+// chunks at all fails readably here rather than panicking on an empty slice —
+// this suite's audience is the author of a not-yet-working backend.
+func lastChunk(t *testing.T, chunks []provider.Chunk) provider.Chunk {
+	t.Helper()
+	if len(chunks) == 0 {
+		t.Fatal("the turn produced no chunks at all")
+	}
+	return chunks[len(chunks)-1]
 }
 
 // assertJSONEqual compares two JSON documents by their compact form, so
