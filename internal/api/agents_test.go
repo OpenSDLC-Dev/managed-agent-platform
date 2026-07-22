@@ -52,6 +52,31 @@ func TestAgentToolsetValidatedAtCreate(t *testing.T) {
 	}
 }
 
+// A misspelled or otherwise unknown key inside an agent_toolset config is rejected
+// at create with a 400 and never persisted: encoding/json would silently drop it,
+// and for a typo'd permission_policy that means the tool falls back to the
+// always_allow default instead of the intended gate (issue #26). The rejection
+// error names the offending field so a client can find the typo.
+func TestAgentToolsetRejectsUnknownField(t *testing.T) {
+	s := newTestServer(t)
+	misspelled := map[string]any{"name": "a", "model": "claude-opus-4-8",
+		"tools": []any{map[string]any{
+			"type":           "agent_toolset_20260401",
+			"default_config": map[string]any{"permission_polciy": map[string]any{"type": "always_ask"}},
+		}}}
+	status, body := s.do(http.MethodPost, "/v1/agents", misspelled)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	inner, _ := body["error"].(map[string]any)
+	if msg, _ := inner["message"].(string); !strings.Contains(msg, "permission_polciy") {
+		t.Errorf("error message %q does not name the misspelled field", msg)
+	}
+	// The rejected agent was not stored.
+	_, list := s.do(http.MethodGet, "/v1/agents", nil)
+	if entries := listData(t, list); len(entries) != 0 {
+		t.Errorf("agents after rejected create = %d, want 0 (not persisted)", len(entries))
+	}
+}
+
 func TestAgentCreateMinimal(t *testing.T) {
 	s := newTestServer(t)
 	res := createAgent(t, s, map[string]any{"name": "helper", "model": "claude-opus-4-8"})
