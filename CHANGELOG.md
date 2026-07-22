@@ -292,6 +292,23 @@ copy of an entry here.
 
 ### Fixed
 
+- **A misspelled `permission_policy` key in an agent toolset silently fell back to `always_allow`**
+  ([#26](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/26)) — an
+  `agent_toolset_20260401` config was decoded with a plain `json.Unmarshal`, which drops unknown
+  object keys, so a typo such as `permission_polciy` was discarded, `PermissionPolicy` stayed nil,
+  and the tool resolved to the `always_allow` default. An operator who wrote `always_ask` to require
+  human confirmation instead got automatic execution — a fail-open at the human-in-the-loop approval
+  boundary. `internal/toolset` now rejects any key outside the pinned wire schema (anthropic-sdk-go
+  v1.58.0) at the toolset object and every nested `default_config`, `configs[]`, and
+  `permission_policy`, naming the offending field's path. The check runs inside `resolveToolset`, so
+  all three API paths that accept a tools array (agent create/update, session create `agent_with_overrides`,
+  session update `agent.tools` patch) return a 400 `invalid_request_error` before the malformed
+  toolset is stored, and the brain is fail-closed when it resolves the toolset. It is **eager** — a
+  typo on a *disabled* tool is a latent fail-open that activates when the tool is enabled, so it is
+  rejected too — and orthogonal to the existing **lazy** validation of a policy's *value*. A
+  genuinely omitted `permission_policy` still uses the documented default, so the `always_allow`
+  default (docs/DIVERGENCES.md, INFERRED #59) is unchanged.
+
 - **docs/DIVERGENCES.md: the skill-version entry claimed the reference resolves `"latest"`
   at create — it does not**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the managed-agents

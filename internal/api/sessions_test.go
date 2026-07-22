@@ -41,6 +41,33 @@ func createSession(t *testing.T, s *tserver, body map[string]any) map[string]any
 	return res
 }
 
+// The unknown-field rejection covers every API path that accepts a tools array,
+// not just agent create: a misspelled permission_policy in a session's inline
+// agent_with_overrides tools, or in a session-update agent.tools patch, is a 400
+// before the malformed toolset is stored on the session snapshot (issue #26).
+func TestSessionToolsetRejectsUnknownField(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	badTools := []any{map[string]any{
+		"type":           "agent_toolset_20260401",
+		"default_config": map[string]any{"permission_polciy": map[string]any{"type": "always_ask"}},
+	}}
+
+	// Session create, via agent_with_overrides.tools.
+	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent":          map[string]any{"type": "agent_with_overrides", "id": agentID, "tools": badTools},
+		"environment_id": envID,
+	})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
+	// Session update, via the agent.tools patch on an existing session.
+	id := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	status, body = s.do(http.MethodPost, "/v1/sessions/"+id, map[string]any{
+		"agent": map[string]any{"tools": badTools},
+	})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+}
+
 func TestSessionCreateWithAgentString(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
