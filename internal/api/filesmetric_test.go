@@ -64,8 +64,10 @@ func TestFileUploadAndDownloadMetrics(t *testing.T) {
 	}
 
 	// Seed a downloadable file and download it (the API produces none in slice 1).
+	// Distinct length from the upload ("stored bytes", 12) so a swapped
+	// upload/download metric would fail the exact-sum assertions below.
 	genID := "file_0000000000000000000000mm"
-	content := []byte("served bytes")
+	content := []byte("served download bytes")
 	if err := s.blobs.Put(context.Background(), "files/"+genID, bytes.NewReader(content), int64(len(content)), "image/png"); err != nil {
 		t.Fatalf("seed blob: %v", err)
 	}

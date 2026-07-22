@@ -33,10 +33,14 @@ func TestFilesUnavailableWithoutObjectStorage(t *testing.T) {
 	res := s.doRaw("GET", "/v1/files/file_0000000000000000000000gk/content", nil,
 		map[string]string{"x-api-key": testKey})
 	var dl map[string]any
-	if raw, _ := io.ReadAll(res.Body); len(raw) > 0 {
-		_ = json.Unmarshal(raw, &dl)
-	}
+	raw, err := io.ReadAll(res.Body)
 	res.Body.Close()
+	if err != nil {
+		t.Fatalf("read download error body: %v", err)
+	}
+	if err := json.Unmarshal(raw, &dl); err != nil {
+		t.Fatalf("decode download error body: %v", err)
+	}
 	wantErr(t, res.StatusCode, dl, http.StatusInternalServerError, "api_error")
 
 	// The list read still answers from the database.
