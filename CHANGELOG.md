@@ -309,6 +309,18 @@ copy of an entry here.
   genuinely omitted `permission_policy` still uses the documented default, so the `always_allow`
   default (docs/DIVERGENCES.md, INFERRED #59) is unchanged.
 
+- **The Docker test harnesses leaked one anonymous volume per test binary on every run** — both
+  `internal/pgtest` (Postgres, `postgres:16-alpine`, `VOLUME /var/lib/postgresql/data`) and
+  `internal/blob/blobtest` (MinIO, `minio/minio:…`, `VOLUME /data`) start one throwaway container
+  per test binary, and each such image declares an anonymous volume. Teardown force-removed the
+  container with `docker rm -f` (no `-v`), and the `--rm` on `docker run` did not help: auto-remove
+  only reaps volumes when a container exits on its own, never when it is force-removed mid-run. A
+  full `make test` therefore stranded one volume per Postgres-backed package (eight) plus one for
+  the MinIO harness — nine per run — and local disk use crept up until a manual
+  `docker volume prune`. Both teardowns now pass `-v` (`docker rm -f -v`), which removes the
+  anonymous volume with the container; verified with before/after `docker volume ls` counts of zero
+  net volumes on both the Postgres- and MinIO-backed suites.
+
 - **docs/DIVERGENCES.md: the skill-version entry claimed the reference resolves `"latest"`
   at create — it does not**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the managed-agents
