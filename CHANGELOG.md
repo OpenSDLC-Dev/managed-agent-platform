@@ -15,6 +15,24 @@ copy of an entry here.
 
 ### Added
 
+- **Shared provider contract suite**
+  ([#48](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/48)) — the two
+  model-provider adapters (`internal/provider/anthropic`, `internal/provider/openai`) now
+  pass one shared suite, `internal/provider/providertest`, the way the sandbox and blob
+  backends already pass `sandboxtest`/`blobtest`. It pins the protocol-agnostic invariants
+  of the `Provider`/`Stream` contract — a turn terminates with a single `done` carrying its
+  stop reason and usage; `stop_reason` is `tool_use` whenever the turn made a tool call; a
+  tool input accumulates across streamed frames and defaults to `{}` when empty; a usage
+  reading is nil only when the endpoint reported none, not when it reported zeroes
+  ([#90](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/90)); a cancelled
+  context surfaces as a stream error rather than a silent completion (a new guarantee neither
+  package tested standalone, held honest by a timing assertion against the fake upstream's
+  backstop); and `Close` releases the stream both after completion and before draining. Each
+  adapter renders the suite's abstract `Script` into its own wire protocol on a fake
+  upstream, so the invariants are written once and both backends — and any future one — are
+  held to them. Protocol-specific tests (wire request shape, credential redaction, the OpenAI
+  lossy conversions and `finish_reason` mapping) stay per-package. `providertest` joins the
+  coverage-gate's test-support exclusions.
 - **Level-1 skill injection into the system prompt (skills plan, slice 5 — closes the plan)**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the brain now
   injects each session agent's `skills[]` as Level-1 metadata. At request-assembly time
