@@ -292,6 +292,16 @@ copy of an entry here.
 
 ### Fixed
 
+- **`internal/pgtest` leaked one anonymous Docker volume per test binary on every run** — the
+  shared Postgres container (`postgres:16-alpine`) declares `VOLUME /var/lib/postgresql/data`, so
+  each container the harness spins up gets an anonymous volume. Teardown force-removed the
+  container with `docker rm -f` (no `-v`), and the `--rm` on `docker run` did not help: auto-remove
+  only reaps volumes when a container exits on its own, never when it is force-removed mid-run. A
+  full `make test` therefore stranded one volume per Postgres-backed package (eight), and local
+  disk use crept up until a manual `docker volume prune`. Teardown now passes `-v`
+  (`docker rm -f -v`), which removes the anonymous volume with the container; verified with a
+  before/after `docker volume ls` count of zero net volumes.
+
 - **docs/DIVERGENCES.md: the skill-version entry claimed the reference resolves `"latest"`
   at create — it does not**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the managed-agents
