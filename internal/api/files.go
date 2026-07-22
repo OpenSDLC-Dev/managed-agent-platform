@@ -75,12 +75,22 @@ func checkFileID(id string) error {
 	return nil
 }
 
+// orphanCleanupTimeout bounds the detached best-effort object delete.
+const orphanCleanupTimeout = 5 * time.Second
+
 // deleteOrphanedFile best-effort-removes an object whose database row never
 // landed (or just left). A failure here leaves a rare orphaned object, accepted
-// and documented in the plan — GC is a non-goal.
+// and documented in the plan — GC is a non-goal. The cleanup runs on a context
+// detached from the request's cancellation (but keeping its trace/log values):
+// the most likely commit-failure cause is that very cancellation, and reusing
+// the dead context would make the cleanup fail immediately every time. (The
+// skills registry's deleteOrphanedObject reuses the request context and has the
+// same latent gap; left as-is here, only files is hardened.)
 func (s *server) deleteOrphanedFile(ctx context.Context, key string) {
-	if err := s.blobs.Delete(ctx, key); err != nil {
-		slog.WarnContext(ctx, "file orphaned in object storage", "key", key, "err", err)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), orphanCleanupTimeout)
+	defer cancel()
+	if err := s.blobs.Delete(cleanupCtx, key); err != nil {
+		slog.WarnContext(cleanupCtx, "file orphaned in object storage", "key", key, "err", err)
 	}
 }
 

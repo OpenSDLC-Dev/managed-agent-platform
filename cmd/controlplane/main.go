@@ -108,14 +108,15 @@ func run(ctx context.Context) error {
 	// be gone before pool.Close shuts the pool it would query.
 	defer func() { _ = reg.Unregister() }()
 
-	// Object storage for skill archives is optional: without it the platform
-	// runs and the storage-backed skill routes report the absence.
+	// Object storage for skill archives and uploaded files is optional: without
+	// it the platform runs and the storage-backed skill/file routes report the
+	// absence.
 	blobs, err := s3.FromEnv(ctx)
 	if err != nil {
 		return err
 	}
 	if blobs == nil {
-		slog.Info("object storage not configured; skills are unavailable")
+		slog.Info("object storage not configured; skills and files are unavailable")
 	}
 
 	srv := &http.Server{

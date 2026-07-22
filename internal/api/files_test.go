@@ -167,13 +167,54 @@ func TestFileUploadValidation(t *testing.T) {
 		status, obj := s.doForm("POST", "/v1/files", ct, body)
 		wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
 	})
-	t.Run("OversizedBody", func(t *testing.T) {
-		restore := api.SetMaxFileUploadBytesForTest(1 << 10)
+	t.Run("OversizedContent", func(t *testing.T) {
+		// Lower the per-file cap and send content past it: the part-content limit
+		// (not just the whole-body budget) must reject it.
+		restore := api.SetMaxFileBytesForTest(1 << 10)
 		defer restore()
 		ct, body := fileForm(t, "big.bin", &oct, strings.Repeat("x", 4<<10))
 		status, obj := s.doForm("POST", "/v1/files", ct, body)
 		wantErr(t, status, obj, http.StatusRequestEntityTooLarge, "request_too_large")
 	})
+}
+
+// TestFileFilenameRuneLength: the 1–255 limit is counted in characters, not
+// bytes — a multibyte name well under 255 runes but over 255 bytes is accepted.
+func TestFileFilenameRuneLength(t *testing.T) {
+	s := newTestServer(t)
+	oct := "application/octet-stream"
+	// 86 CJK runes = 258 UTF-8 bytes, under the 255-rune limit.
+	name := strings.Repeat("文", 86) + ".bin"
+	created := s.uploadFile(t, name, &oct, "x")
+	if created["filename"] != name {
+		t.Errorf("filename = %v, want the multibyte name preserved", created["filename"])
+	}
+	// 256 runes → rejected.
+	ct, body := fileForm(t, strings.Repeat("文", 256), &oct, "x")
+	status, obj := s.doForm("POST", "/v1/files", ct, body)
+	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+}
+
+// TestFileInvalidUTF8: an unstorable byte in the filename or the part
+// Content-Type must not reach the text-column bind as a 500 (#135). An invalid
+// filename is a 400; an invalid part Content-Type falls through to the
+// extension-derived type, so the upload still succeeds.
+func TestFileInvalidUTF8(t *testing.T) {
+	s := newTestServer(t)
+	oct := "application/octet-stream"
+
+	// Invalid-UTF-8 filename → 400, not 500.
+	ct, body := fileForm(t, "bad\xffname.txt", &oct, "x")
+	status, obj := s.doForm("POST", "/v1/files", ct, body)
+	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
+
+	// Invalid-UTF-8 part Content-Type → ignored, falls back to the .txt
+	// extension; the upload succeeds and stores a storable mime_type.
+	badType := "text/\xffplain"
+	created := s.uploadFile(t, "notes.txt", &badType, "x")
+	if mt, _ := created["mime_type"].(string); !strings.HasPrefix(mt, "text/plain") {
+		t.Errorf("mime_type = %q, want the .txt fallback (not the unstorable header)", mt)
+	}
 }
 
 // TestFileDownloadGate: an uploaded file is not downloadable (public docs: 400),

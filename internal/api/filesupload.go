@@ -9,16 +9,21 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
-// maxFileUploadBytes bounds a Files API upload. The public docs cap is 500 MB
-// per file; the extra headroom absorbs multipart framing so a file exactly at
-// the cap is not tipped over 413 by the part boundary. A package var, not a
+// maxFileBytes is the public docs' per-file cap (500 MB). A package var, not a
 // const, so export_test.go can lower it to exercise the 413 path without
 // streaming half a gigabyte through a test. Self-hosted operators own their
 // disk, so the reference's 500 GB per-org quota is deliberately not enforced
 // (docs/DIVERGENCES.md).
-var maxFileUploadBytes int64 = 500<<20 + 1<<20
+var maxFileBytes int64 = 500 << 20
+
+// fileUploadHeadroom is the multipart-framing slop added to the total-body
+// MaxBytesReader budget, so a file exactly at maxFileBytes is not tipped over
+// by the part boundary. The per-file cap itself is enforced on the part content
+// (below), independent of this whole-body defense.
+const fileUploadHeadroom = 1 << 20
 
 // fileUpload is a decoded single-file multipart upload.
 type fileUpload struct {
@@ -39,9 +44,10 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 	if err != nil || mt != "multipart/form-data" || params["boundary"] == "" {
 		return nil, errInvalid("request must be multipart/form-data with one file part")
 	}
-	// MaxBytesReader (not LimitReader) so an over-budget upload surfaces as a
-	// typed 413 mid-read instead of a truncated body.
-	body := http.MaxBytesReader(nil, r.Body, maxFileUploadBytes)
+	// Whole-body defense: MaxBytesReader stops a giant connection from being
+	// read at all (typed 413 mid-read). The per-file cap is enforced on the
+	// part content below — this budget is that cap plus framing headroom.
+	body := http.MaxBytesReader(nil, r.Body, maxFileBytes+fileUploadHeadroom)
 	mr := multipart.NewReader(body, params["boundary"])
 	var up *fileUpload
 	for {
@@ -62,9 +68,16 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 		if err := validateFilename(filename); err != nil {
 			return nil, err
 		}
-		data, err := io.ReadAll(part)
+		// Bound the part content to exactly the per-file cap: read one byte past
+		// it, and reject if that byte exists. This enforces the documented cap on
+		// the file itself, independent of the framing headroom in the body budget.
+		data, err := io.ReadAll(io.LimitReader(part, maxFileBytes+1))
 		if err != nil {
 			return nil, mapFileBodyErr(err)
+		}
+		if int64(len(data)) > maxFileBytes {
+			return nil, &apiError{http.StatusRequestEntityTooLarge, errTypeRequestTooLarge,
+				fmt.Sprintf("file larger than %d bytes", maxFileBytes)}
 		}
 		up = &fileUpload{filename: filename, mimeType: fileMimeType(part, filename), data: data}
 	}
@@ -80,13 +93,20 @@ func parseFileUpload(r *http.Request) (*fileUpload, error) {
 const forbiddenFilenameChars = `<>:"|?*\/`
 
 // validateFilename enforces the documented rule: 1–255 characters, none of the
-// forbidden set, no control characters (U+0000–U+001F). The exact wire error
-// text is an inference (docs/DIVERGENCES.md).
+// forbidden set, no "Unicode characters 0-31" (U+0000–U+001F, exactly — the
+// public docs' wording, so DEL and the C1 range are deliberately not rejected).
+// Length is counted in runes, not bytes, per "1-255 characters". A filename
+// with invalid UTF-8 is rejected too: it would fail as a 500 at the text-column
+// bind, the #135 class. The exact wire error text is an inference
+// (docs/DIVERGENCES.md).
 func validateFilename(name string) error {
 	if name == "" {
 		return errInvalid("file part is missing a filename")
 	}
-	if len(name) > 255 {
+	if !utf8.ValidString(name) {
+		return errInvalid("filename must be valid UTF-8")
+	}
+	if utf8.RuneCountInString(name) > 255 {
 		return errInvalid("filename must be between 1 and 255 characters")
 	}
 	if strings.ContainsAny(name, forbiddenFilenameChars) {
@@ -94,7 +114,7 @@ func validateFilename(name string) error {
 	}
 	for _, r := range name {
 		if r < 0x20 {
-			return errInvalid("filename must not contain control characters")
+			return errInvalid("filename must not contain control characters (U+0000–U+001F)")
 		}
 	}
 	return nil
@@ -103,10 +123,13 @@ func validateFilename(name string) error {
 // fileMimeType resolves the stored MIME type: the part's declared Content-Type
 // when it is specific, otherwise the filename extension, otherwise the generic
 // octet-stream. The reference's exact derivation is unrecorded — an inference
-// (docs/DIVERGENCES.md).
+// (docs/DIVERGENCES.md). The part Content-Type is a raw header value that can
+// carry a non-UTF-8 byte; it is used only when storable, so a malformed one
+// falls through to the extension rather than 500ing at the text-column bind
+// (the #135 class, guarded on filename above and on scope_id/cursor in files.go).
 func fileMimeType(part *multipart.Part, filename string) string {
 	ct := part.Header.Get("Content-Type")
-	if ct != "" && ct != "application/octet-stream" {
+	if ct != "" && ct != "application/octet-stream" && storableText(ct) {
 		return ct
 	}
 	if byExt := mime.TypeByExtension(filepath.Ext(filename)); byExt != "" {
@@ -121,7 +144,7 @@ func mapFileBodyErr(err error) error {
 	var mbe *http.MaxBytesError
 	if errors.As(err, &mbe) {
 		return &apiError{http.StatusRequestEntityTooLarge, errTypeRequestTooLarge,
-			fmt.Sprintf("file larger than %d bytes", maxFileUploadBytes)}
+			fmt.Sprintf("file larger than %d bytes", maxFileBytes)}
 	}
 	return errInvalid("malformed multipart body")
 }
