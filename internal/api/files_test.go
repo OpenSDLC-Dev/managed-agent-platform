@@ -340,6 +340,9 @@ func TestFileList(t *testing.T) {
 		t.Errorf("page 1 has_more = %v, want true", body["has_more"])
 	}
 	status, body = s.do("GET", "/v1/files?limit=2&after_id="+ids[3], nil)
+	if status != http.StatusOK {
+		t.Fatalf("page 2: %d %v", status, body)
+	}
 	data = listData(t, body)
 	if len(data) != 2 || data[0]["id"] != ids[2] || data[1]["id"] != ids[1] {
 		t.Fatalf("page 2 = %v, want [%s %s]", pageIDs(data), ids[2], ids[1])
@@ -347,6 +350,9 @@ func TestFileList(t *testing.T) {
 
 	// Paginate backward with before_id: newer than ids[1] is ids[2..4].
 	status, body = s.do("GET", "/v1/files?limit=2&before_id="+ids[2], nil)
+	if status != http.StatusOK {
+		t.Fatalf("before page: %d %v", status, body)
+	}
 	data = listData(t, body)
 	if len(data) != 2 || data[0]["id"] != ids[4] || data[1]["id"] != ids[3] {
 		t.Fatalf("before page = %v, want [%s %s]", pageIDs(data), ids[4], ids[3])

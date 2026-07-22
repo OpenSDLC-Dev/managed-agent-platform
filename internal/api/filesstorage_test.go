@@ -3,6 +3,8 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -30,10 +32,12 @@ func TestFilesUnavailableWithoutObjectStorage(t *testing.T) {
 
 	res := s.doRaw("GET", "/v1/files/file_0000000000000000000000gk/content", nil,
 		map[string]string{"x-api-key": testKey})
-	res.Body.Close()
-	if res.StatusCode != http.StatusInternalServerError {
-		t.Errorf("download without object storage = %d, want 500", res.StatusCode)
+	var dl map[string]any
+	if raw, _ := io.ReadAll(res.Body); len(raw) > 0 {
+		_ = json.Unmarshal(raw, &dl)
 	}
+	res.Body.Close()
+	wantErr(t, res.StatusCode, dl, http.StatusInternalServerError, "api_error")
 
 	// The list read still answers from the database.
 	if status, obj := s.do("GET", "/v1/files", nil); status != http.StatusOK {

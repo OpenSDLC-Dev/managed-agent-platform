@@ -88,11 +88,11 @@ func TestFileUploadAndDownloadMetrics(t *testing.T) {
 		t.Errorf("uploads{outcome=invalid} = %d, want 1", got)
 	}
 	up := fileBytePoints(t, rm, api.MetricFileUploadBytes)
-	if len(up) != 1 || up[0].Count != 1 || up[0].Sum <= 0 {
-		t.Errorf("upload.bytes = %+v, want one positive reading", up)
+	if len(up) != 1 || up[0].Count != 1 || up[0].Sum != int64(len("stored bytes")) {
+		t.Errorf("upload.bytes = %+v, want one reading summing to %d", up, len("stored bytes"))
 	}
 	down := fileBytePoints(t, rm, api.MetricFileDownloadBytes)
-	if len(down) != 1 || down[0].Count != 1 || down[0].Sum <= 0 {
-		t.Errorf("download.bytes = %+v, want one positive reading", down)
+	if len(down) != 1 || down[0].Count != 1 || down[0].Sum != int64(len(content)) {
+		t.Errorf("download.bytes = %+v, want one reading summing to %d", down, len(content))
 	}
 }

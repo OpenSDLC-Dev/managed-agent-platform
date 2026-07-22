@@ -29,3 +29,7 @@ CREATE TABLE files (
 -- The list's ?scope_id= filter. Partial: only scoped files carry a scope_id, so
 -- the plain-upload rows (the common case in v1) stay out of the index.
 CREATE INDEX files_scope_id_idx ON files (scope_id) WHERE scope_id IS NOT NULL;
+
+-- The list orders and keyset-paginates on (created_at, id) DESC; this index
+-- backs that scan so pagination stays sub-linear as the registry grows.
+CREATE INDEX files_created_at_id_idx ON files (created_at DESC, id DESC);

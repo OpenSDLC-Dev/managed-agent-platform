@@ -8,7 +8,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Tasks
 
-- [x] **Slice 1 — the `/v1/files` registry.** Migration `0008_files.sql`; `api/files.go` + `filesupload.go` + `filesmetrics.go`: upload (multipart, 500 MB cap, filename validation, `downloadable:false`), list (classic `Page` envelope + `after_id`/`before_id`/`limit`/`scope_id`), get-metadata, download (400 gate + streaming path), delete; routes + 405 fallbacks; end-to-end integration test over real Postgres + blob store; structured logging + metrics on every link. — [PR #156](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/156) (draft); `make verify` green (cover 90.68%).
+- [x] **Slice 1 — the `/v1/files` registry** (upload/list/get/download/delete + migration `0008`). — [PR #156](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/156).
 - [ ] Slice 2 — session `resources[]` (`type: "file"`) + the five `sesrsc_` sub-endpoints.
 - [ ] Slice 3 — executor materialization + streaming sandbox write + brain injection + `file-answer` eval.
 - [ ] Slice 4 — BYOC worker + session-scoped env-key content lane; archive.

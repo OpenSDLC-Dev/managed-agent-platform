@@ -75,22 +75,20 @@ func checkFileID(id string) error {
 	return nil
 }
 
-// orphanCleanupTimeout bounds the detached best-effort object delete.
-const orphanCleanupTimeout = 5 * time.Second
-
 // deleteOrphanedFile best-effort-removes an object whose database row never
 // landed (or just left). A failure here leaves a rare orphaned object, accepted
-// and documented in the plan — GC is a non-goal. The cleanup runs on a context
-// detached from the request's cancellation (but keeping its trace/log values):
-// the most likely commit-failure cause is that very cancellation, and reusing
-// the dead context would make the cleanup fail immediately every time. (The
-// skills registry's deleteOrphanedObject reuses the request context and has the
-// same latent gap; left as-is here, only files is hardened.)
+// and documented in the plan — GC is a non-goal. It deliberately runs on the
+// request context (like the skills registry's deleteOrphanedObject): when
+// insertFile's commit fails ambiguously — a cancelled or dropped context, where
+// Postgres may in fact have committed — that same cancelled context makes this
+// delete a no-op, so a possibly-live object is preserved rather than deleted out
+// from under a committed row. A detached context would "fix" the benign orphan
+// leak at the cost of that data-loss risk; preserving the object is the correct
+// trade (a definite commit rejection leaves the context live, so the orphan is
+// still cleaned).
 func (s *server) deleteOrphanedFile(ctx context.Context, key string) {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), orphanCleanupTimeout)
-	defer cancel()
-	if err := s.blobs.Delete(cleanupCtx, key); err != nil {
-		slog.WarnContext(cleanupCtx, "file orphaned in object storage", "key", key, "err", err)
+	if err := s.blobs.Delete(ctx, key); err != nil {
+		slog.WarnContext(ctx, "file orphaned in object storage", "key", key, "err", err)
 	}
 }
 

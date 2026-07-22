@@ -116,7 +116,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	if blobs == nil {
-		slog.Info("object storage not configured; skills and files are unavailable")
+		slog.Info("object storage not configured; storage-backed skill and file routes (upload/download) will report the absence")
 	}
 
 	srv := &http.Server{
