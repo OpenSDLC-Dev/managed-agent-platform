@@ -15,6 +15,24 @@ copy of an entry here.
 
 ### Added
 
+- **Level-1 skill injection into the system prompt (skills plan, slice 5 — closes the plan)**
+  ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — the brain now
+  injects each session agent's `skills[]` as Level-1 metadata. At request-assembly time
+  `buildRequest` receives a resolved block that the brain builds from the store: per skill it
+  resolves the version (a digit string verbatim, else `latest` against `latest_version`), reads
+  `name`/`description` from the resolved version, and renders a lead line plus one
+  `name - description (skills/<dir>/SKILL.md)` bullet per skill, `<dir>` matching the
+  materialization directory. The block is placed after the agent's own system prompt and before
+  any runtime `system.message` text. An unresolvable reference is a logged miss counted by the
+  new `skills.resolve.misses` counter, never fatal to the turn; the `model_request` span gains
+  `skills.injected` and `skills.block_chars` attributes. The exact reference template is captured
+  by no source — the block format and placement are inferred (docs/DIVERGENCES.md). This closes
+  the skills chain end to end (registry → resolution → materialization → injection → model use),
+  exercised by the new opt-in eval task `skill-answer` (plan E2E-2): a self-authored skill whose
+  answer file the task cannot be solved without, and whose turn names neither the skill nor a
+  path — so the injected Level-1 metadata is the discovery mechanism — graded on the model
+  reading the materialized SKILL.md and returning the secret. The skills plan is archived.
+
 - **Skills runtime materialization (skills plan, slice 4)**
   ([#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54)) — a session's
   `agent.skills[]` now materialize into the sandbox at `{workdir}/skills/<name>/` before its

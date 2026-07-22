@@ -45,7 +45,7 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 		ev(10, domain.EventUserInterrupt, `{}`),
 	}
 
-	req, watermark, err := buildRequest(agent, history)
+	req, watermark, err := buildRequest(agent, history, "")
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestBuildRequestCustomToolResultID(t *testing.T) {
 	req, _, err := buildRequest(agent, []domain.Event{
 		ev(1, domain.EventAgentCustomToolUse, `{"name":"x","input":{}}`),
 		ev(2, domain.EventUserCustomToolRes, `{"custom_tool_use_id":"sevt_abc","is_error":true}`),
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestBuildRequestEmptyToolInputDefaults(t *testing.T) {
 	for _, payload := range []string{`{"name":"noop"}`, `{"name":"noop","input":null}`} {
 		req, _, err := buildRequest(agent, []domain.Event{
 			ev(1, domain.EventAgentToolUse, payload),
-		})
+		}, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -161,7 +161,7 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 		ev(1, domain.EventUserToolResult, `not json`),
 	}
 	for _, bad := range cases {
-		if _, _, err := buildRequest(agent, []domain.Event{bad}); err == nil {
+		if _, _, err := buildRequest(agent, []domain.Event{bad}, ""); err == nil {
 			t.Errorf("%s with body %q accepted", bad.Type, bad.Body)
 		}
 	}
@@ -170,7 +170,29 @@ func TestBuildRequestRejectsMalformedEvents(t *testing.T) {
 		Model: domain.Model{ID: "m"},
 		Tools: []json.RawMessage{json.RawMessage(`"not an object"`)},
 	}}
-	if _, _, err := buildRequest(badTool, nil); err == nil {
+	if _, _, err := buildRequest(badTool, nil, ""); err == nil {
 		t.Error("malformed agent tool accepted")
+	}
+
+	// The skills block is placed after the agent system prompt and before any
+	// runtime system.message text, joined with blank lines.
+	skilled := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}, System: "base"}}
+	req, _, err := buildRequest(skilled, []domain.Event{
+		ev(1, domain.EventSystemMessage, `{"content":[{"type":"text","text":"steer"}]}`),
+	}, "SKILLS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.System != "base\n\nSKILLS\n\nsteer" {
+		t.Errorf("system with skills = %q, want %q", req.System, "base\n\nSKILLS\n\nsteer")
+	}
+	// With no agent system prompt the block leads, still before runtime text.
+	bare := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}}}
+	req, _, err = buildRequest(bare, nil, "SKILLS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.System != "SKILLS" {
+		t.Errorf("system with only skills = %q", req.System)
 	}
 }

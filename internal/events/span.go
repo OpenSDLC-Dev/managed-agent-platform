@@ -103,6 +103,13 @@ func (m *ModelRequest) ModelDone(usage *domain.ModelUsage) {
 	}
 }
 
+// SetAttributes records extra attributes on the model_request span — per-turn
+// facts known only after the span opens, such as Level-1 skill injection. Kept
+// off the wire event: these are trace-only observability, not conversation state.
+func (m *ModelRequest) SetAttributes(attrs ...attribute.KeyValue) {
+	m.span.SetAttributes(attrs...)
+}
+
 // StartEventID is the id of the span.model_request_start event, which the
 // end event references as model_request_start_id.
 func (m *ModelRequest) StartEventID() domain.ID { return m.startID }

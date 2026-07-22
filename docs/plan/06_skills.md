@@ -1,9 +1,14 @@
 ---
-status: in-progress
+status: archived
 issue: "#54"
 ---
 
 # Skills distribution + execution
+
+> **Archived 2026-07-22, completed.** All five slices landed (PRs #145–#148 plus the
+> slice-5 injection PR). The as-built system is in docs/ARCHITECTURE.md; the delivery
+> narrative in CHANGELOG.md; acceptance-run records and this plan's progress summary in
+> docs/HISTORY.md. Retained for the rationale below, consulted before large changes.
 
 The plan for [#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54): lift
 the reserved skills seam (`skill_` prefix, the `parseSkills` normalization that accepts
