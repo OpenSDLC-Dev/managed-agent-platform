@@ -190,6 +190,21 @@ copy of an entry here.
 
 ### Changed
 
+- **One shared lease keeper in `internal/queue` (brain + executor stop duplicating it)**
+  ([#70](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/70)) — the brain's turn loop
+  and the executor's item processing each carried a near-verbatim lease-keeper goroutine: the same
+  TTL/3 renewal ticker, the same `TTL − TTL/3` bounded `Extend` (so a stalled database cannot hang
+  the holder behind an unreturnable renewal), and the same lost-lease cancellation. Both now call
+  `Queue.KeepLease`, whose `LeaseKeeper.Close` reports the first renewal failure — one home for
+  timing this subtle. The shared keeper folds in the executor's sub-3ns-TTL guard (a degenerate
+  lease ticks at the TTL itself rather than panicking `time.NewTicker`) that the brain's copy
+  lacked. No behavior change: the existing brain and executor lease tests
+  (`TestLongTimeToFirstTokenKeepsLease`, `TestLostLeaseMidStreamAbandonsQuietly`,
+  `TestLeaseRenewedWhileToolRuns`, `TestLeaseRenewedDuringSlowProvision`,
+  `TestLeaseLostDuringToolAbortsCommit`) pass unchanged against it, and `internal/queue` gains its
+  own keeper contract tests (renewal advances the lease; a stolen lease cancels the work and
+  surfaces `ErrLeaseLost`).
+
 - **Test infrastructure: the three private Docker-Postgres harnesses fold into `internal/pgtest`**
   ([#69](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/69)) — `internal/store`,
   `internal/api`, and `internal/events` predate the shared harness and each carried a private,

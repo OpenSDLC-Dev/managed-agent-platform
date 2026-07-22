@@ -193,7 +193,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		return fmt.Errorf("span start: %w", err)
 	}
 
-	kctx, keeper := b.keepLease(sctx, item)
+	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL)
 	turn, streamErr := b.streamTurn(kctx, sid, p, req)
 	// The call to the model ended here, whatever happens to the turn from now
 	// on. Everything below is ours — leases, classification, a session-locked
@@ -208,7 +208,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	if turn != nil && !turn.firstTokenAt.IsZero() {
 		recordTTFT(sctx, events.Backend{Provider: desc.Protocol, Model: desc.Model}, turn.firstTokenAt.Sub(claimedAt))
 	}
-	if err := keeper.close(); err != nil {
+	if err := keeper.Close(); err != nil {
 		// The lease is gone or unmaintainable: another brain may own the
 		// turn already. Nothing of ours may commit — abandon quietly.
 		span.Finish(sctx, true, err)
@@ -279,63 +279,6 @@ func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) ([]byte,
 		return nil, false, tx.Commit(ctx)
 	}
 	return agentJSON, true, tx.Commit(ctx)
-}
-
-// leaseKeeper extends the work-item lease on a timer while the turn streams:
-// a model can think far longer than any inter-chunk gap allows for (long
-// time-to-first-token on a big replayed context), and a lease lapsing under
-// a healthy turn would fork the session across two brains.
-type leaseKeeper struct {
-	cancel context.CancelFunc
-	quit   chan struct{}
-	done   chan struct{}
-	failed error // written once by the goroutine before done closes
-}
-
-func (b *Brain) keepLease(ctx context.Context, item *queue.Item) (context.Context, *leaseKeeper) {
-	kctx, cancel := context.WithCancel(ctx)
-	k := &leaseKeeper{cancel: cancel, quit: make(chan struct{}), done: make(chan struct{})}
-	go func() {
-		defer close(k.done)
-		t := time.NewTicker(b.cfg.LeaseTTL / 3)
-		defer t.Stop()
-		for {
-			select {
-			case <-k.quit:
-				return
-			case <-kctx.Done():
-				return
-			case <-t.C:
-				// Bounded: close() waits for this goroutine, so an Extend
-				// blocked on an exhausted pool or a stalled database would
-				// otherwise hang the turn forever. The budget is the lease
-				// the last renewal bought minus the tick we waited — an
-				// Extend that overruns it has let the lease lapse anyway.
-				// A duration, not the lease timestamp: the deadline must
-				// not depend on agreement between the database clock and
-				// this process's.
-				ectx, ecancel := context.WithTimeout(kctx, b.cfg.LeaseTTL-b.cfg.LeaseTTL/3)
-				err := b.queue.Extend(ectx, item, b.cfg.LeaseTTL)
-				ecancel()
-				if err != nil {
-					k.failed = err
-					k.cancel() // aborts the in-flight provider stream
-					return
-				}
-			}
-		}
-	}()
-	return kctx, k
-}
-
-// close stops the keeper and reports the first extension failure. The
-// goroutine has exited when close returns, so the item's lease value is
-// stable again for settlement to use as its ownership proof.
-func (k *leaseKeeper) close() error {
-	close(k.quit)
-	<-k.done
-	k.cancel()
-	return k.failed
 }
 
 // pendingInputTypes are the inbound events whose arrival must chain the next

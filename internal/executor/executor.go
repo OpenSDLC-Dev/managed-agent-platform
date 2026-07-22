@@ -189,10 +189,10 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// lapse mid-provision and a second executor reclaim and double-run the
 	// session's tools. Provisioning and every tool run happen under kctx, so
 	// losing the lease cancels the work.
-	kctx, keeper := e.keepLease(ctx, item)
+	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
 
 	results, faultErr, runErr := e.provisionAndRun(kctx, item, net, skillRefs)
-	if kerr := keeper.close(); kerr != nil {
+	if kerr := keeper.Close(); kerr != nil {
 		// The lease is gone — another executor may already own this item.
 		// Nothing of ours may commit; the results we ran are re-derived on the
 		// reclaiming pass (a committed result is never re-run).
