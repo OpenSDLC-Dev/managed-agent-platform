@@ -210,6 +210,7 @@ Config-driven model access (design principle 4).
 | `anthropic/anthropic.go` | The Anthropic-protocol adapter over the official SDK: `base_url` is **required** (no silent api.anthropic.com fallback), extra headers pass through for gateway routing, streaming events translate to chunks (tool_use inputs accumulate from `input_json_delta`; `message_start` seeds all four usage counters and `message_delta` carries the stop reason and supersedes any counter it reports as nonzero, so a sparse or zeroed closing frame cannot zero what `message_start` reported). Retry policy is the SDK's default — no override. |
 | `openai/openai.go` | The OpenAI-compatible adapter (OpenAI, vLLM, or an internal gateway) — the platform's **lossy seam**, confined here. Anthropic-native turns translate to Chat Completions on the way out (system prepended; text→content; assistant `tool_use`→`tool_calls` with object input→JSON-string arguments; user `tool_result`→`tool` role messages; tools→function tools) and the stream back (delta.content→`text_delta`, accumulated `tool_calls`→`tool_use`, usage→`ModelUsage`); **`stop_reason` is `tool_use` whenever the stream carried any tool call** (not read from `finish_reason`, which some servers set to `stop`/`length` on a tool turn — honoring that would strand the tool the brain never runs). `base_url` is required and is the API root (adapter appends `/v1/chat/completions`); `[DONE]` completes a turn, a body ending with neither `finish_reason` nor `[DONE]` (or a mid-stream error frame) fails loudly. Known lossy gaps, documented not silent: thinking blocks dropped, image blocks (top-level or inside a `tool_result`) fail loudly, and a tool_result's `is_error` boolean dropped (the error text in the result content is still forwarded). |
 | `config.go` | `LoadRoutes` reads the `model_providers` JSON file (`model` / `protocol` / `base_url` / `upstream_model` / `api_key` or `api_key_env`; unknown keys rejected). |
+| `providertest/contract.go` | The one suite both protocol adapters must pass (test support; production never imports it): a turn terminates with a single `done` carrying its stop reason and usage; `stop_reason` is `tool_use` whenever the turn made a tool call; a tool input accumulates across frames and defaults to `{}` when empty; a usage reading is nil only when the endpoint reported none (#90); a cancelled context surfaces as a stream error rather than a silent completion; and `Close` releases the stream both after completion and before draining. Each adapter renders the suite's abstract `Script` into its own wire protocol on a fake upstream (the providertest analogue of `sandboxtest.Harness`). |
 
 There is no `internal/mcp` (reserved in early sketches; no MCP client is built — the
 brain's replay treats `mcp_toolset` as awaiting it) and no `internal/policy` (permission
@@ -443,11 +444,13 @@ contract).
 
 Backend variability lives behind interfaces, and where more than one backend exists the
 contract is a **shared suite**: every sandbox provider passes
-`internal/sandbox/sandboxtest` — a new backend inherits the whole battery. The queue and
-the model providers each have one production implementation contract-tested in their own
-packages today (Postgres; the two protocol adapters) — a shared provider contract suite
-is tracked as [#48](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/48),
-and a second queue backend would owe the same extraction. The merge gate is `make verify`
+`internal/sandbox/sandboxtest`, and both model-provider protocol adapters pass
+`internal/provider/providertest` (the cross-provider invariants — stream termination,
+`tool_use` stop, usage-nil-only-when-the-endpoint-reported-none, cancellation, `Close`;
+the wire request shape, redaction, and the OpenAI lossy conversions stay per-package) — a
+new backend inherits the whole battery. The queue still has one production implementation
+(Postgres) contract-tested in its own package; a second queue backend would owe the same
+extraction. The merge gate is `make verify`
 (build, linux/arm cross-compile, vet, gofmt, `go test -count=1`, and **≥90% total
 statement coverage** over the logic packages of `./internal/...`). On top sits the eval
 system (`make eval`, [plan 02](./plan/02_evals-system.md)): ten deterministic regression
