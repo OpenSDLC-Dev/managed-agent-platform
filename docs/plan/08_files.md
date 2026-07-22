@@ -147,7 +147,7 @@ slice 4 gives it a wire-only fetch path and records the divergence.
    legitimately be 500 MB and `Sandbox.WriteFile` takes `[]byte`, slice 3 extends the
    sandbox seam with a **streaming write counterpart** (an `io.Reader` + size signature,
    landed through `sandboxtest` so the docker and k8s backends both satisfy it — docker's
-   CopyToContainer and a k8s exec-with-stdin both stream naturally); blob `Get` and the
+   archive-PUT endpoint and a k8s exec-with-stdin both stream naturally); blob `Get` and the
    SDK's `Files.Download` already return streaming readers, so a mount never fully
    buffers in the executor or the worker.
 8. **Two pagination envelopes.** `/v1/files` gets the classic `Page` shape — a new
