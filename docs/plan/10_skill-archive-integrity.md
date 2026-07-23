@@ -7,7 +7,7 @@ issue: "#155"
 
 > Archived 2026-07-23: completed. Delivered in one PR
 > ([#162](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/162)); the delivery record is in
-> [docs/HISTORY.md](../HISTORY.md) § "Skill archive integrity (plan 09)", the narrative in
+> [docs/HISTORY.md](../HISTORY.md) § "Skill archive integrity (plan 10)", the narrative in
 > CHANGELOG.md. **Everything below describes the state of the repository *before* that PR** — read it
 > as the argument for the change, not a description of the result, except decision D5, which was
 > added mid-PR in response to a review finding and says so.

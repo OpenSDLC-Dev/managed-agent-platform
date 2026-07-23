@@ -1,5 +1,5 @@
 -- 0010_skill_archive_sha256: end-to-end integrity for skill archives
--- (docs/plan/09_skill-archive-integrity.md, issue #155).
+-- (docs/plan/10_skill-archive-integrity.md, issue #155).
 --
 -- The archive bytes live in object storage while the metadata lives here; two
 -- stores with different operators and failure modes. Recording the upload's

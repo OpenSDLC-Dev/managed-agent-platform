@@ -33,9 +33,9 @@ recorded nowhere else.
 
 ---
 
-## Skill archive integrity (plan 09) — archived 2026-07-23
+## Skill archive integrity (plan 10) — archived 2026-07-23
 
-[docs/plan/09_skill-archive-integrity.md](./plan/09_skill-archive-integrity.md), delivered in one PR
+[docs/plan/10_skill-archive-integrity.md](./plan/10_skill-archive-integrity.md), delivered in one PR
 (**#162**) for [#155](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/155). The change and its
 reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a changelog cannot hold.
 

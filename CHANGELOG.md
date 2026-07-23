@@ -17,7 +17,7 @@ copy of an entry here.
 
 - **Skill archives carry a sha256 from upload to materialization**
   ([#155](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/155),
-  [plan 09](docs/plan/09_skill-archive-integrity.md)) — nothing on the skill-archive path
+  [plan 10](docs/plan/10_skill-archive-integrity.md)) — nothing on the skill-archive path
   used to carry a content digest: upload computed none (and `blob.Store` has no checksum
   concept), the registry stored none, the download served none, and both materialization
   halves handed the fetched bytes straight to extraction. The only check anywhere was Go
