@@ -9,8 +9,10 @@ issue: "#155"
 > ([#162](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/162)); the delivery record is in
 > [docs/HISTORY.md](../HISTORY.md) § "Skill archive integrity (plan 10)", the narrative in
 > CHANGELOG.md. **Everything below describes the state of the repository *before* that PR** — read it
-> as the argument for the change, not a description of the result, except decision D5, which was
-> added mid-PR in response to a review finding and says so.
+> as the argument for the change, not a description of the result — "The change" and "Acceptance
+> criteria" are what was *planned*, not a report of what shipped (that is CHANGELOG.md). The one
+> exception is decision D5 and the acceptance criterion belonging to it, added mid-PR in response to
+> a review finding; D5 says so itself.
 
 The plan for [#155](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/155).
 
@@ -112,7 +114,8 @@ populated during a rolling upgrade — control plane and migration deployed firs
 still catching up — would keep matching afterwards and suppress the new verification for the rest of
 that session, which on a long-horizon session is a long time. The marker therefore records what a
 materialization was *guaranteed* to have done (`skills.SentinelVersion`; generation 2 = "verified
-against the recorded digest"), and a marker of any other generation never matches. Cost: one
+against the digest the registry holds for it, where one was recorded" — D3's legacy rows still have
+none), and a marker of any other generation never matches. Cost: one
 re-materialization per live sandbox at upgrade, nothing at steady state. Recording the digests in
 the marker instead — the reviewer's first suggestion — was rejected: the BYOC worker learns a digest
 only from the download response, i.e. *after* the skip decision, so it would have to spend a wire
