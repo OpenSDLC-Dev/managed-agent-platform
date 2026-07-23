@@ -15,6 +15,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -115,6 +116,21 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 // mount_path. The object store's authoritative size drives the streaming write,
 // whose own byte accounting rejects a truncated transfer.
 func (e *Executor) materializeFile(ctx context.Context, sb sandbox.Sandbox, m fileRef) error {
+	// The files row is authoritative for existence, so check it before streaming.
+	// A deleted file leaves its object best-effort (api deleteFile: row gone, blob
+	// orphan accepted), so a still-present blob is not proof the file exists — and
+	// the brain's resolveFilesBlock already treats a row-less mount as dangling.
+	// Mounting the orphan would make the two halves disagree and contradict the
+	// documented absent-mount behavior (plan decision 2); check the row so a
+	// deleted file is the same dangling miss on both halves.
+	var exists bool
+	err := e.pool.QueryRow(ctx, `SELECT true FROM files WHERE id = $1`, m.FileID).Scan(&exists)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: %s", errFileMissing, m.FileID)
+	}
+	if err != nil {
+		return err
+	}
 	rc, size, err := e.blobs.Get(ctx, blob.FilesKey(m.FileID))
 	if errors.Is(err, blob.ErrNotFound) {
 		return fmt.Errorf("%w: %s", errFileMissing, m.FileID)

@@ -36,22 +36,25 @@ func TestResolveFilesBlock(t *testing.T) {
 	b := &Brain{pool: pool}
 	ctx := context.Background()
 
-	if block, n := b.resolveFilesBlock(ctx, nil); block != "" || n != 0 {
-		t.Errorf("nil resources = %q,%d", block, n)
+	if block, n, m := b.resolveFilesBlock(ctx, nil); block != "" || n != 0 || m != 0 {
+		t.Errorf("nil resources = %q,%d,%d", block, n, m)
 	}
-	if block, n := b.resolveFilesBlock(ctx, []byte("[]")); block != "" || n != 0 {
-		t.Errorf("empty resources = %q,%d", block, n)
+	if block, n, m := b.resolveFilesBlock(ctx, []byte("[]")); block != "" || n != 0 || m != 0 {
+		t.Errorf("empty resources = %q,%d,%d", block, n, m)
 	}
 
 	seedFileRow(t, b, "file_here", "report.pdf", "application/pdf", 2048)
 	resources := mustResourcesJSON(t,
 		map[string]string{"type": "file", "file_id": "file_here", "mount_path": "/mnt/session/uploads/file_here"},
-		map[string]string{"type": "file", "file_id": "file_gone", "mount_path": "/data/missing"}, // dangling -> skip
-		map[string]string{"type": "github_repository"},                                           // non-file -> skip
+		map[string]string{"type": "file", "file_id": "file_gone", "mount_path": "/data/missing"}, // dangling -> miss
+		map[string]string{"type": "github_repository"},                                           // non-file -> skip, not a miss
 	)
-	block, n := b.resolveFilesBlock(ctx, resources)
+	block, n, misses := b.resolveFilesBlock(ctx, resources)
 	if n != 1 {
 		t.Errorf("injected = %d, want 1 (dangling + non-file skipped)", n)
+	}
+	if misses != 1 {
+		t.Errorf("misses = %d, want 1 (the dangling mount; the non-file type is a skip, not a miss)", misses)
 	}
 	if !strings.Contains(block, "- /mnt/session/uploads/file_here (report.pdf, application/pdf, 2048 bytes)") {
 		t.Errorf("block missing the resolved mount: %q", block)
@@ -61,8 +64,8 @@ func TestResolveFilesBlock(t *testing.T) {
 	}
 
 	// Malformed resources JSON is a logged skip, not a panic.
-	if block, n := b.resolveFilesBlock(ctx, []byte("not json")); block != "" || n != 0 {
-		t.Errorf("malformed resources = %q,%d", block, n)
+	if block, n, m := b.resolveFilesBlock(ctx, []byte("not json")); block != "" || n != 0 || m != 0 {
+		t.Errorf("malformed resources = %q,%d,%d", block, n, m)
 	}
 }
 

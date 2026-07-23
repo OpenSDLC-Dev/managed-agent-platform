@@ -5,8 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -21,6 +23,7 @@ import (
 // or a swapped/dropped SetAttributes fails here rather than only under the opt-in
 // RUN_EVALS=1 eval.
 func TestFilesInjectedIntoModelRequest(t *testing.T) {
+	collect := collectBrainMetrics(t)
 	// A span recorder so the model_request span's files.* attributes can be read
 	// back — otherwise a swapped/dropped SetAttributes would leave every other
 	// assertion green.
@@ -82,4 +85,30 @@ func TestFilesInjectedIntoModelRequest(t *testing.T) {
 	if got := spanIntAttr(t, recorder, "model_request", "files.block_chars"); got != int64(len(sys)-len("base prompt\n\n")) {
 		t.Errorf("span files.block_chars = %d, want the injected block length", got)
 	}
+	// The dangling mount is one counted resolve miss, the skills-parity metric.
+	if got := fileResolveMissCount(t, collect()); got != 1 {
+		t.Errorf("files.resolve.misses = %d, want 1", got)
+	}
+}
+
+// fileResolveMissCount sums the files.resolve.misses counter, the mounted-file
+// twin of resolveMissCount (skillsinject_test.go).
+func fileResolveMissCount(t *testing.T, rm metricdata.ResourceMetrics) int64 {
+	t.Helper()
+	var total int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != brain.MetricFileResolveMisses {
+				continue
+			}
+			s, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("%s is %T, want an int64 sum", m.Name, m.Data)
+			}
+			for _, dp := range s.DataPoints {
+				total += dp.Value
+			}
+		}
+	}
+	return total
 }

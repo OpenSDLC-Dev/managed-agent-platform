@@ -183,8 +183,11 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	recordResolveMisses(ctx, skillsMisses)
 	// Mounted-file injection: a "Mounted files" block after the skills block so
 	// the agent can find file mounts that live outside its workdir (plan slice
-	// 3). Best-effort, mirroring skills — a dangling mount is a logged skip.
-	filesBlock, filesInjected := b.resolveFilesBlock(ctx, resourcesJSON)
+	// 3). Best-effort, mirroring skills — a dangling mount is a logged, counted
+	// miss; the count is flushed now, before the early returns below, for the same
+	// reason as the skills misses.
+	filesBlock, filesInjected, filesMisses := b.resolveFilesBlock(ctx, resourcesJSON)
+	recordFileResolveMisses(ctx, filesMisses)
 	req, watermark, err := buildRequest(agent, history, skillsBlock, filesBlock)
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err))

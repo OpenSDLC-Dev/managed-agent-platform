@@ -26,12 +26,16 @@ copy of an entry here.
   `resources[]` file mount to its `mount_path` before the tools run, with a
   `.files_materialized` sentinel (skip re-streaming an unchanged, still-present set — presence
   probed by `test -e`, not a read-back, since a mount can be huge) and per-file tolerance for
-  a dangling reference; `sessionForRun` selects `resources` in the same locked read. The brain
-  renders a "Mounted files" block (mount path, filename, MIME type, size) into the system
-  prompt after the skills block, so the agent can find mounts outside its workdir. `slog` +
-  `files.materialized`/`files.materialize.duration` metrics and a `files_materialize` span on
-  the executor pass; `files.injected`/`files.block_chars` span attributes on the brain's
-  model-request span. The `files/{id}` blob-key helper is extracted to `internal/blob`
+  a dangling reference; `sessionForRun` selects `resources` in the same locked read. Both
+  injection points treat the `files` row as authoritative for existence — the brain joins it,
+  the executor checks it before streaming — so a file deleted after mounting (its object left
+  behind best-effort) is the same absent mount on both halves, never stale bytes from the
+  orphan. The brain renders a "Mounted files" block (mount path, filename, MIME type, size)
+  into the system prompt after the skills block, so the agent can find mounts outside its
+  workdir. `slog` + `files.materialized`/`files.materialize.duration` metrics and a
+  `files_materialize` span on the executor pass; `files.injected`/`files.block_chars` span
+  attributes and a `files.resolve.misses` counter (the `skills.resolve.misses` twin) on the
+  brain's injection. The `files/{id}` blob-key helper is extracted to `internal/blob`
   (`blob.FilesKey`) as the one definition the api writer and executor/worker readers share. A
   `file-answer` eval (opt-in, `RUN_EVALS=1`) proves the whole platform chain: upload → mount →
   materialize → the agent reads the mounted passphrase. Slice-3 inferences (the block format

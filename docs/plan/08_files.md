@@ -167,8 +167,11 @@ slice 4 gives it a wire-only fetch path and records the divergence.
 9. **Observability mirrors skills names**, same meters, outcome-only labels, IDs in span
    attributes never metric labels: `files.uploads` / `files.upload.bytes` /
    `files.download.bytes` on the api meter; `files.materialized` /
-   `files.materialize.duration` and a `files_materialize` span at both execution halves.
-   Blob-level metrics come free via the existing `blob.WithMetrics` decorator.
+   `files.materialize.duration` and a `files_materialize` span at both execution halves;
+   `files.resolve.misses` on the brain (the `skills.resolve.misses` twin — a dangling mount
+   the brain cannot inject is a counted miss), plus `files.injected` / `files.block_chars`
+   on the `model_request` span. Blob-level metrics come free via the existing
+   `blob.WithMetrics` decorator.
 10. **Availability and auth follow the skills precedent.** `blobs == nil` → the files
     endpoints fail 500 like `errSkillsUnavailable` (internal/api/skills.go:96-98).
     Management endpoints ride the x-api-key lane; slice 4 adds an `isFileReadPath`

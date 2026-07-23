@@ -415,7 +415,9 @@ func ReadsFile(path string, class Class) Grader {
 				input, _ := use["input"].(map[string]any)
 				switch use["name"] {
 				case "read":
-					if fp, _ := input["file_path"].(string); strings.Contains(fp, path) {
+					// Exact mount-path match: a read of a different path that merely
+					// contains the mount string is not evidence this file was read.
+					if fp, _ := input["file_path"].(string); fp == path {
 						return nil
 					}
 				case "bash":

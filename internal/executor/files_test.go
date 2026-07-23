@@ -74,6 +74,32 @@ func TestMaterializesFiles(t *testing.T) {
 	}
 }
 
+// TestMaterializeOrphanBlobNotMounted: a file whose registry row is gone but
+// whose object was left behind (api deleteFile orphans the blob best-effort) must
+// NOT be mounted — the executor checks the files row like the brain, so a deleted
+// file is the documented absent mount, not stale bytes from the orphan object.
+// This fails if materializeFile trusts blob.Get alone (the orphan would mount).
+func TestMaterializeOrphanBlobNotMounted(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	mount := "/mnt/session/uploads/file_orphan"
+	// An orphan object with no files row — the row was deleted, the blob delete
+	// did not land.
+	if err := h.blobs.Put(context.Background(), blob.FilesKey("file_orphan"),
+		bytes.NewReader([]byte("orphan bytes")), 12, "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	h.refFiles(t, [2]string{"file_orphan", mount})
+
+	h.suspend(t, writeUse("out.txt", "x"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got, ok := sb.files[mount]; ok {
+		t.Errorf("an orphaned blob (no files row) must not mount, got %q", got)
+	}
+}
+
 // TestFilesMaterializeIdempotent: re-provisioning a live sandbox whose sentinel
 // matches the mounted set and whose mounts are present skips restreaming — the
 // object can change underneath and the sandbox keeps the materialized bytes.
