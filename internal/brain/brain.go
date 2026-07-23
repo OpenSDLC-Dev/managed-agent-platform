@@ -134,7 +134,7 @@ func streamUsage(turn *turnResult) *domain.ModelUsage {
 func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Time) error {
 	sid := item.SessionID
 
-	agentJSON, live, err := b.claimLiveSession(ctx, item)
+	agentJSON, resourcesJSON, live, err := b.claimLiveSession(ctx, item)
 	if err != nil || !live {
 		return err
 	}
@@ -181,7 +181,11 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// fact of request assembly, independent of whether the turn later fails for
 	// an unrelated reason. The span attributes wait for the span (below).
 	recordResolveMisses(ctx, skillsMisses)
-	req, watermark, err := buildRequest(agent, history, skillsBlock)
+	// Mounted-file injection: a "Mounted files" block after the skills block so
+	// the agent can find file mounts that live outside its workdir (plan slice
+	// 3). Best-effort, mirroring skills — a dangling mount is a logged skip.
+	filesBlock, filesInjected := b.resolveFilesBlock(ctx, resourcesJSON)
+	req, watermark, err := buildRequest(agent, history, skillsBlock, filesBlock)
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err))
 	}
@@ -207,6 +211,8 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	span.SetAttributes(
 		attribute.Int("skills.injected", skillsInjected),
 		attribute.Int("skills.block_chars", len(skillsBlock)),
+		attribute.Int("files.injected", filesInjected),
+		attribute.Int("files.block_chars", len(filesBlock)),
 	)
 
 	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL)
@@ -272,29 +278,28 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 // forever) — completes the item while no concurrent trigger can interleave:
 // completing it unlocked could swallow a user.message whose enqueue this
 // still-live item had suppressed.
-func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) ([]byte, bool, error) {
+func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJSON, resourcesJSON []byte, live bool, err error) {
 	tx, err := b.pool.Begin(ctx)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var agentJSON []byte
 	var status string
 	var archivedAt *time.Time
 	err = tx.QueryRow(ctx,
-		`SELECT resolved_agent, status, archived_at FROM sessions WHERE id = $1 FOR UPDATE`,
-		item.SessionID.String()).Scan(&agentJSON, &status, &archivedAt)
+		`SELECT resolved_agent, resources, status, archived_at FROM sessions WHERE id = $1 FOR UPDATE`,
+		item.SessionID.String()).Scan(&agentJSON, &resourcesJSON, &status, &archivedAt)
 	if err != nil {
-		return nil, false, fmt.Errorf("load session: %w", err)
+		return nil, nil, false, fmt.Errorf("load session: %w", err)
 	}
 	if status != string(domain.SessionRunning) || archivedAt != nil {
 		if err := b.queue.Complete(ctx, tx, item); err != nil {
-			return nil, false, err
+			return nil, nil, false, err
 		}
-		return nil, false, tx.Commit(ctx)
+		return nil, nil, false, tx.Commit(ctx)
 	}
-	return agentJSON, true, tx.Commit(ctx)
+	return agentJSON, resourcesJSON, true, tx.Commit(ctx)
 }
 
 // pendingInputTypes are the inbound events whose arrival must chain the next

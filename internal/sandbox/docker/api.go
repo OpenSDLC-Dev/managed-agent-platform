@@ -319,9 +319,12 @@ func (c *apiClient) getArchive(ctx context.Context, id, path string) (io.ReadClo
 	return resp.Body, nil
 }
 
-func (c *apiClient) putArchive(ctx context.Context, id, path string, tarball []byte) error {
+// putArchive PUTs a tar stream to the container's archive endpoint. The body is
+// an io.Reader — a bytes.Reader (WriteFile, Content-Length set) or a pipe
+// (WriteFileStream, chunked) — so a large mount never fully buffers here.
+func (c *apiClient) putArchive(ctx context.Context, id, path string, body io.Reader) error {
 	resp, err := c.request(ctx, http.MethodPut, "/containers/"+id+"/archive",
-		url.Values{"path": {path}}, bytes.NewReader(tarball), "application/x-tar")
+		url.Values{"path": {path}}, body, "application/x-tar")
 	if err != nil {
 		return err
 	}

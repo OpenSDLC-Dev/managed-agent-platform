@@ -30,6 +30,35 @@ func tasks() []Task {
 		fibQuickstart(), echoNoTool(), shellState(),
 		editConfig(), needleSearch(), permAllow(), permDeny(),
 		exitCode(), journalMultiturn(), viewRange(), skillAnswer(),
+		fileAnswer(),
+	}
+}
+
+// fileAnswer is the file-mount chain end to end (plan E2E-2): a passphrase lives
+// only in an uploaded file mounted into the sandbox, so a correct answer proves
+// upload → session resource → executor materialization → Level-1 injection →
+// the agent reading the mounted path. The Recall token appears nowhere in any
+// prompt — only in the file's bytes — so the model cannot spell it without
+// reading the mount.
+func fileAnswer() Task {
+	const mount = "/mnt/session/uploads/answer.txt"
+	return Task{
+		ID: "file-answer",
+		Files: []FileFixture{{
+			Name:      "answer.txt",
+			Content:   "The secret passphrase is {{RECALL}}.",
+			MountPath: mount,
+		}},
+		Turns: []Turn{{Message: "A file has been mounted into your sandbox. " +
+			"What is this task's secret passphrase? Reply with exactly the passphrase and nothing else."}},
+		Graders: []Grader{
+			// Either for both, for the same reason as skillAnswer: the passphrase
+			// is reachable only through the materialized mount, so a right answer
+			// is unambiguous, but a missing one may be the model declining to read
+			// — the read grader's transcript evidence is what separates them.
+			ReadsFile(mount, Either),
+			FinalMessageHas("{{RECALL}}", Either),
+		},
 	}
 }
 

@@ -142,12 +142,14 @@ slice 4 gives it a wire-only fetch path and records the divergence.
    union seam open for the git half of #55. The DIVERGENCES line-28 entry ("session
    resources rejected") is carved down accordingly in slice 2.
 7. **Materialization mirrors the skills three-point pattern.** Executor: after
-   `materializeSkills`, a `materializeFiles` pass writes each mounted file's blob bytes to
-   its `mount_path` via `sb.WriteFile` before tool execution, with sentinel idempotence
-   (`{workdir}/.files_materialized` listing `{sesrsc_id, file_id}` pairs, existence
-   re-probed since the workdir is agent-writable — the skills tamper analysis carries
-   over) and per-resource failure tolerated. Worker: a wire-only twin (`Sessions.Get` for
-   `resources[]` → `Files.Download` on the env-key lane → `sb.WriteFile`). Brain: a
+   `materializeSkills`, a `materializeFiles` pass streams each mounted file's blob bytes to
+   its `mount_path` via `sb.WriteFileStream` before tool execution, with sentinel idempotence
+   (`{workdir}/.files_materialized` listing sorted `{file_id, mount_path}` pairs; presence
+   re-probed with a single `test -e` shell exec rather than a ReadFile read-back, since the
+   workdir is agent-writable — the skills tamper analysis carries over — and a mount can be
+   500 MB, far past the 4 MiB read cap) and per-resource failure tolerated. Worker: a
+   wire-only twin (`Sessions.Get` for `resources[]` → `Files.Download` on the env-key lane →
+   `sb.WriteFileStream`). Brain: a
    Level-1-style "Mounted files" block (mount path, filename, mime type, size) appended
    after the skills block at request assembly — format inferred, exactly like the skills
    line-67 entry — so the agent can find mounts outside the workdir. Because a mount can

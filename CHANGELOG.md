@@ -15,6 +15,29 @@ copy of an entry here.
 
 ### Added
 
+- **Files API — materialization: executor mounts, brain injection, streaming sandbox seam (Files plan, slice 3)**
+  ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — mounted files now
+  reach the sandbox and the model. The `sandbox.Sandbox` interface gains a streaming
+  `WriteFileStream(ctx, path, src, size)` counterpart to `WriteFile`, implemented by both
+  backends (docker builds the tar over an `io.Pipe`; k8s reuses the stdin-counting write
+  script) and pinned by a `sandboxtest` contract case — so a 500 MB mount streams straight
+  from object storage into the sandbox without ever fully buffering in the executor. The
+  executor's `materializeFiles` pass (twin of `materializeSkills`) streams each session
+  `resources[]` file mount to its `mount_path` before the tools run, with a
+  `.files_materialized` sentinel (skip re-streaming an unchanged, still-present set — presence
+  probed by `test -e`, not a read-back, since a mount can be huge) and per-file tolerance for
+  a dangling reference; `sessionForRun` selects `resources` in the same locked read. The brain
+  renders a "Mounted files" block (mount path, filename, MIME type, size) into the system
+  prompt after the skills block, so the agent can find mounts outside its workdir. `slog` +
+  `files.materialized`/`files.materialize.duration` metrics and a `files_materialize` span on
+  the executor pass; `files.injected`/`files.block_chars` span attributes on the brain's
+  model-request span. The `files/{id}` blob-key helper is extracted to `internal/blob`
+  (`blob.FilesKey`) as the one definition the api writer and executor/worker readers share. A
+  `file-answer` eval (opt-in, `RUN_EVALS=1`) proves the whole platform chain: upload → mount →
+  materialize → the agent reads the mounted passphrase. Slice-3 inferences (the block format
+  and placement, sentinel idempotence for mounts) are in
+  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md). Remaining: the BYOC worker + the session-scoped
+  env-key content lane (slice 4).
 - **Files API — session file `resources[]` + `sesrsc_` sub-endpoints (Files plan, slice 2)**
   ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — session create
   now accepts `resources[]` with `type:"file"`, replacing the blanket rejection. A file

@@ -403,6 +403,32 @@ func ReadsSkillFile(name, file string, class Class) Grader {
 	}
 }
 
+// ReadsFile asserts the agent read a mounted file at its mount path — the
+// files analog of ReadsSkillFile, keyed on the absolute mount path rather than
+// a skills/<name>/ directory.
+func ReadsFile(path string, class Class) Grader {
+	return Grader{
+		Name:  "reads-file:" + path,
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			for _, use := range eventsOfType(tr, "agent.tool_use") {
+				input, _ := use["input"].(map[string]any)
+				switch use["name"] {
+				case "read":
+					if fp, _ := input["file_path"].(string); strings.Contains(fp, path) {
+						return nil
+					}
+				case "bash":
+					if cmd, _ := input["command"].(string); strings.Contains(cmd, path) {
+						return nil
+					}
+				}
+			}
+			return fmt.Errorf("no read or bash tool call read %s: the agent never read the mounted file", path)
+		},
+	}
+}
+
 // ContainerAbsent asserts no sandbox was made for a session whose agent called
 // no tools — the executor must never provision without a tool_exec.
 //

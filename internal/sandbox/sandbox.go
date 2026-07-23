@@ -16,6 +16,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -104,6 +105,13 @@ type Sandbox interface {
 	// WriteFile writes data, creating parent directories and overwriting any
 	// existing file.
 	WriteFile(ctx context.Context, path string, data []byte) error
+	// WriteFileStream writes exactly size bytes read from src to path, creating
+	// parent directories and overwriting any existing file. Unlike WriteFile it
+	// never buffers the whole payload in the caller, so a large mounted file (up
+	// to the Files API's 500 MB cap) streams straight through from object
+	// storage. size must equal the number of bytes src yields: a short or long
+	// stream is an error, not a silently truncated file.
+	WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error
 	// Destroy removes the sandbox. It is idempotent: destroying an already
 	// destroyed sandbox is not an error.
 	Destroy(ctx context.Context) error

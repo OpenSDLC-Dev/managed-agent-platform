@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
 )
@@ -60,10 +61,6 @@ func renderFile(id, filename, mimeType string, sizeBytes int64, downloadable boo
 // configured without object storage.
 var errFilesUnavailable = &apiError{http.StatusInternalServerError, errTypeAPI,
 	"object storage is not configured on this deployment; files are unavailable"}
-
-// fileBlobKey is the object-storage key layout for a file's bytes — the second
-// consumer of the namespace internal/blob reserved for the Files API.
-func fileBlobKey(id string) string { return "files/" + id }
 
 // checkFileID rejects a path id that is not a well-formed file_ id with the 404
 // an unknown id already gets (checkID's rationale: shape-reject before an
@@ -134,7 +131,7 @@ func (s *server) insertFile(ctx context.Context, id string, up *fileUpload) (tim
 		id, up.filename, up.mimeType, int64(len(up.data))).Scan(&createdAt); err != nil {
 		return time.Time{}, err
 	}
-	key := fileBlobKey(id)
+	key := blob.FilesKey(id)
 	if err := s.blobs.Put(ctx, key, bytes.NewReader(up.data), int64(len(up.data)), up.mimeType); err != nil {
 		return time.Time{}, fmt.Errorf("store file: %w", err)
 	}
@@ -300,7 +297,7 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 	// The row is gone; the object follows best-effort (rare orphans accepted,
 	// GC a non-goal). A deleted file cannot be recovered — the reference has no
 	// file archival (unlike sessions).
-	s.deleteOrphanedFile(ctx, fileBlobKey(id))
+	s.deleteOrphanedFile(ctx, blob.FilesKey(id))
 	slog.InfoContext(ctx, "file deleted", "file_id", id)
 	return map[string]string{"id": id, "type": "file_deleted"}, nil
 }
@@ -340,7 +337,7 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 			"file %s is not downloadable; only files created by skills or the code execution tool can be downloaded", id))
 		return
 	}
-	rc, size, err := s.blobs.Get(ctx, fileBlobKey(id))
+	rc, size, err := s.blobs.Get(ctx, blob.FilesKey(id))
 	if err != nil {
 		// A row whose object is gone is an operator incident, not a client 404.
 		slog.ErrorContext(ctx, "file missing from object storage", "file_id", id, "err", err)

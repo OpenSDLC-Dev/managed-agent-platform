@@ -29,16 +29,19 @@ import (
 //
 // agent.thinking replays as nothing: the wire event carries no content, so
 // thinking is never reconstructed (and v1 never requests extended thinking).
-func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBlock string) (provider.Request, int64, error) {
+func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBlock, filesBlock string) (provider.Request, int64, error) {
 	req := provider.Request{System: agent.System}
-	// The Level-1 skills block is startup metadata: it sits after the agent's
-	// own system prompt and before any runtime system.message text (systemTail),
-	// which is appended at the end. Placement is an inference (docs/DIVERGENCES.md).
-	if skillsBlock != "" {
-		if req.System != "" {
-			req.System += "\n\n"
+	// Startup metadata blocks sit after the agent's own system prompt and before
+	// any runtime system.message text (systemTail), which is appended at the end:
+	// the Level-1 skills block first, then the Mounted-files block. Placement is
+	// an inference (docs/DIVERGENCES.md).
+	for _, block := range []string{skillsBlock, filesBlock} {
+		if block != "" {
+			if req.System != "" {
+				req.System += "\n\n"
+			}
+			req.System += block
 		}
-		req.System += skillsBlock
 	}
 	var watermark int64
 
