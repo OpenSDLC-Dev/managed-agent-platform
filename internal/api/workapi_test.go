@@ -408,6 +408,9 @@ func TestWorkGetReturnsItem(t *testing.T) {
 		"id", "acknowledged_at", "created_at", "data", "environment_id",
 		"latest_heartbeat_at", "metadata", "secret", "started_at", "state",
 		"stop_requested_at", "stopped_at", "type")
+	if body["secret"] != nil {
+		t.Errorf("secret = %v, want null on a non-poll retrieval path", body["secret"])
+	}
 	if body["id"] != workID || body["state"] != "queued" || body["type"] != "work" {
 		t.Errorf("get = %v, want id %s / queued / work", body, workID)
 	}

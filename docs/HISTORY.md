@@ -795,7 +795,15 @@ each member of the second is resolved below.
   of the fix treated null as omission and was caught in review: `param.Opt` represents null and
   omitted as distinct states, the wire types the field as an integer, and the pre-bump handler
   rejected null — so silently accepting it would have dropped the concurrency check for any client
-  that serialized a nil pointer, a regression dressed as a relaxation. The second change,
+  that serialized a nil pointer, a regression dressed as a relaxation. A later review pass then
+  pointed out that both the null rejection *and* its neighbour — a field-less update being a legal
+  no-op that still bumps the version, reachable with an empty body only because `version` became
+  optional — are choices the schema does not settle, so they belong in docs/DIVERGENCES.md's INFERRED
+  section rather than only in a changelog entry; the entry was added and the empty-body case pinned
+  by a test. The reviewers disagreed on this: the verifier judged the null rejection generic strict-input
+  validation needing no entry, the reviewer judged it an unconfirmed inference. Registering it is the
+  cheaper error, and CLAUDE.md's rule ("a divergence not in the registry is a finding") is stated
+  without exception. The second change,
   `BetaManagedAgentsModelConfigParams.Effort` (`betaagent.go:2117`) plus its five level types, is new
   behavior this slice does not build — **recorded** as a CONFIRMED divergence, tracked by #160.
   Everything else in that file's 435-line diff is the effort types' own scaffolding: the field-level
@@ -881,3 +889,17 @@ decoding the exact queued-item body this platform now emits yields `Secret == ""
 being an error. `internal/worker`'s harness already polls against the **real** control-plane handler
 rather than a fixture (the same property `TestWorkerForceStopAcceptsNoContent` relies on), so
 `TestWorkerPollsRunsAndStops` exercises that decode end to end in the passing run.
+
+**Two review findings refuted rather than fixed**, recorded because the refutations are the durable
+part. (1) *"The `version < 1` and non-integer checks run before `checkID`, so a bad version against a
+nonexistent id reports 400 instead of 404."* True, but pre-existing and house style, not introduced
+here: `updateAgent` validated the body before the path id before this change too (a missing `version`
+was already a 400 ahead of the 404), and `updateEnvironment` orders the same way — `decodeObject` →
+`rejectUnknownKeys` → `checkID`. Reordering agents alone would make it the outlier. (2) *"CHANGELOG
+and DIVERGENCES claim `secret` renders on five paths but only poll and get have tests."* The claim is
+true by construction rather than by sampling — all five handlers render the one `toWire`
+(`workapi.go:129,165,263,302,319`), so a field cannot be present on one and absent from another. The
+finding's deeper point — that `wantFields` checks presence only, so no test would catch an *extra* or
+renamed field — is a property of the test harness that predates this branch and is not this bump's to
+redesign; the get path's `secret` assertion was added because that one was a genuine gap between the
+record's wording and the test.

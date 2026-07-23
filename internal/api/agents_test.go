@@ -317,6 +317,17 @@ func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 		t.Errorf("version/name = %v/%v, want 3/unconditional", updated["version"], updated["name"])
 	}
 
+	// A field-less update is a legal no-op patch, and it still bumps the version
+	// and snapshots — the same as a version-only body always did. Reachable with an
+	// empty body only because version became optional, so it is pinned here.
+	status, updated = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("empty update: %d %v", status, updated)
+	}
+	if updated["version"] != float64(4) || updated["name"] != "unconditional" {
+		t.Errorf("version/name = %v/%v, want 4/unconditional", updated["version"], updated["name"])
+	}
+
 	// Unknown agent → 404.
 	status, body = s.do(http.MethodPost, "/v1/agents/agent_missing", map[string]any{"version": 1})
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
