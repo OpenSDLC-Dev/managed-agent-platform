@@ -247,13 +247,47 @@ func TestSentinelMatches(t *testing.T) {
 	}
 }
 
+func TestReadArchiveVerifiesDigest(t *testing.T) {
+	body := []byte("PK\x03\x04 pretend archive bytes")
+	sum := Digest(body)
+
+	got, err := ReadArchive(bytes.NewReader(body), sum)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("ReadArchive(matching) = %q, %v", got, err)
+	}
+	// Another implementation's uppercase hex is the same digest, not a mismatch.
+	if _, err := ReadArchive(bytes.NewReader(body), strings.ToUpper(sum)); err != nil {
+		t.Errorf("ReadArchive(uppercase) = %v", err)
+	}
+	// A substituted object is refused — the corruption this whole path exists
+	// to catch, invisible to zip's per-member CRC when the bytes are a valid zip.
+	if _, err := ReadArchive(bytes.NewReader([]byte("PK\x03\x04 substituted bytes")), sum); !errors.Is(err, ErrDigestMismatch) {
+		t.Errorf("substituted archive = %v, want ErrDigestMismatch", err)
+	}
+	// A truncated object is refused for the same reason.
+	if _, err := ReadArchive(bytes.NewReader(body[:len(body)-1]), sum); !errors.Is(err, ErrDigestMismatch) {
+		t.Errorf("truncated archive = %v, want ErrDigestMismatch", err)
+	}
+	// A malformed expectation can never equal a real digest, so it fails closed
+	// without needing a format check of its own.
+	if _, err := ReadArchive(bytes.NewReader(body), "not-a-digest"); !errors.Is(err, ErrDigestMismatch) {
+		t.Errorf("malformed expectation = %v, want ErrDigestMismatch", err)
+	}
+	// An empty expectation means no digest was recorded for this version: the
+	// archive is read unverified rather than refused (a row predating the
+	// column, or a control plane that sends no digest header).
+	if got, err := ReadArchive(bytes.NewReader(body), ""); err != nil || !bytes.Equal(got, body) {
+		t.Errorf("ReadArchive(unverified) = %q, %v", got, err)
+	}
+}
+
 func TestReadArchive(t *testing.T) {
 	body := []byte("PK\x03\x04 pretend archive bytes")
-	got, err := ReadArchive(bytes.NewReader(body))
+	got, err := ReadArchive(bytes.NewReader(body), "")
 	if err != nil || !bytes.Equal(got, body) {
 		t.Fatalf("ReadArchive = %q, %v", got, err)
 	}
-	if got, err := ReadArchive(bytes.NewReader(nil)); err != nil || len(got) != 0 {
+	if got, err := ReadArchive(bytes.NewReader(nil), ""); err != nil || len(got) != 0 {
 		t.Fatalf("ReadArchive(empty) = %q, %v", got, err)
 	}
 

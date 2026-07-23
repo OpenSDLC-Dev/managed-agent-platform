@@ -32,6 +32,10 @@ const (
 	skillOutcomeOK       = "ok"
 	skillOutcomeNotFound = "not_found"
 	skillOutcomeFailed   = "failed"
+	// corrupt: the archive did not match the digest recorded at upload —
+	// separable from an ordinary miss because it means storage corruption or
+	// substitution, not a dangling reference.
+	skillOutcomeCorrupt = "corrupt"
 
 	fileOutcomeOK       = "ok"
 	fileOutcomeNotFound = "not_found"

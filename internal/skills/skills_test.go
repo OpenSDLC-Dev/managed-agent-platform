@@ -3,6 +3,8 @@ package skills
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -62,6 +64,40 @@ func TestFromFilesHappy(t *testing.T) {
 	if len(got) != 2 || got["financial-skill/SKILL.md"] != goodSkillMD ||
 		got["financial-skill/reference.md"] != "ratios cheat sheet" {
 		t.Errorf("canonical zip contents = %v", got)
+	}
+}
+
+func TestBundleDigest(t *testing.T) {
+	b, err := FromFiles(goodFiles())
+	if err != nil {
+		t.Fatalf("FromFiles: %v", err)
+	}
+	sum := sha256.Sum256(b.Zip)
+	if want := hex.EncodeToString(sum[:]); b.SHA256 != want {
+		t.Errorf("SHA256 = %q, want %q", b.SHA256, want)
+	}
+	if b.SHA256 != Digest(b.Zip) {
+		t.Errorf("SHA256 = %q, Digest = %q", b.SHA256, Digest(b.Zip))
+	}
+	// The canonical zip does not depend on part order, so neither does the
+	// digest: the same content always records the same hash.
+	files := goodFiles()
+	files[0], files[1] = files[1], files[0]
+	reordered, err := FromFiles(files)
+	if err != nil {
+		t.Fatalf("FromFiles(reordered): %v", err)
+	}
+	if reordered.SHA256 != b.SHA256 {
+		t.Errorf("reordered SHA256 = %q, want %q", reordered.SHA256, b.SHA256)
+	}
+	// The zip form stores the upload verbatim, so its digest is the digest of
+	// the bytes the client sent — which is what the download will serve.
+	z, err := FromZip(b.Zip)
+	if err != nil {
+		t.Fatalf("FromZip: %v", err)
+	}
+	if z.SHA256 != Digest(b.Zip) {
+		t.Errorf("FromZip SHA256 = %q, want %q", z.SHA256, Digest(b.Zip))
 	}
 }
 

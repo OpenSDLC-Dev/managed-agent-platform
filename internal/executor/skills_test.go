@@ -11,22 +11,10 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
 
-// seedSkill plants a registry skill the way the API does: rows plus the
-// canonical archive in object storage.
-func (h *harness) seedSkill(t *testing.T, id, version, name string, files map[string]string) {
+// skillArchive builds an archive shaped like the one the registry stores: every
+// file under the skill's single top-level directory.
+func skillArchive(t *testing.T, name string, files map[string]string) []byte {
 	t.Helper()
-	ctx := context.Background()
-	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO skills (id, source, display_title, latest_version) VALUES ($1, 'custom', $1, $2)
-		 ON CONFLICT (id) DO UPDATE SET latest_version = $2`, id, version); err != nil {
-		t.Fatalf("seed skill: %v", err)
-	}
-	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory)
-		 VALUES ('skillver_'||md5($1||$2), $1, $2, $3, 'test skill', $3)`,
-		id, version, name); err != nil {
-		t.Fatalf("seed skill version: %v", err)
-	}
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
 	for p, content := range files {
@@ -41,9 +29,41 @@ func (h *harness) seedSkill(t *testing.T, id, version, name string, files map[st
 	if err := w.Close(); err != nil {
 		t.Fatalf("zip close: %v", err)
 	}
+	return buf.Bytes()
+}
+
+// seedSkill plants a registry skill the way the API does: rows — including the
+// archive digest recorded at upload — plus the archive in object storage.
+func (h *harness) seedSkill(t *testing.T, id, version, name string, files map[string]string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO skills (id, source, display_title, latest_version) VALUES ($1, 'custom', $1, $2)
+		 ON CONFLICT (id) DO UPDATE SET latest_version = $2`, id, version); err != nil {
+		t.Fatalf("seed skill: %v", err)
+	}
+	archive := skillArchive(t, name, files)
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory, sha256)
+		 VALUES ('skillver_'||md5($1||$2), $1, $2, $3, 'test skill', $3, $4)`,
+		id, version, name, skills.Digest(archive)); err != nil {
+		t.Fatalf("seed skill version: %v", err)
+	}
 	if err := h.blobs.Put(ctx, skills.BlobKey(id, version),
-		bytes.NewReader(buf.Bytes()), int64(buf.Len()), "application/zip"); err != nil {
+		bytes.NewReader(archive), int64(len(archive)), "application/zip"); err != nil {
 		t.Fatalf("seed archive: %v", err)
+	}
+}
+
+// swapArchive replaces a version's stored object while leaving its row — and so
+// its recorded digest — untouched: the storage-layer substitution the digest
+// exists to catch, and one zip's own per-member CRC cannot see.
+func (h *harness) swapArchive(t *testing.T, id, version, name string, files map[string]string) {
+	t.Helper()
+	archive := skillArchive(t, name, files)
+	if err := h.blobs.Put(context.Background(), skills.BlobKey(id, version),
+		bytes.NewReader(archive), int64(len(archive)), "application/zip"); err != nil {
+		t.Fatalf("swap archive: %v", err)
 	}
 }
 
@@ -169,6 +189,64 @@ func TestMaterializeToleratesPerSkillFailure(t *testing.T) {
 	// The tool result on the log is the model's, unpolluted by skill skips.
 	if results := h.types(t, "agent.tool_result"); len(results) != 1 {
 		t.Errorf("results = %d, want 1", len(results))
+	}
+}
+
+func TestMaterializeRefusesSubstitutedArchive(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedSkill(t, "skill_mat_swap", "100", "swapped-skill", map[string]string{
+		"SKILL.md": "genuine instructions",
+	})
+	h.seedSkill(t, "skill_mat_kept", "100", "kept-skill", map[string]string{"SKILL.md": "ok"})
+	// The stored object is replaced by a different but perfectly valid archive
+	// — bit-rot, truncation and substitution all present here as bytes that
+	// extract cleanly and are simply not what was uploaded.
+	h.swapArchive(t, "skill_mat_swap", "100", "swapped-skill", map[string]string{
+		"SKILL.md": "tampered instructions",
+	})
+	h.refSkills(t, [2]string{"skill_mat_swap", "100"}, [2]string{"skill_mat_kept", "100"})
+	h.suspend(t, writeUse("out.txt", "hello"))
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got, ok := sb.files["/workspace/skills/swapped-skill/SKILL.md"]; ok {
+		t.Errorf("substituted archive reached the sandbox: %q", got)
+	}
+	// A failed digest is the same per-skill tolerance as any other miss: the
+	// healthy skill and the tool call both proceed.
+	if got := sb.files["/workspace/skills/kept-skill/SKILL.md"]; got != "ok" {
+		t.Errorf("healthy skill = %q", got)
+	}
+	if sb.files["/workspace/out.txt"] != "hello" {
+		t.Error("a corrupt archive blocked the tool run")
+	}
+	// Nothing landed for it, so the sentinel must not claim it — the next pass
+	// retries, and a repaired object materializes then.
+	if sentinel := sb.files["/workspace/skills/"+skills.SentinelName]; strings.Contains(sentinel, "skill_mat_swap") {
+		t.Errorf("sentinel recorded a refused skill: %q", sentinel)
+	}
+}
+
+func TestMaterializeToleratesVersionWithoutDigest(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	h.seedSkill(t, "skill_mat_legacy", "100", "legacy-skill", map[string]string{"SKILL.md": "v1"})
+	// A row written before the sha256 column exists records no digest; there is
+	// nothing to verify against, and that must not make the skill unusable.
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE skill_versions SET sha256 = NULL WHERE skill_id = $1`, "skill_mat_legacy"); err != nil {
+		t.Fatal(err)
+	}
+	h.refSkills(t, [2]string{"skill_mat_legacy", "100"})
+	h.suspend(t, writeUse("out.txt", "x"))
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got := sb.files["/workspace/skills/legacy-skill/SKILL.md"]; got != "v1" {
+		t.Errorf("SKILL.md = %q, want the archive extracted unverified", got)
 	}
 }
 
