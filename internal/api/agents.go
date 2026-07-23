@@ -240,13 +240,24 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		"tools", "mcp_servers", "skills", "metadata", "multiagent"); err != nil {
 		return nil, err
 	}
-	rawVersion, ok := obj["version"]
-	if !ok || isNull(rawVersion) {
-		return nil, errInvalid("version is required")
-	}
-	var expected int64
-	if err := json.Unmarshal(rawVersion, &expected); err != nil {
-		return nil, errInvalid("version must be an integer")
+	// version is the optimistic-concurrency check, and it is opt-in: supplied, the
+	// update must match the stored version (which is at least 1); *omitted*, the
+	// update applies unconditionally. An explicit null is not omission — the wire
+	// types the field as an integer, so accepting null would silently drop the
+	// check for a client that serialized a nil pointer.
+	var expected *int64
+	if raw, ok := obj["version"]; ok {
+		var v int64
+		if isNull(raw) {
+			return nil, errInvalid("version must be an integer")
+		}
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return nil, errInvalid("version must be an integer")
+		}
+		if v < 1 {
+			return nil, errInvalid("version must be at least 1")
+		}
+		expected = &v
 	}
 	if err := checkID(id, "agent"); err != nil {
 		return nil, err
@@ -278,8 +289,8 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	if archivedAt != nil {
 		return nil, errInvalid("agent %s is archived", id)
 	}
-	if expected != current {
-		return nil, errConflict("agent version mismatch: expected %d, currently %d", expected, current)
+	if expected != nil && *expected != current {
+		return nil, errConflict("agent version mismatch: expected %d, currently %d", *expected, current)
 	}
 
 	spec, metadata, err := decodeSpecAndMetadata(specJSON, metaJSON)

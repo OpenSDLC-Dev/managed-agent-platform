@@ -224,7 +224,7 @@ func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 // path so a client can find the typo. It runs after resolveToolset's typed
 // unmarshal, so every object it revisits has already parsed as the right JSON shape.
 //
-// The accepted keys are anthropic-sdk-go v1.58.0's request (*Params) types in
+// The accepted keys are anthropic-sdk-go v1.59.0's request (*Params) types in
 // betaagent.go: BetaManagedAgentsAgentToolset20260401Params (type/configs/
 // default_config), AgentToolsetDefaultConfigParams (enabled/permission_policy),
 // AgentToolConfigParams (name/enabled/permission_policy), and the always_allow/

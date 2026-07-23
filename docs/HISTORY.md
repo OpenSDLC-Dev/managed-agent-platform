@@ -897,3 +897,155 @@ Worth noting for anyone weighing reviewer disagreement by count: two of the thre
 (the verifier and the Claude-side reviewer) examined this decision and endorsed it as defensible.
 Only the Codex pass called it a blocking finding, and the Codex pass was right — it was the one that
 quoted the governing sentence instead of reasoning from the rule's purpose.
+
+---
+
+## anthropic-sdk-go v1.59.0 bump — wire-schema verification record (2026-07-23)
+
+The counterpart to the v1.58.0 record above, and its opposite result. That bump was
+contract-neutral; this one is not. Two shapes this repo mirrors moved, both required code, and a
+third — a constant whose Go identifier did not change but whose *literal* did — is the kind of drift
+that no compiler and no existing test would have caught.
+
+**What the range contains.** Two upstream releases: v1.58.1 (citation `ToParam` copy fixes, a Vertex
+auth-scope default, and a new `general_harms` refusal category) and v1.59.0, whose release note names
+managed-agents surface directly — "Managed Agents model effort, initial session events, and threads
+delta streaming". Endpoint count is unchanged at **131** (`.stats.yml:1`); the OpenAPI spec hash
+moved, so the change is to existing endpoints' schemas, not to the route table.
+
+**The enumeration.** Every SDK file defining a shape this repo mirrors, `git diff`ed pairwise between
+the tags rather than sampled. Unchanged: `betaagentversion.go`, `betasessionresource.go`,
+`betasessionthread.go`, `betasessiontoolrunner.go`, `betaskill.go`, `betaskillversion.go`,
+`betafile.go`. Changed: `betaagent.go`, `betaenvironment.go`, `betaenvironmentwork.go`,
+`betamessage.go`, `betasession.go`, `betasessionevent.go`, `betasessionthreadevent.go`,
+`shared/constant/constants.go`. Listing only the first group would have proven nothing, which is why
+each member of the second is resolved below.
+
+**Question 1 — does a changed type alter a shape `internal/domain` or `internal/api` mirrors?**
+**Yes, three times; two of them are code, one is not.**
+
+- *`betaenvironmentwork.go`* — one field added, `BetaSelfHostedWork.Secret`
+  (`betaenvironmentwork.go:305`), `api:"required"`, "Credential payload used by the environment
+  worker to execute this work item. May be populated when polling for work; null on all other
+  retrieval paths." `internal/api/workapi.go`'s `workWire` documents itself as
+  "the BetaSelfHostedWork response shape, **field for field**", so the bump made that comment false.
+  **Mirrored** (`workWire.Secret`, always null — populating it needs the vault seam, a column only in
+  v1), with the poll and get wire-shape tests extended to require the field and assert null.
+- *`betaagent.go`* — two changes. `BetaAgentUpdateParams.Version` went `int64` (required) →
+  `param.Opt[int64]` (`betaagent.go:2870`): "Must be at least 1 if specified. When supplied, the
+  request fails if it does not match the server's current version; **omit to apply the update
+  unconditionally**." `updateAgent` answered 400 "version is required" — after the pin moved, that is
+  simply wrong against the authoritative schema, so it is **code**: version is now optional, rejected
+  below 1, and the optimistic-concurrency check runs only when supplied. "Supplied" means *present
+  and an integer* — an explicit `"version": null` is 400, not an unconditional update. The first cut
+  of the fix treated null as omission and was caught in review: `param.Opt` represents null and
+  omitted as distinct states, the wire types the field as an integer, and the pre-bump handler
+  rejected null — so silently accepting it would have dropped the concurrency check for any client
+  that serialized a nil pointer, a regression dressed as a relaxation. A later review pass then
+  pointed out that both the null rejection *and* its neighbour — a field-less update being a legal
+  no-op that still bumps the version, reachable with an empty body only because `version` became
+  optional — are choices the schema does not settle, so they belong in docs/DIVERGENCES.md's INFERRED
+  section rather than only in a changelog entry; the entry was added and the empty-body case pinned
+  by a test. The reviewers disagreed on this: the verifier judged the null rejection generic strict-input
+  validation needing no entry, the reviewer judged it an unconfirmed inference. Registering it is the
+  cheaper error, and CLAUDE.md's rule ("a divergence not in the registry is a finding") is stated
+  without exception. The second change,
+  `BetaManagedAgentsModelConfigParams.Effort` (`betaagent.go:2117`) plus its five level types, is new
+  behavior this slice does not build — **recorded** as a CONFIRMED divergence, tracked by #160.
+  Everything else in that file's 435-line diff is the effort types' own scaffolding: the field-level
+  diff of json-tagged struct members contains nothing but `Version` and `Effort` members.
+- *`betasession.go`* — exactly two hunks, both `BetaSessionNewParams.InitialEvents`
+  (`betasession.go:2084`). `createSession`'s strict key allowlist rejects it 400. **Recorded** as a
+  CONFIRMED divergence, tracked by #161; half its union (`user.define_outcome`) is the post-v1
+  outcomes surface (#77).
+
+The remaining four changed files reach nothing this repo mirrors. `betasessionevent.go` is
+**comment-only** (proven by filtering the diff to non-comment lines: empty) — one sentence re-words
+why a turn ends `retries_exhausted`, dropping `max_iterations` as a listed cause; this repo cites
+neither the sentence nor `max_iterations` anywhere. `betamessage.go` (and its non-beta twin
+`message.go`) add the `general_harms` refusal category to two enums; this repo mirrors no refusal
+category at all. `betasessionthreadevent.go` extends `event_deltas` to the *thread* stream and fixes
+that method to forward its params — session threads are post-v1 (#53), and the **session** stream's
+`event_deltas` already existed at v1.58.0, so nothing about the SSE surface this repo implements
+moved. `betamessageutil.go`/`messageutil.go` fix client-side `ToParam` citation copying, in helpers
+this repo does not call (its provider adapters build request params directly).
+
+**Question 2 — does `shared/constant/constants.go` add stop reasons or event types the taxonomy
+should carry?** **No new stop reason and no new session event type — but the file holds this bump's
+one genuinely dangerous change.** `constant.EnvironmentDeleted`'s literal moved from
+`"environment_deleted"` to `"environment.deleted"` (`constants.go:111,337`). The Go identifier is
+unchanged, so nothing would fail to compile and no test that does not assert the literal would fail.
+Traced to its consumers, it is safe here for a specific reason rather than by luck: the constant was
+**repurposed** for the new webhook event types (`environment.created/updated/deleted/archived` and
+`memory_store.created/deleted/archived`, `betawebhook.go:414` et al), and the `DELETE /v1/environments/{id}`
+response — the only place this repo emits that literal — was simultaneously given its own dedicated
+enum still carrying the old value (`betaenvironment.go:487`,
+`BetaEnvironmentDeleteResponseTypeEnvironmentDeleted = "environment_deleted"`). So
+`internal/api/environments.go:534`'s `"environment_deleted"` is still correct, and
+`environments_test.go:249` still pins the right string. The webhook constants belong to a webhook
+surface this repo does not implement; the session `{domain}.{action}` taxonomy is untouched, and the
+three managed-agents stop reasons are still exactly `end_turn` / `requires_action` /
+`retries_exhausted` (`betasessionevent.go`, `AsAny` switch), matching `internal/domain/event.go:103-105`.
+
+**Question 3 — mirrored now, or recorded?** Resolved explicitly for each of the four new fields.
+Mirrored: `secret` (the pin makes an existing self-description false, and null is the reference's own
+value on every path but poll) and the optional `version` (the pin makes an existing rejection wrong).
+Recorded with a tracking issue: `model.effort` (#160) and `initial_events` (#161) — both are real
+behavior, not shape, and honoring them means provider-side and event-pipeline work that CLAUDE.md's
+"simplicity first" places behind the backlog. Thread `event_deltas` needs no entry: it is a surface
+(#53) this repo has not built, and per the v1.58.0 record's rejected decision, a product area with
+only one implementation is not a divergence.
+
+**Citation durability — the trap fired this time.** The live pinned-version label moved in three
+places (`.claude/agents/verifier.md`, `docs/REFERENCE_PROJECTS.md`,
+`internal/toolset/definitions.go`'s accepted-key comment — the last is safe to advance because the
+`agent_toolset_20260401` input types are untouched by this range). Every `file:line` the registry
+cites was re-read at v1.59.0 rather than assumed: `lib/environments/poller.go:439-465` (the 204 /
+`WithResponseBodyInto` comment) and `worker_test.go:118-120` (`WriteHeader(http.StatusNoContent)`)
+hold verbatim; so do `betaagent.go:1123-1124/1178-1179` (skill `Version` on both union variants),
+`betasession.go:693-717` (the file resource variant), `betasessionresource.go:176-209`, and
+`tools/agenttoolset/skills.go:123-146` (`resolveSkillVersion`). One **drifted**: the Stop Work entry's
+`api.md:656-673` no longer covers the work resource — v1.59.0 added 17 lines to `api.md` and the
+`BetaSelfHostedWork`-returning Stop method is now `api.md:683`. The citation was corrected in place
+and the drift noted, since it is the concrete instance of a hazard the v1.58.0 record could only warn
+about. The v1.56.0/v1.58.0 mentions surviving in CHANGELOG.md, `docs/HISTORY.md` above, and archived
+plans 05/06/07 are historical records of what was true when those PRs landed, and were deliberately
+left alone.
+
+**Evidence.** Both code changes were driven by tests that fail against the pre-change code — the
+recorded red run: `TestAgentUpdateOptimisticVersioning` 409 where 400 was wanted (version 0 reached
+the version *comparison* instead of being rejected as below the documented minimum), and
+`TestWorkPollReturnsWireShape` / `TestWorkGetReturnsItem` reporting `required wire field "secret"
+missing`. `make verify` green afterward at total statement coverage **90.7%** (including the Docker and K8s
+sandbox suites; the figure moves run to run — 90.65% to 90.72% across four runs here — and the gate
+is ≥90%). No transitive dependency moved: `go mod tidy` after the bump touched
+`go.mod`/`go.sum` only, in the two lines naming the SDK — so every SDK request type, response field,
+JSON tag, service method, option, paginator, SSE helper and error decoder reached from the non-test
+import sites (`internal/provider/anthropic/anthropic.go`, `internal/worker/{client,lease,toolexec,skills}.go`)
+still compiles and passes unchanged. Unlike the v1.58.0 bump, `sdk.Client`'s own layout did not move
+either — `beta.go`, `client.go` and `aliases.go` are identical across the tags, so no new service is
+constructed at client init; the only unconditional runtime difference is the version-identifying
+`User-Agent` / `X-Stainless-Package-Version` header value (`internal/version.go`).
+
+The one non-obvious hazard in emitting a new null field was checked rather than assumed: the BYOC
+worker polls with the SDK's **typed** decoder into a non-pointer `Secret string`
+(`internal/worker/lease.go:163-175`), so `"secret": null` had to be provably harmless there. It is —
+decoding the exact queued-item body this platform now emits yields `Secret == ""` with
+`JSON.Secret.Valid() == false`, i.e. null is distinguishable from an empty credential rather than
+being an error. `internal/worker`'s harness already polls against the **real** control-plane handler
+rather than a fixture (the same property `TestWorkerForceStopAcceptsNoContent` relies on), so
+`TestWorkerPollsRunsAndStops` exercises that decode end to end in the passing run.
+
+**Two review findings refuted rather than fixed**, recorded because the refutations are the durable
+part. (1) *"The `version < 1` and non-integer checks run before `checkID`, so a bad version against a
+nonexistent id reports 400 instead of 404."* True, but pre-existing and house style, not introduced
+here: `updateAgent` validated the body before the path id before this change too (a missing `version`
+was already a 400 ahead of the 404), and `updateEnvironment` orders the same way — `decodeObject` →
+`rejectUnknownKeys` → `checkID`. Reordering agents alone would make it the outlier. (2) *"CHANGELOG
+and DIVERGENCES claim `secret` renders on five paths but only poll and get have tests."* The claim is
+true by construction rather than by sampling — all five handlers render the one `toWire`
+(`workapi.go:129,165,263,302,319`), so a field cannot be present on one and absent from another. The
+finding's deeper point — that `wantFields` checks presence only, so no test would catch an *extra* or
+renamed field — is a property of the test harness that predates this branch and is not this bump's to
+redesign; the get path's `secret` assertion was added because that one was a genuine gap between the
+record's wording and the test.

@@ -275,8 +275,14 @@ func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 	created := createAgent(t, s, map[string]any{"name": "v", "model": "m1", "system": "keep me"})
 	id := created["id"].(string)
 
-	// version is required.
-	status, body := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"name": "v2"})
+	// version must be at least 1 when supplied.
+	status, body := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 0, "name": "v2"})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
+	// An explicit null is not omission: the wire types version as an integer, and
+	// only *omitting* it means "apply unconditionally". Silently accepting null
+	// would drop the concurrency check for a client that serialized a nil pointer.
+	status, body = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": nil, "name": "v2"})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
 	// Happy path: version 1 → 2; omitted fields preserved.
@@ -299,6 +305,27 @@ func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 	_, got := s.do(http.MethodGet, "/v1/agents/"+id, nil)
 	if got["name"] != "renamed" || got["version"] != float64(2) {
 		t.Errorf("state changed after 409: %v", got)
+	}
+
+	// An omitted version applies the update unconditionally — the reference's
+	// optimistic-concurrency check is opt-in, not mandatory.
+	status, updated = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"name": "unconditional"})
+	if status != http.StatusOK {
+		t.Fatalf("update without version: %d %v", status, updated)
+	}
+	if updated["version"] != float64(3) || updated["name"] != "unconditional" {
+		t.Errorf("version/name = %v/%v, want 3/unconditional", updated["version"], updated["name"])
+	}
+
+	// A field-less update is a legal no-op patch, and it still bumps the version
+	// and snapshots — the same as a version-only body always did. Reachable with an
+	// empty body only because version became optional, so it is pinned here.
+	status, updated = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("empty update: %d %v", status, updated)
+	}
+	if updated["version"] != float64(4) || updated["name"] != "unconditional" {
+		t.Errorf("version/name = %v/%v, want 4/unconditional", updated["version"], updated["name"])
 	}
 
 	// Unknown agent → 404.
