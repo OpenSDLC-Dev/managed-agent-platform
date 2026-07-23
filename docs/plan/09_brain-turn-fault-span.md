@@ -58,11 +58,15 @@ issue was filed by a reviewer working from the executor's shape and did not chec
 `model_turn` consumer span at the `RunOnce` level, mirroring the executor's `tool_exec` span and the
 BYOC worker's, and emit the fault log from inside it.
 
-`events.StartModelRequest`'s `model_request` span cannot carry the log itself. It opens inside
-`runTurn` and is closed by `Finish` before `runTurn` returns, and the faults that matter happen on
-both sides of it — before it opens (session-liveness lookup, replay, provider resolution, span-start
-append) and after it closes (settlement, the lease proof). A consumer span stands for the handling
-of one claimed message end to end, which is exactly the interval a stalled turn's cause lives in.
+`events.StartModelRequest`'s `model_request` span cannot carry the log itself, for two reasons that
+are easy to conflate. Half the faults happen **before it exists**: `claimLiveSession`, the
+reclaim-recovery append, replay, request assembly and provider resolution all reach `failTurn` with a
+nil span. For the other half — settlement and its lease proof — the span does exist, and `Finish`
+even reddens it for a failed commit (`settleTurn` calls `commitTurn` *first*, then
+`span.Finish(ctx, false, err)`; `internal/events/span.go` documents that ordering deliberately). What
+fails is the *hand-off*: `runTurn` returns an error and nothing else, so `sctx` never leaves it, and
+by the time `RunOnce` observes the failure the span is closed. A consumer span standing for the
+handling of one claimed message end to end is the only frame that holds for both halves.
 
 ## Deliberately not in scope
 
@@ -116,6 +120,9 @@ span — the executor's rule ("a tool-level failure is not a platform fault") ap
   error for it — new `TestAModelFailureLeavesTheModelTurnSpanUnset`, the brain's counterpart of the
   executor's and worker's unset-status tests, so a later refactor cannot quietly reclassify ordinary
   model trouble as a platform fault.
+- A clean shutdown logs no claim fault — new `TestShutdownLogsNoClaimFault`. `Run`'s surviving log
+  fires only when the loop meant to keep running; a cancelled claim is the exit path, and announcing
+  a retry there would put one ERROR line into every clean stop.
 - `tool_exec` items still carry the turn's `model_request` span as their parent — retained by the
   existing `TestToolExecEnqueueCapturesTurnTrace`.
 - `make verify` green (build, crossbuild, vet, fmt, test, ≥90% coverage).

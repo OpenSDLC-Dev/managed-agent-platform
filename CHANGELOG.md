@@ -475,22 +475,25 @@ copy of an entry here.
   `tool_exec` attribute set), and closes it from a deferred exit that sets `codes.Error` with the
   reason and emits the fault log with `slog.ErrorContext` under that span — the status matters as
   much as the log, since an operator reaches the log by clicking the red span. The span opens on the
-  claimed item and closes on its fate, because the faults that strand a turn land on both sides of the
-  nested `model_request` span: before it opens (session-liveness lookup, replay, provider resolution)
-  and after `Finish` closes it (settlement, the lease proof). `Run` keeps a log only for the one path
-  with no span to hang it on — a `Claim` that failed before producing an item. Only brain-side faults
-  redden the span: a model failure or a deterministic input problem is settled onto the wire as a
-  `session.error` by `failTurn` and returns no error, the executor's "a tool-level failure is not a
-  platform fault" rule applied to the brain. The brain is the pull protocol's third deployment point
-  and now has the same "handling of one claimed item, end to end" span the executor's `tool_exec` and
-  the BYOC worker's already give theirs. The issue's alternative proposal —
-  `telemetry.Extract(ctx, item.TraceContext)` — was rejected as inert: `queue.Enqueue` captures a
-  trace context only for `tool_exec` and deliberately leaves a `model_turn`'s NULL, so it would have
-  extracted from an always-nil carrier (docs/HISTORY.md, plan 09). Trace-context capture for
-  `model_turn` enqueues is deliberately **not** extended here — that reverses a documented queue-level
-  decision across three enqueue sites with three different end-to-end semantics, and nothing in #92
-  needs it; the `tool_exec` items a turn enqueues still parent on its `model_request` span, so the
-  executor's and worker's correlation is untouched.
+  claimed item and closes on its fate, because the nested `model_request` span can carry neither half
+  of a turn fault: half of them happen before it exists at all (session-liveness lookup, the
+  reclaim-recovery append, replay, request assembly, provider resolution — all reaching `failTurn`
+  with a nil span), and for the rest `runTurn` hands back an error and nothing else, so the
+  span-carrying context never leaves it and `Finish` has closed the span before `RunOnce` sees the
+  failure. `Run` keeps a log only for the one path with no span to hang it on — a `Claim` that failed
+  before producing an item, and not when that failure is the loop's own shutdown. Only brain-side
+  faults redden the span: a model failure or a deterministic input problem is settled onto the wire as
+  a `session.error` by `failTurn` and returns no error, the executor's "a tool-level failure is not a
+  platform fault" rule applied to the brain. The brain is the work queue's third claimant, and now has
+  the same "handling of one claimed item, end to end" span the executor's `tool_exec` and the BYOC
+  worker's already give theirs ("deployment point" keeps its established meaning — the
+  `cloud`/`self_hosted` pair that runs tools; the brain is not a third one of those). Both
+  alternatives #92 weighed — its own cheap `telemetry.Extract(ctx, item.TraceContext)`, and extending
+  trace-context capture to `model_turn` enqueues — were evaluated and rejected, for reasons recorded
+  in [docs/HISTORY.md](./docs/HISTORY.md) § "Brain turn-fault correlation (plan 09)" and
+  [docs/plan/09](./docs/plan/09_brain-turn-fault-span.md). One consequence matters here: the
+  `tool_exec` items a turn enqueues still parent on its `model_request` span, so the executor's and
+  BYOC worker's correlation is untouched.
 
 - **A misspelled `permission_policy` key in an agent toolset silently fell back to `always_allow`**
   ([#26](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/26)) — an

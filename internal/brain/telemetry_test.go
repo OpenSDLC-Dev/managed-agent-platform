@@ -317,6 +317,16 @@ func namedSpan(t *testing.T, spans []sdktrace.ReadOnlySpan, name string) sdktrac
 // context alongside its message: the span context in that context is exactly
 // what the OTLP bridge reads to correlate a log line to a trace, so it is what
 // a correlation claim has to be asserted on.
+//
+// The stdlib-log save/restore is the same one telemetry.Init needs, for the same
+// reason: slog.SetDefault reroutes the standard log package into whatever handler
+// it installs. Restoring only slog.Default() does not undo that — on the way back
+// the previous handler IS a *defaultHandler, so SetDefault's type check skips the
+// log.SetOutput call entirely and log keeps pointing at this test's finished
+// handler. Every later log.Print in the package's test binary would vanish into
+// it, and log.Flags() would stay 0 for the rest of the run. (The executor's
+// telemetry_test.go carries the twin of this helper; the two cannot share one,
+// because that package's tests are internal and these are package brain_test.)
 func captureBrainLogs(t *testing.T) func() []loggedRecord {
 	t.Helper()
 	h := &capturingHandler{}
@@ -420,11 +430,14 @@ func TestTurnFaultLogLandsOnTheModelTurnSpan(t *testing.T) {
 	}
 }
 
-// The fault above surfaces at settlement — after the model_request span has
-// ended — so only a span that covers the whole claimed item can carry it.
-// Pinning model_request as its child is what makes model_turn the handling of
-// one claimed work item end to end, the edge the executor's tool_exec and the
-// BYOC worker's already give their deployment points.
+// The fault above surfaces at settlement, which runs inside the model_request
+// span — but runTurn returns an error and nothing else, so that span's context
+// never reaches the frame that reports the fault, and Finish has closed it by
+// then. Only a span wrapping the whole claimed item can carry the log, and
+// pinning model_request as its child is what proves this one wraps rather than
+// merely sits beside it — the handling-of-one-claimed-item edge the executor's
+// tool_exec span and the BYOC worker's already have. A clean turn leaves it
+// unset: the status is reserved for the platform's own faults.
 func TestModelRequestSpanIsAChildOfTheModelTurnSpan(t *testing.T) {
 	ended := recordBrainSpans(t)
 
@@ -439,6 +452,31 @@ func TestModelRequestSpanIsAChildOfTheModelTurnSpan(t *testing.T) {
 	}
 	if got := namedSpan(t, spans, "model_request").Parent().SpanID(); got != turn.SpanContext().SpanID() {
 		t.Errorf("model_request parent span = %s, want the model_turn span %s", got, turn.SpanContext().SpanID())
+	}
+	if got := turn.Status().Code; got != codes.Unset {
+		t.Errorf("a clean turn's span status = %v, want %v", got, codes.Unset)
+	}
+}
+
+// Shutting the loop down cancels the claim, and a cancelled claim is not a
+// fault: logging it would put one ERROR line — announcing a retry that will
+// never happen, since the select below returns straight away — into every clean
+// exit of every brain. Only a claim that failed while the loop meant to keep
+// running is worth an operator's attention.
+func TestShutdownLogsNoClaimFault(t *testing.T) {
+	logged := captureBrainLogs(t)
+
+	h := newHarness(t, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := h.brain.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled — the loop must have exited through the cancel", err)
+	}
+
+	for _, r := range logged() {
+		if strings.Contains(r.message, "claim failed") {
+			t.Errorf("clean shutdown logged a claim fault: %q", r.message)
+		}
 	}
 }
 

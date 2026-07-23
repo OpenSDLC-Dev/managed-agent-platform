@@ -76,10 +76,13 @@ func New(pool *pgxpool.Pool, registry *provider.Registry, cfg Config) *Brain {
 func (b *Brain) Run(ctx context.Context) error {
 	for {
 		found, err := b.RunOnce(ctx)
-		if err != nil && !found {
+		if err != nil && !found && !errors.Is(err, context.Canceled) {
 			// Nothing was claimed, so there is no turn and no span to hang this
 			// on: the queue itself is unreachable. A claimed turn's own fault is
 			// reported from inside its model_turn span, where a trace carries it.
+			// A cancelled claim is this loop shutting down, not a fault, and the
+			// select below is about to return — saying "retrying" there would be
+			// a lie at ERROR level on every clean exit.
 			slog.ErrorContext(ctx, "brain: claim failed, retrying", "error", err)
 		}
 		if found && err == nil {
@@ -98,11 +101,13 @@ func (b *Brain) Run(ctx context.Context) error {
 //
 // The claimed turn runs under a model_turn consumer span — the brain's
 // counterpart of the executor's tool_exec span and the BYOC worker's, the same
-// pull protocol's other two deployment points. It opens on the claimed item and
-// closes on its fate because both edges carry faults the nested model_request
-// span cannot: a turn can die before it opens (session lookup, replay, provider
-// resolution) and after it has closed (settlement, the lease proof), which is
-// where a stalled session's cause usually is. Unlike a tool_exec item there is no
+// two work-queue claimants. It opens on the claimed item and closes on its fate
+// because the nested model_request span can carry neither half of a turn fault.
+// Half the faults happen before that span exists at all — claimLiveSession, the
+// reclaim-recovery append, replay, request assembly, provider resolution, which
+// reach failTurn with a nil span. For the rest, runTurn hands back an error and
+// nothing else: sctx never leaves it, and Finish has closed the span before the
+// error arrives here. Unlike a tool_exec item there is no
 // enqueuing trace to continue — queue.Enqueue deliberately stores none on a
 // model_turn — so this span roots the turn's trace, and the tool_exec items the
 // turn enqueues carry its model_request onward as their parent.
