@@ -1,7 +1,9 @@
 package api_test
 
 import (
+	"context"
 	"encoding/base64"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -405,6 +407,43 @@ func TestSessionResourceEdgeCases(t *testing.T) {
 	for _, c := range absent {
 		status, body := s.do(c.method, c.path, c.body)
 		wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+	}
+}
+
+// TestSessionResourcesManagementOnlyLane pins the resources sub-endpoints to the
+// management lane: unlike the session-events subtree and the bare session GET,
+// they are not worker-facing, so an environment Bearer key is rejected by the
+// management lane (401), never reaching a handler. This guards against a future
+// change accidentally widening a worker predicate to admit them.
+func TestSessionResourcesManagementOnlyLane(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	const wkey = "wkey_resources_lane"
+	if err := api.EnsureEnvironmentKey(context.Background(), s.pool, envID, wkey); err != nil {
+		t.Fatalf("EnsureEnvironmentKey: %v", err)
+	}
+	bearer := map[string]string{"Authorization": "Bearer " + wkey}
+	fileA := uploadOneFile(t, s, "a.txt")
+	sess := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{map[string]any{"type": "file", "file_id": fileA}},
+	})
+	sid := sess["id"].(string)
+	rid := resourcesOf(t, sess)[0]["id"].(string)
+
+	for _, probe := range []struct{ method, path string }{
+		{"GET", "/v1/sessions/" + sid + "/resources"},
+		{"POST", "/v1/sessions/" + sid + "/resources"},
+		{"GET", "/v1/sessions/" + sid + "/resources/" + rid},
+		{"POST", "/v1/sessions/" + sid + "/resources/" + rid},
+		{"DELETE", "/v1/sessions/" + sid + "/resources/" + rid},
+	} {
+		res := s.doRaw(probe.method, probe.path, nil, bearer)
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusUnauthorized {
+			t.Errorf("env-key %s %s = %d, want 401 (management-only)", probe.method, probe.path, res.StatusCode)
+		}
 	}
 }
 
