@@ -124,10 +124,13 @@ slice 4 gives it a wire-only fetch path and records the divergence.
 5. **Session resources live in `sessions.resources` jsonb** — the column reserved since
    0001_init.sql:80 — as wire-shaped objects, no new table. Every sub-endpoint path
    carries the session ID, so lookups stay inside one row, and mutations take the same
-   `FOR UPDATE OF s` session lock the events path uses (internal/api/events.go:46-64).
-   `domain.SessionResource` (internal/domain/session.go:87-94) grows the typed file fields
-   (`FileID`, `MountPath`, `CreatedAt`, `UpdatedAt`) while keeping the raw envelope for
-   forward compatibility.
+   `FOR UPDATE` session lock the events path uses (internal/api/events.go:46-64).
+   **Refined in slice 2 (api-local, matching the files/skills precedent):** the resources
+   wire shape lives in `internal/api/sessionresources.go` (`fileResourceJSON`), materialized
+   objects are stored verbatim in the jsonb array, and session GET echoes them — the api
+   layer already renders sessions from its own `sessionJSON`, not `domain.Session`, so the
+   unused `domain.SessionResource` type is left as-is rather than grown (slices 3–4 parse the
+   `resources` column directly, exactly as the executor already parses `resolved_agent`).
 6. **`resources[]` validation replaces `rejectUnsupportedList`**
    (internal/api/sessions.go:270-285, call at :305-307). `type: "file"` is accepted:
    `file_` ID shape via `checkID`-style validation, **existence checked at create/add**

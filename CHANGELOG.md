@@ -15,6 +15,27 @@ copy of an entry here.
 
 ### Added
 
+- **Files API — session file `resources[]` + `sesrsc_` sub-endpoints (Files plan, slice 2)**
+  ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — session create
+  now accepts `resources[]` with `type:"file"`, replacing the blanket rejection. A file
+  resource's `file_id` is existence-checked in the create transaction (a missing file is a
+  404), its `mount_path` defaults to `/mnt/session/uploads/<file_id>` (else must be
+  absolute, storable, ≤1024 bytes, and unique within the session), and it is materialized
+  into `{id: sesrsc_…, file_id, mount_path, type, created_at, updated_at}` and stored in the
+  reserved `sessions.resources` jsonb array — session GET echoes it. `github_repository` and
+  `memory_store` stay rejected with "'X' resources are not supported yet", keeping the union
+  seam open for the git half of #55. Five management-only sub-endpoints under
+  `/v1/sessions/{id}/resources` — list (the `next_page` envelope, returning all when `limit`
+  is omitted per the SDK, a last-id cursor otherwise), get, add and delete (both take the
+  `FOR UPDATE` session lock and reject an archived session; delete removes the reference only,
+  never unmounting a live sandbox), and the token-rotation update, always a 400 for a file
+  resource ("only github_repository resources support token rotation"). Exercised end to end
+  over a real Postgres and blob store — create/get/list/add/delete round-trip, the validation
+  and archived-mutation rejections, list pagination — with `slog` and a `session.resources`
+  (outcome-only) counter on every mutation. Slice-2 inferences (existence-checking,
+  mount-path constraints, archived-mutation and no-unmount deletion, the update error shape)
+  are recorded in [docs/DIVERGENCES.md](./docs/DIVERGENCES.md); the create-rejection entry is
+  carved down there. Remaining: executor/brain materialization and the BYOC worker.
 - **Files API — the `/v1/files` registry (Files plan, slice 1)**
   ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — the
   wire-compatible `/v1/files` upload/list/get-metadata/download/delete registry over the
