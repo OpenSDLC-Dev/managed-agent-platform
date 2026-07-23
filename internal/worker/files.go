@@ -76,14 +76,22 @@ func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb san
 		workdir = sandbox.DefaultWorkdir
 	}
 	sentinelPath := path.Join(workdir, filesSentinelName)
+	// A mount at the sentinel's own path disables the sentinel for this session: the
+	// file owns that path, so the marker is neither trusted for the skip (else
+	// marker-equal file bytes — a pre-guard clobber healed on upgrade, or bytes the
+	// agent wrote — would wedge the mount) nor written (which would clobber the
+	// file). Such a session re-materializes every pass — correct, just unoptimized.
+	sentinelUsable := !mountAtPath(mounts, sentinelPath)
 	// Skip only when the marker names exactly this mounted set AND every mount is
 	// still present (a shell test, never a read-back — a mount can be 500 MB), the
 	// executor's rule.
 	marker := filesSentinel(mounts)
-	if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil &&
-		bytes.Equal(prev, marker) && mountsPresent(ctx, sb, mounts) {
-		span.SetAttributes(attribute.Bool("files.unchanged", true))
-		return nil
+	if sentinelUsable {
+		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil &&
+			bytes.Equal(prev, marker) && mountsPresent(ctx, sb, mounts) {
+			span.SetAttributes(attribute.Bool("files.unchanged", true))
+			return nil
+		}
 	}
 
 	landed := make([]fileRef, 0, len(mounts))
@@ -99,12 +107,8 @@ func SetupFiles(ctx context.Context, client sdk.Client, sessionID string, sb san
 	}
 	span.SetAttributes(attribute.Int("files.materialized", len(landed)))
 	// The sentinel records only what landed, so a partial pass (a dangling mount)
-	// leaves a marker that never equals the full set and the next pass re-runs. But
-	// never let the bookkeeping file overwrite a real mount: a caller may mount a
-	// file at the sentinel's own path, and writing the marker there would clobber
-	// the file and then skip it forever. Honor the user's mount and drop the
-	// sentinel — that session re-materializes every pass, correct if unoptimized.
-	if mountAtPath(mounts, sentinelPath) {
+	// leaves a marker that never equals the full set and the next pass re-runs.
+	if !sentinelUsable {
 		slog.WarnContext(ctx, "files sentinel skipped: a mount occupies the sentinel path",
 			"session_id", sessionID, "sentinel_path", sentinelPath)
 	} else if err := sb.WriteFile(ctx, sentinelPath, filesSentinel(landed)); err != nil {

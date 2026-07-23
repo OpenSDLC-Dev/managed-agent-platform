@@ -30,7 +30,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 8
+const wantMigrations = 9
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()

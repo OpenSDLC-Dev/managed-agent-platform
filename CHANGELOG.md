@@ -29,7 +29,9 @@ copy of an entry here.
   a session in its own environment (a superset of, not restricted to, the one session it is
   currently servicing), never a file no session in that environment mounts and never another
   environment's files; a leaked key is not a workspace-wide file-exfiltration credential and
-  cannot even probe cross-environment file existence. The rest
+  cannot even probe cross-environment file existence. This lookup runs on every worker file
+  download, so migration `0009` adds `sessions_environment_idx` — an index that narrows the
+  containment check to the environment's sessions instead of scanning every session. The rest
   of the `/v1/files` registry (metadata GET, list, mutations) and the session `resources`
   sub-endpoints stay management-only. The worker's `SetupFiles` (twin of the executor's
   `materializeFiles`, run right after `SetupSkills` in `RunSessionTools`) reads the session's
@@ -40,10 +42,12 @@ copy of an entry here.
   sentinel/present-probe helpers are duplicated from the executor by design, not shared: the
   two halves never touch the same sandbox (a session runs on `cloud` **or** `self_hosted`).
   A mount whose path collides with the sentinel's own location (`{workdir}/.files_materialized`)
-  no longer has its bytes clobbered by the marker write and then skipped forever: on both
-  halves the sentinel write is dropped when a mount occupies that path, so the file wins and
-  the session re-materializes every pass (a `mountAtPath` guard; the executor half of slice 3
-  carried the same latent hazard and is fixed in the same change).
+  no longer wedges: on both halves a `mountAtPath` guard disables the sentinel for that session
+  — the marker is neither trusted for the skip (so marker-equal bytes at that path, whether a
+  pre-guard clobber healed on upgrade or bytes the agent wrote, cannot short-circuit
+  re-materialization) nor written (so the file is never clobbered) — the file wins and the
+  session re-materializes every pass (the executor half of slice 3 carried the same latent
+  hazard and is fixed in the same change).
   `slog` + `files.materialized`/`files.materialize.duration` metrics on the worker meter
   scope (outcome-labelled, ids in logs and spans never in labels), under a `files_materialize`
   span. Covered end-to-end by `TestSetupFilesOverTheWire` (a worker pulls a mounted file

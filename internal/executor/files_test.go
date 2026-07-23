@@ -251,15 +251,17 @@ func TestFilesSentinelPathCollision(t *testing.T) {
 	if got := sb.files[sentinelPath]; got != "the user's bytes" {
 		t.Fatalf("mount at the sentinel path = %q, want the user's file (the sentinel must not clobber it)", got)
 	}
-	// No wedge: with no sentinel written, a later pass re-materializes rather than
-	// short-circuiting on a marker.
-	sb.files[sentinelPath] = "mutated"
+	// The read-side skip must be disabled on collision too: plant the exact marker
+	// bytes at the mount (a pre-guard clobber healed on upgrade, or bytes the agent
+	// wrote). Without the read guard the skip fires on marker-equal bytes and the
+	// stale marker wedges the mount; with it, the file re-materializes.
+	sb.files[sentinelPath] = string(filesSentinel([]fileRef{{FileID: "file_collide", MountPath: sentinelPath}}))
 	h.suspend(t, writeUse("out2.txt", "y"))
 	if _, err := h.exec.step(context.Background()); err != nil {
 		t.Fatalf("second step: %v", err)
 	}
 	if got := sb.files[sentinelPath]; got != "the user's bytes" {
-		t.Errorf("collision mount not re-materialized: %q, want the user's file", got)
+		t.Errorf("collision mount not re-materialized (read-side skip unguarded): %q, want the user's file", got)
 	}
 }
 

@@ -75,16 +75,24 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 		workdir = sandbox.DefaultWorkdir
 	}
 	sentinelPath := path.Join(workdir, filesSentinelName)
+	// A mount at the sentinel's own path disables the sentinel for this session: the
+	// file owns that path, so the marker is neither trusted for the skip (else
+	// marker-equal file bytes — a pre-guard clobber healed on upgrade, or bytes the
+	// agent wrote — would wedge the mount) nor written (which would clobber the
+	// file). Such a session re-materializes every pass — correct, just unoptimized.
+	sentinelUsable := !mountAtPath(mounts, sentinelPath)
 	// Skip only when the marker names exactly this mounted set AND every mount
 	// still exists — the sandbox filesystem is agent-writable, so a tool call
 	// may have deleted a mount the marker still claims. Presence is probed with
 	// a shell test, never ReadFile: a 500 MB mount cannot be read back to check
 	// it is there.
 	marker := filesSentinel(mounts)
-	if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil &&
-		bytes.Equal(prev, marker) && e.mountsPresent(ctx, sb, mounts) {
-		span.SetAttributes(attribute.Bool("files.unchanged", true))
-		return
+	if sentinelUsable {
+		if prev, err := sb.ReadFile(ctx, sentinelPath); err == nil &&
+			bytes.Equal(prev, marker) && e.mountsPresent(ctx, sb, mounts) {
+			span.SetAttributes(attribute.Bool("files.unchanged", true))
+			return
+		}
 	}
 
 	landed := make([]fileRef, 0, len(mounts))
@@ -107,12 +115,8 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 	span.SetAttributes(attribute.Int("files.materialized", len(landed)))
 	// The sentinel records only what landed: a partial pass (a dangling mount)
 	// leaves a marker that never equals the full set, so the next pass re-runs —
-	// the skills-registry behavior, carried over. But never let the bookkeeping
-	// file overwrite a real mount: a caller may mount a file at the sentinel's own
-	// path, and writing the marker there would clobber the file and then skip it
-	// forever. Honor the user's mount and drop the sentinel — that session
-	// re-materializes every pass, which is correct, just unoptimized.
-	if mountAtPath(mounts, sentinelPath) {
+	// the skills-registry behavior, carried over.
+	if !sentinelUsable {
 		slog.WarnContext(ctx, "files sentinel skipped: a mount occupies the sentinel path",
 			"session_id", sid, "sentinel_path", sentinelPath)
 	} else if err := sb.WriteFile(ctx, sentinelPath, filesSentinel(landed)); err != nil {
