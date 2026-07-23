@@ -1,9 +1,16 @@
 ---
-status: in-progress
+status: archived
 issue: "#55"
 ---
 
 # Files: the `/v1/files` registry and session file resources (plan 08)
+
+> **Archived 2026-07-23, completed (Files half of #55).** All four slices landed (PRs
+> #156–#158 plus the slice-4 BYOC-worker PR). The as-built system is in
+> docs/ARCHITECTURE.md; the delivery narrative in CHANGELOG.md; acceptance-run records and
+> this plan's progress summary in docs/HISTORY.md. #55 stays open for its other half —
+> git/repo mounting (`github_repository` resources). Retained for the rationale below,
+> consulted before large changes.
 
 This plan lifts the **Files half of #55** out of its reserved seam: the wire-compatible
 `/v1/files` registry over the existing object-storage layer, session `resources[]`
@@ -179,10 +186,11 @@ slice 4 gives it a wire-only fetch path and records the divergence.
     `GET /v1/files/{id}/content` to the environment-key dual-auth lane — narrower than
     skills' full read set — and the download handler skips the downloadable gate for that
     lane. Unlike skills (whose env lane is deliberately workspace-global — skills are
-    shared assets), file content can be sensitive, so the env lane is **session-scoped**:
-    the download handler authorizes an environment key only for a file referenced by the
-    `resources[]` of a session in that environment (one jsonb containment lookup —
-    `resources @> '[{"file_id": …}]'` filtered on `environment_id`). A leaked environment
+    shared assets), file content can be sensitive, so the env lane is **environment-scoped
+    and gated on the file being mounted**: the download handler authorizes an environment key
+    only for a file referenced by the `resources[]` of some session in that environment (one
+    jsonb containment lookup — `resources @> '[{"file_id": …}]'` filtered on `environment_id`;
+    the scope is the environment, not the single session a worker is servicing). A leaked environment
     key never becomes a workspace-wide file-exfiltration credential. Recorded with the
     auth-scope entry in slice 4 (the reference has no worker file lane at all).
 
@@ -246,7 +254,7 @@ request/session/file ids) **and** OTel metrics/spans, mirroring the density alre
    endpoint; platform-half chain proven.
 4. **BYOC worker + env-key content lane; archive.** `isFileReadPath` dual-auth lane for
    `GET /v1/files/{id}/content` with the lane-aware downloadable bypass and the
-   session-scoped authorization check (decision 10);
+   environment-scoped authorization check (decision 10);
    `internal/worker/files.go` wire-only twin with the same sentinel and metrics; E2E-3
    manual acceptance (worker on the host materializes a mount; transcript to
    docs/HISTORY.md); README/ARCHITECTURE updates for the landed feature; archive this
@@ -302,7 +310,7 @@ line-67 twin); sentinel idempotence instead of re-materializing every item (exte
 skills line-32 analysis to file mounts).
 
 Slice 4 — **CONFIRMED/INFERRED** — file-content reads on the environment-key lane with
-the downloadable bypass, session-scoped per decision 10 (the reference worker has no file
+the downloadable bypass, environment-scoped per decision 10 (the reference worker has no file
 path at all, so the lane itself and its auth scope are ours to define and record).
 
 ## Recording checklist (deferred until credentials exist)

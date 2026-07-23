@@ -107,8 +107,15 @@ func (e *Executor) materializeFiles(ctx context.Context, sb sandbox.Sandbox, sid
 	span.SetAttributes(attribute.Int("files.materialized", len(landed)))
 	// The sentinel records only what landed: a partial pass (a dangling mount)
 	// leaves a marker that never equals the full set, so the next pass re-runs —
-	// the skills-registry behavior, carried over.
-	if err := sb.WriteFile(ctx, sentinelPath, filesSentinel(landed)); err != nil {
+	// the skills-registry behavior, carried over. But never let the bookkeeping
+	// file overwrite a real mount: a caller may mount a file at the sentinel's own
+	// path, and writing the marker there would clobber the file and then skip it
+	// forever. Honor the user's mount and drop the sentinel — that session
+	// re-materializes every pass, which is correct, just unoptimized.
+	if mountAtPath(mounts, sentinelPath) {
+		slog.WarnContext(ctx, "files sentinel skipped: a mount occupies the sentinel path",
+			"session_id", sid, "sentinel_path", sentinelPath)
+	} else if err := sb.WriteFile(ctx, sentinelPath, filesSentinel(landed)); err != nil {
 		slog.WarnContext(ctx, "files sentinel not written", "session_id", sid, "err", err)
 	}
 }
@@ -182,3 +189,15 @@ func filesSentinel(mounts []fileRef) []byte {
 
 // shellQuote makes a path a single, literal shell word for the presence probe.
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// mountAtPath reports whether any mount targets p (cleaned, so /workspace/./x
+// matches /workspace/x) — the guard that keeps the sentinel from overwriting a
+// file mounted at the sentinel's own path and then skipping it forever.
+func mountAtPath(mounts []fileRef, p string) bool {
+	for _, m := range mounts {
+		if path.Clean(m.MountPath) == p {
+			return true
+		}
+	}
+	return false
+}

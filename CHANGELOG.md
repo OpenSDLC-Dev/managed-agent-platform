@@ -15,6 +15,49 @@ copy of an entry here.
 
 ### Added
 
+- **Files API — the BYOC worker file lane: environment-scoped content download + wire-only materialization (Files plan, slice 4 — closes the Files half of #55)**
+  ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — a self-hosted
+  worker now mounts a session's files exactly as the platform executor does, but wire-only:
+  no database, no object store. `GET /v1/files/{id}/content` becomes a **dual-auth** route
+  (`isFileReadPath`) — the sole `/v1/files` endpoint a worker's environment Bearer key may
+  reach — and its handler is **lane-aware**: on the management lane it keeps the slice-1
+  `downloadable`-column gate, while on the environment-key lane it skips that gate and
+  authorizes by **environment scope** instead, serving only a file that some session in the
+  caller's own environment actually mounts (`fileMountedInEnvironment`, a
+  `resources @> [{file_id}]` jsonb-containment check filtered on `environment_id`) and
+  answering 404 for anything else — so a worker's environment key reads only files mounted by
+  a session in its own environment (a superset of, not restricted to, the one session it is
+  currently servicing), never a file no session in that environment mounts and never another
+  environment's files; a leaked key is not a workspace-wide file-exfiltration credential and
+  cannot even probe cross-environment file existence. The rest
+  of the `/v1/files` registry (metadata GET, list, mutations) and the session `resources`
+  sub-endpoints stay management-only. The worker's `SetupFiles` (twin of the executor's
+  `materializeFiles`, run right after `SetupSkills` in `RunSessionTools`) reads the session's
+  top-level `resources[]` over the wire, streams each mount's bytes from the content lane
+  straight into the sandbox via `WriteFileStream`, and records the same `.files_materialized`
+  sentinel (sorted `{file_id, mount_path}` marker + `test -e` present-set skip probe) and the
+  same per-file tolerance (a dangling mount 404s → `not_found`, never fatal). The
+  sentinel/present-probe helpers are duplicated from the executor by design, not shared: the
+  two halves never touch the same sandbox (a session runs on `cloud` **or** `self_hosted`).
+  A mount whose path collides with the sentinel's own location (`{workdir}/.files_materialized`)
+  no longer has its bytes clobbered by the marker write and then skipped forever: on both
+  halves the sentinel write is dropped when a mount occupies that path, so the file wins and
+  the session re-materializes every pass (a `mountAtPath` guard; the executor half of slice 3
+  carried the same latent hazard and is fixed in the same change).
+  `slog` + `files.materialized`/`files.materialize.duration` metrics on the worker meter
+  scope (outcome-labelled, ids in logs and spans never in labels), under a `files_materialize`
+  span. Covered end-to-end by `TestSetupFilesOverTheWire` (a worker pulls a mounted file
+  through the real control plane over its environment key and streams it into the sandbox;
+  sentinel skip + deleted-mount restore) and `TestFileContentEnvironmentKeyLane` (the content
+  lane's auth matrix: mounted-download 200, unmounted/cross-env 404, and the `/v1/files`
+  metadata GET, list, and DELETE routes 401 on the env key — the session `resources`
+  sub-endpoints' management-only 401s are pinned separately by the pre-existing
+  `TestSessionResourcesManagementOnlyLane`); the sentinel-collision guard is pinned on both
+  halves (`TestFilesSentinelPathCollision`, `TestSetupFilesSentinelPathCollision`). The
+  env-key content lane and its environment scope are recorded in
+  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) (the reference has no worker file lane at all).
+  With this, both execution halves — platform executor and BYOC worker — materialize session
+  file mounts; git/repo mounting stays deferred on #55.
 - **Files API — materialization: executor mounts, brain injection, streaming sandbox seam (Files plan, slice 3)**
   ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — mounted files now
   reach the sandbox and the model. The `sandbox.Sandbox` interface gains a streaming
@@ -43,7 +86,7 @@ copy of an entry here.
   `file-answer` eval (opt-in, `RUN_EVALS=1`) proves the whole platform chain: upload → mount →
   materialize → the agent reads the mounted passphrase. Slice-3 inferences (the block format
   and placement, sentinel idempotence for mounts) are in
-  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md). Remaining: the BYOC worker + the session-scoped
+  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md). Remaining: the BYOC worker + the environment-scoped
   env-key content lane (slice 4).
 - **Files API — session file `resources[]` + `sesrsc_` sub-endpoints (Files plan, slice 2)**
   ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — session create
@@ -85,7 +128,7 @@ copy of an entry here.
   public Files docs, the pinned SDK, and the `ant` CLI source (no live recording —
   recording-only behavior is pre-listed as DIVERGENCES.md inferences per slice). Remaining
   slices: session `resources[]` (`type: "file"`) + `sesrsc_` sub-endpoints, executor/brain
-  materialization, and the BYOC worker with a session-scoped env-key content lane. Git/repo
+  materialization, and the BYOC worker with an environment-scoped env-key content lane. Git/repo
   mounting stays deferred on #55.
 - **Shared provider contract suite**
   ([#48](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/48)) — the two

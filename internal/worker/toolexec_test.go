@@ -38,7 +38,24 @@ type fakeSandbox struct {
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
-func (f *fakeSandbox) Exec(context.Context, sandbox.ExecRequest) (sandbox.ExecResult, error) {
+func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	// Reflect real file presence for SetupFiles's mountsPresent probe
+	// (`test -e '<p>' && … && true`), so a deleted mount reports absent and forces
+	// re-materialization. The exact shape match keeps ordinary tool commands on
+	// the unconditional exit-0 path.
+	if strings.HasPrefix(req.Command, "test -e ") && strings.HasSuffix(req.Command, "&& true") {
+		for _, tok := range strings.Split(req.Command, " && ") {
+			if tok == "true" {
+				continue
+			}
+			p := strings.TrimPrefix(tok, "test -e ")
+			p = strings.TrimSuffix(strings.TrimPrefix(p, "'"), "'")
+			p = strings.ReplaceAll(p, `'\''`, "'") // reverse shellQuote
+			if _, ok := f.files[p]; !ok {
+				return sandbox.ExecResult{ExitCode: 1}, nil
+			}
+		}
+	}
 	return sandbox.ExecResult{}, nil
 }
 func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
