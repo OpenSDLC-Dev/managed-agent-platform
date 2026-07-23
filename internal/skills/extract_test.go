@@ -280,6 +280,13 @@ func marker(entries string) []byte {
 }
 
 func TestReadArchiveVerifiesDigest(t *testing.T) {
+	// A published known-answer vector: every other digest assertion recomputes
+	// the expectation with the same primitives Digest uses, so on its own an
+	// algorithm or encoding swap would pass them all.
+	if got := Digest([]byte("abc")); got != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+		t.Errorf(`Digest("abc") = %q, want the published sha256 vector`, got)
+	}
+
 	body := []byte("PK\x03\x04 pretend archive bytes")
 	sum := Digest(body)
 

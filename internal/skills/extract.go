@@ -74,9 +74,11 @@ func ReadArchive(r io.Reader, wantSHA256 string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if wantSHA256 != "" && !strings.EqualFold(wantSHA256, Digest(data)) {
-		return nil, fmt.Errorf("%w: read %d bytes hashing to %s, expected %s",
-			ErrDigestMismatch, len(data), Digest(data), wantSHA256)
+	if wantSHA256 != "" {
+		if got := Digest(data); !strings.EqualFold(wantSHA256, got) {
+			return nil, fmt.Errorf("%w: read %d bytes hashing to %s, expected %s",
+				ErrDigestMismatch, len(data), got, wantSHA256)
+		}
 	}
 	return data, nil
 }
