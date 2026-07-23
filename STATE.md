@@ -4,11 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55) — Files API, per [docs/plan/08_files.md](./docs/plan/08_files.md) (in-progress). The Files half only; git/repo mounting stays deferred on #55.
+None.
 
 ## Tasks
 
-- [x] **Slice 1 — the `/v1/files` registry** (upload/list/get/download/delete + migration `0008`). — [PR #156](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/156).
-- [x] **Slice 2 — session `resources[]` (`type: "file"`) + the five `sesrsc_` sub-endpoints** (create-time file mounts + list/get/add/delete/update-reject, stored in the `sessions.resources` jsonb). — [PR #157](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/157).
-- [x] **Slice 3 — executor materialization + streaming sandbox write + brain injection + `file-answer` eval** (`Sandbox.WriteFileStream` on both backends; `materializeFiles` streams blob→sandbox with sentinel + `test -e` re-probe; brain "Mounted files" block; evals upload→mount→read). — [PR #158](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/158).
-- [ ] Slice 4 — BYOC worker + session-scoped env-key content lane; archive.
+None.

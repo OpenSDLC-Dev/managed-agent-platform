@@ -332,7 +332,21 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	if !downloadable {
+	// Lane-aware authorization. On the worker environment-key lane, a mount's
+	// bytes must be readable regardless of the downloadable flag (a user upload is
+	// downloadable=false), but the key is scoped to files a session in its own
+	// environment actually mounts — file content can be sensitive, unlike
+	// workspace-global skills (decision 10). A file no session in the env mounts is
+	// answered as absent (404), so a leaked environment key can neither read
+	// arbitrary files nor probe their existence across environments. On the
+	// management x-api-key lane (env == ""), the reference's downloadable gate
+	// stands and there is no session scoping.
+	if env := environmentFrom(ctx); env != "" {
+		if !s.fileMountedInEnvironment(ctx, env, id) {
+			writeError(w, r, errNotFound("file %s not found", id))
+			return
+		}
+	} else if !downloadable {
 		writeError(w, r, errInvalid(
 			"file %s is not downloadable; only files created by skills or the code execution tool can be downloaded", id))
 		return
@@ -359,6 +373,27 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	recordFileDownload(ctx, size)
 	slog.DebugContext(ctx, "file downloaded", "file_id", id, "bytes", size)
+}
+
+// fileMountedInEnvironment reports whether some session in the environment
+// references the file in its resources[] — the environment-scope check that gates
+// the worker environment-key download lane (decision 10). One jsonb containment
+// lookup on `sessions.resources`, filtered on environment_id (the scope is the
+// environment, not the one session a worker is servicing). A store error reads
+// as "not mounted": the lane fails closed to a 404, so a transient database blip
+// denies rather than leaks.
+func (s *server) fileMountedInEnvironment(ctx context.Context, envID, fileID string) bool {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM sessions
+		   WHERE environment_id = $1
+		     AND resources @> jsonb_build_array(jsonb_build_object('file_id', $2::text)))`,
+		envID, fileID).Scan(&exists); err != nil {
+		slog.WarnContext(ctx, "file mount scope check failed",
+			"file_id", fileID, "environment_id", envID, "err", err)
+		return false
+	}
+	return exists
 }
 
 // parseFileLimit parses the GET /v1/files limit (1–1000, default 20). The

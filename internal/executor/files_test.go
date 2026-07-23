@@ -233,6 +233,38 @@ func TestFilesRematerializeWhenMountReassigned(t *testing.T) {
 	}
 }
 
+// TestFilesSentinelPathCollision: a caller may mount a file at the sentinel's own
+// path. The bookkeeping marker must never clobber that mount — the file's bytes
+// win, the sentinel write is dropped, and the mount re-materializes every pass
+// instead of being silently replaced by marker JSON and then skipped forever.
+// Without the mountAtPath guard the first assertion sees the sentinel JSON.
+func TestFilesSentinelPathCollision(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	sentinelPath := sandbox.DefaultWorkdir + "/" + filesSentinelName
+	h.seedFile(t, "file_collide", "the user's bytes")
+	h.refFiles(t, [2]string{"file_collide", sentinelPath})
+	h.suspend(t, writeUse("out.txt", "x"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	if got := sb.files[sentinelPath]; got != "the user's bytes" {
+		t.Fatalf("mount at the sentinel path = %q, want the user's file (the sentinel must not clobber it)", got)
+	}
+	// The read-side skip must be disabled on collision too: plant the exact marker
+	// bytes at the mount (a pre-guard clobber healed on upgrade, or bytes the agent
+	// wrote). Without the read guard the skip fires on marker-equal bytes and the
+	// stale marker wedges the mount; with it, the file re-materializes.
+	sb.files[sentinelPath] = string(filesSentinel([]fileRef{{FileID: "file_collide", MountPath: sentinelPath}}))
+	h.suspend(t, writeUse("out2.txt", "y"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("second step: %v", err)
+	}
+	if got := sb.files[sentinelPath]; got != "the user's bytes" {
+		t.Errorf("collision mount not re-materialized (read-side skip unguarded): %q, want the user's file", got)
+	}
+}
+
 // TestMaterializeFilesNoResources: a session with no file resources materializes
 // nothing and writes no sentinel — the common case must not touch the sandbox.
 func TestMaterializeFilesNoResources(t *testing.T) {

@@ -83,6 +83,9 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 	if err := SetupSkills(ctx, client, sessionID, sb, cfg.Workdir); err != nil {
 		return err
 	}
+	if err := SetupFiles(ctx, client, sessionID, sb, cfg.Workdir); err != nil {
+		return err
+	}
 	runner := toolset.Runner{Sandbox: sb, Session: domain.ID(sessionID), Workdir: cfg.Workdir}
 	for _, u := range uses {
 		res, err := runner.Run(ctx, u.id, u.name, u.input)

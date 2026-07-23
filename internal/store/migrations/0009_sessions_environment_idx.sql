@@ -1,0 +1,14 @@
+-- 0009_sessions_environment_idx: index sessions by environment (docs/plan/08_files.md, slice 4).
+--
+-- The BYOC worker file-content lane authorizes a download by asking whether some
+-- session in the caller's environment mounts the file:
+--   SELECT EXISTS (SELECT 1 FROM sessions
+--      WHERE environment_id = $1
+--        AND resources @> jsonb_build_array(jsonb_build_object('file_id', …)))
+-- (internal/api/files.go, fileMountedInEnvironment). This runs on every worker
+-- file download; until now sessions carried only sessions(agent_id), so the
+-- environment predicate scanned the whole table and the cost grew with total
+-- sessions. This btree gives the lookup an indexed access path, narrowing to the
+-- environment's sessions before the containment check. It also backs the reserved
+-- environment-scoped session queries generally.
+CREATE INDEX sessions_environment_idx ON sessions (environment_id);

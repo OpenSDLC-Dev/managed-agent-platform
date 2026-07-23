@@ -154,6 +154,7 @@ func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	mgmt := requireAPIKey(pool, next)
 	sessionEvents := dispatchSessionEventsAuth(pool, next)
 	skillReads := dualAuth(requireEnvironmentKey(pool, next), mgmt)
+	fileReads := dualAuth(requireEnvironmentKey(pool, next), mgmt)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Classify on the escaped path, splitting only on real '/' — the segment
 		// structure ServeMux routes on (an encoded %2F stays within one segment).
@@ -177,6 +178,8 @@ func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			sessionEvents.ServeHTTP(w, r)
 		case r.Method == http.MethodGet && isSkillReadPath(p):
 			skillReads.ServeHTTP(w, r)
+		case r.Method == http.MethodGet && isFileReadPath(p):
+			fileReads.ServeHTTP(w, r)
 		default:
 			mgmt.ServeHTTP(w, r)
 		}
@@ -297,6 +300,25 @@ func isSkillReadPath(p string) bool {
 		return segs[1] == "versions" && segs[3] == "content"
 	}
 	return false
+}
+
+// isFileReadPath reports whether p is the file-content read route
+// /v1/files/{id}/content — and nothing else. This is the single route a BYOC
+// worker's SetupFiles hits with its environment key to pull a mounted file's
+// bytes, so it alone joins the dual-auth set — deliberately narrower than the
+// skills read set: the metadata GET /v1/files/{id}, the list, and every mutation
+// stay management-only. Unlike skills (workspace-global), file content can be
+// sensitive, so admission to the env lane is not sufficient — downloadFile
+// additionally scopes an environment key to files a session in that environment
+// mounts. Sees the escaped path, so a %2F can never smuggle a files segment past
+// the router's view.
+func isFileReadPath(p string) bool {
+	const prefix = "/v1/files/"
+	if !strings.HasPrefix(p, prefix) {
+		return false
+	}
+	segs := strings.Split(p[len(prefix):], "/")
+	return len(segs) == 2 && segs[0] != "" && segs[1] == "content"
 }
 
 // isBareSessionPath reports whether p is exactly /v1/sessions/{id} — a single
