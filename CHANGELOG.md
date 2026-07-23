@@ -20,7 +20,7 @@ copy of an entry here.
   schema, so moving the pin changes what the repo is measured against; the field-by-field
   measurements are the verification record in [docs/HISTORY.md](./docs/HISTORY.md) §
   "anthropic-sdk-go v1.59.0 bump", and the plan that framed the questions is
-  [09_sdk-bump-1.59.0.md](./docs/plan/09_sdk-bump-1.59.0.md). The range spans v1.58.1 (citation
+  [11_sdk-bump-1.59.0.md](./docs/plan/11_sdk-bump-1.59.0.md). The range spans v1.58.1 (citation
   `ToParam` fixes, a new `general_harms` refusal category) and v1.59.0, which adds managed-agents
   model `effort`, session `initial_events`, and thread delta streaming. The route table did not move
   (131 endpoints, unchanged); four schema fields did, and each resolved to exactly one of *mirror it
