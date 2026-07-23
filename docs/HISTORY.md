@@ -331,6 +331,83 @@ Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https
 
 ---
 
+## Brain turn-fault correlation (plan 09) — archived 2026-07-23
+
+[docs/plan/09_brain-turn-fault-span.md](./plan/09_brain-turn-fault-span.md), delivered in one PR
+(**#164**) for [#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92). The change and
+its reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a changelog cannot
+hold.
+
+**The issue's own "cheap version" was evaluated and rejected as inert — it does not compile into a
+fix.** #92 offered `telemetry.Extract(ctx, item.TraceContext)` in `RunOnce` as the low-cost option,
+"the same shape the executor's fault log had before the log-bridge PR improved it, and better than
+nothing". Against this repository's source it is worth exactly nothing: `internal/queue/queue.go`'s
+`Enqueue` captures a trace context only for `kind == ToolExec` and deliberately writes SQL NULL for a
+`model_turn` ("capturing it there would only persist an unread payload"), a decision ARCHITECTURE.md's
+Observability section states in the same words. `item.TraceContext` is therefore always nil on the
+brain's path, `Extract` returns the context unchanged, and the log would have stayed as uncorrelated
+as before while looking fixed. The issue was filed by a reviewer reasoning from the executor's shape;
+the `issue-triage` subagent independently reached the same refutation from the same source. This is
+the case CLAUDE.md's "verify every finding against the source before acting on it" is written for,
+in its rarer direction: the finding was real, one of its two proposed remedies was not.
+
+**Extending trace-context capture to `model_turn` was considered and deliberately deferred.** It is
+the other way to make a turn's failure findable — parent each turn on whatever enqueued it — and it
+is a strictly larger decision: it reverses the queue-level choice above at three enqueue sites (the
+API's `user.message` trigger, the executor's resume-enqueue, the brain's own chained requeue), and
+those are three *different* traces with three different notions of "end to end". Nothing #92 asks for
+requires picking one. Without it the `model_turn` span roots the turn's own trace exactly as
+`model_request` already did, so the trace topology gains a level and changes no shape, and the
+`tool_exec` items a turn enqueues keep parenting on `model_request` — the executor's and BYOC
+worker's existing correlation is untouched, as `TestToolExecEnqueueCapturesTurnTrace` still asserts.
+
+**Why the fault log could not simply move onto the existing `model_request` span — and why the
+obvious version of that argument is wrong.** The tempting phrasing is "the faults land on both sides
+of it: liveness lookup and replay before it opens, settlement after it closes". The second half is
+false, and the Claude reviewer caught it in six places before merge: `settleTurn` calls `commitTurn`
+**first** and `span.Finish(ctx, false, err)` after, an ordering `internal/events/span.go` states
+deliberately ("Finish runs after the settlement transaction so it can record whether the end event
+actually committed"), so settlement runs *inside* the `model_request` span and a failed commit does
+redden it. The true argument has two halves: (1) `claimLiveSession`, the reclaim-recovery append,
+replay, request assembly and provider resolution fail before that span exists at all — they reach
+`failTurn` with a nil span; (2) for every fault that does occur inside it, `runTurn` returns an error
+and nothing else, so `sctx` never leaves the function and the span is already closed when `RunOnce`
+sees the failure. A `SpanKindConsumer` span standing for the handling of one claimed item end to end
+is the only frame that holds for both.
+
+**Test method — the span id is the assertion, not the trace id.** A parent and its child share a
+trace id, so a trace-id assertion cannot tell "logged on the turn's own span" from "logged on some
+span in the turn's trace", and would have passed against a design that hung the record anywhere in
+the tree. `TestTurnFaultLogLandsOnTheModelTurnSpan` asserts the span id, mirroring
+`internal/executor`'s `TestFaultLogLandsOnTheToolExecSpan`, and was run against the unfixed brain
+first: it failed on the absent `model_turn` span, so it cannot be passing for an unrelated reason.
+
+**Review-hardening record.** Codex (`gpt-5.6-sol`, `ultra`) and the Claude-side reviewer both found
+the code correct under adversarial reading — the named-return/defer pairing, the `err != nil &&
+!found` predicate, span lifetime and nil-safety, the platform-fault-only reddening rule, and
+cross-process trace parenting all survived — and both spent their findings on the prose instead.
+Four corrections landed pre-merge: the inverted settlement/`Finish` ordering above (six places); the
+claim that the old log carried "no session id", when `RunOnce`'s `fmt.Errorf("session %s: %w", …)`
+put it in the message text (narrowed to "no trace, no span"); "the pull protocol's third deployment
+point", which collided with the term's established `cloud`/`self_hosted` meaning in CLAUDE.md,
+README and this file (now "the work queue's third claimant"); and an "always reachable from the red
+span" claim about all three claimants that the BYOC worker's heartbeat path does not honour — its
+lease-loss warnings log outside the run's span, so ARCHITECTURE now names that exception rather than
+overclaiming. Two tests were added in response: the unset-status negative the verifier found
+unpinned, and a shutdown test for `Run`'s surviving log. Every new assertion was mutation-checked —
+the fault-log test against a `context.Background()` log and a removed `SetStatus`, the parenting test
+against a discarded span context, the unset-status test against a `failTurn` that returns an error,
+the shutdown test against the removed cancellation guard — each turning red on the mutation it
+targets.
+
+**Governance — the plan was authored after the fix, and says so.** `issue-triage` returned
+`needs_plan: true`; the implementation was already written test-first from the issue by then, so this
+plan is a decision record rather than a forward design. It lands `archived` in its one delivering PR
+on the plan-07 precedent, and STATE.md is untouched — the work starts and finishes in the same PR, so
+there is never an in-flight state for it to track.
+
+---
+
 ## Reject unknown agent_toolset fields (plan 07) — archived 2026-07-22
 
 [docs/plan/07_reject-unknown-toolset-fields.md](./plan/07_reject-unknown-toolset-fields.md),

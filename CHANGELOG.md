@@ -499,6 +499,39 @@ copy of an entry here.
 
 ### Fixed
 
+- **The brain's turn-fault log reached the collector with no trace, so a stalled session's cause was
+  the one fault missing from its trace**
+  ([#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92)) — `Brain.Run` reported a
+  failed turn with a bare `slog.Error`, which logs against `context.Background()`; the OTLP bridge
+  correlates a record by reading the span context off the *logging* context, so the line arrived with
+  no trace and no span — the session id it carried was free text inside the error string, not
+  something a trace view could pivot on. The executor's twin fault already answers from inside its
+  open `tool_exec` span, and a failed model turn is the more common cause of a stalled session — an
+  operator opening the trace found the tool faults and not the turn's. `RunOnce` now runs the claimed
+  turn under a **`model_turn` consumer span** (`session.id` / `work.id` attributes, the executor's
+  `tool_exec` attribute set), and closes it from a deferred exit that sets `codes.Error` with the
+  reason and emits the fault log with `slog.ErrorContext` under that span — the status matters as
+  much as the log, since an operator reaches the log by clicking the red span. The span opens on the
+  claimed item and closes on its fate, because the nested `model_request` span can carry neither half
+  of a turn fault: half of them happen before it exists at all (session-liveness lookup, the
+  reclaim-recovery append, replay, request assembly, provider resolution — all reaching `failTurn`
+  with a nil span), and for the rest `runTurn` hands back an error and nothing else, so the
+  span-carrying context never leaves it and `Finish` has closed the span before `RunOnce` sees the
+  failure. `Run` keeps a log only for the one path with no span to hang it on — a `Claim` that failed
+  before producing an item, and not when that failure is the loop's own shutdown. Only brain-side
+  faults redden the span: a model failure or a deterministic input problem is settled onto the wire as
+  a `session.error` by `failTurn` and returns no error, the executor's "a tool-level failure is not a
+  platform fault" rule applied to the brain. The brain is the work queue's third claimant, and now has
+  the same "handling of one claimed item, end to end" span the executor's `tool_exec` and the BYOC
+  worker's already give theirs ("deployment point" keeps its established meaning — the
+  `cloud`/`self_hosted` pair that runs tools; the brain is not a third one of those). Both
+  alternatives #92 weighed — its own cheap `telemetry.Extract(ctx, item.TraceContext)`, and extending
+  trace-context capture to `model_turn` enqueues — were evaluated and rejected, for reasons recorded
+  in [docs/HISTORY.md](./docs/HISTORY.md) § "Brain turn-fault correlation (plan 09)" and
+  [docs/plan/09](./docs/plan/09_brain-turn-fault-span.md). One consequence matters here: the
+  `tool_exec` items a turn enqueues still parent on its `model_request` span, so the executor's and
+  BYOC worker's correlation is untouched.
+
 - **A misspelled `permission_policy` key in an agent toolset silently fell back to `always_allow`**
   ([#26](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/26)) — an
   `agent_toolset_20260401` config was decoded with a plain `json.Unmarshal`, which drops unknown
