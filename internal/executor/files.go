@@ -34,10 +34,11 @@ type fileRef struct {
 // so re-provisioning a live session's sandbox skips restreaming unchanged mounts.
 const filesSentinelName = ".files_materialized"
 
-// errFileMissing classifies a dangling mount — the file's object is gone (a
-// delete raced the reference). Tolerated by design (plan decision 2): the mount
-// is skipped and the agent sees an absent path, never a failed run.
-var errFileMissing = errors.New("file object missing")
+// errFileMissing classifies a dangling mount — the file's row is gone, or (rarer)
+// its object, because a delete raced the reference. Tolerated by design (plan
+// decision 2): the mount is skipped and the agent sees an absent path, never a
+// failed run.
+var errFileMissing = errors.New("file missing")
 
 // materializeFiles streams each mounted file's bytes into the sandbox at its
 // mount_path before the tools run — the platform-managed half of file

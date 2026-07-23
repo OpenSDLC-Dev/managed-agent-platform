@@ -28,9 +28,12 @@ copy of an entry here.
   probed by `test -e`, not a read-back, since a mount can be huge) and per-file tolerance for
   a dangling reference; `sessionForRun` selects `resources` in the same locked read. Both
   injection points treat the `files` row as authoritative for existence — the brain joins it,
-  the executor checks it before streaming — so a file deleted after mounting (its object left
-  behind best-effort) is the same absent mount on both halves, never stale bytes from the
-  orphan. The brain renders a "Mounted files" block (mount path, filename, MIME type, size)
+  the executor checks it before streaming — so on any later injection or materialization pass
+  a deleted file is dropped from the brain's next-turn block and is not mounted onto a fresh or
+  reprovisioned sandbox from its best-effort-orphaned object. (It does not retract bytes an
+  earlier pass already materialized into a live sandbox — that keeps them until the mount set
+  changes, the documented residual.) The brain renders a "Mounted files" block (mount path,
+  filename, MIME type, size)
   into the system prompt after the skills block, so the agent can find mounts outside its
   workdir. `slog` + `files.materialized`/`files.materialize.duration` metrics and a
   `files_materialize` span on the executor pass; `files.injected`/`files.block_chars` span
