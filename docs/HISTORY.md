@@ -262,6 +262,58 @@ Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https
 
 ---
 
+## Brain turn-fault correlation (plan 09) — archived 2026-07-23
+
+[docs/plan/09_brain-turn-fault-span.md](./plan/09_brain-turn-fault-span.md), delivered in one PR
+(**#PR**) for [#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92). The change and
+its reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a changelog cannot
+hold.
+
+**The issue's own "cheap version" was evaluated and rejected as inert — it does not compile into a
+fix.** #92 offered `telemetry.Extract(ctx, item.TraceContext)` in `RunOnce` as the low-cost option,
+"the same shape the executor's fault log had before the log-bridge PR improved it, and better than
+nothing". Against this repository's source it is worth exactly nothing: `internal/queue/queue.go`'s
+`Enqueue` captures a trace context only for `kind == ToolExec` and deliberately writes SQL NULL for a
+`model_turn` ("capturing it there would only persist an unread payload"), a decision ARCHITECTURE.md's
+Observability section states in the same words. `item.TraceContext` is therefore always nil on the
+brain's path, `Extract` returns the context unchanged, and the log would have stayed as uncorrelated
+as before while looking fixed. The issue was filed by a reviewer reasoning from the executor's shape;
+the `issue-triage` subagent independently reached the same refutation from the same source. This is
+the case CLAUDE.md's "verify every finding against the source before acting on it" is written for,
+in its rarer direction: the finding was real, one of its two proposed remedies was not.
+
+**Extending trace-context capture to `model_turn` was considered and deliberately deferred.** It is
+the other way to make a turn's failure findable — parent each turn on whatever enqueued it — and it
+is a strictly larger decision: it reverses the queue-level choice above at three enqueue sites (the
+API's `user.message` trigger, the executor's resume-enqueue, the brain's own chained requeue), and
+those are three *different* traces with three different notions of "end to end". Nothing #92 asks for
+requires picking one. Without it the `model_turn` span roots the turn's own trace exactly as
+`model_request` already did, so the trace topology gains a level and changes no shape, and the
+`tool_exec` items a turn enqueues keep parenting on `model_request` — the executor's and BYOC
+worker's existing correlation is untouched, as `TestToolExecEnqueueCapturesTurnTrace` still asserts.
+
+**Why the fault log could not simply move onto the existing `model_request` span.** That span opens
+inside `runTurn` and is closed by `Finish` before `runTurn` returns, while the faults that strand a
+turn land on both sides of it — session-liveness lookup, replay and provider resolution before, the
+settlement transaction and its lease proof after. A `SpanKindConsumer` span standing for the handling
+of one claimed item end to end is the only span that contains all of them, which is why the symmetric
+design subsumes rather than merely improves on the cheap one.
+
+**Test method — the span id is the assertion, not the trace id.** A parent and its child share a
+trace id, so a trace-id assertion cannot tell "logged on the turn's own span" from "logged on some
+span in the turn's trace", and would have passed against a design that hung the record anywhere in
+the tree. `TestTurnFaultLogLandsOnTheModelTurnSpan` asserts the span id, mirroring
+`internal/executor`'s `TestFaultLogLandsOnTheToolExecSpan`, and was run against the unfixed brain
+first: it failed on the absent `model_turn` span, so it cannot be passing for an unrelated reason.
+
+**Governance — the plan was authored after the fix, and says so.** `issue-triage` returned
+`needs_plan: true`; the implementation was already written test-first from the issue by then, so this
+plan is a decision record rather than a forward design. It lands `archived` in its one delivering PR
+on the plan-07 precedent, and STATE.md is untouched — the work starts and finishes in the same PR, so
+there is never an in-flight state for it to track.
+
+---
+
 ## Reject unknown agent_toolset fields (plan 07) — archived 2026-07-22
 
 [docs/plan/07_reject-unknown-toolset-fields.md](./plan/07_reject-unknown-toolset-fields.md),
