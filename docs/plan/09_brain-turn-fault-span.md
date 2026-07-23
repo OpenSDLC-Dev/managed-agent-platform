@@ -82,7 +82,8 @@ asks for. Without it the `model_turn` span roots the turn's own trace, which is 
 level. The `tool_exec` items a turn enqueues keep parenting on its `model_request` span, so the
 executor's and worker's existing correlation is untouched.
 
-#92 asks for this to be weighed against
+Issue [#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92) asks for this to be
+weighed against
 [#87](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/87), which has moved since: its
 substance — the BYOC worker's `tool_exec` span recording an error status on a platform fault —
 shipped in PR #138, and the issue stays open only for the deferred remainder, "lifting the shared
