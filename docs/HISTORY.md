@@ -265,7 +265,7 @@ Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https
 ## Brain turn-fault correlation (plan 09) — archived 2026-07-23
 
 [docs/plan/09_brain-turn-fault-span.md](./plan/09_brain-turn-fault-span.md), delivered in one PR
-(**#PR**) for [#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92). The change and
+(**#164**) for [#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92). The change and
 its reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a changelog cannot
 hold.
 
