@@ -45,16 +45,19 @@ copy of an entry here.
   fails if it does not match the server's current version; **omit to apply the update
   unconditionally**." The handler answered 400 `invalid_request_error` "version is required", so an
   unconditional update — a request the reference accepts — was impossible. `version` is now optional:
-  supplied, it is still the optimistic-concurrency check and a stale value is still 409; omitted (or
-  null), the update applies unconditionally. A supplied value below 1 is now rejected 400 rather than
-  falling through to the version comparison, where it produced a misleading "expected 0, currently 1"
-  conflict.
+  supplied, it is still the optimistic-concurrency check and a stale value is still 409; **omitted**,
+  the update applies unconditionally. Only omission means that — an explicit `"version": null` is
+  still 400, because the wire types the field as an integer and `param.Opt` represents null and
+  omitted distinctly, so accepting null would silently drop the concurrency check for a client that
+  serialized a nil pointer. A supplied value below 1 is now rejected 400 rather than falling through
+  to the version comparison, where it produced a misleading "expected 0, currently 1" conflict.
 
 - **Work items were missing the wire's `secret` field** — v1.59.0 added a required `secret` to
   `BetaSelfHostedWork` (the credential payload a worker executes an item with, "populated when
   polling for work; null on all other retrieval paths"), which made `workWire`'s own
-  "the BetaSelfHostedWork response shape, field for field" comment false. Every work-item response —
-  poll, get, list, ack, stop — now carries it. It is always null: populating it needs the vault seam,
+  "the BetaSelfHostedWork response shape, field for field" comment false. Every work-item response that
+  carries a work object — poll, get, list, ack, and the metadata update — now carries it (stop is
+  exempt: its success is a bodiless 204, a divergence of its own). It is always null: populating it needs the vault seam,
   which is a column only in v1
   ([#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50)), and that is recorded as a
   divergence rather than left implicit.

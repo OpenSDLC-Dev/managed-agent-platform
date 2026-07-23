@@ -279,6 +279,12 @@ func TestAgentUpdateOptimisticVersioning(t *testing.T) {
 	status, body := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 0, "name": "v2"})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
+	// An explicit null is not omission: the wire types version as an integer, and
+	// only *omitting* it means "apply unconditionally". Silently accepting null
+	// would drop the concurrency check for a client that serialized a nil pointer.
+	status, body = s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": nil, "name": "v2"})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
 	// Happy path: version 1 → 2; omitted fields preserved.
 	status, updated := s.do(http.MethodPost, "/v1/agents/"+id, map[string]any{"version": 1, "name": "renamed"})
 	if status != http.StatusOK {

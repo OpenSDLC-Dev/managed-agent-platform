@@ -241,11 +241,16 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// version is the optimistic-concurrency check, and it is opt-in: supplied, the
-	// update must match the stored version (which is at least 1); omitted, the
-	// update applies unconditionally.
+	// update must match the stored version (which is at least 1); *omitted*, the
+	// update applies unconditionally. An explicit null is not omission — the wire
+	// types the field as an integer, so accepting null would silently drop the
+	// check for a client that serialized a nil pointer.
 	var expected *int64
-	if raw, ok := obj["version"]; ok && !isNull(raw) {
+	if raw, ok := obj["version"]; ok {
 		var v int64
+		if isNull(raw) {
+			return nil, errInvalid("version must be an integer")
+		}
 		if err := json.Unmarshal(raw, &v); err != nil {
 			return nil, errInvalid("version must be an integer")
 		}

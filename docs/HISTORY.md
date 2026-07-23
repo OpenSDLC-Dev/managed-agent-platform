@@ -790,7 +790,12 @@ each member of the second is resolved below.
   request fails if it does not match the server's current version; **omit to apply the update
   unconditionally**." `updateAgent` answered 400 "version is required" — after the pin moved, that is
   simply wrong against the authoritative schema, so it is **code**: version is now optional, rejected
-  below 1, and the optimistic-concurrency check runs only when supplied. The second change,
+  below 1, and the optimistic-concurrency check runs only when supplied. "Supplied" means *present
+  and an integer* — an explicit `"version": null` is 400, not an unconditional update. The first cut
+  of the fix treated null as omission and was caught in review: `param.Opt` represents null and
+  omitted as distinct states, the wire types the field as an integer, and the pre-bump handler
+  rejected null — so silently accepting it would have dropped the concurrency check for any client
+  that serialized a nil pointer, a regression dressed as a relaxation. The second change,
   `BetaManagedAgentsModelConfigParams.Effort` (`betaagent.go:2117`) plus its five level types, is new
   behavior this slice does not build — **recorded** as a CONFIRMED divergence, tracked by #160.
   Everything else in that file's 435-line diff is the effort types' own scaffolding: the field-level
@@ -857,9 +862,21 @@ left alone.
 recorded red run: `TestAgentUpdateOptimisticVersioning` 409 where 400 was wanted (version 0 reached
 the version *comparison* instead of being rejected as below the documented minimum), and
 `TestWorkPollReturnsWireShape` / `TestWorkGetReturnsItem` reporting `required wire field "secret"
-missing`. `make verify` green afterward at total statement coverage **90.68%** (including the Docker
+missing`. `make verify` green afterward at total statement coverage **90.69%** (including the Docker
 and K8s sandbox suites). No transitive dependency moved: `go mod tidy` after the bump touched
 `go.mod`/`go.sum` only, in the two lines naming the SDK — so every SDK request type, response field,
 JSON tag, service method, option, paginator, SSE helper and error decoder reached from the non-test
 import sites (`internal/provider/anthropic/anthropic.go`, `internal/worker/{client,lease,toolexec,skills}.go`)
-still compiles and passes unchanged.
+still compiles and passes unchanged. Unlike the v1.58.0 bump, `sdk.Client`'s own layout did not move
+either — `beta.go`, `client.go` and `aliases.go` are identical across the tags, so no new service is
+constructed at client init; the only unconditional runtime difference is the version-identifying
+`User-Agent` / `X-Stainless-Package-Version` header value (`internal/version.go`).
+
+The one non-obvious hazard in emitting a new null field was checked rather than assumed: the BYOC
+worker polls with the SDK's **typed** decoder into a non-pointer `Secret string`
+(`internal/worker/lease.go:163-175`), so `"secret": null` had to be provably harmless there. It is —
+decoding the exact queued-item body this platform now emits yields `Secret == ""` with
+`JSON.Secret.Valid() == false`, i.e. null is distinguishable from an empty credential rather than
+being an error. `internal/worker`'s harness already polls against the **real** control-plane handler
+rather than a fixture (the same property `TestWorkerForceStopAcceptsNoContent` relies on), so
+`TestWorkerPollsRunsAndStops` exercises that decode end to end in the passing run.
