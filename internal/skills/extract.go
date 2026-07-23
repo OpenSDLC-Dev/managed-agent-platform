@@ -4,7 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -37,13 +40,47 @@ const SentinelName = ".materialized"
 // from ever needing a gigabyte-scale allocation.
 const MaxArchiveBytes = 64 << 20
 
+// ErrDigestMismatch reports an archive whose bytes do not hash to the digest
+// recorded for that skill version at upload — storage bit-rot, truncation, or a
+// substituted object between upload and materialization.
+var ErrDigestMismatch = errors.New("skill archive does not match its recorded sha256")
+
+// Digest is the archive digest this platform records and verifies: the
+// lowercase-hex sha256 of the stored bytes.
+func Digest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 // ReadArchive reads a skill archive from an object-store stream, refusing more
-// than MaxArchiveBytes so a hostile or corrupt object cannot exhaust memory.
+// than MaxArchiveBytes so a hostile or corrupt object cannot exhaust memory,
+// then verifies it against the digest recorded for that version.
 // The store's reported length is deliberately NOT used to pre-size the buffer:
 // it is untrusted, and a large hint would let a tiny hostile stream provoke a
 // huge eager allocation. The cap is enforced on bytes actually read.
-func ReadArchive(r io.Reader) ([]byte, error) {
-	return readArchiveLimited(r, MaxArchiveBytes)
+//
+// Verification lives here, in the one function both materialization halves call
+// between fetching an archive and extracting it, so a caller cannot read an
+// archive and forget to check it. wantSHA256 empty means no digest was recorded
+// for this version — a row predating the sha256 column, or (on the wire half) a
+// control plane that sends no digest header — and the archive is read
+// unverified; callers log that. Anything else must match, case-insensitively:
+// our own digests are lowercase by construction, but rejecting another
+// implementation's uppercase hex would be a gratuitous failure. A malformed
+// expectation needs no format check of its own — it can never equal a real
+// digest, so it fails closed.
+func ReadArchive(r io.Reader, wantSHA256 string) ([]byte, error) {
+	data, err := readArchiveLimited(r, MaxArchiveBytes)
+	if err != nil {
+		return nil, err
+	}
+	if wantSHA256 != "" {
+		if got := Digest(data); !strings.EqualFold(wantSHA256, got) {
+			return nil, fmt.Errorf("%w: read %d bytes hashing to %s, expected %s",
+				ErrDigestMismatch, len(data), got, wantSHA256)
+		}
+	}
+	return data, nil
 }
 
 // readArchiveLimited reads the stream into one contiguous buffer whose capacity
@@ -136,6 +173,13 @@ func probeOverCap(r io.Reader, buf []byte, maxBytes int64) ([]byte, error) {
 func BlobKey(skillID, version string) string {
 	return "skills/" + skillID + "/" + version + ".zip"
 }
+
+// ArchiveDigestHeader carries Digest(archive) on the /content download response
+// so the BYOC worker — which never reads the database — can verify what it
+// downloaded. It lives beside BlobKey for the same reason: one definition
+// shared by the API that sends it and the worker that reads it. Additive and
+// ignored by reference clients (the SDK treats the body as opaque bytes).
+const ArchiveDigestHeader = "x-skill-archive-sha256"
 
 // Extract opens a stored skill archive (the canonical zip the registry
 // serves) and returns its files with slash-relative paths, the single
@@ -253,6 +297,34 @@ type Resolved struct {
 	ID      string
 	Version string
 	Dir     string
+	// SHA256 is the archive digest recorded for this version, from the same
+	// trusted metadata that supplies Dir — empty when the source records none.
+	// The executor fills it from the version row it already reads; the BYOC
+	// worker leaves it empty because the SDK's version object carries no
+	// checksum field, and learns the digest from the download response instead.
+	SHA256 string
+}
+
+// SentinelVersion is the marker's integrity generation — what a successful
+// materialization the marker records was actually guaranteed to have done.
+// Version 2 means "every recorded archive was verified against the digest the
+// registry holds for it, where one was recorded" (#155); version 1 was the
+// bare, unversioned JSON array written before any digest existed, and is no
+// longer accepted. Bumping this is how a marker written under a weaker
+// guarantee is stopped from satisfying a stronger one: it costs exactly one
+// re-materialization pass per live sandbox at upgrade — which is where the
+// stronger guarantee gets applied — and nothing at steady state. Recording the
+// digests themselves would be the alternative, and is not viable: the BYOC
+// worker learns a digest only from the download response, i.e. after the skip
+// decision, so it would have to spend a wire round trip per skill per pass to
+// answer a question this constant answers for free.
+const SentinelVersion = 2
+
+// markerFile is the marker's on-disk shape: the integrity generation plus the
+// materialized set.
+type markerFile struct {
+	Version int           `json:"v"`
+	Skills  []markerEntry `json:"skills"`
 }
 
 // markerEntry is one skill as the marker file records it: {skill_id, version}
@@ -264,27 +336,32 @@ type markerEntry struct {
 	Version string `json:"version"`
 }
 
-// Sentinel canonically encodes the materialized set for the marker file:
-// sorted {skill_id, version} JSON, so equal sets always produce equal bytes.
+// Sentinel canonically encodes the materialized set for the marker file: the
+// integrity generation plus sorted {skill_id, version} entries, so equal sets
+// always produce equal bytes.
 func Sentinel(rs []Resolved) []byte {
 	entries := make([]markerEntry, len(rs))
 	for i, r := range rs {
 		entries[i] = markerEntry{ID: r.ID, Version: r.Version}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
-	b, _ := json.Marshal(entries)
+	b, _ := json.Marshal(markerFile{Version: SentinelVersion, Skills: entries})
 	return b
 }
 
-// ParseSentinel decodes a marker file; ok is false only for bytes that are
-// not a JSON array of {skill_id, version} entries (an unreadable or older
-// marker), which a caller treats as "materialize".
+// ParseSentinel decodes a marker file; ok is false for bytes that are not a
+// marker of the current integrity generation — unreadable, or written under an
+// older one (including the unversioned array form) — which a caller treats as
+// "materialize", so the current generation's guarantees are applied on that
+// pass. A marker from a *newer* generation is likewise not accepted: a
+// downgraded binary must re-materialize rather than trust a claim it cannot
+// evaluate.
 func ParseSentinel(data []byte) ([]markerEntry, bool) {
-	var entries []markerEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
+	var f markerFile
+	if err := json.Unmarshal(data, &f); err != nil || f.Version != SentinelVersion {
 		return nil, false
 	}
-	return entries, true
+	return f.Skills, true
 }
 
 // SentinelMatches reports whether the marker proves the resolved set rs is

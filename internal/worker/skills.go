@@ -119,12 +119,18 @@ func SetupSkills(ctx context.Context, client sdk.Client, sessionID string, sb sa
 
 // skipSkill is the per-skill tolerance path: log, count, continue. A wire
 // 404 (missing skill, version, or archive) classifies as not_found — the
-// late-bound surfacing of a dangling reference.
+// late-bound surfacing of a dangling reference. A digest mismatch takes the
+// same tolerant path — one corrupt archive must not fail every session that
+// references it — under its own outcome, so integrity failures are alertable
+// apart from ordinary dangling references.
 func skipSkill(ctx context.Context, sessionID, skillID, version string, err error) {
 	outcome := skillOutcomeFailed
 	var apierr *sdk.Error
-	if errors.As(err, &apierr) && apierr.StatusCode == 404 {
+	switch {
+	case errors.As(err, &apierr) && apierr.StatusCode == 404:
 		outcome = skillOutcomeNotFound
+	case errors.Is(err, skills.ErrDigestMismatch):
+		outcome = skillOutcomeCorrupt
 	}
 	recordSkillMaterialized(ctx, outcome)
 	slog.WarnContext(ctx, "skill not materialized",
@@ -184,14 +190,23 @@ func resolveSkill(ctx context.Context, client sdk.Client, ref skillRef) (skills.
 }
 
 // materializeSkill lands one already-resolved skill version: download, extract,
-// write. The download is read under a byte cap (skills.ReadArchive) so a
-// corrupt or oversized served archive cannot OOM the worker.
+// write. The download is read under a byte cap and verified against the digest
+// the response advertises (skills.ReadArchive), so neither a corrupt or
+// oversized served archive can OOM the worker nor a bit-rotted or substituted
+// one reach the sandbox. The digest arrives as a response header because the
+// SDK's version object carries no checksum field; a control plane that sends
+// none leaves the archive unverified rather than unusable.
 func materializeSkill(ctx context.Context, client sdk.Client, sb sandbox.Sandbox, workdir string, r skills.Resolved) error {
 	resp, err := client.Beta.Skills.Versions.Download(ctx, r.Version, sdk.BetaSkillVersionDownloadParams{SkillID: r.ID})
 	if err != nil {
 		return err
 	}
-	data, err := skills.ReadArchive(resp.Body)
+	want := resp.Header.Get(skills.ArchiveDigestHeader)
+	if want == "" {
+		slog.WarnContext(ctx, "skill archive download advertises no digest; extracting unverified",
+			"skill_id", r.ID, "version", r.Version)
+	}
+	data, err := skills.ReadArchive(resp.Body, want)
 	resp.Body.Close()
 	if err != nil {
 		return err

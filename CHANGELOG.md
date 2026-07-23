@@ -15,6 +15,43 @@ copy of an entry here.
 
 ### Added
 
+- **Skill archives carry a sha256 from upload to materialization**
+  ([#155](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/155),
+  [plan 10](docs/plan/10_skill-archive-integrity.md)) — nothing on the skill-archive path
+  used to carry a content digest: upload computed none (and `blob.Store` has no checksum
+  concept), the registry stored none, the download served none, and both materialization
+  halves handed the fetched bytes straight to extraction. The only check anywhere was Go
+  stdlib zip's per-member CRC-32 — non-cryptographic, and blind to a substituted archive
+  that is itself a valid zip. Because the metadata (Postgres) and the bytes (object
+  storage) live in two different stores, an object that bit-rotted, truncated, or was
+  replaced between upload and materialization reached the sandbox unnoticed. Now both
+  `skills.Bundle` constructors record `Digest(zip)`, the lowercase-hex sha256 of the exact
+  bytes stored; migration `0010` adds the nullable `skill_versions.sha256` column (nullable
+  because a SQL migration cannot read object storage to backfill a pre-existing row's
+  digest — `NULL` therefore means precisely "written before this change"), and all three
+  writers — skill create, version create, and the operator import — persist it in the
+  transaction that lands the row. Verification lives inside `skills.ReadArchive`, the one
+  function both halves already call between fetching an archive and extracting it, so a
+  future reader cannot forget it: the platform executor passes the digest from the version
+  row it already reads for the materialization directory, and the BYOC worker — which
+  never touches the database — reads it from a new additive `x-skill-archive-sha256`
+  response header on `GET /v1/skills/{id}/versions/{version}/content` (the pinned SDK's
+  version object carries no checksum field; reference clients ignore unknown headers, the
+  `traceparent`-on-`/work/poll` pattern). A mismatch takes the same per-skill tolerance as
+  any other miss — one corrupt archive must not fail every session referencing it — but
+  under its own `corrupt` value on the `skills.materialized` outcome, so integrity failures
+  are alertable apart from dangling references. Where no digest was recorded (a row
+  predating the column, or a control plane that sends no header) the archive is read
+  unverified and the fact is logged, rather than making existing skills unusable.
+  The `.materialized` sentinel gains an **integrity generation** so the skip cannot
+  inherit a weaker guarantee than the one now in force: both halves return early when
+  that marker matches, without downloading anything, so a sandbox a pre-verification
+  binary populated during a rolling upgrade would otherwise keep matching and suppress
+  digest verification for the rest of that session. A marker of an older generation (the
+  unversioned array form) — or a newer one, which a downgraded binary cannot evaluate —
+  never matches, costing exactly one re-materialization per live sandbox at upgrade and
+  nothing at steady state.
+
 - **Files API — the BYOC worker file lane: environment-scoped content download + wire-only materialization (Files plan, slice 4 — closes the Files half of #55)**
   ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — a self-hosted
   worker now mounts a session's files exactly as the platform executor does, but wire-only:

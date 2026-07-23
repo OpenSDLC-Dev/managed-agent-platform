@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
 
 // The fixture skills under testdata/skillsimport are self-authored for this
@@ -63,6 +64,13 @@ func TestImportAnthropicSkills(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusOK || res.Header.Get("Content-Type") != "application/zip" {
 		t.Errorf("download: %d %q", res.StatusCode, res.Header.Get("Content-Type"))
+	}
+	// The importer is the third writer of a version row, so it records the
+	// archive digest too — an operator-imported skill is verified at
+	// materialization exactly like an uploaded one.
+	archive, digest := s.downloadArchive(t, "alpha-notes", "20260101")
+	if want := skills.Digest(archive); digest != want {
+		t.Errorf("imported digest = %q, want %q", digest, want)
 	}
 
 	// Idempotent per version: a rerun imports nothing and stores nothing new.

@@ -182,10 +182,10 @@ func (s *server) insertSkill(ctx context.Context, id, displayTitle, version stri
 		return time.Time{}, err
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory, sha256)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		domain.NewID(domain.PrefixSkillVersion).String(), id, version,
-		bundle.Name, bundle.Description, bundle.Directory); err != nil {
+		bundle.Name, bundle.Description, bundle.Directory, bundle.SHA256); err != nil {
 		return time.Time{}, err
 	}
 	key := skillBlobKey(id, version)
@@ -411,9 +411,10 @@ func (s *server) insertSkillVersion(ctx context.Context, id, vid, version string
 	}
 	var createdAt time.Time
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory)
-		 VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at`,
-		vid, id, version, bundle.Name, bundle.Description, bundle.Directory).Scan(&createdAt); err != nil {
+		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory, sha256)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING created_at`,
+		vid, id, version, bundle.Name, bundle.Description, bundle.Directory,
+		bundle.SHA256).Scan(&createdAt); err != nil {
 		return time.Time{}, err
 	}
 	// latest_version advances only to a numerically newer version (length-then-
@@ -625,15 +626,18 @@ func (s *server) downloadSkillVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errSkillsUnavailable)
 		return
 	}
-	var exists bool
-	if err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM skill_versions WHERE skill_id = $1 AND version = $2)`,
-		id, version).Scan(&exists); err != nil {
-		writeError(w, r, err)
+	// The existence probe also fetches the recorded archive digest — the same
+	// round trip, and the only place the wire-only BYOC worker can learn it.
+	var sha *string
+	err := s.pool.QueryRow(ctx,
+		`SELECT sha256 FROM skill_versions WHERE skill_id = $1 AND version = $2`,
+		id, version).Scan(&sha)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, errNotFound("skill %s version %s not found", id, version))
 		return
 	}
-	if !exists {
-		writeError(w, r, errNotFound("skill %s version %s not found", id, version))
+	if err != nil {
+		writeError(w, r, err)
 		return
 	}
 	rc, size, err := s.blobs.Get(ctx, skillBlobKey(id, version))
@@ -650,6 +654,14 @@ func (s *server) downloadSkillVersion(w http.ResponseWriter, r *http.Request) {
 	// Accept: application/binary and treats the body as opaque bytes.
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	// The archive's recorded digest, so a wire-only consumer can verify what it
+	// downloaded (the SDK's version object carries no checksum field). Additive
+	// and ignored by reference clients — the traceparent-on-/work/poll pattern.
+	// Omitted for a version that predates the column: no digest was recorded,
+	// and an absent header says so where a wrong one would fail closed.
+	if sha != nil {
+		w.Header().Set(skills.ArchiveDigestHeader, *sha)
+	}
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, rc); err != nil {
 		// Headers are gone; nothing to do but log the broken stream.

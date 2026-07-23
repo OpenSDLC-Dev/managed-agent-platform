@@ -1,4 +1,4 @@
-package executor
+package worker
 
 import (
 	"context"
@@ -9,10 +9,13 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// TestMaterializeMetrics pins the executor's skills instruments: without it,
-// the counter or histogram could silently stop recording with every other
-// test green (telemetry is deliberately never load-bearing).
-func TestMaterializeMetrics(t *testing.T) {
+// TestSetupSkillsMetrics pins the worker's skills instruments — the executor's
+// twin, same instrument names in a second scope. Without it the counter or
+// histogram could silently stop recording with every other test green
+// (telemetry is deliberately never load-bearing), and a corrupt archive could
+// quietly be counted as an ordinary failure, losing the one signal that
+// separates storage corruption from a dangling reference.
+func TestSetupSkillsMetrics(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	prev := otel.GetMeterProvider()
 	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
@@ -20,19 +23,17 @@ func TestMaterializeMetrics(t *testing.T) {
 
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
-	h.seedSkill(t, "skill_met_one", "100", "metric-skill", map[string]string{"SKILL.md": "m"})
-	// A substituted stored object must count as its own outcome: folding it into
-	// `failed` would lose exactly the signal the label exists to raise.
-	h.seedSkill(t, "skill_met_bad", "100", "corrupt-metric-skill", map[string]string{"SKILL.md": "m"})
-	h.swapArchive(t, "skill_met_bad", "100", "corrupt-metric-skill", map[string]string{"SKILL.md": "swapped"})
+	h.seedSkill(t, "wire-met-one", "100", "metric-wire", map[string]string{"SKILL.md": "m"})
+	h.seedSkill(t, "wire-met-bad", "100", "corrupt-wire", map[string]string{"SKILL.md": "m"})
+	h.swapArchive(t, "wire-met-bad", "100", "corrupt-wire", map[string]string{"SKILL.md": "swapped"})
 	h.refSkills(t,
-		[2]string{"skill_met_one", "latest"},
-		[2]string{"skill_met_gone", "latest"},
-		[2]string{"skill_met_bad", "100"},
+		[2]string{"wire-met-one", "latest"},
+		[2]string{"wire-met-gone", "latest"},
+		[2]string{"wire-met-bad", "100"},
 	)
 	h.suspend(t, writeUse("out.txt", "x"))
-	if _, err := h.exec.step(context.Background()); err != nil {
-		t.Fatalf("step: %v", err)
+	if err := h.run(); err != nil {
+		t.Fatalf("run: %v", err)
 	}
 
 	var rm metricdata.ResourceMetrics

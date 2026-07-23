@@ -75,7 +75,7 @@ func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, si
 			misses++
 			continue
 		}
-		name, err := e.skillName(ctx, ref.SkillID, version)
+		name, sha, err := e.skillVersionMeta(ctx, ref.SkillID, version)
 		if err != nil {
 			e.skipSkill(ctx, sid, ref.SkillID, version, err)
 			misses++
@@ -83,6 +83,7 @@ func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, si
 		}
 		resolved = append(resolved, skills.Resolved{
 			ID: ref.SkillID, Version: version, Dir: skills.TargetDir(name, ref.SkillID),
+			SHA256: sha,
 		})
 	}
 	span.SetAttributes(attribute.Int("skills.referenced", len(refs)))
@@ -120,11 +121,17 @@ func (e *Executor) materializeSkills(ctx context.Context, sb sandbox.Sandbox, si
 	}
 }
 
-// skipSkill is the per-skill tolerance path: log, count, continue.
+// skipSkill is the per-skill tolerance path: log, count, continue. A digest
+// mismatch takes the same path — one corrupt archive must not fail every
+// session that references it — under its own outcome, so integrity failures
+// are alertable apart from ordinary dangling references.
 func (e *Executor) skipSkill(ctx context.Context, sid domain.ID, skillID, version string, err error) {
 	outcome := skillOutcomeFailed
-	if errors.Is(err, errSkillNotFound) {
+	switch {
+	case errors.Is(err, errSkillNotFound):
 		outcome = skillOutcomeNotFound
+	case errors.Is(err, skills.ErrDigestMismatch):
+		outcome = skillOutcomeCorrupt
 	}
 	recordSkillMaterialized(ctx, outcome)
 	slog.WarnContext(ctx, "skill not materialized",
@@ -154,28 +161,34 @@ func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (strin
 	return *latest, nil
 }
 
-// skillName reads a version row's materialization name from trusted storage.
-// It is also the existence check for an already-concrete (all-digits) version,
-// which resolveSkillVersion does not verify: a missing row is a dangling
-// reference, surfaced as errSkillNotFound and skipped.
-func (e *Executor) skillName(ctx context.Context, skillID, version string) (string, error) {
-	var name string
-	err := e.pool.QueryRow(ctx,
-		`SELECT name FROM skill_versions WHERE skill_id = $1 AND version = $2`,
-		skillID, version).Scan(&name)
+// skillVersionMeta reads a version row's materialization name and the archive
+// digest recorded at upload, both from trusted storage. It is also the
+// existence check for an already-concrete (all-digits) version, which
+// resolveSkillVersion does not verify: a missing row is a dangling reference,
+// surfaced as errSkillNotFound and skipped. sha256 is empty for a row written
+// before migration 0010 — nothing to verify against, not a failure.
+func (e *Executor) skillVersionMeta(ctx context.Context, skillID, version string) (name, sha256 string, err error) {
+	var stored *string
+	err = e.pool.QueryRow(ctx,
+		`SELECT name, sha256 FROM skill_versions WHERE skill_id = $1 AND version = $2`,
+		skillID, version).Scan(&name, &stored)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", fmt.Errorf("%w: version %s", errSkillNotFound, version)
+		return "", "", fmt.Errorf("%w: version %s", errSkillNotFound, version)
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return name, nil
+	if stored != nil {
+		sha256 = *stored
+	}
+	return name, sha256, nil
 }
 
 // materializeSkill extracts one already-resolved skill version's archive into
 // the sandbox at {workdir}/skills/{r.Dir}/. The archive is read under a byte
-// cap (skills.ReadArchive) so a corrupt or oversized stored object cannot OOM
-// the executor.
+// cap and verified against the digest the version row recorded at upload
+// (skills.ReadArchive), so neither a corrupt or oversized stored object can OOM
+// the executor nor a bit-rotted or substituted one reach the sandbox.
 func (e *Executor) materializeSkill(ctx context.Context, sb sandbox.Sandbox, workdir string, r skills.Resolved) error {
 	rc, _, err := e.blobs.Get(ctx, skills.BlobKey(r.ID, r.Version))
 	if errors.Is(err, blob.ErrNotFound) {
@@ -184,7 +197,11 @@ func (e *Executor) materializeSkill(ctx context.Context, sb sandbox.Sandbox, wor
 	if err != nil {
 		return err
 	}
-	data, err := skills.ReadArchive(rc)
+	if r.SHA256 == "" {
+		slog.WarnContext(ctx, "skill version records no archive digest; extracting unverified",
+			"skill_id", r.ID, "version", r.Version)
+	}
+	data, err := skills.ReadArchive(rc, r.SHA256)
 	rc.Close()
 	if err != nil {
 		return err

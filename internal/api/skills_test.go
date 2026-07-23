@@ -18,6 +18,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 )
 
 const testSkillMD = `---
@@ -183,6 +184,102 @@ func TestSkillCreateZipRoundTrip(t *testing.T) {
 	}
 	if res.Header.Get("Content-Length") != fmt.Sprint(len(archive)) {
 		t.Errorf("content-length = %q, want %d", res.Header.Get("Content-Length"), len(archive))
+	}
+}
+
+// downloadArchive fetches a version's stored archive, returning the body and
+// the digest the response advertised (empty when it advertised none).
+func (s *tserver) downloadArchive(t *testing.T, id, version string) (body []byte, digest string) {
+	t.Helper()
+	res := s.doRaw("GET", "/v1/skills/"+id+"/versions/"+version+"/content", nil,
+		map[string]string{"x-api-key": testKey})
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("download %s/%s: status %d", id, version, res.StatusCode)
+	}
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read download: %v", err)
+	}
+	return b, res.Header.Get(skills.ArchiveDigestHeader)
+}
+
+// storedDigest is the digest the registry recorded for a version, NULL (no
+// digest recorded) coming back as the empty string.
+func (s *tserver) storedDigest(t *testing.T, id, version string) string {
+	t.Helper()
+	var sha *string
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT sha256 FROM skill_versions WHERE skill_id = $1 AND version = $2`,
+		id, version).Scan(&sha); err != nil {
+		t.Fatalf("read stored digest: %v", err)
+	}
+	if sha == nil {
+		return ""
+	}
+	return *sha
+}
+
+func TestSkillArchiveDigest(t *testing.T) {
+	s := newTestServer(t)
+
+	// Loose-files upload: the digest of the canonical zip the platform built is
+	// recorded at upload and advertised on the download, so a consumer can tell
+	// the served object from a corrupted or substituted one.
+	created := s.createSkill(t)
+	id, _ := created["id"].(string)
+	v1, _ := created["latest_version"].(string)
+	body, digest := s.downloadArchive(t, id, v1)
+	if want := skills.Digest(body); digest != want {
+		t.Errorf("download digest = %q, want %q (the served body's sha256)", digest, want)
+	}
+	if got := s.storedDigest(t, id, v1); got != digest {
+		t.Errorf("stored digest = %q, header %q — the header must be the registry's record", got, digest)
+	}
+
+	// A second version records its own digest, not the first one's.
+	ct, form := skillForm(t, nil, []upFile{
+		{name: "financial-skill/SKILL.md", content: testSkillMD},
+		{name: "financial-skill/v2.txt", content: "second"},
+	})
+	status, obj := s.doForm("POST", "/v1/skills/"+id+"/versions", ct, form)
+	if status != http.StatusOK {
+		t.Fatalf("create version: %d %v", status, obj)
+	}
+	v2, _ := obj["version"].(string)
+	body2, digest2 := s.downloadArchive(t, id, v2)
+	if want := skills.Digest(body2); digest2 != want {
+		t.Errorf("second version digest = %q, want %q", digest2, want)
+	}
+	if digest2 == digest {
+		t.Errorf("both versions recorded the same digest %q despite different content", digest)
+	}
+
+	// The zip upload form stores the client's bytes verbatim, so the recorded
+	// digest is the digest of what the client sent.
+	archive := testZip(t, map[string]string{
+		"financial-skill/SKILL.md":  testSkillMD,
+		"financial-skill/notes.txt": "keep",
+	})
+	ct, form = skillForm(t, nil, []upFile{{name: "financial-skill.zip", content: string(archive)}})
+	status, obj = s.doForm("POST", "/v1/skills/"+id+"/versions", ct, form)
+	if status != http.StatusOK {
+		t.Fatalf("create zip version: %d %v", status, obj)
+	}
+	v3, _ := obj["version"].(string)
+	if got := s.storedDigest(t, id, v3); got != skills.Digest(archive) {
+		t.Errorf("zip-form digest = %q, want the uploaded archive's %q", got, skills.Digest(archive))
+	}
+
+	// A version predating the column records nothing: the download advertises
+	// no digest at all rather than a wrong one, and consumers read it
+	// unverified rather than refusing it.
+	if _, err := s.pool.Exec(t.Context(),
+		`UPDATE skill_versions SET sha256 = NULL WHERE skill_id = $1 AND version = $2`, id, v1); err != nil {
+		t.Fatal(err)
+	}
+	if _, digest := s.downloadArchive(t, id, v1); digest != "" {
+		t.Errorf("digest header on a version with no recorded digest = %q, want none", digest)
 	}
 }
 

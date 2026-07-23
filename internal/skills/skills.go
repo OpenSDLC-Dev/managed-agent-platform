@@ -43,11 +43,14 @@ type File struct {
 
 // Bundle is a validated upload: the SKILL.md frontmatter extraction plus the
 // canonical archive the registry stores and later materializes into sandboxes.
+// SHA256 is Digest(Zip), recorded beside the metadata so materialization can
+// prove the object it reads back is the archive that was validated here.
 type Bundle struct {
 	Name        string
 	Description string
 	Directory   string
 	Zip         []byte
+	SHA256      string
 }
 
 var nameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
@@ -131,7 +134,9 @@ func FromFiles(files []File) (*Bundle, error) {
 	if err := w.Close(); err != nil {
 		return nil, fmt.Errorf("finish archive: %v", err)
 	}
-	return &Bundle{Name: name, Description: description, Directory: dir, Zip: buf.Bytes()}, nil
+	zipped := buf.Bytes()
+	return &Bundle{Name: name, Description: description, Directory: dir,
+		Zip: zipped, SHA256: Digest(zipped)}, nil
 }
 
 // FromZip validates the zip upload form. The original bytes are kept verbatim
@@ -203,7 +208,8 @@ func FromZip(data []byte) (*Bundle, error) {
 	if err := checkDirectoryName(dir, name); err != nil {
 		return nil, err
 	}
-	return &Bundle{Name: name, Description: description, Directory: dir, Zip: data}, nil
+	return &Bundle{Name: name, Description: description, Directory: dir,
+		Zip: data, SHA256: Digest(data)}, nil
 }
 
 // checkPath validates one slash-separated file path — path-qualified, no
