@@ -633,9 +633,17 @@ func readStdout(path, marker string, out *cappedBuffer) ([]byte, error) {
 // stdin so no shell round-trip touches them, and the script is told how many to
 // expect so a stream that delivered fewer cannot pass as a success.
 func (pd *pod) WriteFile(ctx context.Context, path string, data []byte) error {
+	return pd.WriteFileStream(ctx, path, bytes.NewReader(data), int64(len(data)))
+}
+
+// WriteFileStream streams size bytes from src into the pod over the exec stdin
+// the writeScript already counts (tee | wc -c vs the expected size), so a large
+// mount never fully buffers in the executor. WriteFile is the buffered special
+// case: src is a bytes.Reader over the whole payload.
+func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
 	dir := gopath.Dir(path)
-	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir, strconv.Itoa(len(data))}
-	res, err := pd.client.exec(ctx, pd.name, containerName, argv, bytes.NewReader(data), io.Discard, io.Discard)
+	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir, strconv.FormatInt(size, 10)}
+	res, err := pd.client.exec(ctx, pd.name, containerName, argv, src, io.Discard, io.Discard)
 	if err != nil {
 		return pd.execErr(ctx, err)
 	}
@@ -647,7 +655,7 @@ func (pd *pod) WriteFile(ctx context.Context, path string, data []byte) error {
 		// the chain still finished cleanly — see writeScript. Nothing else in the
 		// path can notice, so this is the only place a truncated write can be
 		// turned into the error it is rather than a silent half-written file.
-		return fmt.Errorf("k8s: write %s: short write (exec stdin did not deliver all %d bytes)", path, len(data))
+		return fmt.Errorf("k8s: write %s: short write (exec stdin did not deliver all %d bytes)", path, size)
 	default:
 		// The write failed in the pod — a directory where a file was meant to go, a
 		// read-only path, a full disk. A clean exec that exited non-zero wrote

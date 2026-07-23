@@ -597,18 +597,40 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 		return err
 	}
 	dir := gopath.Dir(path)
-	err = c.api.putArchive(ctx, c.id, dir, tarball)
+	err = c.api.putArchive(ctx, c.id, dir, bytes.NewReader(tarball))
 	if statusIs(err, 404) && !containerGone(err) {
 		// The archive endpoint does not create parents; only a missing
 		// directory can produce this 404, so make it and try once more.
 		if mkErr := c.mkdirAll(ctx, dir); mkErr != nil {
 			return mkErr
 		}
-		err = c.api.putArchive(ctx, c.id, dir, tarball)
+		err = c.api.putArchive(ctx, c.id, dir, bytes.NewReader(tarball))
 	}
 	// Only the container's absence is ErrNotFound here — the other 404 means
 	// the path is wrong, and calling that a missing sandbox would send the
 	// executor looking for the wrong failure.
+	if containerGone(err) {
+		return c.gone()
+	}
+	return err
+}
+
+// WriteFileStream streams size bytes from src into the sandbox as a tar built on
+// the fly over a pipe, so a large mount never fully buffers in the executor.
+// Unlike WriteFile it cannot replay the body for the mkdir-and-retry dance (a
+// one-shot object-storage reader is drained by the first attempt), so it
+// pre-creates the parent directory instead — a mount write is rare enough that
+// the extra exec is immaterial. The tar writer enforces the byte count: a src
+// yielding fewer or more than size bytes fails the archive rather than writing a
+// truncated file.
+func (c *container) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
+	dir := gopath.Dir(path)
+	if err := c.mkdirAll(ctx, dir); err != nil {
+		return err
+	}
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(streamTarFile(pw, gopath.Base(path), src, size)) }()
+	err := c.api.putArchive(ctx, c.id, dir, pr)
 	if containerGone(err) {
 		return c.gone()
 	}
@@ -651,24 +673,33 @@ func (c *container) gone() error { return fmt.Errorf("%s: %w", c.id, sandbox.Err
 
 func tarFile(name string, data []byte) ([]byte, error) {
 	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	err := tw.WriteHeader(&tar.Header{
-		Name:     name,
-		Mode:     0o644,
-		Size:     int64(len(data)),
-		Typeflag: tar.TypeReg,
-		ModTime:  time.Now(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("docker: build archive: %w", err)
-	}
-	if _, err := tw.Write(data); err != nil {
-		return nil, fmt.Errorf("docker: build archive: %w", err)
-	}
-	if err := tw.Close(); err != nil {
-		return nil, fmt.Errorf("docker: build archive: %w", err)
+	if err := streamTarFile(&buf, name, bytes.NewReader(data), int64(len(data))); err != nil {
+		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// streamTarFile writes a single-entry tar (one regular file of exactly size
+// bytes read from src) to w. The tar writer's own length accounting is the
+// integrity check: Close fails if src was short, Write fails if it was long.
+func streamTarFile(w io.Writer, name string, src io.Reader, size int64) error {
+	tw := tar.NewWriter(w)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     name,
+		Mode:     0o644,
+		Size:     size,
+		Typeflag: tar.TypeReg,
+		ModTime:  time.Now(),
+	}); err != nil {
+		return fmt.Errorf("docker: build archive: %w", err)
+	}
+	if _, err := io.Copy(tw, src); err != nil {
+		return fmt.Errorf("docker: build archive: %w", err)
+	}
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("docker: build archive: %w", err)
+	}
+	return nil
 }
 
 // shellQuote makes a path a single, literal shell word.

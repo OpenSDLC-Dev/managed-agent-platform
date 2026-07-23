@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -69,6 +70,13 @@ func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) e
 	}
 	f.files[path] = string(data)
 	return nil
+}
+func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
+	data, err := io.ReadAll(io.LimitReader(src, size))
+	if err != nil {
+		return err
+	}
+	return f.WriteFile(ctx, path, data)
 }
 func (f *fakeSandbox) Destroy(context.Context) error { return nil }
 

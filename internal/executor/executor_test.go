@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -43,7 +44,25 @@ type fakeSandbox struct {
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
-func (f *fakeSandbox) Exec(context.Context, sandbox.ExecRequest) (sandbox.ExecResult, error) {
+func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	// Reflect real file presence for the executor's mountsPresent probe
+	// (`test -e '<p1>' && test -e '<p2>' && true`), so a deleted mount actually
+	// reports absent and forces re-materialization — an always-true Exec would
+	// make the `&& mountsPresent` skip-guard untestable. The exact shape match
+	// keeps ordinary tool commands on the unconditional exit-0 path.
+	if strings.HasPrefix(req.Command, "test -e ") && strings.HasSuffix(req.Command, "&& true") {
+		for _, tok := range strings.Split(req.Command, " && ") {
+			if tok == "true" {
+				continue
+			}
+			p := strings.TrimPrefix(tok, "test -e ")
+			p = strings.TrimSuffix(strings.TrimPrefix(p, "'"), "'")
+			p = strings.ReplaceAll(p, `'\''`, "'") // reverse shellQuote
+			if _, ok := f.files[p]; !ok {
+				return sandbox.ExecResult{ExitCode: 1}, nil
+			}
+		}
+	}
 	return sandbox.ExecResult{}, nil
 }
 func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
@@ -81,6 +100,13 @@ func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) e
 	}
 	f.files[path] = string(data)
 	return nil
+}
+func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
+	data, err := io.ReadAll(io.LimitReader(src, size))
+	if err != nil {
+		return err
+	}
+	return f.WriteFile(ctx, path, data)
 }
 func (f *fakeSandbox) Destroy(context.Context) error { return nil }
 

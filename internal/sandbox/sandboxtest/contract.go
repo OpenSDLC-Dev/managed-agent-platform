@@ -444,6 +444,44 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// WriteFileStream is the streaming counterpart to WriteFile: it must land
+	// exactly the bytes src yields (creating parents, overwriting), across many
+	// stream buffers, without buffering the whole payload. A file mount rides
+	// this path so a 500 MB object never fully buffers in the executor.
+	t.Run("FileStreamRoundTrip", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		// A payload spanning many buffers, deterministic so a mismatch names the
+		// first bad offset (the same xorshift filler the buffered case uses).
+		want := make([]byte, 1<<20)
+		x := uint32(0x1234567)
+		for i := range want {
+			x ^= x << 13
+			x ^= x >> 17
+			x ^= x << 5
+			want[i] = byte(x)
+		}
+		path := workdir + "/streamed/deep/mount.bin"
+		if err := sb.WriteFileStream(ctx, path, bytes.NewReader(want), int64(len(want))); err != nil {
+			t.Fatalf("stream write %d bytes: %v", len(want), err)
+		}
+		got, err := sb.ReadFile(ctx, path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("read back %d bytes, want %d; first difference at %d",
+				len(got), len(want), firstDiff(got, want))
+		}
+
+		// A src yielding fewer bytes than the declared size is an error, never a
+		// silently truncated file — the integrity guarantee the size argument buys.
+		short := workdir + "/short.bin"
+		if err := sb.WriteFileStream(ctx, short, strings.NewReader("hi"), 100); err == nil {
+			t.Error("stream write with a short src returned nil, want an error")
+		}
+	})
+
 	// Files and commands see one filesystem — the whole point of the sandbox.
 	t.Run("FilesAndExecShareTheFilesystem", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)

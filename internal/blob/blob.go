@@ -17,6 +17,14 @@ import (
 // it so callers can errors.Is across backends.
 var ErrNotFound = errors.New("blob: object not found")
 
+// FilesKey is the object-storage key for a Files-API file's bytes — the
+// `files/{file_id}` namespace this package's doc reserves. It lives here, not
+// in a feature package (unlike skills' own BlobKey), because it has no home
+// package: the api registry that writes the object and the executor/worker that
+// stream it into sandboxes all import blob, so one definition keeps the layout
+// from drifting between the writer and its readers.
+func FilesKey(id string) string { return "files/" + id }
+
 // Store is the object-storage contract. Keys are opaque non-empty strings;
 // "/" separators are conventional namespacing, not directories.
 type Store interface {

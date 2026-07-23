@@ -142,12 +142,14 @@ slice 4 gives it a wire-only fetch path and records the divergence.
    union seam open for the git half of #55. The DIVERGENCES line-28 entry ("session
    resources rejected") is carved down accordingly in slice 2.
 7. **Materialization mirrors the skills three-point pattern.** Executor: after
-   `materializeSkills`, a `materializeFiles` pass writes each mounted file's blob bytes to
-   its `mount_path` via `sb.WriteFile` before tool execution, with sentinel idempotence
-   (`{workdir}/.files_materialized` listing `{sesrsc_id, file_id}` pairs, existence
-   re-probed since the workdir is agent-writable — the skills tamper analysis carries
-   over) and per-resource failure tolerated. Worker: a wire-only twin (`Sessions.Get` for
-   `resources[]` → `Files.Download` on the env-key lane → `sb.WriteFile`). Brain: a
+   `materializeSkills`, a `materializeFiles` pass streams each mounted file's blob bytes to
+   its `mount_path` via `sb.WriteFileStream` before tool execution, with sentinel idempotence
+   (`{workdir}/.files_materialized` listing sorted `{file_id, mount_path}` pairs; presence
+   re-probed with a single `test -e` shell exec rather than a ReadFile read-back, since the
+   workdir is agent-writable — the skills tamper analysis carries over — and a mount can be
+   500 MB, far past the 4 MiB read cap) and per-resource failure tolerated. Worker: a
+   wire-only twin (`Sessions.Get` for `resources[]` → `Files.Download` on the env-key lane →
+   `sb.WriteFileStream`). Brain: a
    Level-1-style "Mounted files" block (mount path, filename, mime type, size) appended
    after the skills block at request assembly — format inferred, exactly like the skills
    line-67 entry — so the agent can find mounts outside the workdir. Because a mount can
@@ -165,8 +167,11 @@ slice 4 gives it a wire-only fetch path and records the divergence.
 9. **Observability mirrors skills names**, same meters, outcome-only labels, IDs in span
    attributes never metric labels: `files.uploads` / `files.upload.bytes` /
    `files.download.bytes` on the api meter; `files.materialized` /
-   `files.materialize.duration` and a `files_materialize` span at both execution halves.
-   Blob-level metrics come free via the existing `blob.WithMetrics` decorator.
+   `files.materialize.duration` and a `files_materialize` span at both execution halves;
+   `files.resolve.misses` on the brain (the `skills.resolve.misses` twin — a dangling mount
+   the brain cannot inject is a counted miss), plus `files.injected` / `files.block_chars`
+   on the `model_request` span. Blob-level metrics come free via the existing
+   `blob.WithMetrics` decorator.
 10. **Availability and auth follow the skills precedent.** `blobs == nil` → the files
     endpoints fail 500 like `errSkillsUnavailable` (internal/api/skills.go:96-98).
     Management endpoints ride the x-api-key lane; slice 4 adds an `isFileReadPath`

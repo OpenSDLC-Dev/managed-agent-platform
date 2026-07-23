@@ -50,6 +50,12 @@ type Task struct {
 	// skills/<Name>/ before the first tool runs. Exercises the whole skills
 	// chain — registry, resolution, materialization, Level-1 injection.
 	Skills []SkillFixture
+	// Files are uploaded to the /v1/files registry and mounted as session
+	// resources before the first turn, so the executor materializes each into
+	// the sandbox at its mount path and the brain injects the Mounted-files
+	// block. Exercises the whole file-mount chain — registry, session resource,
+	// materialization, Level-1 injection.
+	Files []FileFixture
 	// Turns are the user messages, sent one at a time; each waits for the
 	// session to go idle before the next is sent.
 	Turns []Turn
@@ -93,6 +99,15 @@ type SkillFixture struct {
 	Description string
 	Body        string
 	Files       map[string]string
+}
+
+// FileFixture is a file uploaded to /v1/files and mounted into the session at
+// MountPath before the first turn. Content has {{NONCE}}/{{RECALL}} substituted;
+// MountPath is explicit so a grader can assert the agent read exactly it.
+type FileFixture struct {
+	Name      string
+	Content   string
+	MountPath string
 }
 
 // Trial is one execution of a Task: everything a grader is allowed to look at.
@@ -154,6 +169,14 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 	envID := s.createEnvironment(t, "eval-"+task.ID)
 	tr.SessionID = s.createSession(t, agentID, envID)
 	rec.Session = tr.SessionID
+
+	// Files are uploaded and mounted as session resources before the first turn,
+	// so the executor materializes each into the sandbox when the first tool runs
+	// and the brain injects the Mounted-files block from turn one.
+	for _, ff := range task.Files {
+		fileID := s.uploadFile(t, ff, tr)
+		s.addResource(t, tr.SessionID, fileID, tr.fill(ff.MountPath))
+	}
 
 	// Seeds are planted before the stream opens and the first turn is sent, so
 	// the files are already there when the agent's first tool runs. Seeding

@@ -126,6 +126,59 @@ func (s *stack) uploadSkill(t *testing.T, sf SkillFixture, tr *Trial) string {
 	return id(t, obj, "upload skill")
 }
 
+// uploadFile uploads one fixture file through the public multipart endpoint
+// (the same single-`file`-part form an `ant beta:files upload` sends) and
+// returns the file id.
+func (s *stack) uploadFile(t *testing.T, ff FileFixture, tr *Trial) string {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	w, err := mw.CreateFormFile("file", ff.Name)
+	if err != nil {
+		t.Fatalf("multipart file part: %v", err)
+	}
+	if _, err := io.WriteString(w, tr.fill(ff.Content)); err != nil {
+		t.Fatalf("write file part: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), restTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url+"/v1/files", &buf)
+	if err != nil {
+		t.Fatalf("new file upload request: %v", err)
+	}
+	req.Header.Set("x-api-key", evalKey)
+	req.Header.Set("content-type", mw.FormDataContentType())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("upload file %s: %v", ff.Name, err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("upload file %s: status %d, body %s", ff.Name, res.StatusCode, raw)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("upload file %s: response is not a JSON object: %s", ff.Name, raw)
+	}
+	return id(t, obj, "upload file")
+}
+
+// addResource mounts an uploaded file into the session as a file resource. An
+// empty mountPath leaves the server to default it to /mnt/session/uploads/<id>.
+func (s *stack) addResource(t *testing.T, sessionID, fileID, mountPath string) {
+	t.Helper()
+	body := map[string]any{"type": "file", "file_id": fileID}
+	if mountPath != "" {
+		body["mount_path"] = mountPath
+	}
+	s.do(t, http.MethodPost, "/v1/sessions/"+sessionID+"/resources", body)
+}
+
 // id pulls a resource id out of a create response.
 func id(t *testing.T, obj map[string]any, what string) string {
 	t.Helper()
