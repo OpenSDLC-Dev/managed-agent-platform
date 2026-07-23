@@ -63,13 +63,38 @@ own contract, and turning one corrupt object into an outage of every session ref
 strictly worse than that session running without the skill — hence the skip under a distinct
 `corrupt` outcome, which keeps integrity failures alertable apart from dangling references.
 
+**Review hardening — the sentinel could inherit a weaker guarantee.** The Codex pass
+(`gpt-5.6-sol`, config `ultra` effort) found the one real defect in the first cut, and it was in
+neither half of the digest plumbing: the `.materialized` sentinel records only `{skill_id, version}`,
+and both halves return *before* downloading anything when it matches. A rolling upgrade therefore had
+a hole — control plane and migration deployed first, an old execution binary materializes a
+now-digest-bearing version without verifying it and writes the legacy marker, and after that binary
+upgrades the unchanged marker keeps matching, suppressing verification for the rest of the session.
+On a platform whose premise is long-horizon sessions, "the rest of the session" is not a short
+window. Fixed by giving the marker an integrity generation (`skills.SentinelVersion`) rather than the
+reviewer's own first suggestion of recording the digests in it — that would force the BYOC worker to
+spend a wire round trip per skill per pass, because it learns a digest only from the download
+response, i.e. after the skip decision it is trying to make. The generation costs one
+re-materialization per live sandbox at upgrade and nothing at steady state. The forced pass detects
+and refuses a substituted archive but does not erase bytes an older binary already wrote — the
+sandbox seam has no delete primitive, the residual already recorded for in-place tampering. A
+knock-on the fix created: several `SentinelMatches` cases used bare-array fixtures that the new
+parser rejects outright, so they would have passed for the wrong reason; they were re-expressed in
+the current generation (via a `marker()` helper that follows future bumps) so they still exercise the
+bijection and probe rules they were written for. Everything else in that pass checked clean: all
+three writers covered with no fourth, both constructors hashing the exact bytes stored, `*string`
+scanning distinguishing NULL from a value, `strings.EqualFold` not exploitable, migration 0010 safe
+on a populated table, and the download endpoint's auth/404/Content-Length behavior unchanged.
+
 **Verification that the tests are load-bearing.** Both refusal tests substitute the stored object
 with a *different but perfectly valid* archive, so zip's own per-member CRC-32 cannot catch it and a
 fixture cannot pass by accident. Each was run against a neutered guard to confirm it fails:
 disabling the comparison in `skills.ReadArchive` let `"tampered instructions"` reach the sandbox in
 the executor test, and suppressing the response header alone did the same in the worker test —
 proving the worker's protection travels over the wire and is not incidentally supplied by anything
-else.
+else. The sentinel-generation test was checked the same way: made to accept the legacy array form
+again, it fails with the pre-verification bytes still in the sandbox and the old marker still
+vouching for them — the reviewer's scenario, reproduced.
 
 **Governance — a single-PR plan archives itself and leaves STATE.md alone.** The plan was authored
 and archived within its one delivering PR, so STATE.md's Active work stayed **None**: it tracks work

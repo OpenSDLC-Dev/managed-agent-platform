@@ -98,7 +98,24 @@ which simply never equals a real one — returns the sentinel `skills.ErrDigestM
 comparison is case-insensitive: our own digests are lowercase by construction, but rejecting
 another implementation's uppercase hex would be a gratuitous failure.
 
-**D5 — A mismatch folds into the existing per-skill tolerance, under its own outcome label.**
+**D5 — The `.materialized` sentinel carries an integrity generation.** *(Added in review — the
+Codex pass found the hole this closes.)* Both halves return early, without downloading anything,
+when the marker matches the freshly resolved set. So a sandbox that a pre-verification binary
+populated during a rolling upgrade — control plane and migration deployed first, execution binaries
+still catching up — would keep matching afterwards and suppress the new verification for the rest of
+that session, which on a long-horizon session is a long time. The marker therefore records what a
+materialization was *guaranteed* to have done (`skills.SentinelVersion`; generation 2 = "verified
+against the recorded digest"), and a marker of any other generation never matches. Cost: one
+re-materialization per live sandbox at upgrade, nothing at steady state. Recording the digests in
+the marker instead — the reviewer's first suggestion — was rejected: the BYOC worker learns a digest
+only from the download response, i.e. *after* the skip decision, so it would have to spend a wire
+round trip per skill per pass to answer what a constant answers for free. What this does not do is
+heal bytes already on disk: the pass detects and refuses the bad archive (counting `corrupt`) and
+declines to vouch for it in the new marker, but the sandbox seam has no delete primitive, so a file
+an older binary wrote stays until something overwrites it — the residual already recorded for
+in-place tampering.
+
+**D6 — A mismatch folds into the existing per-skill tolerance, under its own outcome label.**
 Materialization's contract on both halves is that per-skill failure is logged and skipped, never
 fatal to the tool run (the reference's semantics, restated in `docs/DIVERGENCES.md`). Making a
 corrupt archive fatal would turn one bad object into a total outage of every session referencing
@@ -143,4 +160,8 @@ round trip, same 404 on no rows — and sets the header when the value is non-NU
   — new `internal/executor` tests.
 - The worker does the same end-to-end over the wire against the real API server — new
   `internal/worker` tests.
+- A sentinel written under the pre-verification generation does not match: the pass
+  re-materializes and verifies (healing a healthy archive, refusing a substituted one) and
+  rewrites the marker in the current generation — new `internal/skills` and
+  `internal/executor` tests.
 - `make verify` green (build, crossbuild, vet, fmt, test, ≥90% coverage).

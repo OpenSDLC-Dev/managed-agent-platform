@@ -229,6 +229,50 @@ func TestMaterializeRefusesSubstitutedArchive(t *testing.T) {
 	}
 }
 
+func TestMaterializePreVerificationSentinelIsNotTrusted(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{}}
+	h := newHarness(t, sb)
+	h.seedSkill(t, "skill_mat_old", "100", "old-skill", map[string]string{"SKILL.md": "genuine"})
+	h.refSkills(t, [2]string{"skill_mat_old", "100"})
+	// A binary predating digest verification materialized this session's live
+	// sandbox and left the marker form it wrote — a bare, unversioned array.
+	// Trusting it would suppress verification for the rest of the session, which
+	// on a long-horizon session is a long time.
+	sb.files["/workspace/skills/old-skill/SKILL.md"] = "whatever it wrote"
+	sb.files["/workspace/skills/"+skills.SentinelName] = `[{"skill_id":"skill_mat_old","version":"100"}]`
+	h.suspend(t, writeUse("out.txt", "hello"))
+
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	// The marker cannot vouch for a guarantee its writer never applied, so the
+	// pass re-materializes: the archive verifies and the genuine bytes land.
+	if got := sb.files["/workspace/skills/old-skill/SKILL.md"]; got != "genuine" {
+		t.Errorf("SKILL.md = %q, want the re-materialized archive", got)
+	}
+	// And the marker it leaves is of the current generation, so the next pass
+	// may skip on it.
+	if _, ok := skills.ParseSentinel([]byte(sb.files["/workspace/skills/"+skills.SentinelName])); !ok {
+		t.Errorf("sentinel not rewritten in the current generation: %q",
+			sb.files["/workspace/skills/"+skills.SentinelName])
+	}
+
+	// The same forced pass is what catches an object substituted before that
+	// older binary ever ran: refused, not inherited as already-materialized.
+	h.swapArchive(t, "skill_mat_old", "100", "old-skill", map[string]string{"SKILL.md": "tampered"})
+	sb.files["/workspace/skills/"+skills.SentinelName] = `[{"skill_id":"skill_mat_old","version":"100"}]`
+	h.suspend(t, writeUse("out2.txt", "again"))
+	if _, err := h.exec.step(context.Background()); err != nil {
+		t.Fatalf("second step: %v", err)
+	}
+	if got := sb.files["/workspace/skills/old-skill/SKILL.md"]; got == "tampered" {
+		t.Error("substituted archive was extracted over a pre-verification marker")
+	}
+	if sentinel := sb.files["/workspace/skills/"+skills.SentinelName]; strings.Contains(sentinel, "skill_mat_old") {
+		t.Errorf("sentinel vouched for a refused skill: %q", sentinel)
+	}
+}
+
 func TestMaterializeToleratesVersionWithoutDigest(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -164,6 +165,22 @@ func TestSentinel(t *testing.T) {
 	if _, ok := ParseSentinel([]byte("not json")); ok {
 		t.Error("ParseSentinel accepted garbage")
 	}
+	// A marker written under an older integrity generation — including the
+	// unversioned array form, written before archives were verified at all —
+	// must not satisfy this one: a materialization that predates digest
+	// verification cannot attest to it, so the pass re-materializes and
+	// verifies instead of trusting the marker.
+	if _, ok := ParseSentinel([]byte(`[{"skill_id":"skill_x","version":"100"}]`)); ok {
+		t.Error("ParseSentinel accepted a pre-verification marker")
+	}
+	if _, ok := ParseSentinel([]byte(`{"v":1,"skills":[{"skill_id":"skill_x","version":"100"}]}`)); ok {
+		t.Error("ParseSentinel accepted an older generation")
+	}
+	// Nor may a newer one be trusted by a downgraded binary: it cannot evaluate
+	// a claim it does not know the meaning of.
+	if _, ok := ParseSentinel([]byte(`{"v":99,"skills":[{"skill_id":"skill_x","version":"100"}]}`)); ok {
+		t.Error("ParseSentinel accepted a newer generation")
+	}
 }
 
 func TestSentinelMatches(t *testing.T) {
@@ -220,15 +237,15 @@ func TestSentinelMatches(t *testing.T) {
 		{ID: "skill_x", Version: "100", Dir: "notes"},
 		{ID: "skill_y", Version: "100", Dir: "notes"},
 	}
-	dupMarker := []byte(`[{"skill_id":"skill_x","version":"100"},{"skill_id":"skill_x","version":"100"}]`)
+	dupMarker := marker(`[{"skill_id":"skill_x","version":"100"},{"skill_id":"skill_x","version":"100"}]`)
 	if SentinelMatches(context.Background(), read, "/ws", dupMarker, two) {
 		t.Error("matched a marker with a duplicated id against two distinct skills")
 	}
-	unknownMarker := []byte(`[{"skill_id":"skill_z","version":"100"}]`)
+	unknownMarker := marker(`[{"skill_id":"skill_z","version":"100"}]`)
 	if SentinelMatches(context.Background(), read, "/ws", unknownMarker, rs) {
 		t.Error("matched a marker naming an unresolved skill")
 	}
-	emptyMarker := []byte(`[{}]`)
+	emptyMarker := marker(`[{}]`)
 	if SentinelMatches(context.Background(), read, "/ws", emptyMarker, rs) {
 		t.Error("matched a zero-value marker entry")
 	}
@@ -238,13 +255,28 @@ func TestSentinelMatches(t *testing.T) {
 		t.Error("matched against a duplicated resolved set")
 	}
 
-	// An older marker that still carries a "directory" field parses cleanly —
-	// the field is ignored — and matches, because the probe uses the trusted
-	// directory regardless. Upgrade is seamless and still sound.
-	legacy := []byte(`[{"skill_id":"skill_x","version":"100","directory":"notes"}]`)
-	if !SentinelMatches(context.Background(), read, "/ws", legacy, rs) {
-		t.Error("a legacy directory-bearing marker did not match")
+	// A marker of this generation that still carries a "directory" field parses
+	// cleanly — the field is ignored — and matches, because the probe uses the
+	// trusted directory regardless.
+	withDir := marker(`[{"skill_id":"skill_x","version":"100","directory":"notes"}]`)
+	if !SentinelMatches(context.Background(), read, "/ws", withDir, rs) {
+		t.Error("a directory-bearing marker did not match")
 	}
+	// But a marker written before archives were verified never matches, however
+	// well its {id, version} set lines up: the skip would suppress the digest
+	// check that the pass exists to apply. This is what forces exactly one
+	// re-materialization per live sandbox after an upgrade.
+	preVerification := []byte(`[{"skill_id":"skill_x","version":"100"}]`)
+	if SentinelMatches(context.Background(), read, "/ws", preVerification, rs) {
+		t.Error("a pre-verification marker matched and would suppress verification")
+	}
+}
+
+// marker renders a forged marker body in the current integrity generation, so
+// these cases exercise the bijection and probe rules rather than being rejected
+// for their generation — and keep doing so when SentinelVersion is next bumped.
+func marker(entries string) []byte {
+	return fmt.Appendf(nil, `{"v":%d,"skills":%s}`, SentinelVersion, entries)
 }
 
 func TestReadArchiveVerifiesDigest(t *testing.T) {

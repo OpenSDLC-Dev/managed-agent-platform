@@ -43,6 +43,14 @@ copy of an entry here.
   are alertable apart from dangling references. Where no digest was recorded (a row
   predating the column, or a control plane that sends no header) the archive is read
   unverified and the fact is logged, rather than making existing skills unusable.
+  The `.materialized` sentinel gains an **integrity generation** so the skip cannot
+  inherit a weaker guarantee than the one now in force: both halves return early when
+  that marker matches, without downloading anything, so a sandbox a pre-verification
+  binary populated during a rolling upgrade would otherwise keep matching and suppress
+  digest verification for the rest of that session. A marker of an older generation (the
+  unversioned array form) — or a newer one, which a downgraded binary cannot evaluate —
+  never matches, costing exactly one re-materialization per live sandbox at upgrade and
+  nothing at steady state.
 
 - **Files API — the BYOC worker file lane: environment-scoped content download + wire-only materialization (Files plan, slice 4 — closes the Files half of #55)**
   ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — a self-hosted
