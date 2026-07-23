@@ -61,6 +61,12 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store) http.Handler {
 	mux.HandleFunc("GET /v1/sessions/{id}/events", s.handle(s.listSessionEvents))
 	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", s.streamSessionEvents)
 
+	mux.HandleFunc("GET /v1/sessions/{id}/resources", s.handle(s.listSessionResources))
+	mux.HandleFunc("POST /v1/sessions/{id}/resources", s.handle(s.addSessionResource))
+	mux.HandleFunc("GET /v1/sessions/{id}/resources/{rid}", s.handle(s.getSessionResource))
+	mux.HandleFunc("POST /v1/sessions/{id}/resources/{rid}", s.handle(s.updateSessionResource))
+	mux.HandleFunc("DELETE /v1/sessions/{id}/resources/{rid}", s.handle(s.deleteSessionResource))
+
 	mux.HandleFunc("POST /v1/skills", s.handle(s.createSkill))
 	mux.HandleFunc("GET /v1/skills", s.handle(s.listSkills))
 	mux.HandleFunc("GET /v1/skills/{id}", s.handle(s.getSkill))
@@ -88,6 +94,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store) http.Handler {
 		"/v1/environments", "/v1/environments/{id}", "/v1/environments/{id}/archive",
 		"/v1/sessions", "/v1/sessions/{id}", "/v1/sessions/{id}/archive",
 		"/v1/sessions/{id}/events", "/v1/sessions/{id}/events/stream",
+		"/v1/sessions/{id}/resources", "/v1/sessions/{id}/resources/{rid}",
 		"/v1/skills", "/v1/skills/{id}", "/v1/skills/{id}/versions",
 		"/v1/skills/{id}/versions/{version}", "/v1/skills/{id}/versions/{version}/content",
 		"/v1/files", "/v1/files/{id}", "/v1/files/{id}/content",

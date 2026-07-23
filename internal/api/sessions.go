@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -302,7 +303,9 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	if !ok || isNull(agentRaw) {
 		return nil, errInvalid("agent is required")
 	}
-	if err := rejectUnsupportedList(obj, "resources", "session resources"); err != nil {
+	resourceInputs, err := parseResourceInputs(obj)
+	if err != nil {
+		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return nil, err
 	}
 	if err := rejectUnsupportedList(obj, "vault_ids", "vaults"); err != nil {
@@ -351,6 +354,14 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 
+	now := time.Now().UTC()
+	resources, err := materializeResourceInputs(ctx, tx, resourceInputs, now)
+	if err != nil {
+		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
+		return nil, err
+	}
+	resourcesJSON := mustJSON(resources)
+
 	id := domain.NewID(domain.PrefixSession).String()
 	var createdBy *string
 	if p := principalFrom(ctx); p != "" {
@@ -359,14 +370,14 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	row := sessionRow{
 		id: id, agentJSON: agentJSON, environmentID: envID,
 		status: string(domain.SessionIdle), title: title,
-		metaJSON: mustJSON(metadata), usageJSON: []byte(`{}`), resourcesJSON: []byte(`[]`),
+		metaJSON: mustJSON(metadata), usageJSON: []byte(`{}`), resourcesJSON: resourcesJSON,
 	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id,
-		   status, title, metadata, created_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		   status, title, metadata, resources, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 RETURNING created_at, updated_at`,
-		id, agent.ID, agent.Version, agentJSON, envID, row.status, title, metadata, createdBy).
+		id, agent.ID, agent.Version, agentJSON, envID, row.status, title, metadata, resourcesJSON, createdBy).
 		Scan(&row.createdAt, &row.updatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop
@@ -380,6 +391,11 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+	if len(resources) > 0 {
+		recordResourceMutation(ctx, resourceOutcomeOK, len(resources))
+		slog.InfoContext(ctx, "session created with file resources",
+			"session_id", id, "resource_count", len(resources))
 	}
 	return renderSession(row)
 }
