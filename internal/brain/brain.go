@@ -22,8 +22,14 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracerName is the brain's OTel instrumentation scope.
+const tracerName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 
 // Config sizes the loop.
 type Config struct {
@@ -70,8 +76,14 @@ func New(pool *pgxpool.Pool, registry *provider.Registry, cfg Config) *Brain {
 func (b *Brain) Run(ctx context.Context) error {
 	for {
 		found, err := b.RunOnce(ctx)
-		if err != nil {
-			slog.Error("brain: turn failed, lease left to expire", "error", err)
+		if err != nil && !found && !errors.Is(err, context.Canceled) {
+			// Nothing was claimed, so there is no turn and no span to hang this
+			// on: the queue itself is unreachable. A claimed turn's own fault is
+			// reported from inside its model_turn span, where a trace carries it.
+			// A cancelled claim is this loop shutting down, not a fault, and the
+			// select below is about to return — saying "retrying" there would be
+			// a lie at ERROR level on every clean exit.
+			slog.ErrorContext(ctx, "brain: claim failed, retrying", "error", err)
 		}
 		if found && err == nil {
 			continue // drain the queue before idling
@@ -86,16 +98,50 @@ func (b *Brain) Run(ctx context.Context) error {
 
 // RunOnce claims at most one model_turn and runs it to completion,
 // reporting whether there was work.
-func (b *Brain) RunOnce(ctx context.Context) (bool, error) {
+//
+// The claimed turn runs under a model_turn consumer span — the brain's
+// counterpart of the executor's tool_exec span and the BYOC worker's, the same
+// two work-queue claimants. It opens on the claimed item and closes on its fate
+// because the nested model_request span can carry neither half of a turn fault.
+// Half the faults happen before that span exists at all — claimLiveSession, the
+// reclaim-recovery append, replay, request assembly, provider resolution, which
+// reach failTurn with a nil span. For the rest, runTurn hands back an error and
+// nothing else: sctx never leaves it, and Finish has closed the span before the
+// error arrives here. Unlike a tool_exec item there is no
+// enqueuing trace to continue — queue.Enqueue deliberately stores none on a
+// model_turn — so this span roots the turn's trace, and the tool_exec items the
+// turn enqueues carry its model_request onward as their parent.
+func (b *Brain) RunOnce(ctx context.Context) (found bool, err error) {
 	item, err := b.queue.Claim(ctx, queue.ModelTurn, b.cfg.LeaseTTL)
 	if err != nil || item == nil {
 		return false, err
 	}
+	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "model_turn",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("session.id", item.SessionID.String()),
+			attribute.String("work.id", item.ID.String()),
+		))
+	// Only the brain's own faults reach here. A model that failed or an input
+	// the model can be told about is settled onto the wire as a session.error
+	// by failTurn and returns no error, so it never reddens this span: a turn
+	// the platform handled correctly is not a platform failure.
+	defer func() {
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			// Inside the span, so the record lands on the model_turn it is
+			// about — that red span is where an operator asks for it.
+			slog.ErrorContext(ctx, "brain: turn failed, lease left to expire",
+				"item", item.ID, "session", item.SessionID, "error", err)
+		}
+		span.End()
+	}()
+
 	// The claim is the start of time-to-first-token: replay and request assembly
 	// are latency the user feels, so the clock starts here, not at the provider
 	// call.
 	claimedAt := time.Now()
-	if err := b.runTurn(ctx, item, claimedAt); err != nil {
+	if err = b.runTurn(ctx, item, claimedAt); err != nil {
 		// Infra failure or a lost lease: the item is left to its lease —
 		// expiry hands it to another brain. The turn's output never commits
 		// on these paths (settlement carries the lease proof in the same
