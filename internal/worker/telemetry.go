@@ -31,9 +31,13 @@ const (
 	skillOutcomeOK       = "ok"
 	skillOutcomeNotFound = "not_found"
 	skillOutcomeFailed   = "failed"
-	fileOutcomeOK        = "ok"
-	fileOutcomeNotFound  = "not_found"
-	fileOutcomeFailed    = "failed"
+	// corrupt: the archive did not match the digest the download advertised —
+	// separable from an ordinary miss because it means storage corruption or
+	// substitution, not a dangling reference.
+	skillOutcomeCorrupt = "corrupt"
+	fileOutcomeOK       = "ok"
+	fileOutcomeNotFound = "not_found"
+	fileOutcomeFailed   = "failed"
 )
 
 // recordSkillMaterialized counts one skill's outcome; the meter is resolved

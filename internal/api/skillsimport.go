@@ -113,10 +113,10 @@ func importSkillDir(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, d
 		return name, errVersionExists
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		`INSERT INTO skill_versions (id, skill_id, version, name, description, directory, sha256)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		domain.NewID(domain.PrefixSkillVersion).String(), name, version,
-		bundle.Name, bundle.Description, bundle.Directory); err != nil {
+		bundle.Name, bundle.Description, bundle.Directory, bundle.SHA256); err != nil {
 		return name, err
 	}
 	// latest_version follows the numerically newest version (length-then-

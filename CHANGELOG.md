@@ -64,6 +64,43 @@ copy of an entry here.
 
 ### Added
 
+- **Skill archives carry a sha256 from upload to materialization**
+  ([#155](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/155),
+  [plan 10](docs/plan/10_skill-archive-integrity.md)) — nothing on the skill-archive path
+  used to carry a content digest: upload computed none (and `blob.Store` has no checksum
+  concept), the registry stored none, the download served none, and both materialization
+  halves handed the fetched bytes straight to extraction. The only check anywhere was Go
+  stdlib zip's per-member CRC-32 — non-cryptographic, and blind to a substituted archive
+  that is itself a valid zip. Because the metadata (Postgres) and the bytes (object
+  storage) live in two different stores, an object that bit-rotted, truncated, or was
+  replaced between upload and materialization reached the sandbox unnoticed. Now both
+  `skills.Bundle` constructors record `Digest(zip)`, the lowercase-hex sha256 of the exact
+  bytes stored; migration `0010` adds the nullable `skill_versions.sha256` column (nullable
+  because a SQL migration cannot read object storage to backfill a pre-existing row's
+  digest — `NULL` therefore means precisely "written before this change"), and all three
+  writers — skill create, version create, and the operator import — persist it in the
+  transaction that lands the row. Verification lives inside `skills.ReadArchive`, the one
+  function both halves already call between fetching an archive and extracting it, so a
+  future reader cannot forget it: the platform executor passes the digest from the version
+  row it already reads for the materialization directory, and the BYOC worker — which
+  never touches the database — reads it from a new additive `x-skill-archive-sha256`
+  response header on `GET /v1/skills/{id}/versions/{version}/content` (the pinned SDK's
+  version object carries no checksum field; reference clients ignore unknown headers, the
+  `traceparent`-on-`/work/poll` pattern). A mismatch takes the same per-skill tolerance as
+  any other miss — one corrupt archive must not fail every session referencing it — but
+  under its own `corrupt` value on the `skills.materialized` outcome, so integrity failures
+  are alertable apart from dangling references. Where no digest was recorded (a row
+  predating the column, or a control plane that sends no header) the archive is read
+  unverified and the fact is logged, rather than making existing skills unusable.
+  The `.materialized` sentinel gains an **integrity generation** so the skip cannot
+  inherit a weaker guarantee than the one now in force: both halves return early when
+  that marker matches, without downloading anything, so a sandbox a pre-verification
+  binary populated during a rolling upgrade would otherwise keep matching and suppress
+  digest verification for the rest of that session. A marker of an older generation (the
+  unversioned array form) — or a newer one, which a downgraded binary cannot evaluate —
+  never matches, costing exactly one re-materialization per live sandbox at upgrade and
+  nothing at steady state.
+
 - **Files API — the BYOC worker file lane: environment-scoped content download + wire-only materialization (Files plan, slice 4 — closes the Files half of #55)**
   ([#55](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/55)) — a self-hosted
   worker now mounts a session's files exactly as the platform executor does, but wire-only:
@@ -510,6 +547,39 @@ copy of an entry here.
   will catch, so the two spellings are gone rather than documented.
 
 ### Fixed
+
+- **The brain's turn-fault log reached the collector with no trace, so a stalled session's cause was
+  the one fault missing from its trace**
+  ([#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92)) — `Brain.Run` reported a
+  failed turn with a bare `slog.Error`, which logs against `context.Background()`; the OTLP bridge
+  correlates a record by reading the span context off the *logging* context, so the line arrived with
+  no trace and no span — the session id it carried was free text inside the error string, not
+  something a trace view could pivot on. The executor's twin fault already answers from inside its
+  open `tool_exec` span, and a failed model turn is the more common cause of a stalled session — an
+  operator opening the trace found the tool faults and not the turn's. `RunOnce` now runs the claimed
+  turn under a **`model_turn` consumer span** (`session.id` / `work.id` attributes, the executor's
+  `tool_exec` attribute set), and closes it from a deferred exit that sets `codes.Error` with the
+  reason and emits the fault log with `slog.ErrorContext` under that span — the status matters as
+  much as the log, since an operator reaches the log by clicking the red span. The span opens on the
+  claimed item and closes on its fate, because the nested `model_request` span can carry neither half
+  of a turn fault: half of them happen before it exists at all (session-liveness lookup, the
+  reclaim-recovery append, replay, request assembly, provider resolution — all reaching `failTurn`
+  with a nil span), and for the rest `runTurn` hands back an error and nothing else, so the
+  span-carrying context never leaves it and `Finish` has closed the span before `RunOnce` sees the
+  failure. `Run` keeps a log only for the one path with no span to hang it on — a `Claim` that failed
+  before producing an item, and not when that failure is the loop's own shutdown. Only brain-side
+  faults redden the span: a model failure or a deterministic input problem is settled onto the wire as
+  a `session.error` by `failTurn` and returns no error, the executor's "a tool-level failure is not a
+  platform fault" rule applied to the brain. The brain is the work queue's third claimant, and now has
+  the same "handling of one claimed item, end to end" span the executor's `tool_exec` and the BYOC
+  worker's already give theirs ("deployment point" keeps its established meaning — the
+  `cloud`/`self_hosted` pair that runs tools; the brain is not a third one of those). Both
+  alternatives #92 weighed — its own cheap `telemetry.Extract(ctx, item.TraceContext)`, and extending
+  trace-context capture to `model_turn` enqueues — were evaluated and rejected, for reasons recorded
+  in [docs/HISTORY.md](./docs/HISTORY.md) § "Brain turn-fault correlation (plan 09)" and
+  [docs/plan/09](./docs/plan/09_brain-turn-fault-span.md). One consequence matters here: the
+  `tool_exec` items a turn enqueues still parent on its `model_request` span, so the executor's and
+  BYOC worker's correlation is untouched.
 
 - **A misspelled `permission_policy` key in an agent toolset silently fell back to `always_allow`**
   ([#26](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/26)) — an

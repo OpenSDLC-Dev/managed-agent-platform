@@ -33,6 +33,75 @@ recorded nowhere else.
 
 ---
 
+## Skill archive integrity (plan 10) — archived 2026-07-23
+
+[docs/plan/10_skill-archive-integrity.md](./plan/10_skill-archive-integrity.md), delivered in one PR
+(**#162**) for [#155](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/155). The change and its
+reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a changelog cannot hold.
+
+**Why this was a plan, not a straight fix.** The read half that runs in a customer's BYOC worker
+never touches the database, and the pinned SDK (v1.58.0, `betaskillversion.go`) gives the version
+object no checksum field — so the expected digest had to reach it over the wire, a surface no
+source records for the reference. That decision (ship the worker half now, on an additive response
+header) and its alternative (executor-only, worker deferred) are materially different scopes, which
+is what put the resolution in a plan rather than in the diff.
+
+**Decisions evaluated and rejected.** (a) RFC 9530 `Repr-Digest: sha-256=:<base64>:` — the
+standards-track field for exactly this. Rejected: nothing between our control plane and our worker
+consumes the standard field, and shipping one algorithm with no `Want-Repr-Digest` and no
+`Content-Digest` distinction advertises a contract we do not honor; a platform-specific
+`x-skill-archive-sha256` is the smaller, honest claim. (b) The object store's own checksum — the
+S3 ETag `minio-go` already returns and `internal/blob/s3` discards. Rejected: an ETag is not a
+content hash under multipart upload and is backend-specific, so it cannot be the cross-backend
+contract `blob.Store` needs; the digest belongs in the registry, which is already the trusted store.
+(c) A `NOT NULL` digest column. Rejected as impossible rather than undesirable: the bytes a
+pre-existing row's digest would be computed from live in object storage, which a SQL migration
+cannot read. `NULL` therefore means exactly "written before migration 0010", is read unverified with
+a log line, and a later migration can tighten the column once no such rows remain. (d) Making a
+mismatch fatal to the tool run. Rejected: materialization's per-skill tolerance is the reference's
+own contract, and turning one corrupt object into an outage of every session referencing it is
+strictly worse than that session running without the skill — hence the skip under a distinct
+`corrupt` outcome, which keeps integrity failures alertable apart from dangling references.
+
+**Review hardening — the sentinel could inherit a weaker guarantee.** The Codex pass
+(`gpt-5.6-sol`, config `ultra` effort) found the one real defect in the first cut, and it was in
+neither half of the digest plumbing: the `.materialized` sentinel records only `{skill_id, version}`,
+and both halves return *before* downloading anything when it matches. A rolling upgrade therefore had
+a hole — control plane and migration deployed first, an old execution binary materializes a
+now-digest-bearing version without verifying it and writes the legacy marker, and after that binary
+upgrades the unchanged marker keeps matching, suppressing verification for the rest of the session.
+On a platform whose premise is long-horizon sessions, "the rest of the session" is not a short
+window. Fixed by giving the marker an integrity generation (`skills.SentinelVersion`) rather than the
+reviewer's own first suggestion of recording the digests in it — that would force the BYOC worker to
+spend a wire round trip per skill per pass, because it learns a digest only from the download
+response, i.e. after the skip decision it is trying to make. The generation costs one
+re-materialization per live sandbox at upgrade and nothing at steady state. The forced pass detects
+and refuses a substituted archive but does not erase bytes an older binary already wrote — the
+sandbox seam has no delete primitive, the residual already recorded for in-place tampering. A
+knock-on the fix created: several `SentinelMatches` cases used bare-array fixtures that the new
+parser rejects outright, so they would have passed for the wrong reason; they were re-expressed in
+the current generation (via a `marker()` helper that follows future bumps) so they still exercise the
+bijection and probe rules they were written for. Everything else in that pass checked clean: all
+three writers covered with no fourth, both constructors hashing the exact bytes stored, `*string`
+scanning distinguishing NULL from a value, `strings.EqualFold` not exploitable, migration 0010 safe
+on a populated table, and the download endpoint's auth/404/Content-Length behavior unchanged.
+
+**Verification that the tests are load-bearing.** Both refusal tests substitute the stored object
+with a *different but perfectly valid* archive, so zip's own per-member CRC-32 cannot catch it and a
+fixture cannot pass by accident. Each was run against a neutered guard to confirm it fails:
+disabling the comparison in `skills.ReadArchive` let `"tampered instructions"` reach the sandbox in
+the executor test, and suppressing the response header alone did the same in the worker test —
+proving the worker's protection travels over the wire and is not incidentally supplied by anything
+else. The sentinel-generation test was checked the same way: made to accept the legacy array form
+again, it fails with the pre-verification bytes still in the sandbox and the old marker still
+vouching for them — the reviewer's scenario, reproduced.
+
+**Governance — a single-PR plan archives itself and leaves STATE.md alone.** The plan was authored
+and archived within its one delivering PR, so STATE.md's Active work stayed **None**: it tracks work
+in flight, and at merge there is none. The narrative lives in CHANGELOG; this is the same shape as
+plan 07 below, and is only defensible *because* the plan lands `archived` rather than `in-progress`
+with nothing left to do.
+
 ## Files plan — archived 2026-07-23, all four slices delivered (Files half of #55)
 
 docs/plan/08_files.md (issue #55) is archived complete for its **Files half**; #55 stays open for git/repo mounting (`github_repository` resources). Slice 1: the wire-compatible `/v1/files` registry over object storage — migration 0008, `file_` ids, the multipart upload decode (one `file` part, filename/MIME validation, 500 MB budget), five endpoints, the newest-first `Page` list envelope, and the `downloadable`-column download gate (an upload is `downloadable:false`, refused 400) (PR #156). Slice 2: session `resources[]` accepting `type:"file"` mounts — `file_id` existence-checked in the create transaction, `mount_path` defaulting/validation, materialization into the `sessions.resources` jsonb, and the five management-only `sesrsc_` sub-endpoints (list/get/add/delete + update-reject); `github_repository`/`memory_store` stay rejected, keeping the union seam open for the git half (PR #157). Slice 3: materialization on the platform half — `Sandbox.WriteFileStream` on both backends (docker `io.Pipe` tar, k8s stdin-counting script) pinned by the sandboxtest contract, the executor's `materializeFiles` (row-authoritative existence, `.files_materialized` sentinel + `test -e` present-set probe, per-file tolerance), the brain's "Mounted files" system-prompt block with `files.injected`/`files.block_chars` span attributes and the `files.resolve.misses` counter, and the opt-in `file-answer` eval proving upload→mount→materialize→read (PR #158). Slice 4: the BYOC half — the worker's wire-only `SetupFiles` twin (session GET → `resources[]` → stream from the content lane into the sandbox, same sentinel/tolerance duplicated because the two halves never share a sandbox) and the environment-scoped content lane it reads through (`GET /v1/files/{id}/content` made dual-auth via `isFileReadPath`, the download handler made lane-aware to skip the `downloadable` gate and authorize by `fileMountedInEnvironment` — a jsonb-containment check filtered on `environment_id` — instead, 404 for anything no session in the caller's environment mounts), a `mountAtPath` guard on both halves so a mount at the sentinel's own path is not clobbered by the marker write (the slice-3 executor carried the same latent hazard, fixed here), plus the worker's `files.materialized`/`files.materialize.duration` instruments (this PR). Deliberate divergences and inferences are in docs/DIVERGENCES.md; the as-built system in docs/ARCHITECTURE.md.
@@ -259,6 +328,83 @@ The first test that drives a whole session the way a customer does — public RE
 Prompts are written the way the docs tell a user to write them — a prompt tuned until only our platform's quirks satisfy it stops being a regression test. Two that a refusal-prone live model (MiniMax-M3) balked at were reworded to exercise the platform rather than trip a safety reflex: `perm-deny`'s "delete a file in a `protected` directory" became a benign append the reviewer declines, and `view-range`'s "SECRET" marker copied "to another file" — which the model read as exfiltration — became a plain marker copied to a file. All ten run 10/10 green live.
 
 Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/96), needs repo `MODEL_*` secrets), `tool_choice`/`disable_parallel_tool_use` for phase 1.5 (on #30), and production sandbox reaping ([#64](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/64)). The harness reaps its own containers at stack teardown.
+
+---
+
+## Brain turn-fault correlation (plan 09) — archived 2026-07-23
+
+[docs/plan/09_brain-turn-fault-span.md](./plan/09_brain-turn-fault-span.md), delivered in one PR
+(**#164**) for [#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92). The change and
+its reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a changelog cannot
+hold.
+
+**The issue's own "cheap version" was evaluated and rejected as inert — it does not compile into a
+fix.** #92 offered `telemetry.Extract(ctx, item.TraceContext)` in `RunOnce` as the low-cost option,
+"the same shape the executor's fault log had before the log-bridge PR improved it, and better than
+nothing". Against this repository's source it is worth exactly nothing: `internal/queue/queue.go`'s
+`Enqueue` captures a trace context only for `kind == ToolExec` and deliberately writes SQL NULL for a
+`model_turn` ("capturing it there would only persist an unread payload"), a decision ARCHITECTURE.md's
+Observability section states in the same words. `item.TraceContext` is therefore always nil on the
+brain's path, `Extract` returns the context unchanged, and the log would have stayed as uncorrelated
+as before while looking fixed. The issue was filed by a reviewer reasoning from the executor's shape;
+the `issue-triage` subagent independently reached the same refutation from the same source. This is
+the case CLAUDE.md's "verify every finding against the source before acting on it" is written for,
+in its rarer direction: the finding was real, one of its two proposed remedies was not.
+
+**Extending trace-context capture to `model_turn` was considered and deliberately deferred.** It is
+the other way to make a turn's failure findable — parent each turn on whatever enqueued it — and it
+is a strictly larger decision: it reverses the queue-level choice above at three enqueue sites (the
+API's `user.message` trigger, the executor's resume-enqueue, the brain's own chained requeue), and
+those are three *different* traces with three different notions of "end to end". Nothing #92 asks for
+requires picking one. Without it the `model_turn` span roots the turn's own trace exactly as
+`model_request` already did, so the trace topology gains a level and changes no shape, and the
+`tool_exec` items a turn enqueues keep parenting on `model_request` — the executor's and BYOC
+worker's existing correlation is untouched, as `TestToolExecEnqueueCapturesTurnTrace` still asserts.
+
+**Why the fault log could not simply move onto the existing `model_request` span — and why the
+obvious version of that argument is wrong.** The tempting phrasing is "the faults land on both sides
+of it: liveness lookup and replay before it opens, settlement after it closes". The second half is
+false, and the Claude reviewer caught it in six places before merge: `settleTurn` calls `commitTurn`
+**first** and `span.Finish(ctx, false, err)` after, an ordering `internal/events/span.go` states
+deliberately ("Finish runs after the settlement transaction so it can record whether the end event
+actually committed"), so settlement runs *inside* the `model_request` span and a failed commit does
+redden it. The true argument has two halves: (1) `claimLiveSession`, the reclaim-recovery append,
+replay, request assembly and provider resolution fail before that span exists at all — they reach
+`failTurn` with a nil span; (2) for every fault that does occur inside it, `runTurn` returns an error
+and nothing else, so `sctx` never leaves the function and the span is already closed when `RunOnce`
+sees the failure. A `SpanKindConsumer` span standing for the handling of one claimed item end to end
+is the only frame that holds for both.
+
+**Test method — the span id is the assertion, not the trace id.** A parent and its child share a
+trace id, so a trace-id assertion cannot tell "logged on the turn's own span" from "logged on some
+span in the turn's trace", and would have passed against a design that hung the record anywhere in
+the tree. `TestTurnFaultLogLandsOnTheModelTurnSpan` asserts the span id, mirroring
+`internal/executor`'s `TestFaultLogLandsOnTheToolExecSpan`, and was run against the unfixed brain
+first: it failed on the absent `model_turn` span, so it cannot be passing for an unrelated reason.
+
+**Review-hardening record.** Codex (`gpt-5.6-sol`, `ultra`) and the Claude-side reviewer both found
+the code correct under adversarial reading — the named-return/defer pairing, the `err != nil &&
+!found` predicate, span lifetime and nil-safety, the platform-fault-only reddening rule, and
+cross-process trace parenting all survived — and both spent their findings on the prose instead.
+Four corrections landed pre-merge: the inverted settlement/`Finish` ordering above (six places); the
+claim that the old log carried "no session id", when `RunOnce`'s `fmt.Errorf("session %s: %w", …)`
+put it in the message text (narrowed to "no trace, no span"); "the pull protocol's third deployment
+point", which collided with the term's established `cloud`/`self_hosted` meaning in CLAUDE.md,
+README and this file (now "the work queue's third claimant"); and an "always reachable from the red
+span" claim about all three claimants that the BYOC worker's heartbeat path does not honour — its
+lease-loss warnings log outside the run's span, so ARCHITECTURE now names that exception rather than
+overclaiming. Two tests were added in response: the unset-status negative the verifier found
+unpinned, and a shutdown test for `Run`'s surviving log. Every new assertion was mutation-checked —
+the fault-log test against a `context.Background()` log and a removed `SetStatus`, the parenting test
+against a discarded span context, the unset-status test against a `failTurn` that returns an error,
+the shutdown test against the removed cancellation guard — each turning red on the mutation it
+targets.
+
+**Governance — the plan was authored after the fix, and says so.** `issue-triage` returned
+`needs_plan: true`; the implementation was already written test-first from the issue by then, so this
+plan is a decision record rather than a forward design. It lands `archived` in its one delivering PR
+on the plan-07 precedent, and STATE.md is untouched — the work starts and finishes in the same PR, so
+there is never an in-flight state for it to track.
 
 ---
 
