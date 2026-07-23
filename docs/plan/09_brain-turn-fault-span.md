@@ -22,7 +22,9 @@ slog.Error("brain: turn failed, lease left to expire", "error", err)
 
 `slog.Error` logs against `context.Background()`, and `internal/telemetry`'s OTLP bridge
 (`otelslog`) correlates a record by reading the span context off the *logging* context — so this
-line reaches the collector with no trace, no span, and no session. It is the brain's counterpart of
+line reaches the collector with no trace and no span. `RunOnce` does wrap the error as
+`fmt.Errorf("session %s: %w", …)`, so the session id is in the message text; it is free text inside
+an error string, not a correlation a trace view can pivot on. It is the brain's counterpart of
 the executor's fault log, which `internal/executor/executor.go`'s `report` already emits with
 `slog.ErrorContext` from inside the open `tool_exec` span. A failed model turn is the more common
 cause of a stalled session, so an operator who opens the trace finds every fault except the one
@@ -110,6 +112,10 @@ span — the executor's rule ("a tool-level failure is not a platform fault") ap
 - `model_request` is a **child** of `model_turn`, and `model_turn` is a consumer span — new
   `TestModelRequestSpanIsAChildOfTheModelTurnSpan`, pinning that the outer span really covers the
   whole claimed item.
+- A model failure settled as `session.error` leaves the span **unset**, and `RunOnce` returns no
+  error for it — new `TestAModelFailureLeavesTheModelTurnSpanUnset`, the brain's counterpart of the
+  executor's and worker's unset-status tests, so a later refactor cannot quietly reclassify ordinary
+  model trouble as a platform fault.
 - `tool_exec` items still carry the turn's `model_request` span as their parent — retained by the
   existing `TestToolExecEnqueueCapturesTurnTrace`.
 - `make verify` green (build, crossbuild, vet, fmt, test, ≥90% coverage).

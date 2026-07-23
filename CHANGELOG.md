@@ -467,14 +467,15 @@ copy of an entry here.
   ([#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92)) — `Brain.Run` reported a
   failed turn with a bare `slog.Error`, which logs against `context.Background()`; the OTLP bridge
   correlates a record by reading the span context off the *logging* context, so the line arrived with
-  no trace, no span, and no session id. The executor's twin fault already answers from inside its
+  no trace and no span — the session id it carried was free text inside the error string, not
+  something a trace view could pivot on. The executor's twin fault already answers from inside its
   open `tool_exec` span, and a failed model turn is the more common cause of a stalled session — an
   operator opening the trace found the tool faults and not the turn's. `RunOnce` now runs the claimed
   turn under a **`model_turn` consumer span** (`session.id` / `work.id` attributes, the executor's
   `tool_exec` attribute set), and closes it from a deferred exit that sets `codes.Error` with the
   reason and emits the fault log with `slog.ErrorContext` under that span — the status matters as
-  much as the log, since an operator reaches the log by clicking the red span. The span covers the
-  claim through the item's fate, because the faults that strand a turn land on both sides of the
+  much as the log, since an operator reaches the log by clicking the red span. The span opens on the
+  claimed item and closes on its fate, because the faults that strand a turn land on both sides of the
   nested `model_request` span: before it opens (session-liveness lookup, replay, provider resolution)
   and after `Finish` closes it (settlement, the lease proof). `Run` keeps a log only for the one path
   with no span to hang it on — a `Claim` that failed before producing an item. Only brain-side faults

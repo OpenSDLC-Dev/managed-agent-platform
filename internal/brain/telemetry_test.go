@@ -2,6 +2,7 @@ package brain_test
 
 import (
 	"context"
+	"errors"
 	"log"
 	"log/slog"
 	"slices"
@@ -438,5 +439,28 @@ func TestModelRequestSpanIsAChildOfTheModelTurnSpan(t *testing.T) {
 	}
 	if got := namedSpan(t, spans, "model_request").Parent().SpanID(); got != turn.SpanContext().SpanID() {
 		t.Errorf("model_request parent span = %s, want the model_turn span %s", got, turn.SpanContext().SpanID())
+	}
+}
+
+// A model that failed is not the platform failing: `failTurn` settles it onto
+// the wire as a `session.error` and the turn was handled correctly, so the span
+// stays unset. Reddening it would light every trace view up on ordinary model
+// trouble — the line the executor's and the BYOC worker's spans already hold,
+// and one only a test keeps a later refactor from blurring.
+func TestAModelFailureLeavesTheModelTurnSpanUnset(t *testing.T) {
+	ended := recordBrainSpans(t)
+
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "partial")}},
+		[]error{errors.New("upstream 529")})
+	h.wake(t, "hi")
+	if found, err := h.brain.RunOnce(context.Background()); !found || err != nil {
+		t.Fatalf("RunOnce = (%v, %v), want found with no error — a model failure is handled, not suffered", found, err)
+	}
+
+	if n := h.countType(t, "session.error"); n != 1 {
+		t.Fatalf("session.error events = %d, want 1 — the fixture has to really fail the turn", n)
+	}
+	if got := namedSpan(t, ended(), "model_turn").Status().Code; got != codes.Unset {
+		t.Errorf("a model failure reddened the turn span (status = %v), want %v", got, codes.Unset)
 	}
 }

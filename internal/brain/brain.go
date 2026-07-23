@@ -98,11 +98,11 @@ func (b *Brain) Run(ctx context.Context) error {
 //
 // The claimed turn runs under a model_turn consumer span — the brain's
 // counterpart of the executor's tool_exec span and the BYOC worker's, the same
-// pull protocol's other two deployment points. It spans the claim to the item's
-// fate because both edges carry faults the nested model_request span cannot: a
-// turn can die before it opens (session lookup, replay, provider resolution)
-// and after it has closed (settlement, the lease proof), which is where a
-// stalled session's cause usually is. Unlike a tool_exec item there is no
+// pull protocol's other two deployment points. It opens on the claimed item and
+// closes on its fate because both edges carry faults the nested model_request
+// span cannot: a turn can die before it opens (session lookup, replay, provider
+// resolution) and after it has closed (settlement, the lease proof), which is
+// where a stalled session's cause usually is. Unlike a tool_exec item there is no
 // enqueuing trace to continue — queue.Enqueue deliberately stores none on a
 // model_turn — so this span roots the turn's trace, and the tool_exec items the
 // turn enqueues carry its model_request onward as their parent.
