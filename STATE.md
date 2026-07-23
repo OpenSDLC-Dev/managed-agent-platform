@@ -9,6 +9,6 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Tasks
 
 - [x] **Slice 1 — the `/v1/files` registry** (upload/list/get/download/delete + migration `0008`). — [PR #156](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/156).
-- [ ] Slice 2 — session `resources[]` (`type: "file"`) + the five `sesrsc_` sub-endpoints.
+- [x] **Slice 2 — session `resources[]` (`type: "file"`) + the five `sesrsc_` sub-endpoints** (create-time file mounts + list/get/add/delete/update-reject, stored in the `sessions.resources` jsonb). — [PR #157](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/157).
 - [ ] Slice 3 — executor materialization + streaming sandbox write + brain injection + `file-answer` eval.
 - [ ] Slice 4 — BYOC worker + session-scoped env-key content lane; archive.
