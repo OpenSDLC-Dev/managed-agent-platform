@@ -819,7 +819,7 @@ this repo does not call (its provider adapters build request params directly).
 **Question 2 — does `shared/constant/constants.go` add stop reasons or event types the taxonomy
 should carry?** **No new stop reason and no new session event type — but the file holds this bump's
 one genuinely dangerous change.** `constant.EnvironmentDeleted`'s literal moved from
-`"environment_deleted"` to `"environment.deleted"` (`constants.go:109,338`). The Go identifier is
+`"environment_deleted"` to `"environment.deleted"` (`constants.go:111,337`). The Go identifier is
 unchanged, so nothing would fail to compile and no test that does not assert the literal would fail.
 Traced to its consumers, it is safe here for a specific reason rather than by luck: the constant was
 **repurposed** for the new webhook event types (`environment.created/updated/deleted/archived` and
@@ -862,8 +862,9 @@ left alone.
 recorded red run: `TestAgentUpdateOptimisticVersioning` 409 where 400 was wanted (version 0 reached
 the version *comparison* instead of being rejected as below the documented minimum), and
 `TestWorkPollReturnsWireShape` / `TestWorkGetReturnsItem` reporting `required wire field "secret"
-missing`. `make verify` green afterward at total statement coverage **90.69%** (including the Docker
-and K8s sandbox suites). No transitive dependency moved: `go mod tidy` after the bump touched
+missing`. `make verify` green afterward at total statement coverage **90.7%** (including the Docker and K8s
+sandbox suites; the figure moves run to run — 90.65% to 90.72% across four runs here — and the gate
+is ≥90%). No transitive dependency moved: `go mod tidy` after the bump touched
 `go.mod`/`go.sum` only, in the two lines naming the SDK — so every SDK request type, response field,
 JSON tag, service method, option, paginator, SSE helper and error decoder reached from the non-test
 import sites (`internal/provider/anthropic/anthropic.go`, `internal/worker/{client,lease,toolexec,skills}.go`)
