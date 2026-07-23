@@ -13,6 +13,52 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Changed
+
+- **`anthropic-sdk-go` pinned at v1.59.0**, up from v1.58.0 — and unlike the v1.58.0 bump, this one
+  was not contract-neutral. CLAUDE.md makes the pinned SDK this project's authoritative typed wire
+  schema, so moving the pin changes what the repo is measured against; the field-by-field
+  measurements are the verification record in [docs/HISTORY.md](./docs/HISTORY.md) §
+  "anthropic-sdk-go v1.59.0 bump", and the plan that framed the questions is
+  [09_sdk-bump-1.59.0.md](./docs/plan/09_sdk-bump-1.59.0.md). The range spans v1.58.1 (citation
+  `ToParam` fixes, a new `general_harms` refusal category) and v1.59.0, which adds managed-agents
+  model `effort`, session `initial_events`, and thread delta streaming. The route table did not move
+  (131 endpoints, unchanged); four schema fields did, and each resolved to exactly one of *mirror it
+  now* or *record it with an issue*. Two were mirrored, in the same PR and test-first — see Fixed
+  below. Two are new behavior rather than new shape and are recorded as CONFIRMED divergences in
+  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md): `model.effort` is accepted and silently dropped
+  ([#160](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/160)), and `initial_events` on
+  session create is rejected by the strict key allowlist
+  ([#161](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/161)). The bump's most
+  dangerous change was invisible to the compiler: `constant.EnvironmentDeleted`'s literal moved from
+  `"environment_deleted"` to `"environment.deleted"` — but it was *repurposed* for the new webhook
+  event types while the environment-delete response gained its own enum still carrying the old value,
+  so the string this platform emits is unchanged and correct. Live pinned-version labels advanced in
+  three places, and every SDK `file:line` the divergence registry cites was re-read at v1.59.0: all
+  hold except the Stop Work entry's `api.md:656-673`, which drifted with v1.59.0's `api.md` additions
+  and now reads `api.md:683`.
+
+### Fixed
+
+- **`POST /v1/agents/{id}` required `version`, which the reference makes optional** — the pinned SDK
+  types the field `param.Opt[int64]`: "Must be at least 1 if specified. When supplied, the request
+  fails if it does not match the server's current version; **omit to apply the update
+  unconditionally**." The handler answered 400 `invalid_request_error` "version is required", so an
+  unconditional update — a request the reference accepts — was impossible. `version` is now optional:
+  supplied, it is still the optimistic-concurrency check and a stale value is still 409; omitted (or
+  null), the update applies unconditionally. A supplied value below 1 is now rejected 400 rather than
+  falling through to the version comparison, where it produced a misleading "expected 0, currently 1"
+  conflict.
+
+- **Work items were missing the wire's `secret` field** — v1.59.0 added a required `secret` to
+  `BetaSelfHostedWork` (the credential payload a worker executes an item with, "populated when
+  polling for work; null on all other retrieval paths"), which made `workWire`'s own
+  "the BetaSelfHostedWork response shape, field for field" comment false. Every work-item response —
+  poll, get, list, ack, stop — now carries it. It is always null: populating it needs the vault seam,
+  which is a column only in v1
+  ([#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50)), and that is recorded as a
+  divergence rather than left implicit.
+
 ### Added
 
 - **Files API — the BYOC worker file lane: environment-scoped content download + wire-only materialization (Files plan, slice 4 — closes the Files half of #55)**

@@ -114,8 +114,8 @@ func TestWorkPollReturnsWireShape(t *testing.T) {
 	}
 	wantFields(t, body,
 		"id", "acknowledged_at", "created_at", "data", "environment_id",
-		"latest_heartbeat_at", "metadata", "started_at", "state", "stop_requested_at",
-		"stopped_at", "type")
+		"latest_heartbeat_at", "metadata", "secret", "started_at", "state",
+		"stop_requested_at", "stopped_at", "type")
 
 	if id, _ := body["id"].(string); !domain.ID(id).HasPrefix("work") {
 		t.Errorf("work id = %v, want work_-prefixed", body["id"])
@@ -128,6 +128,11 @@ func TestWorkPollReturnsWireShape(t *testing.T) {
 	}
 	if body["state"] != "queued" {
 		t.Errorf("state = %v, want queued (ack transitions it)", body["state"])
+	}
+	// secret is present but always null: the credential payload it carries in the
+	// reference needs vaults, which v1 does not implement (#50).
+	if body["secret"] != nil {
+		t.Errorf("secret = %v, want null", body["secret"])
 	}
 	// A still-queued item has reached none of the lifecycle timestamps.
 	for _, k := range []string{"acknowledged_at", "started_at", "stop_requested_at", "stopped_at", "latest_heartbeat_at"} {
@@ -401,8 +406,8 @@ func TestWorkGetReturnsItem(t *testing.T) {
 	}
 	wantFields(t, body,
 		"id", "acknowledged_at", "created_at", "data", "environment_id",
-		"latest_heartbeat_at", "metadata", "started_at", "state", "stop_requested_at",
-		"stopped_at", "type")
+		"latest_heartbeat_at", "metadata", "secret", "started_at", "state",
+		"stop_requested_at", "stopped_at", "type")
 	if body["id"] != workID || body["state"] != "queued" || body["type"] != "work" {
 		t.Errorf("get = %v, want id %s / queued / work", body, workID)
 	}

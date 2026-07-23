@@ -45,11 +45,15 @@ type workWire struct {
 	EnvironmentID     string            `json:"environment_id"`
 	LatestHeartbeatAt *time.Time        `json:"latest_heartbeat_at"`
 	Metadata          map[string]string `json:"metadata"`
-	StartedAt         *time.Time        `json:"started_at"`
-	State             string            `json:"state"`
-	StopRequestedAt   *time.Time        `json:"stop_requested_at"`
-	StoppedAt         *time.Time        `json:"stopped_at"`
-	Type              string            `json:"type"` // always "work"
+	// Secret is the reference's credential payload for the worker to execute the
+	// item with. It is always null here: injecting credentials needs vaults, which
+	// v1 does not implement (#50).
+	Secret          *string    `json:"secret"`
+	StartedAt       *time.Time `json:"started_at"`
+	State           string     `json:"state"`
+	StopRequestedAt *time.Time `json:"stop_requested_at"`
+	StoppedAt       *time.Time `json:"stopped_at"`
+	Type            string     `json:"type"` // always "work"
 }
 
 // toWire maps a queue row onto the wire work item. Lifecycle timestamps a work
