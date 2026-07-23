@@ -1,9 +1,16 @@
 ---
-status: in-progress
+status: archived
 issue: "#155"
 ---
 
 # Skill archive integrity — a sha256 stored at upload, verified at materialization
+
+> Archived 2026-07-23: completed. Delivered in one PR
+> ([#162](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/162)); the delivery record is in
+> [docs/HISTORY.md](../HISTORY.md) § "Skill archive integrity (plan 09)", the narrative in
+> CHANGELOG.md. **Everything below describes the state of the repository *before* that PR** — read it
+> as the argument for the change, not a description of the result, except decision D5, which was
+> added mid-PR in response to a review finding and says so.
 
 The plan for [#155](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/155).
 
