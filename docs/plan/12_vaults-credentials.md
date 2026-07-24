@@ -95,9 +95,11 @@ live recording was possible; everything only a recording can settle is pre-liste
   docs prescribe the mapping: invalid = the grant is gone / OAuth 4xx; unknown =
   transient 5xx/429/network), `mcp_probe` `{method, http_response}` (the failing MCP
   step, e.g. `initialize`), `refresh` `{status
-  succeeded|failed|connect_error|no_refresh_token, http_response}`. Every captured
-  `http_response` is `{status_code, content_type, body, body_truncated}`, the body
-  truncated and scrubbed of sensitive values.
+  succeeded|failed|connect_error|no_refresh_token, http_response}`. `http_response` is
+  **nullable** in both `mcp_probe` and `refresh` — the public docs' example renders
+  `"http_response": null` for `no_refresh_token`; when present it is `{status_code,
+  content_type, body, body_truncated}`, the body truncated and scrubbed of sensitive
+  values.
 
 ### Hard semantics from the public docs (settled 2026-07-23, previously unknowable from types)
 
@@ -258,8 +260,14 @@ round-trips `vault_ids`; archived vault → create fails; update still rejects.*
 
 **Slice 4 — the egress gate, phase 1.** `sandbox.Spec.Env` seam in both backends;
 per-session gate proxy (Docker: internal per-session network, sandbox reaches only the
-proxy, proxy CONNECT-filters on the environment policy; K8s: sidecar listener + the
-existing init-container mechanics repointed at "only the sidecar routes out");
+proxy, proxy CONNECT-filters on the environment policy; K8s: a gate sidecar in the
+sandbox pod running as a dedicated UID, with the existing NET_ADMIN init container
+replacing its route-flush by iptables **owner-match** rules — egress permitted only for
+the sidecar's UID, everything else dropped. The sidecar shares the pod netns, so
+plain route removal would strand it and any surviving route would be open to processes
+that ignore `HTTP(S)_PROXY`; UID-scoped filtering is the isolation mechanism, is
+CNI-independent, and stays testable on kind — NetworkPolicy is deliberately not relied
+on, since its enforcement depends on the cluster's CNI);
 `HTTP(S)_PROXY` injection; placeholder minting + env injection per D4; the substitution
 engine package with plain-HTTP substitution live in the gate;
 `credential_host_unreachable_error` emission; sandboxtest contract rows updated from
