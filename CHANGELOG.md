@@ -46,7 +46,9 @@ copy of an entry here.
   field lines (repeats honored) — are stripped from both the forwarded request and the returned
   response, `Content-Length` is
   recomputed after substitution, and the buffered body is bounded (`MaxBodyBytes`, default 10 MiB) so
-  an oversized sandbox-controlled body is refused `413` rather than read without limit. The forwarded
+  an oversized sandbox-controlled body is refused `413` rather than read without limit. The proxy
+  forwards responses transparently (no auto-decompression — the origin's `Content-Encoding` reaches
+  the sandbox intact) and bounds a stalled origin with a response-header timeout. The forwarded
   Host authority always comes from the request-target URI (Go normalizes it), so a spoofed `Host`
   header cannot route a substituted credential to a different vhost than the one authorized.
   Transport-only: it holds one session's resolved credentials and opens sockets, but reads no store

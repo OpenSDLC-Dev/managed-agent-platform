@@ -2,6 +2,8 @@ package gate_test
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -618,6 +620,51 @@ func TestGateConnectForwardsPipelinedClientBytes(t *testing.T) {
 	n, _ := io.ReadFull(br, echo)
 	if string(echo[:n]) != "PIPE" {
 		t.Errorf("origin echoed %q, want PIPE (pipelined CONNECT bytes were dropped?)", echo[:n])
+	}
+}
+
+func TestGatePlainHTTPDoesNotDecompressResponse(t *testing.T) {
+	// A transparent proxy must not auto-decompress: the origin's gzipped body and
+	// its Content-Encoding must reach the sandbox unaltered, even when the sandbox
+	// sent no Accept-Encoding — which would otherwise make Go's transport request
+	// gzip and silently decode the response.
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	if _, err := zw.Write([]byte("compressed-payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	compressed := gz.Bytes()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write(compressed)
+	}))
+	defer origin.Close()
+	host := hostOf(t, origin.URL)
+
+	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}}})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	// Disable the *test client's* auto-decompression too, so we observe exactly
+	// the bytes the gate forwarded rather than the client's own decoding.
+	client := proxyClient(t, gsrv.URL, nil)
+	client.Transport.(*http.Transport).DisableCompression = true
+	resp, err := client.Get(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if ce := resp.Header.Get("Content-Encoding"); ce != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip preserved (the gate must not auto-decompress)", ce)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, compressed) {
+		t.Errorf("forwarded body was altered in transit; want the original gzipped bytes")
 	}
 }
 

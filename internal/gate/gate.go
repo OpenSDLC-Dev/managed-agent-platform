@@ -80,11 +80,19 @@ func New(cfg Config) *Gate {
 	transport := cfg.Transport
 	if transport == nil {
 		transport = &http.Transport{
-			DialContext:           dial,
-			ForceAttemptHTTP2:     false,
-			MaxIdleConns:          32,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
+			DialContext:       dial,
+			ForceAttemptHTTP2: false,
+			MaxIdleConns:      32,
+			IdleConnTimeout:   90 * time.Second,
+			// A transparent proxy must not inject Accept-Encoding or auto-decompress:
+			// the sandbox controls its own content negotiation, and the origin's
+			// Content-Encoding/Content-Length must reach it unaltered.
+			DisableCompression:  true,
+			TLSHandshakeTimeout: 10 * time.Second,
+			// Bound a stalled origin's hold on the serving goroutine — this caps
+			// time-to-response-headers only, so a slow-streaming body is unaffected.
+			// The deployment wiring (4c-2b) can override the whole transport.
+			ResponseHeaderTimeout: 60 * time.Second,
 			ExpectContinueTimeout: time.Second,
 		}
 	}
