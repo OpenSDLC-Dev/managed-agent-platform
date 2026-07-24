@@ -4,19 +4,19 @@
 // cache), so rotation and archive propagate without a session restart
 // (docs/plan/12_vaults-credentials.md, D5).
 //
-// This slice resolves only the sandbox-visible half: each active
-// environment_variable credential's secret_name paired with an opaque
-// placeholder derived per (session, secret_name) (internal/egress) — stable
-// across re-provision. The secret the placeholder stands for is
-// read and substituted separately, at egress time in the per-session gate (a
-// later slice) — never injected into the sandbox, which sees the placeholder
-// alone.
+// Two resolutions share one selection rule (winnersFor, first-vault-wins), so
+// they can never disagree on which credential a secret_name resolves to.
+// Bindings yields the sandbox-visible half: each active environment_variable
+// credential's secret_name paired with an opaque placeholder derived per
+// (session, secret_name) (internal/egress) — stable across re-provision.
+// Credentials yields the gate half: the same winners with their secrets
+// decrypted, which the per-session egress gate substitutes back for the
+// placeholder at egress time. The sandbox only ever sees the placeholder; the
+// secret is never injected into it.
 package vaultresolve
 
 import (
 	"context"
-	"encoding/json"
-	"sort"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/jackc/pgx/v5"
@@ -45,60 +45,13 @@ type Binding struct {
 // derived per (session, secret_name), so resolution is fully deterministic — a
 // re-provision or the egress gate recovers the exact tokens already injected.
 func Bindings(ctx context.Context, q Querier, sessionID string, vaultIDs []string) ([]Binding, error) {
-	if len(vaultIDs) == 0 {
-		return nil, nil
-	}
-	// The vault's own archived_at is checked directly, not only the credential's:
-	// an archived vault contributes nothing is a security guarantee, so it does
-	// not rest solely on the archive cascade (archiving a vault archives+purges
-	// its credentials) holding — a stale un-cascaded credential row is still
-	// excluded here.
-	rows, err := q.Query(ctx,
-		`SELECT c.vault_id, c.auth FROM vault_credentials c
-		    JOIN vaults v ON v.id = c.vault_id
-		  WHERE c.vault_id = ANY($1) AND c.auth_type = 'environment_variable'
-		    AND c.archived_at IS NULL AND v.archived_at IS NULL`,
-		vaultIDs)
+	winners, err := winnersFor(ctx, q, vaultIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	// Group secret_names by vault so first-vault-wins can be applied in the
-	// caller's vault_ids order, which the ANY(...) query does not preserve.
-	byVault := map[string][]string{}
-	for rows.Next() {
-		var vaultID string
-		var authDoc []byte
-		if err := rows.Scan(&vaultID, &authDoc); err != nil {
-			return nil, err
-		}
-		var doc struct {
-			SecretName string `json:"secret_name"`
-		}
-		if err := json.Unmarshal(authDoc, &doc); err != nil {
-			return nil, err
-		}
-		if doc.SecretName != "" {
-			byVault[vaultID] = append(byVault[vaultID], doc.SecretName)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	seen := map[string]struct{}{}
 	var out []Binding
-	for _, vid := range vaultIDs {
-		names := byVault[vid]
-		sort.Strings(names)
-		for _, name := range names {
-			if _, dup := seen[name]; dup {
-				continue // first attached vault with this secret_name already won
-			}
-			seen[name] = struct{}{}
-			out = append(out, Binding{SecretName: name, Placeholder: egress.Placeholder(sessionID, name)})
-		}
+	for _, w := range winners {
+		out = append(out, Binding{SecretName: w.secretName, Placeholder: egress.Placeholder(sessionID, w.secretName)})
 	}
 	return out, nil
 }

@@ -27,6 +27,20 @@ copy of an entry here.
 
 ### Added
 
+- **Gate-side vault resolution — `vaultresolve.Credentials`** (plan 12 slice 4, #50). The decrypt
+  half of vault credential injection: the same active `environment_variable` winners `Bindings`
+  turns into sandbox placeholders, now also resolved to their decrypted secrets for the per-session
+  gate's substitution set. A shared selection rule (`winnersFor`, extracted from `Bindings` with its
+  behavior preserved) reads current rows every call and applies first-vault-wins, so the sandbox
+  placeholder and the gate's substituted value can never disagree on which credential a `secret_name`
+  resolves to — pinned by a parity test. Each winner's `secret_value` is unsealed through the
+  `secrets.Cipher`, and the credential's own networking (`unrestricted` / `allowed_hosts`) and
+  `injection_location` arms travel with it; the plaintext lives only in memory, never logged or
+  stored. Fail-closed: a cipher is required once the session has an active credential, a decrypt failure or a
+  tampered/short sealed document fails the whole call (error messages name credential ids, never
+  secret bytes), and an active credential whose ciphertext was purged is skipped so its placeholder
+  egresses literally. Lands inert — its consumer (the controlplane internal gate-config endpoint)
+  arrives in the next slice-4 sub-PR.
 - **Egress gate — the per-session forward proxy (`internal/gate`)** (plan 12 slice 4, #50). The
   transport core of the domain gate the sandbox reaches through `HTTP_PROXY`/`HTTPS_PROXY` (D3),
   driving the `internal/egress` engine. Two request paths: a plain-HTTP request is host-filtered
