@@ -40,8 +40,9 @@ func TestSessionVaultAttachment(t *testing.T) {
 		t.Fatalf("vault_ids not round-tripped in order: %v", got)
 	}
 	sid := res["id"].(string)
-	if _, fetched := s.do(http.MethodGet, "/v1/sessions/"+sid, nil); len(fetched["vault_ids"].([]any)) != 2 {
-		t.Fatalf("GET did not echo vault_ids: %v", fetched["vault_ids"])
+	_, fetched := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	if got := fetched["vault_ids"].([]any); len(got) != 2 || got[0] != vaultA || got[1] != vaultB {
+		t.Fatalf("GET did not echo vault_ids in order: %v", got)
 	}
 
 	// Empty/omitted vault_ids is fine and echoes an empty array.
@@ -50,12 +51,11 @@ func TestSessionVaultAttachment(t *testing.T) {
 		t.Fatalf("omitted vault_ids should echo []: %v", res2["vault_ids"])
 	}
 
-	// An archived vault fails the create (400).
+	// An archived vault fails the create with the standard error envelope.
 	s.do(http.MethodPost, "/v1/vaults/"+vaultB+"/archive", nil)
-	if status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
-		"agent": agentID, "environment_id": envID, "vault_ids": []any{vaultA, vaultB}}); status != http.StatusBadRequest {
-		t.Fatalf("archived vault must 400: status %d (%v)", status, body)
-	}
+	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID, "vault_ids": []any{vaultA, vaultB}})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	// The unarchived vault alone still succeeds.
 	createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID, "vault_ids": []any{vaultA}})
 }
