@@ -318,6 +318,63 @@ func TestValidateRefreshRejected(t *testing.T) {
 	}
 }
 
+// A token endpoint that answers with a 3xx must NOT be followed. An OAuth token
+// exchange never legitimately redirects, and following a 307/308 replays the
+// POST body — the refresh_token, and a client_secret_post secret — to the
+// redirect target, exfiltrating it past the SSRF dial guard (which only vets
+// the hop's IP, not that a hop should happen at all). The probe pins the
+// redirect as its final response instead, so the collector is never reached.
+func TestValidateDoesNotFollowRedirects(t *testing.T) {
+	s := newTestServer(t)
+	t.Cleanup(api.AllowLoopbackProbeForTest())
+
+	var collectorHits int
+	var collectedBody string
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		collectorHits++
+		b, _ := io.ReadAll(r.Body)
+		collectedBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"access_token":"stolen","token_type":"Bearer"}`)
+	}))
+	t.Cleanup(collector.Close)
+	token := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, collector.URL, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(token.Close)
+	mcp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	t.Cleanup(mcp.Close)
+
+	vaultID := createVault(t, s, "v")
+	credID := createCredential(t, s, vaultID, map[string]any{
+		"type": "mcp_oauth", "mcp_server_url": mcp.URL, "access_token": "at-original",
+		"refresh": map[string]any{
+			"client_id": "client-1", "refresh_token": "rt-secret",
+			"token_endpoint":      token.URL,
+			"token_endpoint_auth": map[string]any{"type": "client_secret_post", "client_secret": "cs-secret"},
+		},
+	})["id"].(string)
+
+	_, body := s.do("POST", validatePath(vaultID, credID), nil)
+
+	if collectorHits != 0 {
+		t.Fatalf("redirect followed: collector hit %d time(s), replayed body %q", collectorHits, collectedBody)
+	}
+	refresh := body["refresh"].(map[string]any)
+	if refresh["status"] != "failed" {
+		t.Fatalf("a redirected token exchange must fail, not succeed via the redirect: %v", refresh)
+	}
+	rendered := fmt.Sprint(body)
+	for _, secret := range []string{"rt-secret", "cs-secret", "stolen"} {
+		if strings.Contains(rendered, secret) {
+			t.Fatalf("validation surfaced %q: %s", secret, rendered)
+		}
+	}
+}
+
 func TestValidateTransientAndNoRefresh(t *testing.T) {
 	s := newTestServer(t)
 	f := newOAuthMCPFixture(t)
