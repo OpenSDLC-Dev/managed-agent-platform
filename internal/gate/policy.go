@@ -54,10 +54,14 @@ func isHopByHop(k string) bool {
 
 // removeHopByHop strips the hop-by-hop headers, including any named in a
 // Connection header, from a request or response the proxy is about to forward.
+// RFC 7230 §6.1 permits Connection to appear as several field lines, so every
+// value is consulted, not just the first.
 func removeHopByHop(h http.Header) {
-	for _, name := range strings.Split(h.Get("Connection"), ",") {
-		if name = strings.TrimSpace(name); name != "" {
-			h.Del(name)
+	for _, conn := range h.Values("Connection") {
+		for _, name := range strings.Split(conn, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				h.Del(name)
+			}
 		}
 	}
 	for k := range h {

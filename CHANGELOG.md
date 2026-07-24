@@ -34,14 +34,17 @@ copy of an entry here.
   headers and body become their secrets before it leaves, so the third party receives the real
   credential and never the placeholder; an HTTPS request is an opaque `CONNECT` tunnel, admitted or
   refused on the target host but never inspected, so an in-sandbox TLS body keeps its placeholders
-  until the TLS-terminating phase (#166 — the documented gap). The networking policy is the
+  until the TLS-terminating phase (#166 — the documented gap); the tunnel forwards bytes the server
+  buffered past the `CONNECT` line (a pipelined ClientHello), propagates a half-close in either
+  direction, and tears down only when both directions close. The networking policy is the
   request-level half of the two-level gate (`limited` = only `allowed_hosts`, `unrestricted` = every
   host with its safety blocklist deferred and recorded INFERRED, an unknown type fails closed); a
   credential's own `allowed_hosts` is the second half, enforced by the engine. A credential the
   request host may not use is left as its literal placeholder (never the secret) and surfaced
   through an `OnUnreachable` seam the deployment wiring turns into `credential_host_unreachable_error`.
-  Forwarding is RFC 7230-clean: hop-by-hop headers — including any named by a `Connection` header —
-  are stripped from both the forwarded request and the returned response, `Content-Length` is
+  Forwarding is RFC 7230-clean: hop-by-hop headers — including any named across the `Connection`
+  field lines (repeats honored) — are stripped from both the forwarded request and the returned
+  response, `Content-Length` is
   recomputed after substitution, and the buffered body is bounded (`MaxBodyBytes`, default 10 MiB) so
   an oversized sandbox-controlled body is refused `413` rather than read without limit. The forwarded
   Host authority always comes from the request-target URI (Go normalizes it), so a spoofed `Host`

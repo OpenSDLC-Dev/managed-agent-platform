@@ -133,7 +133,7 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "proxy does not support hijacking", http.StatusInternalServerError)
 		return
 	}
-	client, _, err := hj.Hijack()
+	client, clientBuf, err := hj.Hijack()
 	if err != nil {
 		return
 	}
@@ -142,14 +142,24 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
 	}
-	// Tunnel until either side closes; the sandbox's own TLS rides inside.
+	// Tunnel until BOTH directions close; the sandbox's own TLS rides inside.
+	// The client half reads through the hijacked bufio.Reader so bytes the
+	// server already buffered past the CONNECT request (a client may pipeline
+	// the TLS ClientHello before reading the 200) are forwarded, not dropped.
+	// Each direction's EOF is propagated to the peer as a half-close (CloseWrite)
+	// so a client that shuts its write side and awaits the reply is not
+	// truncated by the other pump being torn down first.
 	done := make(chan struct{}, 2)
-	cp := func(dst, src net.Conn) {
+	cp := func(dst net.Conn, src io.Reader) {
 		_, _ = io.Copy(dst, src)
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
 		done <- struct{}{}
 	}
-	go cp(upstream, client)
+	go cp(upstream, clientBuf)
 	go cp(client, upstream)
+	<-done
 	<-done
 }
 

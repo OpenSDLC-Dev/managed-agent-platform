@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
@@ -217,7 +218,11 @@ func TestGateConnectTunnelsAdmittedHTTPS(t *testing.T) {
 	gsrv := httptest.NewServer(g)
 	defer gsrv.Close()
 
-	resp, err := proxyClient(t, gsrv.URL, origin).Get(origin.URL)
+	client := proxyClient(t, gsrv.URL, origin)
+	// The tunnel now closes only when both directions do; close the pooled
+	// tunnel connection so the handler goroutine unwinds at test end.
+	defer client.CloseIdleConnections()
+	resp, err := client.Get(origin.URL)
 	if err != nil {
 		t.Fatalf("CONNECT to an admitted host failed: %v", err)
 	}
@@ -286,17 +291,24 @@ func TestGatePlainHTTPBadGatewayWhenOriginUnreachable(t *testing.T) {
 
 func TestGateConnectBadGatewayWhenOriginUnreachable(t *testing.T) {
 	origin := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	host := hostOf(t, origin.URL)
-	originURL := origin.URL
+	u, err := url.Parse(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := u.Host
 	origin.Close() // admitted, but the CONNECT dial will fail
 
-	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}}})
+	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{u.Hostname()}}})
 	gsrv := httptest.NewServer(g)
 	defer gsrv.Close()
 
-	// The gate answers CONNECT with 502; the client cannot establish the tunnel.
-	if _, err := proxyClient(t, gsrv.URL, nil).Get(originURL); err == nil {
-		t.Error("expected an error when the CONNECT target is unreachable")
+	// The dial to an admitted-but-unreachable CONNECT target fails before hijack,
+	// so the gate answers 502 on the wire (asserted directly — a proxying client
+	// would only surface a generic tunnel error, which a 200-then-close would
+	// also produce).
+	status := rawStatusLine(t, gsrv.URL, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n\r\n")
+	if !strings.HasPrefix(status, "HTTP/1.1 502") {
+		t.Errorf("CONNECT status line = %q, want HTTP/1.1 502 when the target is unreachable", status)
 	}
 }
 
@@ -369,7 +381,9 @@ func rawResponseOrigin(t *testing.T, rawResponse string) net.Listener {
 }
 
 func TestGatePlainHTTPStripsResponseConnectionHeaders(t *testing.T) {
-	ln := rawResponseOrigin(t, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: X-Hop\r\nX-Hop: leaked\r\nX-Keep: kept\r\n\r\n")
+	// Two Connection field lines (RFC 7230 §6.1 permits repeats) name two
+	// hop-by-hop headers; both must be stripped, X-Keep must survive.
+	ln := rawResponseOrigin(t, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: X-Hop\r\nConnection: X-Hop2\r\nX-Hop: leaked\r\nX-Hop2: leaked2\r\nX-Keep: kept\r\n\r\n")
 	defer ln.Close()
 	host, _, _ := net.SplitHostPort(ln.Addr().String())
 
@@ -382,11 +396,16 @@ func TestGatePlainHTTPStripsResponseConnectionHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	// X-Hop is named by the response's own Connection header, so it is hop-by-hop
-	// and must not reach the sandbox; X-Keep is a normal end-to-end header. The
-	// transport preserves both, so the gate must strip X-Hop itself.
+	// X-Hop / X-Hop2 are named by the response's Connection field lines, so they
+	// are hop-by-hop and must not reach the sandbox; X-Keep is a normal
+	// end-to-end header. The transport preserves all three, so the gate must
+	// strip the hop-by-hop ones itself — including the one named by the second
+	// Connection line.
 	if got := resp.Header.Get("X-Hop"); got != "" {
 		t.Errorf("X-Hop = %q, want it stripped as a Connection-named response header", got)
+	}
+	if got := resp.Header.Get("X-Hop2"); got != "" {
+		t.Errorf("X-Hop2 = %q, want it stripped — named by a second Connection line", got)
 	}
 	if got := resp.Header.Get("X-Keep"); got != "kept" {
 		t.Errorf("X-Keep = %q, want it forwarded end-to-end", got)
@@ -439,9 +458,12 @@ func TestGatePlainHTTPForwardsAuthorizedHostHeader(t *testing.T) {
 		gotHost <- r.Host
 	}))
 	defer origin.Close()
-	host := hostOf(t, origin.URL)
+	u, err := url.Parse(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}}})
+	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{u.Hostname()}}})
 	gsrv := httptest.NewServer(g)
 	defer gsrv.Close()
 
@@ -450,7 +472,187 @@ func TestGatePlainHTTPForwardsAuthorizedHostHeader(t *testing.T) {
 	if !strings.HasPrefix(status, "HTTP/1.1 200") {
 		t.Fatalf("status line = %q, want HTTP/1.1 200", status)
 	}
-	if h := <-gotHost; h == "forbidden.example" {
-		t.Errorf("origin saw spoofed Host %q; the gate must forward the authorized URL authority", h)
+	// The origin must see the authorized URL authority, not the spoofed Host.
+	if h := <-gotHost; h != u.Host {
+		t.Errorf("origin saw Host %q, want the authorized authority %q (spoofed Host must not survive)", h, u.Host)
+	}
+}
+
+// dialCONNECT opens a raw CONNECT tunnel through the gate to target and returns
+// the client conn plus a reader positioned just past the 200 response, ready to
+// read tunnelled bytes.
+func dialCONNECT(t *testing.T, gateURL, target string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	u, err := url.Parse(gateURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(conn, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(status, "HTTP/1.1 200") {
+		t.Fatalf("CONNECT status = %q, want 200", status)
+	}
+	for { // consume the rest of the CONNECT response headers
+		line, err := br.ReadString('\n')
+		if err != nil || line == "\r\n" {
+			break
+		}
+	}
+	return conn, br
+}
+
+func TestGateConnectHalfCloseDeliversResponse(t *testing.T) {
+	// A tunneled client that finishes sending, half-closes its write side, and
+	// waits for the origin's reply must still receive the full response — the
+	// gate must propagate the half-close as EOF, not tear down both directions on
+	// the first pump's EOF.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = io.ReadAll(c) // drain until the client half-closes its write side
+		_, _ = io.WriteString(c, "RESPONSE-AFTER-EOF")
+	}()
+	host, _, _ := net.SplitHostPort(ln.Addr().String())
+
+	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}}})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	conn, br := dialCONNECT(t, gsrv.URL, ln.Addr().String())
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "PING"); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := io.ReadAll(br)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(reply) != "RESPONSE-AFTER-EOF" {
+		t.Errorf("tunneled reply = %q, want RESPONSE-AFTER-EOF (half-close truncated the response?)", reply)
+	}
+}
+
+func TestGateConnectForwardsPipelinedClientBytes(t *testing.T) {
+	// A client may write payload bytes in the same segment as the CONNECT
+	// request, before reading the 200. Those bytes land in the server's hijack
+	// buffer; the gate must forward them from that buffer, not drop them.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		buf := make([]byte, 4)
+		n, _ := io.ReadFull(c, buf)
+		// Echo what arrived — empty on a regression that drops the pipelined
+		// bytes, so the assertion fails cleanly instead of hanging.
+		_, _ = c.Write(buf[:n])
+	}()
+	host, _, _ := net.SplitHostPort(ln.Addr().String())
+
+	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}}})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	gu, err := url.Parse(gsrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", gu.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// The CONNECT request and the pipelined payload go out in one write, before
+	// reading the 200 — so the payload lands in the server's hijack buffer.
+	if _, err := io.WriteString(conn, "CONNECT "+ln.Addr().String()+" HTTP/1.1\r\nHost: "+ln.Addr().String()+"\r\n\r\nPIPE"); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(status, "HTTP/1.1 200") {
+		t.Fatalf("CONNECT status = %q, want 200", status)
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil || line == "\r\n" {
+			break
+		}
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	echo := make([]byte, 4)
+	n, _ := io.ReadFull(br, echo)
+	if string(echo[:n]) != "PIPE" {
+		t.Errorf("origin echoed %q, want PIPE (pipelined CONNECT bytes were dropped?)", echo[:n])
+	}
+}
+
+func TestGatePlainHTTPBadGatewayWhenBodyReadFails(t *testing.T) {
+	origin := echoOrigin(t)
+	defer origin.Close()
+	u, err := url.Parse(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{u.Hostname()}}})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	// Declare more body than we send, then half-close: the gate's body read hits
+	// an unexpected EOF and answers 502 — the read-failure arm, distinct from the
+	// 413 over-limit arm.
+	gu, err := url.Parse(gsrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", gu.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	raw := "POST " + origin.URL + "/ HTTP/1.1\r\nHost: " + u.Host + "\r\nContent-Length: 100\r\n\r\nshort"
+	if _, err := io.WriteString(conn, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, "HTTP/1.1 502") {
+		t.Errorf("status line = %q, want HTTP/1.1 502 when the request body read fails", line)
 	}
 }
