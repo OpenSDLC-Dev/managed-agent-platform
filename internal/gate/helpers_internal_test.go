@@ -3,7 +3,24 @@ package gate
 import (
 	"net/http"
 	"testing"
+	"time"
 )
+
+func TestDefaultTransportConfig(t *testing.T) {
+	g := New(Config{})
+	tr, ok := g.transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("default transport is %T, want *http.Transport", g.transport)
+	}
+	// A transparent forward proxy must not negotiate/undo compression itself, and
+	// must bound a stalled origin's time-to-response-headers.
+	if !tr.DisableCompression {
+		t.Error("default transport must set DisableCompression so responses forward verbatim")
+	}
+	if tr.ResponseHeaderTimeout != 60*time.Second {
+		t.Errorf("default ResponseHeaderTimeout = %v, want 60s", tr.ResponseHeaderTimeout)
+	}
+}
 
 func TestHostOnly(t *testing.T) {
 	cases := map[string]string{

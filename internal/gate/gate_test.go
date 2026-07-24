@@ -668,6 +668,54 @@ func TestGatePlainHTTPDoesNotDecompressResponse(t *testing.T) {
 	}
 }
 
+func TestGatePlainHTTPBadGatewayWhenOriginStalls(t *testing.T) {
+	// An origin that accepts the connection but never sends response headers must
+	// not pin the serving goroutine: a short ResponseHeaderTimeout bounds the wait
+	// and the gate answers 502.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c) // hold open, never respond
+			mu.Unlock()
+		}
+	}()
+	defer func() {
+		mu.Lock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+		mu.Unlock()
+	}()
+	host, _, _ := net.SplitHostPort(ln.Addr().String())
+
+	g := gate.New(gate.Config{
+		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
+		Transport:  &http.Transport{ResponseHeaderTimeout: 200 * time.Millisecond},
+	})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	resp, err := proxyClient(t, gsrv.URL, nil).Get("http://" + ln.Addr().String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 when the origin stalls past ResponseHeaderTimeout", resp.StatusCode)
+	}
+}
+
 func TestGatePlainHTTPBadGatewayWhenBodyReadFails(t *testing.T) {
 	origin := echoOrigin(t)
 	defer origin.Close()
