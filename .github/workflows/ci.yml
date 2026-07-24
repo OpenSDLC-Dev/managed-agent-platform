@@ -57,10 +57,34 @@ jobs:
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" \
             --set postgresql.enabled=false --set minio.enabled=false \
+            --set openbao.enabled=false \
             --set existingSecret=my-preexisting)"
           echo "$out" | grep -q 'name: my-preexisting' || { echo "expected Deployments to reference existingSecret" >&2; exit 1; }
           echo "$out" | grep -q '^kind: Secret' && { echo "chart must not create a Secret when existingSecret is set" >&2; exit 1; }
           echo "ok: existingSecret path"
+      - name: external-openbao and local-cipher paths render
+        run: |
+          helm template t "$CHART" -f "$VALUES" \
+            --set openbao.enabled=false \
+            --set externalOpenBao.address='https://bao.example.internal:8200' \
+            --set externalOpenBao.token=ci-placeholder \
+            --show-only templates/secret.yaml | grep -q 'bao-addr:' \
+            || { echo "expected the external-openbao Secret keys" >&2; exit 1; }
+          helm template t "$CHART" -f "$VALUES" \
+            --set openbao.enabled=false \
+            --set localCipher.masterKey='Y2ktcGxhY2Vob2xkZXItc3RhdGljLXNlYWwta2V5ISE=' \
+            --show-only templates/secret.yaml | grep -q 'secrets-master-key:' \
+            || { echo "expected the local-cipher Secret keys" >&2; exit 1; }
+          if helm template t "$CHART" -f "$VALUES" \
+               --set externalOpenBao.address='https://bao.example.internal:8200' \
+               --set externalOpenBao.token=ci-placeholder > /dev/null 2>&1; then
+            echo "expected the bundled-vs-external ambiguity guard to fail the render" >&2; exit 1
+          fi
+          if helm template t "$CHART" -f "$VALUES" \
+               --set localCipher.masterKey='Y2ktcGxhY2Vob2xkZXItc3RhdGljLXNlYWwta2V5ISE=' > /dev/null 2>&1; then
+            echo "expected the openbao-vs-localCipher ambiguity guard to fail the render" >&2; exit 1
+          fi
+          echo "ok: cipher paths (positive and guards)"
       - name: required-value guard fires (missing controlplane.apiKey)
         run: |
           if helm template t "$CHART" --set image.tag=x \

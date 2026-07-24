@@ -13,6 +13,16 @@
 //	                      required with BLOB_ENDPOINT
 //	BLOB_REGION           optional bucket region
 //	BLOB_TLS              "true" for https to the endpoint (default plain)
+//	SECRETS_BACKEND       secrets cipher for vault credential material
+//	                      (docs/plan/12): "openbao", "local", or empty to
+//	                      deploy without one (vault credential storage
+//	                      reports it)
+//	BAO_ADDR / BAO_TOKEN  OpenBao transit endpoint and token, required with
+//	                      SECRETS_BACKEND=openbao
+//	BAO_TRANSIT_KEY       transit key name (default "map-secrets")
+//	SECRETS_MASTER_KEY    base64 32-byte key, required with SECRETS_BACKEND=local
+//	SECRETS_KEY_ID        key id stored beside local-cipher ciphertext
+//	                      (default "local-1")
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
 //	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
 //
@@ -43,6 +53,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
@@ -117,6 +128,18 @@ func run(ctx context.Context) error {
 	}
 	if blobs == nil {
 		slog.Info("object storage not configured; storage-backed skill and file routes (upload/download) will report the absence")
+	}
+
+	// The secrets cipher is optional the same way: constructing it here means a
+	// misconfigured or unreachable backend fails the process at startup rather
+	// than on the first credential write. The vaults API (plan 12 slice 2) is
+	// its consumer; until it lands, startup validation is the wired behavior.
+	cipher, err := secrets.FromEnv(ctx)
+	if err != nil {
+		return err
+	}
+	if cipher == nil {
+		slog.Info("secrets cipher not configured; vault credential storage will report the absence")
 	}
 
 	srv := &http.Server{

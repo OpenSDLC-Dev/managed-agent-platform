@@ -15,6 +15,31 @@ copy of an entry here.
 
 ### Added
 
+- **Vaults slice 1 — the credential-cipher seam and its infrastructure** (plan 12, #50). A new
+  `internal/secrets` package defines the `Cipher` seam (`Encrypt` returns ciphertext bound to a
+  `key_id`; `Decrypt` requires the matching pair) with two backends behind one shared contract
+  suite: `local` (AES-256-GCM under a configured 32-byte master key, the key id as AAD so
+  ciphertext cannot silently decrypt under a rotated id) and `openbao` (a hand-rolled ~100-line
+  client for the Vault-compatible transit HTTP API — encrypt/decrypt only, key ensured at
+  startup, works against any OpenBao/Vault endpoint). `secrets.FromEnv` wires `SECRETS_BACKEND`
+  (`openbao` / `local` / empty = no cipher) into the controlplane and executor, which construct
+  it at startup so a misconfigured or unreachable backend fails the process instead of the first
+  credential write; the vaults API (slice 2) and egress substitution (slice 4) are the consumers.
+  The contract suite's bao leg runs a real `openbao/openbao:2.6.1` container via the new
+  `internal/secrets/secretstest` harness (hard failure without Docker, like every container
+  suite; added to the coverage-gate exclusion list). Deployment lands on the bundled-MinIO
+  pattern: compose gains an `openbao` service (persistent file storage, KMS-free static-seal
+  auto-unseal keyed from the environment) plus an idempotent `openbao-init` one-shot that
+  initializes on first boot and mints/renews the transit-scoped periodic platform token —
+  verified end-to-end locally, including an encrypt/decrypt round-trip surviving a container
+  restart; helm gains an `openbao.enabled` StatefulSet with an init sidecar (same script family,
+  plus daily token renewal), an `externalOpenBao` block for bring-your-own OpenBao/Vault, a
+  `localCipher` fallback, and `existingSecret` compatibility — exercised on a live cluster
+  (first-boot init, round-trip via the scoped token, restart auto-unseal decrypting pre-restart
+  ciphertext). The backup pairing (Postgres ciphertext + bao key material live and die together;
+  restore bao first) is documented in values.yaml, the chart README, and
+  docs/self-hosted-security.md §7.
+
 - **Vaults plan (12) drafted** — [docs/plan/12_vaults-credentials.md](./docs/plan/12_vaults-credentials.md)
   lifts #50 (vaults + egress-time credential injection) out of its reserved seam as four slices: the
   `internal/secrets` cipher seam (OpenBao transit as the production backend, ciphertext staying in

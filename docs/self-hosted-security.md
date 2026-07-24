@@ -201,6 +201,34 @@ What you own:
   history. (The management `x-api-key` follows the same model: hashed at rest,
   rotation-by-restart via `EnsureAPIKey`.)
 
+### 7. Credential-cipher key material and backup pairing
+
+The vaults feature ([#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50),
+docs/plan/12_vaults-credentials.md — landing incrementally, cipher and deployment
+first) encrypts vault credential material through `internal/secrets`: ciphertext
+lives in Postgres, but the key that decrypts it lives **outside** — in your
+OpenBao/Vault's own storage (`SECRETS_BACKEND=openbao`, the transit engine) or in
+the `SECRETS_MASTER_KEY` you configured (`SECRETS_BACKEND=local`). That split is
+the point — a Postgres dump alone cannot leak secrets — and it is also a
+restore-ordering constraint you own:
+
+- **Back up the pair together.** A Postgres backup restores ciphertext that only
+  the matching transit key (or master key) can open. Back up the bao storage
+  backend alongside Postgres — and, for the bundled instances, the static seal
+  key too (compose `BAO_STATIC_KEY` / helm `openbao.staticSealKey` live outside
+  the data volume, and a restored bao cannot unseal without the exact key it was
+  sealed with); for `local`, escrow the master key.
+- **Restore bao before anything that must decrypt.** Metadata CRUD works without
+  the cipher; egress substitution and credential validation do not.
+- **Losing the key loses every secret encrypted under it.** There is no recovery
+  path; credential metadata survives and secrets must be re-entered.
+- **The bundled dev instances store their own bootstrap material.** The compose
+  `openbao` service and the chart's `openbao.enabled` StatefulSet self-initialize
+  and keep the root token beside the data (compose `baoinit` volume / the chart's
+  data PVC) — a documented dev-grade convenience. Production points
+  `externalOpenBao` / `BAO_ADDR` at an instance whose unseal and audit story you
+  run yourself.
+
 ### Host and runtime isolation
 
 The sandbox runs untrusted, model-directed commands, so the strength of the

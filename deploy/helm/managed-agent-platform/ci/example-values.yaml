@@ -18,6 +18,10 @@ postgresql:
 minio:
   rootUser: "ci-placeholder"
   rootPassword: "ciPlaceholderMinio"
+openbao:
+  # base64 of the 32-byte placeholder "ci-placeholder-static-seal-key!!".
+  staticSealKey: "Y2ktcGxhY2Vob2xkZXItc3RhdGljLXNlYWwta2V5ISE="
+  platformToken: "ci-placeholder-bao-token"
 otlp:
   endpoint: "otel-collector.observability:4317"
   insecure: true

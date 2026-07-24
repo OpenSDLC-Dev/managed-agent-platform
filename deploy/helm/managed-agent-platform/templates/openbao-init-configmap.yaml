@@ -1,0 +1,114 @@
+{{- if .Values.openbao.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "map.fullname" . }}-openbao-init
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openbao
+data:
+  openbao-init.sh: |
+    #!/bin/sh
+    # One-time initialization + platform-token renewal for the bundled OpenBao
+    # (docs/plan/12_vaults-credentials.md, D2). Runs as a sidecar beside the
+    # server container; the in-cluster sibling of deploy/compose/openbao-init.sh
+    # — keep their shared logic in sync.
+    #
+    #   1. `bao operator init` on first boot; the root token and recovery keys
+    #      land in /openbao/init on the data PVC. Dev-grade by design — a
+    #      self-unsealing bundled instance necessarily stores its own bootstrap
+    #      material. Production uses externalOpenBao instead.
+    #   2. Ensures the transit engine is mounted and the map-transit policy
+    #      exists.
+    #   3. Mints the deterministic platform token ($BAO_PLATFORM_TOKEN) the
+    #      controlplane and executor authenticate with — orphan, periodic,
+    #      scoped to transit only — then stays up, renewing it daily so a
+    #      long-lived pod never lets the period lapse.
+    #
+    # Idempotent throughout: every step checks before it changes; a failure
+    # exits the container and the kubelet restart re-runs the whole sequence.
+    set -eu
+
+    # Everything this script creates holds bootstrap secrets (init.json
+    # carries the root token) — never group/world-readable, not even between
+    # creation and the explicit chmod below.
+    umask 077
+
+    INIT_FILE=/openbao/init/init.json
+
+    # The transit key name lands verbatim in the policy below; constrain it so
+    # a malformed value cannot mangle the policy document.
+    case "${BAO_TRANSIT_KEY:-}" in
+    '' | *[!a-zA-Z0-9_-]*)
+    	echo "BAO_TRANSIT_KEY must be non-empty and match [a-zA-Z0-9_-]" >&2
+    	exit 1
+    	;;
+    esac
+
+    initialized() {
+    	bao status -format=json 2>/dev/null | grep -q '"initialized": *true'
+    }
+
+    # Wait for the server container's listener (the two containers start
+    # concurrently).
+    tries=0
+    until bao status >/dev/null 2>&1 || [ $? -eq 2 ]; do
+    	tries=$((tries + 1))
+    	[ "$tries" -ge 60 ] && { echo "openbao never answered" >&2; exit 1; }
+    	sleep 1
+    done
+
+    if ! initialized; then
+    	echo "initializing openbao (first boot)"
+    	bao operator init -format=json >"$INIT_FILE"
+    	chmod 600 "$INIT_FILE"
+    elif [ ! -f "$INIT_FILE" ]; then
+    	echo "openbao is initialized but $INIT_FILE is missing (volume lost?);" >&2
+    	echo "restore the data PVC or initialize manually" >&2
+    	exit 1
+    fi
+
+    BAO_TOKEN=$(grep -o '"root_token": *"[^"]*"' "$INIT_FILE" | cut -d'"' -f4)
+    [ -n "$BAO_TOKEN" ] || { echo "no root_token in $INIT_FILE" >&2; exit 1; }
+    export BAO_TOKEN
+
+    if ! bao secrets list -format=json | grep -q '"transit/"'; then
+    	bao secrets enable transit
+    fi
+
+    # Scoped to the one transit key the platform uses — never a wildcard, so
+    # a leaked platform token cannot touch any other key this bao may grow.
+    bao policy write map-transit - <<EOF
+    path "transit/keys/${BAO_TRANSIT_KEY}" {
+      capabilities = ["create", "read", "update"]
+    }
+    path "transit/encrypt/${BAO_TRANSIT_KEY}" {
+      capabilities = ["update"]
+    }
+    path "transit/decrypt/${BAO_TRANSIT_KEY}" {
+      capabilities = ["update"]
+    }
+    EOF
+
+    # A pre-existing token under this ID (an earlier manual init, a re-used
+    # ID) is adopted only if it carries the map-transit policy and not root;
+    # anything else fails closed.
+    if info=$(BAO_TOKEN="$BAO_PLATFORM_TOKEN" bao token lookup -format=json 2>/dev/null); then
+    	if ! echo "$info" | grep -q '"map-transit"' || echo "$info" | grep -q '"root"'; then
+    		echo "a token with the configured platform-token ID exists but does not carry the map-transit policy;" >&2
+    		echo "revoke it (BAO_TOKEN=<root> bao token revoke <id>) or change openbao.platformToken" >&2
+    		exit 1
+    	fi
+    else
+    	bao token create -id="$BAO_PLATFORM_TOKEN" -policy=map-transit -orphan -period=768h >/dev/null
+    fi
+    echo "openbao ready: transit mounted, platform token minted"
+
+    # Renew daily so the 768h period never lapses while the pod runs; a
+    # transient failure (server restarting) exits the container, and the
+    # restart re-runs the idempotent sequence above.
+    while :; do
+    	BAO_TOKEN="$BAO_PLATFORM_TOKEN" bao token renew >/dev/null
+    	sleep 86400
+    done
+{{- end -}}

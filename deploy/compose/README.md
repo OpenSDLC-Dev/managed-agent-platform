@@ -1,12 +1,13 @@
 # Local development stack (docker compose)
 
 Brings up the platform's three server processes — **controlplane**, **brain**,
-**executor** — against a bundled Postgres and a bundled MinIO (S3-compatible
+**executor** — against a bundled Postgres, a bundled MinIO (S3-compatible
 object storage where the controlplane stores skill archives — the `/v1/skills`
-registry, docs/plan/06_skills.md), so you can drive the API with the real
-`ant` CLI or the Anthropic SDKs on your laptop. It's the compose companion to the
-[Helm chart](../helm); same binaries (built from the repo-root `Dockerfile`),
-wired for local use.
+registry, docs/plan/06_skills.md), and a bundled OpenBao (the transit cipher
+that encrypts vault credential material, docs/plan/12_vaults-credentials.md),
+so you can drive the API with the real `ant` CLI or the Anthropic SDKs on your
+laptop. It's the compose companion to the [Helm chart](../helm); same binaries
+(built from the repo-root `Dockerfile`), wired for local use.
 
 The **BYOC worker** is intentionally not here — it runs on your own compute,
 outside the platform. Run it separately with `go run ./cmd/worker` (or the built
@@ -56,6 +57,7 @@ and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 | `MODEL_PROVIDERS_FILE` | Brain routing file to mount (default `model-providers.example.json`). Set to your copy to use a real endpoint. |
 | `EXECUTOR_IMAGE` | Base image for per-session sandbox containers (default `debian:stable-slim`). |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | Credentials for the bundled MinIO (defaults `map` / `map-blob-dev`; the password needs ≥ 8 characters). The controlplane's and executor's `BLOB_*` wiring follows them automatically. |
+| `BAO_STATIC_KEY` / `BAO_PLATFORM_TOKEN` / `BAO_TRANSIT_KEY` | Static-unseal key (base64, 32 bytes), platform token, and transit key name (default `map-secrets`) for the bundled OpenBao (committed dev defaults; rotate via `.env` beyond a laptop). The `openbao-init` one-shot initializes the instance on first boot — root token and recovery keys land on the `baoinit` volume, a dev-grade convenience — and mints/renews the platform token, scoped to exactly that transit key, which the controlplane's and executor's `SECRETS_*`/`BAO_*` wiring follows automatically. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector for traces, metrics **and logs**; empty disables telemetry export entirely. Set to `jaeger:4317` with the observability profile — but note Jaeger ingests **traces only**, so each failed log-export batch prints one `Unimplemented … LogsService` line to stderr. Point at a collector that takes all three (an OTel Collector, Grafana Alloy) to silence it. |
 
 The **model routing** file (mounted into the brain at
@@ -112,5 +114,7 @@ and the noise gone, put an OTel Collector at `4317` and let it fan out.
 
 ```sh
 docker compose down          # stop and remove containers
-docker compose down -v       # also drop the Postgres volume (wipes all data)
+docker compose down -v       # also drop the volumes (wipes all data — Postgres,
+                             # MinIO, and OpenBao together; ciphertext and its
+                             # transit key live and die as a pair)
 ```

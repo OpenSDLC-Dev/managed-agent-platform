@@ -1,0 +1,138 @@
+{{- if .Values.openbao.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "map.fullname" . }}-openbao
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openbao
+spec:
+  # Headless: {fullname}-openbao resolves straight to the pod, which is the host
+  # in the bao-addr the chart's Secret carries.
+  clusterIP: None
+  selector:
+    {{- include "map.selectorLabels" (dict "ctx" . "component" "openbao") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8200
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "map.fullname" . }}-openbao
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openbao
+spec:
+  serviceName: {{ include "map.fullname" . }}-openbao
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "openbao") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Restart the pod (and re-run the idempotent init sidecar) when the
+        # init script — or the chart Secret both containers read env from —
+        # changes on upgrade: rotating openbao.platformToken must re-run the
+        # sidecar so the new token gets minted, not just renewed away by the
+        # old pod. (Rotating staticSealKey still bricks the instance, as
+        # values.yaml documents.)
+        checksum/openbao-init: {{ include (print $.Template.BasePath "/openbao-init-configmap.yaml") . | sha256sum | quote }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
+      labels:
+        {{- include "map.labels" . | nindent 8 }}
+        app.kubernetes.io/component: openbao
+    spec:
+      securityContext:
+        # The image runs as uid 100, gid 1000 ("openbao"); fsGroup makes the
+        # PVC's subPath directories group-writable for both containers.
+        fsGroup: 1000
+      containers:
+        - name: openbao
+          image: {{ .Values.openbao.image | quote }}
+          args: ["server"]
+          env:
+            # The image entrypoint chowns /openbao/file when it isn't owned by
+            # the openbao user — fatal for a non-root container on an
+            # fsGroup-owned PVC. fsGroup already grants group write, so the
+            # chown is unnecessary; the image's own escape hatch skips it.
+            - name: SKIP_CHOWN
+              value: "true"
+            - name: BAO_STATIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "map.secretName" . }}
+                  key: bao-static-key
+            # Persistent file storage + a static (KMS-free) auto-unseal keyed
+            # from the environment, as the compose bundled instance. mlock is
+            # disabled instead of granting IPC_LOCK — many clusters forbid
+            # added capabilities, and this is a dev-grade bundled instance;
+            # production uses externalOpenBao.
+            - name: BAO_LOCAL_CONFIG
+              value: >-
+                {"storage":{"file":{"path":"/openbao/file"}},
+                 "listener":[{"tcp":{"address":"0.0.0.0:8200","tls_disable":true}}],
+                 "seal":{"static":{"current_key_id":"dev-1","current_key":"env://BAO_STATIC_KEY"}},
+                 "disable_mlock":true}
+          ports:
+            - name: http
+              containerPort: 8200
+          readinessProbe:
+            # The strict health endpoint: 200 only once initialized and
+            # unsealed, so the Service resolves only when usable. The init
+            # sidecar reaches the server over localhost, unaffected.
+            httpGet:
+              path: /v1/sys/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              subPath: file
+              mountPath: /openbao/file
+          {{- with .Values.openbao.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: init
+          # Sidecar twin of the compose openbao-init one-shot: initializes on
+          # first boot, idempotently ensures transit + the platform token, then
+          # stays up renewing the periodic token (see the ConfigMap script).
+          image: {{ .Values.openbao.image | quote }}
+          command: ["/bin/sh", "/init/openbao-init.sh"]
+          env:
+            - name: BAO_ADDR
+              value: http://127.0.0.1:8200
+            - name: BAO_PLATFORM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "map.secretName" . }}
+                  key: bao-token
+            # The init policy is scoped to exactly this key — the same value
+            # the chart Secret hands the app processes as BAO_TRANSIT_KEY.
+            - name: BAO_TRANSIT_KEY
+              value: {{ .Values.openbao.transitKey | quote }}
+          volumeMounts:
+            - name: data
+              subPath: init
+              mountPath: /openbao/init
+            - name: init-script
+              mountPath: /init
+      volumes:
+        - name: init-script
+          configMap:
+            name: {{ include "map.fullname" . }}-openbao-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.openbao.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.openbao.storage | quote }}
+{{- end -}}

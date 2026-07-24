@@ -27,6 +27,12 @@
 //	                         disables skills materialization
 //	BLOB_ACCESS_KEY / BLOB_SECRET_KEY / BLOB_BUCKET / BLOB_REGION / BLOB_TLS
 //	                         the rest of the storage config (as controlplane)
+//	SECRETS_BACKEND          secrets cipher for vault credential material
+//	                         (docs/plan/12): "openbao", "local", or empty to
+//	                         run without one; the egress substitution that
+//	                         consumes it lands in plan 12 slice 4
+//	BAO_ADDR / BAO_TOKEN / BAO_TRANSIT_KEY / SECRETS_MASTER_KEY / SECRETS_KEY_ID
+//	                         the rest of the cipher config (as controlplane)
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
 //	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
 package main
@@ -45,6 +51,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/executor"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/backend"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
@@ -108,6 +115,17 @@ func run(ctx context.Context) error {
 	}
 	if blobs == nil {
 		slog.Info("object storage not configured; skills will not materialize")
+	}
+
+	// Constructed for startup validation (fail fast on a misconfigured or
+	// unreachable backend); the egress substitution engine (plan 12 slice 4)
+	// is its consumer here.
+	cipher, err := secrets.FromEnv(ctx)
+	if err != nil {
+		return err
+	}
+	if cipher == nil {
+		slog.Info("secrets cipher not configured; egress credential substitution will be unavailable")
 	}
 
 	slog.Info("executor running")

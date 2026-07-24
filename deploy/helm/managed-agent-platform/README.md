@@ -9,14 +9,17 @@ Deploys the platform's three server processes into a Kubernetes namespace:
 | **executor** | Deployment + RBAC | independently | runs tools in a per-session **Kubernetes sandbox Pod** |
 
 An optional in-cluster **Postgres** (StatefulSet) is included for a batteries-included
-install, and likewise an optional in-cluster **MinIO** (StatefulSet) — S3-compatible
+install, likewise an optional in-cluster **MinIO** (StatefulSet) — S3-compatible
 object storage for skill archives (consumed by the skills registry as
-docs/plan/06_skills.md lands). Both follow the same rule: bundled single-node
-instances for dev/POC, hand-written templates rather than subcharts (air-gap
-self-hosting must not require pulling an external chart), and a production
-recommendation to disable them and point `externalDatabase` /
-`externalObjectStorage` at services with their own backup and upgrade lifecycle.
-The platform speaks plain S3 — any compatible store (AWS S3, Ceph RGW, …) works.
+docs/plan/06_skills.md lands) — and an optional in-cluster **OpenBao**
+(StatefulSet) — the transit cipher for vault credential material
+(docs/plan/12_vaults-credentials.md). All three follow the same rule: bundled
+single-node instances for dev/POC, hand-written templates rather than subcharts
+(air-gap self-hosting must not require pulling an external chart), and a
+production recommendation to disable them and point `externalDatabase` /
+`externalObjectStorage` / `externalOpenBao` at services with their own backup
+and upgrade lifecycle. The platform speaks plain S3 — any compatible store
+(AWS S3, Ceph RGW, …) works — and the plain Vault-compatible transit HTTP API.
 
 The **BYOC worker is deliberately not in this chart** — it runs on the customer's own
 compute, outside the platform cluster, and reaches the control plane only over the wire.
@@ -35,9 +38,10 @@ compute, outside the platform cluster, and reaches the control plane only over t
 ## Install
 
 Minimum required values: a bootstrap API key, at least one model provider, and — with
-the bundled Postgres and MinIO — a database password and MinIO root credentials
-(neither is auto-generated: a generated credential is unstable under
-`helm template`/GitOps; MinIO requires a root password of at least 8 characters).
+the bundled Postgres, MinIO, and OpenBao — a database password, MinIO root
+credentials, and the OpenBao seal key + platform token (none is auto-generated: a
+generated credential is unstable under `helm template`/GitOps; MinIO requires a
+root password of at least 8 characters).
 
 ```bash
 helm install map ./deploy/helm/managed-agent-platform \
@@ -49,6 +53,8 @@ helm install map ./deploy/helm/managed-agent-platform \
   --set postgresql.password=$(openssl rand -hex 24) \
   --set minio.rootUser=map \
   --set minio.rootPassword=$(openssl rand -hex 24) \
+  --set openbao.staticSealKey=$(openssl rand -base64 32) \
+  --set openbao.platformToken=$(openssl rand -hex 24) \
   --set-json 'brain.modelProviders=[{"model":"*","protocol":"anthropic","base_url":"https://gateway.internal","api_key":"sk-..."}]'
 ```
 
@@ -99,6 +105,47 @@ This is a deliberate divergence from bundling a Postgres subchart: a self-hostab
 air-gap-friendly platform should not require pulling an external chart from a repo, and
 production operators run their own database anyway.
 
+## Credential cipher (OpenBao)
+
+`openbao.enabled=true` (default) runs a single-replica in-cluster OpenBao whose
+**transit** engine encrypts vault credential material
+(docs/plan/12_vaults-credentials.md): ciphertext lives in Postgres, only the key
+material lives in OpenBao's storage. The StatefulSet self-initializes — an init
+sidecar performs `bao operator init` on first boot (root token and recovery keys
+land on the data PVC, a documented dev-grade convenience), mounts transit, and
+mints the transit-scoped periodic token the controlplane and executor
+authenticate with (`openbao.platformToken`). `openbao.staticSealKey` (base64 of
+exactly 32 random bytes) drives the KMS-free static auto-unseal; changing it
+after first boot bricks the instance.
+
+**Back up in pairs, restore in order:** a Postgres backup restores ciphertext
+that only the matching transit key can open — back up OpenBao's storage
+alongside Postgres **and preserve `openbao.staticSealKey`** (it lives in your
+values/Secret, not on the PVC, and a restored instance cannot unseal without
+the exact key it was sealed with), restore OpenBao first, and treat losing the
+transit key as losing every secret encrypted under it (credential metadata
+survives; secrets must be re-entered). See docs/self-hosted-security.md.
+
+**For production, point at your own OpenBao/Vault** — any endpoint speaking the
+Vault-compatible transit HTTP API:
+
+```bash
+--set openbao.enabled=false \
+--set externalOpenBao.address='https://bao.internal:8200' \
+--set externalOpenBao.token='<transit-scoped token>'
+```
+
+The token needs `update` on `transit/encrypt/<transitKey>` and
+`transit/decrypt/<transitKey>`, plus `create`/`read`/`update` on
+`transit/keys/<transitKey>` (the platform POSTs that path at startup to ensure
+the key exists — an update once the key does), mirroring the bundled init
+policy.
+
+With the bundled instance disabled and no `externalOpenBao.address`, setting
+`localCipher.masterKey` (base64, 32 bytes) selects the AES-256-GCM local cipher —
+minimal deployments only. Leaving all three unset deploys without a cipher: the
+platform runs, vault credential storage is unavailable.
+
 ## Security notes
 
 - **Sandbox Pod network isolation.** The executor launches sandbox Pods in the release
@@ -119,9 +166,12 @@ production operators run their own database anyway.
 ## Managing your own Secret
 
 To keep credentials out of Helm values, pre-create a Secret with keys
-`controlplane-api-key`, `model-providers.json`, and `database-url`, then set
-`existingSecret=<name>`. In this mode the chart creates no Secret and does not manage an
-in-cluster database (`postgresql.enabled` must be false).
+`controlplane-api-key`, `model-providers.json`, and `database-url` (plus the
+`blob-*` keys for object storage and the `secrets-backend`/`bao-*`/`secrets-*`
+keys for the credential cipher, if used), then set `existingSecret=<name>`. In
+this mode the chart creates no Secret and does not manage in-cluster backing
+services (`postgresql.enabled`, `minio.enabled`, and `openbao.enabled` must be
+false).
 
 ## Observability
 
@@ -139,6 +189,10 @@ processes; `otlp.insecure=true` to export without TLS.
 | `postgresql.enabled` | `true` | run the bundled Postgres |
 | `postgresql.password` | `""` (required when enabled) | URL-safe DB password; not auto-generated |
 | `externalDatabase.url` | `""` | DSN used when `postgresql.enabled=false` |
+| `openbao.enabled` | `true` | run the bundled OpenBao (credential cipher) |
+| `openbao.staticSealKey` / `openbao.platformToken` | `""` (required when enabled) | static-unseal key (base64, 32 bytes) and platform token; not auto-generated |
+| `externalOpenBao.address` | `""` | external OpenBao/Vault URL when `openbao.enabled=false` |
+| `localCipher.masterKey` | `""` | AES-256-GCM fallback when no OpenBao is configured |
 | `existingSecret` | `""` | reference a pre-created Secret instead of inlining |
 | `executor.sandboxImage` | `debian:stable-slim` | base image for sandbox Pods |
 
