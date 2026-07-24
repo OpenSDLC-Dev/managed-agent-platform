@@ -27,6 +27,38 @@ copy of an entry here.
 
 ### Added
 
+- **Egress gate — the per-session forward proxy (`internal/gate`)** (plan 12 slice 4, #50). The
+  transport core of the domain gate the sandbox reaches through `HTTP_PROXY`/`HTTPS_PROXY` (D3),
+  driving the `internal/egress` engine. Two request paths: a plain-HTTP request is host-filtered
+  against the environment's networking policy and then substituted — vault placeholders in its
+  headers and body become their secrets before it leaves, so the third party receives the real
+  credential and never the placeholder; an HTTPS request is an opaque `CONNECT` tunnel, admitted or
+  refused on the target host but never inspected, so an in-sandbox TLS body keeps its placeholders
+  until the TLS-terminating phase (#166 — the documented gap); the tunnel forwards bytes the server
+  buffered past the `CONNECT` line (a pipelined ClientHello), propagates a half-close in either
+  direction, and tears down only when both directions close. The networking policy is the
+  request-level half of the two-level gate (`limited` = only `allowed_hosts`, `unrestricted` = every
+  host with its safety blocklist deferred and recorded INFERRED, an unknown type fails closed); a
+  credential's own `allowed_hosts` is the second half, enforced by the engine. A credential the
+  request host may not use is left as its literal placeholder (never the secret) and surfaced
+  through an `OnUnreachable` seam the deployment wiring turns into `credential_host_unreachable_error`.
+  Forwarding is RFC 7230-clean: hop-by-hop headers — including any named across the `Connection`
+  field lines (repeats honored) — are stripped from both the forwarded request and the returned
+  response, `Content-Length` is
+  recomputed after substitution, and the buffered body is bounded (`MaxBodyBytes`, default 10 MiB) so
+  an oversized sandbox-controlled body is refused `413` rather than read without limit. The proxy
+  forwards responses transparently (no auto-decompression — the origin's `Content-Encoding` reaches
+  the sandbox intact) and bounds a stalled origin with a response-header timeout. The forwarded
+  Host authority always comes from the request-target URI (Go normalizes it), so a spoofed `Host`
+  header cannot route a substituted credential to a different vhost than the one authorized.
+  Transport-only: it holds one session's resolved credentials and opens sockets, but reads no store
+  and emits no events. Exercised end-to-end in tests as a real forward proxy — header and body
+  substitution for an admitted host, a 403 for a host outside the policy, an opaque `CONNECT` tunnel
+  over TLS, an unreachable credential left literal and reported, a `413` for an oversized body,
+  Connection-named response headers stripped, a half-close preserved through a `CONNECT` tunnel, and
+  a spoofed Host header normalized to the authorized authority. Nothing runs it yet: the `cmd/gate`
+  binary and the Docker/K8s wiring that deliver its config and secrets land in following sub-PRs.
+
 - **Read-time credential resolution + placeholder injection** (plan 12 slice 4, #50). A new
   `internal/vaultresolve` package turns a session's attached `vault_ids` into the environment
   variables its sandbox is provisioned with: it reads the active `environment_variable`
