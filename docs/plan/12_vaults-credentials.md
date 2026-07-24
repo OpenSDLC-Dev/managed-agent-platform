@@ -139,10 +139,16 @@ live recording was possible; everything only a recording can settle is pre-liste
 the repo's standard shared contract suite: `openbao` (transit engine; production
 default) and `local` (AES-256-GCM under a configured 32-byte master key; tests and
 minimal deployments — `make test` must never require a live bao). Postgres stays the
-single canonical store: resource rows plus `bytea` ciphertext plus `key_id`; no
-dual-write, backups stay atomic, and a bao outage degrades only decrypt-time paths
-(egress substitution, `mcp_oauth_validate`), never metadata CRUD. Archive **deletes the
-ciphertext** and keeps the row (the docs' "secrets are purged; records are retained").
+single canonical store for resource state: rows plus `bytea` ciphertext plus `key_id`,
+so there is no dual-write consistency problem between two data stores. Restorability is
+still a pair — ciphertext in a Postgres backup decrypts only if the matching transit key
+material survives in bao's own storage — so D2's deployment docs pair the two backups
+and order restore (bao first) ahead of any decrypt-dependent path. A bao outage fails
+closed exactly on the cipher's paths: secret-bearing creates and updates cannot encrypt
+and are rejected, egress substitution and `mcp_oauth_validate` cannot decrypt; metadata
+CRUD (get/list, name/metadata updates, archive, delete) stays available. Archive
+**deletes the ciphertext** and keeps the row (the docs' "secrets are purged; records
+are retained").
 The contract suite's bao leg runs against a dev-mode OpenBao container (Docker is
 already a hard test dependency); the new test-support package joins the coverage-gate
 exclusion list in the Makefile and CLAUDE.md.
@@ -161,7 +167,11 @@ plain transit HTTP API — any Vault-compatible endpoint works, the same posture
 `local` cipher with the master key in the chart Secret. `BAO_ADDR` + credentials reach
 **controlplane** (encrypt on write, decrypt for poll-render later under #165 and for
 `mcp_oauth_validate`) and **executor** (decrypt at substitution time); **brain** joins
-with #45; the **worker never talks to bao**.
+with #45; the **worker never talks to bao**. The deployment docs (values.yaml comments +
+docs/self-hosted-security.md) state the backup pairing from D1: back up bao's storage
+alongside Postgres, restore bao before anything that must decrypt, and treat losing the
+transit key as losing every secret encrypted under it (re-enter credentials; metadata
+survives).
 
 **D3 — Egress in two phases; phase 1 has no TLS interception.** Slice 4 builds a
 per-session forward proxy — the domain gate: sandbox egress rides `HTTP_PROXY` /
@@ -267,8 +277,10 @@ a session on a `limited` environment with the vault attached; drive a bash tool 
 that curls `http://httpbin.org/headers` with the placeholder env var — response shows
 the substituted header; curl any other host — refused by the gate;
 `GET /v1/vaults/{id}/credentials/{cid}` never shows `secret_value`; archive the
-credential, re-resolve, placeholder no longer minted. Record the transcript in
-docs/HISTORY.md as the acceptance run.
+credential and assert both revocation halves — a fresh resolution mints no placeholder,
+**and** a request reusing the pre-archive placeholder is no longer substituted (the
+engine resolves at egress time from current rows, and the purged ciphertext cannot
+resolve). Record the transcript in docs/HISTORY.md as the acceptance run.
 
 ## Observability
 
