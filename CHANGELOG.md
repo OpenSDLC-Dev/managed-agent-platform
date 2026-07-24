@@ -36,7 +36,7 @@ copy of an entry here.
   resolves to — pinned by a parity test. Each winner's `secret_value` is unsealed through the
   `secrets.Cipher`, and the credential's own networking (`unrestricted` / `allowed_hosts`) and
   `injection_location` arms travel with it; the plaintext lives only in memory, never logged or
-  stored. Fail-closed: a cipher is required once the session has an active credential, a decrypt failure or a
+  stored. Fail-closed: a cipher is required once the session has an active environment-variable credential, a decrypt failure or a
   tampered/short sealed document fails the whole call (error messages name credential ids, never
   secret bytes), and an active credential whose ciphertext was purged is skipped so its placeholder
   egresses literally. Lands inert — its consumer (the controlplane internal gate-config endpoint)

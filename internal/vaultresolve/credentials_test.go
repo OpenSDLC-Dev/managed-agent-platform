@@ -217,8 +217,11 @@ func TestCredentialsDecryptFailureFailsClosed(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected an error on tampered ciphertext, got nil")
 		}
-		if !strings.Contains(err.Error(), id) {
-			t.Errorf("error must name the credential id %q for debuggability: %v", id, err)
+		// Exact match, not Contains: the decrypt error must be the id-only message
+		// with NOTHING appended, so a regression re-wrapping the cipher error (%w)
+		// fails here.
+		if got := err.Error(); got != "vaultresolve: cannot decrypt credential "+id {
+			t.Errorf("decrypt error = %q, want the id-only message", got)
 		}
 	})
 
@@ -252,8 +255,11 @@ func TestCredentialsDecryptFailureFailsClosed(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected an error for a non-JSON sealed payload, got nil")
 		}
-		if !strings.Contains(err.Error(), id) {
-			t.Errorf("error must name the credential id %q: %v", id, err)
+		// Exact match: this is the one path where the decrypted plaintext reaches a
+		// json error. A regression wrapping it with %w would append the offending
+		// byte of plaintext (json.SyntaxError) and fail this assertion.
+		if got := err.Error(); got != "vaultresolve: malformed sealed secret for credential "+id {
+			t.Errorf("sealed-parse error = %q, want the id-only message", got)
 		}
 	})
 
