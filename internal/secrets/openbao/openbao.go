@@ -75,9 +75,11 @@ func (c *Cipher) Encrypt(ctx context.Context, plaintext []byte) ([]byte, string,
 	if err != nil {
 		return nil, "", fmt.Errorf("openbao cipher: encrypt: %w", err)
 	}
+	// Transit ciphertext is always "vault:vN:…"; anything else is a broken
+	// or interposed endpoint, and storing it would fail only at decrypt time.
 	ct, _ := data["ciphertext"].(string)
-	if ct == "" {
-		return nil, "", errors.New("openbao cipher: encrypt response carried no ciphertext")
+	if !strings.HasPrefix(ct, "vault:v") {
+		return nil, "", errors.New("openbao cipher: encrypt response carried no vault-prefixed ciphertext")
 	}
 	return []byte(ct), c.key, nil
 }
@@ -131,7 +133,10 @@ func (c *Cipher) post(ctx context.Context, path string, body map[string]any) (ma
 			Errors []string `json:"errors"`
 		}
 		_ = json.Unmarshal(raw, &serverErr)
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.Join(serverErr.Errors, "; "))
+		// The error body is server-controlled text; an interposed endpoint
+		// could reflect the request's token into it, so scrub before wrapping.
+		msg := strings.ReplaceAll(strings.Join(serverErr.Errors, "; "), c.token, "[redacted]")
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, msg)
 	}
 	var envelope struct {
 		Data map[string]any `json:"data"`

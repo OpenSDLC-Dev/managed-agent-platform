@@ -105,6 +105,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "map.secretName" . }}
                   key: bao-token
+            # The init policy is scoped to exactly this key — the same value
+            # the chart Secret hands the app processes as BAO_TRANSIT_KEY.
+            - name: BAO_TRANSIT_KEY
+              value: {{ .Values.openbao.transitKey | quote }}
           volumeMounts:
             - name: data
               subPath: init

@@ -17,6 +17,15 @@ set -eu
 
 INIT_FILE=/openbao/init/init.json
 
+# The transit key name lands verbatim in the policy below; constrain it so a
+# malformed value cannot mangle the policy document.
+case "${BAO_TRANSIT_KEY:-}" in
+'' | *[!a-zA-Z0-9_-]*)
+	echo "BAO_TRANSIT_KEY must be non-empty and match [a-zA-Z0-9_-]" >&2
+	exit 1
+	;;
+esac
+
 initialized() {
 	bao status -format=json 2>/dev/null | grep -q '"initialized": *true'
 }
@@ -48,14 +57,16 @@ if ! bao secrets list -format=json | grep -q '"transit/"'; then
 	bao secrets enable transit
 fi
 
-bao policy write map-transit - <<'EOF'
-path "transit/keys/*" {
+# Scoped to the one transit key the platform uses — never a wildcard, so a
+# leaked platform token cannot touch any other key this bao may grow.
+bao policy write map-transit - <<EOF
+path "transit/keys/${BAO_TRANSIT_KEY}" {
   capabilities = ["create", "read", "update"]
 }
-path "transit/encrypt/*" {
+path "transit/encrypt/${BAO_TRANSIT_KEY}" {
   capabilities = ["update"]
 }
-path "transit/decrypt/*" {
+path "transit/decrypt/${BAO_TRANSIT_KEY}" {
   capabilities = ["update"]
 }
 EOF
@@ -63,8 +74,14 @@ EOF
 # The platform token is deterministic (compose injects the same value into the
 # app services' BAO_TOKEN) and periodic; re-running this script on each
 # `compose up` renews it, so an idle stack older than the period just needs a
-# restart, not a re-init.
-if BAO_TOKEN="$BAO_PLATFORM_TOKEN" bao token lookup >/dev/null 2>&1; then
+# restart, not a re-init. A token under this ID that carries different (wider)
+# privileges — an earlier manual init, a re-used ID — is refused, not adopted.
+if info=$(BAO_TOKEN="$BAO_PLATFORM_TOKEN" bao token lookup -format=json 2>/dev/null); then
+	if ! echo "$info" | grep -q '"map-transit"' || echo "$info" | grep -q '"root"'; then
+		echo "a token with the configured platform-token ID exists but does not carry the map-transit policy;" >&2
+		echo "revoke it (BAO_TOKEN=<root> bao token revoke \$BAO_PLATFORM_TOKEN) or change BAO_PLATFORM_TOKEN" >&2
+		exit 1
+	fi
 	BAO_TOKEN="$BAO_PLATFORM_TOKEN" bao token renew >/dev/null
 else
 	bao token create -id="$BAO_PLATFORM_TOKEN" -policy=map-transit -orphan -period=768h >/dev/null

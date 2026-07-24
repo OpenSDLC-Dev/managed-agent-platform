@@ -2,6 +2,9 @@ package openbao_test
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -61,6 +64,48 @@ func TestNewFailsFastOnBadToken(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "not-the-token") {
 		t.Fatalf("error echoes the token: %v", err)
+	}
+}
+
+// A hostile or misconfigured endpoint (a reverse proxy, a captive portal) may
+// reflect the request's token into its error body; the client must scrub it
+// before the text can reach a process error path or a log.
+func TestServerErrorTextNeverEchoesToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprintf(w, `{"errors":["invalid X-Vault-Token: %s"]}`, r.Header.Get("X-Vault-Token"))
+	}))
+	defer srv.Close()
+	_, err := openbao.New(context.Background(), openbao.Config{
+		Address: srv.URL, Token: "sekrit-token-value", Key: "k",
+	})
+	if err == nil {
+		t.Fatal("New succeeded against an all-errors endpoint")
+	}
+	if strings.Contains(err.Error(), "sekrit-token-value") {
+		t.Fatalf("error echoes the reflected token: %v", err)
+	}
+}
+
+// Transit ciphertext is always "vault:vN:…"; anything else out of the endpoint
+// is a broken proxy, and accepting it would persist data no decrypt can open.
+func TestEncryptRejectsMalformedCiphertext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/encrypt/") {
+			fmt.Fprint(w, `{"data":{"ciphertext":"queued"}}`)
+			return
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+	c, err := openbao.New(context.Background(), openbao.Config{
+		Address: srv.URL, Token: "x", Key: "k",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, _, err := c.Encrypt(context.Background(), []byte("v")); err == nil {
+		t.Fatal("Encrypt accepted a ciphertext without the vault: prefix")
 	}
 }
 
