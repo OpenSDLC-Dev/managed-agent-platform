@@ -41,8 +41,10 @@ copy of an entry here.
   Kubernetes apiserver. `Env` is bound at container create, like `Networking`: `Provision` adopts
   a session's existing sandbox without re-applying a changed `Env`, so a re-provisioned session
   must keep its `Env` stable (the gate mints stable per-session placeholders and resolves live
-  values at egress). Shared contract rows `SpecEnvReachesExec` (two variables, one carrying a
-  space, read back verbatim) and `SpecEnvRejectsInvalidKey` — green on Docker and on Kubernetes.
+  values at egress). Shared contract rows `SpecEnvReachesExec` (three variables — one carrying a
+  space, one a literal `$(...)` — read back verbatim), `SpecEnvRejectsInvalidKey`, and
+  `SpecEnvBoundAtProvision` (re-provisioning a session with a changed `Env` keeps the adopted
+  sandbox's id and create-time value) — green on Docker and on Kubernetes.
 
 - **Vaults slice 3 — sessions attach vaults** (plan 12, #50). `POST /v1/sessions` now accepts
   the top-level `vault_ids` array (the DIVERGENCES.md:28 create-rejection is lifted): each id
