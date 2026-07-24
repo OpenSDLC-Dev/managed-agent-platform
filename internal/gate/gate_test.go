@@ -544,6 +544,10 @@ func TestGateConnectHalfCloseDeliversResponse(t *testing.T) {
 	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
+	// A deadline so a regression that stops propagating the half-close (the
+	// origin then never sees EOF and never replies) fails cleanly here instead
+	// of hanging to the global test timeout.
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	reply, err := io.ReadAll(br)
 	if err != nil {
 		t.Fatal(err)

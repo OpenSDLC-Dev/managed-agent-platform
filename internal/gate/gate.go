@@ -149,6 +149,12 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Each direction's EOF is propagated to the peer as a half-close (CloseWrite)
 	// so a client that shuts its write side and awaits the reply is not
 	// truncated by the other pump being torn down first.
+	//
+	// Phase 1 sets no idle/overall tunnel deadline: an idle tunnel holds its two
+	// goroutines and sockets until a peer closes. The blast radius is one
+	// session's own disposable gate (self-inflicted), so an activity-based idle
+	// timeout is deferred to the cmd/gate server wiring (4c-2b) rather than
+	// hard-coded here, where a too-short cut would break long-lived TLS.
 	done := make(chan struct{}, 2)
 	cp := func(dst net.Conn, src io.Reader) {
 		_, _ = io.Copy(dst, src)

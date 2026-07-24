@@ -53,9 +53,9 @@ copy of an entry here.
   and emits no events. Exercised end-to-end in tests as a real forward proxy — header and body
   substitution for an admitted host, a 403 for a host outside the policy, an opaque `CONNECT` tunnel
   over TLS, an unreachable credential left literal and reported, a `413` for an oversized body,
-  Connection-named response headers stripped, and a spoofed Host header normalized to the authorized
-  authority. Nothing runs it yet: the `cmd/gate` binary and the Docker/K8s wiring that deliver its
-  config and secrets land in following sub-PRs.
+  Connection-named response headers stripped, a half-close preserved through a `CONNECT` tunnel, and
+  a spoofed Host header normalized to the authorized authority. Nothing runs it yet: the `cmd/gate`
+  binary and the Docker/K8s wiring that deliver its config and secrets land in following sub-PRs.
 
 - **Read-time credential resolution + placeholder injection** (plan 12 slice 4, #50). A new
   `internal/vaultresolve` package turns a session's attached `vault_ids` into the environment
