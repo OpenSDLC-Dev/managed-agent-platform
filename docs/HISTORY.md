@@ -33,6 +33,35 @@ recorded nowhere else.
 
 ---
 
+## Vaults slice 1 (plan 12, PR #168) — review hardening, 2026-07-24
+
+**The dual review converged on the transit trust boundary.** The Codex pass (`gpt-5.6-sol`,
+config `ultra` effort) returned five findings; four were confirmed and fixed in the same PR,
+each behavioral one with a test proven red on the vulnerable code: the transit client scrubs
+the configured token from server-controlled error text (an interposed endpoint reflecting
+`X-Vault-Token` could otherwise land it in a process error path), `Encrypt` refuses a response
+whose ciphertext is not `vault:v<digits>:<payload>` (a broken proxy's junk would otherwise
+persist and fail only at decrypt), the init scripts scope the `map-transit` policy to exactly
+the configured transit key instead of transit-wide wildcards (proven live: `map-secrets`
+round-trips, a foreign key 403s), and a pre-existing token under the deterministic
+platform-token ID is adopted only after a policy check (proven live: a planted `default`-policy
+token under the ID fails the init closed with a revoke hint). The Claude-side review workflow
+(agents on Opus 4.8; zero findings across the crypto, deployment, and security dimensions)
+added one confirmed doc defect: the externalOpenBao token guidance omitted `update` on
+`transit/keys/<key>`, which the startup ensure-POST needs once the key exists — a token
+provisioned per the old comment would 403 the controlplane/executor at boot.
+
+**Refuted with evidence — helm subPath mounts on a fresh PVC.** Codex's remaining finding
+(High: "nothing creates the `file/`/`init/` subPath directories on a new PVC, so kubelet
+rejects both mounts and the pod stays in `CreateContainerConfigError`") was refuted rather
+than fixed: the live-cluster run in this same branch created both subPaths on a brand-new PVC
+— the first pod attempt entered the image entrypoint (failing later on `chown`, which proves
+the mounts had succeeded) and, after `SKIP_CHOWN`, completed first-boot init and wrote
+`init.json` into the `init` subPath. Kubelet creates missing subPath directories; the finding's
+premise is false. That same live run is what surfaced the one genuine runtime defect lint
+could not see (the entrypoint's fatal `chown` on an fsGroup-owned PVC, fixed with the image's
+own `SKIP_CHOWN` escape hatch).
+
 ## Skill archive integrity (plan 10) — archived 2026-07-23
 
 [docs/plan/10_skill-archive-integrity.md](./plan/10_skill-archive-integrity.md), delivered in one PR

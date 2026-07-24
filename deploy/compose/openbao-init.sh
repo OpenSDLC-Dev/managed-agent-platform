@@ -74,8 +74,9 @@ EOF
 # The platform token is deterministic (compose injects the same value into the
 # app services' BAO_TOKEN) and periodic; re-running this script on each
 # `compose up` renews it, so an idle stack older than the period just needs a
-# restart, not a re-init. A token under this ID that carries different (wider)
-# privileges — an earlier manual init, a re-used ID — is refused, not adopted.
+# restart, not a re-init. A pre-existing token under this ID (an earlier
+# manual init, a re-used ID) is adopted only if it carries the map-transit
+# policy and not root; anything else fails closed.
 if info=$(BAO_TOKEN="$BAO_PLATFORM_TOKEN" bao token lookup -format=json 2>/dev/null); then
 	if ! echo "$info" | grep -q '"map-transit"' || echo "$info" | grep -q '"root"'; then
 		echo "a token with the configured platform-token ID exists but does not carry the map-transit policy;" >&2

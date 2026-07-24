@@ -78,8 +78,8 @@ func (c *Cipher) Encrypt(ctx context.Context, plaintext []byte) ([]byte, string,
 	// Transit ciphertext is always "vault:vN:…"; anything else is a broken
 	// or interposed endpoint, and storing it would fail only at decrypt time.
 	ct, _ := data["ciphertext"].(string)
-	if !strings.HasPrefix(ct, "vault:v") {
-		return nil, "", errors.New("openbao cipher: encrypt response carried no vault-prefixed ciphertext")
+	if !wellFormedCiphertext(ct) {
+		return nil, "", errors.New("openbao cipher: encrypt response carried no vault:vN:-form ciphertext")
 	}
 	return []byte(ct), c.key, nil
 }
@@ -103,6 +103,20 @@ func (c *Cipher) Decrypt(ctx context.Context, ciphertext []byte, keyID string) (
 		return nil, errors.New("openbao cipher: decrypt response carried no plaintext")
 	}
 	return plaintext, nil
+}
+
+// wellFormedCiphertext reports whether ct has the transit engine's
+// "vault:v<digits>:<payload>" shape.
+func wellFormedCiphertext(ct string) bool {
+	rest, ok := strings.CutPrefix(ct, "vault:v")
+	if !ok {
+		return false
+	}
+	version, payload, ok := strings.Cut(rest, ":")
+	if !ok || version == "" || payload == "" {
+		return false
+	}
+	return strings.TrimLeft(version, "0123456789") == ""
 }
 
 // post sends one authenticated transit call and returns the response's

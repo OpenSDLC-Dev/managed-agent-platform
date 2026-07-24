@@ -90,9 +90,10 @@ func TestServerErrorTextNeverEchoesToken(t *testing.T) {
 // Transit ciphertext is always "vault:vN:…"; anything else out of the endpoint
 // is a broken proxy, and accepting it would persist data no decrypt can open.
 func TestEncryptRejectsMalformedCiphertext(t *testing.T) {
+	var ciphertext string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/encrypt/") {
-			fmt.Fprint(w, `{"data":{"ciphertext":"queued"}}`)
+			fmt.Fprintf(w, `{"data":{"ciphertext":%q}}`, ciphertext)
 			return
 		}
 		fmt.Fprint(w, `{}`)
@@ -104,8 +105,14 @@ func TestEncryptRejectsMalformedCiphertext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, _, err := c.Encrypt(context.Background(), []byte("v")); err == nil {
-		t.Fatal("Encrypt accepted a ciphertext without the vault: prefix")
+	for _, ciphertext = range []string{"", "queued", "vault:verybad", "vault:v1", "vault:v:x"} {
+		if _, _, err := c.Encrypt(context.Background(), []byte("v")); err == nil {
+			t.Fatalf("Encrypt accepted malformed ciphertext %q", ciphertext)
+		}
+	}
+	ciphertext = "vault:v1:AAAA"
+	if _, _, err := c.Encrypt(context.Background(), []byte("v")); err != nil {
+		t.Fatalf("Encrypt rejected well-formed ciphertext: %v", err)
 	}
 }
 
