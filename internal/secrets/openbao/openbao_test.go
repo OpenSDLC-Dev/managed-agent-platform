@@ -2,7 +2,9 @@ package openbao_test
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -84,6 +86,36 @@ func TestServerErrorTextNeverEchoesToken(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "sekrit-token-value") {
 		t.Fatalf("error echoes the reflected token: %v", err)
+	}
+}
+
+// The request body carries the plaintext being sealed (base64); an endpoint
+// that reflects the request into its error text must not leak it through the
+// returned error either.
+func TestServerErrorTextNeverEchoesRequestValues(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/encrypt/") {
+			raw, _ := io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"errors":[%q]}`, "bad request: "+string(raw))
+			return
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+	c, err := openbao.New(context.Background(), openbao.Config{
+		Address: srv.URL, Token: "x", Key: "k",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, _, err = c.Encrypt(context.Background(), []byte("super-secret-plaintext"))
+	if err == nil {
+		t.Fatal("Encrypt succeeded against an all-errors endpoint")
+	}
+	encoded := base64.StdEncoding.EncodeToString([]byte("super-secret-plaintext"))
+	if strings.Contains(err.Error(), encoded) {
+		t.Fatalf("error echoes the reflected plaintext: %v", err)
 	}
 }
 

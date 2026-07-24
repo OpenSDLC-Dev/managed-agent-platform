@@ -34,8 +34,13 @@ spec:
     metadata:
       annotations:
         # Restart the pod (and re-run the idempotent init sidecar) when the
-        # init script changes on upgrade.
+        # init script — or the chart Secret both containers read env from —
+        # changes on upgrade: rotating openbao.platformToken must re-run the
+        # sidecar so the new token gets minted, not just renewed away by the
+        # old pod. (Rotating staticSealKey still bricks the instance, as
+        # values.yaml documents.)
         checksum/openbao-init: {{ include (print $.Template.BasePath "/openbao-init-configmap.yaml") . | sha256sum | quote }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
       labels:
         {{- include "map.labels" . | nindent 8 }}
         app.kubernetes.io/component: openbao
