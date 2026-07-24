@@ -13,6 +13,25 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Added
+
+- **Vaults plan (12) drafted** — [docs/plan/12_vaults-credentials.md](./docs/plan/12_vaults-credentials.md)
+  lifts #50 (vaults + egress-time credential injection) out of its reserved seam as four slices: the
+  `internal/secrets` cipher seam (OpenBao transit as the production backend, ciphertext staying in
+  Postgres, a `local` AES-GCM fallback, compose/helm integration on the bundled-MinIO pattern), the
+  wire-complete `/v1/vaults` + credentials CRUD with a live `mcp_oauth_validate` probe, session
+  `vault_ids` attachment with read-time credential resolution, and phase 1 of the reserved egress
+  point — a per-session domain gate that finally honors `limited` networking's `allowed_hosts` and
+  hosts the placeholder-substitution engine (no TLS interception yet). Ground truth was settled
+  against the public vaults guide (fetched 2026-07-23) and the pinned SDK v1.59.0 — including two
+  findings that shaped the scope: the reference's own docs state env-var credentials are *not yet
+  supported with self-hosted sandboxes* (so `work.secret` stays null, matching the reference; the
+  extension is [#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165)), and its
+  managed sandbox substitutes inside sandbox-originated HTTPS, which phase 1 deliberately does not
+  (TLS-terminating phase 2 is
+  [#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)). Lands as a draft for
+  discussion — STATE.md stays unclaimed until implementation starts.
+
 ### Changed
 
 - **`anthropic-sdk-go` pinned at v1.59.0**, up from v1.58.0 — and unlike the v1.58.0 bump, this one
