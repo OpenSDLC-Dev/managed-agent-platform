@@ -94,13 +94,21 @@ func Credentials(ctx context.Context, q Querier, cipher secrets.Cipher, sessionI
 		if secret == "" {
 			return nil, fmt.Errorf("vaultresolve: credential %s has no secret_value", w.id)
 		}
+		// Reject an unknown networking arm rather than coercing it to limited: a
+		// corrupt or future type carried alongside allowed_hosts would otherwise be
+		// silently treated as a host allow-list and could substitute the secret.
+		// Fail-closed, matching the other corruption paths above.
+		unrestricted := doc.Networking.Type == string(domain.NetUnrestricted)
+		if !unrestricted && doc.Networking.Type != string(domain.NetLimited) {
+			return nil, fmt.Errorf("vaultresolve: credential %s has an unknown networking type", w.id)
+		}
 		out = append(out, Credential{
 			CredentialID: w.id,
 			SecretName:   w.secretName,
 			Placeholder:  egress.Placeholder(sessionID, w.secretName),
 			Secret:       secret,
 			AllowedHosts: doc.Networking.AllowedHosts,
-			Unrestricted: doc.Networking.Type == string(domain.NetUnrestricted),
+			Unrestricted: unrestricted,
 			Header:       doc.InjectionLocation.Header,
 			Body:         doc.InjectionLocation.Body,
 		})

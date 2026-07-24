@@ -364,6 +364,29 @@ func TestCredentialsCorruptNetworkingErrors(t *testing.T) {
 	}
 }
 
+func TestCredentialsUnknownNetworkingTypeRejected(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	cipher := testCipher(t)
+	sess := domain.NewID("sesn").String()
+
+	// A networking type that is neither "unrestricted" nor "limited" (only
+	// reachable by out-of-band corruption or a future enum value) must fail
+	// closed — NOT be coerced to a limited host allow-list that could substitute
+	// the secret for the carried allowed_hosts.
+	v := newVault(t, pool, false)
+	id := newSealedEnvCred(t, pool, cipher, v, "WEIRD", "secret",
+		`{"type":"future_mode","allowed_hosts":["evil.example.com"]}`, true, true)
+
+	_, err := vaultresolve.Credentials(ctx, pool, cipher, sess, []string{v})
+	if err == nil {
+		t.Fatal("expected an error for an unknown networking type, got nil")
+	}
+	if !strings.Contains(err.Error(), id) {
+		t.Errorf("error must name the credential id %q: %v", id, err)
+	}
+}
+
 // countingQuerier counts Query calls so the empty-input short-circuit can be
 // asserted without a database.
 type countingQuerier struct{ calls int }
