@@ -164,6 +164,7 @@ type hostConfig struct {
 
 type containerConfig struct {
 	Image      string            `json:"Image"`
+	Env        []string          `json:"Env,omitempty"`
 	Entrypoint []string          `json:"Entrypoint"`
 	Cmd        []string          `json:"Cmd"`
 	WorkingDir string            `json:"WorkingDir"`

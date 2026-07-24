@@ -16,6 +16,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -63,6 +64,53 @@ type Spec struct {
 	Image      string
 	Workdir    string
 	Networking domain.Networking
+	// Env is injected at provision time and visible to every tool exec (nil =
+	// none). Slice 4 populates it with the per-session egress-proxy address and
+	// the vault env-var placeholders; both backends thread it in the same way,
+	// so the behavior is identical across Docker and Kubernetes.
+	//
+	// Keys must be valid environment-variable names (ValidateEnv); an invalid
+	// key fails provisioning on both backends rather than diverging (Docker
+	// would fold a '=' into the value, Kubernetes would reject the pod). Values
+	// are unconstrained opaque strings.
+	//
+	// Env is bound when the sandbox is first created. Provision is idempotent
+	// and adopts a session's existing sandbox without re-applying a changed Env
+	// — the same "fixed at create" property Networking already has. A caller
+	// that re-provisions a session must therefore keep its Env stable; the
+	// egress gate relies on this by minting stable per-session placeholders and
+	// resolving their live values at egress rather than re-injecting them.
+	Env map[string]string
+}
+
+// ValidateEnv reports whether every key in a Spec.Env map is a valid
+// environment-variable name — [A-Za-z_][A-Za-z0-9_]* — the portable grammar
+// both backends inject unchanged. Both call it before rendering so a bad key is
+// one clear error, not a silent Docker mis-parse or an opaque Kubernetes pod
+// rejection. Values are never constrained.
+func ValidateEnv(env map[string]string) error {
+	for k := range env {
+		if !validEnvName(k) {
+			return fmt.Errorf("sandbox: invalid environment variable name %q", k)
+		}
+	}
+	return nil
+}
+
+func validEnvName(k string) bool {
+	if k == "" {
+		return false
+	}
+	for i, r := range k {
+		switch {
+		case r == '_':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ExecRequest runs Command through /bin/bash -c inside the sandbox's workdir.

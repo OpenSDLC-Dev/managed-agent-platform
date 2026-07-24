@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	gopath "path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -83,6 +84,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	}
 	if spec.Image == "" {
 		return nil, errors.New("k8s: provision needs an image")
+	}
+	if err := sandbox.ValidateEnv(spec.Env); err != nil {
+		return nil, err
 	}
 	workdir := spec.Workdir
 	if workdir == "" {
@@ -210,6 +214,7 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec) *corev1.Pod 
 				Command: []string{"/bin/bash", "-c",
 					"mkdir -p " + shellQuote(workdir) + " && while :; do sleep 3600; done"},
 				WorkingDir: workdir,
+				Env:        envVars(spec.Env),
 			}},
 		},
 	}
@@ -217,6 +222,26 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec) *corev1.Pod 
 		pod.Spec.InitContainers = []corev1.Container{p.netSetup()}
 	}
 	return pod
+}
+
+// envVars renders Spec.Env as the pod container's Env list, key-sorted so a given
+// spec always produces the same pod. Returns nil for an empty map so the
+// container carries only the image's own environment. A plain-value EnvVar (no
+// ValueFrom) mirrors the docker backend's KEY=value injection exactly.
+func envVars(env map[string]string) []corev1.EnvVar {
+	if len(env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]corev1.EnvVar, 0, len(env))
+	for _, k := range keys {
+		out = append(out, corev1.EnvVar{Name: k, Value: env[k]})
+	}
+	return out
 }
 
 // netSetup fails closed like the docker backend's `NetworkMode: none`: `limited`
