@@ -253,10 +253,11 @@ D8. DIVERGENCES entries per the list below. *Verify: `ant beta:vaults` /
 from every response, log, and error.*
 
 **Slice 3 — sessions attach vaults.** Session create accepts `vault_ids` (existence +
-unarchived validation; the DIVERGENCES.md:28 rejection entry updates); the resolution
-package (attached vaults → active env-var credentials, first-vault-wins) with read-time
-semantics per D5; update keeps its wire-faithful rejection. *Verify: create-with-vault
-round-trips `vault_ids`; archived vault → create fails; update still rejects.*
+unarchived validation; the DIVERGENCES.md:28 rejection entry updates); update keeps its
+wire-faithful rejection. *Verify: create-with-vault round-trips `vault_ids`; archived
+vault → create fails; update still rejects.* (The read-time resolution package moved to
+slice 4, built beside its egress consumers so its shape follows real use rather than
+being reserved ahead of need — CLAUDE.md's "no speculative single-use code".)
 
 **Slice 4 — the egress gate, phase 1.** `sandbox.Spec.Env` seam in both backends;
 per-session gate proxy (Docker: internal per-session network, sandbox reaches only the
@@ -268,8 +269,9 @@ plain route removal would strand it and any surviving route would be open to pro
 that ignore `HTTP(S)_PROXY`; UID-scoped filtering is the isolation mechanism, is
 CNI-independent, and stays testable on kind — NetworkPolicy is deliberately not relied
 on, since its enforcement depends on the cluster's CNI);
-`HTTP(S)_PROXY` injection; placeholder minting + env injection per D4; the substitution
-engine package with plain-HTTP substitution live in the gate;
+`HTTP(S)_PROXY` injection; the read-time resolution package (attached vaults → active
+env-var credentials, first-vault-wins, per D5); placeholder minting + env injection per
+D4; the substitution engine package with plain-HTTP substitution live in the gate;
 `credential_host_unreachable_error` emission; sandboxtest contract rows updated from
 "limited = no route" to "limited = only allowed_hosts through the gate"; DIVERGENCES.md:42
 superseded, self-hosted-security.md's reserved-work section rewritten. *Verify: contract

@@ -15,6 +15,18 @@ copy of an entry here.
 
 ### Added
 
+- **Vaults slice 3 — sessions attach vaults** (plan 12, #50). `POST /v1/sessions` now accepts
+  the top-level `vault_ids` array (the DIVERGENCES.md:28 create-rejection is lifted): each id
+  must name an existing, unarchived vault — validated `FOR SHARE` inside the create transaction
+  so a concurrent archive/delete cannot race the insert — and the list round-trips on the create
+  response and on GET. A malformed id, a missing vault, or an archived one fails the create with
+  a 400 (INFERRED — the reference documents only that a session referencing such a vault fails
+  later, not the create-time status). Attachment is create-time-only: `vault_ids` on update stays
+  rejected, wire-faithful with the SDK, which carries the field on the update params but documents
+  it "Not yet supported; requests setting this field are rejected." Read-time credential
+  resolution (attached vaults → active env-var credentials, first-vault-wins) lands with its
+  egress consumers in slice 4, so its shape is driven by real use rather than reserved ahead.
+
 - **Vaults slice 2 — `/v1/vaults` and credentials, wire-complete** (plan 12, #50). The full
   management surface on the environments exemplar: vault CRUD (POST updates, tombstone
   `vault_deleted` delete cascading to credentials, idempotent archive that purges and archives
