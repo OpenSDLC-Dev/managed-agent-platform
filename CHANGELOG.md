@@ -15,6 +15,32 @@ copy of an entry here.
 
 ### Added
 
+- **Vaults slice 2 — `/v1/vaults` and credentials, wire-complete** (plan 12, #50). The full
+  management surface on the environments exemplar: vault CRUD (POST updates, tombstone
+  `vault_deleted` delete cascading to credentials, idempotent archive that purges and archives
+  every credential with it, keyset pagination) and the nested credentials CRUD with the complete
+  auth union — `mcp_oauth` (incl. the refresh block and all three `token_endpoint_auth` arms),
+  `static_bearer`, and `environment_variable` (networking union, `injection_location` with the
+  documented create/update asymmetry and its 400s). Write-only secret fields never enter the
+  stored auth document: they are sealed as one JSON object through the slice-1 cipher
+  (`bytea` ciphertext + key id in migration `0011_vaults.sql`; no cipher configured → the
+  secret-bearing paths fail closed while metadata CRUD serves), archive purges them, and the
+  update unions enforce the SDK's structural immutability (no variant switch, frozen
+  `mcp_server_url`/`secret_name`/refresh anchors, `none` dropped on update, arm switches demand
+  a `client_secret`). Documented limits enforced as hard 400s (metadata 16/64/512, display_name
+  lengths, ≤16 `allowed_hosts` with the host grammar, ≤20 active credentials) with duplicate
+  active keys a 409 freed by archive. `mcp_oauth_validate` is a real probe (D8): the RFC 6749
+  refresh exchange, then a streamable-HTTP MCP `initialize` under the possibly-refreshed token —
+  statuses mapped per the docs, successful refreshes persisted. Because the probe dials
+  credential-supplied URLs, a connect-time SSRF guard checks the resolved IP (DNS-rebinding- and
+  redirect-safe) and blocks loopback/link-local/unspecified/multicast while deliberately
+  permitting on-prem RFC 1918 targets; captured bodies are truncated and scrubbed of secrets by
+  value (with encodings) and of token-shaped JSON keys by name, the full read window scrubbed
+  before truncation so a boundary-straddling secret cannot leak (tests prove even freshly-rotated
+  tokens and an OIDC `id_token` never surface). The `vcrd_` prefix
+  joins the wire rules; new divergence entries record the inferred edges and the `work.secret`
+  entry re-points at #165.
+
 - **Vaults slice 1 — the credential-cipher seam and its infrastructure** (plan 12, #50). A new
   `internal/secrets` package defines the `Cipher` seam (`Encrypt` returns ciphertext bound to a
   `key_id`; `Decrypt` requires the matching pair) with two backends behind one shared contract

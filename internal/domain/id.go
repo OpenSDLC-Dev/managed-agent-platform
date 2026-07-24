@@ -24,6 +24,7 @@ const (
 	PrefixEvent         = "sevt"
 	PrefixWork          = "work"
 	PrefixVault         = "vlt"
+	PrefixCredential    = "vcrd"
 	PrefixResource      = "sesrsc"
 	PrefixDeployment    = "depl"
 	PrefixDeploymentRun = "drun"
@@ -50,8 +51,9 @@ var idEncoding = base32.NewEncoding(idAlphabet).WithPadding(base32.NoPadding)
 // spelling validates alongside sesn_.
 var knownPrefixes = map[string]bool{
 	PrefixAgent: true, PrefixEnvironment: true, PrefixSession: true, PrefixEvent: true,
-	PrefixWork: true, PrefixVault: true, PrefixResource: true, PrefixDeployment: true,
-	PrefixDeploymentRun: true, PrefixFile: true, PrefixSkill: true, PrefixSkillVersion: true,
+	PrefixWork: true, PrefixVault: true, PrefixCredential: true, PrefixResource: true,
+	PrefixDeployment: true, PrefixDeploymentRun: true, PrefixFile: true,
+	PrefixSkillVersion: true, PrefixSkill: true,
 	altSessionPrefix: true,
 }
 

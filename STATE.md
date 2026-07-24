@@ -8,7 +8,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Tasks
 
-- [x] Slice 1 — cipher seam + infrastructure (this PR): `internal/secrets` (Cipher iface, `local` AES-GCM + `openbao` transit backends, shared contract suite, `secretstest` container harness), controlplane/executor env plumbing, compose `openbao` + `openbao-init` (encrypt/decrypt round-trip survives container restart — verified), helm `openbao.enabled` StatefulSet + `externalOpenBao` + `localCipher` fallback (init/round-trip/restart-unseal verified on a live cluster).
-- [ ] Slice 2 — `/v1/vaults` + credentials CRUD, wire-complete (migration 0011, `vcrd` prefix, auth-union validation, `mcp_oauth_validate` probe, DIVERGENCES entries).
+- [x] Slice 1 — cipher seam + infrastructure (PR #168, merged): `internal/secrets` (Cipher iface, `local` + `openbao` backends, contract suite, `secretstest` harness), controlplane/executor plumbing, compose `openbao` + init one-shot, helm StatefulSet + `externalOpenBao` + `localCipher` — all runtime-verified.
+- [x] Slice 2 — `/v1/vaults` + credentials CRUD, wire-complete (this PR): migration 0011, `vcrd` prefix, full auth-union validation, sealed secrets via the cipher, `mcp_oauth_validate` live probe, DIVERGENCES entries + `work.secret` re-pointed at #165.
 - [ ] Slice 3 — session `vault_ids` attachment + read-time resolution.
 - [ ] Slice 4 — egress gate phase 1 (domain gate proxy, placeholder minting + substitution engine, K8s UID-owner iptables sidecar, DIVERGENCES.md:42 superseded).

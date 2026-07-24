@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -26,14 +27,18 @@ type server struct {
 	broker *events.Broker
 	queue  *queue.Queue
 	blobs  blob.Store
+	cipher secrets.Cipher
 }
 
 // NewHandler assembles the control-plane HTTP surface over the given pool.
 // blobs is the object store backing skill archives; nil deploys without
 // object storage — everything serves except the storage-backed skill routes,
-// which answer with a configuration error.
-func NewHandler(pool *pgxpool.Pool, blobs blob.Store) http.Handler {
-	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs}
+// which answer with a configuration error. cipher seals vault credential
+// secrets; nil deploys without one — vault metadata CRUD serves, while the
+// secret-bearing paths (credential create/update with secret fields, the
+// validate probe) answer with a configuration error (fails closed, plan 12 D1).
+func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) http.Handler {
+	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs, cipher: cipher}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /v1/agents", s.handle(s.createAgent))
@@ -67,6 +72,20 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store) http.Handler {
 	mux.HandleFunc("POST /v1/sessions/{id}/resources/{rid}", s.handle(s.updateSessionResource))
 	mux.HandleFunc("DELETE /v1/sessions/{id}/resources/{rid}", s.handle(s.deleteSessionResource))
 
+	mux.HandleFunc("POST /v1/vaults", s.handle(s.createVault))
+	mux.HandleFunc("GET /v1/vaults", s.handle(s.listVaults))
+	mux.HandleFunc("GET /v1/vaults/{id}", s.handle(s.getVault))
+	mux.HandleFunc("POST /v1/vaults/{id}", s.handle(s.updateVault))
+	mux.HandleFunc("DELETE /v1/vaults/{id}", s.handle(s.deleteVault))
+	mux.HandleFunc("POST /v1/vaults/{id}/archive", s.handle(s.archiveVault))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials", s.handle(s.createVaultCredential))
+	mux.HandleFunc("GET /v1/vaults/{id}/credentials", s.handle(s.listVaultCredentials))
+	mux.HandleFunc("GET /v1/vaults/{id}/credentials/{cid}", s.handle(s.getVaultCredential))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}", s.handle(s.updateVaultCredential))
+	mux.HandleFunc("DELETE /v1/vaults/{id}/credentials/{cid}", s.handle(s.deleteVaultCredential))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}/archive", s.handle(s.archiveVaultCredential))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}/mcp_oauth_validate", s.handle(s.validateVaultCredential))
+
 	mux.HandleFunc("POST /v1/skills", s.handle(s.createSkill))
 	mux.HandleFunc("GET /v1/skills", s.handle(s.listSkills))
 	mux.HandleFunc("GET /v1/skills/{id}", s.handle(s.getSkill))
@@ -95,6 +114,10 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store) http.Handler {
 		"/v1/sessions", "/v1/sessions/{id}", "/v1/sessions/{id}/archive",
 		"/v1/sessions/{id}/events", "/v1/sessions/{id}/events/stream",
 		"/v1/sessions/{id}/resources", "/v1/sessions/{id}/resources/{rid}",
+		"/v1/vaults", "/v1/vaults/{id}", "/v1/vaults/{id}/archive",
+		"/v1/vaults/{id}/credentials", "/v1/vaults/{id}/credentials/{cid}",
+		"/v1/vaults/{id}/credentials/{cid}/archive",
+		"/v1/vaults/{id}/credentials/{cid}/mcp_oauth_validate",
 		"/v1/skills", "/v1/skills/{id}", "/v1/skills/{id}/versions",
 		"/v1/skills/{id}/versions/{version}", "/v1/skills/{id}/versions/{version}/content",
 		"/v1/files", "/v1/files/{id}", "/v1/files/{id}/content",
