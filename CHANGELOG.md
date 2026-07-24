@@ -43,12 +43,18 @@ copy of an entry here.
   placeholder, never the secret, which is resolved and substituted later at egress (the gate, a
   later sub-PR). An archived vault contributes nothing — archiving a vault archives and purges its
   credentials, so the `archived_at` filter already excludes them, giving the acceptance run's
-  revocation half (a fresh resolution mints no placeholder) for free. A credential whose
-  `secret_name` is not a valid environment-variable name is skipped rather than injected — an
-  invalid key would fault every provision and reclaim-loop, so it is dropped as the "a bad
-  credential surfaces [later] and does not block the session" arm of the resolution model rather
-  than rejected at credential-create (whose `secret_name` validation the reference does not
-  specify). Nothing egresses differently yet: the placeholders are inert until the gate substitutes
+  revocation half (a fresh resolution mints no placeholder) for free — and the resolution query
+  guards the vault's own `archived_at` directly, not only the credential's, so an archived vault
+  delivers nothing even if the archive cascade ever left a stale credential row. A credential whose
+  `secret_name` cannot be safely injected is skipped rather than injected — the "a bad credential
+  surfaces [later] and does not block the session" arm of the resolution model, rather than
+  rejected at credential-create (whose `secret_name` validation the reference does not specify).
+  Two cases are skipped: a name that is not a valid environment-variable name (an invalid `Spec.Env`
+  key would fault every provision and reclaim-loop), and a platform-**reserved** name (`PATH` and
+  the loader/shell hooks `LD_PRELOAD`/`LD_LIBRARY_PATH`/`LD_AUDIT`/`BASH_ENV`/`ENV`/`IFS`) — `PATH`
+  is a valid env-var name, so a credential named `PATH` would otherwise clobber the sandbox's binary
+  resolution and break the bootstrap and every tool exec. Nothing egresses differently yet: the
+  placeholders are inert until the gate substitutes
   their secrets. Covered by a Postgres-backed resolution contract test (first-vault-wins,
   archived/non-env-var exclusion) and an executor test asserting the placeholders reach `Spec.Env`
   while invalid-named and archived credentials do not.

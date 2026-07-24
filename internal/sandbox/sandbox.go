@@ -97,6 +97,32 @@ func ValidateEnv(env map[string]string) error {
 	return nil
 }
 
+// reservedEnvNames are variables an untrusted source must not be allowed to set
+// in a sandbox: injecting an opaque value over one of these breaks the sandbox
+// or subverts how it launches processes. PATH governs binary resolution for the
+// bootstrap (`/bin/bash -c "mkdir … && sleep …"`, unqualified) and every tool
+// exec, so overriding it with a placeholder makes the container exit before it
+// serves work — a reclaim-loop. LD_PRELOAD/LD_LIBRARY_PATH/LD_AUDIT are dynamic
+// loader hooks and BASH_ENV/ENV are shell-startup hooks — process-injection
+// surfaces. (The egress-proxy variables the gate injects are the platform's own,
+// set after this filter, and are reserved against a credential overriding them
+// in the slice that adds them.)
+var reservedEnvNames = map[string]struct{}{
+	"PATH": {}, "LD_PRELOAD": {}, "LD_LIBRARY_PATH": {}, "LD_AUDIT": {},
+	"BASH_ENV": {}, "ENV": {}, "IFS": {},
+}
+
+// ReservedEnvName reports whether k is an environment variable the platform
+// reserves — one a caller must not let an untrusted source (a vault credential's
+// secret_name) set, because injecting over it would break or subvert the
+// sandbox. Such a name is skipped like a name that fails ValidEnvName; it is not
+// a grammar rule, so ValidateEnv (which the platform's own trusted injections
+// also pass through) does not enforce it.
+func ReservedEnvName(k string) bool {
+	_, ok := reservedEnvNames[k]
+	return ok
+}
+
 // ValidEnvName reports whether k is a valid environment-variable name —
 // [A-Za-z_][A-Za-z0-9_]*. A caller assembling Spec.Env from an external source
 // whose keys are not guaranteed valid (vault credential secret_names) uses it to

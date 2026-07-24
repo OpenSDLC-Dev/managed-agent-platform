@@ -56,6 +56,7 @@ func TestProvisionInjectsVaultPlaceholders(t *testing.T) {
 	vaultID := h.attachVault(t)
 	h.addEnvCred(t, vaultID, "API_KEY", false)  // active, valid → injected
 	h.addEnvCred(t, vaultID, "bad-name", false) // invalid env-var name → skipped
+	h.addEnvCred(t, vaultID, "PATH", false)     // reserved name → skipped (would break the sandbox)
 	h.addEnvCred(t, vaultID, "OLD_KEY", true)   // archived → excluded
 
 	h.suspend(t, writeUse("out.txt", "hi"))
@@ -74,6 +75,9 @@ func TestProvisionInjectsVaultPlaceholders(t *testing.T) {
 	}
 	if _, bad := env["bad-name"]; bad {
 		t.Error("an invalid-named credential was injected; it must be skipped")
+	}
+	if _, path := env["PATH"]; path {
+		t.Error("a reserved-named credential (PATH) was injected; it must be skipped")
 	}
 	if _, old := env["OLD_KEY"]; old {
 		t.Error("an archived credential was injected; it must be excluded")

@@ -201,11 +201,14 @@ func TestBindingsArchivedVaultExcluded(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	ctx := context.Background()
 
-	// A vault archived after attachment: its credentials are archived and their
-	// secrets purged, so resolution yields nothing — the revocation half the
-	// acceptance run asserts (a fresh resolution mints no placeholder).
+	// An archived vault yields nothing — the revocation half the acceptance run
+	// asserts (a fresh resolution mints no placeholder). The credential here is
+	// left *active*, so exclusion rests on the query's direct vault archived_at
+	// guard, not on the archive cascade having archived the credential row: the
+	// "archived vault delivers no credential" guarantee holds even against a
+	// stale un-cascaded row.
 	v := newVault(t, pool, true)
-	newEnvCred(t, pool, v, "STALE", true)
+	newEnvCred(t, pool, v, "STALE", false)
 
 	got, err := vaultresolve.Bindings(ctx, pool, domain.NewID("sesn").String(), []string{v})
 	if err != nil {

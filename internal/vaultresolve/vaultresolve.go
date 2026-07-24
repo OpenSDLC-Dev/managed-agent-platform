@@ -48,9 +48,16 @@ func Bindings(ctx context.Context, q Querier, sessionID string, vaultIDs []strin
 	if len(vaultIDs) == 0 {
 		return nil, nil
 	}
+	// The vault's own archived_at is checked directly, not only the credential's:
+	// an archived vault contributes nothing is a security guarantee, so it does
+	// not rest solely on the archive cascade (archiving a vault archives+purges
+	// its credentials) holding — a stale un-cascaded credential row is still
+	// excluded here.
 	rows, err := q.Query(ctx,
-		`SELECT vault_id, auth FROM vault_credentials
-		  WHERE vault_id = ANY($1) AND auth_type = 'environment_variable' AND archived_at IS NULL`,
+		`SELECT c.vault_id, c.auth FROM vault_credentials c
+		    JOIN vaults v ON v.id = c.vault_id
+		  WHERE c.vault_id = ANY($1) AND c.auth_type = 'environment_variable'
+		    AND c.archived_at IS NULL AND v.archived_at IS NULL`,
 		vaultIDs)
 	if err != nil {
 		return nil, err
