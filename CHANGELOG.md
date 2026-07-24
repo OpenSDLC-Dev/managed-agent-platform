@@ -27,6 +27,27 @@ copy of an entry here.
 
 ### Added
 
+- **Read-time credential resolution + placeholder injection** (plan 12 slice 4, #50). A new
+  `internal/vaultresolve` package turns a session's attached `vault_ids` into the environment
+  variables its sandbox is provisioned with: it reads the active `environment_variable`
+  credentials of the attached vaults (current rows every time — no cache, so rotation and archive
+  propagate without a session restart), collapses a `secret_name` that several attached vaults
+  share to the first vault in `vault_ids` order (D5's first-vault-wins), and pairs each with a
+  freshly minted opaque `vltph_` placeholder. The executor injects these as
+  `secret_name=placeholder` entries in `sandbox.Spec.Env` at provision; the sandbox sees only the
+  placeholder, never the secret, which is resolved and substituted later at egress (the gate, a
+  later sub-PR). An archived vault contributes nothing — archiving a vault archives and purges its
+  credentials, so the `archived_at` filter already excludes them, giving the acceptance run's
+  revocation half (a fresh resolution mints no placeholder) for free. A credential whose
+  `secret_name` is not a valid environment-variable name is skipped rather than injected — an
+  invalid key would fault every provision and reclaim-loop, so it is dropped as the "a bad
+  credential surfaces [later] and does not block the session" arm of the resolution model rather
+  than rejected at credential-create (whose `secret_name` validation the reference does not
+  specify). Nothing egresses differently yet: the placeholders are inert until the gate substitutes
+  their secrets. Covered by a Postgres-backed resolution contract test (first-vault-wins,
+  archived/non-env-var exclusion) and an executor test asserting the placeholders reach `Spec.Env`
+  while invalid-named and archived credentials do not.
+
 - **Egress substitution engine — `internal/egress`** (plan 12 slice 4, #50). The shared, I/O-free
   core the per-session gate (a later sub-PR) drives to rewrite vault placeholders into their secret
   values on outbound requests. Three pieces: a `HostSet` matcher for the `allowed_hosts` grammar the

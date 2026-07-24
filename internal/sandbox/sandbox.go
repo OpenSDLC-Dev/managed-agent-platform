@@ -90,14 +90,19 @@ type Spec struct {
 // rejection. Values are never constrained.
 func ValidateEnv(env map[string]string) error {
 	for k := range env {
-		if !validEnvName(k) {
+		if !ValidEnvName(k) {
 			return fmt.Errorf("sandbox: invalid environment variable name %q", k)
 		}
 	}
 	return nil
 }
 
-func validEnvName(k string) bool {
+// ValidEnvName reports whether k is a valid environment-variable name —
+// [A-Za-z_][A-Za-z0-9_]*. A caller assembling Spec.Env from an external source
+// whose keys are not guaranteed valid (vault credential secret_names) uses it to
+// drop the keys ValidateEnv would reject, rather than fault the whole provision
+// on one bad name.
+func ValidEnvName(k string) bool {
 	if k == "" {
 		return false
 	}

@@ -114,14 +114,16 @@ type fakeProvider struct {
 	sb           *fakeSandbox
 	provisionErr error
 	provisions   int
+	lastSpec     sandbox.Spec // captured for env-injection assertions
 	// entered/gate mirror fakeSandbox's, for a test that holds provisioning open
 	// (a slow image pull) to observe the lease keeper renew across it.
 	entered chan struct{}
 	gate    chan struct{}
 }
 
-func (p *fakeProvider) Provision(ctx context.Context, _ sandbox.Spec) (sandbox.Sandbox, error) {
+func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
 	p.provisions++
+	p.lastSpec = spec
 	if p.entered != nil {
 		select {
 		case p.entered <- struct{}{}:
