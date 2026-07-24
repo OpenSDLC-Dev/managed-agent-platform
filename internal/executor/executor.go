@@ -38,6 +38,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -179,7 +180,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// re-running its tools each lease period; this mirrors the brain's
 	// claimLiveSession. Loading the egress policy under the same lock keeps it
 	// to one round trip.
-	net, skillRefs, fileRefs, live, err := e.sessionForRun(ctx, item)
+	sess, live, err := e.sessionForRun(ctx, item)
 	if err != nil || !live {
 		return err
 	}
@@ -191,7 +192,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// losing the lease cancels the work.
 	kctx, keeper := e.queue.KeepLease(ctx, item, e.cfg.LeaseTTL)
 
-	results, faultErr, runErr := e.provisionAndRun(kctx, item, net, skillRefs, fileRefs)
+	results, faultErr, runErr := e.provisionAndRun(kctx, item, sess)
 	if kerr := keeper.Close(); kerr != nil {
 		// The lease is gone — another executor may already own this item.
 		// Nothing of ours may commit; the results we ran are re-derived on the
@@ -246,24 +247,68 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 // append, the first backend fault a tool hit (nil if every tool ran), and a
 // setup error from provisioning or reading the log — which stops the item with
 // nothing committed, distinct from a tool fault, which commits what did run.
-func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, net domain.Networking, refs []skillRef, files []fileRef) ([]events.NewEvent, error, error) {
+func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun) ([]events.NewEvent, error, error) {
+	env, err := e.sandboxEnv(ctx, item.SessionID, sess.vaultIDs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve vault credentials: %w", err)
+	}
 	sb, err := e.provider.Provision(ctx, sandbox.Spec{
 		SessionID:  item.SessionID,
 		Image:      e.cfg.Image,
 		Workdir:    e.cfg.Workdir,
-		Networking: net,
+		Networking: sess.networking,
+		Env:        env,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("provision sandbox: %w", err)
 	}
-	e.materializeSkills(ctx, sb, item.SessionID, refs)
-	e.materializeFiles(ctx, sb, item.SessionID, files)
+	e.materializeSkills(ctx, sb, item.SessionID, sess.skills)
+	e.materializeFiles(ctx, sb, item.SessionID, sess.files)
 	uses, err := e.unansweredToolUses(ctx, item.SessionID)
 	if err != nil {
 		return nil, nil, err
 	}
 	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses)
 	return results, faultErr, nil
+}
+
+// sandboxEnv resolves the session's attached vaults into the environment
+// variables the sandbox is provisioned with: one secret_name=placeholder entry
+// per active environment_variable credential (vaultresolve). The placeholders
+// are opaque and inert on their own — the per-session gate substitutes the real
+// secrets at egress time (a later slice). No attached vaults, or none carrying
+// env-var credentials, yields a nil map: an ordinary sandbox.
+//
+// Placeholders are derived per (session, secret_name), so a re-provision of the
+// same session resolves the identical tokens — matching what the create-bound
+// Spec.Env already holds (Provision adopts a running sandbox without re-applying
+// a changed Env) rather than drifting to fresh values the gate could no longer
+// substitute.
+//
+// A credential whose secret_name cannot be safely injected is skipped rather
+// than delivered — the "a bad credential surfaces [later] and does not block the
+// session" arm of the resolution model — for two reasons: a name that is not a
+// valid environment-variable name would fail ValidateEnv and fault the whole
+// provision (a reclaim-loop), and a name the platform reserves (PATH and the
+// loader/shell hooks) would break the sandbox or subvert how it launches
+// processes if a credential could set it. Only a resolution I/O error faults the
+// item, which then retries on reclaim like any other transient failure.
+func (e *Executor) sandboxEnv(ctx context.Context, sessionID domain.ID, vaultIDs []string) (map[string]string, error) {
+	bindings, err := vaultresolve.Bindings(ctx, e.pool, sessionID.String(), vaultIDs)
+	if err != nil {
+		return nil, err
+	}
+	var env map[string]string
+	for _, b := range bindings {
+		if !sandbox.ValidEnvName(b.SecretName) || sandbox.ReservedEnvName(b.SecretName) {
+			continue
+		}
+		if env == nil {
+			env = make(map[string]string, len(bindings))
+		}
+		env[b.SecretName] = b.Placeholder
+	}
+	return env, nil
 }
 
 // runTools runs each unanswered tool use in order, returning the result events
@@ -316,60 +361,76 @@ func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, erro
 	return events.NewEvent{Type: domain.EventAgentToolResult, Payload: payload}, nil
 }
 
+// sessionRun is the per-run session state sessionForRun loads under the row
+// lock: the egress policy, the snapshot's skills and file mounts, and the
+// attached vault ids that drive credential resolution.
+type sessionRun struct {
+	networking domain.Networking
+	skills     []skillRef
+	files      []fileRef
+	vaultIDs   []string
+}
+
 // sessionForRun loads the session's egress policy, its snapshot's skills
-// references, and its file-mount resources under its row lock, and reports
-// whether the session is still live for tool execution. A session that is not
-// running, or has been archived, is stale: its tool_exec item is completed here
-// and false is returned, so a dead session cannot reclaim-loop (every append the
-// run would make is rejected). A session that no longer exists took its
-// cascade-deleted work item with it, so there is nothing to drain. Mirrors the
-// brain's claimLiveSession. Reading skills and resources here keeps the run to
-// one session read — a second, later read would add a transient-failure point
-// that faults the whole item.
-func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (domain.Networking, []skillRef, []fileRef, bool, error) {
+// references, its file-mount resources, and its attached vault ids under the
+// session's row lock, and reports whether the session is still live for tool
+// execution. A session that is not running, or has been archived, is stale: its
+// tool_exec item is completed here and false is returned, so a dead session
+// cannot reclaim-loop (every append the run would make is rejected). A session
+// that no longer exists took its cascade-deleted work item with it, so there is
+// nothing to drain. Mirrors the brain's claimLiveSession. Reading skills,
+// resources, and vault ids here keeps the run to one session read — a second,
+// later read would add a transient-failure point that faults the whole item.
+func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (sessionRun, bool, error) {
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
-		return domain.Networking{}, nil, nil, false, err
+		return sessionRun{}, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var status string
 	var archivedAt *time.Time
 	var configJSON, agentJSON, resourcesJSON []byte
+	var vaultIDs []string
 	err = tx.QueryRow(ctx,
-		`SELECT s.status, s.archived_at, e.config, s.resolved_agent, s.resources
+		`SELECT s.status, s.archived_at, e.config, s.resolved_agent, s.resources, s.vault_ids
 		   FROM sessions s JOIN environments e ON e.id = s.environment_id
 		  WHERE s.id = $1 FOR UPDATE OF s`,
-		item.SessionID.String()).Scan(&status, &archivedAt, &configJSON, &agentJSON, &resourcesJSON)
+		item.SessionID.String()).Scan(&status, &archivedAt, &configJSON, &agentJSON, &resourcesJSON, &vaultIDs)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Networking{}, nil, nil, false, nil
+		return sessionRun{}, false, nil
 	}
 	if err != nil {
-		return domain.Networking{}, nil, nil, false, err
+		return sessionRun{}, false, err
 	}
 
 	if status != string(domain.SessionRunning) || archivedAt != nil {
 		if err := e.queue.Complete(ctx, tx, item); err != nil {
-			return domain.Networking{}, nil, nil, false, err
+			return sessionRun{}, false, err
 		}
-		return domain.Networking{}, nil, nil, false, tx.Commit(ctx)
+		return sessionRun{}, false, tx.Commit(ctx)
 	}
 
 	var cfg domain.EnvironmentConfig
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {
-		return domain.Networking{}, nil, nil, false, err
+		return sessionRun{}, false, err
 	}
 	var agent struct {
 		Skills []skillRef `json:"skills"`
 	}
 	if err := json.Unmarshal(agentJSON, &agent); err != nil {
-		return domain.Networking{}, nil, nil, false, err
+		return sessionRun{}, false, err
 	}
 	var resources []fileRef
 	if err := json.Unmarshal(resourcesJSON, &resources); err != nil {
-		return domain.Networking{}, nil, nil, false, err
+		return sessionRun{}, false, err
 	}
-	return cfg.Networking, agent.Skills, resources, true, tx.Commit(ctx)
+	return sessionRun{
+		networking: cfg.Networking,
+		skills:     agent.Skills,
+		files:      resources,
+		vaultIDs:   vaultIDs,
+	}, true, tx.Commit(ctx)
 }
 
 // report is where per-item faults surface. The queue's reclaim is the recovery

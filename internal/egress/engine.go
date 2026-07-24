@@ -1,29 +1,38 @@
 package egress
 
 import (
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 )
 
 // PlaceholderPrefix marks the opaque tokens the platform injects into a sandbox
 // in place of a vault secret. The reference calls the sandbox-visible value an
-// "opaque placeholder" and defines no format; this prefix and the random suffix
+// "opaque placeholder" and defines no format; this prefix and the derived suffix
 // are ours (recorded as a deliberate divergence). The token is a valid
 // environment-variable value — no spaces or shell metacharacters — so it injects
 // cleanly through sandbox.Spec.Env.
 const PlaceholderPrefix = "vltph_"
 
-// NewPlaceholder mints a fresh opaque placeholder: the prefix plus 128 bits of
-// randomness in hex. crypto/rand never fails on the platforms we target; a read
-// error would be a broken system, so it panics rather than mint a guessable or
-// empty token.
-func NewPlaceholder() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic("egress: crypto/rand failed: " + err.Error())
-	}
-	return PlaceholderPrefix + hex.EncodeToString(b[:])
+// Placeholder derives the opaque token the sandbox sees in place of the vault
+// secret named secretName for the given session: the prefix plus 128 bits from
+// SHA-256 of (sessionID, secretName), in hex.
+//
+// It is deterministic on purpose. The sandbox binds its environment at container
+// create and keeps it across the idempotent re-provisions of a session
+// (sandbox.Spec.Env is "fixed at create"), so every executor pass — and later
+// the egress gate resolving live secret values — must derive the exact token
+// already in the sandbox, not mint a fresh one that would no longer match.
+// Stability is per (session, secret_name): a rotated credential (same
+// secret_name, new secret) keeps its placeholder and the gate resolves the new
+// value under it. The token is opaque and not itself a secret — the per-session
+// gate only substitutes a session's own placeholders, and only for a host the
+// credential's allowed_hosts admit, so correctness needs a stable derivation,
+// not an unguessable one. The NUL separator keeps ("a","bc") from colliding with
+// ("ab","c").
+func Placeholder(sessionID, secretName string) string {
+	sum := sha256.Sum256([]byte(sessionID + "\x00" + secretName))
+	return PlaceholderPrefix + hex.EncodeToString(sum[:16])
 }
 
 // Location is where in an outbound request a placeholder was found — the two
