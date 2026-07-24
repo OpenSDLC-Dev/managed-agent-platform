@@ -103,6 +103,27 @@ the controlplane serves with skills unavailable instead of crash-looping.
 {{- end }}
 {{- end -}}
 
+{{/*
+The SECRETS_ and BAO_ env entries for processes that use the credential cipher
+(docs/plan/12_vaults-credentials.md: the controlplane encrypts on write and
+decrypts for mcp_oauth_validate; the executor decrypts at egress substitution;
+the brain joins with #45; the BYOC worker never talks to bao). Every key is
+optional, exactly like map.blobEnv: a chart Secret rendered without secrets-*
+keys — or an existingSecret that never carried them — deploys without a cipher,
+and the processes serve with vault credential storage unavailable instead of
+crash-looping.
+*/}}
+{{- define "map.secretsEnv" -}}
+{{- range $var, $key := dict "SECRETS_BACKEND" "secrets-backend" "BAO_ADDR" "bao-addr" "BAO_TOKEN" "bao-token" "BAO_TRANSIT_KEY" "bao-transit-key" "SECRETS_MASTER_KEY" "secrets-master-key" "SECRETS_KEY_ID" "secrets-key-id" }}
+- name: {{ $var }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "map.secretName" $ }}
+      key: {{ $key }}
+      optional: true
+{{- end }}
+{{- end -}}
+
 {{/* imagePullSecrets block, rendered under a podSpec. */}}
 {{- define "map.imagePullSecrets" -}}
 {{- with .Values.imagePullSecrets }}

@@ -142,10 +142,61 @@ externalObjectStorage:
   region: ""
   tls: true
 
+# -- In-cluster OpenBao: the transit cipher for vault credential material
+# (docs/plan/12_vaults-credentials.md). Same shape and rationale as the bundled
+# Postgres and MinIO — a hand-written single-node StatefulSet, deliberately not
+# a subchart, fine for dev/POC; production should disable it and point
+# externalOpenBao at an OpenBao/Vault with its own backup/HA lifecycle. The
+# platform speaks the plain Vault-compatible transit HTTP API.
+# BACKUP PAIRING: credential ciphertext lives in Postgres, the transit key
+# material lives in OpenBao's storage — back up both together and restore
+# OpenBao before anything that must decrypt. Losing the transit key loses every
+# secret encrypted under it (credential metadata survives; re-enter secrets).
+openbao:
+  enabled: true
+  image: openbao/openbao:2.6.1
+  # -- REQUIRED when openbao.enabled: base64 of exactly 32 random bytes for the
+  # static (KMS-free) auto-unseal (`openssl rand -base64 32`); not
+  # auto-generated, for the same GitOps-render-stability reason as
+  # postgresql.password. Changing it after first boot bricks the instance —
+  # treat it like the data it seals.
+  staticSealKey: ""
+  # -- REQUIRED when openbao.enabled: the deterministic token the platform
+  # authenticates with. The init sidecar mints it (orphan, periodic,
+  # transit-scoped) and the chart injects it into the controlplane and executor
+  # as BAO_TOKEN.
+  platformToken: ""
+  transitKey: map-secrets
+  storage: 1Gi
+  storageClassName: ""  # empty uses the cluster default StorageClass
+  resources: {}
+  # OpenBao listens on the standard 8200; not configurable for the bundled
+  # instance, which serves plain HTTP inside the cluster like the bundled MinIO.
+
+# -- External OpenBao/Vault transit endpoint, used when openbao.enabled is
+# false. address is a full URL (scheme picks TLS, e.g. https://bao.internal:8200).
+# The token needs transit encrypt/decrypt on the key plus create/read on
+# transit/keys/<transitKey> — the platform ensures the key exists at startup.
+externalOpenBao:
+  address: ""
+  token: ""
+  transitKey: map-secrets
+
+# -- Fallback cipher when the bundled OpenBao is disabled and no external one is
+# configured: AES-256-GCM under this base64 32-byte master key
+# (`openssl rand -base64 32`), stored in the chart Secret. Minimal deployments
+# only — no rotation story. Leaving masterKey empty too deploys without a
+# cipher: the platform runs, vault credential storage is unavailable.
+localCipher:
+  masterKey: ""
+  keyId: local-1
+
 # -- Reference a pre-created Secret instead of letting the chart create one. When
 # set, the chart creates NO Secret and every process reads credentials from this
 # one, which must carry keys: controlplane-api-key, model-providers.json,
-# database-url (plus the blob-* keys if object storage is in use). Incompatible
-# with postgresql.enabled and minio.enabled (bring your own backing services in
-# this mode) — the chart fails the render otherwise.
+# database-url (plus the blob-* keys if object storage is in use, and the
+# secrets-backend/bao-*/secrets-* keys if a credential cipher is in use — see
+# templates/_helpers.tpl map.secretsEnv). Incompatible with postgresql.enabled,
+# minio.enabled, and openbao.enabled (bring your own backing services in this
+# mode) — the chart fails the render otherwise.
 existingSecret: ""

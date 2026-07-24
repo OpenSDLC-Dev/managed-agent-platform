@@ -338,6 +338,24 @@ the BYOC worker stays wire-only and receives blob bytes through the control plan
 | `s3/s3.go` | The S3-compatible backend on minio-go — plain S3 wire only, no MinIO-specific APIs, so MinIO/AWS S3/Ceph RGW are interchangeable. `New` validates config, connects, and ensures the bucket (racing creators both succeed via the `BucketAlreadyOwnedByYou`/`BucketAlreadyExists` codes); `Get` calls `Stat` to force the lazy request so absence surfaces as `ErrNotFound` at `Get`, and only object absence maps there — auth failures and a vanished bucket stay real errors. |
 | `blobtest/` | Test support: one Dockerized MinIO per test binary (`Main`, pinned to the same image release as compose and the chart), per-test fresh-bucket `Target`s, and `Run` — the shared contract suite every backend must pass (round-trip, overwrite, `ErrNotFound`, idempotent delete, empty object, namespaced keys, 5 MiB payload), run against the S3 backend both bare and through the metrics decorator. `Mem` is an in-memory `Store` for suites above the storage seam (the API tests), kept honest against the same contract suite. |
 
+### internal/secrets
+
+The credential-cipher seam (docs/plan/12_vaults-credentials.md, D1): reversible
+encryption of vault secret material behind one interface, ciphertext + key id persisted
+by the caller in Postgres — the cipher only transforms bytes. Optional like object
+storage: `FromEnv` returns `(nil, nil)` when `SECRETS_BACKEND` is unset, and a selected
+but misconfigured backend fails construction at startup (the modeltest opt-in rule).
+Only controlplane and executor construct it; the BYOC worker never talks to the secrets
+backend.
+
+| File | Contents |
+|---|---|
+| `secrets.go` | `Cipher` — `Encrypt(ctx, plaintext) → (ciphertext, keyID)` / `Decrypt(ctx, ciphertext, keyID)`; every ciphertext is bound to the key that produced it, so a foreign `keyID` is an error, never a silent success. |
+| `env.go` | `FromEnv` — the one construction controlplane and executor share: `SECRETS_BACKEND` empty → `(nil, nil)`; `local` → `SECRETS_MASTER_KEY` (base64, 32 bytes) + `SECRETS_KEY_ID`; `openbao` → `BAO_ADDR`+`BAO_TOKEN`+`BAO_TRANSIT_KEY`. Logs the configured backend, never a token or key. |
+| `local/local.go` | AES-256-GCM under a configured master key, for tests and bao-less installs: fresh 12-byte nonce per encryption (`nonce ‖ sealed`), the key id as additional authenticated data so re-labelling a key without re-encrypting is caught, eager 32-byte validation at `New`. |
+| `openbao/openbao.go` | The production backend: OpenBao transit (any Vault-compatible transit endpoint) over its plain HTTP API — deliberately not the official client library. `New` validates eagerly and idempotently ensures the named transit key; ciphertext keeps the engine's `vault:vN:` version prefix so bao-side key rotation needs no schema change; error text carries the server's `errors` array but never the token or any secret value. |
+| `secretstest/` | Test support: one dev-mode OpenBao per test binary (`Main`, pinned to the image compose and the chart default to) with the transit engine mounted, per-test `FreshKey` names, and `Run` — the shared cipher contract suite (round-trip incl. binary + 64 KiB payloads, ciphertext hides plaintext, fresh nonces, tamper/truncation rejection, unknown-key rejection) run against both backends. |
+
 ### internal/skills
 
 Skill-upload validation, normalization, and archive extraction
@@ -358,9 +376,12 @@ databases — migrated pools via `NewPool`, or bare un-migrated DSNs via `FreshD
 suites that exercise `store.Open`/`Migrate` themselves (a missing Docker daemon is a
 hard failure, never a skip). `internal/blob/blobtest` is its MinIO twin for the blob
 seam (see above).
+`internal/secrets/secretstest` is the OpenBao twin for the
+secrets-cipher seam: one dev-mode OpenBao per test binary with the transit engine
+mounted, per-test key names, and the shared cipher contract suite.
 `internal/modeltest` owns the live-tier opt-in contract: `.env` supplies configuration,
 `RUN_LIVE_MODEL_TESTS`/`RUN_EVALS` supply consent, and opted-in-but-misconfigured fails
-rather than skips (`TierEnabled` serves `TestMain` callers). All three are deliberately
+rather than skips (`TierEnabled` serves `TestMain` callers). All of them are deliberately
 outside the coverage-gate denominator, as is `cmd/`.
 
 The four `cmd/` binaries are env-config plus wiring: `controlplane` (serves the REST API;

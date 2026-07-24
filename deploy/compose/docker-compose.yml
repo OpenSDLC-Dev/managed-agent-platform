@@ -1,6 +1,8 @@
 # Local development stack: the three server processes (controlplane + brain +
-# executor) against a Postgres and a MinIO (object storage for skill archives),
-# with an optional Jaeger for traces. This is the
+# executor) against a Postgres, a MinIO (object storage for skill archives),
+# and an OpenBao (transit cipher for vault credential material,
+# docs/plan/12_vaults-credentials.md), with an optional Jaeger for traces.
+# This is the
 # compose companion to deploy/helm — the same binaries, wired for a laptop.
 # Quick start and configuration: see deploy/compose/README.md.
 #
@@ -60,6 +62,59 @@ services:
     volumes:
       - miniodata:/data
 
+  openbao:
+    # Transit cipher for vault credential material (docs/plan/12, D1/D2):
+    # ciphertext stays in Postgres, this holds only the transit key. Same
+    # pinned release as the helm default and the secretstest contract harness.
+    # Persistent file storage + a static (KMS-free) auto-unseal whose key
+    # comes from the environment — dev-grade defaults, like the MinIO
+    # password above; production points externalOpenBao / BAO_ADDR at a
+    # managed instance instead.
+    image: openbao/openbao:2.6.1
+    command: server
+    cap_add:
+      - IPC_LOCK
+    environment:
+      # 32 bytes, base64. The committed default is a well-known dev value —
+      # rotate via .env for anything beyond a laptop.
+      BAO_STATIC_KEY: ${BAO_STATIC_KEY:-bWFwLW9wZW5iYW8tZGV2LXN0YXRpYy1zZWFsLWtleSE=}
+      BAO_LOCAL_CONFIG: >-
+        {"storage":{"file":{"path":"/openbao/file"}},
+         "listener":[{"tcp":{"address":"0.0.0.0:8200","tls_disable":true}}],
+         "seal":{"static":{"current_key_id":"dev-1","current_key":"env://BAO_STATIC_KEY"}}}
+    healthcheck:
+      # 200 whatever the init/seal state: openbao-init (below) handles the
+      # one-time initialization once the listener answers.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8200/v1/sys/health?uninitcode=200&sealedcode=200&standbyok=true"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - baodata:/openbao/file
+
+  openbao-init:
+    # One-shot: initializes the bundled OpenBao on first boot (root token and
+    # recovery keys land on the baoinit volume — dev-grade convenience, the
+    # documented trade-off of a self-unsealing local stack), then idempotently
+    # ensures the transit engine and the deterministic platform token the app
+    # services authenticate with. Re-runs on every `compose up` to renew the
+    # periodic token.
+    image: openbao/openbao:2.6.1
+    restart: "no"
+    # Root only to own the baoinit volume (the image's default user cannot
+    # write a fresh named volume); the server container keeps its own user.
+    user: "0:0"
+    depends_on:
+      openbao:
+        condition: service_healthy
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_PLATFORM_TOKEN: ${BAO_PLATFORM_TOKEN:-map-bao-dev-token}
+    entrypoint: ["/bin/sh", "/init/openbao-init.sh"]
+    volumes:
+      - ./openbao-init.sh:/init/openbao-init.sh:ro
+      - baoinit:/openbao/init
+
   controlplane:
     <<: *app
     command: /controlplane
@@ -73,11 +128,19 @@ services:
       BLOB_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-map-blob-dev}
       BLOB_BUCKET: map-blob
       BLOB_TLS: "false"
+      # Vault credential material is encrypted through the bundled OpenBao's
+      # transit engine; the token is the deterministic one openbao-init mints.
+      SECRETS_BACKEND: openbao
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: ${BAO_PLATFORM_TOKEN:-map-bao-dev-token}
+      BAO_TRANSIT_KEY: map-secrets
     depends_on:
       postgres:
         condition: service_healthy
       minio:
         condition: service_healthy
+      openbao-init:
+        condition: service_completed_successfully
     ports:
       # Bound to loopback by default: the committed CONTROLPLANE_API_KEY is a
       # well-known placeholder, so the API must not be reachable from the LAN.
@@ -114,12 +177,20 @@ services:
       BLOB_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-map-blob-dev}
       BLOB_BUCKET: map-blob
       BLOB_TLS: "false"
+      # Same cipher wiring as the controlplane: slice 4's egress substitution
+      # decrypts here (docs/plan/12).
+      SECRETS_BACKEND: openbao
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: ${BAO_PLATFORM_TOKEN:-map-bao-dev-token}
+      BAO_TRANSIT_KEY: map-secrets
     # An explicit depends_on replaces the anchor's, so postgres is restated.
     depends_on:
       postgres:
         condition: service_healthy
       minio:
         condition: service_healthy
+      openbao-init:
+        condition: service_completed_successfully
     volumes:
       # The docker sandbox backend drives the host daemon to run sibling sandbox
       # containers. Local-dev convenience; the production path uses the k8s backend.
@@ -137,3 +208,5 @@ services:
 volumes:
   pgdata:
   miniodata:
+  baodata:
+  baoinit:

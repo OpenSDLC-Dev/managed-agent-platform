@@ -1,0 +1,72 @@
+#!/bin/sh
+# One-time initialization + idempotent setup for the bundled OpenBao
+# (docs/plan/12_vaults-credentials.md, D2). Runs as the compose openbao-init
+# one-shot on every `compose up`:
+#
+#   1. `bao operator init` on first boot; the root token and recovery keys
+#      land on the baoinit volume. Dev-grade by design — a self-unsealing
+#      local stack necessarily stores its own bootstrap material. Production
+#      uses an external OpenBao/Vault instead of this bundled instance.
+#   2. Ensures the transit engine is mounted and the map-transit policy exists.
+#   3. Mints/renews the deterministic platform token ($BAO_PLATFORM_TOKEN)
+#      the controlplane and executor authenticate with: orphan, periodic,
+#      scoped to transit only.
+#
+# Idempotent throughout: every step checks before it changes.
+set -eu
+
+INIT_FILE=/openbao/init/init.json
+
+initialized() {
+	bao status -format=json 2>/dev/null | grep -q '"initialized": *true'
+}
+
+# Wait for the listener (the compose healthcheck already gates on it, but a
+# race here would fail the whole stack).
+tries=0
+until bao status >/dev/null 2>&1 || [ $? -eq 2 ]; do
+	tries=$((tries + 1))
+	[ "$tries" -ge 60 ] && { echo "openbao never answered" >&2; exit 1; }
+	sleep 1
+done
+
+if ! initialized; then
+	echo "initializing openbao (first boot)"
+	bao operator init -format=json >"$INIT_FILE"
+	chmod 600 "$INIT_FILE"
+elif [ ! -f "$INIT_FILE" ]; then
+	echo "openbao is initialized but $INIT_FILE is missing (volume lost?);" >&2
+	echo "re-create the baodata+baoinit volumes together or initialize manually" >&2
+	exit 1
+fi
+
+BAO_TOKEN=$(grep -o '"root_token": *"[^"]*"' "$INIT_FILE" | cut -d'"' -f4)
+[ -n "$BAO_TOKEN" ] || { echo "no root_token in $INIT_FILE" >&2; exit 1; }
+export BAO_TOKEN
+
+if ! bao secrets list -format=json | grep -q '"transit/"'; then
+	bao secrets enable transit
+fi
+
+bao policy write map-transit - <<'EOF'
+path "transit/keys/*" {
+  capabilities = ["create", "read", "update"]
+}
+path "transit/encrypt/*" {
+  capabilities = ["update"]
+}
+path "transit/decrypt/*" {
+  capabilities = ["update"]
+}
+EOF
+
+# The platform token is deterministic (compose injects the same value into the
+# app services' BAO_TOKEN) and periodic; re-running this script on each
+# `compose up` renews it, so an idle stack older than the period just needs a
+# restart, not a re-init.
+if BAO_TOKEN="$BAO_PLATFORM_TOKEN" bao token lookup >/dev/null 2>&1; then
+	BAO_TOKEN="$BAO_PLATFORM_TOKEN" bao token renew >/dev/null
+else
+	bao token create -id="$BAO_PLATFORM_TOKEN" -policy=map-transit -orphan -period=768h >/dev/null
+fi
+echo "openbao ready: transit mounted, platform token minted"

@@ -88,7 +88,7 @@ Configure the endpoint once in a gitignored repo-root `.env` — `MODEL_PROTOCOL
 (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID` — and the live tiers
 read it (the environment wins over the file). Never commit real credentials.
 
-**Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres and MinIO (and an optional Jaeger):
+**Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres, MinIO, and OpenBao (and an optional Jaeger):
 
 ```bash
 cd deploy/compose
