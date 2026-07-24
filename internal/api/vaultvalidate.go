@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -392,8 +393,9 @@ func readProbeBody(resp *http.Response, scrub *scrubber) []byte {
 // exchange sends the token in an x-www-form-urlencoded body), and base64 (std
 // and url).
 type scrubber struct {
-	needles []string
-	maxLen_ int
+	needles  []string
+	maxLen_  int
+	prepared bool
 }
 
 func newScrubber(secrets map[string]string) *scrubber {
@@ -454,7 +456,29 @@ func (s *scrubber) add(needle string) {
 var sensitiveJSONValue = regexp.MustCompile(
 	`("(?:id_token|access_token|refresh_token|client_secret|client_assertion)"\s*:\s*")[^"]*`)
 
+// prepare sorts the needles by descending length and de-dupes them, so that
+// when one secret is a substring of another (an access token that prefixes a
+// refresh token, say) the longer value is redacted first — replacing the
+// shorter one first would leave the longer secret's suffix exposed.
+func (s *scrubber) prepare() {
+	if s.prepared {
+		return
+	}
+	sort.Slice(s.needles, func(i, j int) bool { return len(s.needles[i]) > len(s.needles[j]) })
+	out := s.needles[:0]
+	seen := map[string]bool{}
+	for _, n := range s.needles {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	s.needles = out
+	s.prepared = true
+}
+
 func (s *scrubber) clean(text string) string {
+	s.prepare()
 	for _, n := range s.needles {
 		text = strings.ReplaceAll(text, n, "[redacted]")
 	}

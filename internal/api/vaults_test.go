@@ -356,6 +356,10 @@ func TestCredentialValidationRules(t *testing.T) {
 		"missing networking": {"type": "environment_variable", "secret_name": "K", "secret_value": "v"},
 		"null networking": {"type": "environment_variable", "secret_name": "K", "secret_value": "v",
 			"networking": nil},
+		"limited without allowed_hosts": {"type": "environment_variable", "secret_name": "K", "secret_value": "v",
+			"networking": map[string]any{"type": "limited"}},
+		"limited empty allowed_hosts": {"type": "environment_variable", "secret_name": "K", "secret_value": "v",
+			"networking": map[string]any{"type": "limited", "allowed_hosts": []string{}}},
 		"both locations disabled": {"type": "environment_variable", "secret_name": "K", "secret_value": "v",
 			"networking":         map[string]any{"type": "unrestricted"},
 			"injection_location": map[string]any{}},
@@ -777,6 +781,19 @@ func TestCredentialUpdateConcurrentRotation(t *testing.T) {
 		"auth": map[string]any{"type": "environment_variable", "secret_value": "rotated"}})
 	if status != http.StatusConflict {
 		t.Fatalf("a concurrent secret rotation must 409, got %d (%v)", status, body)
+	}
+}
+
+// A client-supplied expires_at with an offset is stored and rendered in the
+// API's UTC Z form, like every other timestamp.
+func TestCredentialExpiresAtNormalizedToUTC(t *testing.T) {
+	s := newTestServer(t)
+	vaultID := createVault(t, s, "tz")
+	body := createCredential(t, s, vaultID, map[string]any{
+		"type": "mcp_oauth", "mcp_server_url": "https://m.example.com", "access_token": "at",
+		"expires_at": "2027-01-01T00:00:00+08:00"})
+	if got := body["auth"].(map[string]any)["expires_at"]; got != "2026-12-31T16:00:00Z" {
+		t.Fatalf("expires_at not normalized to UTC Z: %v", got)
 	}
 }
 

@@ -255,6 +255,17 @@ func TestValidateScrubsReflectedBasicAuth(t *testing.T) {
 	}
 }
 
+// When one secret is a prefix of another, the scrubber must redact the longer
+// value first — redacting the shorter one first would leave the longer secret's
+// suffix exposed. The needles are added shortest-first to prove the ordering is
+// by length, not insertion.
+func TestScrubberRedactsLongestFirst(t *testing.T) {
+	got := api.ScrubberCleanForTest([]string{"abc", "abcXYZsecret"}, "value=abcXYZsecret")
+	if strings.Contains(got, "XYZsecret") || !strings.Contains(got, "[redacted]") {
+		t.Fatalf("overlapping needle left a secret suffix exposed: %q", got)
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)

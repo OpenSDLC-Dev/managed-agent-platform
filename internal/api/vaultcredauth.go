@@ -347,6 +347,12 @@ func parseCredNetworking(raw json.RawMessage) (json.RawMessage, error) {
 				return nil, errInvalid("allowed_hosts must be a list of hostnames")
 			}
 		}
+		// The SDK marks allowed_hosts required on the limited variant (omitzero
+		// drops an empty list), so an omitted/null/empty list is a 400 rather
+		// than a silently-accepted no-op.
+		if len(hosts) == 0 {
+			return nil, errInvalid("limited networking requires a non-empty allowed_hosts")
+		}
 		if len(hosts) > credentialAllowedHosts {
 			return nil, errInvalid("allowed_hosts cannot exceed %d entries", credentialAllowedHosts)
 		}
@@ -438,6 +444,9 @@ func timeField(obj map[string]json.RawMessage, key string) (*time.Time, error) {
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, errInvalid("%s must be an RFC 3339 timestamp", key)
 	}
+	// Normalize to UTC so it renders in the API's Z form, like every other
+	// timestamp, rather than round-tripping a client-supplied +HH:MM offset.
+	t = t.UTC()
 	return &t, nil
 }
 

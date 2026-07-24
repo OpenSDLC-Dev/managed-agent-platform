@@ -33,6 +33,18 @@ func SetUpdateCredentialResealHookForTest(f func()) (restore func()) {
 	return func() { updateCredentialResealHook = nil }
 }
 
+// ScrubberCleanForTest builds a scrubber from the given literal needles (in
+// order) and runs its redaction over text, so a test can assert the
+// longest-first ordering without reaching into unexported internals. Test
+// binary only.
+func ScrubberCleanForTest(needles []string, text string) string {
+	s := &scrubber{}
+	for _, n := range needles {
+		s.add(n)
+	}
+	return s.clean(text)
+}
+
 // SetPingIntervalForTest shortens the SSE keepalive cadence so contract tests
 // can observe ping frames without real-time waits. Test binary only.
 func SetPingIntervalForTest(d time.Duration) (restore func()) {

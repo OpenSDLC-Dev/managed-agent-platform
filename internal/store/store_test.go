@@ -80,7 +80,7 @@ func TestOpenMigratesFreshDatabase(t *testing.T) {
 	for _, want := range []string{
 		"schema_migrations", "agents", "agent_versions", "environments",
 		"sessions", "events", "work_items", "api_keys", "environment_keys",
-		"skills", "skill_versions", "files",
+		"skills", "skill_versions", "files", "vaults", "vault_credentials",
 	} {
 		if !slices.Contains(tables, want) {
 			t.Errorf("table %q missing after migration; have %v", want, tables)
