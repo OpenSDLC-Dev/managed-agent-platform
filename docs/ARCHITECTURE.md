@@ -388,17 +388,26 @@ TLS-terminating phase (#166), and the BYOC worker (#165) — never forked per co
 ### internal/vaultresolve
 
 Read-time resolution (docs/plan/12_vaults-credentials.md, D5): the bridge from a session's
-attached `vault_ids` to the environment variables its sandbox is provisioned with. `Bindings`
-reads the active `environment_variable` credentials of the attached vaults (current rows every
-call — no cache, so rotation and archive propagate without a session restart), collapses a
-`secret_name` shared across attached vaults to the first vault in `vault_ids` order
-(first-vault-wins), and pairs each with a `vltph_` placeholder derived per `(session, secret_name)`
-(`internal/egress`), so a re-provision or the gate recovers the exact token already in the sandbox.
-It returns only the sandbox-visible half — `secret_name` → placeholder; the secret itself is read
-and substituted separately at egress in the per-session gate (a later slice 4 sub-PR). An archived
-vault contributes nothing — the query guards the vault's own `archived_at` directly, not only the
-credential's, so the "archived vault delivers no credential" guarantee holds even if the archive
-cascade ever left a stale credential row. This package does the store read; `internal/egress` stays
+attached `vault_ids` to both halves of vault credential injection. One shared selection rule
+(`winnersFor`) reads the active `environment_variable` credentials of the attached vaults (current
+rows every call — no cache, so rotation and archive propagate without a session restart) and
+collapses a `secret_name` shared across attached vaults to the first vault in `vault_ids` order
+(first-vault-wins), so the two halves can never disagree on which credential a `secret_name`
+resolves to. `Bindings` projects the winners to the sandbox-visible half — each `secret_name`
+paired with a `vltph_` placeholder derived per `(session, secret_name)` (`internal/egress`), so a
+re-provision or the gate recovers the exact token already in the sandbox. `Credentials` projects
+the same winners to the gate half — the same placeholder plus the secret decrypted through the
+`secrets.Cipher`, the credential's own networking (`unrestricted`, or `allowed_hosts` for
+`limited`), and its `injection_location` arms — which the per-session gate substitutes back for the
+placeholder at egress time; the plaintext secret lives only in the resolving process's memory,
+never injected into the sandbox. A cipher is required once the session has any active
+`environment_variable` credential (even one whose ciphertext was purged); a decrypt
+failure or a tampered/short sealed document fails the whole call (fail-closed, and error messages
+carry credential ids, never secret bytes), while an active credential whose ciphertext was purged
+is skipped so its placeholder simply egresses literally. An archived vault contributes nothing —
+the query guards the vault's own `archived_at` directly, not only the credential's, so the
+"archived vault delivers no credential" guarantee holds even if the archive cascade ever left a
+stale credential row. This package does the store read and cipher call; `internal/egress` stays
 I/O-free.
 
 ### internal/gate
