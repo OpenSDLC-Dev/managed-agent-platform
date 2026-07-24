@@ -30,8 +30,9 @@ copy of an entry here.
   [#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165)), and its
   managed sandbox substitutes inside sandbox-originated HTTPS, which phase 1 deliberately does not
   (TLS-terminating phase 2 is
-  [#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)). Lands as a draft for
-  discussion — STATE.md stays unclaimed until implementation starts.
+  [#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)). Drafted for
+  discussion and approved in the same review cycle; lands as `approved` — STATE.md stays unclaimed
+  until implementation starts.
 
 ### Changed
 
