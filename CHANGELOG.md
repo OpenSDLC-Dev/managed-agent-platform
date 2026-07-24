@@ -27,6 +27,25 @@ copy of an entry here.
 
 ### Added
 
+- **Sandbox `Spec.Env` seam** (plan 12 slice 4, #50). `sandbox.Spec` gains an `Env
+  map[string]string`, injected at provision time and visible to every tool exec. Both backends
+  thread it identically — the Docker container config's `Env` list and the Kubernetes pod
+  container's `Env` — each rendered key-sorted so a spec always yields the same container/pod,
+  and omitted entirely for an empty map so the image's own environment stands. Values are
+  opaque: Kubernetes' `$(VAR)` expansion is neutralized (every `$` doubled) so a placeholder or
+  proxy URL is byte-identical on both backends, never a template. This is the one
+  seam neither backend had (plan D4); the egress gate's later sub-PRs use it to hand the sandbox
+  its per-session proxy address and the `vltph_` vault placeholders. Keys are validated up front
+  (`ValidateEnv`, the shared `[A-Za-z_][A-Za-z0-9_]*` grammar) so a malformed name fails
+  identically on both backends instead of silently mis-parsing on Docker or being rejected by the
+  Kubernetes apiserver. `Env` is bound at container create, like `Networking`: `Provision` adopts
+  a session's existing sandbox without re-applying a changed `Env`, so a re-provisioned session
+  must keep its `Env` stable (the gate mints stable per-session placeholders and resolves live
+  values at egress). Shared contract rows `SpecEnvReachesExec` (three variables — one carrying a
+  space, one a literal `$(...)` — read back verbatim), `SpecEnvRejectsInvalidKey`, and
+  `SpecEnvBoundAtProvision` (re-provisioning a session with a changed `Env` keeps the adopted
+  sandbox's id and create-time value) — green on Docker and on Kubernetes.
+
 - **Vaults slice 3 — sessions attach vaults** (plan 12, #50). `POST /v1/sessions` now accepts
   the top-level `vault_ids` array (the DIVERGENCES.md:28 create-rejection is lifted): each id
   must name an existing, unarchived vault — validated `FOR SHARE` inside the create transaction

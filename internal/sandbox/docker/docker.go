@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	gopath "path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -137,6 +138,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	if spec.Image == "" {
 		return nil, errors.New("docker: provision needs an image")
 	}
+	if err := sandbox.ValidateEnv(spec.Env); err != nil {
+		return nil, err
+	}
 	workdir := spec.Workdir
 	if workdir == "" {
 		workdir = sandbox.DefaultWorkdir
@@ -161,6 +165,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 
 	cfg := containerConfig{
 		Image: spec.Image,
+		Env:   envSlice(spec.Env),
 		// Hold the container open and guarantee the workdir exists. Nothing
 		// else runs here: every tool call is its own exec.
 		Entrypoint: []string{"/bin/bash", "-c",
@@ -238,6 +243,25 @@ func networkMode(net domain.Networking) string {
 		return "none"
 	}
 	return "bridge"
+}
+
+// envSlice renders Spec.Env as the Docker API's KEY=value list, key-sorted so a
+// given spec always produces the same container config. Returns nil for an empty
+// map so the config omits Env entirely and the image's own environment stands.
+func envSlice(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(env))
+	for _, k := range keys {
+		out = append(out, k+"="+env[k])
+	}
+	return out
 }
 
 type container struct {

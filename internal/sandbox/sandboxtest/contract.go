@@ -100,6 +100,126 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// Spec.Env is injected at provision time and visible to every tool exec —
+	// the seam slice 4 uses to hand the sandbox its egress-proxy address and
+	// vault placeholder env vars. A value with a space proves no word-splitting;
+	// a value containing `$(...)` proves the two backends agree it is opaque —
+	// Kubernetes would otherwise expand it while Docker keeps it literal.
+	t.Run("SpecEnvReachesExec", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := context.Background()
+		sb, err := h.Provider.Provision(ctx, sandbox.Spec{
+			SessionID: domain.NewID("sesn"), Image: h.Image, Workdir: workdir,
+			Networking: unrestricted,
+			Env: map[string]string{
+				"VAULT_SEAM_ONE":   "alpha",
+				"VAULT_SEAM_TWO":   "beta gamma",
+				"VAULT_SEAM_THREE": "$(VAULT_SEAM_ONE)/$lit",
+			},
+		})
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := sb.Destroy(context.Background()); err != nil {
+				t.Errorf("destroy: %v", err)
+			}
+		})
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: `printf '%s|%s|%s' "$VAULT_SEAM_ONE" "$VAULT_SEAM_TWO" "$VAULT_SEAM_THREE"`,
+		})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		const want = `alpha|beta gamma|$(VAULT_SEAM_ONE)/$lit`
+		if res.Stdout != want {
+			t.Errorf("Spec.Env not visible to exec verbatim: stdout=%q, want %q", res.Stdout, want)
+		}
+	})
+
+	// An invalid env-var name is refused up front by both backends, identically —
+	// never a silent Docker mis-parse (KEY "A=B" folded into the value) or an
+	// opaque Kubernetes pod rejection at create — and nothing is created.
+	t.Run("SpecEnvRejectsInvalidKey", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := context.Background()
+		sid := domain.NewID("sesn")
+		sb, err := h.Provider.Provision(ctx, sandbox.Spec{
+			SessionID: sid, Image: h.Image, Workdir: workdir,
+			Networking: unrestricted,
+			Env:        map[string]string{"A=B": "x"},
+		})
+		if err == nil {
+			// Nothing should have been created, but don't leak if it was.
+			_ = sb.Destroy(ctx)
+			t.Fatal("provision accepted an invalid env-var name")
+		}
+		// The rejection must happen before anything is created: a later provision
+		// of the SAME session with a valid Env creates a fresh sandbox and sees
+		// exactly that Env. Had the rejected attempt leaked a container/pod, the
+		// idempotent provision would adopt it — and adoption never re-applies Env
+		// — so the valid value would be missing.
+		sb2, err := h.Provider.Provision(ctx, sandbox.Spec{
+			SessionID: sid, Image: h.Image, Workdir: workdir,
+			Networking: unrestricted,
+			Env:        map[string]string{"VALID_KEY": "ok"},
+		})
+		if err != nil {
+			t.Fatalf("provision after a rejected one: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := sb2.Destroy(context.Background()); err != nil {
+				t.Errorf("destroy: %v", err)
+			}
+		})
+		res, err := sb2.Exec(ctx, sandbox.ExecRequest{Command: `printf '%s' "$VALID_KEY"`})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if res.Stdout != "ok" {
+			t.Errorf("a resource leaked from the rejected provision (stale sandbox adopted): stdout=%q", res.Stdout)
+		}
+	})
+
+	// Env is bound when the sandbox is first created. Re-provisioning the same
+	// session with a changed Env adopts the running sandbox — same id — and does
+	// NOT re-apply the new value, the property the egress gate relies on to keep
+	// a session's placeholders stable across an executor restart.
+	t.Run("SpecEnvBoundAtProvision", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := context.Background()
+		sid := domain.NewID("sesn")
+		spec := func(v string) sandbox.Spec {
+			return sandbox.Spec{
+				SessionID: sid, Image: h.Image, Workdir: workdir,
+				Networking: unrestricted, Env: map[string]string{"BOUND": v},
+			}
+		}
+		sb1, err := h.Provider.Provision(ctx, spec("first"))
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := sb1.Destroy(context.Background()); err != nil {
+				t.Errorf("destroy: %v", err)
+			}
+		})
+		sb2, err := h.Provider.Provision(ctx, spec("second"))
+		if err != nil {
+			t.Fatalf("re-provision: %v", err)
+		}
+		if sb2.ID() != sb1.ID() {
+			t.Errorf("re-provision created a new sandbox %q, want the adopted %q", sb2.ID(), sb1.ID())
+		}
+		res, err := sb2.Exec(ctx, sandbox.ExecRequest{Command: `printf '%s' "$BOUND"`})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if res.Stdout != "first" {
+			t.Errorf("adoption re-applied Env: BOUND=%q, want the create-time %q", res.Stdout, "first")
+		}
+	})
+
 	// A hung command must not hang the executor, and it must not poison the
 	// sandbox: the next tool call still works. Nothing the sandbox does to
 	// enforce the deadline may show up as output the command appears to have
