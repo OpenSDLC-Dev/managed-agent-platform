@@ -120,9 +120,11 @@ after first boot bricks the instance.
 
 **Back up in pairs, restore in order:** a Postgres backup restores ciphertext
 that only the matching transit key can open — back up OpenBao's storage
-alongside Postgres, restore OpenBao first, and treat losing the transit key as
-losing every secret encrypted under it (credential metadata survives; secrets
-must be re-entered). See docs/self-hosted-security.md.
+alongside Postgres **and preserve `openbao.staticSealKey`** (it lives in your
+values/Secret, not on the PVC, and a restored instance cannot unseal without
+the exact key it was sealed with), restore OpenBao first, and treat losing the
+transit key as losing every secret encrypted under it (credential metadata
+survives; secrets must be re-entered). See docs/self-hosted-security.md.
 
 **For production, point at your own OpenBao/Vault** — any endpoint speaking the
 Vault-compatible transit HTTP API:

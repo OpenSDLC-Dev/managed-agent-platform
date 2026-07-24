@@ -159,7 +159,8 @@ openbao:
   # static (KMS-free) auto-unseal (`openssl rand -base64 32`); not
   # auto-generated, for the same GitOps-render-stability reason as
   # postgresql.password. Changing it after first boot bricks the instance —
-  # treat it like the data it seals.
+  # treat it like the data it seals, and keep it with your backups (it lives
+  # here, not on the PVC; a restored instance cannot unseal without it).
   staticSealKey: ""
   # -- REQUIRED when openbao.enabled: the deterministic token the platform
   # authenticates with. The init sidecar mints it (orphan, periodic,

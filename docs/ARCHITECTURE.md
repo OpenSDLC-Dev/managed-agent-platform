@@ -354,7 +354,7 @@ backend.
 | `env.go` | `FromEnv` — the one construction controlplane and executor share: `SECRETS_BACKEND` empty → `(nil, nil)`; `local` → `SECRETS_MASTER_KEY` (base64, 32 bytes) + `SECRETS_KEY_ID`; `openbao` → `BAO_ADDR`+`BAO_TOKEN`+`BAO_TRANSIT_KEY`. Logs the configured backend, never a token or key. |
 | `local/local.go` | AES-256-GCM under a configured master key, for tests and bao-less installs: fresh 12-byte nonce per encryption (`nonce ‖ sealed`), the key id as additional authenticated data so re-labelling a key without re-encrypting is caught, eager 32-byte validation at `New`. |
 | `openbao/openbao.go` | The production backend: OpenBao transit (any Vault-compatible transit endpoint) over its plain HTTP API — deliberately not the official client library. `New` validates eagerly and idempotently ensures the named transit key; ciphertext keeps the engine's `vault:vN:` version prefix so bao-side key rotation needs no schema change; error text carries the server's `errors` array but never the token or any secret value. |
-| `secretstest/` | Test support: one dev-mode OpenBao per test binary (`Main`, pinned to the image compose and the chart default to) with the transit engine mounted, per-test `FreshKey` names, and `Run` — the shared cipher contract suite (round-trip incl. binary + 64 KiB payloads, ciphertext hides plaintext, fresh nonces, tamper/truncation rejection, unknown-key rejection) run against both backends. |
+| `secretstest/` | Test support: one dev-mode OpenBao per test binary (`Main`, pinned to the same `openbao/openbao:2.6.1` release as compose and the chart) with the transit engine mounted, per-test `FreshKey` names, and `Run` — the shared cipher contract suite (round-trip incl. binary + 64 KiB payloads, ciphertext hides plaintext, fresh nonces, tamper/truncation rejection, unknown-key rejection) run against both backends. |
 
 ### internal/skills
 
@@ -396,12 +396,13 @@ only `DATABASE_URL` + `BLOB_*` and exits instead of serving), `brain`
 required; no `DATABASE_URL` by design).
 
 `deploy/helm/managed-agent-platform` is the chart (controlplane + brain + executor with
-the k8s sandbox backend, optional inline Postgres and MinIO — both hand-written
-templates, not subcharts, per the air-gap rule — with `externalDatabase` /
-`externalObjectStorage` for BYO, OTLP values);
+the k8s sandbox backend, optional inline Postgres, MinIO, and OpenBao — all
+hand-written templates, not subcharts, per the air-gap rule — with
+`externalDatabase` / `externalObjectStorage` / `externalOpenBao` for BYO, a
+`localCipher` fallback, OTLP values);
 `deploy/compose/docker-compose.yml` is the local stack (one multi-stage image for all
-four binaries, bundled Postgres + MinIO, loopback-bound control plane, optional Jaeger
-profile).
+four binaries, bundled Postgres + MinIO + OpenBao with its init one-shot,
+loopback-bound control plane, optional Jaeger profile).
 
 ## Security invariants
 

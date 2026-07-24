@@ -15,6 +15,11 @@
 # Idempotent throughout: every step checks before it changes.
 set -eu
 
+# Everything this script creates holds bootstrap secrets (init.json carries
+# the root token) — never group/world-readable, not even between creation and
+# the explicit chmod below.
+umask 077
+
 INIT_FILE=/openbao/init/init.json
 
 # The transit key name lands verbatim in the policy below; constrain it so a
