@@ -175,8 +175,11 @@ openbao:
 
 # -- External OpenBao/Vault transit endpoint, used when openbao.enabled is
 # false. address is a full URL (scheme picks TLS, e.g. https://bao.internal:8200).
-# The token needs transit encrypt/decrypt on the key plus create/read on
-# transit/keys/<transitKey> — the platform ensures the key exists at startup.
+# The token needs update on transit/encrypt/<transitKey> and
+# transit/decrypt/<transitKey>, plus create/read/update on
+# transit/keys/<transitKey> — the platform POSTs that path at startup to
+# ensure the key exists, and under Vault ACL semantics that POST needs
+# update once the key does (the same grant the bundled init policy makes).
 externalOpenBao:
   address: ""
   token: ""

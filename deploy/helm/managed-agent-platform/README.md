@@ -133,6 +133,12 @@ Vault-compatible transit HTTP API:
 --set externalOpenBao.token='<transit-scoped token>'
 ```
 
+The token needs `update` on `transit/encrypt/<transitKey>` and
+`transit/decrypt/<transitKey>`, plus `create`/`read`/`update` on
+`transit/keys/<transitKey>` (the platform POSTs that path at startup to ensure
+the key exists — an update once the key does), mirroring the bundled init
+policy.
+
 With the bundled instance disabled and no `externalOpenBao.address`, setting
 `localCipher.masterKey` (base64, 32 bytes) selects the AES-256-GCM local cipher —
 minimal deployments only. Leaving all three unset deploys without a cipher: the
