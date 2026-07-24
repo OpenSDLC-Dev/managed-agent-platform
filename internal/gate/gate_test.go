@@ -1,13 +1,16 @@
 package gate_test
 
 import (
+	"bufio"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,17 +20,44 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gate"
 )
 
-// echoOrigin reflects the request's Authorization header and body so a test can
-// see what the gate actually forwarded.
+// echoOrigin reflects the request's Authorization header, body, and the
+// Content-Length it received so a test can see what the gate actually forwarded.
 func echoOrigin(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"authorization": r.Header.Get("Authorization"),
-			"body":          string(body),
+			"authorization":  r.Header.Get("Authorization"),
+			"body":           string(body),
+			"content_length": strconv.FormatInt(r.ContentLength, 10),
 		})
 	}))
+}
+
+// rawStatusLine dials the gate directly, writes a raw HTTP request, and returns
+// its status line. A proxying http.Client masks the gate's own response — a
+// CONNECT refusal surfaces as a generic tunnel error (indistinguishable from a
+// TLS failure), and a normalized Host header is invisible — so tests that must
+// observe the gate's wire response dial it raw.
+func rawStatusLine(t *testing.T, gateURL, raw string) string {
+	t.Helper()
+	u, err := url.Parse(gateURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, raw); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimRight(line, "\r\n")
 }
 
 // proxyClient is an http.Client that routes through the gate served at gateURL.
@@ -71,9 +101,12 @@ func TestGatePlainHTTPSubstitutesForAdmittedHost(t *testing.T) {
 	defer origin.Close()
 	host := hostOf(t, origin.URL)
 
+	// The secret is deliberately a different length from its placeholder, so a
+	// forwarded request whose Content-Length was not recomputed after substitution
+	// would reach the origin truncated — making the length reset load-bearing.
 	g := gate.New(gate.Config{
 		Networking:  domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
-		Credentials: []egress.Credential{cred("vltph_tok", "sk-secret", []string{host})},
+		Credentials: []egress.Credential{cred("vltph_tok", "sk-live-super-secret", []string{host})},
 	})
 	gsrv := httptest.NewServer(g)
 	defer gsrv.Close()
@@ -93,11 +126,17 @@ func TestGatePlainHTTPSubstitutesForAdmittedHost(t *testing.T) {
 	}
 	// The origin — a stand-in third party — must have received the real secret in
 	// both the header and the body, never the placeholder.
-	if echoed["authorization"] != "Bearer sk-secret" {
+	if echoed["authorization"] != "Bearer sk-live-super-secret" {
 		t.Errorf("origin saw Authorization %q, want the substituted secret", echoed["authorization"])
 	}
-	if echoed["body"] != "payload=sk-secret" {
-		t.Errorf("origin saw body %q, want the substituted secret", echoed["body"])
+	wantBody := "payload=sk-live-super-secret"
+	if echoed["body"] != wantBody {
+		t.Errorf("origin saw body %q, want %q", echoed["body"], wantBody)
+	}
+	// The Content-Length must be recomputed to the substituted length, or the
+	// origin receives a truncated (or over-read) body.
+	if echoed["content_length"] != strconv.Itoa(len(wantBody)) {
+		t.Errorf("origin saw Content-Length %q, want %d", echoed["content_length"], len(wantBody))
 	}
 }
 
@@ -190,19 +229,21 @@ func TestGateConnectTunnelsAdmittedHTTPS(t *testing.T) {
 }
 
 func TestGateConnectRefusesDisallowedHTTPS(t *testing.T) {
-	origin := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	defer origin.Close()
-
 	g := gate.New(gate.Config{
 		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"allowed.example"}},
 	})
 	gsrv := httptest.NewServer(g)
 	defer gsrv.Close()
 
-	// The CONNECT is refused (403), so the client's tunnel is never established
-	// and the HTTPS request errors rather than reaching the origin.
-	if _, err := proxyClient(t, gsrv.URL, nil).Get(origin.URL); err == nil {
-		t.Error("expected an error reaching a host the networking policy forbids")
+	// Assert the gate answers a forbidden-host CONNECT with 403 on the wire. A
+	// proxying http.Client only surfaces a generic tunnel error, which also fires
+	// on an unrelated TLS failure — so it cannot prove the host-filter ran (a
+	// deleted CONNECT admit check would still leave such a test green). Raw-dial
+	// so the 403 (vs. the 502 an unfiltered dial to the refused host would give)
+	// is observed directly.
+	status := rawStatusLine(t, gsrv.URL, "CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n")
+	if !strings.HasPrefix(status, "HTTP/1.1 403") {
+		t.Errorf("CONNECT status line = %q, want HTTP/1.1 403 for a host outside the networking policy", status)
 	}
 }
 
@@ -293,5 +334,123 @@ func TestGateUnrestrictedAdmitsAnyHost(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("unrestricted networking should admit any host, got %d", resp.StatusCode)
+	}
+}
+
+// rawResponseOrigin serves one fixed raw HTTP/1.1 response per connection, so a
+// test can craft response headers Go's http.Server would not emit (e.g. a
+// Connection-named hop-by-hop header). hostOf its address is the admitted host.
+func rawResponseOrigin(t *testing.T, rawResponse string) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil || line == "\r\n" {
+						break
+					}
+				}
+				_, _ = io.WriteString(c, rawResponse)
+			}(c)
+		}
+	}()
+	return ln
+}
+
+func TestGatePlainHTTPStripsResponseConnectionHeaders(t *testing.T) {
+	ln := rawResponseOrigin(t, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: X-Hop\r\nX-Hop: leaked\r\nX-Keep: kept\r\n\r\n")
+	defer ln.Close()
+	host, _, _ := net.SplitHostPort(ln.Addr().String())
+
+	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}}})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	resp, err := proxyClient(t, gsrv.URL, nil).Get("http://" + ln.Addr().String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// X-Hop is named by the response's own Connection header, so it is hop-by-hop
+	// and must not reach the sandbox; X-Keep is a normal end-to-end header. The
+	// transport preserves both, so the gate must strip X-Hop itself.
+	if got := resp.Header.Get("X-Hop"); got != "" {
+		t.Errorf("X-Hop = %q, want it stripped as a Connection-named response header", got)
+	}
+	if got := resp.Header.Get("X-Keep"); got != "kept" {
+		t.Errorf("X-Keep = %q, want it forwarded end-to-end", got)
+	}
+}
+
+func TestGatePlainHTTPBoundsRequestBody(t *testing.T) {
+	origin := echoOrigin(t)
+	defer origin.Close()
+	host := hostOf(t, origin.URL)
+
+	g := gate.New(gate.Config{
+		Networking:   domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
+		MaxBodyBytes: 16,
+	})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+	client := proxyClient(t, gsrv.URL, nil)
+
+	// A body at the limit is forwarded normally.
+	atLimit, err := client.Post(origin.URL, "text/plain", strings.NewReader(strings.Repeat("A", 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	atLimit.Body.Close()
+	if atLimit.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 for a body at MaxBodyBytes", atLimit.StatusCode)
+	}
+
+	// One byte over the limit is refused with 413 rather than buffered unbounded.
+	over, err := client.Post(origin.URL, "text/plain", strings.NewReader(strings.Repeat("A", 17)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	over.Body.Close()
+	if over.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413 for a body over MaxBodyBytes", over.StatusCode)
+	}
+}
+
+func TestGatePlainHTTPForwardsAuthorizedHostHeader(t *testing.T) {
+	// An adversarial sandbox sends an absolute-form proxy request whose Host
+	// header names a different vhost than the request-target. The gate authorizes
+	// and forwards on the URL authority only, so the spoofed Host must never reach
+	// the origin — otherwise a co-hosted forbidden vhost could receive a
+	// substituted secret. Go's server derives r.Host from the absolute URI; this
+	// test locks that in through the real serving path.
+	gotHost := make(chan string, 1)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost <- r.Host
+	}))
+	defer origin.Close()
+	host := hostOf(t, origin.URL)
+
+	g := gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}}})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	status := rawStatusLine(t, gsrv.URL,
+		"GET "+origin.URL+"/ HTTP/1.1\r\nHost: forbidden.example\r\nConnection: close\r\n\r\n")
+	if !strings.HasPrefix(status, "HTTP/1.1 200") {
+		t.Fatalf("status line = %q, want HTTP/1.1 200", status)
+	}
+	if h := <-gotHost; h == "forbidden.example" {
+		t.Errorf("origin saw spoofed Host %q; the gate must forward the authorized URL authority", h)
 	}
 }

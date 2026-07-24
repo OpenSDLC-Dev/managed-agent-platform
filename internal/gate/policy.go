@@ -53,7 +53,7 @@ func isHopByHop(k string) bool {
 }
 
 // removeHopByHop strips the hop-by-hop headers, including any named in a
-// Connection header, from a request the proxy is about to forward.
+// Connection header, from a request or response the proxy is about to forward.
 func removeHopByHop(h http.Header) {
 	for _, name := range strings.Split(h.Get("Connection"), ",") {
 		if name = strings.TrimSpace(name); name != "" {

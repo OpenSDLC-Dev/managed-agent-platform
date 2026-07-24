@@ -17,16 +17,25 @@ package gate
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 )
+
+// defaultMaxBodyBytes bounds a plain-HTTP request body the gate buffers for
+// substitution when Config.MaxBodyBytes is unset.
+const defaultMaxBodyBytes = 10 << 20 // 10 MiB
+
+// errBodyTooLarge signals a request body over the substitution size limit; the
+// handler maps it to 413 rather than the generic read-failure 502.
+var errBodyTooLarge = errors.New("request body exceeds the gate substitution limit")
 
 // Config constructs a Gate. Networking is the environment's request-level
 // policy; Credentials are the session's resolved env-var credentials for
@@ -42,6 +51,11 @@ type Config struct {
 	// HTTP request. Both default to direct, non-proxied network access.
 	Dial      func(ctx context.Context, network, addr string) (net.Conn, error)
 	Transport http.RoundTripper
+	// MaxBodyBytes bounds a plain-HTTP request body the gate buffers for
+	// substitution; a larger body is refused with 413 rather than read into
+	// memory, since the sandbox controls its size. Zero selects
+	// defaultMaxBodyBytes.
+	MaxBodyBytes int64
 }
 
 // Gate is one session's forward proxy. It implements http.Handler: an
@@ -53,6 +67,7 @@ type Gate struct {
 	onUnreachable func(host string, placeholders []string)
 	dial          func(ctx context.Context, network, addr string) (net.Conn, error)
 	transport     http.RoundTripper
+	maxBody       int64
 }
 
 // New builds a Gate from cfg.
@@ -73,12 +88,17 @@ func New(cfg Config) *Gate {
 			ExpectContinueTimeout: time.Second,
 		}
 	}
+	maxBody := cfg.MaxBodyBytes
+	if maxBody <= 0 {
+		maxBody = defaultMaxBodyBytes
+	}
 	return &Gate{
 		policy:        newPolicy(cfg.Networking),
 		engine:        egress.NewEngine(cfg.Credentials),
 		onUnreachable: cfg.OnUnreachable,
 		dial:          dial,
 		transport:     transport,
+		maxBody:       maxBody,
 	}
 }
 
@@ -152,6 +172,10 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	unreachable := map[string]struct{}{}
 	g.substituteHeaders(host, out.Header, unreachable)
 	if err := g.substituteBody(host, out, unreachable); err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			http.Error(w, "request body too large to substitute", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "cannot read request body", http.StatusBadGateway)
 		return
 	}
@@ -165,11 +189,12 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// Strip hop-by-hop response headers — including any named in the response's
+	// own Connection header, which the transport leaves intact — before copying
+	// the end-to-end headers back to the sandbox.
+	removeHopByHop(resp.Header)
 	respHeader := w.Header()
 	for k, vs := range resp.Header {
-		if isHopByHop(k) {
-			continue
-		}
 		for _, v := range vs {
 			respHeader.Add(k, v)
 		}
@@ -195,24 +220,28 @@ func (g *Gate) substituteHeaders(host string, h http.Header, unreachable map[str
 
 // substituteBody rewrites the request body in the body location. Phase 1 buffers
 // the whole body: the placeholder is a small token and the body must be a single
-// string for substitution; a streaming pass is a later refinement.
+// string for substitution; a streaming pass is a later refinement. The read is
+// bounded by maxBody — the sandbox controls the size, so an oversized body is
+// refused (errBodyTooLarge) rather than buffered without limit.
 func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[string]struct{}) error {
 	if r.Body == nil {
 		return nil
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, g.maxBody+1))
 	_ = r.Body.Close()
 	if err != nil {
 		return err
+	}
+	if int64(len(body)) > g.maxBody {
+		return errBodyTooLarge
 	}
 	out, unr := g.engine.Substitute(host, egress.LocationBody, string(body))
 	for _, c := range unr {
 		unreachable[c.Placeholder] = struct{}{}
 	}
-	sub := []byte(out)
-	r.Body = io.NopCloser(strings.NewReader(string(sub)))
-	r.ContentLength = int64(len(sub))
-	r.Header.Set("Content-Length", fmt.Sprintf("%d", len(sub)))
+	r.Body = io.NopCloser(strings.NewReader(out))
+	r.ContentLength = int64(len(out))
+	r.Header.Set("Content-Length", strconv.Itoa(len(out)))
 	return nil
 }
 

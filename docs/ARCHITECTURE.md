@@ -406,13 +406,14 @@ I/O-free.
 The per-session egress gate (docs/plan/12_vaults-credentials.md, D3): a forward proxy the sandbox
 reaches through `HTTP_PROXY`/`HTTPS_PROXY`, and the enforcement point of the two-level gate. It is
 transport-only — it holds one session's resolved credentials and opens sockets, but reads no store
-and emits no events. It runs as a shared `cmd/gate` container image, a sidecar of the sandbox on
-both backends (a following sub-PR wires it in and delivers its config and secrets).
+and emits no events. It will run as a shared `cmd/gate` container image, a sidecar of the sandbox on
+both backends (a following sub-PR builds that binary, wires it in, and delivers its config and
+secrets).
 
 | File | Contents |
 |---|---|
-| `policy.go` | `policy` — the environment's request-level networking gate (the first of the two levels): `unrestricted` admits every host (its safety blocklist unpublished by the reference, deferred and recorded INFERRED), `limited` admits only `allowed_hosts` (via `egress.HostSet`), an unknown type fails closed. Plus the hop-by-hop header set a forwarding proxy must strip (`removeHopByHop`, honoring a request's `Connection` header). |
-| `gate.go` | `Gate` — an `http.Handler` forward proxy. `CONNECT` is host-filtered on its target and, if admitted, tunnelled opaquely (no substitution — the #166 TLS gap). A plain-HTTP request is host-filtered, then its header values and body are rewritten through `egress.Engine.Substitute` (the second gate level — a credential's own `allowed_hosts`) before it is forwarded and the response streamed back; a credential the host does not admit is left as its literal placeholder (never the secret) and its placeholder — never the `*Credential`, which carries the secret — is surfaced through the `OnUnreachable` seam the wiring turns into `credential_host_unreachable_error`. |
+| `policy.go` | `policy` — the environment's request-level networking gate (the first of the two levels): `unrestricted` admits every host (its safety blocklist unpublished by the reference, deferred and recorded INFERRED), `limited` admits only `allowed_hosts` (via `egress.HostSet`), an unknown type fails closed. Plus the hop-by-hop header set a forwarding proxy must strip (`removeHopByHop`, honoring the `Connection` header on both the forwarded request and the returned response). |
+| `gate.go` | `Gate` — an `http.Handler` forward proxy. `CONNECT` is host-filtered on its target and, if admitted, tunnelled opaquely (no substitution — the #166 TLS gap). A plain-HTTP request is host-filtered, then its header values and body are rewritten through `egress.Engine.Substitute` (the second gate level — a credential's own `allowed_hosts`) before it is forwarded and the response streamed back; a credential the host does not admit is left as its literal placeholder (never the secret) and its placeholder — never the `*Credential`, which carries the secret — is surfaced through the `OnUnreachable` seam the wiring turns into `credential_host_unreachable_error`. The body buffered for substitution is bounded by `MaxBodyBytes` (default 10 MiB) — a larger sandbox-controlled body is refused `413` rather than read unbounded. |
 
 ### Test support and cmd/
 

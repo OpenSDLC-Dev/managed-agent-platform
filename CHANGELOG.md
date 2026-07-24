@@ -40,11 +40,19 @@ copy of an entry here.
   credential's own `allowed_hosts` is the second half, enforced by the engine. A credential the
   request host may not use is left as its literal placeholder (never the secret) and surfaced
   through an `OnUnreachable` seam the deployment wiring turns into `credential_host_unreachable_error`.
+  Forwarding is RFC 7230-clean: hop-by-hop headers — including any named by a `Connection` header —
+  are stripped from both the forwarded request and the returned response, `Content-Length` is
+  recomputed after substitution, and the buffered body is bounded (`MaxBodyBytes`, default 10 MiB) so
+  an oversized sandbox-controlled body is refused `413` rather than read without limit. The forwarded
+  Host authority always comes from the request-target URI (Go normalizes it), so a spoofed `Host`
+  header cannot route a substituted credential to a different vhost than the one authorized.
   Transport-only: it holds one session's resolved credentials and opens sockets, but reads no store
   and emits no events. Exercised end-to-end in tests as a real forward proxy — header and body
   substitution for an admitted host, a 403 for a host outside the policy, an opaque `CONNECT` tunnel
-  over TLS, an unreachable credential left literal and reported. Nothing runs it yet: the `cmd/gate`
-  binary and the Docker/K8s wiring that deliver its config and secrets land in following sub-PRs.
+  over TLS, an unreachable credential left literal and reported, a `413` for an oversized body,
+  Connection-named response headers stripped, and a spoofed Host header normalized to the authorized
+  authority. Nothing runs it yet: the `cmd/gate` binary and the Docker/K8s wiring that deliver its
+  config and secrets land in following sub-PRs.
 
 - **Read-time credential resolution + placeholder injection** (plan 12 slice 4, #50). A new
   `internal/vaultresolve` package turns a session's attached `vault_ids` into the environment
