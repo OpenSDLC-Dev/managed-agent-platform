@@ -69,8 +69,11 @@ const (
 // endpoint but are prime exfiltration targets — loopback (the control plane's
 // own surfaces), link-local (cloud metadata, 169.254.169.254 / fe80::/10),
 // the unspecified address, and multicast — checked on the *resolved* IP at
-// connect time (net.Dialer.Control), so it holds across DNS rebinding and HTTP
-// redirects alike. RFC 1918 private ranges are deliberately allowed: this
+// connect time (net.Dialer.Control) on every dial, so DNS rebinding cannot slip
+// a blocked address past it. HTTP redirects are a separate matter: probeClient
+// refuses to follow them at all, because the IP guard cannot see that following
+// one would replay the request body to the new target. RFC 1918 private ranges
+// are deliberately allowed: this
 // platform's premise is on-prem / in-VPC operation (CLAUDE.md), where MCP
 // servers and token endpoints legitimately live on the operator's own private
 // network. A blocked target surfaces as a connection failure — connect_error
@@ -121,10 +124,17 @@ func embeddedIPv4(ip net.IP) net.IP {
 
 // probeClient is the SSRF-guarded client for both outbound validate calls. The
 // Control hook reads probeIPAllowed on every dial (so a test override takes
-// effect), and default redirect following is safe because each hop re-dials
-// through the same hook.
+// effect). Redirects are never followed: neither an OAuth token exchange nor an
+// MCP initialize legitimately redirects, and following a 307/308 would replay
+// the POST body — the refresh_token and a client_secret_post secret — to the
+// redirect target, an exfiltration the per-dial IP guard cannot see (it vets
+// the hop's address, not that a hop should happen at all). ErrUseLastResponse
+// pins the 3xx as the final response, so it is captured as a failure instead.
 var probeClient = &http.Client{
 	Timeout: validateCallTimeout,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
 	Transport: &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout: validateCallTimeout,

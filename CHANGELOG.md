@@ -13,6 +13,18 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Security
+
+- **`mcp_oauth_validate` probe no longer follows HTTP redirects** (plan 12, #50). The SSRF guard on
+  the validate probe vets each dial's resolved IP, but the client still followed 3xx redirects — and a
+  307/308 from a credential-supplied token endpoint replays the POST body (the `refresh_token`, and a
+  `client_secret_post` client secret) to the redirect target, exfiltrating vault secrets past a guard
+  that only reasons about where a hop lands, not whether a hop should happen. Neither an OAuth token
+  exchange nor an MCP `initialize` legitimately redirects, so `probeClient` now sets
+  `CheckRedirect` to `http.ErrUseLastResponse`: a 3xx is pinned as the final response and captured as
+  a failure, never followed. Covered by a test that a redirecting token endpoint's collector is never
+  reached and no secret surfaces in the verdict.
+
 ### Added
 
 - **Vaults slice 3 — sessions attach vaults** (plan 12, #50). `POST /v1/sessions` now accepts
@@ -44,8 +56,9 @@ copy of an entry here.
   active keys a 409 freed by archive. `mcp_oauth_validate` is a real probe (D8): the RFC 6749
   refresh exchange, then a streamable-HTTP MCP `initialize` under the possibly-refreshed token —
   statuses mapped per the docs, successful refreshes persisted. Because the probe dials
-  credential-supplied URLs, a connect-time SSRF guard checks the resolved IP (DNS-rebinding- and
-  redirect-safe) and blocks loopback/link-local/unspecified/multicast while deliberately
+  credential-supplied URLs, a connect-time SSRF guard checks the resolved IP (DNS-rebinding-safe;
+  redirects are refused outright — see the Security entry above) and blocks
+  loopback/link-local/unspecified/multicast while deliberately
   permitting on-prem RFC 1918 targets; captured bodies are truncated and scrubbed of secrets by
   value (with encodings) and of token-shaped JSON keys by name, the full read window scrubbed
   before truncation so a boundary-straddling secret cannot leak (tests prove even freshly-rotated
