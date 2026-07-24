@@ -8,8 +8,8 @@ import (
 func TestNewIDCarriesPrefix(t *testing.T) {
 	cases := []string{
 		PrefixAgent, PrefixEnvironment, PrefixSession, PrefixEvent, PrefixWork,
-		PrefixVault, PrefixResource, PrefixDeployment, PrefixDeploymentRun,
-		PrefixFile, PrefixSkill, PrefixSkillVersion,
+		PrefixVault, PrefixCredential, PrefixResource, PrefixDeployment,
+		PrefixDeploymentRun, PrefixFile, PrefixSkill, PrefixSkillVersion,
 	}
 	for _, prefix := range cases {
 		id := NewID(prefix)

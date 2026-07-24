@@ -69,7 +69,7 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 	// One in-memory blob store shared by the API (skill uploads) and the
 	// executor (materialization), so eval tasks can exercise skills end to end.
 	blobs := blobtest.Mem()
-	srv := httptest.NewServer(api.NewHandler(pool, blobs))
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, nil))
 	t.Cleanup(srv.Close)
 
 	// One default route. Config.Model is the id the *endpoint* receives, so it

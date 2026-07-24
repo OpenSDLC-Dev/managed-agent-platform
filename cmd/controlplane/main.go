@@ -132,8 +132,9 @@ func run(ctx context.Context) error {
 
 	// The secrets cipher is optional the same way: constructing it here means a
 	// misconfigured or unreachable backend fails the process at startup rather
-	// than on the first credential write. The vaults API (plan 12 slice 2) is
-	// its consumer; until it lands, startup validation is the wired behavior.
+	// than on the first credential write. The vaults API consumes it to seal
+	// credential secrets; without one, the secret-bearing routes report the
+	// absence and everything else serves.
 	cipher, err := secrets.FromEnv(ctx)
 	if err != nil {
 		return err
@@ -144,7 +145,7 @@ func run(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: api.NewHandler(pool, blobs),
+		Handler: api.NewHandler(pool, blobs, cipher),
 		// Slow-client bounds: auth runs inside the handler, so unauthenticated
 		// connections must not be able to sit open indefinitely.
 		ReadHeaderTimeout: 10 * time.Second,

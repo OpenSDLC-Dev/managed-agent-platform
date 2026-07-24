@@ -148,7 +148,7 @@ func newHarnessWrapped(t *testing.T, sb *fakeSandbox, wrap func(http.Handler) ht
 		t.Fatalf("ensure env key: %v", err)
 	}
 	blobs := blobtest.Mem()
-	var handler http.Handler = api.NewHandler(pool, blobs)
+	var handler http.Handler = api.NewHandler(pool, blobs, nil)
 	if wrap != nil {
 		handler = wrap(handler)
 	}

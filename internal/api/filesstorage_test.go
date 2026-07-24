@@ -18,7 +18,7 @@ import (
 // report the absence cleanly (500 api_error), the read routes still answer.
 func TestFilesUnavailableWithoutObjectStorage(t *testing.T) {
 	pool := newPoolWithKey(t)
-	srv := httptest.NewServer(api.NewHandler(pool, nil))
+	srv := httptest.NewServer(api.NewHandler(pool, nil, nil))
 	t.Cleanup(srv.Close)
 	s := &tserver{t: t, url: srv.URL, pool: pool}
 	oct := "application/octet-stream"
@@ -55,9 +55,9 @@ func TestFilesUnavailableWithoutObjectStorage(t *testing.T) {
 func TestFileFailedPutCommitsNoRows(t *testing.T) {
 	pool := newPoolWithKey(t)
 	working := blobtest.Mem()
-	okSrv := httptest.NewServer(api.NewHandler(pool, working))
+	okSrv := httptest.NewServer(api.NewHandler(pool, working, nil))
 	t.Cleanup(okSrv.Close)
-	badSrv := httptest.NewServer(api.NewHandler(pool, failingStore{working}))
+	badSrv := httptest.NewServer(api.NewHandler(pool, failingStore{working}, nil))
 	t.Cleanup(badSrv.Close)
 	ok := &tserver{t: t, url: okSrv.URL, pool: pool, blobs: working}
 	bad := &tserver{t: t, url: badSrv.URL, pool: pool, blobs: working}
