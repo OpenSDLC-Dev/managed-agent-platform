@@ -14,11 +14,14 @@ carries the placeholder-substitution engine. Four PR slices.
 Deliberately **not** in this plan, each with its own tracker:
 
 - **BYOC credential delivery** ([#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165)):
-  `work.secret` stays null. This matches the reference — its public vaults doc states
-  *"Environment variable credentials (`environment_variable`) are not yet supported with
-  self-hosted sandboxes"*, and its shipped SDK/CLI worker never reads the field
-  (anthropic-sdk-go `lib/environments/worker.go` reads only `work.ID/EnvironmentID/Data.*`;
-  the `poller_test.go` fixture calls the field "unused-by-helper").
+  `work.secret` stays null. That remains a CONFIRMED divergence — the wire says the
+  field "may be populated when polling", and what the reference actually populates is
+  unobserved — but the reference's documented posture keeps it small: its public vaults
+  doc states *"Environment variable credentials (`environment_variable`) are not yet
+  supported with self-hosted sandboxes"*, and its shipped SDK/CLI worker never reads the
+  field (anthropic-sdk-go `lib/environments/worker.go` reads only
+  `work.ID/EnvironmentID/Data.*`; the `poller_test.go` fixture calls the field
+  "unused-by-helper"). The existing DIVERGENCES entry stands, re-pointed at #165.
 - **TLS-terminating (MITM) substitution for in-sandbox HTTPS traffic**
   ([#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)): phase 2 of
   the egress point. Phase 1 (slice 4 here) substitutes only where the platform already
@@ -87,12 +90,14 @@ live recording was possible; everything only a recording can settle is pre-liste
     or `*.`-prefixed wildcard — no URLs/ports/paths/IPv6; exact match, `*.` matches
     subdomains but not the apex; update is **full replacement**), `injection_location`
     (`{body, header}`). Write-only: `secret_value`.
-- **Validation** (`type:"vault_credential_validation"`): `status`
-  `valid`/`invalid`/`unknown` (invalid = the grant is gone / OAuth 4xx; unknown =
+- **Validation** (`type:"vault_credential_validation"`): `credential_id`, `vault_id`,
+  `validated_at`, `has_refresh_token`, `status` `valid`/`invalid`/`unknown` (the public
+  docs prescribe the mapping: invalid = the grant is gone / OAuth 4xx; unknown =
   transient 5xx/429/network), `mcp_probe` `{method, http_response}` (the failing MCP
-  step, e.g. `initialize`; body truncated + scrubbed), `refresh` `{status
-  succeeded|failed|connect_error|no_refresh_token, http_response}`,
-  `has_refresh_token`, `validated_at`.
+  step, e.g. `initialize`), `refresh` `{status
+  succeeded|failed|connect_error|no_refresh_token, http_response}`. Every captured
+  `http_response` is `{status_code, content_type, body, body_truncated}`, the body
+  truncated and scrubbed of sensitive values.
 
 ### Hard semantics from the public docs (settled 2026-07-23, previously unknowable from types)
 
@@ -192,8 +197,9 @@ First-attached-vault-wins on key collision across vaults, matching the docs.
 (the existing workapi mirror and its DIVERGENCES entry stand, now pointing at #165 for
 the extension); attaching a vault to a session on a `self_hosted` environment is
 accepted — attachment is environment-type-agnostic — but env-var credentials are simply
-never delivered there, matching the reference's "not yet supported with self-hosted
-sandboxes".
+never delivered there, consistent with the reference's documented "not yet supported
+with self-hosted sandboxes". The always-null render itself stays a CONFIRMED divergence
+(the wire's "may be populated when polling" is unobserved).
 
 **D7 — Documented limits are enforced.** Metadata caps (16/64/512), display_name
 lengths, ≤20 credentials, ≤16 allowed_hosts, uniqueness-409, injection_location's
@@ -205,8 +211,10 @@ recorded once in DIVERGENCES.md rather than silently harmonized in either direct
 attempt the refresh exchange when a refresh block exists (`succeeded` / `failed` /
 `connect_error` / `no_refresh_token`), then probe the MCP server with a streamable-HTTP
 `initialize` under the (possibly refreshed) token, scrub and truncate captured bodies,
-and map to `valid` / `invalid` (4xx) / `unknown` (transient). A successful refresh
-persists the rotated tokens, mirroring the reference's managed refresh.
+and map to `valid` / `invalid` (4xx) / `unknown` (transient) — the mapping the public
+docs prescribe. A successful refresh persists the rotated tokens: our decision,
+consistent with the reference's managed re-resolution refreshing expired tokens, but
+whether *its* validate endpoint persists is unobserved (inferences below).
 
 ## Slices
 
@@ -267,9 +275,11 @@ docs/HISTORY.md as the acceptance run.
 CRUD spans follow the existing api conventions. The gate emits one span per egress
 decision (host, verdict, matched rule; never values) and the substitution engine one per
 substitution (credential_id, location; never values). The Redactor posture extends:
-plaintext secrets exist only inside the cipher and the substitution call path, are never
-logged, and never enter session events — the same invariant the provider Redactor
-enforces for model keys.
+plaintext secrets exist only inside the cipher, the substitution call path, and the
+`mcp_oauth_validate` probe (whose outbound refresh and MCP calls necessarily carry the
+token, and whose captured responses are scrubbed and truncated before they are stored or
+rendered); they are never logged and never enter session events — the same invariant the
+provider Redactor enforces for model keys.
 
 ## Inferences and divergences to record, by slice
 
@@ -278,11 +288,13 @@ is unobserved (documented-but-unrecorded); whether credential routes 404 on a
 `{vault_id}` path segment that mismatches the credential's actual vault (we will —
 INFERRED); update-on-archived-credential behavior (we reject like archived environments —
 INFERRED); `mcp_oauth_validate` on a non-`mcp_oauth` credential (we 400 — INFERRED);
-probe details of D8 (initialize framing, scrub rules — INFERRED against #78's recording
-checklist). Slice 3: the error status/shape for `vault_ids` naming a missing or archived
+probe details of D8 (initialize framing, scrub rules, and whether the reference's
+validate persists a successfully refreshed token as ours does — INFERRED against #78's
+recording checklist). Slice 3: the error status/shape for `vault_ids` naming a missing or archived
 vault on session create (we 400 with the standard envelope — INFERRED; the docs say only
 "future sessions … fail"). Slice 4: the placeholder token format (opaque by design —
 ours, recorded as deliberate); phase-1's literal-placeholder pass-through for in-sandbox
 HTTPS (deliberate divergence until #166); `unrestricted`'s safety-blocklist contents
 (reference's list unpublished — ours is INFERRED). Standing: `work.secret` null
-(existing entry re-pointed at #165).
+(a CONFIRMED divergence — the wire's "may be populated when polling" is unobserved;
+existing entry re-pointed at #165).

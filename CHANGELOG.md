@@ -25,8 +25,9 @@ copy of an entry here.
   hosts the placeholder-substitution engine (no TLS interception yet). Ground truth was settled
   against the public vaults guide (fetched 2026-07-23) and the pinned SDK v1.59.0 — including two
   findings that shaped the scope: the reference's own docs state env-var credentials are *not yet
-  supported with self-hosted sandboxes* (so `work.secret` stays null, matching the reference; the
-  extension is [#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165)), and its
+  supported with self-hosted sandboxes* (so `work.secret` stays null — still the recorded
+  always-null divergence, since what the reference populates on poll is unobserved; the extension is
+  [#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165)), and its
   managed sandbox substitutes inside sandbox-originated HTTPS, which phase 1 deliberately does not
   (TLS-terminating phase 2 is
   [#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)). Lands as a draft for
