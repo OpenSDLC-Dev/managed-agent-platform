@@ -27,6 +27,25 @@ copy of an entry here.
 
 ### Added
 
+- **Egress gate — the per-session forward proxy (`internal/gate`)** (plan 12 slice 4, #50). The
+  transport core of the domain gate the sandbox reaches through `HTTP_PROXY`/`HTTPS_PROXY` (D3),
+  driving the `internal/egress` engine. Two request paths: a plain-HTTP request is host-filtered
+  against the environment's networking policy and then substituted — vault placeholders in its
+  headers and body become their secrets before it leaves, so the third party receives the real
+  credential and never the placeholder; an HTTPS request is an opaque `CONNECT` tunnel, admitted or
+  refused on the target host but never inspected, so an in-sandbox TLS body keeps its placeholders
+  until the TLS-terminating phase (#166 — the documented gap). The networking policy is the
+  request-level half of the two-level gate (`limited` = only `allowed_hosts`, `unrestricted` = every
+  host with its safety blocklist deferred and recorded INFERRED, an unknown type fails closed); a
+  credential's own `allowed_hosts` is the second half, enforced by the engine. A credential the
+  request host may not use is left as its literal placeholder (never the secret) and surfaced
+  through an `OnUnreachable` seam the deployment wiring turns into `credential_host_unreachable_error`.
+  Transport-only: it holds one session's resolved credentials and opens sockets, but reads no store
+  and emits no events. Exercised end-to-end in tests as a real forward proxy — header and body
+  substitution for an admitted host, a 403 for a host outside the policy, an opaque `CONNECT` tunnel
+  over TLS, an unreachable credential left literal and reported. Nothing runs it yet: the `cmd/gate`
+  binary and the Docker/K8s wiring that deliver its config and secrets land in following sub-PRs.
+
 - **Read-time credential resolution + placeholder injection** (plan 12 slice 4, #50). A new
   `internal/vaultresolve` package turns a session's attached `vault_ids` into the environment
   variables its sandbox is provisioned with: it reads the active `environment_variable`
