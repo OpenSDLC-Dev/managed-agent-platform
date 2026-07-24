@@ -225,8 +225,8 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec) *corev1.Pod 
 }
 
 // envVars renders Spec.Env as the pod container's Env list, key-sorted so a given
-// spec always produces the same pod. Returns nil for an empty map so the
-// container carries only the image's own environment.
+// spec always produces the same pod. Returns nil for an empty map, leaving the
+// image's own environment untouched; a non-empty map adds these variables on top.
 //
 // Unlike the docker backend, which injects KEY=value verbatim, Kubernetes
 // expands `$(VAR)` references inside an EnvVar.Value (and un-escapes `$$` to
