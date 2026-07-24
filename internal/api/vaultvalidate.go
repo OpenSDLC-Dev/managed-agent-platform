@@ -95,11 +95,13 @@ func productionProbeIPAllowed(ip net.IP) error {
 }
 
 // embeddedIPv4 returns the IPv4 address wrapped by an IPv6 transition form —
-// NAT64 (64:ff9b::/96 and the 64:ff9b:1::/48 local prefix, v4 in the low 32
-// bits), 6to4 (2002::/16, v4 in bytes 2–5), and Teredo (2001:0::/32, client v4
-// in the inverted low 32 bits) — so the guard re-checks the target a translator
-// would actually reach. Standard /96-style NAT64 embedding only; returns nil
-// for a plain address.
+// NAT64 (the whole 64:ff9b::/32, covering both the 64:ff9b::/96 well-known and
+// 64:ff9b:1::/48 local prefixes; v4 in the low 32 bits), 6to4 (2002::/16, v4 in
+// bytes 2–5), and Teredo (2001:0::/32, client v4 in the inverted low 32 bits) —
+// so the guard re-checks the target a translator would actually reach. The
+// NAT64 match is deliberately broad and assumes /96-style low-32 embedding: a
+// mis-decode can only add a refusal, never an admit, so it stays fail-safe.
+// Returns nil for a plain address.
 func embeddedIPv4(ip net.IP) net.IP {
 	b := ip.To16()
 	if b == nil || ip.To4() != nil {
