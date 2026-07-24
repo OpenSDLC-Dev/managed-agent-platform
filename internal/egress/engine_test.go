@@ -16,6 +16,13 @@ func TestPlaceholder(t *testing.T) {
 	if a, b := egress.Placeholder(sess, "API_KEY"), egress.Placeholder(sess, "API_KEY"); a != b {
 		t.Fatalf("placeholder is not stable: %q vs %q", a, b)
 	}
+	// A golden vector pins the exact derivation (separator, hash, truncation,
+	// encoding). The formula is a cross-version contract: during a rolling
+	// upgrade a new executor must derive the same token an older one baked into a
+	// running sandbox, so an accidental change to it must fail here, loudly.
+	if got := egress.Placeholder("sesn_abc", "API_KEY"); got != "vltph_c608ad05f5fe37adfa275fcf7ad0bc99" {
+		t.Fatalf("derivation changed: Placeholder(sesn_abc, API_KEY) = %q", got)
+	}
 	// Distinct secret_names, and the same secret_name under a different session,
 	// derive distinct tokens — no cross-name or cross-session collision, and the
 	// NUL separator keeps ("a","bc") from colliding with ("ab","c").
