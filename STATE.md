@@ -9,6 +9,6 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Tasks
 
 - [x] Slice 1 — cipher seam + infrastructure (PR #168, merged): `internal/secrets` (Cipher iface, `local` + `openbao` backends, contract suite, `secretstest` harness), controlplane/executor plumbing, compose `openbao` + init one-shot, helm StatefulSet + `externalOpenBao` + `localCipher` — all runtime-verified.
-- [x] Slice 2 — `/v1/vaults` + credentials CRUD, wire-complete (this PR): migration 0011, `vcrd` prefix, full auth-union validation, sealed secrets via the cipher, `mcp_oauth_validate` live probe, DIVERGENCES entries + `work.secret` re-pointed at #165.
-- [ ] Slice 3 — session `vault_ids` attachment + read-time resolution.
-- [ ] Slice 4 — egress gate phase 1 (domain gate proxy, placeholder minting + substitution engine, K8s UID-owner iptables sidecar, DIVERGENCES.md:42 superseded).
+- [x] Slice 2 — `/v1/vaults` + credentials CRUD, wire-complete (PR #169, merged): migration 0011, `vcrd` prefix, full auth-union validation, sealed secrets via the cipher, `mcp_oauth_validate` live probe, DIVERGENCES entries + `work.secret` re-pointed at #165.
+- [x] Slice 3 — session `vault_ids` attachment (this PR): `POST /v1/sessions` accepts/validates (existing + unarchived, `FOR SHARE`) and round-trips `vault_ids`; update stays wire-faithfully rejected; DIVERGENCES:28 create-rejection lifted + create-time error-shape inference recorded. Read-time resolution moves to slice 4 (built beside its egress consumers so its shape isn't guessed).
+- [ ] Slice 4 — egress gate phase 1 (domain gate proxy, `sandbox.Spec.Env` seam, read-time resolution package + placeholder minting + substitution engine, K8s UID-owner iptables sidecar, DIVERGENCES.md:42 superseded).

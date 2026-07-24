@@ -268,19 +268,59 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 	}, nil
 }
 
-// rejectUnsupportedList returns a wire error when a post-v1 feature list is
-// present and non-empty (empty lists are accepted as no-ops).
-func rejectUnsupportedList(obj map[string]json.RawMessage, key, feature string) error {
-	raw, ok := obj[key]
+// parseVaultIDs reads the optional top-level vault_ids array attached at session
+// create. Each entry must be a well-formed vlt_ id; existence and archive state
+// are checked inside the create transaction (validateAttachedVaults).
+func parseVaultIDs(obj map[string]json.RawMessage) ([]string, error) {
+	raw, ok := obj["vault_ids"]
 	if !ok || isNull(raw) {
+		return []string{}, nil
+	}
+	var ids []string
+	if err := json.Unmarshal(raw, &ids); err != nil {
+		return nil, errInvalid("vault_ids must be an array of vault ids")
+	}
+	for _, id := range ids {
+		if !strings.HasPrefix(id, domain.PrefixVault+"_") {
+			return nil, errInvalid("vault_ids entry %q is not a vault id", id)
+		}
+	}
+	return ids, nil
+}
+
+// validateAttachedVaults confirms every attached vault exists and is unarchived,
+// FOR SHARE so a concurrent archive/delete cannot race between the check and the
+// insert. A missing or archived vault fails the create with a 400 (INFERRED —
+// the docs say only that future sessions referencing such a vault fail).
+func validateAttachedVaults(ctx context.Context, tx pgx.Tx, ids []string) error {
+	if len(ids) == 0 {
 		return nil
 	}
-	var items []json.RawMessage
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return errInvalid("%s must be an array", key)
+	rows, err := tx.Query(ctx, `SELECT id, archived_at FROM vaults WHERE id = ANY($1) FOR SHARE`, ids)
+	if err != nil {
+		return err
 	}
-	if len(items) > 0 {
-		return errInvalid("%s are not supported yet", feature)
+	defer rows.Close()
+	archivedAt := map[string]*time.Time{}
+	for rows.Next() {
+		var id string
+		var at *time.Time
+		if err := rows.Scan(&id, &at); err != nil {
+			return err
+		}
+		archivedAt[id] = at
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		at, ok := archivedAt[id]
+		if !ok {
+			return errInvalid("vault %s not found", id)
+		}
+		if at != nil {
+			return errInvalid("vault %s is archived", id)
+		}
 	}
 	return nil
 }
@@ -308,7 +348,8 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return nil, err
 	}
-	if err := rejectUnsupportedList(obj, "vault_ids", "vaults"); err != nil {
+	vaultIDs, err := parseVaultIDs(obj)
+	if err != nil {
 		return nil, err
 	}
 	title, _, null, err := stringField(obj, "title")
@@ -344,6 +385,9 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	if envArchivedAt != nil {
 		return nil, errInvalid("environment %s is archived", envID)
 	}
+	if err := validateAttachedVaults(ctx, tx, vaultIDs); err != nil {
+		return nil, err
+	}
 
 	agent, err := s.resolveAgent(ctx, tx, agentRaw)
 	if err != nil {
@@ -371,13 +415,14 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		id: id, agentJSON: agentJSON, environmentID: envID,
 		status: string(domain.SessionIdle), title: title,
 		metaJSON: mustJSON(metadata), usageJSON: []byte(`{}`), resourcesJSON: resourcesJSON,
+		vaultIDs: vaultIDs,
 	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id,
-		   status, title, metadata, resources, created_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		   status, title, metadata, resources, vault_ids, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING created_at, updated_at`,
-		id, agent.ID, agent.Version, agentJSON, envID, row.status, title, metadata, resourcesJSON, createdBy).
+		id, agent.ID, agent.Version, agentJSON, envID, row.status, title, metadata, resourcesJSON, vaultIDs, createdBy).
 		Scan(&row.createdAt, &row.updatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop
@@ -505,8 +550,10 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	if err := rejectUnknownKeys(obj, "title", "metadata", "agent", "vault_ids"); err != nil {
 		return nil, err
 	}
-	if raw, ok := obj["vault_ids"]; ok && !isNull(raw) {
-		// The reference server rejects this too ("Not yet supported").
+	if _, ok := obj["vault_ids"]; ok {
+		// The field is wholly unsupported on update ("Not yet supported;
+		// requests setting this field are rejected"), so any presence — an
+		// array or an explicit null — is a 400, not just a non-null value.
 		return nil, errInvalid("vault_ids updates are not yet supported")
 	}
 	if err := checkID(id, "session"); err != nil {

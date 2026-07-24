@@ -24,6 +24,42 @@ var sessionAgentRequiredFields = []string{
 	"tools", "mcp_servers", "skills", "multiagent",
 }
 
+// Slice 3: a session attaches vaults at create time (top-level vault_ids). The
+// ids must name existing, unarchived vaults; the list round-trips on the
+// response and on GET; update still rejects vault_ids changes (create-only).
+func TestSessionVaultAttachment(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	vaultA := createVault(t, s, "attach-a")
+	vaultB := createVault(t, s, "attach-b")
+
+	res := createSession(t, s, map[string]any{
+		"agent": agentID, "environment_id": envID, "vault_ids": []any{vaultA, vaultB}})
+	got := res["vault_ids"].([]any)
+	if len(got) != 2 || got[0] != vaultA || got[1] != vaultB {
+		t.Fatalf("vault_ids not round-tripped in order: %v", got)
+	}
+	sid := res["id"].(string)
+	_, fetched := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	if got := fetched["vault_ids"].([]any); len(got) != 2 || got[0] != vaultA || got[1] != vaultB {
+		t.Fatalf("GET did not echo vault_ids in order: %v", got)
+	}
+
+	// Empty/omitted vault_ids is fine and echoes an empty array.
+	res2 := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	if len(res2["vault_ids"].([]any)) != 0 {
+		t.Fatalf("omitted vault_ids should echo []: %v", res2["vault_ids"])
+	}
+
+	// An archived vault fails the create with the standard error envelope.
+	s.do(http.MethodPost, "/v1/vaults/"+vaultB+"/archive", nil)
+	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID, "vault_ids": []any{vaultA, vaultB}})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	// The unarchived vault alone still succeeds.
+	createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID, "vault_ids": []any{vaultA}})
+}
+
 // fixture creates an agent and an environment and returns their ids.
 func fixture(t *testing.T, s *tserver) (agentID, envID string) {
 	t.Helper()
@@ -230,8 +266,10 @@ func TestSessionCreateValidation(t *testing.T) {
 			"resources": []any{map[string]any{"type": "github_repository", "url": "https://github.com/x/y"}}}, 400, "invalid_request_error"},
 		"memory resources unsupported": {map[string]any{"agent": agentID, "environment_id": envID,
 			"resources": []any{map[string]any{"type": "memory_store", "memory_store_id": "mem_x"}}}, 400, "invalid_request_error"},
-		"vaults unsupported": {map[string]any{"agent": agentID, "environment_id": envID,
-			"vault_ids": []any{"vlt_x"}}, 400, "invalid_request_error"},
+		"unknown vault": {map[string]any{"agent": agentID, "environment_id": envID,
+			"vault_ids": []any{"vlt_missing0000000000000000"}}, 400, "invalid_request_error"},
+		"malformed vault id": {map[string]any{"agent": agentID, "environment_id": envID,
+			"vault_ids": []any{"env_wrongprefix"}}, 400, "invalid_request_error"},
 		"malformed json": {`{"agent": `, 400, "invalid_request_error"},
 	} {
 		status, body := s.do(http.MethodPost, "/v1/sessions", tc.body)
@@ -297,8 +335,11 @@ func TestSessionUpdate(t *testing.T) {
 		t.Errorf("snapshot fields changed: %v", a)
 	}
 
-	// vault_ids on update matches the reference server: not yet supported.
+	// vault_ids on update matches the reference server: not yet supported. Any
+	// presence is rejected — an array or an explicit null.
 	status, body := s.do(http.MethodPost, "/v1/sessions/"+id, map[string]any{"vault_ids": []any{"vlt_x"}})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	status, body = s.do(http.MethodPost, "/v1/sessions/"+id, map[string]any{"vault_ids": nil})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 
 	// Only tools/mcp_servers are updatable inside agent.
