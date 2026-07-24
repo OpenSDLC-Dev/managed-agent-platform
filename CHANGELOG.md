@@ -27,6 +27,20 @@ copy of an entry here.
 
 ### Added
 
+- **Egress substitution engine — `internal/egress`** (plan 12 slice 4, #50). The shared, I/O-free
+  core the per-session gate (a later sub-PR) drives to rewrite vault placeholders into their secret
+  values on outbound requests. Three pieces: a `HostSet` matcher for the `allowed_hosts` grammar the
+  vault API validates — exact hostname, IPv4 literal, or `*.`-wildcard (any subdomain depth, never
+  the apex; case-insensitive; the one matcher shared by a credential's `allowed_hosts` and an
+  environment's networking allow-list); `NewPlaceholder`, which mints the opaque `vltph_` tokens the
+  sandbox sees in place of a secret (ours to define — the reference specifies no format); and
+  `Engine.Substitute(host, location, s)`, which replaces a credential's placeholder with its secret
+  only when the request host is admitted and the credential's `injection_location` is enabled —
+  otherwise leaving the opaque placeholder literal (never the secret) and reporting the credential as
+  host-unreachable so the caller can emit `credential_host_unreachable_error`. Secrets live only in
+  the substitution call path; a disabled location is neither substituted nor stripped (matching the
+  documented behavior). Pure and exhaustively unit-tested; nothing consumes it until the gate lands.
+
 - **Sandbox `Spec.Env` seam** (plan 12 slice 4, #50). `sandbox.Spec` gains an `Env
   map[string]string`, injected at provision time and visible to every tool exec. Both backends
   thread it identically — the Docker container config's `Env` list and the Kubernetes pod

@@ -372,6 +372,19 @@ the upload paths is upload-caused and safe to echo as a 400.
 | `skills.go` | `FromFiles` (loose path-qualified parts → deterministic canonical zip: sorted entries, no timestamps) and `FromZip` (a valid archive is stored verbatim — the download endpoint streams it unmodified), both returning a `Bundle` (name/description/directory + archive + the archive's `Digest`, the sha256 the registry records so materialization can verify what it reads back). Validation: SKILL.md YAML frontmatter at the directory root (name ≤64 chars lowercase/digits/hyphens, no reserved words; description non-empty ≤1024 runes, no XML tags; unknown keys tolerated), directory-vs-name match (case- and underscore-insensitive), path hygiene (no escapes, path-qualified under one top directory), 30 MB total / 10k member caps. `IsZip` — the magic-byte form detection. |
 | `extract.go` | The materialization side: `ReadArchive` reads a stored archive under a compressed-byte cap **and** verifies it against the digest recorded for that version (`ErrDigestMismatch`; an empty expectation means none was recorded and the archive is read unverified) — verification lives in the one function both halves call between fetching and extracting, so a reader cannot forget it; `Extract` then opens it with the reference worker's guards (escape refusal, 10k members, 1 GiB decompressed — actual bytes counted, declared sizes untrusted; zip only, since the platform serves canonical zips) and strips the single top-level wrapper; `Digest` (the lowercase-hex sha256 both halves compare); `TargetDir` (the version's name, skill id fallback); `Sentinel` / `ParseSentinel` / `SentinelVersion` (canonical resolved-set encoding for the idempotence marker, carrying an integrity generation so a marker written under a weaker guarantee — one that predates digest verification — can never satisfy a stronger pass); `BlobKey` (the one `skills/{id}/{version}.zip` layout) and `ArchiveDigestHeader` (the download header that carries the digest to the database-less worker). |
 
+### internal/egress
+
+The egress-time credential-injection subsystem (docs/plan/12_vaults-credentials.md, D4/D5).
+The substitution engine here is I/O-free: it holds no store handle and opens no sockets, so
+resolution supplies it credentials and the per-session gate (a later slice 4 sub-PR) drives it
+against real outbound requests. Written once, shared by the gate, the future web tools (#47), the
+TLS-terminating phase (#166), and the BYOC worker (#165) — never forked per consumer.
+
+| File | Contents |
+|---|---|
+| `hostset.go` | `HostSet` — the `allowed_hosts` matcher in the grammar the vault API validates (`internal/api/vaultcredauth.go`): exact hostname, IPv4 literal, or `*.`-wildcard. A wildcard matches any subdomain depth but never the apex; matching is case-insensitive and tolerant of a trailing FQDN dot. The one matcher shared by a credential's `allowed_hosts` (may this secret be used for this host?) and an environment's networking allow-list (may this request leave at all?). |
+| `engine.go` | `PlaceholderPrefix` (`vltph_`) + `NewPlaceholder` (prefix + 128 random bits, hex) — the opaque token the sandbox sees in place of a secret (ours to define; the reference specifies no format). `Credential` (resolved placeholder → secret + `HostSet` + the two `injection_location` arms) and `Engine.Substitute(host, location, s)`: substitutes a credential's placeholder with its secret only when the host is admitted and the location is enabled, otherwise leaving the opaque placeholder literal (never the secret) and reporting the credential as host-unreachable so the caller can emit `credential_host_unreachable_error`; a disabled location is neither substituted nor stripped. Secrets live only on this call path. |
+
 ### Test support and cmd/
 
 `internal/pgtest` starts one Dockerized Postgres per test binary and hands out fresh
