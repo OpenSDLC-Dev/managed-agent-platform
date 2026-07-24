@@ -383,7 +383,7 @@ TLS-terminating phase (#166), and the BYOC worker (#165) — never forked per co
 | File | Contents |
 |---|---|
 | `hostset.go` | `HostSet` — the `allowed_hosts` matcher in the grammar the vault API validates (`internal/api/vaultcredauth.go`): exact hostname, IPv4 literal, or `*.`-wildcard. A wildcard matches any subdomain depth but never the apex; matching is case-insensitive and tolerant of a trailing FQDN dot. The one matcher shared by a credential's `allowed_hosts` (may this secret be used for this host?) and an environment's networking allow-list (may this request leave at all?). |
-| `engine.go` | `PlaceholderPrefix` (`vltph_`) + `NewPlaceholder` (prefix + 128 random bits, hex) — the opaque token the sandbox sees in place of a secret (ours to define; the reference specifies no format). `Credential` (resolved placeholder → secret + `HostSet` + the two `injection_location` arms) and `Engine.Substitute(host, location, s)`: substitutes a credential's placeholder with its secret only when the host is admitted and the location is enabled, otherwise leaving the opaque placeholder literal (never the secret) and reporting the credential as host-unreachable so the caller can emit `credential_host_unreachable_error`; a disabled location is neither substituted nor stripped. Secrets live only on this call path. |
+| `engine.go` | `PlaceholderPrefix` (`vltph_`) + `Placeholder(sessionID, secretName)` (prefix + 128 bits from SHA-256, deterministic) — the opaque token the sandbox sees in place of a secret (ours to define; the reference specifies no format), derived per `(session, secret_name)` so it stays stable across a session's create-bound re-provisions and the gate recovers the exact token in the sandbox. `Credential` (resolved placeholder → secret + `HostSet` + the two `injection_location` arms) and `Engine.Substitute(host, location, s)`: substitutes a credential's placeholder with its secret only when the host is admitted and the location is enabled, otherwise leaving the opaque placeholder literal (never the secret) and reporting the credential as host-unreachable so the caller can emit `credential_host_unreachable_error`; a disabled location is neither substituted nor stripped. Secrets live only on this call path. |
 
 ### internal/vaultresolve
 
@@ -392,7 +392,8 @@ attached `vault_ids` to the environment variables its sandbox is provisioned wit
 reads the active `environment_variable` credentials of the attached vaults (current rows every
 call — no cache, so rotation and archive propagate without a session restart), collapses a
 `secret_name` shared across attached vaults to the first vault in `vault_ids` order
-(first-vault-wins), and pairs each with a freshly minted `vltph_` placeholder (`internal/egress`).
+(first-vault-wins), and pairs each with a `vltph_` placeholder derived per `(session, secret_name)`
+(`internal/egress`), so a re-provision or the gate recovers the exact token already in the sandbox.
 It returns only the sandbox-visible half — `secret_name` → placeholder; the secret itself is read
 and substituted separately at egress in the per-session gate (a later slice 4 sub-PR). An archived
 vault contributes nothing (archiving purges and archives its credentials, so the `archived_at`

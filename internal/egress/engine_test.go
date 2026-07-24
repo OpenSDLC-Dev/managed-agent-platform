@@ -7,16 +7,30 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 )
 
-func TestNewPlaceholder(t *testing.T) {
+func TestPlaceholder(t *testing.T) {
+	const sess = "sesn_abc"
+
+	// Stability is the load-bearing property: the same (session, secret_name)
+	// derives the same token every time, so a re-provision or the egress gate
+	// recovers the exact placeholder already baked into the sandbox.
+	if a, b := egress.Placeholder(sess, "API_KEY"), egress.Placeholder(sess, "API_KEY"); a != b {
+		t.Fatalf("placeholder is not stable: %q vs %q", a, b)
+	}
+	// Distinct secret_names, and the same secret_name under a different session,
+	// derive distinct tokens — no cross-name or cross-session collision, and the
+	// NUL separator keeps ("a","bc") from colliding with ("ab","c").
 	seen := map[string]struct{}{}
-	for i := 0; i < 100; i++ {
-		p := egress.NewPlaceholder()
+	for _, in := range []struct{ session, name string }{
+		{sess, "API_KEY"}, {sess, "DB_URL"}, {"sesn_xyz", "API_KEY"},
+		{"a", "bc"}, {"ab", "c"},
+	} {
+		p := egress.Placeholder(in.session, in.name)
 		if !strings.HasPrefix(p, egress.PlaceholderPrefix) {
 			t.Fatalf("placeholder %q lacks prefix %q", p, egress.PlaceholderPrefix)
 		}
-		// The suffix is the documented 128 bits of randomness in hex — exactly 32
-		// lowercase-hex chars. Pinning the exact format catches an entropy
-		// regression (e.g. a drop to 96 bits) a loose length check would miss.
+		// The suffix is the documented 128 bits in hex — exactly 32 lowercase-hex
+		// chars. Pinning the exact format catches a width regression (e.g. a drop
+		// to 96 bits) a loose length check would miss.
 		suffix := strings.TrimPrefix(p, egress.PlaceholderPrefix)
 		if len(suffix) != 32 {
 			t.Fatalf("placeholder %q suffix is %d chars, want 32", p, len(suffix))
@@ -32,7 +46,7 @@ func TestNewPlaceholder(t *testing.T) {
 			t.Fatalf("placeholder %q contains an unsafe character", p)
 		}
 		if _, dup := seen[p]; dup {
-			t.Fatalf("placeholder %q repeated", p)
+			t.Fatalf("placeholder %q collided across distinct inputs", p)
 		}
 		seen[p] = struct{}{}
 	}

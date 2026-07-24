@@ -248,7 +248,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 // setup error from provisioning or reading the log — which stops the item with
 // nothing committed, distinct from a tool fault, which commits what did run.
 func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun) ([]events.NewEvent, error, error) {
-	env, err := e.sandboxEnv(ctx, sess.vaultIDs)
+	env, err := e.sandboxEnv(ctx, item.SessionID, sess.vaultIDs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve vault credentials: %w", err)
 	}
@@ -279,14 +279,20 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 // secrets at egress time (a later slice). No attached vaults, or none carrying
 // env-var credentials, yields a nil map: an ordinary sandbox.
 //
+// Placeholders are derived per (session, secret_name), so a re-provision of the
+// same session resolves the identical tokens — matching what the create-bound
+// Spec.Env already holds (Provision adopts a running sandbox without re-applying
+// a changed Env) rather than drifting to fresh values the gate could no longer
+// substitute.
+//
 // A credential whose secret_name is not a valid environment-variable name
 // cannot be injected as an env var (ValidateEnv would fail the whole provision
 // and the item would reclaim-loop), so it is skipped here rather than delivered
 // — the "a bad credential surfaces [later] and does not block the session" arm
 // of the resolution model. Only a resolution I/O error faults the item, which
 // then retries on reclaim like any other transient failure.
-func (e *Executor) sandboxEnv(ctx context.Context, vaultIDs []string) (map[string]string, error) {
-	bindings, err := vaultresolve.Bindings(ctx, e.pool, vaultIDs)
+func (e *Executor) sandboxEnv(ctx context.Context, sessionID domain.ID, vaultIDs []string) (map[string]string, error) {
+	bindings, err := vaultresolve.Bindings(ctx, e.pool, sessionID.String(), vaultIDs)
 	if err != nil {
 		return nil, err
 	}

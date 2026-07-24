@@ -5,8 +5,9 @@
 // (docs/plan/12_vaults-credentials.md, D5).
 //
 // This slice resolves only the sandbox-visible half: each active
-// environment_variable credential's secret_name paired with a freshly minted
-// opaque placeholder (internal/egress). The secret the placeholder stands for is
+// environment_variable credential's secret_name paired with an opaque
+// placeholder derived per (session, secret_name) (internal/egress) — stable
+// across re-provision. The secret the placeholder stands for is
 // read and substituted separately, at egress time in the per-session gate (a
 // later slice) — never injected into the sandbox, which sees the placeholder
 // alone.
@@ -36,14 +37,14 @@ type Binding struct {
 	Placeholder string
 }
 
-// Bindings resolves the active environment_variable credentials of the
-// session's attached vaults into placeholder bindings. When several attached
-// vaults carry the same secret_name, the first vault in vaultIDs order wins
-// (D5). An archived vault contributes nothing: archiving a vault archives and
-// purges its credentials, so the archived_at filter already excludes them.
-// Bindings within a vault are emitted in secret_name order, so a session's
-// injected env is deterministic apart from the random placeholder values.
-func Bindings(ctx context.Context, q Querier, vaultIDs []string) ([]Binding, error) {
+// Bindings resolves the active environment_variable credentials of sessionID's
+// attached vaults into placeholder bindings. When several attached vaults carry
+// the same secret_name, the first vault in vaultIDs order wins (D5). An archived
+// vault contributes nothing: archiving a vault archives and purges its
+// credentials, so the archived_at filter already excludes them. Placeholders are
+// derived per (session, secret_name), so resolution is fully deterministic — a
+// re-provision or the egress gate recovers the exact tokens already injected.
+func Bindings(ctx context.Context, q Querier, sessionID string, vaultIDs []string) ([]Binding, error) {
 	if len(vaultIDs) == 0 {
 		return nil, nil
 	}
@@ -89,7 +90,7 @@ func Bindings(ctx context.Context, q Querier, vaultIDs []string) ([]Binding, err
 				continue // first attached vault with this secret_name already won
 			}
 			seen[name] = struct{}{}
-			out = append(out, Binding{SecretName: name, Placeholder: egress.NewPlaceholder()})
+			out = append(out, Binding{SecretName: name, Placeholder: egress.Placeholder(sessionID, name)})
 		}
 	}
 	return out, nil

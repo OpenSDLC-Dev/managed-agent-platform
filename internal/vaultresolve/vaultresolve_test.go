@@ -54,11 +54,16 @@ func newEnvCred(t *testing.T, pool *pgxpool.Pool, vaultID, secretName string, ar
 	}
 }
 
-// newMCPCred inserts a non-env-var credential, which resolution must ignore.
+// newMCPCred inserts a non-env-var credential, which resolution must ignore. Its
+// auth doc deliberately also carries a secret_name — a shape no real
+// static_bearer credential has — so that its exclusion pins the query's
+// auth_type = 'environment_variable' filter: without that filter it would
+// resolve to an MCP_TOKEN binding and fail the caller's assertion, whereas the
+// empty-secret_name skip alone would not distinguish it.
 func newMCPCred(t *testing.T, pool *pgxpool.Pool, vaultID string) {
 	t.Helper()
 	id := domain.NewID("vcrd").String()
-	auth := `{"type":"static_bearer","mcp_server_url":"https://mcp.example.com"}`
+	auth := `{"type":"static_bearer","mcp_server_url":"https://mcp.example.com","secret_name":"MCP_TOKEN"}`
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO vault_credentials (id, vault_id, auth_type, auth, cred_key)
 		 VALUES ($1, $2, 'static_bearer', $3::jsonb, $4)`,
@@ -78,6 +83,7 @@ func names(bindings []vaultresolve.Binding) []string {
 func TestBindings(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	ctx := context.Background()
+	sess := domain.NewID("sesn").String()
 
 	v1 := newVault(t, pool, false)
 	v2 := newVault(t, pool, false)
@@ -89,7 +95,7 @@ func TestBindings(t *testing.T) {
 	newMCPCred(t, pool, v1)                  // non-env-var: excluded
 
 	t.Run("resolves active env-var creds, first vault wins on collision", func(t *testing.T) {
-		got, err := vaultresolve.Bindings(ctx, pool, []string{v1, v2})
+		got, err := vaultresolve.Bindings(ctx, pool, sess, []string{v1, v2})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -117,7 +123,7 @@ func TestBindings(t *testing.T) {
 	t.Run("vault order does not change the deduped set", func(t *testing.T) {
 		// First-vault-wins picks a different winning row when the order flips,
 		// but the secret_name set (and thus the injected env keys) is identical.
-		got, err := vaultresolve.Bindings(ctx, pool, []string{v2, v1})
+		got, err := vaultresolve.Bindings(ctx, pool, sess, []string{v2, v1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -126,8 +132,31 @@ func TestBindings(t *testing.T) {
 		}
 	})
 
+	t.Run("placeholders are stable across resolutions of the same session", func(t *testing.T) {
+		// The load-bearing property for the gate: the sandbox binds its env at
+		// create and keeps it across re-provisions, so a re-resolution must yield
+		// the same secret_name→placeholder mapping, not fresh tokens.
+		first, err := vaultresolve.Bindings(ctx, pool, sess, []string{v1, v2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := vaultresolve.Bindings(ctx, pool, sess, []string{v1, v2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]string{}
+		for _, b := range first {
+			m[b.SecretName] = b.Placeholder
+		}
+		for _, b := range second {
+			if m[b.SecretName] != b.Placeholder {
+				t.Errorf("%s placeholder drifted: %q then %q", b.SecretName, m[b.SecretName], b.Placeholder)
+			}
+		}
+	})
+
 	t.Run("no attached vaults resolves to nothing", func(t *testing.T) {
-		got, err := vaultresolve.Bindings(ctx, pool, nil)
+		got, err := vaultresolve.Bindings(ctx, pool, sess, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -137,7 +166,7 @@ func TestBindings(t *testing.T) {
 	})
 
 	t.Run("an unknown vault id contributes nothing", func(t *testing.T) {
-		got, err := vaultresolve.Bindings(ctx, pool, []string{domain.NewID("vlt").String()})
+		got, err := vaultresolve.Bindings(ctx, pool, sess, []string{domain.NewID("vlt").String()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -163,7 +192,7 @@ func TestBindingsCorruptAuthDocErrors(t *testing.T) {
 		t.Fatalf("insert corrupt cred: %v", err)
 	}
 
-	if _, err := vaultresolve.Bindings(ctx, pool, []string{v}); err == nil {
+	if _, err := vaultresolve.Bindings(ctx, pool, domain.NewID("sesn").String(), []string{v}); err == nil {
 		t.Fatal("expected an error resolving a corrupt auth document, got nil")
 	}
 }
@@ -178,7 +207,7 @@ func TestBindingsArchivedVaultExcluded(t *testing.T) {
 	v := newVault(t, pool, true)
 	newEnvCred(t, pool, v, "STALE", true)
 
-	got, err := vaultresolve.Bindings(ctx, pool, []string{v})
+	got, err := vaultresolve.Bindings(ctx, pool, domain.NewID("sesn").String(), []string{v})
 	if err != nil {
 		t.Fatal(err)
 	}

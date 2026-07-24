@@ -32,8 +32,13 @@ copy of an entry here.
   variables its sandbox is provisioned with: it reads the active `environment_variable`
   credentials of the attached vaults (current rows every time — no cache, so rotation and archive
   propagate without a session restart), collapses a `secret_name` that several attached vaults
-  share to the first vault in `vault_ids` order (D5's first-vault-wins), and pairs each with a
-  freshly minted opaque `vltph_` placeholder. The executor injects these as
+  share to the first vault in `vault_ids` order (D5's first-vault-wins), and pairs each with an
+  opaque `vltph_` placeholder derived per `(session, secret_name)`. Deriving the placeholder
+  deterministically — rather than minting a random one each pass — is what makes it stable: the
+  sandbox binds its environment at container create and keeps it across the idempotent
+  re-provisions of a session, so every executor pass and the future egress gate must recover the
+  exact token already baked into the sandbox, and a rotated credential (same `secret_name`, new
+  secret) keeps its placeholder. The executor injects these as
   `secret_name=placeholder` entries in `sandbox.Spec.Env` at provision; the sandbox sees only the
   placeholder, never the secret, which is resolved and substituted later at egress (the gate, a
   later sub-PR). An archived vault contributes nothing — archiving a vault archives and purges its
@@ -53,8 +58,10 @@ copy of an entry here.
   values on outbound requests. Three pieces: a `HostSet` matcher for the `allowed_hosts` grammar the
   vault API validates — exact hostname, IPv4 literal, or `*.`-wildcard (any subdomain depth, never
   the apex; case-insensitive; the one matcher shared by a credential's `allowed_hosts` and an
-  environment's networking allow-list); `NewPlaceholder`, which mints the opaque `vltph_` tokens the
-  sandbox sees in place of a secret (ours to define — the reference specifies no format); and
+  environment's networking allow-list); `Placeholder(sessionID, secretName)`, which derives the
+  opaque `vltph_` token the sandbox sees in place of a secret (ours to define — the reference
+  specifies no format) deterministically per `(session, secret_name)` so it stays stable across a
+  session's create-bound re-provisions; and
   `Engine.Substitute(host, location, s)`, which replaces a credential's placeholder with its secret
   only when the request host is admitted and the credential's `injection_location` is enabled —
   otherwise leaving the opaque placeholder literal (never the secret) and reporting the credential as
