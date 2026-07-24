@@ -102,15 +102,20 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 
 	// Spec.Env is injected at provision time and visible to every tool exec —
 	// the seam slice 4 uses to hand the sandbox its egress-proxy address and
-	// vault placeholder env vars. A value with a space proves no word-splitting
-	// on the way in.
+	// vault placeholder env vars. A value with a space proves no word-splitting;
+	// a value containing `$(...)` proves the two backends agree it is opaque —
+	// Kubernetes would otherwise expand it while Docker keeps it literal.
 	t.Run("SpecEnvReachesExec", func(t *testing.T) {
 		h := newHarness(t)
 		ctx := context.Background()
 		sb, err := h.Provider.Provision(ctx, sandbox.Spec{
 			SessionID: domain.NewID("sesn"), Image: h.Image, Workdir: workdir,
 			Networking: unrestricted,
-			Env:        map[string]string{"VAULT_SEAM_ONE": "alpha", "VAULT_SEAM_TWO": "beta gamma"},
+			Env: map[string]string{
+				"VAULT_SEAM_ONE":   "alpha",
+				"VAULT_SEAM_TWO":   "beta gamma",
+				"VAULT_SEAM_THREE": "$(VAULT_SEAM_ONE)/$lit",
+			},
 		})
 		if err != nil {
 			t.Fatalf("provision: %v", err)
@@ -121,13 +126,14 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			}
 		})
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{
-			Command: `printf '%s|%s' "$VAULT_SEAM_ONE" "$VAULT_SEAM_TWO"`,
+			Command: `printf '%s|%s|%s' "$VAULT_SEAM_ONE" "$VAULT_SEAM_TWO" "$VAULT_SEAM_THREE"`,
 		})
 		if err != nil {
 			t.Fatalf("exec: %v", err)
 		}
-		if res.Stdout != "alpha|beta gamma" {
-			t.Errorf("Spec.Env not visible to exec: stdout=%q, want %q", res.Stdout, "alpha|beta gamma")
+		const want = `alpha|beta gamma|$(VAULT_SEAM_ONE)/$lit`
+		if res.Stdout != want {
+			t.Errorf("Spec.Env not visible to exec verbatim: stdout=%q, want %q", res.Stdout, want)
 		}
 	})
 
@@ -172,6 +178,45 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 		if res.Stdout != "ok" {
 			t.Errorf("a resource leaked from the rejected provision (stale sandbox adopted): stdout=%q", res.Stdout)
+		}
+	})
+
+	// Env is bound when the sandbox is first created. Re-provisioning the same
+	// session with a changed Env adopts the running sandbox — same id — and does
+	// NOT re-apply the new value, the property the egress gate relies on to keep
+	// a session's placeholders stable across an executor restart.
+	t.Run("SpecEnvBoundAtProvision", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := context.Background()
+		sid := domain.NewID("sesn")
+		spec := func(v string) sandbox.Spec {
+			return sandbox.Spec{
+				SessionID: sid, Image: h.Image, Workdir: workdir,
+				Networking: unrestricted, Env: map[string]string{"BOUND": v},
+			}
+		}
+		sb1, err := h.Provider.Provision(ctx, spec("first"))
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := sb1.Destroy(context.Background()); err != nil {
+				t.Errorf("destroy: %v", err)
+			}
+		})
+		sb2, err := h.Provider.Provision(ctx, spec("second"))
+		if err != nil {
+			t.Fatalf("re-provision: %v", err)
+		}
+		if sb2.ID() != sb1.ID() {
+			t.Errorf("re-provision created a new sandbox %q, want the adopted %q", sb2.ID(), sb1.ID())
+		}
+		res, err := sb2.Exec(ctx, sandbox.ExecRequest{Command: `printf '%s' "$BOUND"`})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if res.Stdout != "first" {
+			t.Errorf("adoption re-applied Env: BOUND=%q, want the create-time %q", res.Stdout, "first")
 		}
 	})
 

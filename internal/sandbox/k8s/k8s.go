@@ -226,8 +226,13 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec) *corev1.Pod 
 
 // envVars renders Spec.Env as the pod container's Env list, key-sorted so a given
 // spec always produces the same pod. Returns nil for an empty map so the
-// container carries only the image's own environment. A plain-value EnvVar (no
-// ValueFrom) mirrors the docker backend's KEY=value injection exactly.
+// container carries only the image's own environment.
+//
+// Unlike the docker backend, which injects KEY=value verbatim, Kubernetes
+// expands `$(VAR)` references inside an EnvVar.Value (and un-escapes `$$` to
+// `$`). Env values here are opaque — a placeholder or a proxy URL, never a
+// template — so every `$` is doubled, which makes Kubernetes emit the value
+// literally and keeps the two backends byte-identical.
 func envVars(env map[string]string) []corev1.EnvVar {
 	if len(env) == 0 {
 		return nil
@@ -239,7 +244,7 @@ func envVars(env map[string]string) []corev1.EnvVar {
 	sort.Strings(keys)
 	out := make([]corev1.EnvVar, 0, len(env))
 	for _, k := range keys {
-		out = append(out, corev1.EnvVar{Name: k, Value: env[k]})
+		out = append(out, corev1.EnvVar{Name: k, Value: strings.ReplaceAll(env[k], "$", "$$")})
 	}
 	return out
 }

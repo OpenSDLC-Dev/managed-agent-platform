@@ -31,7 +31,9 @@ copy of an entry here.
   map[string]string`, injected at provision time and visible to every tool exec. Both backends
   thread it identically — the Docker container config's `Env` list and the Kubernetes pod
   container's `Env` — each rendered key-sorted so a spec always yields the same container/pod,
-  and omitted entirely for an empty map so the image's own environment stands. This is the one
+  and omitted entirely for an empty map so the image's own environment stands. Values are
+  opaque: Kubernetes' `$(VAR)` expansion is neutralized (every `$` doubled) so a placeholder or
+  proxy URL is byte-identical on both backends, never a template. This is the one
   seam neither backend had (plan D4); the egress gate's later sub-PRs use it to hand the sandbox
   its per-session proxy address and the `vltph_` vault placeholders. Keys are validated up front
   (`ValidateEnv`, the shared `[A-Za-z_][A-Za-z0-9_]*` grammar) so a malformed name fails
