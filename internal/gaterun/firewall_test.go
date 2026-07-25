@@ -61,6 +61,13 @@ func TestCheckListing(t *testing.T) {
 	if err := gaterun.CheckListing(below, 100); err != nil {
 		t.Errorf("foreign OUTPUT rules below the jump rejected: %v", err)
 	}
+	// A duplicate gate jump below the first is equally unreachable and equally
+	// tolerated (a concurrent-apply residue; Apply converges it away on the
+	// next re-apply rather than verification refusing to serve on it).
+	dup := gaterun.Listing{Chain: goodChain, Output: goodOutput + "\n-A OUTPUT -j MAP-GATE-EGRESS"}
+	if err := gaterun.CheckListing(dup, 100); err != nil {
+		t.Errorf("duplicate jump below the first rejected: %v", err)
+	}
 
 	chain := func(body string) gaterun.Listing {
 		return gaterun.Listing{Chain: body, Output: goodOutput}

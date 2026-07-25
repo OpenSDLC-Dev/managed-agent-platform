@@ -176,14 +176,19 @@ func TestGateImageFirewallReconcilesForeignRules(t *testing.T) {
 		t.Errorf("root egress escaped the owner-match DROP with a foreign rule present:\n%s", out)
 	}
 
-	// Remediation path: push a foreign ACCEPT ABOVE the jump (the already-
-	// fail-open state a CNI/mesh agent could create at runtime), then re-run
-	// /gate in the SAME netns. Setup re-applies — iptables-restore resets the
-	// populated chain, ensureJumpFirst deletes and re-inserts the jump at 1 —
-	// then the second process exits on the bind conflict with the live gate.
+	// Remediation path: push a foreign ACCEPT ABOVE the jump (the partially-
+	// fail-open state a CNI/mesh agent could create at runtime) AND plant a
+	// duplicate gate jump below, then re-run /gate in the SAME netns. Setup
+	// re-applies — iptables-restore resets the populated chain, ensureJumpFirst
+	// inserts a fresh first jump before removing the displaced and duplicate
+	// ones — then the second process exits on the bind conflict with the live
+	// gate.
 	for _, bin := range []string{"iptables", "ip6tables"} {
 		if out, code := dockerCLI(t, "exec", "-u", "0", id, bin, "-I", "OUTPUT", "1", "-p", "tcp", "--dport", "19", "-j", "ACCEPT"); code != 0 {
 			t.Fatalf("%s -I OUTPUT 1: exit %d\n%s", bin, code, out)
+		}
+		if out, code := dockerCLI(t, "exec", "-u", "0", id, bin, "-A", "OUTPUT", "-j", "MAP-GATE-EGRESS"); code != 0 {
+			t.Fatalf("%s -A OUTPUT duplicate jump: exit %d\n%s", bin, code, out)
 		}
 	}
 	reExecGate(t, id)

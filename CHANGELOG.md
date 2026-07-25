@@ -83,8 +83,11 @@ copy of an entry here.
   serve beside them). The rules now live in a chain the gate owns outright, `MAP-GATE-EGRESS`,
   rebuilt atomically with `iptables-restore --noflush` (the kube-proxy coexistence pattern — the
   payload's chain declaration resets only that chain, in one kernel commit), and `OUTPUT` gets a
-  single `-j MAP-GATE-EGRESS` jump ensured at position 1 — checked before inserted, so a restarted
-  sidecar re-applying over its previous incarnation's rules is a no-op, never a duplicate. `OUTPUT`
+  single `-j MAP-GATE-EGRESS` jump ensured at position 1 — checked before touched, so a restarted
+  sidecar re-applying over its previous incarnation's rules is a no-op; a displaced jump is
+  remediated insert-first-then-delete (the jump count never drops, so a narrowly-fail-open state is
+  never widened mid-remediation, and a failure leaves a safe unreachable duplicate, never zero
+  jumps), and duplicate jumps are converged away by rule number. `OUTPUT`
   itself is never flushed and its policy never touched. Fail-closed moves from the policy backstop
   to ordering: the chain is complete before the jump steers any traffic into it, and every chain
   verdict is terminal (ACCEPT or DROP, nothing returns), so foreign rules below the jump are

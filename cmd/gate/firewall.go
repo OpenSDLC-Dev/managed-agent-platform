@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
@@ -60,52 +60,62 @@ func restorePayload(rules []gaterun.Rule) string {
 	return b.String()
 }
 
-// ensureJumpFirst reconciles the single OUTPUT jump into the gate's chain:
-// absent → insert at position 1; already first → no-op (the restarted-sidecar
-// path, no traffic disturbed); present but no longer first → delete and
-// re-insert at 1. Only that last, already-fail-open state (something inserted
-// a rule above a previously verified jump) has a brief jump-absent window —
-// remediating it fast beats refusing to serve while it persists.
+// ensureJumpFirst reconciles OUTPUT to hold exactly one jump into the gate's
+// chain, at position 1: absent → insert; already first → no-op apart from
+// removing duplicates (the restarted-sidecar path, no traffic disturbed);
+// present but not first → insert a NEW first jump before removing the old one.
+// Insert-before-delete is the fail-closed ordering: at no instant does the
+// jump count drop, so the netns is never left to the OUTPUT policy — a foreign
+// rule above the old jump may have been a narrow ACCEPT, so "not first" is
+// only partially fail-open and must not be widened while being remediated, and
+// a failure mid-way leaves a safe unreachable duplicate, never zero jumps.
+// Duplicates (ours below the first, or the old jump after remediation) are
+// removed by rule number, highest first so the numbers stay valid.
 func ensureJumpFirst(ctx context.Context, bin string) error {
+	rules, err := outputRules(ctx, bin)
+	if err != nil {
+		return err
+	}
 	jump := []string{"-j", gaterun.ChainName}
-	if out, err := exec.CommandContext(ctx, bin, append([]string{"-C", "OUTPUT"}, jump...)...).CombinedOutput(); err != nil {
-		var ee *exec.ExitError
-		if !errors.As(err, &ee) || ee.ExitCode() != 1 {
-			return fmt.Errorf("%s -C OUTPUT -j %s: %w: %s", bin, gaterun.ChainName, err, out)
-		}
-		// Exit 1: the jump does not exist yet — fall through to the insert.
-	} else {
-		first, err := firstOutputRule(ctx, bin)
-		if err != nil {
-			return err
-		}
-		if slices.Equal(first, jump) {
-			return nil
-		}
-		if out, err := exec.CommandContext(ctx, bin, append([]string{"-D", "OUTPUT"}, jump...)...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%s -D OUTPUT -j %s: %w: %s", bin, gaterun.ChainName, err, out)
+	var pos []int // 1-based OUTPUT positions holding our jump
+	for i, r := range rules {
+		if slices.Equal(r, jump) {
+			pos = append(pos, i+1)
 		}
 	}
-	if out, err := exec.CommandContext(ctx, bin, append([]string{"-I", "OUTPUT", "1"}, jump...)...).CombinedOutput(); err != nil {
-		return fmt.Errorf("%s -I OUTPUT 1 -j %s: %w: %s", bin, gaterun.ChainName, err, out)
+	if len(pos) > 0 && pos[0] == 1 {
+		pos = pos[1:] // the first rule is already our jump; the rest are duplicates
+	} else {
+		if out, err := exec.CommandContext(ctx, bin, "-I", "OUTPUT", "1", "-j", gaterun.ChainName).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s -I OUTPUT 1 -j %s: %w: %s", bin, gaterun.ChainName, err, out)
+		}
+		for i := range pos {
+			pos[i]++ // everything shifted down by the insert
+		}
+	}
+	for i := len(pos) - 1; i >= 0; i-- {
+		if out, err := exec.CommandContext(ctx, bin, "-D", "OUTPUT", strconv.Itoa(pos[i])).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s -D OUTPUT %d: %w: %s", bin, pos[i], err, out)
+		}
 	}
 	return nil
 }
 
-// firstOutputRule returns the token slice of the first appended OUTPUT rule
-// (the arguments after "-A OUTPUT"), or nil when the chain has none.
-func firstOutputRule(ctx context.Context, bin string) ([]string, error) {
+// outputRules returns the token slices of the appended OUTPUT rules (the
+// arguments after "-A OUTPUT"), in chain order.
+func outputRules(ctx context.Context, bin string) ([][]string, error) {
 	out, err := exec.CommandContext(ctx, bin, "-S", "OUTPUT").Output()
 	if err != nil {
 		return nil, fmt.Errorf("%s -S OUTPUT: %w", bin, err)
 	}
+	var rules [][]string
 	for _, ln := range strings.Split(string(out), "\n") {
 		f := strings.Fields(ln)
 		if len(f) >= 2 && f[0] == "-A" && f[1] == "OUTPUT" {
-			return f[2:], nil
+			rules = append(rules, f[2:])
 		}
 	}
-	return nil, nil
+	return rules, nil
 }
 
 func (iptablesFirewall) List(ctx context.Context) (v4, v6 gaterun.Listing, err error) {
