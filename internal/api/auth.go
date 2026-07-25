@@ -23,7 +23,9 @@ func hashKey(key string) string {
 // under the same name. That gives rotation-by-restart semantics — changing
 // CONTROLPLANE_API_KEY and restarting cmd/controlplane revokes the previous
 // key instead of leaving it valid forever. All replicas must therefore share
-// one key value per name.
+// one key value per name; replicas booting with *different* values for one name
+// race, and api_keys_one_live resolves that by failing the loser's transaction
+// rather than leaving the name with two live credentials.
 func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) error {
 	hash := hashKey(key)
 	tx, err := pool.Begin(ctx)
@@ -31,16 +33,19 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO api_keys (id, name, key_hash) VALUES ($1, $2, $3)
-		 ON CONFLICT (key_hash) DO UPDATE SET revoked_at = NULL, name = EXCLUDED.name`,
-		domain.NewID("apikey").String(), name, hash); err != nil {
-		return err
-	}
+	// Revoke before inserting: api_keys_one_live admits one unrevoked row per
+	// name and Postgres enforces it per statement, so registering the
+	// replacement while the incumbent is still live would fail every rotation.
 	if _, err := tx.Exec(ctx,
 		`UPDATE api_keys SET revoked_at = now()
 		 WHERE name = $1 AND key_hash <> $2 AND revoked_at IS NULL`,
 		name, hash); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO api_keys (id, name, key_hash) VALUES ($1, $2, $3)
+		 ON CONFLICT (key_hash) DO UPDATE SET revoked_at = NULL, name = EXCLUDED.name`,
+		domain.NewID("apikey").String(), name, hash); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

@@ -30,7 +30,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 12
+const wantMigrations = 13
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -280,6 +280,85 @@ func TestWorkItemsSessionIndexExists(t *testing.T) {
 	}
 	if !exists {
 		t.Errorf("no index on work_items(session_id)")
+	}
+}
+
+// TestKeyRotationMigrationRepairsExistingDuplicates: 0013's one-live indexes
+// land on databases where the concurrent-mint race (#72) has already left a name
+// or an environment holding several live credentials. Migrate runs every pending
+// migration inside one transaction, so an unrepaired duplicate would fail the
+// whole startup migration and take the deployment down rather than just skipping
+// the index — 0013 must collapse the duplicates first, keeping the newest live
+// row per slot and leaving other slots alone.
+func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
+	ctx := context.Background()
+	pool := open(t, pgtest.FreshDB(t))
+	seedSessionChain(t, pool)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO environments (id, name, kind, config) VALUES ('env_2', 'e2', 'cloud', '{"type":"cloud"}')`); err != nil {
+		t.Fatalf("second environment: %v", err)
+	}
+
+	// Rewind to the pre-0013 schema, then stage the state the race produced.
+	for _, q := range []string{
+		`DROP INDEX api_keys_one_live`,
+		`DROP INDEX environment_keys_one_live`,
+		`DELETE FROM schema_migrations WHERE version = '0013_key_rotation_one_live.sql'`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("rewind %q: %v", q, err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		created := fmt.Sprintf("2026-01-0%d", i+1)
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO api_keys (id, name, key_hash, created_at) VALUES ($1, 'boot', $2, $3)`,
+			fmt.Sprintf("apikey_dup%d", i), fmt.Sprintf("ak_hash_%d", i), created); err != nil {
+			t.Fatalf("stage api_keys duplicate: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO environment_keys (id, environment_id, key_hash, created_at) VALUES ($1, 'env_1', $2, $3)`,
+			fmt.Sprintf("envkey_dup%d", i), fmt.Sprintf("ek_hash_%d", i), created); err != nil {
+			t.Fatalf("stage environment_keys duplicate: %v", err)
+		}
+	}
+	// Untouched neighbours: the repair is per slot, not a global revoke.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO api_keys (id, name, key_hash) VALUES ('apikey_other', 'other', 'ak_other')`); err != nil {
+		t.Fatalf("stage other name: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ('envkey_other', 'env_2', 'ek_other')`); err != nil {
+		t.Fatalf("stage other environment: %v", err)
+	}
+
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("re-applying 0013 over existing duplicates must repair them, not fail: %v", err)
+	}
+
+	// One live row per slot, and the survivor is the newest — the row a mint
+	// would have left live had the race not happened.
+	for _, tc := range []struct{ what, query, want string }{
+		{"api_keys/boot", `SELECT id FROM api_keys WHERE name = 'boot' AND revoked_at IS NULL`, "apikey_dup2"},
+		{"environment_keys/env_1", `SELECT id FROM environment_keys WHERE environment_id = 'env_1' AND revoked_at IS NULL`, "envkey_dup2"},
+		{"api_keys/other", `SELECT id FROM api_keys WHERE name = 'other' AND revoked_at IS NULL`, "apikey_other"},
+		{"environment_keys/env_2", `SELECT id FROM environment_keys WHERE environment_id = 'env_2' AND revoked_at IS NULL`, "envkey_other"},
+	} {
+		rows, err := pool.Query(ctx, tc.query)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.what, err)
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				t.Fatalf("%s scan: %v", tc.what, err)
+			}
+			ids = append(ids, id)
+		}
+		if len(ids) != 1 || ids[0] != tc.want {
+			t.Errorf("%s live rows = %v, want exactly [%s]", tc.what, ids, tc.want)
+		}
 	}
 }
 

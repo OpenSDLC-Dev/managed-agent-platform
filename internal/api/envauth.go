@@ -13,11 +13,14 @@ import (
 )
 
 // EnsureEnvironmentKey makes key the one live worker credential for an
-// environment: it inserts (or un-revokes) the hash and revokes every other
-// unrevoked key for the same environment_id. That gives one live
-// Authorization: Bearer credential per environment's work queue, with
+// environment: in one transaction it revokes every other unrevoked key for the
+// same environment_id, then inserts (or un-revokes) the hash. That gives one
+// live Authorization: Bearer credential per environment's work queue, with
 // rotation-by-re-mint semantics (registering a fresh value revokes the prior
-// one). Only the hash is stored.
+// one). Concurrent mints for one environment race, and
+// environment_keys_one_live resolves that by failing the loser's transaction
+// rather than leaving the queue with two live credentials. Only the hash is
+// stored.
 //
 // Issuance is a deliberate divergence: the reference mints environment keys in
 // its console with no public wire endpoint, so a self-hostable platform owns
@@ -30,25 +33,36 @@ func EnsureEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, environmentID
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// Insert or un-revoke this value. A key value is bound to one environment
-	// for life: on conflict we never re-point it (rebinding environment_id would
-	// silently move a live worker credential to a different environment). If the
-	// value already belongs to another environment, reject rather than escalate.
-	var boundEnv string
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)
-		 ON CONFLICT (key_hash) DO UPDATE SET revoked_at = NULL
-		 RETURNING environment_id`,
-		domain.NewID("envkey").String(), environmentID, hash).Scan(&boundEnv); err != nil {
-		return err
-	}
-	if boundEnv != environmentID {
-		return fmt.Errorf("api: environment key value is already bound to a different environment")
-	}
+	// Revoke before inserting: environment_keys_one_live admits one unrevoked
+	// row per environment and Postgres enforces it per statement, so registering
+	// the replacement while the incumbent is still live would fail every
+	// rotation.
 	if _, err := tx.Exec(ctx,
 		`UPDATE environment_keys SET revoked_at = now()
 		 WHERE environment_id = $1 AND key_hash <> $2 AND revoked_at IS NULL`,
 		environmentID, hash); err != nil {
+		return err
+	}
+	// Insert or un-revoke this value. A key value is bound to one environment for
+	// life: the conflict action never re-points it, and its WHERE confines the
+	// un-revoke to this environment's own row, so a value belonging to another
+	// environment is left entirely alone — updating no row, which is how the
+	// rejection is detected. (Without that guard the un-revoke could give the
+	// other environment a second live key and trip environment_keys_one_live,
+	// failing with a raw constraint error instead of this one.) The rollback also
+	// undoes the revoke above, so a rejected call leaves this environment's
+	// incumbent key untouched.
+	var boundEnv string
+	err = tx.QueryRow(ctx,
+		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)
+		 ON CONFLICT (key_hash) DO UPDATE SET revoked_at = NULL
+		   WHERE environment_keys.environment_id = EXCLUDED.environment_id
+		 RETURNING environment_id`,
+		domain.NewID("envkey").String(), environmentID, hash).Scan(&boundEnv)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && boundEnv != environmentID) {
+		return fmt.Errorf("api: environment key value is already bound to a different environment")
+	}
+	if err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

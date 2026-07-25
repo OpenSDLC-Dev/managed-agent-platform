@@ -182,8 +182,11 @@ The platform owns the *primitive*; you own the *lifecycle*. `EnsureEnvironmentKe
 makes a supplied value the one live worker credential for an environment: it
 stores only the hash, and registering a fresh value **revokes the prior one**
 (rotation-by-re-mint). A key value is bound to one environment for life; it is
-never silently re-pointed. There is **no expiry or TTL** — a key is live until
-re-minted or revoked — and there is **no automatic rotation**.
+never silently re-pointed. The schema enforces the invariant rather than trusting
+the helper: `environment_keys_one_live` (migration 0013) admits one unrevoked row
+per environment, so a second live credential — from concurrent mints, or from a
+hand-written `INSERT` — is rejected outright. There is **no expiry or TTL** — a
+key is live until re-minted or revoked — and there is **no automatic rotation**.
 
 What you own:
 
