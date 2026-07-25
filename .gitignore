@@ -40,3 +40,4 @@ model-providers.json
 # Parallel-session worktrees live here; without this every worktree's checkout
 # shows up as untracked files in the main one. See .worktreeinclude.
 .claude/worktrees/
+/gate
