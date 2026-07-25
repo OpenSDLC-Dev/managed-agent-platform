@@ -27,6 +27,15 @@ copy of an entry here.
 
 ### Added
 
+- **Per-session gate tokens — `internal/gatetoken`** (plan 12 slice 4, #50). The scoped bearer
+  credential a session's egress gate will present to the controlplane's internal gate-config endpoint.
+  `Mint` issues an opaque `gtk_` value (256 bits, internal-only — never on the `/v1` wire); `Ensure`
+  stores only its hash as the session's one live token, revoking any predecessor (a replacement gate
+  re-mints); `Authenticate` resolves a token to its session and fails closed once the session is
+  archived — there is no wall-clock expiry, so a controlplane outage longer than a TTL cannot be
+  misread as a revocation, and a deleted session's token cascades away. New migration
+  `0012_session_gate_tokens`. Lands inert — the endpoint that consumes it arrives in the next slice-4
+  sub-PR.
 - **Gate-side vault resolution — `vaultresolve.Credentials`** (plan 12 slice 4, #50). The decrypt
   half of vault credential injection: the same active `environment_variable` winners `Bindings`
   turns into sandbox placeholders, now also resolved to their decrypted secrets for the per-session
