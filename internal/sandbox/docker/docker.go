@@ -807,10 +807,14 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 	if containerGone(err) {
 		return c.gone()
 	}
+	tmp = gopath.Join(dir, tmp)
 	if err != nil {
+		// Whatever of the entry landed is nobody's file; the stream path sheds its
+		// residue the same way.
+		c.discard(ctx, tmp)
 		return err
 	}
-	return c.rename(ctx, gopath.Join(dir, tmp), path)
+	return c.rename(ctx, tmp, path)
 }
 
 // WriteFileStream streams size bytes from src into the sandbox as a tar built on
