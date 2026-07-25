@@ -15,6 +15,33 @@ copy of an entry here.
 
 ### Security
 
+- **The pinned actions moved to their current majors** (Dependabot's first batch:
+  [#187](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/187),
+  [#188](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/188),
+  [#189](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/189),
+  [#190](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/190)). The hardening entry below
+  deliberately pinned each action to the major it was already running — pinning is not an upgrade —
+  leaving the majors to land on their own and be read as the behavior changes they are. That is what
+  landed: `actions/checkout` 4.4.0 → 7.0.1, `actions/setup-go` 5.6.0 → 7.0.0,
+  `actions/upload-artifact` 4.6.2 → 7.0.1, `azure/setup-helm` 4.3.1 → 5.0.1, one PR per action as
+  `.github/dependabot.yml` intends, each pin a SHA that resolves to the tag its trailing comment
+  claims. The behavior changes that ride along, none of which required a workflow change beyond a
+  comment: **(1)** all four now run on Node 24 and want Actions Runner ≥ 2.327.1 — every job here is
+  `ubuntu-latest`, so only a self-hosted runner would need attention. **(2)** From `checkout` v6 a
+  persisted token lives in a credentials file under `$RUNNER_TEMP` wired into the job's git config
+  rather than as a `.git/config` extraheader; every checkout in this repository sets
+  `persist-credentials: false`, so nothing is persisted either way, but the comments that named the
+  old mechanism are reworded to match. **(3)** `checkout` v7 refuses to check out a fork PR's head
+  under `pull_request_target` and `workflow_run` — neither trigger exists here (CI is
+  `push`/`pull_request`, the eval run is `schedule`/`workflow_dispatch`), so no job changes.
+  **(4)** `setup-go` v6 exports `GOTOOLCHAIN=local` and prefers go.mod's `toolchain` directive over
+  its `go` directive; go.mod carries no `toolchain` line and asks for `go 1.26.0`, which is exactly
+  what the action installs, so the gate now runs on the toolchain it was handed and a `go` directive
+  raised past it would fail loudly instead of quietly downloading another. `upload-artifact` v7's new
+  direct upload (`archive: false`) is opt-in and both call sites keep the zipped default. The full
+  workflow — `ci`, `helm`, `compose`, `coverage` — is green on all four PRs; the copies of these
+  actions in `evals.yml` are exercised only by the nightly run.
+
 - **Actions supply-chain hardening: SHA-pinned workflows, Dependabot, and an environment-scoped model
   credential** (#96 review follow-ups). Three changes that only matter together, prompted by adding the
   first workflow in this repository that holds a live credential.
