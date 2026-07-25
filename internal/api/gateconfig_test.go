@@ -209,7 +209,11 @@ func settleEmission() { time.Sleep(500 * time.Millisecond) }
 // TestGateConfigEmitsCredentialHostUnreachableError: a credential whose
 // allowed_hosts includes a host the environment's networking policy does not
 // permit (the SDK's documented trigger) surfaces a session.error carrying the
-// credential_host_unreachable_error variant — once, not once per fetch.
+// credential_host_unreachable_error variant — best-effort once (deduped
+// against the events table), not once per fetch. The dedupe and no-conflict
+// branches are additionally pinned deterministically by the synchronous
+// white-box tests in gateconfig_internal_test.go; these HTTP tests prove the
+// async wiring.
 func TestGateConfigEmitsCredentialHostUnreachableError(t *testing.T) {
 	s := newTestServer(t)
 	agent := createAgent(t, s, map[string]any{"name": "a", "model": "claude-opus-4-8", "system": "base"})

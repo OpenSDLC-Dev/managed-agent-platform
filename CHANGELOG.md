@@ -80,8 +80,13 @@ copy of an entry here.
   `GET /internal/v1/gate/config` — a dedupe query plus an event append per conflicting credential,
   spent inside the gate client's 10-second fetch budget, where a slow events table could time out
   the config a live gate was blocking on over an advisory. The emission now runs detached from the
-  request: its own goroutine on an uncancellable context, so the response neither waits for it nor
-  kills it, and its errors stay warn-logged and swallowed. With it, the docs' cadence claim is
+  request: its own goroutine, unhooked from the request's cancellation (the response neither waits
+  for it nor kills it) but bounded by its own 10-second deadline — matching the budget the
+  synchronous path had, so a stalled events table cannot accumulate goroutines holding the shared
+  pool's connections — and handed only a non-secret projection of the credentials, so the detached
+  work never retains a plaintext secret past the response. Its errors stay warn-logged and
+  swallowed; the dedupe and no-conflict branches are additionally pinned by synchronous white-box
+  tests (a fire-and-forget goroutine's absence assertions can otherwise only false-pass). With it, the docs' cadence claim is
   aligned to what the code always did: emission is **best-effort once** per (session, credential)
   — the dedupe is a check-then-append against the events table, so a concurrent duplicate fetch
   can rarely double-emit (a rarity deliberately not worth a uniqueness constraint) — corrected in

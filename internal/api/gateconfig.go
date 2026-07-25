@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
@@ -74,13 +75,44 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 	// Advisory only, so it must never delay the config a live gate is blocking
 	// on (the gate client's fetch has a 10-second budget): the emission runs
 	// detached from this request — its own goroutine, unhooked from the
-	// request's cancellation (the response returning must not kill it).
-	go s.emitUnreachableCredentials(context.WithoutCancel(ctx), sessionID, cfg.Networking, creds)
+	// request's cancellation (the response returning must not kill it) but with
+	// its own deadline, restoring the bound the synchronous path had. Unbounded,
+	// a stalled events table would accumulate one goroutine per fetch (every
+	// 30s per gate), each holding pool connections the whole controlplane
+	// shares. The goroutine gets only the non-secret projection of the
+	// credentials, so it never retains plaintext secrets past the response.
+	probes := make([]unreachableProbe, 0, len(creds))
+	for _, c := range creds {
+		probes = append(probes, unreachableProbe{
+			credentialID: c.CredentialID, vaultID: c.VaultID,
+			unrestricted: c.Unrestricted, allowedHosts: c.AllowedHosts,
+		})
+	}
+	emitCtx, emitDone := context.WithTimeout(context.WithoutCancel(ctx), emitTimeout)
+	go func() {
+		defer emitDone()
+		s.emitUnreachableCredentials(emitCtx, sessionID, cfg.Networking, probes)
+	}()
 
 	return gateconfig.Config{
 		Networking:  cfg.Networking,
 		Credentials: toGateCredentials(creds),
 	}, nil
+}
+
+// emitTimeout bounds one detached advisory emission — matching the gate
+// client's own fetch budget, so the async path can never outlive what the
+// synchronous path was allowed.
+const emitTimeout = 10 * time.Second
+
+// unreachableProbe is the non-secret projection of a resolved credential that
+// conflict detection needs. The detached emission goroutine receives these
+// instead of vaultresolve.Credential so it never retains a plaintext secret.
+type unreachableProbe struct {
+	credentialID string
+	vaultID      string
+	unrestricted bool
+	allowedHosts []string
 }
 
 // emitUnreachableCredentials surfaces the reference's
@@ -94,11 +126,12 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 // each (session, credential) conflict is emitted best-effort once —
 // check-then-append, so concurrent duplicate fetches could double-emit an
 // advisory event; that rarity is not worth a uniqueness constraint.
-// Best-effort and asynchronous: the caller runs it in its own goroutine on an
-// uncancellable context, so the config a live gate is waiting for is neither
-// delayed nor failed over an advisory event — detection or append errors are
-// logged and swallowed.
-func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID string, net domain.Networking, creds []vaultresolve.Credential) {
+// Best-effort and asynchronous: the caller runs it in its own goroutine,
+// detached from the request's cancellation but bounded by emitTimeout, so the
+// config a live gate is waiting for is neither delayed nor failed over an
+// advisory event, and a stalled events table cannot accumulate goroutines —
+// detection or append errors are logged and swallowed.
+func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID string, net domain.Networking, creds []unreachableProbe) {
 	// Only a limited policy refuses hosts. The zero value is the wire default,
 	// unrestricted; an unknown type never reaches here (the API validates).
 	if net.Type != domain.NetLimited {
@@ -106,11 +139,11 @@ func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID strin
 	}
 	policy := egress.NewHostSet(net.AllowedHosts)
 	for _, c := range creds {
-		if c.Unrestricted {
+		if c.unrestricted {
 			continue // no allowed_hosts of its own; reach is the environment's call
 		}
 		var blocked []string
-		for _, e := range c.AllowedHosts {
+		for _, e := range c.allowedHosts {
 			if !policy.CoversEntry(e) {
 				blocked = append(blocked, e)
 			}
@@ -124,9 +157,9 @@ func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID strin
 			 WHERE session_id = $1 AND type = 'session.error'
 			   AND payload->'error'->>'type' = 'credential_host_unreachable_error'
 			   AND payload->'error'->>'credential_id' = $2)`,
-			sessionID, c.CredentialID).Scan(&already)
+			sessionID, c.credentialID).Scan(&already)
 		if err != nil {
-			slog.WarnContext(ctx, "gateconfig: unreachable-credential dedupe check failed", "credential", c.CredentialID, "error", err)
+			slog.WarnContext(ctx, "gateconfig: unreachable-credential dedupe check failed", "credential", c.credentialID, "error", err)
 			continue
 		}
 		if already {
@@ -135,8 +168,8 @@ func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID strin
 		payload, err := json.Marshal(map[string]any{
 			"error": map[string]any{
 				"type":          "credential_host_unreachable_error",
-				"credential_id": c.CredentialID,
-				"vault_id":      c.VaultID,
+				"credential_id": c.credentialID,
+				"vault_id":      c.vaultID,
 				// Hostnames only — never a secret, never a placeholder.
 				"message": "credential allowed_hosts include hosts the environment's networking policy does not permit: " +
 					strings.Join(blocked, ", "),
@@ -144,13 +177,13 @@ func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID strin
 			},
 		})
 		if err != nil {
-			slog.WarnContext(ctx, "gateconfig: unreachable-credential payload", "credential", c.CredentialID, "error", err)
+			slog.WarnContext(ctx, "gateconfig: unreachable-credential payload", "credential", c.credentialID, "error", err)
 			continue
 		}
 		if _, err := s.log.Append(ctx, domain.ID(sessionID), []events.NewEvent{{
 			Type: domain.EventSessionError, Payload: payload,
 		}}); err != nil {
-			slog.WarnContext(ctx, "gateconfig: unreachable-credential event append failed", "credential", c.CredentialID, "error", err)
+			slog.WarnContext(ctx, "gateconfig: unreachable-credential event append failed", "credential", c.credentialID, "error", err)
 		}
 	}
 }
