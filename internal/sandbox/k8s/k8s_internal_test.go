@@ -225,18 +225,31 @@ func TestProvisionReclaimsUnreadyPodItCreated(t *testing.T) {
 // image. It pins what the script does with its arguments; that the image carries
 // a shell able to run it is the live contract test's job.
 func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
-	run := func(t *testing.T, stdin []byte, declared int, path string) int {
+	// The temporary file the script writes through is named by Go, exactly as
+	// WriteFileStream names it, and handed back so a test can assert it is gone:
+	// every failure path in the script has to take its own residue with it.
+	run := func(t *testing.T, stdin []byte, declared int, path string, env ...string) (int, string) {
 		t.Helper()
-		cmd := exec.Command("/bin/bash", "-c", writeScript, "map-write", path, gopath.Dir(path), strconv.Itoa(declared))
+		tmp := gopath.Join(gopath.Dir(path), sandbox.TempName())
+		cmd := exec.Command("/bin/bash", "-c", writeScript, "map-write", path,
+			gopath.Dir(path), strconv.Itoa(declared), tmp)
+		cmd.Env = env // nil inherits, which is what every row but the shimmed one wants
 		cmd.Stdin = bytes.NewReader(stdin)
 		if err := cmd.Run(); err != nil {
 			var ee *exec.ExitError
 			if !errors.As(err, &ee) {
 				t.Fatalf("run writeScript: %v", err)
 			}
-			return ee.ExitCode()
+			return ee.ExitCode(), tmp
 		}
-		return 0
+		return 0, tmp
+	}
+	// gone asserts the script left no temporary file behind, whatever it decided.
+	gone := func(t *testing.T, tmp string) {
+		t.Helper()
+		if _, err := os.Lstat(tmp); !os.IsNotExist(err) {
+			t.Errorf("temporary file %s survived (%v), want it removed", tmp, err)
+		}
 	}
 	dir := t.TempDir()
 
@@ -245,63 +258,151 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 	t.Run("FullDelivery", func(t *testing.T) {
 		payload := []byte{0x00, 0x01, 0xff, 0xfe, 'h', 'i', 0x00}
 		path := dir + "/deep/nested/blob.bin"
-		if code := run(t, payload, len(payload), path); code != 0 {
+		code, tmp := run(t, payload, len(payload), path)
+		if code != 0 {
 			t.Fatalf("exit %d, want 0", code)
 		}
 		got, err := os.ReadFile(path)
 		if err != nil || !bytes.Equal(got, payload) {
 			t.Errorf("file = %v, %v; want %v", got, err, payload)
 		}
+		// The rename consumed it; nothing hidden is left beside the file.
+		gone(t, tmp)
 	})
 
 	// The #103 signature: the stdin stream delivered nothing, the redirection
 	// truncated the file anyway, and `cat` exited 0. Without the length check
 	// this is indistinguishable from a successful write.
 	t.Run("NothingDelivered", func(t *testing.T) {
-		if code := run(t, nil, 4, dir+"/lost"); code != writeShort {
+		code, tmp := run(t, nil, 4, dir+"/lost")
+		if code != writeShort {
 			t.Errorf("exit %d, want %d (short write)", code, writeShort)
 		}
+		gone(t, tmp)
 	})
 
-	// A stream that lost only its tail must not read as success either.
+	// A stream that lost only its tail must not read as success either — and what
+	// did arrive must not be at the target. This is the atomicity guarantee at its
+	// narrowest: a write that failed leaves the file it was replacing untouched,
+	// where writing straight to the target truncated it before the loss was even
+	// visible (#71).
 	t.Run("PartialDelivery", func(t *testing.T) {
-		if code := run(t, []byte("kept"), 100, dir+"/partial"); code != writeShort {
+		path := dir + "/partial"
+		if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
+			t.Fatalf("seed the target: %v", err)
+		}
+		code, tmp := run(t, []byte("kept"), 100, path)
+		if code != writeShort {
 			t.Errorf("exit %d, want %d (short write)", code, writeShort)
 		}
+		if got, err := os.ReadFile(path); err != nil || string(got) != "original" {
+			t.Errorf("target = %q, %v; want %q untouched", got, err, "original")
+		}
+		gone(t, tmp)
 	})
 
 	// Writing no bytes is a legitimate write of an empty file, not a loss.
 	t.Run("EmptyWriteIsNotShort", func(t *testing.T) {
 		path := dir + "/empty"
-		if code := run(t, nil, 0, path); code != 0 {
+		code, tmp := run(t, nil, 0, path)
+		if code != 0 {
 			t.Fatalf("exit %d, want 0", code)
 		}
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("stat empty file: %v", err)
 		}
+		gone(t, tmp)
 	})
 
-	// A write that cannot land at all keeps its own failure code — the length
-	// check must not swallow it and report a short write instead.
-	t.Run("UnwritablePathIsNotShort", func(t *testing.T) {
-		if code := run(t, []byte("x"), 1, dir); code == 0 || code == writeShort {
-			t.Errorf("exit %d writing onto a directory, want a non-zero code other than %d", code, writeShort)
+	// A target that is a directory is refused by name, because the rename would
+	// otherwise move the file *into* it, and the docker daemon's extraction would
+	// delete it outright. The directory and its contents survive (#71).
+	t.Run("TargetIsADirectory", func(t *testing.T) {
+		held := dir + "/adir/inside"
+		if err := os.MkdirAll(gopath.Dir(held), 0o755); err != nil {
+			t.Fatalf("stage a directory: %v", err)
+		}
+		if err := os.WriteFile(held, []byte("kept"), 0o644); err != nil {
+			t.Fatalf("stage a file inside it: %v", err)
+		}
+		code, tmp := run(t, []byte("x"), 1, gopath.Dir(held))
+		if code != sandbox.ExitPathIsDirectory {
+			t.Errorf("exit %d writing onto a directory, want %d", code, sandbox.ExitPathIsDirectory)
+		}
+		if got, err := os.ReadFile(held); err != nil || string(got) != "kept" {
+			t.Errorf("file inside the directory = %q, %v; want it untouched", got, err)
+		}
+		gone(t, tmp)
+	})
+
+	// The target is asked about twice, and this is the second answer's row. The race
+	// it defends against cannot be interleaved from a test — something in the
+	// sandbox would have to make the target a directory in the instant between the
+	// first check and the move — so what a racing `mv` *does* is staged instead:
+	// this one finds the destination a directory and puts the file inside it,
+	// exiting 0, exactly as the real one would. The write must not report that as a
+	// success, and must not leave the file it never asked to put there.
+	t.Run("TargetBecameADirectoryDuringTheMove", func(t *testing.T) {
+		realMV, err := exec.LookPath("mv")
+		if err != nil {
+			t.Fatalf("find the real mv: %v", err)
+		}
+		bin := t.TempDir()
+		shim := "#!/bin/sh\nmkdir -p \"$3\" && exec " + realMV + " \"$2\" \"$3\"/\n"
+		if err := os.WriteFile(bin+"/mv", []byte(shim), 0o755); err != nil {
+			t.Fatalf("stage the racing mv: %v", err)
+		}
+		path := dir + "/raced"
+		code, tmp := run(t, []byte("x"), 1, path, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if code != sandbox.ExitPathIsDirectory {
+			t.Errorf("exit %d, want %d — the move landed inside a directory", code, sandbox.ExitPathIsDirectory)
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			t.Fatalf("read the directory the move landed in: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("the directory holds %d entries, want the file the move put there removed", len(entries))
+		}
+		gone(t, tmp)
+	})
+
+	// A path blocked by a non-directory is the caller's to fix, and `mkdir -p` is
+	// where that shows up: the shared shell names it so the model gets a tool error
+	// rather than the executor getting a sandbox fault (#71).
+	t.Run("PathBlockedByAFile", func(t *testing.T) {
+		if err := os.WriteFile(dir+"/plain", []byte("i am a file"), 0o644); err != nil {
+			t.Fatalf("stage a regular file: %v", err)
+		}
+		for _, path := range []string{dir + "/plain/child", dir + "/plain/deeper/child"} {
+			if code, _ := run(t, []byte("x"), 1, path); code != sandbox.ExitPathNotDirectory {
+				t.Errorf("exit %d for %s, want %d", code, path, sandbox.ExitPathNotDirectory)
+			}
 		}
 	})
 
-	// The count comes from the stream, not from re-reading the target, so a
-	// destination that keeps nothing is still a delivered write. Re-stating the
-	// path here would report 0 bytes and fail a write that in fact succeeded —
-	// and the docker backend accepts this, so the two would diverge.
-	t.Run("DestinationThatKeepsNothing", func(t *testing.T) {
-		if code := run(t, []byte("swallowed"), 9, "/dev/null"); code != 0 {
-			t.Errorf("exit %d writing to /dev/null, want 0", code)
+	// A write that cannot land for a reason of the sandbox's own keeps its own
+	// failure code — the length check must not swallow it and report a short write,
+	// and the path checks must not claim it as theirs.
+	t.Run("UnwritableDirectoryIsNotShort", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores the write bit, so this proves nothing")
+		}
+		locked := dir + "/locked"
+		if err := os.Mkdir(locked, 0o500); err != nil {
+			t.Fatalf("stage a read-only directory: %v", err)
+		}
+		code, _ := run(t, []byte("x"), 1, locked+"/denied")
+		if code == 0 || code == writeShort ||
+			code == sandbox.ExitPathNotDirectory || code == sandbox.ExitPathIsDirectory {
+			t.Errorf("exit %d writing into a read-only directory, want a plain failure", code)
 		}
 	})
 
-	// `tee` needs only write permission; re-reading the target would need read
-	// permission the sandbox user may not have on a file it can legitimately
-	// write.
+	// `tee` needs only write permission on the directory: the bytes go to a fresh
+	// temporary file and are renamed over the target, so a target the sandbox user
+	// cannot read is still replaceable — and re-reading it to count what landed
+	// would need a read permission it may not have.
 	t.Run("WriteOnlyFile", func(t *testing.T) {
 		path := dir + "/writeonly"
 		if err := os.WriteFile(path, nil, 0o200); err != nil {
@@ -310,9 +411,11 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root ignores the read bit, so this proves nothing")
 		}
-		if code := run(t, []byte("kept"), 4, path); code != 0 {
+		code, tmp := run(t, []byte("kept"), 4, path)
+		if code != 0 {
 			t.Errorf("exit %d writing a write-only file, want 0", code)
 		}
+		gone(t, tmp)
 	})
 }
 
@@ -434,6 +537,16 @@ func TestReadScriptMarksWhatItSent(t *testing.T) {
 		if err := exec.Command("mkfifo", dir+"/fifo").Run(); err != nil {
 			t.Fatalf("stage fifo: %v", err)
 		}
+		// A directory and a regular file whose name is that directory's plus a
+		// newline. Asking the shared shell about the *file*'s child must not be
+		// answered for the *directory* — which is what happens the moment the path
+		// travels through a command substitution on its way there.
+		if err := os.Mkdir(dir+"/nl", 0o755); err != nil {
+			t.Fatalf("stage dir: %v", err)
+		}
+		if err := os.WriteFile(dir+"/nl\n", nil, 0o600); err != nil {
+			t.Fatalf("stage its newline-suffixed sibling: %v", err)
+		}
 		for _, c := range []struct {
 			name string
 			path string
@@ -441,6 +554,12 @@ func TestReadScriptMarksWhatItSent(t *testing.T) {
 			want int
 		}{
 			{"Missing", dir + "/nope", sandbox.MaxFileBytes, readNotExist},
+			// Missing for a reason the model can act on: a file is in the way. It
+			// must not read as a plain absence, which would invite a mkdir that
+			// cannot work either (#71).
+			{"BlockedByAFile", gate + "/child", sandbox.MaxFileBytes, sandbox.ExitPathNotDirectory},
+			{"DeeperBlockedByAFile", gate + "/x/y", sandbox.MaxFileBytes, sandbox.ExitPathNotDirectory},
+			{"BlockedByAFileNamedWithANewline", dir + "/nl\n/child", sandbox.MaxFileBytes, sandbox.ExitPathNotDirectory},
 			{"Directory", dir + "/sub", sandbox.MaxFileBytes, readIsDir},
 			{"Symlink", dir + "/link", sandbox.MaxFileBytes, readNotRegular},
 			{"Fifo", dir + "/fifo", sandbox.MaxFileBytes, readNotRegular},

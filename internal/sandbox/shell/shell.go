@@ -126,11 +126,16 @@ func Run(ctx context.Context, sb sandbox.Sandbox, session, id domain.ID, req Req
 		// `$(<head)`, so an empty file is no committed snapshot and the next call
 		// starts from a fresh shell in the workdir. The container's other files are
 		// untouched, as the reference's restart leaves them. This goes through the
-		// sandbox's file API rather than a `rm` in the container: a `rm` resolves
-		// against the container's PATH, and a prior call that dropped a program
-		// named `rm` earlier in it would make the reset exit 0 without removing
-		// anything — a restart that reports success and resets nothing. WriteFile
-		// has no shell and no PATH; its error, not a command's exit code, gates it.
+		// sandbox's file API rather than a `rm` in the *session's* shell, which
+		// carries whatever the agent has done to it — its PATH, its functions, its
+		// aliases — so a call that dropped a program named `rm` earlier in that PATH
+		// would make the reset exit 0 without removing anything: a restart that
+		// reports success and resets nothing. WriteFile runs no session shell and is
+		// gated on its own error rather than a command's exit code. It is not
+		// immune, though: since #71 it renames a temporary file into place, so it
+		// resolves `mv` against the container's PATH, and an agent that plants one
+		// can fool its own restart the same way. Closing that would take a file API
+		// that never shells out at all, which neither backend has.
 		if err := sb.WriteFile(ctx, state+"/head", nil); err != nil {
 			return Result{}, err
 		}

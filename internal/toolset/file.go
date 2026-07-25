@@ -123,12 +123,18 @@ func (r Runner) edit(ctx context.Context, raw json.RawMessage) (Result, error) {
 // they are tool results. Anything else is the sandbox itself failing, and that
 // is the executor's to handle. The path in the message is the one the model
 // used, not the resolved one: it is the name the model can act on.
+//
+// The distinction is not cosmetic: a fault left unclassified reaches the executor,
+// which stops the tool set and abandons the work item to lease reclaim — so the
+// same doomed call is retried until the lease runs out (#71).
 func fileFault(verb, display string, err error) (Result, error) {
 	switch {
 	case errors.Is(err, sandbox.ErrFileNotExist):
 		return failf("%s %s: no such file or directory", verb, display)
 	case errors.Is(err, sandbox.ErrIsDirectory), errors.Is(err, sandbox.ErrNotRegularFile):
 		return failf("%s: %s is not a regular file", verb, display)
+	case errors.Is(err, sandbox.ErrNotDirectory):
+		return failf("%s %s: not a directory", verb, display)
 	case errors.Is(err, sandbox.ErrFileTooLarge):
 		return failf("%s: %s exceeds the %d-byte limit. Use bash (head/tail/sed) to work on a slice.",
 			verb, display, sandbox.MaxFileBytes)

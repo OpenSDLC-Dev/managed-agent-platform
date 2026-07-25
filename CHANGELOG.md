@@ -141,6 +141,76 @@ copy of an entry here.
 
 ### Fixed
 
+- **A write to a blocked path is now the model's error, a write onto a directory no longer destroys
+  it, and both backends' writes are atomic** ([#71](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/71)).
+  Three defects in the sandbox file primitives, all of them where the two backends had drifted apart:
+  - **A path blocked by a non-directory** (`write file_path="/a/regular/file/child"`) reached
+    `internal/toolset`'s `fileFault` as an unclassified backend error — the docker daemon's raw
+    `http 400: extraction point is not a directory`, its `http 500: not a directory` one level
+    deeper, a bare `exit 1` from the k8s pod — so the executor read a *path* mistake as the sandbox
+    failing: it stopped the tool set and abandoned the work item to lease reclaim, and the same
+    doomed write was retried until the lease ran out. It is now `sandbox.ErrNotDirectory`, the
+    ENOTDIR of the existing `ErrFileNotExist`/`ErrIsDirectory`/`ErrNotRegularFile` family, and a
+    tool result the model can act on. Reads answer alike, where the backends had disagreed outright
+    (docker raised the daemon's lstat error, k8s called it a plain absence) — `edit` reads before it
+    writes, so both halves had to be recoverable.
+  - **A write *onto* an existing directory** returned `nil` from the docker backend, and the
+    daemon's archive extraction had deleted the directory and put the file where it stood: every
+    file it held, gone, on a write the tool reported as a success. It is now `ErrIsDirectory` and
+    the directory is left whole. (The k8s backend refused it already, but as an unclassified
+    `exit 1`.)
+  - **Neither backend's write was atomic.** Bytes went straight at the target — docker extracting a
+    tar entry over it, k8s `tee`-ing into it — so a transfer that failed part way through left the
+    target truncated to whatever had arrived: a seeded file holding `original` came back holding
+    `hi` after a failed 100-byte write, and a failed write of a *new* file created one. Both now
+    land the bytes under a temporary name in the target's own directory and `rename` them into
+    place (the reference's temp-write-and-rename), so a failed write leaves the target as it was —
+    or absent, where it was absent — and every failure the write itself reports takes its residue
+    with it rather than stranding a partial mount on the sandbox's disk. (A failure of the *call*
+    rather than of the write — a dead sandbox, a transport error — can still leave a temporary file,
+    which dies with the sandbox.)
+
+  What the two backends must not drift on lives in one place, `internal/sandbox/filefault.go`: the
+  `__map_path_fault` shell they both embed (it walks to the nearest existing component of a path and
+  exits on a non-directory, because the block can be any distance above the leaf) and the temporary
+  name they both write under. That shell is written in bash builtins alone — no `dirname` — because
+  the sandbox filesystem is the agent's: a planted `dirname` that echoed its argument back would
+  spin the walk forever, and one that lied would answer for it. `mv` and `rm` have no builtin
+  equivalent and are resolved through the container's PATH, so an agent can still make its own file
+  tools misreport; that is the sandbox being the agent's own rather than a boundary between
+  sessions, and the two docs that claimed the file primitives were shell-free (docs/ARCHITECTURE.md's
+  toolset row, and the bash tool's restart comment) now say what is true.
+
+  The shared `sandboxtest` contract suite pins the three regressions on both backends — four new
+  rows, and the three that cover the defects above failed on both backends before the fix — while
+  the decisions a container makes expensive to stage are pinned against a real shell instead: the
+  shared shell's own tests cover a path component ending in a newline and a planted `dirname`, and
+  the k8s script tests cover a target that became a directory mid-move (staged with a shimmed `mv`,
+  since the race itself cannot be interleaved). One k8s-only test went away with the fix: it
+  asserted that a write onto a directory fails there *because* "the docker backend surfaces the
+  daemon's error the same way", which was never true; the shared row now holds both backends to it.
+
+  **Four consequences of writing by rename**, all of them documented on the `Sandbox` interface:
+  a symlink at the target is supplanted by a regular file and what it pointed at is untouched (a
+  symlink to a *directory* is a directory here, and refused as one); the parent directory must be
+  writable even where the target already is; the target's permission bits are not preserved
+  ([#204](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/204) — the Claude Code
+  harness chmods its temporary file to the target's mode first, a harness-design observation rather
+  than a wire behavior of the managed-agents reference); and a target that cannot be renamed onto at
+  all, such as a file bind-mounted into the sandbox, now fails rather than being written through
+  ([#205](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/205) — both backends agree
+  on that now, where only k8s used to succeed). Docker writes also cost one extra exec each — 2.2 ms
+  to 15.3 ms per buffered write, measured — which is what
+  [#206](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/206) is about for
+  materializations that write thousands of files one at a time.
+
+  Two docs/DIVERGENCES.md entries move with it. The "write / edit built-in tools — atomicity"
+  divergence is **converged rather than deleted** — it recorded the platform as non-atomic *because*
+  the sandbox extracted a tar onto the target, which is exactly what changed — and now records the
+  two residuals the rename creates instead (#204, #205). The file-materialization entry's first
+  accepted residual said an atomic `WriteFileStream` "would need a rename primitive the `Sandbox`
+  seam does not yet have"; it has one now, and that residual is closed.
+
 - **The unreachable-credential advisory no longer rides the gate-config response** (plan 12
   follow-up, #50). `credential_host_unreachable_error` detection ran synchronously inside
   `GET /internal/v1/gate/config` — a dedupe query plus an event append per conflicting credential,

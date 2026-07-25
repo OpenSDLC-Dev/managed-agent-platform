@@ -744,6 +744,17 @@ func (c *container) ReadFile(ctx context.Context, path string) ([]byte, error) {
 		if statusIs(err, 404) && !containerGone(err) {
 			return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
 		}
+		if !containerGone(err) {
+			// The daemon reports a path blocked by a non-directory as a plain 500
+			// carrying its own lstat message, so what the read hit is asked in the
+			// sandbox rather than parsed out of that message. It is the read's
+			// *parent* chain that is in question — the file itself being a regular
+			// file is the normal case here — and only a read that already failed
+			// asks, so nothing is spent on the path that works.
+			if fault := c.pathFault(ctx, gopath.Dir(path)); fault != nil {
+				return nil, fmt.Errorf("%s: %w", path, fault)
+			}
+		}
 		return nil, c.wrap(err)
 	}
 	defer stream.Close()
@@ -770,28 +781,44 @@ func (c *container) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	return data, nil
 }
 
+// WriteFile lands the bytes as a one-entry tar under a temporary name in the
+// target's directory and renames them into place, so a transfer that fails part
+// way through leaves the target as it was rather than truncated.
 func (c *container) WriteFile(ctx context.Context, path string, data []byte) error {
-	tarball, err := tarFile(gopath.Base(path), data)
+	dir, tmp := gopath.Dir(path), sandbox.TempName()
+	tarball, err := tarFile(tmp, data)
 	if err != nil {
 		return err
 	}
-	dir := gopath.Dir(path)
 	err = c.api.putArchive(ctx, c.id, dir, bytes.NewReader(tarball))
-	if statusIs(err, 404) && !containerGone(err) {
-		// The archive endpoint does not create parents; only a missing
-		// directory can produce this 404, so make it and try once more.
+	if err != nil && !containerGone(err) {
+		// The archive endpoint creates nothing and refuses an unusable extraction
+		// point three ways: 404 for a directory that is missing, 400 for one that
+		// is a non-directory, 500 for one whose own ancestor is. Making the
+		// directory answers the first and classifies the rest, so all three go
+		// through mkdirAll — and only the container's absence is ErrNotFound,
+		// because calling a wrong path a missing sandbox would send the executor
+		// looking for the wrong failure.
 		if mkErr := c.mkdirAll(ctx, dir); mkErr != nil {
+			// A put that was refused outright landed nothing, but one that died
+			// mid-transfer left a piece of the entry behind; shed it on the way out
+			// rather than let the directory keep it.
+			c.discard(ctx, gopath.Join(dir, tmp))
 			return mkErr
 		}
 		err = c.api.putArchive(ctx, c.id, dir, bytes.NewReader(tarball))
 	}
-	// Only the container's absence is ErrNotFound here — the other 404 means
-	// the path is wrong, and calling that a missing sandbox would send the
-	// executor looking for the wrong failure.
 	if containerGone(err) {
 		return c.gone()
 	}
-	return err
+	tmp = gopath.Join(dir, tmp)
+	if err != nil {
+		// Whatever of the entry landed is nobody's file; the stream path sheds its
+		// residue the same way.
+		c.discard(ctx, tmp)
+		return err
+	}
+	return c.rename(ctx, tmp, path)
 }
 
 // WriteFileStream streams size bytes from src into the sandbox as a tar built on
@@ -799,32 +826,102 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 // Unlike WriteFile it cannot replay the body for the mkdir-and-retry dance (a
 // one-shot object-storage reader is drained by the first attempt), so it
 // pre-creates the parent directory instead — a mount write is rare enough that
-// the extra exec is immaterial. The tar writer enforces the byte count: a src
-// yielding fewer or more than size bytes fails the archive rather than writing a
-// truncated file.
+// the extra exec is immaterial, and pre-creating is also what classifies a blocked
+// path here. The tar writer enforces the byte count: a src yielding fewer or more
+// than size bytes fails the archive rather than writing a truncated file, and
+// because the bytes were landing under a temporary name, that failure takes the
+// partial file with it instead of leaving it at the target.
 func (c *container) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
 	dir := gopath.Dir(path)
 	if err := c.mkdirAll(ctx, dir); err != nil {
 		return err
 	}
+	tmp := gopath.Join(dir, sandbox.TempName())
 	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(streamTarFile(pw, gopath.Base(path), src, size)) }()
+	go func() { pw.CloseWithError(streamTarFile(pw, gopath.Base(tmp), src, size)) }()
 	err := c.api.putArchive(ctx, c.id, dir, pr)
 	if containerGone(err) {
 		return c.gone()
 	}
-	return err
+	if err != nil {
+		// However much of the payload landed, it is nobody's file. Leaving it
+		// would cost a failed 500 MB mount 500 MB of the sandbox's disk.
+		c.discard(ctx, tmp)
+		return err
+	}
+	return c.rename(ctx, tmp, path)
 }
 
+// rename puts a landed temporary file at its target — the step that makes a write
+// atomic — after refusing the one target a rename would quietly do the wrong thing
+// with. `mv -f file dir` moves the file *into* the directory, so a target that is
+// one is answered with the sentinel a read of a directory gets, and the temporary
+// file is removed rather than left behind. The daemon's own extraction, given the
+// same target, deletes the directory and puts the file where it was (#71).
+func (c *container) rename(ctx context.Context, tmp, path string) error {
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: fmt.Sprintf(
+		"if [ -d %[2]s ]; then rm -f %[1]s; exit %[3]d; fi\n"+
+			"mv -f %[1]s %[2]s || { rm -f %[1]s; exit 1; }\n"+
+			// Asked again, because the first answer describes a moment that has
+			// passed: something in the sandbox can make the target a directory in
+			// between, and then the move puts the file *inside* it and exits 0 —
+			// a reported success that wrote nothing where the caller asked.
+			"if [ -d %[2]s ]; then rm -f %[2]s/%[4]s; exit %[3]d; fi",
+		shellQuote(tmp), shellQuote(path), sandbox.ExitPathIsDirectory, gopath.Base(tmp))})
+	if err != nil {
+		// The bytes are landed and unnamed, and this exec is how they were to be
+		// named; shed them rather than leave the sandbox carrying a payload nothing
+		// will ever claim.
+		c.discard(ctx, tmp)
+		return err
+	}
+	switch res.ExitCode {
+	case 0:
+		return nil
+	case sandbox.ExitPathIsDirectory:
+		return fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
+	default:
+		return fmt.Errorf("docker: write %s: exit %d: %s", path, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+}
+
+// pathFault asks the sandbox whether a non-directory is what blocked path,
+// returning ErrNotDirectory when it is and nil when it is not. Nil is also what a
+// probe that could not run itself returns: the caller has a real failure to report
+// already, and a guess about it would be worse than the daemon's own message.
+func (c *container) pathFault(ctx context.Context, path string) error {
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.PathFaultShell +
+		fmt.Sprintf("__map_path_fault %s\nexit 0", shellQuote(path))})
+	if err == nil && res.ExitCode == sandbox.ExitPathNotDirectory {
+		return sandbox.ErrNotDirectory
+	}
+	return nil
+}
+
+// discard removes a temporary file a failed write left behind. Its own failure is
+// not worth reporting over the write's: the caller already has the error that
+// matters, and a sandbox that cannot delete the file is about to be thrown away.
+func (c *container) discard(ctx context.Context, tmp string) {
+	_, _ = c.Exec(ctx, sandbox.ExecRequest{Command: "rm -f " + shellQuote(tmp)})
+}
+
+// mkdirAll makes the directory a write needs, and is where a path blocked by a
+// non-directory is named: `mkdir -p` fails there, and the shared shell says
+// whether that is why (both backends embed it, so both answer alike).
 func (c *container) mkdirAll(ctx context.Context, dir string) error {
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: "mkdir -p " + shellQuote(dir)})
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.PathFaultShell +
+		fmt.Sprintf("mkdir -p %[1]s || { __map_path_fault %[1]s; exit 1; }", shellQuote(dir))})
 	if err != nil {
 		return err
 	}
-	if res.ExitCode != 0 {
+	switch res.ExitCode {
+	case 0:
+		return nil
+	case sandbox.ExitPathNotDirectory:
+		return fmt.Errorf("%s: %w", dir, sandbox.ErrNotDirectory)
+	default:
 		return fmt.Errorf("docker: mkdir -p %s: exit %d: %s", dir, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-	return nil
 }
 
 // Destroy removes the sandbox and, when it is half of a pair, its egress gate.
