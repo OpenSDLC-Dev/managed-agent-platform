@@ -416,6 +416,22 @@ func TestAlreadyAnsweredIsNoOp(t *testing.T) {
 	}
 }
 
+// countEventReads returns a counter of the scan's wire cost and the handler
+// wrapper that feeds it: one tick per GET of the session events list, which is
+// the only request the diff makes. Both bound tests share it so they cannot
+// drift into counting different things.
+func countEventReads() (*atomic.Int32, func(http.Handler) http.Handler) {
+	var reads atomic.Int32
+	return &reads, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events") {
+				reads.Add(1)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // TestScanIsBoundedByTheTrailingTurn: the outstanding set is always the last
 // suspended turn's, so the wire scan must cost the same on a long session as on
 // a fresh one. With sixty answered tool calls behind it, reading the one
@@ -424,15 +440,7 @@ func TestAlreadyAnsweredIsNoOp(t *testing.T) {
 // oldest-first full scan paged the whole history twice (seven requests here,
 // growing with the session), which is what #76 bounds.
 func TestScanIsBoundedByTheTrailingTurn(t *testing.T) {
-	var reads atomic.Int32
-	count := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events") {
-				reads.Add(1)
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
+	reads, count := countEventReads()
 	sb := &fakeSandbox{}
 	h := newHarnessWrapped(t, sb, count)
 	h.answeredHistory(t, 60)
@@ -467,15 +475,7 @@ func TestScanIsBoundedByTheTrailingTurn(t *testing.T) {
 // still hand the tools back in log order across the page break.
 func TestScanPagesATurnWiderThanOnePage(t *testing.T) {
 	const tools = toolScanPageSize + 5
-	var reads atomic.Int32
-	count := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events") {
-				reads.Add(1)
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
+	reads, count := countEventReads()
 	sb := &fakeSandbox{}
 	h := newHarnessWrapped(t, sb, count)
 	h.answeredHistory(t, 30)

@@ -103,14 +103,14 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 }
 
 // toolScanPageSize is how many events one page of the scan below requests. The
-// walk needs the trailing turn only — its tool uses plus whatever already
-// answers them, at most 2N+1 events for a turn of N parallel tools — so a single
-// page covers a fresh suspension of up to 19 parallel tools, and a wider turn
-// (or a reclaim whose answered results are on the wire too) simply pages on. The
-// size caps what one page over-reads, which is the cost that matters: tool
-// inputs and results carry file contents. It is sent explicitly rather than left
-// to the server's default: the bound is this worker's, and it holds against any
-// wire-compatible control plane.
+// walk reads the trailing turn only, which for a turn of N parallel tools is
+// N+1 events on a fresh suspension (the uses plus the boundary result) and at
+// most 2N+1 on a reclaim (their answered results are on the wire too) — so one
+// page of 20 finishes in a single round trip up to N=19 fresh, N=9 reclaimed,
+// and anything wider simply pages on. The size caps what a page over-reads,
+// which is the cost that matters: tool inputs and results carry file contents.
+// It is sent explicitly rather than left to the server's default: the bound is
+// this worker's, and it holds against any wire-compatible control plane.
 const toolScanPageSize = 20
 
 // unansweredToolUses reads the session's event log over the wire and returns the
