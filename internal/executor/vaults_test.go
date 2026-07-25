@@ -51,6 +51,10 @@ func (h *harness) addEnvCred(t *testing.T, vaultID, secretName string, archived 
 // invalid env-var name (which would fault the provision) or an archived one is
 // left out rather than injected.
 func TestProvisionInjectsVaultPlaceholders(t *testing.T) {
+	// The Spec.Env the executor hands the provider is just the vault placeholders;
+	// the gate's proxy variables (when a gate is configured) are the Docker
+	// provider's own injection, not part of this map, so this test needs no gate
+	// config.
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
 	vaultID := h.attachVault(t)

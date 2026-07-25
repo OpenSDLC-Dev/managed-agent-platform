@@ -129,7 +129,7 @@ func execDaemon(t *testing.T, fe fakeExec) *container {
 	// Registered after fakeDaemon's, so it runs before it: cleanups are LIFO,
 	// and the test server will not shut down while a handler is still held.
 	t.Cleanup(func() { close(held) })
-	return p.attach("abc", "/workspace")
+	return p.attach("abc", "/workspace", "")
 }
 
 func TestNewResolvesDaemonAddress(t *testing.T) {
@@ -413,7 +413,7 @@ func TestDestroyIsIdempotentAndSurfacesRealFailures(t *testing.T) {
 	c := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `{"message":"No such container: gone"}`)
-	}).attach("gone", "/workspace")
+	}).attach("gone", "/workspace", "")
 	if err := c.Destroy(context.Background()); err != nil {
 		t.Errorf("destroy of a missing container: %v, want nil", err)
 	}
@@ -421,7 +421,7 @@ func TestDestroyIsIdempotentAndSurfacesRealFailures(t *testing.T) {
 	c = fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		io.WriteString(w, `{"message":"removal in progress"}`)
-	}).attach("busy", "/workspace")
+	}).attach("busy", "/workspace", "")
 	if err := c.Destroy(context.Background()); err == nil {
 		t.Error("a failed removal reported success")
 	}
@@ -434,7 +434,7 @@ func TestGoneContainerMapsToErrNotFound(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `{"message":"No such container: gone"}`)
 	})
-	c := p.attach("gone", "/workspace")
+	c := p.attach("gone", "/workspace", "")
 	if _, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true"}); !errors.Is(err, sandbox.ErrNotFound) {
 		t.Errorf("exec: %v, want ErrNotFound", err)
 	}
@@ -466,7 +466,7 @@ func TestExecWaitsForTheExitCode(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace")
+	c := p.attach("abc", "/workspace", "")
 	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "echo hi"})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
@@ -701,7 +701,7 @@ func TestPathProseCannotFakeAMissingSandbox(t *testing.T) {
 		// "No such container".
 		io.WriteString(w, `{"message":"Could not find the file /workspace/No such container/f in container abc"}`)
 	})
-	c := p.attach("abc", "/workspace")
+	c := p.attach("abc", "/workspace", "")
 	_, err := c.ReadFile(context.Background(), "/workspace/No such container/f")
 	if !errors.Is(err, sandbox.ErrFileNotExist) {
 		t.Errorf("read: %v, want ErrFileNotExist", err)
@@ -720,7 +720,7 @@ func TestStaleExecIsNotAMissingSandbox(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `{"message":"No such exec instance: e1"}`)
 	})
-	c := p.attach("abc", "/workspace")
+	c := p.attach("abc", "/workspace", "")
 	_, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true"})
 	if err == nil || errors.Is(err, sandbox.ErrNotFound) {
 		t.Errorf("exec: %v, want the daemon's own error", err)
@@ -754,7 +754,7 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	c := p.attach("abc", "/workspace")
+	c := p.attach("abc", "/workspace", "")
 	if err := c.WriteFile(context.Background(), "/workspace/a/b/f.txt", []byte("x")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -778,7 +778,7 @@ func TestWriteFileKeepsPathFailuresDistinctFromAMissingSandbox(t *testing.T) {
 			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
 		}
 	})
-	c := p.attach("abc", "/workspace")
+	c := p.attach("abc", "/workspace", "")
 	err := c.WriteFile(context.Background(), "/workspace/a/f.txt", []byte("x"))
 	if err == nil || errors.Is(err, sandbox.ErrNotFound) {
 		t.Fatalf("err = %v, want the daemon's path error", err)
@@ -802,7 +802,7 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 			io.WriteString(w, `{"Running":false,"ExitCode":1}`)
 		}
 	})
-	c := p.attach("abc", "/workspace")
+	c := p.attach("abc", "/workspace", "")
 	err := c.WriteFile(context.Background(), "/workspace/a/f.txt", []byte("x"))
 	if err == nil || !strings.Contains(err.Error(), "Read-only file system") {
 		t.Errorf("err = %v, want the mkdir's stderr", err)
@@ -937,7 +937,7 @@ func TestExecSurfacesStartAndInspectFailures(t *testing.T) {
 				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
 			}
 		})
-		return p.attach("abc", "/workspace")
+		return p.attach("abc", "/workspace", "")
 	}
 	for _, path := range []string{"/exec/e1/start", "/exec/e1/json"} {
 		_, err := failing(path).Exec(context.Background(), sandbox.ExecRequest{Command: "true"})
@@ -969,7 +969,7 @@ func TestExecFailsLoudlyWhenTheDaemonWillNotNameTheProcess(t *testing.T) {
 			io.WriteString(w, `{"Titles":["PID"],"Processes":[]}`)
 		}
 	})
-	c := p.attach("abc", "/workspace")
+	c := p.attach("abc", "/workspace", "")
 	c.exitBudget = 100 * time.Millisecond
 
 	_, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true", Timeout: time.Second})
@@ -1012,7 +1012,7 @@ func TestAnUnreadableProcessListPrefersTheTimeout(t *testing.T) {
 					io.WriteString(w, tc.top)
 				}
 			})
-			c := p.attach("abc", "/workspace")
+			c := p.attach("abc", "/workspace", "")
 			c.overrunSlop = 100 * time.Millisecond
 
 			res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "exit 0", Timeout: time.Second})
@@ -1036,7 +1036,7 @@ func TestExecRefusesToInventAnExitCode(t *testing.T) {
 			io.WriteString(w, `{"Running":true}`)
 		}
 	})
-	c := p.attach("abc", "/workspace")
+	c := p.attach("abc", "/workspace", "")
 	c.exitBudget = 200 * time.Millisecond
 	if _, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "true"}); err == nil ||
 		!strings.Contains(err.Error(), "still running") {
@@ -1119,7 +1119,7 @@ func TestOverrunSurvivesTheStreamClosingDuringItsProbe(t *testing.T) {
 	// Registered after fakeDaemon's cleanup so it runs first (LIFO): the server
 	// will not shut down while the start handler is still holding the stream.
 	t.Cleanup(releaseStream)
-	c := p.attach("abc", "/workspace")
+	c := p.attach("abc", "/workspace", "")
 
 	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "x", Timeout: time.Second})
 	if err != nil {
@@ -1200,7 +1200,7 @@ func TestOverrunDetectedWhenTheFirstProbeStalls(t *testing.T) {
 		}
 	})
 	t.Cleanup(releaseStream)
-	c := p.attach("abc", "/workspace")
+	c := p.attach("abc", "/workspace", "")
 
 	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "x", Timeout: time.Second})
 	if err != nil {
@@ -1229,7 +1229,7 @@ func tarball(t *testing.T, header *tar.Header, body string) []byte {
 func TestReadFileRejectsWhatItCannotReturn(t *testing.T) {
 	serve := func(archive []byte) *container {
 		p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) { w.Write(archive) })
-		return p.attach("abc", "/workspace")
+		return p.attach("abc", "/workspace", "")
 	}
 
 	// A symlink carries no contents; returning its (empty) body as the file

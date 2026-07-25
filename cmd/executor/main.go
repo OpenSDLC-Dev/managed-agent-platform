@@ -13,9 +13,20 @@
 //	EXECUTOR_LEASE_TTL       work-item lease, Go duration (default "15m") —
 //	                         must comfortably exceed a single tool's timeout
 //	EXECUTOR_POLL_INTERVAL   idle queue poll, Go duration (default "500ms")
+//	CONTROLPLANE_URL         where a session's egress gate fetches its config;
+//	                         set with EXECUTOR_GATE_IMAGE to opt into the gate.
+//	                         Unset: no gate runs; a gate-wanting session (limited
+//	                         or vault-attached) falls back to the backend's own
+//	                         fail-closed networking (Docker limited -> no egress),
+//	                         while unrestricted sessions network directly as before
+//	EXECUTOR_GATE_IMAGE      the egress-gate container image (built with
+//	                         `docker build --target gate`); opts into the gate
+//	                         together with CONTROLPLANE_URL
 //	SANDBOX_BACKEND          "docker" (default) or "k8s"
 //	DOCKER_HOST              Docker daemon address for the docker backend
 //	                         (falls back to the well-known socket)
+//	SANDBOX_DOCKER_GATE_NETWORK   Docker network a session's egress-gate
+//	                         container joins (default "bridge")
 //	SANDBOX_K8S_KUBECONFIG   kubeconfig path for the k8s backend; empty, together
 //	                         with an empty SANDBOX_K8S_CONTEXT, uses in-cluster
 //	                         config, then the default loading rules
@@ -76,8 +87,14 @@ func run(ctx context.Context) error {
 	}
 
 	cfg := executor.Config{
-		Image:   os.Getenv("EXECUTOR_IMAGE"),
-		Workdir: os.Getenv("EXECUTOR_WORKDIR"),
+		Image:           os.Getenv("EXECUTOR_IMAGE"),
+		Workdir:         os.Getenv("EXECUTOR_WORKDIR"),
+		ControlplaneURL: os.Getenv("CONTROLPLANE_URL"),
+		GateImage:       os.Getenv("EXECUTOR_GATE_IMAGE"),
+		// The same OTLP config telemetry.Run reads for this executor, handed on to
+		// each session's gate container so its egress spans reach the collector too.
+		OTelEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		OTelInsecure: os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
 	}
 	for env, dst := range map[string]*time.Duration{
 		"EXECUTOR_LEASE_TTL": &cfg.LeaseTTL, "EXECUTOR_POLL_INTERVAL": &cfg.PollInterval,
@@ -92,12 +109,13 @@ func run(ctx context.Context) error {
 	}
 
 	provider, err := backend.New(backend.Config{
-		Backend:          os.Getenv("SANDBOX_BACKEND"),
-		DockerHost:       os.Getenv("DOCKER_HOST"),
-		K8sKubeconfig:    os.Getenv("SANDBOX_K8S_KUBECONFIG"),
-		K8sContext:       os.Getenv("SANDBOX_K8S_CONTEXT"),
-		K8sNamespace:     os.Getenv("SANDBOX_K8S_NAMESPACE"),
-		K8sNetSetupImage: os.Getenv("SANDBOX_K8S_NETSETUP_IMAGE"),
+		Backend:           os.Getenv("SANDBOX_BACKEND"),
+		DockerHost:        os.Getenv("DOCKER_HOST"),
+		DockerGateNetwork: os.Getenv("SANDBOX_DOCKER_GATE_NETWORK"),
+		K8sKubeconfig:     os.Getenv("SANDBOX_K8S_KUBECONFIG"),
+		K8sContext:        os.Getenv("SANDBOX_K8S_CONTEXT"),
+		K8sNamespace:      os.Getenv("SANDBOX_K8S_NAMESPACE"),
+		K8sNetSetupImage:  os.Getenv("SANDBOX_K8S_NETSETUP_IMAGE"),
 	})
 	if err != nil {
 		return err
