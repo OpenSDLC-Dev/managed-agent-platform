@@ -255,10 +255,22 @@ type Sandbox interface {
 	// non-directory is ErrNotDirectory, and a target that is a directory is
 	// ErrIsDirectory (the directory is left intact, never replaced).
 	//
-	// Being a rename, it replaces the name: a target that is a symlink, a device
-	// node or another non-regular file is *supplanted* by a regular file rather
-	// than written through, and the parent directory must be writable even when
-	// the target itself already is.
+	// Being a rename, it replaces the *name*, and four consequences follow that a
+	// write-through would not have had:
+	//   - A symlink at the target is supplanted by a regular file; what it pointed
+	//     at is untouched. A symlink to a *directory* is a directory here, as it is
+	//     to every other question asked of a path, and is refused as one.
+	//   - The parent directory must be writable, even where the target itself
+	//     already is.
+	//   - The target's permission bits are not preserved: the file that lands is a
+	//     fresh 0644. (The reference's own atomic write does preserve them; #204
+	//     tracks doing the same.)
+	//   - A file bind-mounted into the sandbox cannot be renamed onto at all, so a
+	//     write to one now fails on both backends where the k8s backend used to
+	//     succeed. Device nodes are the one target the two still answer
+	//     differently (k8s replaces the node; docker cannot land its temporary file
+	//     under a mounted /dev), and neither failure is one of these sentinels
+	//     yet — both are #205.
 	WriteFile(ctx context.Context, path string, data []byte) error
 	// WriteFileStream writes exactly size bytes read from src to path, creating
 	// parent directories and overwriting any existing file, atomically and with

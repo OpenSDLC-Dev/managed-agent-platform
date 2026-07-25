@@ -115,22 +115,41 @@ copy of an entry here.
     `hi` after a failed 100-byte write, and a failed write of a *new* file created one. Both now
     land the bytes under a temporary name in the target's own directory and `rename` them into
     place (the reference's temp-write-and-rename), so a failed write leaves the target as it was —
-    or absent, where it was absent — and every failure path removes its own residue rather than
-    stranding a partial mount on the sandbox's disk.
+    or absent, where it was absent — and every failure the write itself reports takes its residue
+    with it rather than stranding a partial mount on the sandbox's disk. (A failure of the *call*
+    rather than of the write — a dead sandbox, a transport error — can still leave a temporary file,
+    which dies with the sandbox.)
 
   What the two backends must not drift on lives in one place, `internal/sandbox/filefault.go`: the
   `__map_path_fault` shell they both embed (it walks to the nearest existing component of a path and
   exits on a non-directory, because the block can be any distance above the leaf) and the temporary
-  name they both write under. The shared `sandboxtest` contract suite pins all of it on both
-  backends — three new rows, which failed on both before the fix — and the k8s script tests pin the
-  same decisions against a real shell. One k8s-only test went away with the fix: it asserted that a
+  name they both write under. That shell is written in bash builtins alone — no `dirname` — because
+  the sandbox filesystem is the agent's: a planted `dirname` that echoed its argument back would
+  spin the walk forever, and one that lied would answer for it. `mv` and `rm` have no builtin
+  equivalent and are resolved through the container's PATH, so an agent can still make its own file
+  tools misreport; that is the sandbox being the agent's own rather than a boundary between
+  sessions, and the two docs that claimed the file primitives were shell-free (docs/ARCHITECTURE.md's
+  toolset row, and the bash tool's restart comment) now say what is true.
+
+  The shared `sandboxtest` contract suite pins the three regressions on both backends — four new
+  rows, and the three that cover the defects above failed on both backends before the fix — and the
+  k8s script tests pin the same decisions against a real shell, including a path component ending in
+  a newline and a planted `dirname`. One k8s-only test went away with the fix: it asserted that a
   write onto a directory fails there *because* "the docker backend surfaces the daemon's error the
   same way", which was never true; the shared row now holds both backends to it.
 
-  Two behavior changes come with the rename, and are the backends *converging* on what docker's
-  extraction always did rather than a new limitation: a target that is a symlink, device node or
-  other non-regular file is supplanted by a regular file instead of being written through, and the
-  parent directory must be writable even when the target already is.
+  **Four consequences of writing by rename**, all of them documented on the `Sandbox` interface:
+  a symlink at the target is supplanted by a regular file and what it pointed at is untouched (a
+  symlink to a *directory* is a directory here, and refused as one); the parent directory must be
+  writable even where the target already is; the target's permission bits are not preserved
+  ([#204](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/204) — the reference
+  preserves them); and a target that cannot be renamed onto at all, such as a file bind-mounted into
+  the sandbox, now fails rather than being written through
+  ([#205](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/205) — both backends agree
+  on that now, where only k8s used to succeed). Docker writes also cost one extra exec each — 2.2 ms
+  to 15.3 ms per buffered write, measured — which is what
+  [#206](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/206) is about for
+  materializations that write thousands of files one at a time.
 
 - **The unreachable-credential advisory no longer rides the gate-config response** (plan 12
   follow-up, #50). `credential_host_unreachable_error` detection ran synchronously inside

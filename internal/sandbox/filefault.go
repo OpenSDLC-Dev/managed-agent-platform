@@ -43,6 +43,15 @@ const TempPrefix = ".map-write-"
 // the sandbox as broken. `-h` is tested alongside `-e` so a dangling symlink
 // counts as a block: it exists as a name, `mkdir -p` will not build through it,
 // and falling through to the directory above it would call the path fine.
+//
+// Every operation here is a bash builtin — `[`, `case`, and the `%` parameter
+// expansion — and that is deliberate. The sandbox filesystem is the agent's, so a
+// `dirname` on its PATH is the agent's too: one that echoed its argument back
+// would spin this loop forever, and one that lied would answer for it. A builtin
+// cannot be shadowed by a file on PATH, and the expansion is byte-exact where a
+// `$(dirname …)` substitution would have eaten a component's trailing newlines.
+// The loop terminates because each turn either returns or drops a component, and
+// `/` and `.` both exist.
 const PathFaultShell = `
 __map_path_fault() {
   __p="$1"
@@ -51,8 +60,10 @@ __map_path_fault() {
       [ -d "$__p" ] || exit 15
       return 0
     fi
-    [ "$__p" = "/" ] && return 0
-    __p=$(dirname "$__p")
+    case "$__p" in
+      */?*) __p="${__p%/*}"; [ -n "$__p" ] || __p="/" ;;
+      *)    return 0 ;;
+    esac
   done
 }
 `

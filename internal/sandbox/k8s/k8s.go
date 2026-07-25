@@ -990,12 +990,14 @@ const (
 //
 // A path that does not exist is asked *why* before it is reported as missing: a
 // non-directory somewhere above it is a different answer, and the model can act on
-// it. The parent is what the shared shell is given, because the leaf not existing
-// is the premise here, and only this branch pays for the walk (#71).
+// it. Only this branch pays for the walk, and it hands over `$f` itself rather
+// than a parent computed here: the leaf not existing is this branch's premise, so
+// the walk steps over it either way — and a `$(dirname "$f")` would have eaten the
+// trailing newlines of a path that ends in one, asking about a different file (#71).
 const readScript = sandbox.PathFaultShell + `
 f="$1"
 if [ -h "$f" ]; then exit 12; fi
-if [ ! -e "$f" ]; then __map_path_fault "$(dirname "$f")"; exit 10; fi
+if [ ! -e "$f" ]; then __map_path_fault "$f"; exit 10; fi
 if [ -d "$f" ]; then exit 11; fi
 if [ ! -f "$f" ]; then exit 12; fi
 sz=$(stat -c %s "$f") || exit 1
@@ -1018,11 +1020,20 @@ printf %s "$3"
 //
 // The rename is also what decides the one target that must be refused: `mv -f file
 // dir` moves the file *into* the directory, so a target that is a directory exits
-// 16 (sandbox.ExitPathIsDirectory) and the directory is left whole. That check sits
-// after the length check rather than before it so stdin is always drained first —
-// a script that exited without reading it would leave client-go's stdin copy to
-// fail into runtime.HandleError, and the exit code is the only thing that reaches
-// the caller from here.
+// 16 (sandbox.ExitPathIsDirectory) and the directory is left whole. It is asked
+// twice, because one test before the move is a claim about a moment that has
+// passed: something in the sandbox can make the target a directory in between, and
+// then the move lands the file *inside* it and exits 0, which would report a
+// success that wrote nothing where the caller asked. The second test catches that,
+// removes what went in, and refuses the same way. The first test is what keeps the
+// common case from ever moving anything at all.
+//
+// The pre-move test sits after the length check rather than before it so stdin is
+// drained first — a script that exited without reading it would leave client-go's
+// stdin copy to fail into runtime.HandleError, and the exit code is the only thing
+// that reaches the caller from here. (The `mkdir` branch above still exits without
+// draining; that is measured to work — the exit code arrives and the copy's failure
+// is logged — but it is not what this ordering rests on.)
 //
 // A `mkdir -p` that fails asks the shared path-fault shell whether a
 // non-directory is why, so a blocked path is the model's to fix (15,
@@ -1064,6 +1075,7 @@ sz=$(tee "$4" | wc -c) || { rm -f "$4"; exit 1; }
 [ "$sz" -eq "$3" ] || { rm -f "$4"; exit 14; }
 if [ -d "$1" ]; then rm -f "$4"; exit 16; fi
 mv -f "$4" "$1" || { rm -f "$4"; exit 1; }
+if [ -d "$1" ]; then rm -f "$1/${4##*/}"; exit 16; fi
 `
 
 // cappedBuffer keeps at most limit bytes and records whether more arrived. A

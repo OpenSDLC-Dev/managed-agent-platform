@@ -10,30 +10,34 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
+// pathFault runs the shared shell against one path and returns what it exited
+// with. The path travels as an argument, never as script text — the same way
+// every backend passes it — so nothing in a path can be read as shell.
+func pathFault(t *testing.T, path string, env ...string) int {
+	t.Helper()
+	cmd := exec.Command("/bin/bash", "-c",
+		sandbox.PathFaultShell+"\n__map_path_fault \"$1\"\nexit 0", "map-fault", path)
+	if len(env) > 0 {
+		cmd.Env = env
+	}
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("run the path-fault shell: %v", err)
+		}
+		return ee.ExitCode()
+	}
+	return 0
+}
+
 // The shared path-fault shell is what turns "the sandbox is broken" into "the
 // path you asked for cannot exist" on both backends, so its contract is pinned
 // here against a real shell rather than left to the two live contract suites: a
 // host runs it in milliseconds and stages blocked paths a container makes
 // expensive to reach. That the sandbox image carries a userland able to run it is
 // the live contract test's job.
-//
-// The path travels as an argument, never as script text — the same way both
-// backends pass it — so nothing in a path can be read as shell.
 func TestPathFaultShell(t *testing.T) {
-	run := func(t *testing.T, path string) int {
-		t.Helper()
-		cmd := exec.Command("/bin/bash", "-c",
-			sandbox.PathFaultShell+"\n__map_path_fault \"$1\"\nexit 0", "map-fault", path)
-		if err := cmd.Run(); err != nil {
-			var ee *exec.ExitError
-			if !errors.As(err, &ee) {
-				t.Fatalf("run the path-fault shell: %v", err)
-			}
-			return ee.ExitCode()
-		}
-		return 0
-	}
-
+	run := pathFault
 	dir := t.TempDir()
 	if err := os.WriteFile(dir+"/plain", []byte("i am a file"), 0o644); err != nil {
 		t.Fatalf("stage a regular file: %v", err)
@@ -84,6 +88,54 @@ func TestPathFaultShell(t *testing.T) {
 				t.Errorf("exit %d for %s, want 0", code, path)
 			}
 		})
+	}
+}
+
+// A component whose name ends in a newline is walked as itself. A `$(dirname …)`
+// substitution would have eaten those bytes and walked a *different* path — the
+// sibling without the newline — and answered for it; the tools accept such names
+// (only NUL is rejected), so the shell has to survive them.
+func TestPathFaultShellWalksNewlineComponents(t *testing.T) {
+	dir := t.TempDir()
+	// Two siblings: one a directory, the other the same name plus a newline, a
+	// regular file. Confusing them inverts the answer, in both directions.
+	if err := os.Mkdir(dir+"/block", 0o755); err != nil {
+		t.Fatalf("stage a directory: %v", err)
+	}
+	if err := os.WriteFile(dir+"/block\n", nil, 0o644); err != nil {
+		t.Fatalf("stage its newline-suffixed sibling: %v", err)
+	}
+	if code := pathFault(t, dir+"/block\n/x/y"); code != sandbox.ExitPathNotDirectory {
+		t.Errorf("exit %d for a file with a trailing newline in its name, want %d",
+			code, sandbox.ExitPathNotDirectory)
+	}
+	if code := pathFault(t, dir+"/block/x/y"); code != 0 {
+		t.Errorf("exit %d for the directory sibling, want 0", code)
+	}
+}
+
+// The sandbox filesystem is the agent's, so anything the shell resolves through
+// PATH is the agent's to replace. The walk uses builtins only, and this is what
+// says so: a `dirname` that echoes its argument back would spin the loop forever,
+// and one that lied would answer for it — with PATH pointed at both, the answers
+// must not move.
+func TestPathFaultShellIgnoresAShadowedDirname(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(bin+"/dirname", []byte("#!/bin/sh\nprintf '%s' \"$1\"\n"), 0o755); err != nil {
+		t.Fatalf("stage a shadowing dirname: %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/plain", []byte("i am a file"), 0o644); err != nil {
+		t.Fatalf("stage a regular file: %v", err)
+	}
+	env := []string{"PATH=" + bin}
+	// The blocked path still exits on the block rather than looping until the
+	// test's own deadline, and the clear path is still clear.
+	if code := pathFault(t, dir+"/plain/x/y", env...); code != sandbox.ExitPathNotDirectory {
+		t.Errorf("exit %d with a shadowed dirname, want %d", code, sandbox.ExitPathNotDirectory)
+	}
+	if code := pathFault(t, dir+"/fresh/x", env...); code != 0 {
+		t.Errorf("exit %d with a shadowed dirname on a clear path, want 0", code)
 	}
 }
 

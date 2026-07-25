@@ -800,6 +800,10 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 		// because calling a wrong path a missing sandbox would send the executor
 		// looking for the wrong failure.
 		if mkErr := c.mkdirAll(ctx, dir); mkErr != nil {
+			// A put that was refused outright landed nothing, but one that died
+			// mid-transfer left a piece of the entry behind; shed it on the way out
+			// rather than let the directory keep it.
+			c.discard(ctx, gopath.Join(dir, tmp))
 			return mkErr
 		}
 		err = c.api.putArchive(ctx, c.id, dir, bytes.NewReader(tarball))
@@ -856,9 +860,19 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 // same target, deletes the directory and puts the file where it was (#71).
 func (c *container) rename(ctx context.Context, tmp, path string) error {
 	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: fmt.Sprintf(
-		"if [ -d %[2]s ]; then rm -f %[1]s; exit %[3]d; fi\nmv -f %[1]s %[2]s || { rm -f %[1]s; exit 1; }",
-		shellQuote(tmp), shellQuote(path), sandbox.ExitPathIsDirectory)})
+		"if [ -d %[2]s ]; then rm -f %[1]s; exit %[3]d; fi\n"+
+			"mv -f %[1]s %[2]s || { rm -f %[1]s; exit 1; }\n"+
+			// Asked again, because the first answer describes a moment that has
+			// passed: something in the sandbox can make the target a directory in
+			// between, and then the move puts the file *inside* it and exits 0 —
+			// a reported success that wrote nothing where the caller asked.
+			"if [ -d %[2]s ]; then rm -f %[2]s/%[4]s; exit %[3]d; fi",
+		shellQuote(tmp), shellQuote(path), sandbox.ExitPathIsDirectory, gopath.Base(tmp))})
 	if err != nil {
+		// The bytes are landed and unnamed, and this exec is how they were to be
+		// named; shed them rather than leave the sandbox carrying a payload nothing
+		// will ever claim.
+		c.discard(ctx, tmp)
 		return err
 	}
 	switch res.ExitCode {

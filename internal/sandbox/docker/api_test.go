@@ -793,6 +793,42 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 	}
 }
 
+// A buffered write whose put fails takes its residue with it. However much of the
+// entry the daemon extracted before the failure, it is landed under a name nothing
+// will ever claim — and a real daemon does not produce this failure on demand, so
+// it is staged here rather than left to the live suite (which can only reach the
+// streaming half of it, through a short src).
+func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
+	var commands []string
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `{"message":"daemon gave up mid-transfer"}`)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			commands = append(commands, body.Cmd[len(body.Cmd)-2])
+			io.WriteString(w, `{"Id":"e1"}`)
+		case r.URL.Path == "/exec/e1/start":
+		case r.URL.Path == "/exec/e1/json":
+			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	if err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x")); err == nil {
+		t.Fatal("write returned nil, want the daemon's failure")
+	}
+	last := commands[len(commands)-1]
+	if !strings.HasPrefix(last, "rm -f '/workspace/"+sandbox.TempPrefix) {
+		t.Errorf("last exec = %q, want the temporary file removed", last)
+	}
+}
+
 // A path that still 404s after its parents exist is a bad path, not a missing
 // sandbox: reporting ErrNotFound would send the executor after the wrong fault.
 func TestWriteFileKeepsPathFailuresDistinctFromAMissingSandbox(t *testing.T) {

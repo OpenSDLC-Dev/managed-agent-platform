@@ -707,6 +707,47 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// What the rename does to a symlink, which is the one non-regular target both
+	// backends can reach identically: it replaces the *name*, so the link is
+	// supplanted by a regular file and whatever it pointed at is left alone —
+	// never written through. A link to a directory is a directory here, as it is
+	// to every other question the backends ask, and is refused like one. Pinned
+	// because it is a behavior change (docker's extraction removed the link,
+	// k8s's `tee` wrote through it) and because the deleted `/dev/null` row used
+	// to be what said anything at all about non-regular targets.
+	t.Run("WriteOntoSymlink", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		if err := sb.WriteFile(ctx, workdir+"/pointee.txt", []byte("pointee")); err != nil {
+			t.Fatalf("stage the link's target: %v", err)
+		}
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "mkdir -p adir && ln -s pointee.txt tolink && ln -s adir todir",
+		})
+		if err != nil || res.ExitCode != 0 {
+			t.Fatalf("stage the symlinks: %+v, %v", res, err)
+		}
+
+		if err := sb.WriteFile(ctx, workdir+"/tolink", []byte("through")); err != nil {
+			t.Fatalf("write onto a symlink to a file: %v", err)
+		}
+		if got, err := sb.ReadFile(ctx, workdir+"/tolink"); err != nil || string(got) != "through" {
+			t.Errorf("the symlink's name holds %q, %v; want the bytes just written", got, err)
+		}
+		if got, err := sb.ReadFile(ctx, workdir+"/pointee.txt"); err != nil || string(got) != "pointee" {
+			t.Errorf("what the link pointed at holds %q, %v; want it untouched", got, err)
+		}
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "test -L tolink && echo still-a-link"}); err != nil {
+			t.Fatalf("inspect the replaced name: %v", err)
+		} else if strings.TrimSpace(res.Stdout) != "" {
+			t.Errorf("the name is still a symlink; want a regular file in its place")
+		}
+
+		if err := sb.WriteFile(ctx, workdir+"/todir", []byte("x")); !errors.Is(err, sandbox.ErrIsDirectory) {
+			t.Errorf("write onto a symlink to a directory: err = %v, want ErrIsDirectory", err)
+		}
+	})
+
 	// Files and commands see one filesystem — the whole point of the sandbox.
 	t.Run("FilesAndExecShareTheFilesystem", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
