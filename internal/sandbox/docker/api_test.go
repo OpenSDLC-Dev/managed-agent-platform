@@ -58,7 +58,8 @@ type fakeExec struct {
 	holdStream bool          // ignore streamFor; never close it
 	code       int
 	stdout     string
-	inspects   *int // optional: counts /exec/{id}/json calls
+	inspects   *int          // optional: counts /exec/{id}/json calls
+	topDelay   time.Duration // how long the daemon takes to answer /top
 }
 
 const fakeExecPid = 4242
@@ -114,6 +115,16 @@ func execDaemon(t *testing.T, fe fakeExec) *container {
 			fmt.Fprintf(w, `{"Running":%t,"ExitCode":%d,"Pid":%d}`, running, fe.code, fakeExecPid)
 
 		case strings.HasSuffix(r.URL.Path, "/top"):
+			// A loaded daemon: `top` forks `ps` on the host, so the answer can
+			// arrive well after the request did — or never, if the caller gives
+			// up first.
+			if fe.topDelay > 0 {
+				select {
+				case <-time.After(fe.topDelay):
+				case <-r.Context().Done():
+					return
+				}
+			}
 			elapsed, started := ran()
 			alive := !started || elapsed < fe.aliveFor
 			rows := `["1","/sbin/docker-init"]`
@@ -1208,6 +1219,74 @@ func TestOverrunDetectedWhenTheFirstProbeStalls(t *testing.T) {
 	}
 	if !res.TimedOut {
 		t.Errorf("a command that overran while its pre-deadline probe stalled was reported finished: %+v", res)
+	}
+}
+
+// The third probe race, and the one on the punctual-kill path: the watchdog's
+// kill is itself what closes the command's stream and cancels the pre-deadline
+// probe's `top`, so on a daemon slower to answer than the 50ms probe lead the
+// probe never answers at all — and `aliveAtDeadline` is the only term that can
+// fire when a command is killed on time. Reading that cancellation as "already
+// finished" reported a real timeout as a plain `{137, TimedOut: false}` (#193).
+//
+// What tells a punctual kill from an early exit is *when* the stream closed,
+// which the daemon side already knows: a command that finished early cannot
+// close its stream after the deadline. The rows below differ only in the
+// daemon's `top` latency and in when the command died.
+func TestAPunctualKillSurvivesASlowPreDeadlineProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		command      string
+		aliveFor     time.Duration
+		topDelay     time.Duration
+		probeLead    time.Duration
+		wantTimedOut bool
+	}{
+		// The control: the same kill on a daemon that answers inside the lead, so
+		// the probe carries the verdict itself.
+		{
+			name: "a fast top answers before the kill", command: "sleep 300",
+			aliveFor: 1200 * time.Millisecond, wantTimedOut: true,
+		},
+		// The bug: the answer is still in flight when the kill lands, so the probe
+		// is cancelled with nothing to say. The close is past the deadline, which
+		// is not something a command that finished early can do.
+		{
+			name: "a slow top loses its answer to the kill", command: "sleep 300",
+			aliveFor: 1200 * time.Millisecond, topDelay: 500 * time.Millisecond, wantTimedOut: true,
+		},
+		// The other direction on that same slow daemon: a command that SIGKILLs
+		// itself inside the lead closes its stream *before* the deadline, and no
+		// answer is needed to know that is an early exit, not a timeout to invent.
+		// The lead is widened so the exit lands inside it, which is the only window
+		// where the probe fires and is then cut short before the deadline. Neither
+		// row rests on a scheduling window: the kill above closes the stream 200ms
+		// *past* the deadline and a cancellation can only be seen later still,
+		// while the exit here is 600ms clear of it — and this daemon would answer
+		// "gone" at 800ms regardless, which is the same verdict.
+		{
+			name: "a close before the deadline is still an early exit", command: "kill -9 $$",
+			aliveFor: 400 * time.Millisecond, topDelay: 600 * time.Millisecond,
+			probeLead: 800 * time.Millisecond, wantTimedOut: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := execDaemon(t, fakeExec{aliveFor: tc.aliveFor, topDelay: tc.topDelay, code: sigkillExit})
+			if tc.probeLead > 0 {
+				c.probeLead = tc.probeLead
+			}
+			start := time.Now()
+			res, err := c.Exec(context.Background(), sandbox.ExecRequest{
+				Command: tc.command, Timeout: time.Second,
+			})
+			if err != nil {
+				t.Fatalf("exec: %v", err)
+			}
+			if res.TimedOut != tc.wantTimedOut {
+				t.Errorf("result = %+v after %s, want TimedOut=%t",
+					res, time.Since(start), tc.wantTimedOut)
+			}
+		})
 	}
 }
 

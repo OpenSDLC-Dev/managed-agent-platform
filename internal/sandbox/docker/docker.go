@@ -439,9 +439,10 @@ type verdict struct {
 // read as "process gone" and its overrun erased. confirmCtx outlives the stream
 // close and dies only on Exec's own bound or the caller giving up.
 //
-// A probe whose wait is cut short answers false, and correctly: the stream
+// A probe whose *wait* is cut short answers false, and correctly: the stream
 // cannot close while the process that owns it is alive, so a close before an
-// instant is a command that had already finished by it.
+// instant is a command that had already finished by it. A probe cut short
+// mid-request is a different question, and alive reads it against the deadline.
 func (c *container) probeDeadline(sleepCtx, confirmCtx context.Context, pid int, deadline time.Duration, start time.Time) <-chan verdict {
 	answer := make(chan verdict, 1)
 	var atDeadline, overran bool
@@ -451,7 +452,7 @@ func (c *container) probeDeadline(sleepCtx, confirmCtx context.Context, pid int,
 	go func() {
 		defer wg.Done()
 		if sleepUntil(sleepCtx, start.Add(deadline-c.probeLead)) {
-			atDeadline = c.alive(sleepCtx, pid)
+			atDeadline = c.alive(sleepCtx, pid, start.Add(deadline))
 		}
 	}()
 	// Still alive once the deadline and the slop had both passed? The guarantee,
@@ -482,19 +483,27 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 }
 
 // alive answers the pre-deadline probe. Its context is the one the stream close
-// cancels, and it reads that cancellation as "process gone": the stream cannot
-// close while the process holding it is alive, so a close before the deadline
-// is a command that finished early, not one still running.
-func (c *container) alive(ctx context.Context, pid int) bool {
+// cancels, and what that cancellation is worth depends on when it arrived — the
+// instant the daemon side already has, needing nothing from inside the
+// container. Before the deadline it settles the question: nothing that held the
+// stream is left, so the command was gone by the deadline. At or after it the
+// close says nothing about the deadline, because the watchdog's punctual kill is
+// itself what closes the stream, and so is a straggler outliving a command that
+// finished early — an unanswered probe, which is the same thing as a daemon that
+// would not answer.
+func (c *container) alive(ctx context.Context, pid int, deadlineAt time.Time) bool {
 	for range 2 {
 		alive, err := c.api.processAlive(ctx, c.id, pid)
 		if err == nil {
 			return alive
 		}
 		if ctx.Err() != nil {
-			// The stream closed, so the process it was holding is gone, and
-			// nobody is waiting on this answer any more.
-			return false
+			if time.Now().Before(deadlineAt) {
+				// The stream closed inside the probe's lead, so the process it
+				// was holding is gone, and nobody is waiting on this answer.
+				return false
+			}
+			break
 		}
 	}
 	// The daemon would not say. Assume the command is still running: hiding an

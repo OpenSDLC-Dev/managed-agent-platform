@@ -489,6 +489,43 @@ copy of an entry here.
 
 ### Fixed
 
+- **The Docker sandbox reported a punctual watchdog kill as a plain SIGKILL exit whenever the daemon
+  was slow to answer the pre-deadline probe**
+  ([#193](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/193)) — the #95/#110 failure
+  mode, which had been fixed on the K8s backend alone. `Exec` classifies a timeout as
+  `(code == sigkillExit && v.aliveAtDeadline) || v.overran`, and on the punctual-kill path
+  `aliveAtDeadline` is the only term that can fire: a command killed *on* its deadline never overran.
+  That term comes from a `GET /containers/{id}/top` fired `probeLead` (50 ms) before the deadline, on
+  the context the output stream's close cancels — and the watchdog's kill is exactly what closes that
+  stream. So on a daemon taking longer than the lead to fork its `ps`, which a loaded runner does, the
+  probe was still in flight when the kill landed, `alive` read the cancellation as "the command had
+  already finished", and a real timeout came back `{ExitCode: 137, TimedOut: false}`: the one case the
+  deadline exists to report, delivered to the model and to the session's event log as an ordinary
+  failure. It also made `TestDockerProviderContract/ExecTimeoutKillsAndSurvives` an intermittent red
+  on PRs nowhere near the sandbox — #187's `coverage` job, green on rerun with no code change.
+
+  The gap was that `alive`'s inference never asked *when* the close happened. Its justification — the
+  stream cannot close while the process holding it is alive — settles the question only for a close
+  *before* the deadline: nothing that held the stream is left, so the command was gone by the
+  deadline. A close at or after the deadline says nothing about it, because the watchdog's punctual
+  kill closes the stream itself, and so does a straggler outliving a command that finished early. A
+  cancellation arriving then is therefore just an unanswered probe, and it now falls to the rule
+  `alive` already applied to a daemon that would not answer: count the command as still running,
+  because hiding a timeout breaks the deadline's promise while mislabelling one costs a tool call. The
+  discriminator is the instant of the close, which the daemon side already holds — the K8s fix's
+  in-pod kill mark is deliberately *not* ported, since Docker's probe is a daemon-host call the
+  sandboxed command can neither reach nor forge, and the verdict stays that way.
+
+  Pinned by three fake-daemon rows differing only in the daemon's `top` latency and in when the
+  command died: a fast `top` answering inside the lead (the control), the same kill lost to a slow one
+  (which fails against the previous code with the issue's exact `{ExitCode:137 TimedOut:false}` at
+  about the deadline), and — the guard against inventing a timeout instead — a command that SIGKILLs
+  itself inside a widened lead, whose close lands *before* the deadline and must still read as an
+  early exit. Two mutations are caught, each by exactly its own row: dropping the before-deadline
+  check, and comparing against the probe instant rather than the deadline. The real-daemon
+  `ExecTimeoutKillsAndSurvives` stays green over five repetitions with the host under load, but a
+  healthy daemon is not what the bug needed and the deterministic rows are the pin.
+
 - **A wedged eval run no longer loses its artifacts** (#96 review follow-up). `writeArtifacts` was
   called once, after `pgtest.Main(m)` returned in the suite's `TestMain` — and Go implements
   `go test -timeout` as a panic raised from `testing`'s alarm goroutine, so `m.Run` never returns and
