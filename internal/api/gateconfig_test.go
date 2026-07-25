@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gatetoken"
@@ -107,6 +108,39 @@ func TestGateConfigServesNetworkingAndCredentials(t *testing.T) {
 	}
 }
 
+func TestGateConfigUnrestrictedCredential(t *testing.T) {
+	s := newTestServer(t)
+	agent := createAgent(t, s, map[string]any{"name": "a", "model": "claude-opus-4-8", "system": "base"})
+	env := createEnvironment(t, s, map[string]any{"name": "env"})
+	vaultID := createVault(t, s, "creds")
+	createCredential(t, s, vaultID, map[string]any{
+		"type": "environment_variable", "secret_name": "TOKEN", "secret_value": "v",
+		"networking":         map[string]any{"type": "unrestricted"},
+		"injection_location": map[string]any{"header": true, "body": false},
+	})
+	sess := createSession(t, s, map[string]any{
+		"agent": agent["id"], "environment_id": env["id"], "vault_ids": []any{vaultID},
+	})
+	token := mintGateToken(t, s, sess["id"].(string))
+
+	cfg, err := gateconfig.NewClient(s.url, token, nil).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(cfg.Credentials) != 1 {
+		t.Fatalf("credentials = %d, want 1", len(cfg.Credentials))
+	}
+	// The unrestricted arm of toGateCredentials must render type "unrestricted"
+	// with no fabricated allowed_hosts — a secret usable against any host.
+	cr := cfg.Credentials[0]
+	if cr.Networking.Type != "unrestricted" {
+		t.Errorf("credential networking type = %q, want unrestricted", cr.Networking.Type)
+	}
+	if len(cr.Networking.AllowedHosts) != 0 {
+		t.Errorf("unrestricted credential carries allowed_hosts = %v, want none", cr.Networking.AllowedHosts)
+	}
+}
+
 func TestGateConfigNoVaultsIsEmptyCredentials(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s) // unrestricted env, no vaults
@@ -165,4 +199,31 @@ func TestGateConfigAuthLane(t *testing.T) {
 	res = s.doRaw(http.MethodPost, gateconfig.Path, nil, map[string]string{"Authorization": "Bearer " + token})
 	body = decodeBody(t, res)
 	wantErr(t, res.StatusCode, body, http.StatusMethodNotAllowed, "invalid_request_error")
+
+	// Lane isolation, both directions. A valid gate token must not authenticate
+	// a management or a worker route (it is neither an x-api-key nor an
+	// environment key), and a valid environment key must not open the gate lane.
+	gateBearer := map[string]string{"Authorization": "Bearer " + token}
+	res = s.doRaw(http.MethodGet, "/v1/agents", nil, gateBearer) // management route
+	body = decodeBody(t, res)
+	wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
+
+	res = s.doRaw(http.MethodGet, "/v1/environments/env_x/work/poll", nil, gateBearer) // worker route
+	body = decodeBody(t, res)
+	wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
+
+	env := createEnvironment(t, s, map[string]any{"name": "worker-env"})
+	if err := api.EnsureEnvironmentKey(context.Background(), s.pool, env["id"].(string), "ek-reverse"); err != nil {
+		t.Fatalf("EnsureEnvironmentKey: %v", err)
+	}
+	res = s.doRaw(http.MethodGet, gateconfig.Path, nil, map[string]string{"Authorization": "Bearer ek-reverse"})
+	body = decodeBody(t, res)
+	wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
+
+	// A percent-encoded slash does not forge the gate path: it fails the exact
+	// isGateConfigPath match, falls to management auth, and 401s under a gate
+	// token (never routing to the handler).
+	res = s.doRaw(http.MethodGet, "/internal/v1/gate%2Fconfig", nil, gateBearer)
+	body = decodeBody(t, res)
+	wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
 }

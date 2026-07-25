@@ -23,13 +23,17 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 
 	var configJSON []byte
 	var vaultIDs []string
+	// The archived_at guard is re-applied here, not just in requireGateToken's
+	// gatetoken.Authenticate: a session archived in the window between auth and
+	// this read must still fail closed rather than serve one last config with
+	// live secrets. An archived (or raced-deleted) session yields no row.
 	err := s.pool.QueryRow(r.Context(),
 		`SELECT e.config, s.vault_ids
 		   FROM sessions s JOIN environments e ON e.id = s.environment_id
-		  WHERE s.id = $1`,
+		  WHERE s.id = $1 AND s.archived_at IS NULL`,
 		sessionID).Scan(&configJSON, &vaultIDs)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// The token authenticated, but the session raced a delete between auth and
+		// Authenticated, but the session was archived or deleted between auth and
 		// this read — re-auth (fail-closed), never a partial config.
 		return nil, errAuth("gate token no longer valid")
 	}

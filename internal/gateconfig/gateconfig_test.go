@@ -100,6 +100,25 @@ func TestFetchOtherStatusIsPlainError(t *testing.T) {
 	}
 }
 
+func TestFetchDecodeError(t *testing.T) {
+	// A 200 whose body is not a valid Config is a decode error, not a silent
+	// empty config — the gate must not treat garbage as a fresh policy.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"networking": "not-an-object"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := gateconfig.NewClient(srv.URL, "gtk_x", srv.Client())
+	_, err := c.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("Fetch on malformed body returned nil error")
+	}
+	if errors.Is(err, gateconfig.ErrUnauthorized) {
+		t.Errorf("decode error mapped to ErrUnauthorized")
+	}
+}
+
 func TestFetchTransportErrorPropagates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	url := srv.URL
