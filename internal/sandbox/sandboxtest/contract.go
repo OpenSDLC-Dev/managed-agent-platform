@@ -22,9 +22,17 @@ import (
 
 // Harness is one backend under test. Image must name a Linux image carrying
 // /bin/bash (the plan's image contract) and a POSIX userland.
+//
+// Gate, when non-nil, declares that the backend runs the per-session egress
+// gate: it is called once per gated subtest and returns the fixture those rows
+// provision with (a GateSpec plus the egress targets the fixture serves). A
+// backend that does not yet run a gate leaves it nil — the gated rows are not
+// registered, and the ungated limited-networking row keeps the fail-closed
+// no-route expectation for every backend.
 type Harness struct {
 	Provider sandbox.Provider
 	Image    string
+	Gate     func(t *testing.T) GateFixture
 }
 
 const workdir = "/workspace"
@@ -754,10 +762,12 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
-	// `limited` networking is enforced as no egress at all until the egress
-	// proxy lands: fail closed, never silently unrestricted. The routing table
-	// is the honest probe — a network namespace can carry down, unconfigured
-	// tunnel devices from the host kernel and still reach nothing.
+	// Without a gate (a backend not yet gate-wired, or a deployment not opted
+	// in), `limited` networking is enforced as no egress at all: fail closed,
+	// never silently unrestricted. The routing table is the honest probe — a
+	// network namespace can carry down, unconfigured tunnel devices from the
+	// host kernel and still reach nothing. The gated meaning of `limited`
+	// ("only allowed_hosts, through the gate") is the gate rows' contract.
 	t.Run("LimitedNetworkingHasNoEgressRoute", func(t *testing.T) {
 		sb, _, _ := provision(t, domain.Networking{
 			Type: domain.NetLimited, AllowedHosts: []string{"example.com"},
@@ -773,6 +783,12 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			t.Error("unrestricted sandbox has no route out")
 		}
 	})
+
+	// The gated rows run only for a backend that declares gate support; the
+	// suite never fabricates a GateSpec of its own.
+	if newHarness(t).Gate != nil {
+		gateRows(t, newHarness)
+	}
 }
 
 // firstDiff returns the index of the first byte where a and b differ, or the
