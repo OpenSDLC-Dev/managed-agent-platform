@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
@@ -178,6 +179,52 @@ func (h *harness) suspend(t *testing.T, uses ...string) []domain.Event {
 		t.Fatalf("suspend: %v", err)
 	}
 	return out
+}
+
+// answer appends a result for one tool use, as a prior pass would have left it.
+// typ selects which answering type: user.tool_result (a worker's) or
+// agent.tool_result (the platform's, and what a denial synthesizes).
+func (h *harness) answer(t *testing.T, typ domain.EventType, useID domain.ID) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"tool_use_id": useID.String(),
+		"content":     []map[string]any{{"type": "text", "text": "already done"}},
+		"is_error":    false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.log.AppendWith(context.Background(), h.sid,
+		[]events.NewEvent{{Type: typ, Payload: body}}, events.AppendOptions{}); err != nil {
+		t.Fatalf("answer %s: %v", useID, err)
+	}
+}
+
+// answeredHistory appends n fully-answered agent.tool_use / user.tool_result
+// pairs — the long prior history the scan must not re-page. The use ids are
+// minted here rather than read back, so the whole history lands in one append.
+func (h *harness) answeredHistory(t *testing.T, n int) {
+	t.Helper()
+	var evs []events.NewEvent
+	for i := 0; i < n; i++ {
+		id := domain.NewID("sevt")
+		body, err := json.Marshal(map[string]any{
+			"tool_use_id": id.String(),
+			"content":     []map[string]any{{"type": "text", "text": "done"}},
+			"is_error":    false,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		evs = append(evs,
+			events.NewEvent{ID: id, Type: domain.EventAgentToolUse,
+				Payload: json.RawMessage(writeUse(fmt.Sprintf("old%d.txt", i), "x"))},
+			events.NewEvent{Type: domain.EventUserToolResult, Payload: body},
+		)
+	}
+	if _, err := h.log.AppendWith(context.Background(), h.sid, evs, events.AppendOptions{}); err != nil {
+		t.Fatalf("answered history: %v", err)
+	}
 }
 
 func (h *harness) types(t *testing.T, typ string) []domain.Event {
@@ -365,6 +412,124 @@ func TestAlreadyAnsweredIsNoOp(t *testing.T) {
 	}
 	if got := len(h.results(t)); got != 1 {
 		t.Errorf("user.tool_result = %d, want 1 (no duplicate)", got)
+	}
+}
+
+// TestScanIsBoundedByTheTrailingTurn: the outstanding set is always the last
+// suspended turn's, so the wire scan must cost the same on a long session as on
+// a fresh one. With sixty answered tool calls behind it, reading the one
+// outstanding tool takes a single events request — the newest-first walk stops
+// at the first result older than the trailing turn's uses. The old
+// oldest-first full scan paged the whole history twice (seven requests here,
+// growing with the session), which is what #76 bounds.
+func TestScanIsBoundedByTheTrailingTurn(t *testing.T) {
+	var reads atomic.Int32
+	count := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events") {
+				reads.Add(1)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	sb := &fakeSandbox{}
+	h := newHarnessWrapped(t, sb, count)
+	h.answeredHistory(t, 60)
+	uses := h.suspend(t, writeUse("out.txt", "hello"))
+
+	if err := h.run(); err != nil {
+		t.Fatalf("RunSessionTools: %v", err)
+	}
+
+	if got := reads.Load(); got != 1 {
+		t.Errorf("events requests = %d, want 1 (the scan must not re-page prior history)", got)
+	}
+	results := h.results(t)
+	if len(results) != 61 {
+		t.Fatalf("user.tool_result = %d, want 61 (60 historical + 1 new)", len(results))
+	}
+	if got := results[60].ToolUseID; got != uses[0].ID.String() {
+		t.Errorf("the posted result references %q, want the outstanding use %q", got, uses[0].ID)
+	}
+	if sb.files["/workspace/out.txt"] != "hello" {
+		t.Errorf("outstanding tool did not run: %v", sb.files)
+	}
+	if _, reran := sb.files["/workspace/old0.txt"]; reran {
+		t.Error("an answered historical tool was re-run")
+	}
+}
+
+// TestScanPagesATurnWiderThanOnePage: a turn with more tools than one page
+// holds still walks to its own boundary — the follow-up request must keep
+// walking newest-first (the cursor binds the direction the control plane minted
+// it under), stop on the later page where the prior turn's result appears, and
+// still hand the tools back in log order across the page break.
+func TestScanPagesATurnWiderThanOnePage(t *testing.T) {
+	const tools = toolScanPageSize + 5
+	var reads atomic.Int32
+	count := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events") {
+				reads.Add(1)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	sb := &fakeSandbox{}
+	h := newHarnessWrapped(t, sb, count)
+	h.answeredHistory(t, 30)
+	var batch []string
+	for i := 0; i < tools; i++ {
+		batch = append(batch, writeUse(fmt.Sprintf("new%d.txt", i), fmt.Sprint(i)))
+	}
+	uses := h.suspend(t, batch...)
+
+	if err := h.run(); err != nil {
+		t.Fatalf("RunSessionTools: %v", err)
+	}
+
+	if got := reads.Load(); got != 2 {
+		t.Errorf("events requests = %d, want 2 (the turn spans two pages, and no more)", got)
+	}
+	results := h.results(t)
+	if len(results) != 30+tools {
+		t.Fatalf("user.tool_result = %d, want %d", len(results), 30+tools)
+	}
+	for i, r := range results[30:] {
+		if r.ToolUseID != uses[i].ID.String() {
+			t.Fatalf("result %d references %q, want %q (tools must run in log order)", i, r.ToolUseID, uses[i].ID)
+		}
+	}
+}
+
+// TestOutOfOrderAnswerStillRunsTheEarlierTool: within one suspended turn a later
+// tool can be answered before an earlier one — a denial synthesizes its
+// agent.tool_result immediately while the allowed tool is still outstanding, and
+// a faulted pass answers only what ran. The newest-first walk must therefore
+// read the whole trailing turn, not stop at the first answered use it meets.
+func TestOutOfOrderAnswerStillRunsTheEarlierTool(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarnessWrapped(t, sb, nil)
+	h.answeredHistory(t, 3)
+	uses := h.suspend(t, writeUse("a.txt", "one"), writeUse("b.txt", "two"))
+	h.answer(t, domain.EventAgentToolResult, uses[1].ID) // the second use, answered first
+
+	if err := h.run(); err != nil {
+		t.Fatalf("RunSessionTools: %v", err)
+	}
+
+	if _, ran := sb.files["/workspace/a.txt"]; !ran {
+		t.Error("the still-unanswered earlier tool was skipped")
+	}
+	if _, reran := sb.files["/workspace/b.txt"]; reran {
+		t.Error("the already-answered later tool was re-run")
+	}
+	results := h.results(t)
+	if len(results) != 4 {
+		t.Fatalf("user.tool_result = %d, want 4 (3 historical + 1 new)", len(results))
+	}
+	if got := results[3].ToolUseID; got != uses[0].ID.String() {
+		t.Errorf("the posted result references %q, want the earlier use %q", got, uses[0].ID)
 	}
 }
 

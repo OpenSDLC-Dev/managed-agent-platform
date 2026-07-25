@@ -246,6 +246,25 @@ copy of an entry here.
 
 ### Changed
 
+- **The BYOC worker's unanswered-tool scan is bounded by the trailing turn**
+  ([#76](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/76)). The worker has no
+  database, so it re-derives its work over the wire — and it did so with two oldest-first walks over
+  the session's *entire* `agent.tool_use` and tool-result history, diffed to find the outstanding
+  few. Every polled work item therefore cost a scan that grew with session age: on a session with
+  sixty answered tool calls behind it, seven paged requests before a single tool ran.
+  `worker.unansweredToolUses` now makes one newest-first pass (`order=desc`, an explicit page size)
+  and stops at the trailing turn's boundary — a constant one request in that same scenario. Two
+  platform invariants make the early stop exact rather than heuristic: the brain commits a turn's
+  `agent.tool_use` events in a single append, and no later turn's uses reach the log until every
+  outstanding one is answered, so the unanswered set is always the newest contiguous run of tool
+  uses and the first result older than that run is the boundary. The walk deliberately reads the
+  *whole* run rather than stopping at the first answered use it meets: a turn's tools can be
+  answered out of order (a denial's `agent.tool_result` lands at once while an allowed sibling is
+  still outstanding), and stopping early there would strand the earlier tool forever. No wire
+  surface was added and no behavior changed — the same tools run, in log order, and a reclaiming
+  pass still re-derives exactly the still-unanswered ones. Pinned by tests for the bound (request
+  count flat against a long history), for a turn wider than one page (the desc cursor keeps its
+  direction across the page break, and order is preserved), and for the out-of-order answer.
 - **`anthropic-sdk-go` pinned at v1.59.0**, up from v1.58.0 — and unlike the v1.58.0 bump, this one
   was not contract-neutral. CLAUDE.md makes the pinned SDK this project's authoritative typed wire
   schema, so moving the pin changes what the repo is measured against; the field-by-field
