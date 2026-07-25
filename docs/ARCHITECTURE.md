@@ -478,7 +478,7 @@ policy and its verification, the DTO→`gate.Config` conversion, and the fetch-a
 
 | File | Contents |
 |---|---|
-| `firewall.go` | `Ruleset(uid)` — the three OUTPUT rules, order load-bearing (first-match-wins): loopback `ACCEPT` (all intra-netns loopback), owner-match `ACCEPT` for the gate's own uid, catch-all `DROP`. `Setup` (which refuses a non-positive or oversized gate uid via `CheckGateID` — uid 0 is a silent no-op drop, an oversized id truncates in the syscall) applies them via the `Firewall` adapter — whose contract is to *replace* the chain (policy `DROP` first so the non-atomic flush→append rebuild stays fail-closed throughout, then flush and append), so the state is deterministic and not reliant on a fresh netns — lists both the v4 and v6 tables back, and `CheckListing` requires each chain to be *exactly* those three rules, token-for-token (a foreign `ACCEPT` ahead of the `DROP`, or a rule that only resembles ours — a colliding uid prefix, `-o lo0`, `! -o lo` — is rejected) before it lets `PrivDropper.Drop` run; a firewall that did not take aborts with the process still root, so it never serves fail-open. This is the egress fail-closed invariant: the sandbox shares the gate's netns, and only the gate's uid may reach the network. |
+| `firewall.go` | `Ruleset(uid)` — the three owner-match rules, order load-bearing (first-match-wins): loopback `ACCEPT` (all intra-netns loopback), owner-match `ACCEPT` for the gate's own uid, catch-all `DROP`. They live in a chain the gate owns outright (`ChainName`, `MAP-GATE-EGRESS`), jumped to from `OUTPUT` position 1 — not inlined into `OUTPUT` — so the gate *reconciles* with a netns whose `OUTPUT` already carries foreign rules (CNI/mesh rules in a K8s pod netns): `Apply`'s contract is an atomic rebuild of the owned chain followed by ensuring the single first-position jump, never flushing `OUTPUT` or touching its policy, and idempotent under re-apply (a restarted sidecar). Ordering is the fail-closed guarantee — the chain is complete before the jump steers traffic into it — and every chain verdict is terminal, so foreign rules below the jump are unreachable and the semantics equal owning the whole chain. `Setup` (which refuses a non-positive or oversized gate uid via `CheckGateID` — uid 0 is a silent no-op drop, an oversized id truncates in the syscall) applies via the `Firewall` adapter, lists both families back, and `CheckListing` requires the owned chain to be *exactly* those three rules token-for-token (a foreign `ACCEPT` ahead of the `DROP`, or a rule that only resembles ours — a colliding uid prefix, `-o lo0`, `! -o lo` — is rejected) **and** the first appended `OUTPUT` rule to be exactly the jump (a rule above it would decide traffic before the policy; rules below are tolerated) before it lets `PrivDropper.Drop` run; a firewall that did not take aborts with the process still root, so it never serves fail-open. This is the egress fail-closed invariant: the sandbox shares the gate's netns, and only the gate's uid may reach the network. |
 | `gaterun.go` | `Convert` maps a fetched `gateconfig.Config` to the transport-layer `gate.Config` (a credential's networking `unrestricted` becomes the `egress` engine's per-credential `Unrestricted`). `SwappableHandler` is the `http.Handler` the server binds: an `atomic.Pointer[gate.Gate]` the fetch loop swaps under live traffic, wrapping each request in an `egress_request` span (`semconv` HTTP method + server address). |
 | `loop.go` | `RunFetchLoop` — fetch immediately, then on a ticker: a good config swaps in a fresh `gate.Gate`; `ErrUnauthorized` (revoked token / archived session) swaps in a deny-all gate and returns terminal so the binary shuts down; any transient error keeps the last-known-good gate serving; ctx-cancel returns nil. |
 
@@ -522,12 +522,20 @@ plane cannot suspend the revocation check. It applies and verifies the
 firewall before anything listens, so the Docker `HEALTHCHECK` — the binary's own `-healthcheck`
 probe, which dials the proxy port — cannot pass until egress is fail-closed, making it the sidecar's
 admission signal. It ships as a separate image (`--target gate` — iptables + a dedicated uid) that the Docker
-provider provisions as the sandbox's netns peer. A real-daemon contract test
+provider provisions as the sandbox's netns peer. The firewall adapter reconciles rather than
+flushes: the owned `MAP-GATE-EGRESS` chain is rebuilt atomically (`iptables-restore --noflush` —
+the kube-proxy coexistence pattern, which resets only the chains the payload declares) and the
+`OUTPUT` jump ensured first, so the same adapter serves a fresh Docker netns and a CNI/mesh-populated
+K8s pod netns alike. A real-daemon contract test
 (`cmd/gate/firewall_docker_test.go`) runs that image end-to-end: reaching healthy proves the
-apply→verify→privdrop chain against real iptables-nft in a real netns, the `-S` echo is pinned
-token-for-token on both families against a deliberately hard-coded copy of the ruleset (so an
+apply→verify→privdrop chain against real iptables-nft in a real netns, the `-S` echo of the owned
+chain — and the jump heading `OUTPUT` — is pinned token-for-token on both families against a
+deliberately hard-coded copy of the ruleset (so an
 accidental `Ruleset` change fails the pin instead of being followed), and exec probes prove the
-packets — root egress dropped, gate-uid egress allowed, loopback allowed.
+packets — root egress dropped, gate-uid egress allowed, loopback allowed. A second test is the
+reconcile proof: a netns pre-populated with a foreign `OUTPUT` rule reaches healthy with the rule
+surviving below the jump (unreachable — root egress still dropped), and a container restart in the
+same netns re-applies idempotently (no duplicate rules, no duplicate jump).
 
 `deploy/helm/managed-agent-platform` is the chart (controlplane + brain + executor with
 the k8s sandbox backend, optional inline Postgres, MinIO, and OpenBao — all

@@ -32,42 +32,67 @@ func TestRuleset(t *testing.T) {
 	}
 }
 
-const goodBody = `-A OUTPUT -o lo -j ACCEPT
--A OUTPUT -m owner --uid-owner 100 -j ACCEPT
--A OUTPUT -j DROP`
+const goodChainBody = `-A MAP-GATE-EGRESS -o lo -j ACCEPT
+-A MAP-GATE-EGRESS -m owner --uid-owner 100 -j ACCEPT
+-A MAP-GATE-EGRESS -j DROP`
 
-// goodListing prefixes the rules with a *permissive* -P OUTPUT ACCEPT policy on
-// purpose: CheckListing must ignore the policy line entirely — the explicit
-// catch-all DROP rule is what makes the chain fail-closed — so the dangerous
-// value is the one that proves the property. The real gate sets -P OUTPUT DROP.
-const goodListing = "-P OUTPUT ACCEPT\n" + goodBody
+// goodChain carries the -N declaration line a real `-S MAP-GATE-EGRESS` emits;
+// CheckListing must ignore it the way it ignores -P lines.
+const goodChain = "-N MAP-GATE-EGRESS\n" + goodChainBody
+
+// goodOutput prefixes the jump with a *permissive* -P OUTPUT ACCEPT policy on
+// purpose: CheckListing must ignore policy lines entirely — the chain's
+// explicit catch-all DROP is what makes the steady state fail-closed — so the
+// dangerous value is the one that proves the property.
+const goodOutput = "-P OUTPUT ACCEPT\n-A OUTPUT -j MAP-GATE-EGRESS"
+
+func goodListing() gaterun.Listing {
+	return gaterun.Listing{Chain: goodChain, Output: goodOutput}
+}
 
 func TestCheckListing(t *testing.T) {
-	if err := gaterun.CheckListing(goodListing, 100); err != nil {
+	if err := gaterun.CheckListing(goodListing(), 100); err != nil {
 		t.Errorf("valid listing rejected: %v", err)
 	}
+	// Foreign OUTPUT rules BELOW the jump are the reconcile case (CNI/mesh rules
+	// in a shared pod netns): unreachable behind the terminal chain, tolerated.
+	below := gaterun.Listing{Chain: goodChain,
+		Output: goodOutput + "\n-A OUTPUT -j ACCEPT\n-A OUTPUT -p tcp -j KUBE-SERVICES"}
+	if err := gaterun.CheckListing(below, 100); err != nil {
+		t.Errorf("foreign OUTPUT rules below the jump rejected: %v", err)
+	}
 
+	chain := func(body string) gaterun.Listing {
+		return gaterun.Listing{Chain: body, Output: goodOutput}
+	}
 	cases := map[string]struct {
-		listing string
+		listing gaterun.Listing
 		uid     int
 	}{
-		"missing DROP":        {"-A OUTPUT -o lo -j ACCEPT\n-A OUTPUT -m owner --uid-owner 100 -j ACCEPT", 100},
-		"missing gate ACCEPT": {"-A OUTPUT -o lo -j ACCEPT\n-A OUTPUT -j DROP", 100},
-		"missing loopback":    {"-A OUTPUT -m owner --uid-owner 100 -j ACCEPT\n-A OUTPUT -j DROP", 100},
-		"wrong uid":           {goodListing, 999},
-		"DROP before ACCEPT":  {"-A OUTPUT -j DROP\n-A OUTPUT -o lo -j ACCEPT\n-A OUTPUT -m owner --uid-owner 100 -j ACCEPT", 100},
-		"empty":               {"", 100},
-		// A foreign ACCEPT ahead of ours leaves egress fail-open (first-match-wins)
-		// even though our three rules are all present in order — exact-count catches it.
-		"extra foreign ACCEPT first": {"-A OUTPUT -j ACCEPT\n" + goodBody, 100},
+		"missing DROP":        {chain("-A MAP-GATE-EGRESS -o lo -j ACCEPT\n-A MAP-GATE-EGRESS -m owner --uid-owner 100 -j ACCEPT"), 100},
+		"missing gate ACCEPT": {chain("-A MAP-GATE-EGRESS -o lo -j ACCEPT\n-A MAP-GATE-EGRESS -j DROP"), 100},
+		"missing loopback":    {chain("-A MAP-GATE-EGRESS -m owner --uid-owner 100 -j ACCEPT\n-A MAP-GATE-EGRESS -j DROP"), 100},
+		"wrong uid":           {goodListing(), 999},
+		"DROP before ACCEPT":  {chain("-A MAP-GATE-EGRESS -j DROP\n-A MAP-GATE-EGRESS -o lo -j ACCEPT\n-A MAP-GATE-EGRESS -m owner --uid-owner 100 -j ACCEPT"), 100},
+		"empty chain":         {chain(""), 100},
+		// A foreign ACCEPT inside our chain ahead of ours leaves egress fail-open
+		// (first-match-wins) even though our three rules are all present in order —
+		// exact-count catches it.
+		"extra foreign ACCEPT first": {chain("-A MAP-GATE-EGRESS -j ACCEPT\n" + goodChainBody), 100},
 		// uid substring collision: the gate ACCEPT is for 1000, not 100.
-		"uid prefix collision": {"-A OUTPUT -o lo -j ACCEPT\n-A OUTPUT -m owner --uid-owner 1000 -j ACCEPT\n-A OUTPUT -j DROP", 100},
+		"uid prefix collision": {chain("-A MAP-GATE-EGRESS -o lo -j ACCEPT\n-A MAP-GATE-EGRESS -m owner --uid-owner 1000 -j ACCEPT\n-A MAP-GATE-EGRESS -j DROP"), 100},
 		// A negated interface match accepts every non-loopback interface.
-		"negated loopback": {"-A OUTPUT ! -o lo -j ACCEPT\n-A OUTPUT -m owner --uid-owner 100 -j ACCEPT\n-A OUTPUT -j DROP", 100},
+		"negated loopback": {chain("-A MAP-GATE-EGRESS ! -o lo -j ACCEPT\n-A MAP-GATE-EGRESS -m owner --uid-owner 100 -j ACCEPT\n-A MAP-GATE-EGRESS -j DROP"), 100},
 		// A different interface (lo0) is not loopback lo.
-		"lo0 not lo": {"-A OUTPUT -o lo0 -j ACCEPT\n-A OUTPUT -m owner --uid-owner 100 -j ACCEPT\n-A OUTPUT -j DROP", 100},
+		"lo0 not lo": {chain("-A MAP-GATE-EGRESS -o lo0 -j ACCEPT\n-A MAP-GATE-EGRESS -m owner --uid-owner 100 -j ACCEPT\n-A MAP-GATE-EGRESS -j DROP"), 100},
 		// An extra match clause on the loopback rule changes its meaning.
-		"extra match clause": {"-A OUTPUT -o lo -p tcp -j ACCEPT\n-A OUTPUT -m owner --uid-owner 100 -j ACCEPT\n-A OUTPUT -j DROP", 100},
+		"extra match clause": {chain("-A MAP-GATE-EGRESS -o lo -p tcp -j ACCEPT\n-A MAP-GATE-EGRESS -m owner --uid-owner 100 -j ACCEPT\n-A MAP-GATE-EGRESS -j DROP"), 100},
+		// The jump must exist and be FIRST in OUTPUT — a foreign rule above it
+		// decides traffic before the owner-match policy (fail-open for an ACCEPT).
+		"no OUTPUT jump":            {gaterun.Listing{Chain: goodChain, Output: "-P OUTPUT ACCEPT"}, 100},
+		"foreign rule above jump":   {gaterun.Listing{Chain: goodChain, Output: "-A OUTPUT -j ACCEPT\n-A OUTPUT -j MAP-GATE-EGRESS"}, 100},
+		"jump to a foreign chain":   {gaterun.Listing{Chain: goodChain, Output: "-A OUTPUT -j KUBE-SERVICES\n-A OUTPUT -j MAP-GATE-EGRESS"}, 100},
+		"jump with an extra clause": {gaterun.Listing{Chain: goodChain, Output: "-A OUTPUT -p tcp -j MAP-GATE-EGRESS"}, 100},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -80,7 +105,7 @@ func TestCheckListing(t *testing.T) {
 
 type fakeFirewall struct {
 	applied    []gaterun.Rule
-	v4, v6     string
+	v4, v6     gaterun.Listing
 	applyErr   error
 	listErr    error
 	listCalled bool
@@ -91,7 +116,7 @@ func (f *fakeFirewall) Apply(_ context.Context, rules []gaterun.Rule) error {
 	return f.applyErr
 }
 
-func (f *fakeFirewall) List(context.Context) (string, string, error) {
+func (f *fakeFirewall) List(context.Context) (gaterun.Listing, gaterun.Listing, error) {
 	f.listCalled = true
 	return f.v4, f.v6, f.listErr
 }
@@ -104,7 +129,7 @@ type fakePriv struct {
 func (p *fakePriv) Drop() error { p.dropped = true; return p.err }
 
 func TestSetupHappyPath(t *testing.T) {
-	fw := &fakeFirewall{v4: goodListing, v6: goodListing}
+	fw := &fakeFirewall{v4: goodListing(), v6: goodListing()}
 	pd := &fakePriv{}
 	if err := gaterun.Setup(context.Background(), fw, pd, 100); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -118,10 +143,12 @@ func TestSetupHappyPath(t *testing.T) {
 }
 
 func TestSetupDoesNotDropPrivilegesWhenVerificationFails(t *testing.T) {
-	// The IPv6 table did not take (its DROP is missing). Setup must abort before
-	// dropping privileges — the process stays root so an operator/entrypoint sees
-	// the failure and the gate never serves on a half-applied firewall.
-	fw := &fakeFirewall{v4: goodListing, v6: "-A OUTPUT -o lo -j ACCEPT"}
+	// The IPv6 table did not take (its chain DROP is missing). Setup must abort
+	// before dropping privileges — the process stays root so an operator/
+	// entrypoint sees the failure and the gate never serves on a half-applied
+	// firewall.
+	fw := &fakeFirewall{v4: goodListing(),
+		v6: gaterun.Listing{Chain: "-A MAP-GATE-EGRESS -o lo -j ACCEPT", Output: goodOutput}}
 	pd := &fakePriv{}
 	if err := gaterun.Setup(context.Background(), fw, pd, 100); err == nil {
 		t.Fatal("Setup accepted a firewall whose IPv6 table did not take")
@@ -146,7 +173,7 @@ func TestSetupApplyErrorStopsBeforeListing(t *testing.T) {
 }
 
 func TestSetupDropErrorSurfaces(t *testing.T) {
-	fw := &fakeFirewall{v4: goodListing, v6: goodListing}
+	fw := &fakeFirewall{v4: goodListing(), v6: goodListing()}
 	pd := &fakePriv{err: errors.New("setuid: operation not permitted")}
 	err := gaterun.Setup(context.Background(), fw, pd, 100)
 	if err == nil || !strings.Contains(err.Error(), "drop privileges") {
@@ -160,7 +187,7 @@ func TestSetupRejectsInvalidUID(t *testing.T) {
 	// firewall, so a misconfigured gate fails closed (never applies rules, never
 	// "drops", never serves).
 	for _, uid := range []int{0, -1, 1 << 31, 1<<31 + 100} {
-		fw := &fakeFirewall{v4: goodListing, v6: goodListing}
+		fw := &fakeFirewall{v4: goodListing(), v6: goodListing()}
 		pd := &fakePriv{}
 		if err := gaterun.Setup(context.Background(), fw, pd, uid); err == nil {
 			t.Errorf("Setup accepted gateUID %d, want an invalid-uid error", uid)

@@ -46,6 +46,30 @@ copy of an entry here.
   a failure, never followed. Covered by a test that a redirecting token endpoint's collector is never
   reached and no secret surfaces in the verdict.
 
+### Changed
+
+- **The gate firewall reconciles instead of flushing — the shared-adapter groundwork for the K8s
+  sidecar** (plan 12 slice 4d-i, #50). The Docker-era adapter owned its whole netns: it set
+  `-P OUTPUT DROP`, flushed `OUTPUT`, and appended the three owner-match rules, and verification
+  demanded the chain equal exactly those rules — dead on arrival in a Kubernetes pod netns whose
+  `OUTPUT` already carries CNI or service-mesh rules (flushing destroys them; exactness refuses to
+  serve beside them). The rules now live in a chain the gate owns outright, `MAP-GATE-EGRESS`,
+  rebuilt atomically with `iptables-restore --noflush` (the kube-proxy coexistence pattern — the
+  payload's chain declaration resets only that chain, in one kernel commit), and `OUTPUT` gets a
+  single `-j MAP-GATE-EGRESS` jump ensured at position 1 — checked before inserted, so a restarted
+  sidecar re-applying over its previous incarnation's rules is a no-op, never a duplicate. `OUTPUT`
+  itself is never flushed and its policy never touched. Fail-closed moves from the policy backstop
+  to ordering: the chain is complete before the jump steers any traffic into it, and every chain
+  verdict is terminal (ACCEPT or DROP, nothing returns), so foreign rules below the jump are
+  unreachable — the policy semantics are identical to owning the whole chain, on both backends.
+  Verification splits accordingly (`gaterun.CheckListing`): the owned chain must be token-for-token
+  exactly the ruleset, and the *first* appended `OUTPUT` rule must be exactly the jump — a foreign
+  rule above it would decide traffic before the owner-match policy, while rules below are tolerated;
+  both families, still before the privilege drop. The real-netns contract test re-pins the new
+  shape hard-coded, and a second test is the reconcile proof: a netns pre-populated with a foreign
+  `OUTPUT` ACCEPT reaches healthy with the rule surviving below the jump — root egress still
+  dropped, non-vacuously — and a container restart in the same netns re-applies idempotently.
+
 ### Added
 
 - **`credential_host_unreachable_error` is emitted — as the config conflict the SDK defines, not the

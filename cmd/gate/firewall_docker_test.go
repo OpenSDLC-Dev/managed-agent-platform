@@ -58,32 +58,7 @@ func TestGateImageOwnerMatchFirewall(t *testing.T) {
 
 	waitHealthy(t, id)
 
-	// The kernel's echo of the applied rules must be exactly Ruleset's tokens,
-	// in order, on both families — this pins that iptables-nft does not reorder
-	// or normalize what CheckListing must re-verify at startup. `want` is a
-	// deliberate hard-coded copy of gaterun.Ruleset(65532), not a call to it:
-	// an expectation rendered from Ruleset would follow an accidental edit,
-	// where this pin fails it.
-	want := []string{
-		"-A OUTPUT -o lo -j ACCEPT",
-		"-A OUTPUT -m owner --uid-owner 65532 -j ACCEPT",
-		"-A OUTPUT -j DROP",
-	}
-	for _, bin := range []string{"iptables", "ip6tables"} {
-		listing, code := dockerCLI(t, "exec", id, bin, "-S", "OUTPUT")
-		if code != 0 {
-			t.Fatalf("%s -S OUTPUT: exit %d\n%s", bin, code, listing)
-		}
-		var appended []string
-		for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
-			if strings.HasPrefix(line, "-A OUTPUT") {
-				appended = append(appended, strings.TrimSpace(line))
-			}
-		}
-		if strings.Join(appended, "\n") != strings.Join(want, "\n") {
-			t.Errorf("%s echoed rules:\n%s\nwant exactly:\n%s", bin, strings.Join(appended, "\n"), strings.Join(want, "\n"))
-		}
-	}
+	assertFirewallShape(t, id)
 
 	// Real packets: a root process (the sandbox's uid in production) cannot
 	// leave the netns except over loopback; the gate's dropped-to uid can.
@@ -98,6 +73,142 @@ func TestGateImageOwnerMatchFirewall(t *testing.T) {
 	if out, code := dockerCLI(t, "exec", id, "timeout", "3", "bash", "-c", loop); code != 0 {
 		t.Errorf("root loopback dial to the proxy refused (exit %d), want allowed:\n%s", code, out)
 	}
+}
+
+// assertFirewallShape pins the kernel's echo of the applied firewall on both
+// families: the gate's own chain must be exactly Ruleset's tokens, in order,
+// and the FIRST appended OUTPUT rule must be the jump into it — this pins that
+// iptables-nft does not reorder or normalize what CheckListing must re-verify
+// at startup. `wantChain` is a deliberate hard-coded copy of
+// gaterun.Ruleset(65532) rehomed into the chain, not a render from it: an
+// expectation rendered from Ruleset would follow an accidental edit, where
+// this pin fails it.
+func assertFirewallShape(t *testing.T, id string) {
+	t.Helper()
+	wantChain := []string{
+		"-A MAP-GATE-EGRESS -o lo -j ACCEPT",
+		"-A MAP-GATE-EGRESS -m owner --uid-owner 65532 -j ACCEPT",
+		"-A MAP-GATE-EGRESS -j DROP",
+	}
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		listing, code := dockerCLI(t, "exec", id, bin, "-S", "MAP-GATE-EGRESS")
+		if code != 0 {
+			t.Fatalf("%s -S MAP-GATE-EGRESS: exit %d\n%s", bin, code, listing)
+		}
+		if got := appendedLines(listing, "-A MAP-GATE-EGRESS"); strings.Join(got, "\n") != strings.Join(wantChain, "\n") {
+			t.Errorf("%s echoed chain:\n%s\nwant exactly:\n%s", bin, strings.Join(got, "\n"), strings.Join(wantChain, "\n"))
+		}
+		out, code := dockerCLI(t, "exec", id, bin, "-S", "OUTPUT")
+		if code != 0 {
+			t.Fatalf("%s -S OUTPUT: exit %d\n%s", bin, code, out)
+		}
+		jumps := appendedLines(out, "-A OUTPUT")
+		if len(jumps) == 0 || jumps[0] != "-A OUTPUT -j MAP-GATE-EGRESS" {
+			t.Errorf("%s OUTPUT does not start with the gate jump:\n%s", bin, out)
+		}
+	}
+}
+
+// appendedLines returns the listing's lines that start with prefix, trimmed.
+func appendedLines(listing, prefix string) []string {
+	var got []string
+	for _, line := range strings.Split(strings.TrimSpace(listing), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			got = append(got, line)
+		}
+	}
+	return got
+}
+
+// TestGateImageFirewallReconcilesForeignRules is the reconcile proof: a netns
+// whose OUTPUT chain already carries a foreign rule (the K8s pod situation —
+// CNI or mesh rules present before the sidecar starts) must not be flushed.
+// The gate becomes healthy, the foreign rule survives below the gate's jump —
+// unreachable behind the chain's terminal verdicts, so root egress is still
+// dropped — and a container restart (same netns, the restarted-sidecar case)
+// re-applies idempotently: no duplicate chain rules, no duplicate jump.
+func TestGateImageFirewallReconcilesForeignRules(t *testing.T) {
+	image := sandboxtest.BuildGateImage(t)
+
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	hostAddr := sandboxtest.DockerHostAddr(t)
+	port := fmt.Sprint(ln.Addr().(*net.TCPAddr).Port)
+
+	// Pre-populate the netns before the gate runs: a foreign ACCEPT in OUTPUT
+	// (would fail-open if it ended up above the gate's jump) — then exec the
+	// gate. No --rm: the restart below must not remove the container.
+	foreign := "iptables -A OUTPUT -p tcp --dport 9 -j ACCEPT && ip6tables -A OUTPUT -p tcp --dport 9 -j ACCEPT && exec /gate"
+	out, code := dockerCLI(t, "run", "-d", "--cap-add", "NET_ADMIN",
+		"--entrypoint", "/bin/bash",
+		"-e", "CONTROLPLANE_URL=http://"+net.JoinHostPort(hostAddr, "1"),
+		"-e", "GATE_TOKEN=gtk_firewalltest", image, "-c", foreign)
+	if code != 0 {
+		t.Fatalf("docker run: exit %d\n%s", code, out)
+	}
+	id := strings.TrimSpace(out)
+	t.Cleanup(func() { _, _ = exec.Command("docker", "rm", "-f", id).CombinedOutput() })
+
+	waitHealthy(t, id)
+	assertReconciledShape(t, id)
+
+	// Root egress is still dropped: the foreign ACCEPT survives but sits below
+	// the jump, where the chain's terminal verdicts make it unreachable.
+	dial := `exec 3<>"/dev/tcp/` + hostAddr + `/` + port + `"`
+	if out, code := dockerCLI(t, "exec", id, "timeout", "3", "bash", "-c", dial); code == 0 {
+		t.Errorf("root egress escaped the owner-match DROP with a foreign rule present:\n%s", out)
+	}
+
+	// Restart: same netns, rules still in the kernel — the re-apply must be
+	// idempotent (the restarted-sidecar case on K8s).
+	if out, code := dockerCLI(t, "restart", id); code != 0 {
+		t.Fatalf("docker restart: exit %d\n%s", code, out)
+	}
+	waitHealthy(t, id)
+	assertReconciledShape(t, id)
+}
+
+// assertReconciledShape asserts the gate shape AND the foreign rule's survival,
+// with exactly one gate jump in OUTPUT (idempotency).
+func assertReconciledShape(t *testing.T, id string) {
+	t.Helper()
+	assertFirewallShape(t, id)
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		out, code := dockerCLI(t, "exec", id, bin, "-S", "OUTPUT")
+		if code != 0 {
+			t.Fatalf("%s -S OUTPUT: exit %d\n%s", bin, code, out)
+		}
+		rules := appendedLines(out, "-A OUTPUT")
+		if n := countEqual(rules, "-A OUTPUT -j MAP-GATE-EGRESS"); n != 1 {
+			t.Errorf("%s OUTPUT holds %d gate jumps, want exactly 1:\n%s", bin, n, out)
+		}
+		if n := countEqual(rules, "-A OUTPUT -p tcp -m tcp --dport 9 -j ACCEPT"); n != 1 {
+			t.Errorf("%s foreign rule did not survive the reconcile (found %d):\n%s", bin, n, out)
+		}
+	}
+}
+
+func countEqual(lines []string, want string) int {
+	n := 0
+	for _, l := range lines {
+		if l == want {
+			n++
+		}
+	}
+	return n
 }
 
 // waitHealthy polls the container's HEALTHCHECK; failing to get there means the
