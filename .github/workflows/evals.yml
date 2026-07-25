@@ -44,7 +44,13 @@ jobs:
     # one that fails a trial inspectably; these two only stop a wedged run.
     timeout-minutes: 75
     steps:
+      # persist-credentials: false because nothing here pushes. The default
+      # leaves GITHUB_TOKEN in .git/config as an extraheader for the rest of the
+      # job, and the rest of this job is `make eval` — a suite that runs a real
+      # model's tool calls. It has no business inheriting a repo credential.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
