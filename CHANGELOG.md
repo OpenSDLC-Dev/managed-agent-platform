@@ -132,9 +132,11 @@ copy of an entry here.
   toolset row, and the bash tool's restart comment) now say what is true.
 
   The shared `sandboxtest` contract suite pins the three regressions on both backends — four new
-  rows, and the three that cover the defects above failed on both backends before the fix — and the
-  k8s script tests pin the same decisions against a real shell, including a path component ending in
-  a newline and a planted `dirname`. One k8s-only test went away with the fix: it asserted that a
+  rows, and the three that cover the defects above failed on both backends before the fix — while
+  the decisions a container makes expensive to stage are pinned against a real shell instead: the
+  shared shell's own tests cover a path component ending in a newline and a planted `dirname`, and
+  the k8s script tests cover a target that became a directory mid-move (staged with a shimmed `mv`,
+  since the race itself cannot be interleaved). One k8s-only test went away with the fix: it asserted that a
   write onto a directory fails there *because* "the docker backend surfaces the daemon's error the
   same way", which was never true; the shared row now holds both backends to it.
 
@@ -142,8 +144,10 @@ copy of an entry here.
   a symlink at the target is supplanted by a regular file and what it pointed at is untouched (a
   symlink to a *directory* is a directory here, and refused as one); the parent directory must be
   writable even where the target already is; the target's permission bits are not preserved
-  ([#204](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/204) — the reference
-  preserves them); and a target that cannot be renamed onto at all, such as a file bind-mounted into
+  ([#204](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/204) — the Claude Code
+  harness chmods its temporary file to the target's mode first, a harness-design observation rather
+  than a wire behavior of the managed-agents reference); and a target that cannot be renamed onto at
+  all, such as a file bind-mounted into
   the sandbox, now fails rather than being written through
   ([#205](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/205) — both backends agree
   on that now, where only k8s used to succeed). Docker writes also cost one extra exec each — 2.2 ms

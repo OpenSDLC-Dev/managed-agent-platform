@@ -11,8 +11,10 @@ import (
 )
 
 // pathFault runs the shared shell against one path and returns what it exited
-// with. The path travels as an argument, never as script text — the same way
-// every backend passes it — so nothing in a path can be read as shell.
+// with. The path travels as an argument, the way the k8s backend passes it; the
+// docker backend interpolates it into the script text instead, shell-quoted. The
+// argument form is the one that leaves the shell itself nothing to expand, so it
+// is what these tests hold the shell to.
 func pathFault(t *testing.T, path string, env ...string) int {
 	t.Helper()
 	cmd := exec.Command("/bin/bash", "-c",

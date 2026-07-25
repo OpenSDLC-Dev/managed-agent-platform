@@ -791,6 +791,13 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 		!strings.Contains(commands[1], "'/workspace/a/b/f.txt'") {
 		t.Errorf("second exec = %q, want the temporary file renamed onto the target", commands[1])
 	}
+	// Asked before the move and again after it. The race between them cannot be
+	// staged from here — this backend's script runs in a container — so what is
+	// pinned is that the script the daemon is handed asks twice; the k8s script
+	// test stages the outcome itself, against a shimmed `mv`.
+	if n := strings.Count(commands[1], "[ -d "); n != 2 {
+		t.Errorf("the rename asks whether the target is a directory %d times, want 2: %q", n, commands[1])
+	}
 }
 
 // A buffered write whose put fails takes its residue with it. However much of the
@@ -855,12 +862,18 @@ func TestWriteFileKeepsPathFailuresDistinctFromAMissingSandbox(t *testing.T) {
 }
 
 func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
+	var commands []string
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/containers/abc/archive":
 			w.WriteHeader(http.StatusNotFound)
 			io.WriteString(w, `{"message":"no such directory"}`)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			commands = append(commands, body.Cmd[len(body.Cmd)-2])
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 			w.Write(frame(2, "Read-only file system\n"))
@@ -872,6 +885,38 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 	err := c.WriteFile(context.Background(), "/workspace/a/f.txt", []byte("x"))
 	if err == nil || !strings.Contains(err.Error(), "Read-only file system") {
 		t.Errorf("err = %v, want the mkdir's stderr", err)
+	}
+	// And the put that failed before the mkdir did not get to keep whatever it
+	// landed: a put refused outright leaves nothing, but one that died in transfer
+	// leaves a piece of the entry, and this is the path that sheds it.
+	if last := commands[len(commands)-1]; !strings.HasPrefix(last, "rm -f '/workspace/a/"+sandbox.TempPrefix) {
+		t.Errorf("last exec = %q, want the temporary file removed after the failed mkdir", last)
+	}
+}
+
+// The rename is one exec, and when that exec cannot run at all the bytes are
+// landed under a name nothing will claim. The removal is attempted on the way out
+// — here it fails too, since this daemon refuses every exec, which is exactly why
+// the attempt is what gets asserted rather than its outcome.
+func TestWriteFileShedsItsTempWhenTheRenameCannotRun(t *testing.T) {
+	var execs int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			execs++
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `{"message":"cannot create exec"}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	if err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x")); err == nil {
+		t.Fatal("write returned nil, want the failed rename")
+	}
+	if execs != 2 {
+		t.Errorf("%d exec attempts, want 2 — the rename, then the removal of what it could not name", execs)
 	}
 }
 

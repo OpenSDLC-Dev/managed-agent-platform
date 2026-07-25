@@ -263,8 +263,9 @@ type Sandbox interface {
 	//   - The parent directory must be writable, even where the target itself
 	//     already is.
 	//   - The target's permission bits are not preserved: the file that lands is a
-	//     fresh 0644. (The reference's own atomic write does preserve them; #204
-	//     tracks doing the same.)
+	//     fresh 0644. (The Claude Code harness chmods its temporary file to the
+	//     target's mode before renaming — a harness-design observation, not a wire
+	//     behavior of the managed-agents reference; #204 tracks doing the same.)
 	//   - A file bind-mounted into the sandbox cannot be renamed onto at all, so a
 	//     write to one now fails on both backends where the k8s backend used to
 	//     succeed. Device nodes are the one target the two still answer

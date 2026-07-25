@@ -228,11 +228,12 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 	// The temporary file the script writes through is named by Go, exactly as
 	// WriteFileStream names it, and handed back so a test can assert it is gone:
 	// every failure path in the script has to take its own residue with it.
-	run := func(t *testing.T, stdin []byte, declared int, path string) (int, string) {
+	run := func(t *testing.T, stdin []byte, declared int, path string, env ...string) (int, string) {
 		t.Helper()
 		tmp := gopath.Join(gopath.Dir(path), sandbox.TempName())
 		cmd := exec.Command("/bin/bash", "-c", writeScript, "map-write", path,
 			gopath.Dir(path), strconv.Itoa(declared), tmp)
+		cmd.Env = env // nil inherits, which is what every row but the shimmed one wants
 		cmd.Stdin = bytes.NewReader(stdin)
 		if err := cmd.Run(); err != nil {
 			var ee *exec.ExitError
@@ -330,6 +331,38 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 		}
 		if got, err := os.ReadFile(held); err != nil || string(got) != "kept" {
 			t.Errorf("file inside the directory = %q, %v; want it untouched", got, err)
+		}
+		gone(t, tmp)
+	})
+
+	// The target is asked about twice, and this is the second answer's row. The race
+	// it defends against cannot be interleaved from a test — something in the
+	// sandbox would have to make the target a directory in the instant between the
+	// first check and the move — so what a racing `mv` *does* is staged instead:
+	// this one finds the destination a directory and puts the file inside it,
+	// exiting 0, exactly as the real one would. The write must not report that as a
+	// success, and must not leave the file it never asked to put there.
+	t.Run("TargetBecameADirectoryDuringTheMove", func(t *testing.T) {
+		realMV, err := exec.LookPath("mv")
+		if err != nil {
+			t.Fatalf("find the real mv: %v", err)
+		}
+		bin := t.TempDir()
+		shim := "#!/bin/sh\nmkdir -p \"$3\" && exec " + realMV + " \"$2\" \"$3\"/\n"
+		if err := os.WriteFile(bin+"/mv", []byte(shim), 0o755); err != nil {
+			t.Fatalf("stage the racing mv: %v", err)
+		}
+		path := dir + "/raced"
+		code, tmp := run(t, []byte("x"), 1, path, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if code != sandbox.ExitPathIsDirectory {
+			t.Errorf("exit %d, want %d — the move landed inside a directory", code, sandbox.ExitPathIsDirectory)
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			t.Fatalf("read the directory the move landed in: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("the directory holds %d entries, want the file the move put there removed", len(entries))
 		}
 		gone(t, tmp)
 	})
@@ -504,6 +537,16 @@ func TestReadScriptMarksWhatItSent(t *testing.T) {
 		if err := exec.Command("mkfifo", dir+"/fifo").Run(); err != nil {
 			t.Fatalf("stage fifo: %v", err)
 		}
+		// A directory and a regular file whose name is that directory's plus a
+		// newline. Asking the shared shell about the *file*'s child must not be
+		// answered for the *directory* — which is what happens the moment the path
+		// travels through a command substitution on its way there.
+		if err := os.Mkdir(dir+"/nl", 0o755); err != nil {
+			t.Fatalf("stage dir: %v", err)
+		}
+		if err := os.WriteFile(dir+"/nl\n", nil, 0o600); err != nil {
+			t.Fatalf("stage its newline-suffixed sibling: %v", err)
+		}
 		for _, c := range []struct {
 			name string
 			path string
@@ -516,6 +559,7 @@ func TestReadScriptMarksWhatItSent(t *testing.T) {
 			// cannot work either (#71).
 			{"BlockedByAFile", gate + "/child", sandbox.MaxFileBytes, sandbox.ExitPathNotDirectory},
 			{"DeeperBlockedByAFile", gate + "/x/y", sandbox.MaxFileBytes, sandbox.ExitPathNotDirectory},
+			{"BlockedByAFileNamedWithANewline", dir + "/nl\n/child", sandbox.MaxFileBytes, sandbox.ExitPathNotDirectory},
 			{"Directory", dir + "/sub", sandbox.MaxFileBytes, readIsDir},
 			{"Symlink", dir + "/link", sandbox.MaxFileBytes, readNotRegular},
 			{"Fifo", dir + "/fifo", sandbox.MaxFileBytes, readNotRegular},
