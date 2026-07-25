@@ -1,0 +1,22 @@
+# Dependabot exists here for one reason: the workflows pin every action to a
+# commit SHA, and a pin with nobody refreshing it is how a workflow ends up
+# running two-year-old code with known holes. SHA pinning and this file are a
+# pair — do not add a pinned action without leaving this able to see it.
+#
+# github-actions only. Go modules are deliberately not enrolled: this repo's
+# dependency set is small and deliberate (see CLAUDE.md's primary deps), and a
+# weekly flood of module bumps would bury the action updates that this file is
+# actually here for.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    # "/" covers .github/workflows/*.yml — Dependabot reads the workflow
+    # directory from the repository root, not a per-workflow path.
+    directory: /
+    schedule:
+      interval: weekly
+    # One PR per action, so a broken bump is reverted on its own rather than
+    # taking the rest of the week's updates with it.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore

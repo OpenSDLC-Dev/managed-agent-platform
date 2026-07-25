@@ -19,7 +19,10 @@ import (
 // for) the suite. That is the discipline the evals writeup argues for: the
 // transcript is the primary artifact, and a summary nobody can inspect is a
 // score, not evidence.
-const artifactsDir = "artifacts"
+// A var, not a const, only so the report's own tests can point it somewhere
+// disposable — writing into the real directory would clobber the artifacts of
+// whatever run the developer was reading.
+var artifactsDir = "artifacts"
 
 // failure is one grader's verdict on one trial.
 type failure struct {
@@ -80,10 +83,27 @@ func recordMeta(cfg modeltest.Config) {
 	recorder.secrets = secretsOf(cfg)
 }
 
+// recordTrial adds a trial's outcome to the run and flushes the artifacts.
+//
+// Flushing here rather than once at the end is what makes the artifacts survive
+// a wedged run. `go test -timeout` fires from testing's alarm goroutine and
+// panics the process, so m.Run never returns and anything after it is
+// unreachable — which would leave the run whose evidence someone actually needs,
+// the one that hung, with nothing on disk but the panic's stack dump. Rewriting
+// the whole report once per trial is invisible against trials that take minutes.
+//
+// The write happens outside the lock: writeArtifacts takes the same mutex.
 func recordTrial(rec record) {
 	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
 	recorder.rep.Records = append(recorder.rep.Records, rec)
+	recorder.mu.Unlock()
+
+	// Not fatal, for the same reason the end-of-run write was not: the tests'
+	// own verdict is the run's verdict, and a report that could not be written
+	// must not turn a green run red.
+	if err := writeArtifacts(); err != nil {
+		os.Stderr.WriteString("evals: writing artifacts failed: " + err.Error() + "\n")
+	}
 }
 
 // endpointHost reduces a base URL to host:port, dropping userinfo, path and

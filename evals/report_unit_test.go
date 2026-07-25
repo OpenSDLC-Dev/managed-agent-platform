@@ -1,11 +1,64 @@
 package evals
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modeltest"
 )
+
+// withScratchRecorder points the artifacts at a temp directory and empties the
+// run-wide recorder, restoring both afterwards. The restore is not tidiness: a
+// record left in the global recorder would make TestMain's end-of-run
+// writeArtifacts fire on an ordinary offline `go test`, scribbling a fake run
+// into the developer's real evals/artifacts/.
+func withScratchRecorder(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	oldDir, oldRep, oldSecrets := artifactsDir, recorder.rep, recorder.secrets
+	artifactsDir = dir
+	recorder.rep, recorder.secrets = report{}, nil
+	t.Cleanup(func() {
+		artifactsDir = oldDir
+		recorder.rep, recorder.secrets = oldRep, oldSecrets
+	})
+	return dir
+}
+
+// A run that wedges until `go test -timeout` fires never returns from m.Run, so
+// TestMain's writeArtifacts is unreachable and the run most in need of evidence
+// is the one that leaves none. The defence is that every trial's artifacts are
+// already on disk by the time the next one starts, which is what this pins:
+// recordTrial alone, with no end-of-run write, must leave a readable report.
+func TestRecordTrialFlushesArtifactsWithoutTheEndOfRunWrite(t *testing.T) {
+	dir := withScratchRecorder(t)
+
+	recordTrial(record{Task: "first", Session: "sesn_1", Pass: true})
+	recordTrial(record{
+		Task: "second", Session: "sesn_2", Pass: false,
+		Failures: []failure{{Grader: "g", Class: string(Platform), Error: "boom"}},
+		events:   []map[string]any{{"type": "session.error"}},
+	})
+
+	report, err := os.ReadFile(filepath.Join(dir, "report.json"))
+	if err != nil {
+		t.Fatalf("no report.json after two recorded trials: %v", err)
+	}
+	for _, want := range []string{"first", "second"} {
+		if !strings.Contains(string(report), want) {
+			t.Errorf("report.json is missing trial %q: %s", want, report)
+		}
+	}
+	if _, err := os.ReadFile(filepath.Join(dir, "summary.md")); err != nil {
+		t.Errorf("no summary.md after two recorded trials: %v", err)
+	}
+	// The failed trial's transcript is the artifact triage actually opens.
+	if _, err := os.ReadFile(filepath.Join(dir, "transcript-second-sesn_2.json")); err != nil {
+		t.Errorf("no transcript for the failed trial: %v", err)
+	}
+}
 
 func TestScrubRedactsConfiguredSecrets(t *testing.T) {
 	cfg := modeltest.Config{

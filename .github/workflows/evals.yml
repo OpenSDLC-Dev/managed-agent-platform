@@ -10,7 +10,7 @@ name: evals
 # run instead. (Scheduled runs are best-effort on GitHub's side: under load they
 # are delayed, and can be dropped. Daily is the cadence asked for, not an SLA.)
 #
-# Deferred from plan 02 until a maintainer could set the repo secrets it needs;
+# Deferred from plan 02 until a maintainer could set the secrets it needs;
 # filed and delivered as #96. It calls a real model and starts real containers,
 # so every run costs money — hence daily rather than per-push, and one at a time.
 on:
@@ -36,22 +36,33 @@ jobs:
   evals:
     name: evals
     runs-on: ubuntu-latest
+    # The four MODEL_* secrets live in this environment and nowhere else — there
+    # are no repository-level copies — so this line is what grants access to
+    # them, and the environment's deployment-branch policy (main only) is what
+    # bounds it. That closes the hole a plain repo secret leaves: `workflow_dispatch`
+    # runs the workflow file from whichever ref is chosen, so without the policy a
+    # modified branch could rewrite the eval step and walk off with the credential.
+    #
+    # Deliberately NO required reviewers on this environment: an approval gate on
+    # a nightly unattended job means the job waits for a human every night, which
+    # is precisely the regression net this workflow exists to avoid needing.
+    environment: evals
     # `make eval` caps the test binary at 60m, and that is the timeout worth
-    # hitting: it panics naming the trial that hung. This is only the outer
-    # backstop, so it must sit above it. Neither timeout leaves artifacts behind
-    # — a binary-timeout panic never returns from m.Run, so evals/main_test.go's
-    # writeArtifacts is never reached. The harness's own per-turn timeout is the
-    # one that fails a trial inspectably; these two only stop a wedged run.
+    # hitting: it panics naming the trial that hung, and every trial that had
+    # already finished is on disk — the suite flushes its artifacts after each
+    # trial rather than at the end, precisely because that panic never returns
+    # from m.Run. This 75m is only the outer backstop and must stay above the
+    # 60m, or the job would be killed before the publishing steps below run.
     timeout-minutes: 75
     steps:
       # persist-credentials: false because nothing here pushes. The default
       # leaves GITHUB_TOKEN in .git/config as an extraheader for the rest of the
       # job, and the rest of this job is `make eval` — a suite that runs a real
       # model's tool calls. It has no business inheriting a repo credential.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       # The command lives in the Makefile — the single executable source — and it
@@ -64,7 +75,7 @@ jobs:
       # failure this workflow exists to prevent: green while testing nothing.
       # So until the four secrets are configured, this job is red by design.
       - name: eval suite (real model endpoint + Docker sandboxes)
-        # The endpoint, from repo secrets and nowhere else. No .env is written
+        # The endpoint, from the environment's secrets and nowhere else. No .env is written
         # here, on purpose: internal/modeltest resolves MODEL_* from the
         # environment first and only falls back to the repo-root file, so in CI
         # these four *are* the whole configuration. An unset secret renders as the
@@ -93,11 +104,11 @@ jobs:
           if [ -f evals/artifacts/summary.md ]; then
             cat evals/artifacts/summary.md >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'No summary.md was written, so this run recorded no artifacts. The two ways that happens: it failed before any trial ran (an unset MODEL_* repo secret is the likeliest cause), or it wedged until a timeout. See the step log above.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'No summary.md was written, so no trial ever finished — the suite flushes its artifacts after every one. The likeliest cause is an unset MODEL_* secret; a run that wedged inside its first trial looks the same. See the step log above.' >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: upload the run artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: eval-artifacts
           path: evals/artifacts/
