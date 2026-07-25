@@ -171,6 +171,19 @@ func TestProvisionCreatesGatePair(t *testing.T) {
 	}
 }
 
+// TestGateConfigOmitsOTLPWhenUnset: an empty OTelEndpoint injects no OTEL_* env,
+// so the gate runs without an exporter exactly as the executor does with an empty
+// endpoint — never a bogus empty OTEL_EXPORTER_OTLP_ENDPOINT= that telemetry.Init
+// would treat as configured.
+func TestGateConfigOmitsOTLPWhenUnset(t *testing.T) {
+	cfg := gateConfig(gatedSpec(&fakeMinter{token: "gtk_x"}), "gtk_x", "bridge")
+	for _, e := range cfg.Env {
+		if strings.HasPrefix(e, "OTEL_") {
+			t.Errorf("gate env carries %q with no OTLP endpoint configured", e)
+		}
+	}
+}
+
 // TestProvisionAdoptsExistingGate is the normal path: on a re-provision both
 // halves already run, so the gate is adopted and no token is minted — minting
 // would revoke the token the live gate is authenticating with.
