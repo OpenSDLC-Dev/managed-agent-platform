@@ -70,7 +70,12 @@ func restorePayload(rules []gaterun.Rule) string {
 // only partially fail-open and must not be widened while being remediated, and
 // a failure mid-way leaves a safe unreachable duplicate, never zero jumps.
 // Duplicates (ours below the first, or the old jump after remediation) are
-// removed by rule number, highest first so the numbers stay valid.
+// removed by rule number, highest first so the numbers stay valid. (By-spec
+// -D is not an option once the fresh jump is in: it deletes the FIRST match —
+// the new jump itself. Numbered deletion is non-atomic against a concurrent
+// OUTPUT mutation between the -S snapshot and the delete; that race is
+// inherent to iptables outside a full restore, confined to this startup path,
+// and the verification that follows refuses to serve on any shape it bent.)
 func ensureJumpFirst(ctx context.Context, bin string) error {
 	rules, err := outputRules(ctx, bin)
 	if err != nil {

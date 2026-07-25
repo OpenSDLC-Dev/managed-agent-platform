@@ -130,8 +130,9 @@ func appendedLines(listing, prefix string) []string {
 // `docker restart` recreates the netns, so the only way to meet populated
 // kernel state is re-running /gate inside the same container) is then proven
 // on both divergence paths: a foreign rule pushed above the jump is remediated
-// (delete + re-insert first), and a re-apply over an already-correct state is
-// a no-op — no duplicate chain rules, no duplicate jump, either way.
+// (a fresh jump inserted first, the displaced one then removed), and a
+// re-apply over an already-correct state is a no-op — no duplicate chain
+// rules, no duplicate jump, either way.
 func TestGateImageFirewallReconcilesForeignRules(t *testing.T) {
 	image := sandboxtest.BuildGateImage(t)
 
@@ -154,7 +155,7 @@ func TestGateImageFirewallReconcilesForeignRules(t *testing.T) {
 
 	// Pre-populate the netns before the gate runs: a foreign ACCEPT in OUTPUT
 	// (would fail-open if it ended up above the gate's jump) — then exec the
-	// gate. No --rm: the restart below must not remove the container.
+	// gate. No --rm: the re-exec legs below need the container to persist.
 	foreign := "iptables -A OUTPUT -p tcp --dport 9 -j ACCEPT && ip6tables -A OUTPUT -p tcp --dport 9 -j ACCEPT && exec /gate"
 	out, code := dockerCLI(t, "run", "-d", "--cap-add", "NET_ADMIN",
 		"--entrypoint", "/bin/bash",
