@@ -46,7 +46,7 @@ jobs:
           # Nothing in CI pushes, so the token has no reason to outlive this
           # step in .git/config as an extraheader.
           persist-credentials: false
-      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: helm lint
         run: helm lint "$CHART" -f "$VALUES"
       - name: helm template renders (smoke)
