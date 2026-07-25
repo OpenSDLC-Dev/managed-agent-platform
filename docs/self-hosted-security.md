@@ -155,11 +155,11 @@ sandbox (plan 12) is the exception: the provider drops `NET_RAW`, `SETUID` and
 same three and sets `allowPrivilegeEscalation: false`), so the sandbox can
 neither craft raw packets past the gate's owner-match firewall nor become the
 gate's UID *at runtime*. One caveat the drops cannot cover: a sandbox **image**
-whose `USER` directive is already the gate's UID (65532 — notably distroless's
-`nonroot` user) starts every tool process as the UID the owner-match firewall
-permits, silently bypassing `allowed_hosts` on both backends. Do not use
-sandbox images that run as UID 65532 with the gate; enforcement is tracked in
-#196. The `NET_ADMIN` holders are the gate container/sidecar itself (it
+whose `USER` directive is already the gate's dropped-to UID (`GATE_UID`,
+default 65532 — notably distroless's `nonroot` user) starts every tool
+process as the UID the owner-match firewall permits, silently bypassing
+`allowed_hosts` on both backends. Do not use sandbox images that run as the
+configured gate UID; enforcement is tracked in #196. The `NET_ADMIN` holders are the gate container/sidecar itself (it
 installs the firewall, then drops privileges) and, on Kubernetes, the
 short-lived `netsetup` init container that enforces gate-less `limited`
 networking — never the sandbox container.
