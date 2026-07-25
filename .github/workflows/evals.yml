@@ -105,7 +105,7 @@ jobs:
           if [ -f evals/artifacts/summary.md ]; then
             cat evals/artifacts/summary.md >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'No summary.md, so this run persisted no artifacts: the suite writes them after every trial, and none finished — or the eval step never ran at all, since this step runs even when an earlier one failed. See the step log above for which.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'No summary.md to render. The suite writes one after every trial, so either no trial finished or the eval step never ran at all — this step runs even when an earlier one failed. See the step log above, and the uploaded artifact for whatever else did land.' >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: upload the run artifacts
         if: always()
