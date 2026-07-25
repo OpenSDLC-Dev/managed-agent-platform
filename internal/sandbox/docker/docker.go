@@ -662,21 +662,24 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 		return sandbox.ExecResult{}, err
 	}
 
-	// Two ways a finished command can have hit its deadline. The watchdog killed
-	// it: SIGKILL, and the command was alive to receive it — a command cannot
-	// survive SIGKILL to fake that, and one that kills itself before the
-	// pre-deadline probe was already gone when we looked, whenever the probe got
-	// an answer to look at. (Two SIGKILLs of the command's own read as the
-	// watchdog's, both erring toward a timeout: one inside the probe's short lead,
-	// the deliberate cost of sampling a lead ahead of the deadline; and one whose
-	// probe went unanswered — see alive — where the command's exec stream, held
-	// open past the deadline by something it backgrounded, is all that is left to
-	// read and it says nothing about the command.) Or it
-	// was still running after the deadline and the
-	// slop, and exited anyway, which on the honest path is impossible, because
-	// the watchdog would have killed it first. (A command the kernel OOM-kills
-	// past its deadline reads as a timeout. It hit a limit and produced nothing;
-	// the label is close enough, and the alternative is to guess.)
+	// Two ways a finished command can have hit its deadline.
+	//
+	// One: the watchdog killed it — SIGKILL, and the command was alive to receive
+	// it, which a command cannot survive SIGKILL to fake. A command that SIGKILLs
+	// itself is normally excluded by that same aliveness, the probe having found
+	// it already gone. Two such commands are not excluded, and both read as the
+	// watchdog's, erring toward the timeout label rather than away from it: one
+	// that kills itself inside the probe's short lead, the deliberate cost of
+	// sampling a lead ahead of the deadline; and one whose probe went unanswered,
+	// where all that is left to read is an exec stream held open past the deadline
+	// by something the command backgrounded, and that says nothing about the
+	// command (see alive).
+	//
+	// Two: it was still running after the deadline and the slop, and exited
+	// anyway, which on the honest path is impossible, because the watchdog would
+	// have killed it first. (A command the kernel OOM-kills past its deadline
+	// reads as a timeout. It hit a limit and produced nothing; the label is close
+	// enough, and the alternative is to guess.)
 	timedOut := (code == sigkillExit && v.aliveAtDeadline) || v.overran
 	return sandbox.ExecResult{
 		Stdout:    string(out.stdout),

@@ -512,8 +512,11 @@ copy of an entry here.
   cancellation arriving then is therefore just an unanswered probe, and it now falls to the rule
   `alive` already applied to a daemon that would not answer: count the command as still running,
   because hiding a timeout breaks the deadline's promise while mislabelling one costs a tool call. The
-  discriminator is the instant of the close, which the daemon side already holds — the K8s fix's
-  in-pod kill mark is deliberately *not* ported, since Docker's probe is a daemon-host call the
+  discriminator is the instant of the close as `Exec` sees it — its own host-side reading, not
+  something the daemon hands over, and noticed a scheduling hop after the close itself, so a close
+  within a hop of the deadline reads as the later case. Like the probe lead, that boundary is paid
+  toward the label and never away from it. Nothing new is read from inside the container: the K8s
+  fix's in-pod kill mark is deliberately *not* ported, since Docker's probe is a daemon-host call the
   sandboxed command can neither reach nor forge, and the verdict stays that way.
 
   Two things this deliberately leaves as they were, both surfaced by review. The fix is scoped to a
