@@ -225,13 +225,24 @@ func writeArtifacts() error {
 	// right there, exactly the evidence the per-trial flush exists to keep. This
 	// run's own transcripts need no sweeping: their names are deterministic, so
 	// the rewrite below overwrites them in place.
+	//
+	// Latched only once the sweep actually succeeded, so a removal that failed is
+	// retried by the next flush instead of leaving a prior run's transcript
+	// beside this run's fresh summary for good. A failure is not propagated: the
+	// artifacts this call is about to write matter more than a leftover, and
+	// returning here would trade a stale file for no report at all.
 	if !recorder.swept {
-		recorder.swept = true
-		if old, err := filepath.Glob(filepath.Join(artifactsDir, "transcript-*.json")); err == nil {
-			for _, f := range old {
-				_ = os.Remove(f)
+		swept := true
+		old, err := filepath.Glob(filepath.Join(artifactsDir, "transcript-*.json"))
+		if err != nil {
+			swept = false
+		}
+		for _, f := range old {
+			if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+				swept = false
 			}
 		}
+		recorder.swept = swept
 	}
 	// Every artifact is scrubbed of known secrets on its way to disk (see
 	// secretsOf): the scrub runs over the final rendered bytes, so a credential

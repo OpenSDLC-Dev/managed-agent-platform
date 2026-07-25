@@ -22,7 +22,9 @@ copy of an entry here.
   trailing comment (`actions/checkout@11d5960… # v4.4.0` and so on) instead of a mutable major tag; a
   retargeted `v4` would otherwise run attacker-chosen code in a job that can read secrets. The pins are
   the *current* major of each action — pinning is not an upgrade, and silently jumping checkout from v4
-  to v7 would smuggle a behavior change into a security change.
+  to v7 would smuggle a behavior change into a security change. Every `actions/checkout` in the
+  repository also gained `persist-credentials: false`: no CI job pushes, so `GITHUB_TOKEN` has no
+  reason to sit in `.git/config` as an extraheader for the rest of the job.
   **(2)** A new `.github/dependabot.yml` enrolls `github-actions` weekly, because a pin with nobody
   refreshing it is how a workflow ends up running two-year-old code with known holes; the two are a
   pair. Go modules are deliberately not enrolled.

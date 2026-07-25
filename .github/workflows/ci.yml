@@ -15,6 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Nothing in CI pushes, so the token has no reason to outlive this
+          # step in .git/config as an extraheader.
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
@@ -38,6 +42,10 @@ jobs:
       VALUES: deploy/helm/managed-agent-platform/ci/example-values.yaml
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Nothing in CI pushes, so the token has no reason to outlive this
+          # step in .git/config as an extraheader.
+          persist-credentials: false
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
       - name: helm lint
         run: helm lint "$CHART" -f "$VALUES"
@@ -105,6 +113,10 @@ jobs:
         working-directory: deploy/compose
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Nothing in CI pushes, so the token has no reason to outlive this
+          # step in .git/config as an extraheader.
+          persist-credentials: false
       - name: seed local env from the committed example
         # model-providers.json is intentionally NOT created: the brain mount
         # defaults to the committed example, so this also exercises that default.
@@ -183,6 +195,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Nothing in CI pushes, so the token has no reason to outlive this
+          # step in .git/config as an extraheader.
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
