@@ -71,7 +71,11 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	s.emitUnreachableCredentials(ctx, sessionID, cfg.Networking, creds)
+	// Advisory only, so it must never delay the config a live gate is blocking
+	// on (the gate client's fetch has a 10-second budget): the emission runs
+	// detached from this request — its own goroutine, unhooked from the
+	// request's cancellation (the response returning must not kill it).
+	go s.emitUnreachableCredentials(context.WithoutCancel(ctx), sessionID, cfg.Networking, creds)
 
 	return gateconfig.Config{
 		Networking:  cfg.Networking,
@@ -87,11 +91,13 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 // on those hosts through this environment (SDK betasessionevent.go's
 // documented trigger). Detection runs on every config render (resolution is
 // read-time, so an edit heals or introduces a conflict without a restart) but
-// each (session, credential) conflict is emitted once — check-then-append, so
-// concurrent duplicate fetches could double-emit an advisory event; that rarity
-// is not worth a uniqueness constraint. Best-effort: the config
-// a live gate is waiting for is never failed over an advisory event, so
-// detection or append errors are logged and swallowed.
+// each (session, credential) conflict is emitted best-effort once —
+// check-then-append, so concurrent duplicate fetches could double-emit an
+// advisory event; that rarity is not worth a uniqueness constraint.
+// Best-effort and asynchronous: the caller runs it in its own goroutine on an
+// uncancellable context, so the config a live gate is waiting for is neither
+// delayed nor failed over an advisory event — detection or append errors are
+// logged and swallowed.
 func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID string, net domain.Networking, creds []vaultresolve.Credential) {
 	// Only a limited policy refuses hosts. The zero value is the wire default,
 	// unrestricted; an unknown type never reaches here (the API validates).

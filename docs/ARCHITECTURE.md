@@ -442,11 +442,13 @@ injection locations, and the non-secret `credential_id`). The endpoint decrypts 
 never secret bytes) is a property of that one function. Rendering the config is also where the
 controlplane detects the reference's `credential_host_unreachable_error`: a *configuration conflict*
 — a credential whose `allowed_hosts` includes an entry the environment's `limited` networking policy
-does not cover (`egress.HostSet.CoversEntry`) — appended post-commit and best-effort as a
-`session.error` event naming `credential_id` and `vault_id` (hostnames only, never a secret), once
-per (session, credential) via an events-table dedupe. Detection re-runs every fetch, so a healed or
-newly-introduced conflict tracks vault edits without a restart; an append failure is logged and
-never fails the config a live gate is waiting for. `Client.Fetch` presents the token as a Bearer
+does not cover (`egress.HostSet.CoversEntry`) — appended post-commit as a `session.error` event
+naming `credential_id` and `vault_id` (hostnames only, never a secret), best-effort once per
+(session, credential): the dedupe is an events-table check-then-append, so a concurrent duplicate
+fetch can rarely double-emit the advisory. Detection re-runs every fetch, so a healed or
+newly-introduced conflict tracks vault edits without a restart; the emission runs detached from the
+request (its own goroutine, uncancellable context), so the config a live gate is waiting for is
+neither delayed nor failed by it — append failures are logged and swallowed. `Client.Fetch` presents the token as a Bearer
 credential and maps a 401 (revoked token / archived session) to a fail-closed `ErrUnauthorized`,
 distinct from a transient error — the signal a periodic-fetching gate uses to choose between stopping
 and keeping its last-known-good config. Neither the endpoint nor the client is on the public `/v1`

@@ -73,6 +73,20 @@ copy of an entry here.
   a failure, never followed. Covered by a test that a redirecting token endpoint's collector is never
   reached and no secret surfaces in the verdict.
 
+### Fixed
+
+- **The unreachable-credential advisory no longer rides the gate-config response** (plan 12
+  follow-up, #50). `credential_host_unreachable_error` detection ran synchronously inside
+  `GET /internal/v1/gate/config` — a dedupe query plus an event append per conflicting credential,
+  spent inside the gate client's 10-second fetch budget, where a slow events table could time out
+  the config a live gate was blocking on over an advisory. The emission now runs detached from the
+  request: its own goroutine on an uncancellable context, so the response neither waits for it nor
+  kills it, and its errors stay warn-logged and swallowed. With it, the docs' cadence claim is
+  aligned to what the code always did: emission is **best-effort once** per (session, credential)
+  — the dedupe is a check-then-append against the events table, so a concurrent duplicate fetch
+  can rarely double-emit (a rarity deliberately not worth a uniqueness constraint) — corrected in
+  the 4c-2c entry below, DIVERGENCES' INFERRED record, and the architecture notes.
+
 ### Changed
 
 - **The gate firewall reconciles instead of flushing — the shared-adapter groundwork for the K8s
@@ -159,9 +173,9 @@ copy of an entry here.
   `session.error` event whose error names the SDK's required fields: `credential_id` and `vault_id`
   (`vaultresolve.Credential` now carries the containing vault's id), a `message` listing the
   uncovered hostnames (non-secret), and `retry_status` `{"type": "retrying"}` (the conflict heals on
-  edit). Emission is once per (session, credential) via an events-table dedupe, post-commit and
-  best-effort — an append failure is warn-logged and never fails the config a live gate is waiting
-  for. The gate's `OnUnreachable` seam stays diagnostic-only and deliberately unwired; the comments
+  edit). Emission is best-effort once per (session, credential) via an events-table
+  check-then-append dedupe (a concurrent duplicate fetch can rarely double-emit), post-commit —
+  an append failure is warn-logged and never fails the config a live gate is waiting for. The gate's `OnUnreachable` seam stays diagnostic-only and deliberately unwired; the comments
   in `internal/gate`, `internal/gaterun`, and `internal/gateconfig` that promised it would become
   the wire error are corrected, and the inferred residuals (emission point, cadence, `retry_status`
   choice, message wording, wildcard-vs-wildcard coverage) are recorded INFERRED in DIVERGENCES.
