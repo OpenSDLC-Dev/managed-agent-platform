@@ -7,11 +7,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -620,6 +622,102 @@ func TestGateConnectForwardsPipelinedClientBytes(t *testing.T) {
 	n, _ := io.ReadFull(br, echo)
 	if string(echo[:n]) != "PIPE" {
 		t.Errorf("origin echoed %q, want PIPE (pipelined CONNECT bytes were dropped?)", echo[:n])
+	}
+}
+
+func TestGateConnectIdleTunnelClosedAfterDeadline(t *testing.T) {
+	// An established tunnel that moves no bytes in either direction for the
+	// idle window must be torn down by the gate — both the client conn and the
+	// origin conn — rather than holding its goroutines and sockets forever.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	originClosed := make(chan struct{})
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, _ = io.ReadAll(c) // returns when the gate closes the upstream side
+		close(originClosed)
+	}()
+	host, _, _ := net.SplitHostPort(ln.Addr().String())
+
+	g := gate.New(gate.Config{
+		Networking:        domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
+		TunnelIdleTimeout: 150 * time.Millisecond,
+	})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	conn, br := dialCONNECT(t, gsrv.URL, ln.Addr().String())
+	defer conn.Close()
+
+	// Go silent. The guard deadline only bounds a regression: if the gate never
+	// cuts the idle tunnel, the read times out instead of hanging the test.
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := br.ReadByte(); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("idle tunnel client read = %v, want a closed connection within the idle window", err)
+	}
+	select {
+	case <-originClosed:
+	case <-time.After(3 * time.Second):
+		t.Error("idle tunnel origin conn never closed")
+	}
+}
+
+func TestGateConnectActiveTunnelSurvivesIdleWindow(t *testing.T) {
+	// Activity in ONE direction must keep the tunnel alive past the idle window:
+	// a long download is silent upstream-ward while active downstream-ward, so a
+	// per-direction read deadline would wrongly cut it. The origin streams bytes
+	// for twice the idle window, then closes; the client must receive them all.
+	const (
+		idle     = 200 * time.Millisecond
+		interval = 25 * time.Millisecond
+		chunks   = 16 // 16×25ms = 400ms of one-directional traffic > 2× idle
+	)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for range chunks {
+			if _, err := io.WriteString(c, "x"); err != nil {
+				return
+			}
+			time.Sleep(interval)
+		}
+		_, _ = io.WriteString(c, "END")
+	}()
+	host, _, _ := net.SplitHostPort(ln.Addr().String())
+
+	g := gate.New(gate.Config{
+		Networking:        domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
+		TunnelIdleTimeout: idle,
+	})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	conn, br := dialCONNECT(t, gsrv.URL, ln.Addr().String())
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, err := io.ReadAll(br)
+	if err != nil {
+		t.Fatalf("reading tunneled stream: %v (idle deadline cut an active tunnel?)", err)
+	}
+	want := strings.Repeat("x", chunks) + "END"
+	if string(got) != want {
+		t.Errorf("tunneled stream = %q, want %q", got, want)
 	}
 }
 
