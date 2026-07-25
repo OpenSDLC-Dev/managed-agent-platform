@@ -43,22 +43,27 @@ func EnsureEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, environmentID
 		environmentID, hash); err != nil {
 		return err
 	}
-	// Insert or un-revoke this value. A key value is bound to one environment
-	// for life: on conflict we never re-point it (rebinding environment_id would
-	// silently move a live worker credential to a different environment). If the
-	// value already belongs to another environment, reject rather than escalate
-	// — the rollback also undoes the revoke above, so a rejected call leaves the
-	// environment's incumbent key untouched.
+	// Insert or un-revoke this value. A key value is bound to one environment for
+	// life: the conflict action never re-points it, and its WHERE confines the
+	// un-revoke to this environment's own row, so a value belonging to another
+	// environment is left entirely alone — updating no row, which is how the
+	// rejection is detected. (Without that guard the un-revoke could give the
+	// other environment a second live key and trip environment_keys_one_live,
+	// failing with a raw constraint error instead of this one.) The rollback also
+	// undoes the revoke above, so a rejected call leaves this environment's
+	// incumbent key untouched.
 	var boundEnv string
-	if err := tx.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)
 		 ON CONFLICT (key_hash) DO UPDATE SET revoked_at = NULL
+		   WHERE environment_keys.environment_id = EXCLUDED.environment_id
 		 RETURNING environment_id`,
-		domain.NewID("envkey").String(), environmentID, hash).Scan(&boundEnv); err != nil {
-		return err
-	}
-	if boundEnv != environmentID {
+		domain.NewID("envkey").String(), environmentID, hash).Scan(&boundEnv)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && boundEnv != environmentID) {
 		return fmt.Errorf("api: environment key value is already bound to a different environment")
+	}
+	if err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

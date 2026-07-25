@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -68,6 +69,14 @@ func TestConcurrentEnvironmentKeyMintsLeaveOneLiveKey(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	_, envID := pgtest.NewSession(t, pool, "self_hosted")
 
+	// Race against a live incumbent, not an empty slot: every racer then has a
+	// row to revoke, which is what makes the test fail if the two statements are
+	// ever reordered back to insert-then-revoke (the insert would meet the live
+	// incumbent and trip the index on the very first rotation).
+	if err := api.EnsureEnvironmentKey(ctx, pool, envID.String(), "ek-incumbent"); err != nil {
+		t.Fatalf("seed incumbent: %v", err)
+	}
+
 	const racers = 8
 	raceMints(t, racers, func(i int) error {
 		return api.EnsureEnvironmentKey(ctx, pool, envID.String(), fmt.Sprintf("ek-racer-%d", i))
@@ -87,6 +96,12 @@ func TestConcurrentAPIKeyMintsLeaveOneLiveKey(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
 
+	// Against a live incumbent, so the test also fails if the statements are
+	// reordered back (see the environment-key twin).
+	if err := api.EnsureAPIKey(ctx, pool, "boot", "ak-incumbent"); err != nil {
+		t.Fatalf("seed incumbent: %v", err)
+	}
+
 	const racers = 8
 	raceMints(t, racers, func(i int) error {
 		return api.EnsureAPIKey(ctx, pool, "boot", fmt.Sprintf("ak-racer-%d", i))
@@ -95,6 +110,129 @@ func TestConcurrentAPIKeyMintsLeaveOneLiveKey(t *testing.T) {
 	if live := countLive(t, pool,
 		"SELECT count(*) FROM api_keys WHERE name = $1 AND revoked_at IS NULL", "boot"); live != 1 {
 		t.Fatalf("live api_keys after %d concurrent mints = %d, want 1", racers, live)
+	}
+}
+
+// TestConcurrentSameValueAPIKeyMintsAllSucceed guards the production startup
+// path: every controlplane replica calls EnsureAPIKey with the *same* bootstrap
+// value (cmd/controlplane/main.go), and a returned error is fatal — the process
+// refuses to start. Replicas booting together must therefore all succeed, which
+// they do because the shared key_hash makes each racer's upsert converge on one
+// row instead of adding a second live one. Nothing about the one-live index may
+// turn a simultaneous rollout into a crash loop.
+func TestConcurrentSameValueAPIKeyMintsAllSucceed(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	// A prior key under the same name, so the racers rotate rather than seed.
+	if err := api.EnsureAPIKey(ctx, pool, "bootstrap", "ak-previous"); err != nil {
+		t.Fatalf("seed previous key: %v", err)
+	}
+
+	const racers = 8
+	succeeded := raceMints(t, racers, func(int) error {
+		return api.EnsureAPIKey(ctx, pool, "bootstrap", "ak-shared")
+	})
+	if succeeded != racers {
+		t.Errorf("same-value concurrent mints succeeded = %d/%d; a simultaneous rollout must not fail a replica", succeeded, racers)
+	}
+	if live := countLive(t, pool,
+		"SELECT count(*) FROM api_keys WHERE name = $1 AND revoked_at IS NULL", "bootstrap"); live != 1 {
+		t.Errorf("live api_keys = %d, want 1", live)
+	}
+}
+
+// TestCrossEnvironmentReuseLeavesTheIncumbentAlone pins the rollback the revoke-
+// before-insert order made load-bearing: the rejected call has already revoked
+// the target environment's live key by the time it learns the value belongs to
+// another environment, so only the transaction rollback keeps that environment's
+// worker credential alive. The existing cross-environment test gives the target
+// environment no key, so it cannot see this.
+func TestCrossEnvironmentReuseLeavesTheIncumbentAlone(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	_, envA := pgtest.NewSession(t, pool, "self_hosted")
+	_, envB := pgtest.NewSession(t, pool, "self_hosted")
+
+	// A has *rotated away* from shared-value: the value is bound to A but retired,
+	// and A holds a different live key. That is the corner where an unguarded
+	// conflict action would un-revoke A's retired row, hand A a second live key,
+	// and fail on environment_keys_one_live — losing the descriptive rejection to
+	// a raw constraint error. One ordinary rotation leaves exactly this state.
+	if err := api.EnsureEnvironmentKey(ctx, pool, envA.String(), "shared-value"); err != nil {
+		t.Fatalf("mint for A: %v", err)
+	}
+	if err := api.EnsureEnvironmentKey(ctx, pool, envA.String(), "ek-a-current"); err != nil {
+		t.Fatalf("rotate A: %v", err)
+	}
+	if err := api.EnsureEnvironmentKey(ctx, pool, envB.String(), "ek-b-incumbent"); err != nil {
+		t.Fatalf("mint for B: %v", err)
+	}
+	var before string
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM environment_keys WHERE environment_id = $1 AND revoked_at IS NULL`,
+		envB.String()).Scan(&before); err != nil {
+		t.Fatalf("read B's incumbent: %v", err)
+	}
+
+	if err := api.EnsureEnvironmentKey(ctx, pool, envB.String(), "shared-value"); err == nil {
+		t.Fatal("re-minting env A's key value for env B was accepted")
+	} else if !strings.Contains(err.Error(), "already bound to a different environment") {
+		t.Errorf("rejection surfaced as %v, want the bound-to-a-different-environment error", err)
+	}
+
+	// A's retired value must stay retired: the rejected mint may not resurrect it.
+	var revoked bool
+	if err := pool.QueryRow(ctx,
+		`SELECT revoked_at IS NOT NULL FROM environment_keys WHERE key_hash <> '' AND environment_id = $1
+		   AND id <> (SELECT id FROM environment_keys WHERE environment_id = $1 AND revoked_at IS NULL)`,
+		envA.String()).Scan(&revoked); err != nil {
+		t.Fatalf("read A's retired row: %v", err)
+	}
+	if !revoked {
+		t.Error("env A's retired key was un-revoked by a rejected cross-environment mint")
+	}
+
+	var after string
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM environment_keys WHERE environment_id = $1 AND revoked_at IS NULL`,
+		envB.String()).Scan(&after); err != nil {
+		t.Fatalf("B has no live key after a rejected mint: %v", err)
+	}
+	if after != before {
+		t.Errorf("B's live key changed from %s to %s across a rejected mint", before, after)
+	}
+	if live := countLive(t, pool,
+		"SELECT count(*) FROM environment_keys WHERE environment_id = $1 AND revoked_at IS NULL",
+		envA.String()); live != 1 {
+		t.Errorf("env A live keys = %d, want 1 (the rejected mint must not disturb A either)", live)
+	}
+}
+
+// TestAPIKeyValueRepointsToAnotherName pins EnsureAPIKey's documented
+// `name = EXCLUDED.name` behaviour now that the one-live index constrains it: a
+// key value moved to a second logical name takes that name's live slot and frees
+// the first, rather than leaving the value live under both.
+func TestAPIKeyValueRepointsToAnotherName(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+
+	if err := api.EnsureAPIKey(ctx, pool, "first", "ak-moving"); err != nil {
+		t.Fatalf("mint under first: %v", err)
+	}
+	if err := api.EnsureAPIKey(ctx, pool, "second", "ak-incumbent"); err != nil {
+		t.Fatalf("mint under second: %v", err)
+	}
+	if err := api.EnsureAPIKey(ctx, pool, "second", "ak-moving"); err != nil {
+		t.Fatalf("re-point the value to second: %v", err)
+	}
+
+	if live := countLive(t, pool,
+		"SELECT count(*) FROM api_keys WHERE name = $1 AND revoked_at IS NULL", "second"); live != 1 {
+		t.Errorf("live keys under second = %d, want 1", live)
+	}
+	if live := countLive(t, pool,
+		"SELECT count(*) FROM api_keys WHERE name = $1 AND revoked_at IS NULL", "first"); live != 0 {
+		t.Errorf("live keys under first = %d, want 0 (the value moved)", live)
 	}
 }
 

@@ -278,9 +278,10 @@ copy of an entry here.
   concurrent mint cannot see the other transaction's uncommitted insert, so each revoked nothing and
   all of them committed: the invariant both functions document — one live `x-api-key` per logical
   name, one live `Authorization: Bearer` credential per environment's work queue — held only because
-  minting happened to be a serialized admin action. Eight racing mints left **six** live environment
-  keys and **five** live api keys, and they stayed live until the next uncontended rotation, so
-  whoever minted one credential had no way to learn the others existed.
+  minting happened to be a serialized admin action. Eight racing mints left six live environment keys
+  and five live api keys in one measured run — the count is whatever the interleaving yields, not a
+  fixed number — and they stayed live until the next uncontended rotation, so whoever minted one
+  credential had no way to learn the others existed.
 
   Both functions now revoke before inserting, and migration `0013_key_rotation_one_live` adds the
   partial unique indexes — `api_keys (name) WHERE revoked_at IS NULL` and `environment_keys
@@ -290,15 +291,37 @@ copy of an entry here.
   is what makes the invariant hold against writers that are not these two functions — the operator
   issuance surface ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)) will
   make minting an invocable action, at which point "admin actions are serialized" stops being a safe
-  assumption. A mint that loses the race now fails its own transaction instead of sharing the slot.
+  assumption. A mint that loses the race now fails its own transaction instead of sharing the slot;
+  replicas booting with the *same* value — the supported configuration — all still succeed, because
+  the shared `key_hash` converges their upserts on one row.
+
+  `EnsureEnvironmentKey`'s conflict action gained a `WHERE` confining the un-revoke to the calling
+  environment's own row. Without it the index turned one corner of the cross-environment rejection
+  into a raw constraint error: re-minting a value that another environment had *retired* would
+  un-revoke that environment's row, hand it a second live key, and fail on
+  `environment_keys_one_live` before reaching the descriptive "already bound to a different
+  environment" check. The guard also means a rejected mint no longer touches another environment's
+  row at all.
 
   The migration collapses any duplicates an existing database already holds before creating the
-  indexes, keeping the newest live row per slot and leaving other slots alone: `Migrate` runs every
-  pending migration inside one transaction, so an unrepaired duplicate would fail the whole startup
-  migration and take the deployment down rather than skip one statement. Tests pin the race outcome
-  for both tables, the schema-level rejection of a second live row (revoked rows and other slots
-  unaffected), and the repair path — the last verified against a build with the repair statements
-  removed, where re-applying the migration fails with `23505` exactly as a real deployment would.
+  indexes, keeping the newest live row per slot and leaving other slots alone. **Upgrade note:** the
+  rows it revokes are credentials that were authenticating until then, and they stop working
+  immediately — a database that hit the race must expect any but the newest value per slot to start
+  returning 401. It also takes `LOCK TABLE api_keys, environment_keys IN SHARE MODE` first: the
+  migrator's advisory lock serializes only other migrators, so a not-yet-upgraded replica could
+  otherwise mint a duplicate between the repair and the index build, and since `Migrate` runs every
+  pending migration inside one transaction that failing build aborts the whole startup migration
+  rather than one statement — leaving upgraded replicas unable to boot. `SHARE` is what
+  `CREATE INDEX` takes anyway, and it leaves plain `SELECT` (so authentication) untouched.
+
+  Tests pin the race outcome for both tables (racing against a live incumbent, so they also fail if
+  the two statements are ever reordered back), that same-value concurrent mints all succeed, the
+  cross-environment rejection keeping both environments' keys intact, the `name = EXCLUDED.name`
+  re-pointing path, the schema-level rejection of a second live row (revoked rows and other slots
+  unaffected), and the migration's repair path. Each was run against the pre-fix code: the race tests
+  leave six and five live rows, dropping the conflict guard turns the cross-environment rejection into
+  `23505`, and removing the repair statements makes re-applying the migration fail with `23505`
+  exactly as a real deployment would.
 
 - **`POST /v1/agents/{id}` required `version`, which the reference makes optional** — the pinned SDK
   types the field `param.Opt[int64]`: "Must be at least 1 if specified. When supplied, the request
