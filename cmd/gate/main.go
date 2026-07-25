@@ -108,10 +108,14 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if gateUID <= 0 || gateGID <= 0 {
-		// A root uid/gid makes the privilege drop a silent no-op (Setgid/Setuid(0)
-		// return nil while already root), leaving the gate root with CAP_NET_ADMIN.
-		return errors.New("GATE_UID and GATE_GID must be positive non-root ids")
+	// A root uid/gid makes the privilege drop a silent no-op (Setgid/Setuid(0)
+	// return nil while already root); an oversized value truncates in the syscall
+	// and can land on root (e.g. 2^32 -> 0). CheckGateID rejects both.
+	if err := gaterun.CheckGateID("GATE_UID", gateUID); err != nil {
+		return err
+	}
+	if err := gaterun.CheckGateID("GATE_GID", gateGID); err != nil {
+		return err
 	}
 	interval := defaultFetchInterval
 	if v := os.Getenv("GATE_FETCH_INTERVAL"); v != "" {

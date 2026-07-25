@@ -90,18 +90,36 @@ func CheckListing(listing string, gateUID int) error {
 	return nil
 }
 
+// maxGateID caps the gate's uid/gid. uid_t/gid_t are 32-bit; an int that does
+// not fit truncates in the setuid/setgid syscall — e.g. 2^32 becomes 0 (root) —
+// so the drop identity is required to sit well inside the range (a positive
+// int32). No real deployment needs an id above this.
+const maxGateID = 1<<31 - 1
+
+// CheckGateID rejects a uid/gid that is not a positive non-root value fitting
+// uid_t/gid_t. Zero is root (a Setuid/Setgid(0) drop is a silent no-op); a value
+// past maxGateID would truncate in the syscall and could land on root. name
+// labels the error for the caller (e.g. "GATE_UID").
+func CheckGateID(name string, id int) error {
+	if id <= 0 || id > maxGateID {
+		return fmt.Errorf("%s must be a positive non-root id no larger than %d, got %d", name, maxGateID, id)
+	}
+	return nil
+}
+
 // Setup applies the owner-match firewall, verifies it took on both IP tables,
 // then drops privileges — the startup order the gate's entrypoint runs before it
 // begins serving (so the HEALTHCHECK that gates admission cannot pass until the
 // firewall is in force). A verification failure aborts startup fail-closed: the
 // gate never serves on a firewall that did not take.
 //
-// gateUID must be a positive non-root uid: dropping to uid 0 is a silent no-op
-// (the process stays root, keeps CAP_NET_ADMIN, and can still rewrite the chain),
-// so a root gateUID is refused here rather than serving as un-dropped root.
+// gateUID must be a positive non-root uid (see CheckGateID): dropping to uid 0
+// is a silent no-op (the process stays root, keeps CAP_NET_ADMIN, and can still
+// rewrite the chain), so an invalid gateUID is refused here rather than serving
+// as un-dropped root.
 func Setup(ctx context.Context, fw Firewall, pd PrivDropper, gateUID int) error {
-	if gateUID <= 0 {
-		return fmt.Errorf("gaterun: gate uid must be a positive non-root uid, got %d", gateUID)
+	if err := CheckGateID("gate uid", gateUID); err != nil {
+		return fmt.Errorf("gaterun: %w", err)
 	}
 	if err := fw.Apply(ctx, Ruleset(gateUID)); err != nil {
 		return fmt.Errorf("gaterun: apply firewall: %w", err)

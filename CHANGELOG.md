@@ -30,13 +30,15 @@ copy of an entry here.
 - **Egress-gate runtime — `cmd/gate` + `internal/gaterun`** (plan 12 slice 4, #50). The per-session
   sidecar that runs `internal/gate`'s forward proxy, split ports-and-adapters so all decision logic is
   testable and only raw syscalls sit in `cmd/`. On startup it **replaces** the `OUTPUT` chain on both
-  the v4 and v6 tables (flush, then append the owner-match rules — loopback `ACCEPT`, gate-uid
-  `ACCEPT`, catch-all `DROP`), then **lists it back and requires the chain to be exactly those three
-  rules, token-for-token** — a foreign `ACCEPT` ahead of the `DROP` or a rule that only resembles ours
-  (a colliding uid prefix, `-o lo0`, `! -o lo`) is rejected — before dropping to its unprivileged uid;
-  a firewall that did not take aborts with the process still root, so the gate never serves fail-open.
-  A root gate uid/gid is refused outright (dropping to uid 0 is a silent no-op that would leave the
-  gate root). It then serves the proxy on a **loopback-only** port — validated, since the proxy is
+  the v4 and v6 tables — policy `DROP` first, so the rebuild is fail-closed at every instant (a
+  mid-flush crash or a partial append failure denies egress rather than opening it), then flush and
+  append the owner-match rules (loopback `ACCEPT`, gate-uid `ACCEPT`, catch-all `DROP`) — then **lists
+  it back and requires the chain to be exactly those three rules, token-for-token** — a foreign
+  `ACCEPT` ahead of the `DROP` or a rule that only resembles ours (a colliding uid prefix, `-o lo0`,
+  `! -o lo`) is rejected — before dropping to its unprivileged uid; a firewall that did not take aborts
+  with the process still root, so the gate never serves fail-open. The gate uid/gid is required to be
+  a positive non-root id that fits `uid_t`/`gid_t` (uid 0 is a silent no-op drop; an oversized id
+  truncates in the syscall and could land on root). It then serves the proxy on a **loopback-only** port — validated, since the proxy is
   unauthenticated and credential-bearing — deny-all until the first config arrives, and runs a
   fetch-and-swap loop against the gate-config endpoint: a good config hot-swaps a fresh gate under
   live traffic (`atomic.Pointer`), a 401 swaps in deny-all and shuts the binary down (the session was

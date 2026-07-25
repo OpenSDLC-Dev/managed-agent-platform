@@ -18,10 +18,20 @@ type iptablesFirewall struct{}
 
 func (iptablesFirewall) Apply(ctx context.Context, rules []gaterun.Rule) error {
 	for _, bin := range []string{"iptables", "ip6tables"} {
-		// Flush OUTPUT first so the chain is exactly these rules regardless of
-		// what it started with — the verification that follows demands an exact
-		// listing, and a fresh netns is not something a fail-closed gate may
-		// assume. -F clears only the filter table's OUTPUT chain; NAT is untouched.
+		// Set the chain policy to DROP *before* flushing, so egress is fail-closed
+		// for the entire rebuild. The flush→append sequence is not atomic: with a
+		// default-ACCEPT policy the window between the flush and the catch-all DROP
+		// would be fail-open (an issue on a gate restart while the sandbox is live),
+		// and a partial append failure would leave a permissive chain. With policy
+		// DROP, every instant from here on — a mid-rebuild crash, an append error,
+		// even the gate exiting — denies all egress except what the rules below
+		// re-admit. Then flush and append the exact rule set. This assumes the gate
+		// owns its netns OUTPUT chain — true for the per-session Docker sandbox
+		// netns; the K8s sidecar must reconcile with CNI/mesh rules (STATE, 4d).
+		// -F/-P touch only the filter table's OUTPUT chain; NAT is untouched.
+		if out, err := exec.CommandContext(ctx, bin, "-P", "OUTPUT", "DROP").CombinedOutput(); err != nil {
+			return fmt.Errorf("%s -P OUTPUT DROP: %w: %s", bin, err, out)
+		}
 		if out, err := exec.CommandContext(ctx, bin, "-F", "OUTPUT").CombinedOutput(); err != nil {
 			return fmt.Errorf("%s -F OUTPUT: %w: %s", bin, err, out)
 		}

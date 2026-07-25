@@ -150,21 +150,37 @@ func TestSetupDropErrorSurfaces(t *testing.T) {
 	}
 }
 
-func TestSetupRejectsRootUID(t *testing.T) {
-	// Dropping to uid 0 is a silent no-op that leaves the gate root. Setup must
-	// refuse before touching the firewall, so a misconfigured gate fails closed
-	// (never applies rules, never "drops" to root, never serves).
-	for _, uid := range []int{0, -1} {
+func TestSetupRejectsInvalidUID(t *testing.T) {
+	// uid 0 is root (a silent no-op drop); an oversized uid would truncate in the
+	// syscall and could land on root. Setup must refuse before touching the
+	// firewall, so a misconfigured gate fails closed (never applies rules, never
+	// "drops", never serves).
+	for _, uid := range []int{0, -1, 1 << 31, 1<<31 + 100} {
 		fw := &fakeFirewall{v4: goodListing, v6: goodListing}
 		pd := &fakePriv{}
 		if err := gaterun.Setup(context.Background(), fw, pd, uid); err == nil {
-			t.Errorf("Setup accepted gateUID %d, want a non-root-uid error", uid)
+			t.Errorf("Setup accepted gateUID %d, want an invalid-uid error", uid)
 		}
 		if fw.applied != nil {
 			t.Errorf("Setup applied rules for gateUID %d before rejecting it", uid)
 		}
 		if pd.dropped {
 			t.Errorf("Setup dropped privileges for gateUID %d", uid)
+		}
+	}
+}
+
+func TestCheckGateID(t *testing.T) {
+	for _, id := range []int{1, 100, 65532, 1<<31 - 1} {
+		if err := gaterun.CheckGateID("id", id); err != nil {
+			t.Errorf("CheckGateID(%d) = %v, want nil", id, err)
+		}
+	}
+	// 0/negative are root or nonsense; anything past int32 truncates in the
+	// setuid/setgid syscall (2^32 -> 0 = root).
+	for _, id := range []int{0, -1, 1 << 31, 1 << 32, 1<<32 + 1} {
+		if err := gaterun.CheckGateID("id", id); err == nil {
+			t.Errorf("CheckGateID(%d) = nil, want an out-of-range error", id)
 		}
 	}
 }
