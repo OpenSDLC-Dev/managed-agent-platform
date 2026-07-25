@@ -50,6 +50,7 @@ const (
 	ctxKeyRequestID ctxKey = iota
 	ctxKeyPrincipal
 	ctxKeyEnvironment // the environment a worker's Bearer key is scoped to
+	ctxKeySession     // the session a gate's Bearer token is scoped to
 )
 
 func requestIDFrom(ctx context.Context) string {
