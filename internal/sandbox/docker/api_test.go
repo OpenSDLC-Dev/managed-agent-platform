@@ -58,7 +58,8 @@ type fakeExec struct {
 	holdStream bool          // ignore streamFor; never close it
 	code       int
 	stdout     string
-	inspects   *int // optional: counts /exec/{id}/json calls
+	inspects   *int          // optional: counts /exec/{id}/json calls
+	topDelay   time.Duration // how long the daemon takes to answer /top
 }
 
 const fakeExecPid = 4242
@@ -114,6 +115,16 @@ func execDaemon(t *testing.T, fe fakeExec) *container {
 			fmt.Fprintf(w, `{"Running":%t,"ExitCode":%d,"Pid":%d}`, running, fe.code, fakeExecPid)
 
 		case strings.HasSuffix(r.URL.Path, "/top"):
+			// A loaded daemon: `top` forks `ps` on the host, so the answer can
+			// arrive well after the request did — or never, if the caller gives
+			// up first.
+			if fe.topDelay > 0 {
+				select {
+				case <-time.After(fe.topDelay):
+				case <-r.Context().Done():
+					return
+				}
+			}
 			elapsed, started := ran()
 			alive := !started || elapsed < fe.aliveFor
 			rows := `["1","/sbin/docker-init"]`
@@ -1208,6 +1219,77 @@ func TestOverrunDetectedWhenTheFirstProbeStalls(t *testing.T) {
 	}
 	if !res.TimedOut {
 		t.Errorf("a command that overran while its pre-deadline probe stalled was reported finished: %+v", res)
+	}
+}
+
+// The third probe race, and the one on the punctual-kill path: the watchdog's
+// kill is itself what closes the command's stream and cancels the pre-deadline
+// probe's `top`, so on a daemon slower to answer than the 50ms probe lead the
+// probe never answers at all — and `aliveAtDeadline` is the only term that can
+// fire when a command is killed on time. Reading that cancellation as "already
+// finished" reported a real timeout as a plain `{137, TimedOut: false}` (#193).
+//
+// What tells a punctual kill from an early exit is *when* the stream closed,
+// which Exec already knows host-side: a command that finished early cannot close
+// its stream after the deadline. The rows below differ only in the daemon's `top`
+// latency and in when the command died.
+//
+// Every row runs against a one-second deadline with the probe lead widened from
+// the production 50ms to 800ms, so the probe fires at 200ms and each instant that
+// matters — the probe, the command's death, the deadline — is hundreds of
+// milliseconds from the next. The lead's own value is not what these rows pin
+// (TestTimedOutNeedsTheWatchdogsDeadlineNotTheCallers covers the default), and at
+// 50ms a row would turn on whether a loaded runner scheduled one goroutine inside
+// a 50ms window.
+func TestAPunctualKillSurvivesASlowPreDeadlineProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		command      string
+		aliveFor     time.Duration
+		topDelay     time.Duration
+		wantTimedOut bool
+	}{
+		// The control: the same kill on a daemon that answers at once, so the probe
+		// carries the verdict itself.
+		{
+			name: "a fast top answers before the kill", command: "sleep 300",
+			aliveFor: 1200 * time.Millisecond, wantTimedOut: true,
+		},
+		// The bug: the answer would not have come until 1.4s, so it is still in
+		// flight when the kill closes the stream at 1.2s and the probe is cancelled
+		// with nothing to say. That close is 200ms *past* the deadline, and seeing
+		// it can only slip later — a command that finished early could not have
+		// closed there at all.
+		{
+			name: "a slow top loses its answer to the kill", command: "sleep 300",
+			aliveFor: 1200 * time.Millisecond, topDelay: 1200 * time.Millisecond, wantTimedOut: true,
+		},
+		// The other direction on that same slow daemon: a command that SIGKILLs
+		// itself at 700ms closes its stream 300ms *before* the deadline, and no
+		// answer is needed to know that is an early exit, not a timeout to invent.
+		// This is the row that guards the discriminator — and if a stall did push
+		// the probe past the close, or the daemon did answer, the verdict is the
+		// same `false`, so the row cannot flake into a failure either way.
+		{
+			name: "a close before the deadline is still an early exit", command: "kill -9 $$",
+			aliveFor: 700 * time.Millisecond, topDelay: 700 * time.Millisecond, wantTimedOut: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := execDaemon(t, fakeExec{aliveFor: tc.aliveFor, topDelay: tc.topDelay, code: sigkillExit})
+			c.probeLead = 800 * time.Millisecond
+			start := time.Now()
+			res, err := c.Exec(context.Background(), sandbox.ExecRequest{
+				Command: tc.command, Timeout: time.Second,
+			})
+			if err != nil {
+				t.Fatalf("exec: %v", err)
+			}
+			if res.TimedOut != tc.wantTimedOut {
+				t.Errorf("result = %+v after %s, want TimedOut=%t",
+					res, time.Since(start), tc.wantTimedOut)
+			}
+		})
 	}
 }
 

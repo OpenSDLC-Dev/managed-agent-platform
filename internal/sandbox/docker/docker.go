@@ -103,7 +103,9 @@ const (
 	// command is still alive. It has to be before, not at, the deadline: the
 	// watchdog fires at the deadline, and a command already killed by it looks
 	// exactly like one that was never there. The cost is that a command which
-	// SIGKILLs itself within this much of its deadline reads as a timeout.
+	// SIGKILLs itself within this much of its deadline reads as a timeout — and,
+	// when the probe goes unanswered altogether, one that SIGKILLs itself any time
+	// before the deadline and leaves the stream open past it (see alive).
 	defaultProbeLead = 50 * time.Millisecond
 )
 
@@ -439,9 +441,10 @@ type verdict struct {
 // read as "process gone" and its overrun erased. confirmCtx outlives the stream
 // close and dies only on Exec's own bound or the caller giving up.
 //
-// A probe whose wait is cut short answers false, and correctly: the stream
+// A probe whose *wait* is cut short answers false, and correctly: the stream
 // cannot close while the process that owns it is alive, so a close before an
-// instant is a command that had already finished by it.
+// instant is a command that had already finished by it. A probe cut short
+// mid-request is a different question, and alive reads it against the deadline.
 func (c *container) probeDeadline(sleepCtx, confirmCtx context.Context, pid int, deadline time.Duration, start time.Time) <-chan verdict {
 	answer := make(chan verdict, 1)
 	var atDeadline, overran bool
@@ -451,7 +454,7 @@ func (c *container) probeDeadline(sleepCtx, confirmCtx context.Context, pid int,
 	go func() {
 		defer wg.Done()
 		if sleepUntil(sleepCtx, start.Add(deadline-c.probeLead)) {
-			atDeadline = c.alive(sleepCtx, pid)
+			atDeadline = c.alive(sleepCtx, pid, start.Add(deadline))
 		}
 	}()
 	// Still alive once the deadline and the slop had both passed? The guarantee,
@@ -482,19 +485,36 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 }
 
 // alive answers the pre-deadline probe. Its context is the one the stream close
-// cancels, and it reads that cancellation as "process gone": the stream cannot
-// close while the process holding it is alive, so a close before the deadline
-// is a command that finished early, not one still running.
-func (c *container) alive(ctx context.Context, pid int) bool {
+// cancels, and what that cancellation is worth depends on when Exec sees it —
+// its own host-side reading, needing nothing from inside the container. Seen
+// before the deadline it settles the question: nothing that held the stream is
+// left, so the command was gone by the deadline. Seen at or after it the close
+// says nothing about the deadline, because the watchdog's punctual kill is itself
+// what closes the stream, and so is a straggler outliving a command that finished
+// early — an unanswered probe, which is the same thing as a daemon that would not
+// answer, and takes the same fail-open answer below.
+//
+// Seen, not recorded: the cancellation is noticed a scheduling hop after the
+// close, so this reads the later case for a close within a hop of the deadline —
+// like the probe lead itself, a cost paid in the direction of the label rather
+// than away from it. What it costs in full is a command that SIGKILLs itself
+// before the deadline, leaves something backgrounded holding its stream past it,
+// and gets no answer out of the daemon: that reads as a timeout. The overrun
+// probe's own fail-open rule already did this to the same command a slop later;
+// this brings it forward to the deadline, and only ever adds a timeout.
+func (c *container) alive(ctx context.Context, pid int, deadlineAt time.Time) bool {
 	for range 2 {
 		alive, err := c.api.processAlive(ctx, c.id, pid)
 		if err == nil {
 			return alive
 		}
 		if ctx.Err() != nil {
-			// The stream closed, so the process it was holding is gone, and
-			// nobody is waiting on this answer any more.
-			return false
+			if time.Now().Before(deadlineAt) {
+				// The stream closed before the deadline, so the process it was
+				// holding is gone, and nobody is waiting on this answer.
+				return false
+			}
+			break
 		}
 	}
 	// The daemon would not say. Assume the command is still running: hiding an
@@ -642,17 +662,24 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 		return sandbox.ExecResult{}, err
 	}
 
-	// Two ways a finished command can have hit its deadline. The watchdog killed
-	// it: SIGKILL, and the command was alive to receive it — a command cannot
-	// survive SIGKILL to fake that, and one that kills itself before the
-	// pre-deadline probe was already gone when we looked. (A self-SIGKILL inside
-	// the probe's short lead reads as the watchdog's: the deliberate cost of
-	// sampling a lead ahead of the deadline, and it errs toward a timeout.) Or it
-	// was still running after the deadline and the
-	// slop, and exited anyway, which on the honest path is impossible, because
-	// the watchdog would have killed it first. (A command the kernel OOM-kills
-	// past its deadline reads as a timeout. It hit a limit and produced nothing;
-	// the label is close enough, and the alternative is to guess.)
+	// Two ways a finished command can have hit its deadline.
+	//
+	// One: the watchdog killed it — SIGKILL, and the command was alive to receive
+	// it, which a command cannot survive SIGKILL to fake. A command that SIGKILLs
+	// itself is normally excluded by that same aliveness, the probe having found
+	// it already gone. Two such commands are not excluded, and both read as the
+	// watchdog's, erring toward the timeout label rather than away from it: one
+	// that kills itself inside the probe's short lead, the deliberate cost of
+	// sampling a lead ahead of the deadline; and one whose probe went unanswered,
+	// where all that is left to read is an exec stream held open past the deadline
+	// by something the command backgrounded, and that says nothing about the
+	// command (see alive).
+	//
+	// Two: it was still running after the deadline and the slop, and exited
+	// anyway, which on the honest path is impossible, because the watchdog would
+	// have killed it first. (A command the kernel OOM-kills past its deadline
+	// reads as a timeout. It hit a limit and produced nothing; the label is close
+	// enough, and the alternative is to guess.)
 	timedOut := (code == sigkillExit && v.aliveAtDeadline) || v.overran
 	return sandbox.ExecResult{
 		Stdout:    string(out.stdout),
