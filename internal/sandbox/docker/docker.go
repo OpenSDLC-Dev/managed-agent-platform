@@ -313,13 +313,20 @@ func sandboxConfig(spec sandbox.Spec, workdir, gateID string) containerConfig {
 // provider that runs the gate rather than leaking into the backend-agnostic
 // executor.
 func withProxyEnv(env map[string]string) map[string]string {
-	out := make(map[string]string, len(env)+4)
+	out := make(map[string]string, len(env)+6)
 	for k, v := range env {
 		out[k] = v
 	}
 	proxyURL := "http://" + gaterun.DefaultProxyAddr
 	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
 		out[k] = proxyURL
+	}
+	// Force NO_PROXY empty, overriding anything the base image baked in (a
+	// `NO_PROXY=*` or an internal-domain exclusion): a proxy-aware client that
+	// honored it would bypass the loopback gate and hit the owner-match firewall's
+	// DROP, failing even a policy-allowed request. Everything goes through the gate.
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		out[k] = ""
 	}
 	return out
 }

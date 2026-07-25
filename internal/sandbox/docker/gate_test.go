@@ -74,6 +74,7 @@ func boolStr(b bool) string {
 func TestProvisionCreatesGatePair(t *testing.T) {
 	m := &fakeMinter{token: "gtk_test"}
 	s := gatedSpec(m)
+	s.Gate.OTelEndpoint, s.Gate.OTelInsecure = "otel:4317", true
 	s.Env = map[string]string{"API_KEY": "vltph_test"} // a vault placeholder rides along
 	gateName, sbName := "map-gate-"+string(s.SessionID), "map-"+string(s.SessionID)
 
@@ -130,6 +131,12 @@ func TestProvisionCreatesGatePair(t *testing.T) {
 	if !slices.Contains(gateBody.Env, "GATE_TOKEN=gtk_test") || !slices.Contains(gateBody.Env, "CONTROLPLANE_URL=http://cp") {
 		t.Errorf("gate env = %v", gateBody.Env)
 	}
+	// The gate exports its egress spans to the deployment's collector.
+	for _, want := range []string{"OTEL_EXPORTER_OTLP_ENDPOINT=otel:4317", "OTEL_EXPORTER_OTLP_INSECURE=true"} {
+		if !slices.Contains(gateBody.Env, want) {
+			t.Errorf("gate env missing %q; got %v", want, gateBody.Env)
+		}
+	}
 
 	// The sandbox: inside the gate's netns, hardened so it cannot become the
 	// gate's uid and slip past the owner-match rule.
@@ -143,8 +150,13 @@ func TestProvisionCreatesGatePair(t *testing.T) {
 		t.Errorf("sandbox SecurityOpt = %v", sbBody.HostConfig.SecurityOpt)
 	}
 	// The sandbox reaches the world only through the gate's loopback proxy, and
-	// the vault placeholder is preserved alongside the injected proxy vars.
-	for _, want := range []string{"HTTP_PROXY=http://127.0.0.1:15080", "https_proxy=http://127.0.0.1:15080", "API_KEY=vltph_test"} {
+	// the vault placeholder is preserved alongside the injected proxy vars. NO_PROXY
+	// is forced empty so nothing the base image baked in lets a client bypass the
+	// gate into the owner-match firewall's DROP.
+	for _, want := range []string{
+		"HTTP_PROXY=http://127.0.0.1:15080", "https_proxy=http://127.0.0.1:15080",
+		"NO_PROXY=", "no_proxy=", "API_KEY=vltph_test",
+	} {
 		if !slices.Contains(sbBody.Env, want) {
 			t.Errorf("sandbox env missing %q; got %v", want, sbBody.Env)
 		}

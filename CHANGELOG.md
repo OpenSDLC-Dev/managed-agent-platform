@@ -33,7 +33,9 @@ copy of an entry here.
   default `bridge`) holding `CAP_NET_ADMIN` so it owns the network namespace and installs its
   owner-match firewall; only once its HEALTHCHECK reports **healthy** — i.e. the firewall took and the
   proxy is listening — is the sandbox created inside that namespace (`NetworkMode: container:<gateID>`)
-  with its `HTTP(S)_PROXY` pointed at the gate's loopback proxy. The sandbox is hardened so it cannot
+  with its `HTTP(S)_PROXY` pointed at the gate's loopback proxy and its `NO_PROXY` forced empty (so a
+  value baked into the base image — e.g. `NO_PROXY=*` — cannot let a proxy-aware client bypass the gate
+  and hit the owner-match firewall's `DROP`). The sandbox is hardened so it cannot
   forge the gate's egress identity: `CapDrop [NET_RAW, SETUID, SETGID]` + `no-new-privileges`. **This
   is what lets the sandbox stay root** — with `SETUID`/`SETGID` dropped, even a root process cannot
   `setuid` to the gate's uid to match the owner-`ACCEPT` rule, so no distinct sandbox uid, `chown`, or
@@ -49,7 +51,11 @@ copy of an entry here.
   may be unpersisted or revoked) rather than restarted, a sandbox not paired with the current gate is
   rebuilt in its namespace, and a sandbox that fails to start is removed so a dead-gate network
   reference cannot poison later retries. The proxy address is a single shared constant
-  (`gaterun.DefaultProxyAddr`) so `cmd/gate`'s listener and the injected `HTTP_PROXY` cannot drift.
+  (`gaterun.DefaultProxyAddr`) so `cmd/gate`'s listener and the injected `HTTP_PROXY` cannot drift. The
+  executor's own OTLP collector config (`OTEL_EXPORTER_OTLP_ENDPOINT`/`_INSECURE`) is threaded into each
+  gate container so its `egress_request` spans export to the same collector — the gate is a separate
+  process that does not inherit the executor's environment, so its telemetry endpoint is handed to it
+  explicitly (observability is built in, not bolted on).
   **Opt-in and non-breaking:** the gate runs only where the executor sets `CONTROLPLANE_URL` +
   `EXECUTOR_GATE_IMAGE`. Where it is not configured — the Kubernetes backend (its own sidecar is slice
   4d), and any Docker deployment that has not opted in — no gate is requested and each backend keeps its

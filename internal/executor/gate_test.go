@@ -14,17 +14,24 @@ import (
 // provider that runs the gate injects the proxy env, not this method); an
 // unrestricted vault-less session is not.
 func TestGateSpecGatesLimitedAndVaultSessions(t *testing.T) {
-	e := &Executor{cfg: Config{GateImage: "gate:1", ControlplaneURL: "http://cp"}}
+	e := &Executor{cfg: Config{
+		GateImage: "gate:1", ControlplaneURL: "http://cp",
+		OTelEndpoint: "otel:4317", OTelInsecure: true,
+	}}
 
 	// Unrestricted, no vaults: no gate.
 	if gate := e.gateSpec(sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); gate != nil {
 		t.Errorf("ungated session: gate=%v, want nil", gate)
 	}
 
-	// Limited networking: gated.
+	// Limited networking: gated, carrying the deployment's OTLP config so the gate
+	// exports its egress spans.
 	gate := e.gateSpec(sessionRun{networking: domain.Networking{Type: domain.NetLimited}})
 	if gate == nil || gate.Image != "gate:1" || gate.ControlplaneURL != "http://cp" {
 		t.Fatalf("limited session gate = %+v, want image gate:1 / cp http://cp", gate)
+	}
+	if gate.OTelEndpoint != "otel:4317" || !gate.OTelInsecure {
+		t.Errorf("gate OTLP = %q insecure=%v, want otel:4317 / true", gate.OTelEndpoint, gate.OTelInsecure)
 	}
 	if gate.TokenMinter == nil {
 		t.Error("gate has no token minter")

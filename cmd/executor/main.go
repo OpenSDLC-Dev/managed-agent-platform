@@ -89,6 +89,10 @@ func run(ctx context.Context) error {
 		Workdir:         os.Getenv("EXECUTOR_WORKDIR"),
 		ControlplaneURL: os.Getenv("CONTROLPLANE_URL"),
 		GateImage:       os.Getenv("EXECUTOR_GATE_IMAGE"),
+		// The same OTLP config telemetry.Run reads for this executor, handed on to
+		// each session's gate container so its egress spans reach the collector too.
+		OTelEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		OTelInsecure: os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
 	}
 	for env, dst := range map[string]*time.Duration{
 		"EXECUTOR_LEASE_TTL": &cfg.LeaseTTL, "EXECUTOR_POLL_INTERVAL": &cfg.PollInterval,

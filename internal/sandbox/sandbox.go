@@ -103,6 +103,15 @@ type GateSpec struct {
 	Image           string          // the gate container image (built with `docker build --target gate`)
 	ControlplaneURL string          // the gate fetches its per-session config from here
 	TokenMinter     GateTokenMinter // mints the gate token on create; see GateTokenMinter
+	// OTelEndpoint and OTelInsecure carry the deployment's OTLP collector config
+	// into the gate container so its egress_request spans export to the same
+	// collector as the rest of the platform (observability is built in, not bolted
+	// on). The gate is a separate process that does not inherit the executor's
+	// environment, so its telemetry endpoint must be handed to it explicitly. Empty
+	// OTelEndpoint means no collector configured — the gate runs without an
+	// exporter, exactly as the executor does with an empty endpoint.
+	OTelEndpoint string
+	OTelInsecure bool
 }
 
 // GateTokenMinter mints a per-session gate token in two steps so the provider can

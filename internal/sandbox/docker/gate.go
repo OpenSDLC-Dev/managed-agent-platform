@@ -148,15 +148,25 @@ func (p *Provider) removeDetached(id string) {
 // gateConfig builds the gate container's config: the gate image on the deploy
 // network, holding CAP_NET_ADMIN so it can install its owner-match iptables
 // before dropping to its own uid. Entrypoint/Cmd/WorkingDir are left unset so
-// the image's own /gate entrypoint stands. The per-session token and the
-// control-plane URL travel as env.
+// the image's own /gate entrypoint stands. The per-session token, the
+// control-plane URL, and the OTLP collector config (so the gate's egress_request
+// spans reach the same collector as the rest of the platform) travel as env.
 func gateConfig(spec sandbox.Spec, token, network string) containerConfig {
+	env := map[string]string{
+		"CONTROLPLANE_URL": spec.Gate.ControlplaneURL,
+		"GATE_TOKEN":       token,
+	}
+	// Only when a collector is configured; an empty endpoint runs the gate without
+	// an exporter, matching the executor's own telemetry.Run behavior.
+	if spec.Gate.OTelEndpoint != "" {
+		env["OTEL_EXPORTER_OTLP_ENDPOINT"] = spec.Gate.OTelEndpoint
+		if spec.Gate.OTelInsecure {
+			env["OTEL_EXPORTER_OTLP_INSECURE"] = "true"
+		}
+	}
 	return containerConfig{
-		Image: spec.Gate.Image,
-		Env: envSlice(map[string]string{
-			"CONTROLPLANE_URL": spec.Gate.ControlplaneURL,
-			"GATE_TOKEN":       token,
-		}),
+		Image:  spec.Gate.Image,
+		Env:    envSlice(env),
 		Labels: map[string]string{sessionLabel: string(spec.SessionID)},
 		HostConfig: hostConfig{
 			NetworkMode: network,

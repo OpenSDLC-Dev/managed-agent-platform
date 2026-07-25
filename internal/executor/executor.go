@@ -72,6 +72,13 @@ type Config struct {
 	// gateSpec.
 	ControlplaneURL string
 	GateImage       string
+	// OTelEndpoint and OTelInsecure are the deployment's OTLP collector config,
+	// threaded into each session's gate container so its egress_request spans
+	// export to the same collector as the executor (the gate is a separate process
+	// that does not inherit this executor's environment). Empty OTelEndpoint =
+	// no collector; the gate runs without an exporter.
+	OTelEndpoint string
+	OTelInsecure bool
 }
 
 func (c Config) withDefaults() Config {
@@ -349,6 +356,8 @@ func (e *Executor) gateSpec(sess sessionRun) *sandbox.GateSpec {
 		Image:           e.cfg.GateImage,
 		ControlplaneURL: e.cfg.ControlplaneURL,
 		TokenMinter:     gateTokenMinter{pool: e.pool},
+		OTelEndpoint:    e.cfg.OTelEndpoint,
+		OTelInsecure:    e.cfg.OTelInsecure,
 	}
 }
 
