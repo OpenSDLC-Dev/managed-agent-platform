@@ -75,12 +75,12 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 	// Advisory only, so it must never delay the config a live gate is blocking
 	// on (the gate client's fetch has a 10-second budget): the emission runs
 	// detached from this request — its own goroutine, unhooked from the
-	// request's cancellation (the response returning must not kill it) but with
-	// its own deadline, restoring the bound the synchronous path had. Unbounded,
-	// a stalled events table would accumulate one goroutine per fetch (every
-	// 30s per gate), each holding pool connections the whole controlplane
-	// shares. The goroutine gets only the non-secret projection of the
-	// credentials, so it never retains plaintext secrets past the response.
+	// request's cancellation (the response returning must not kill it) but
+	// bounded in lifetime (emitTimeout) and in count (startEmission coalesces
+	// per session), so a stalled events table can hold neither this response
+	// nor an accumulating stack of the shared pool's connections. The
+	// goroutine gets only the non-secret projection of the credentials, so it
+	// never retains plaintext secrets past the response.
 	probes := make([]unreachableProbe, 0, len(creds))
 	for _, c := range creds {
 		probes = append(probes, unreachableProbe{
@@ -88,11 +88,7 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 			unrestricted: c.Unrestricted, allowedHosts: c.AllowedHosts,
 		})
 	}
-	emitCtx, emitDone := context.WithTimeout(context.WithoutCancel(ctx), emitTimeout)
-	go func() {
-		defer emitDone()
-		s.emitUnreachableCredentials(emitCtx, sessionID, cfg.Networking, probes)
-	}()
+	s.startEmission(ctx, sessionID, cfg.Networking, probes)
 
 	return gateconfig.Config{
 		Networking:  cfg.Networking,
@@ -104,6 +100,26 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 // client's own fetch budget, so the async path can never outlive what the
 // synchronous path was allowed.
 const emitTimeout = 10 * time.Second
+
+// startEmission launches the detached advisory emission unless one is already
+// in flight for the session. The timeout bounds each emission's lifetime and
+// this coalesces their count: a client fetching faster than emissions drain
+// (the interval is client-configured) gets at most one goroutine per session,
+// never a stack of them contending for the shared pool. Skipping is lossless —
+// detection re-runs on the next fetch. Returns whether it launched, for the
+// white-box tests; production ignores it.
+func (s *server) startEmission(ctx context.Context, sessionID string, net domain.Networking, probes []unreachableProbe) bool {
+	if _, busy := s.emitting.LoadOrStore(sessionID, struct{}{}); busy {
+		return false
+	}
+	emitCtx, emitDone := context.WithTimeout(context.WithoutCancel(ctx), emitTimeout)
+	go func() {
+		defer s.emitting.Delete(sessionID)
+		defer emitDone()
+		s.emitUnreachableCredentials(emitCtx, sessionID, net, probes)
+	}()
+	return true
+}
 
 // unreachableProbe is the non-secret projection of a resolved credential that
 // conflict detection needs. The detached emission goroutine receives these

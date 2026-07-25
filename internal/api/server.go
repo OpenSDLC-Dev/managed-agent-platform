@@ -9,6 +9,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -29,6 +30,10 @@ type server struct {
 	queue  *queue.Queue
 	blobs  blob.Store
 	cipher secrets.Cipher
+	// emitting marks sessions with an unreachable-credential advisory emission
+	// in flight, so a gate fetching faster than the emission drains cannot
+	// stack detached goroutines (startEmission).
+	emitting sync.Map
 }
 
 // NewHandler assembles the control-plane HTTP surface over the given pool.
