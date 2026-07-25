@@ -56,9 +56,9 @@ jobs:
     timeout-minutes: 75
     steps:
       # persist-credentials: false because nothing here pushes. The default
-      # leaves GITHUB_TOKEN in a credentials file git reads for the rest of the
-      # job, and the rest of this job is `make eval` — a suite that runs a real
-      # model's tool calls. It has no business inheriting a repo credential.
+      # leaves GITHUB_TOKEN in a credentials file wired into the job's git
+      # config, and the rest of this job is `make eval` — a suite that runs a
+      # real model's tool calls. It has no business inheriting a repo credential.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
