@@ -154,6 +154,13 @@ copy of an entry here.
   [#206](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/206) is about for
   materializations that write thousands of files one at a time.
 
+  Two docs/DIVERGENCES.md entries move with it. The "write / edit built-in tools — atomicity"
+  divergence is **converged rather than deleted** — it recorded the platform as non-atomic *because*
+  the sandbox extracted a tar onto the target, which is exactly what changed — and now records the
+  two residuals the rename creates instead (#204, #205). The file-materialization entry's first
+  accepted residual said an atomic `WriteFileStream` "would need a rename primitive the `Sandbox`
+  seam does not yet have"; it has one now, and that residual is closed.
+
 - **The unreachable-credential advisory no longer rides the gate-config response** (plan 12
   follow-up, #50). `credential_host_unreachable_error` detection ran synchronously inside
   `GET /internal/v1/gate/config` — a dedupe query plus an event append per conflicting credential,

@@ -1014,9 +1014,11 @@ printf %s "$3"
 // removes $4 — and the target keeps what it held rather than being truncated to
 // whatever arrived (#71). The docker backend writes the same way, for the same
 // reason. Being a rename, it replaces the name at $1 rather than writing through
-// it, so a symlink or a device node there is supplanted by a regular file; that is
-// what the docker daemon's extraction has always done, and the two backends now
-// agree on it.
+// it, so a symlink there is supplanted by a regular file; that is what the docker
+// daemon's extraction has always done, and the two backends now agree on it. A
+// device node is supplanted too, but only where the temporary file can land beside
+// it: under a mounted /dev the docker backend cannot put one there and fails, which
+// is the one target the two still answer differently (#205).
 //
 // The rename is also what decides the one target that must be refused: `mv -f file
 // dir` moves the file *into* the directory, so a target that is a directory exits

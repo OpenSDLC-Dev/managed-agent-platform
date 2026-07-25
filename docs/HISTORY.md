@@ -1167,8 +1167,8 @@ That a hardening pass needs its own hardening pass is the point of the rule that
 never certifies their own work — these were guards written *in response to a review*, and they still
 arrived untested.
 
-**Evaluated, and deliberately left for their own issues.** Each is real and measured; none is what
-#71 asked for, and each would widen the change in a way a bug fix should not:
+**Evaluated, and deliberately left for their own issues.** Each is real and measured; none of them
+is what #71 asked for, and each would widen the change in a way a bug fix should not:
 
 - **[#204] The target's permission bits are not preserved** (`755` → `644` on k8s; docker's tar
   header has always been a fixed `0644`, so this is convergence rather than a one-sided regression).
