@@ -13,6 +13,20 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Plan 12 (vaults + egress-time credential injection, #50) is complete and archived.** The
+  end-to-end acceptance passed on the full compose stack driven by the real `ant` CLI: an
+  `environment_variable` credential attached to a `limited` session, a bash tool call curling an
+  allowed host through the gate shows the **real secret** substituted into the request header while
+  the sandbox holds only the `vltph_` placeholder; a non-allowed host is refused by the gate (403);
+  the management API never returns `secret_value`; and both revocation halves hold after archiving
+  the credential — a fresh session mints no placeholder, and a replayed pre-archive placeholder is
+  left literal (the engine resolves at egress from current rows, and the purged ciphertext cannot
+  resolve). The transcript and the slice-by-slice delivery record are in docs/HISTORY.md. The two
+  deliberately-split-out follow-ons stay open as their own issues: BYOC gate delivery (#165) and
+  TLS-terminating in-sandbox substitution (#166).
+
 ### Security
 
 - **The pinned actions moved to their current majors** (Dependabot's first batch:

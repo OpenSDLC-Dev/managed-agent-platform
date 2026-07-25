@@ -1,9 +1,16 @@
 ---
-status: in-progress
+status: archived
 issue: "#50"
 ---
 
 # Vaults + egress-time credential injection (plan 12)
+
+> **Archived 2026-07-25 — all four slices delivered and the end-to-end acceptance passed.**
+> The delivery record and the acceptance transcript are in docs/HISTORY.md ("Vaults plan —
+> archived" and "Vaults acceptance"); the as-built system is docs/ARCHITECTURE.md. The two
+> deliberately-split-out follow-ons stay open as their own issues: BYOC gate delivery (#165)
+> and TLS-terminating in-sandbox substitution (#166). This file is the original design plan,
+> kept for rationale.
 
 This plan lifts **#50** out of its reserved seam: the wire-compatible `/v1/vaults` and
 nested credentials API with encrypted-at-rest secret storage (OpenBao transit), session
