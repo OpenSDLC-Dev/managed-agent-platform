@@ -73,6 +73,7 @@ var recorder struct {
 	mu      sync.Mutex
 	rep     report
 	secrets []string // scrubbed from every artifact before it is written
+	swept   bool     // a prior run's transcripts have been cleared, once per run
 }
 
 func recordMeta(cfg modeltest.Config) {
@@ -217,9 +218,19 @@ func writeArtifacts() error {
 	// this run. report.json and summary.md are overwritten below, but transcripts
 	// are named per session and would otherwise accumulate — a stale one sitting
 	// beside a fresh green summary reads as a failure of the run that just passed.
-	if old, err := filepath.Glob(filepath.Join(artifactsDir, "transcript-*.json")); err == nil {
-		for _, f := range old {
-			_ = os.Remove(f)
+	//
+	// Once per run, not once per flush. This is called after every trial now, and
+	// a glob-delete that repeated would re-open a window after each one in which
+	// transcripts already safely on disk are gone — losing, if the run wedged
+	// right there, exactly the evidence the per-trial flush exists to keep. This
+	// run's own transcripts need no sweeping: their names are deterministic, so
+	// the rewrite below overwrites them in place.
+	if !recorder.swept {
+		recorder.swept = true
+		if old, err := filepath.Glob(filepath.Join(artifactsDir, "transcript-*.json")); err == nil {
+			for _, f := range old {
+				_ = os.Remove(f)
+			}
 		}
 	}
 	// Every artifact is scrubbed of known secrets on its way to disk (see

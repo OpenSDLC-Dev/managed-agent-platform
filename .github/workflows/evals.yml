@@ -85,7 +85,8 @@ jobs:
         # Scoped to this step rather than the job: only `make eval` reads them,
         # and job-level env would hand the live credential to every third-party
         # action here too — checkout, setup-go, upload-artifact — none of which
-        # needs it, each of which is a mutable tag someone else controls.
+        # needs it. Those are SHA-pinned, so this is defence in depth rather than
+        # the only thing between the key and a compromised release.
         env:
           MODEL_PROTOCOL: ${{ secrets.MODEL_PROTOCOL }}
           MODEL_BASE_URL: ${{ secrets.MODEL_BASE_URL }}

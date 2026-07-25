@@ -15,8 +15,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    # One PR per action, so a broken bump is reverted on its own rather than
-    # taking the rest of the week's updates with it.
-    open-pull-requests-limit: 5
+    # No `groups:` block on purpose, which is what gives one PR per action: a
+    # bump that breaks the gate is then reverted on its own rather than taking
+    # the rest of the week's updates with it.
     commit-message:
       prefix: chore

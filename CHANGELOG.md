@@ -411,12 +411,19 @@ copy of an entry here.
   nothing after it executes. The run that most needed a transcript, the one that hung, was exactly the
   run that left none: a `go test` panic dump and an empty `evals/artifacts/`. `recordTrial` now flushes
   the whole report after each trial instead, so every trial that finished is already on disk when the
-  alarm fires, and the end-of-run write is gone rather than duplicated. Rewriting one small report per
-  trial is invisible against trials that take minutes. Pinned by a test that records two trials and
+  alarm fires, and the end-of-run write is gone rather than duplicated. Each flush rewrites
+  `report.json`, `summary.md` and every failed trial's transcript so far — more work than "write the
+  report" suggests, and still invisible against trials that take minutes.
+  Pinned by a test that records two trials and
   reads `report.json`, `summary.md` and the failed trial's transcript back **without** any end-of-run
   write — it fails against the previous code with "no report.json". `artifactsDir` became a `var` so
   that test can write to a temp directory rather than clobbering the artifacts of whatever run the
-  developer was reading.
+  developer was reading. The transcript sweep that clears a *prior* run's leftovers now runs once per
+  run rather than once per write: repeated, it would delete transcripts already safely on disk at the
+  start of every trial's flush, so a run that wedged in that window would lose exactly the evidence
+  this change exists to keep. This run's own transcripts need no sweeping — their names are
+  deterministic and the rewrite overwrites them in place. Pinned by its own test, which fails against
+  the sweep-every-time version.
 
 - **Concurrent key mints left several live credentials in one rotation slot**
   ([#72](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/72)) — `EnsureAPIKey`
