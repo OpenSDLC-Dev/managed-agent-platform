@@ -580,10 +580,9 @@ func TestStaleWorkerStopCannotStrandTheReplacement(t *testing.T) {
 	if got := h.workID(t); got == stale.ID.String() {
 		t.Fatalf("reclaim re-offered the stale work id %s", got)
 	}
-	// Let the replacement's claim beat land, so the item is active and the mark
-	// below is a real heartbeat to advance past.
+	// Let the replacement's claim beat land, so the item is active and there is a
+	// real heartbeat for the wait below to advance past.
 	waitForState(t, h, "active")
-	mark := h.lastHeartbeat(t)
 
 	// The stale worker revives and force-stops under its old identity.
 	var raw *http.Response
@@ -604,7 +603,10 @@ func TestStaleWorkerStopCannotStrandTheReplacement(t *testing.T) {
 	// last_heartbeat (internal/queue/lifecycle.go) and the loop winds the run
 	// down instead — so this wait is what the race destroys. Released only after,
 	// because letting the tool finish first lets it win that race either way.
-	h.waitHeartbeatAfter(t, mark)
+	//
+	// The mark is read AFTER the stop, never before: a beat landing in the gap
+	// would otherwise satisfy the wait on its own and hollow the counterfactual out.
+	h.waitHeartbeatAfter(t, h.lastHeartbeat(t))
 
 	close(sb.gate) // release the held tool: the replacement finishes its run
 	waitDone(t, done)

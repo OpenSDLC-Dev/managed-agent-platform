@@ -55,7 +55,6 @@ copy of an entry here.
   stopped item's heartbeat no longer advances. Both fail on the pre-fix code, and both still fail
   with their id assertions relaxed, so neither rests on a happy path that would hold either way.
 
-
 ### Changed
 
 - **Plan 12 (vaults + egress-time credential injection, #50) is complete and archived.** The
