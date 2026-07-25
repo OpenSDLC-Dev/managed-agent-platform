@@ -190,7 +190,9 @@ copy of an entry here.
   host with its safety blocklist deferred and recorded INFERRED, an unknown type fails closed); a
   credential's own `allowed_hosts` is the second half, enforced by the engine. A credential the
   request host may not use is left as its literal placeholder (never the secret) and surfaced
-  through an `OnUnreachable` seam the deployment wiring turns into `credential_host_unreachable_error`.
+  through an `OnUnreachable` diagnostic seam — which the deployment wiring leaves unset: the wire
+  `credential_host_unreachable_error` was later resolved to a controlplane-emitted config conflict
+  (see the 4c-2c entry above).
   Forwarding is RFC 7230-clean: hop-by-hop headers — including any named across the `Connection`
   field lines (repeats honored) — are stripped from both the forwarded request and the returned
   response, `Content-Length` is
@@ -252,7 +254,9 @@ copy of an entry here.
   `Engine.Substitute(host, location, s)`, which replaces a credential's placeholder with its secret
   only when the request host is admitted and the credential's `injection_location` is enabled —
   otherwise leaving the opaque placeholder literal (never the secret) and reporting the credential as
-  host-unreachable so the caller can emit `credential_host_unreachable_error`. Secrets live only in
+  host-unreachable — a diagnostic: the wire `credential_host_unreachable_error` was later resolved
+  to a controlplane-emitted config conflict, never a per-request report (see the 4c-2c entry
+  above). Secrets live only in
   the substitution call path; a disabled location is neither substituted nor stripped (matching the
   documented behavior). Pure and exhaustively unit-tested; nothing consumes it until the gate lands.
 
