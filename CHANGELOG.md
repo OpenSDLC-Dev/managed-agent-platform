@@ -22,8 +22,10 @@ copy of an entry here.
   the sandbox holds only the `vltph_` placeholder; a non-allowed host is refused by the gate (403);
   the management API never returns `secret_value`; and both revocation halves hold after archiving
   the credential — a fresh session mints no placeholder, and a replayed pre-archive placeholder is
-  left literal (the engine resolves at egress from current rows, and the purged ciphertext cannot
-  resolve). The transcript and the slice-by-slice delivery record are in docs/HISTORY.md. The two
+  left literal because the gate substitutes from a config the controlplane renders from current
+  rows at fetch time, and a config fetched after the archive no longer carries the credential or its
+  purged ciphertext (immediately for a new session's gate; within the fetch interval for one already
+  running). The transcript and the slice-by-slice delivery record are in docs/HISTORY.md. The two
   deliberately-split-out follow-ons stay open as their own issues: BYOC gate delivery (#165) and
   TLS-terminating in-sandbox substitution (#166).
 
