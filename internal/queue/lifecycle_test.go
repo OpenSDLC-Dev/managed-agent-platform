@@ -3,12 +3,14 @@ package queue_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestAckTransitionsQueuedToStarting(t *testing.T) {
@@ -290,14 +292,18 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A queued reservation whose window lapsed is re-offered on the next poll.
+	// A queued reservation whose window lapsed is re-offered on the next poll —
+	// under a fresh identity (see TestEveryReHandOutMintsAFreshWorkIdentity).
 	first, _ := q.Poll(ctx, env, -time.Second) // reservation already expired
 	if first == nil {
 		t.Fatal("first poll returned nil")
 	}
 	again, err := q.Poll(ctx, env, time.Minute)
-	if err != nil || again == nil || again.ID != first.ID {
+	if err != nil || again == nil || !again.CreatedAt.Equal(first.CreatedAt) {
 		t.Fatalf("lapsed queued reservation not re-offered: %+v %v", again, err)
+	}
+	if again.ID == first.ID {
+		t.Errorf("re-offered under the same id %s, want a fresh one", again.ID)
 	}
 
 	expireLease := func(id domain.ID) {
@@ -310,10 +316,10 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 
 	// Ack it (queued→starting) and give it a live lease via a first heartbeat
 	// (starting→active). While the lease is LIVE, poll must not reclaim it.
-	if _, err := q.Ack(ctx, env, first.ID); err != nil {
+	if _, err := q.Ack(ctx, env, again.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.Heartbeat(ctx, env, first.ID, queue.NoHeartbeat, 30); err != nil {
+	if _, err := q.Heartbeat(ctx, env, again.ID, queue.NoHeartbeat, 30); err != nil {
 		t.Fatal(err)
 	}
 	if w, err := q.Poll(ctx, env, time.Minute); err != nil || w != nil {
@@ -321,11 +327,15 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 	}
 
 	// The worker dies: its lease lapses. Poll now reclaims the active item,
-	// resetting it so it re-enters the poll→ack→NO_HEARTBEAT-claim flow.
-	expireLease(first.ID)
+	// resetting it so it re-enters the poll→ack→NO_HEARTBEAT-claim flow — again
+	// under a fresh identity.
+	expireLease(again.ID)
 	reclaimed, err := q.Poll(ctx, env, time.Minute)
-	if err != nil || reclaimed == nil || reclaimed.ID != first.ID {
+	if err != nil || reclaimed == nil || !reclaimed.CreatedAt.Equal(first.CreatedAt) {
 		t.Fatalf("expired active item not reclaimed: %+v %v", reclaimed, err)
+	}
+	if reclaimed.ID == again.ID {
+		t.Errorf("reclaimed under the same id %s, want a fresh one", reclaimed.ID)
 	}
 	if _, err := q.Ack(ctx, env, reclaimed.ID); err != nil {
 		t.Fatalf("reclaimed item cannot be re-acked: %v", err)
@@ -352,10 +362,122 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 	}
 
 	// Once that startup lease lapses — a worker that died between ack and its
-	// first heartbeat — the starting item is reclaimed.
+	// first heartbeat — the starting item is reclaimed, under a fresh identity.
 	expireLease(w2.ID)
-	if got, err := q.Poll(ctx, env2, time.Minute); err != nil || got == nil || got.ID != w2.ID {
+	got, err := q.Poll(ctx, env2, time.Minute)
+	if err != nil || got == nil || !got.CreatedAt.Equal(w2.CreatedAt) {
 		t.Fatalf("expired starting item not reclaimed: %+v %v", got, err)
+	}
+	if got.ID == w2.ID {
+		t.Errorf("reclaimed under the same id %s, want a fresh one", got.ID)
+	}
+}
+
+// TestEveryReHandOutMintsAFreshWorkIdentity pins the fix for the identity-blind
+// hung-worker race (#62). The wire's lifecycle calls carry no ownership proof —
+// stop's body is {force} only and the work object has no generation field — so
+// while a reclaim re-offered the SAME work id, a hung-then-revived worker's
+// force-stop landed on whatever worker held the item next, re-stranding the
+// session. Every re-hand-out now mints a fresh id: the stale worker's ack,
+// heartbeat, and stop all address an id that no longer exists (not-found → 404),
+// and the replacement's item is untouched. The row is the same row, so the
+// client-visible metadata rides through the rotation.
+//
+// The FIRST hand-out keeps the id enqueue minted — no worker has ever held it,
+// so there is nothing to invalidate, and a client that listed the queued item
+// can still address it.
+func TestEveryReHandOutMintsAFreshWorkIdentity(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
+	// Enqueued under an active span, so the rotation can be shown to carry the
+	// trace context over: a reclaimed run that lost it would silently detach from
+	// the turn that produced the work — and the reclaim is the run an operator
+	// most needs traced.
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19},
+		SpanID:     trace.SpanID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		TraceFlags: trace.FlagsSampled,
+	})
+	if _, err := q.Enqueue(trace.ContextWithSpanContext(ctx, sc), pool, env, sessionID, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	var enqueued string
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'`,
+		sessionID.String()).Scan(&enqueued); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.UpdateMetadata(ctx, env, domain.ID(enqueued), map[string]string{"k": "v"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// The hung worker's hand-out: the id is the one enqueue minted.
+	stale, err := q.Poll(ctx, env, time.Minute)
+	if err != nil || stale == nil {
+		t.Fatalf("poll: %+v %v", stale, err)
+	}
+	if stale.ID.String() != enqueued {
+		t.Errorf("first hand-out id = %s, want the enqueued %s (nothing has held it)", stale.ID, enqueued)
+	}
+	if _, err := q.Ack(ctx, env, stale.ID); err != nil {
+		t.Fatal(err)
+	}
+	beat, err := q.Heartbeat(ctx, env, stale.ID, queue.NoHeartbeat, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleEcho := beat.LastHeartbeat.Format(time.RFC3339Nano) // what its next beat would send
+	// It hangs; its lease lapses.
+	if _, err := pool.Exec(ctx,
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, stale.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The replacement reclaims it under a fresh identity and takes the lease.
+	fresh, err := q.Poll(ctx, env, time.Minute)
+	if err != nil || fresh == nil {
+		t.Fatalf("reclaim poll: %+v %v", fresh, err)
+	}
+	if fresh.ID == stale.ID {
+		t.Fatalf("reclaimed under the stale id %s, want a fresh one", fresh.ID)
+	}
+	if !fresh.ID.HasPrefix("work") {
+		t.Errorf("reclaimed id %q not work_-prefixed", fresh.ID)
+	}
+	if fresh.SessionID != sessionID || fresh.EnvironmentID != env || fresh.Metadata["k"] != "v" {
+		t.Errorf("reclaim did not carry the item over: %+v", fresh)
+	}
+	if !fresh.CreatedAt.Equal(stale.CreatedAt) {
+		t.Errorf("reclaim created_at = %s, want the enqueued %s (same row)", fresh.CreatedAt, stale.CreatedAt)
+	}
+	if want := fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID()); fresh.TraceContext["traceparent"] != want {
+		t.Errorf("reclaim trace_context[traceparent] = %q, want %q", fresh.TraceContext["traceparent"], want)
+	}
+	if _, err := q.Ack(ctx, env, fresh.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Heartbeat(ctx, env, fresh.ID, queue.NoHeartbeat, 30); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stale worker revives. Every lifecycle call it makes under the identity
+	// it was handed is not-found — none of them reaches the replacement's item.
+	if _, err := q.Stop(ctx, env, stale.ID, true); !errors.Is(err, queue.ErrWorkNotFound) {
+		t.Errorf("stale force-stop = %v, want ErrWorkNotFound", err)
+	}
+	if _, err := q.Ack(ctx, env, stale.ID); !errors.Is(err, queue.ErrWorkNotFound) {
+		t.Errorf("stale ack = %v, want ErrWorkNotFound", err)
+	}
+	if _, err := q.Heartbeat(ctx, env, stale.ID, staleEcho, 30); !errors.Is(err, queue.ErrWorkNotFound) {
+		t.Errorf("stale heartbeat = %v, want ErrWorkNotFound (it was a 412 while the id was reused)", err)
+	}
+
+	// The replacement's item is still live and still its own.
+	live, err := q.GetWork(ctx, env, fresh.ID)
+	if err != nil || live.State != "active" {
+		t.Fatalf("replacement item = %+v %v, want a live active item", live, err)
 	}
 }
 

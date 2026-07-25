@@ -13,6 +13,48 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A hung-then-revived BYOC worker can no longer force-stop the item a replacement worker is
+  running** ([#62](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/62)). The wire's
+  work lifecycle carries no ownership proof — stop's body is `{force}` only, and the work object
+  has no generation or version field — so while a reclaim re-offered the **same** `work_` id, a
+  worker that hung past its lease and then finished its tools before its next heartbeat could
+  `412` would force-stop whatever worker held the item next, moving it to the terminal `stopped`
+  state no reclaim recovers and re-stranding the session's outstanding tool work. The lease loop's
+  `!lostLease` guard narrowed that window but could not close it, and the wire offers nothing to
+  guard the call with. The fix rotates the identity instead: `queue.Poll` now mints a fresh
+  `work_` id every time it **re**-offers an item — both the lapsed un-acked reservation and the
+  dead-worker `starting`/`active` reclaim — so the stale worker's stop, ack and heartbeat all
+  address an id that no longer exists while the replacement's item is untouched. The **first**
+  hand-out keeps the id `Enqueue` minted, so the ordinary poll → ack → run → stop lifecycle
+  stays id-stable; a rotation is the same row under a new name, carrying its metadata,
+  trace context and `created_at` over unchanged (`work_items.id` has no incoming foreign key).
+  Ids are opaque to the client, so no wire field, status or shape changes. The divergence
+  registry records the two observable deltas: a client holding an id whose hand-out lapsed must
+  re-poll rather than reuse it, and an item that rotates between pages of `ListWork` can repeat
+  (or, on a `created_at` tie, be skipped), its keyset cursor being `(created_at, id)`. The
+  platform executor's `Claim` path needed nothing: its lease-equality proof already closed the
+  same race there.
+
+  The three `404`s a stale worker now meets are safe by three different routes, and one of them
+  changed. A `404` heartbeat is a fatal 4xx that releases the lease and cancels the run. A `404`
+  stop is logged and dropped — now carrying its session id, because the work id that line names is
+  by then unresolvable, and that line is the only one that fires in exactly this scenario. And a
+  `404` **ack** — routine hand-off, not a fault — is now dropped as an empty poll instead of
+  returned as an error, so it no longer logs `worker: poll failed` at Error and escalates the poll
+  backoff the way a genuinely unreachable control plane does.
+
+  Proven, not asserted. A queue-level test drives the whole stale-identity set: stop, ack and
+  heartbeat under the old id all not-found, the replacement still `active`, and the row carried
+  over with its metadata, `created_at` and trace context intact — the last mattering because a
+  reclaimed run that lost its trace context would silently detach from the turn that produced it.
+  An end-to-end worker test force-stops over the real wire under the old id while the replacement
+  is held mid-tool, then waits for the replacement's **next heartbeat** to land on a still-live
+  item before releasing the tool: that wait is the observation a reused id destroys, since a
+  stopped item's heartbeat no longer advances. Both fail on the pre-fix code, and both still fail
+  with their id assertions relaxed, so neither rests on a happy path that would hold either way.
+
 ### Changed
 
 - **The `/code-review` reviewer pin moved to Opus 5** (`.claude/skills/run-reviews/SKILL.md`,

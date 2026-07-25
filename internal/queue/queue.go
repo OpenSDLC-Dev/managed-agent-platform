@@ -227,12 +227,30 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // re-claim it with a fresh NO_HEARTBEAT — the mirror of Claim's expired-active
 // reclaim for cloud. Note the lease a starting/active item is reclaimed on is a
 // real lease (Ack installs a startup lease, heartbeats extend it), not the
-// un-acked poll reservation. A
-// revived stale worker learns it lost the item on its next heartbeat (the echoed
-// last_heartbeat no longer matches → 412). The active-item reclaim keys on the
-// lapsed lease, NOT on reclaim_older_than_ms (which stays the un-acked-reservation
-// window, per the wire). The C2a driver re-derives work from the still-unanswered
-// tool uses, so a reclaimed run re-executes only unanswered tools.
+// un-acked poll reservation. The active-item reclaim keys on the lapsed lease,
+// NOT on reclaim_older_than_ms (which stays the un-acked-reservation window, per
+// the wire). The C2a driver re-derives work from the still-unanswered tool uses,
+// so a reclaimed run re-executes only unanswered tools.
+//
+// Every RE-hand-out mints a fresh work id (#62). A work item's identity is stable
+// only while one worker holds it, because the wire's lifecycle calls carry no
+// ownership proof — stop's body is {force} only, and the work object has no
+// generation/version field — so re-offering the same id let a hung-then-revived
+// worker's force-stop land on whatever worker held the item next, re-stranding
+// the session. Under a rotated id that worker's stop, ack, and heartbeat all
+// address an id that no longer exists (ErrWorkNotFound → 404) while the
+// replacement's item is untouched. The three 404s are safe by different routes,
+// not one: our worker's heartbeat reads a 4xx as a lost lease and cancels the
+// run, a 404 stop is logged and dropped, and a 404 ack is dropped as an empty
+// poll (routine hand-off, not a fault to back off from). The row, and with it
+// the item's metadata and trace context, carries over unchanged.
+//
+// The FIRST hand-out keeps the id enqueue minted — no worker has ever held it, so
+// there is nothing to invalidate, and a client that listed the queued item can
+// still address it. That is exactly the lease_expires_at IS NULL case: every
+// other branch matched on a lease the item was previously handed out under. Ids
+// are opaque to the client, so the wire is unchanged. Claim needs no equivalent:
+// the cloud executor proves ownership with the lease itself (see Item.Lease).
 //
 // Poll serves only self_hosted environments — the mirror of Claim scoping
 // tool_exec to cloud. The two are therefore mutually exclusive by environment
@@ -254,7 +272,8 @@ func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration
 		    LIMIT 1
 		 )
 		 UPDATE work_items t
-		 SET state            = 'queued',
+		 SET id               = CASE WHEN t.lease_expires_at IS NULL THEN t.id ELSE $3 END,
+		     state            = 'queued',
 		     last_heartbeat   = NULL,
 		     acknowledged_at  = NULL,
 		     started_at       = NULL,
@@ -263,7 +282,7 @@ func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration
 		 FROM picked p
 		 WHERE t.id = p.pid
 		 RETURNING `+workColumns,
-		envID, reclaim.Seconds()))
+		envID, reclaim.Seconds(), domain.NewID("work")))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

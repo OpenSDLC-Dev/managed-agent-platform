@@ -159,7 +159,11 @@ func (w *Worker) Run(ctx context.Context) error {
 // recovers. Force-stopping it would instead move it to the terminal stopped
 // state that no reclaim recovers, permanently stranding the session's
 // outstanding tool work over a single hiccup. Run's backoff keeps a genuinely
-// un-ackable item from hot-looping.
+// un-ackable item from hot-looping. A 404 here is the one non-transient case: an
+// ack so delayed that the control plane re-offered the item under a fresh
+// identity (#62), which another worker now owns. That is routine hand-off, not a
+// fault, so it is dropped as an empty poll rather than returned as an error —
+// see the branch below.
 func (w *Worker) pollAck(ctx context.Context) (*sdk.BetaSelfHostedWork, map[string]string, error) {
 	var resp *http.Response
 	work, err := w.client.Beta.Environments.Work.Poll(ctx, w.cfg.EnvironmentID, sdk.BetaEnvironmentWorkPollParams{
@@ -175,6 +179,15 @@ func (w *Worker) pollAck(ctx context.Context) (*sdk.BetaSelfHostedWork, map[stri
 	if _, err := w.client.Beta.Environments.Work.Ack(ctx, work.ID, sdk.BetaEnvironmentWorkAckParams{
 		EnvironmentID: w.cfg.EnvironmentID,
 	}); err != nil {
+		if isStatus(err, 404) {
+			// Not a fault, so it must not reach Run's error path: reporting it
+			// there would log a control-plane failure at Error and escalate the
+			// backoff for what is routine hand-off. Returning no item takes the
+			// empty-poll branch — space one poll and try again.
+			slog.InfoContext(ctx, "worker: acked item was re-offered to another worker, dropping",
+				"work", work.ID, "session", work.Data.ID)
+			return nil, nil, nil
+		}
 		return nil, nil, fmt.Errorf("ack %s: %w", work.ID, err)
 	}
 	return work, pollTraceContext(resp), nil
@@ -235,9 +248,10 @@ const (
 //     now own the item and stopping it could terminate that worker's run. This
 //     !lostLease guard covers the common case; the tightest residual race (a
 //     worker whose delayed ack let a second worker reclaim, then completes before
-//     its own claim-beat 412s) is NOT closed by it and cannot be closed by the
-//     reclaim alone — the wire's stop carries no ownership proof, so fully
-//     closing it needs a fresh work identity per reclaim (a later hardening).
+//     its own claim-beat 412s) is not closed by it — the wire's stop carries no
+//     ownership proof — and is closed on the control-plane side instead, where
+//     every re-hand-out mints a fresh work id (#62): once another worker holds
+//     the item, a stop under the identity this one was handed can only 404.
 //   - reclaim: leave the item live (mirrors the executor completing only when
 //     faultErr is nil).
 func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, parent map[string]string) {
@@ -277,14 +291,14 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 
 	switch outcome {
 	case outcomeDrain:
-		w.forceStop(work.ID)
+		w.forceStop(work.ID, work.Data.ID)
 	case outcomeComplete:
 		if hb.lostLease {
 			// runCtx, not ctx: the span has ended but its context has not, so the
 			// record still lands on the tool_exec span it is about.
 			slog.WarnContext(runCtx, "worker: completed work but observed losing the lease, not stopping", "work", work.ID)
 		} else {
-			w.forceStop(work.ID)
+			w.forceStop(work.ID, work.Data.ID)
 		}
 	case outcomeReclaim:
 		// leave the item live for reclaim
@@ -489,6 +503,12 @@ func (w *Worker) sessionLive(ctx context.Context, sessionID string) (bool, error
 // forceStop stops the work item, ignoring a 409 (already stopping/stopped, which
 // the reference also ignores). It runs on a fresh background context so the item
 // is still stopped even when the worker is shutting down and ctx is cancelled.
+// A 404 is logged rather than ignored: it means this worker hung long enough for
+// the control plane to re-offer its item under a fresh identity (#62), so the
+// stop reached nothing — which is the point, but is worth an operator's eye. It
+// is the one log line that fires in exactly that scenario, and the id it names
+// is by then unresolvable, so it carries the session too: that is the key an
+// operator can still follow, and the one the item's spans are joined on.
 //
 // Stop answers a bodiless 204, but the generated method is typed
 // *BetaSelfHostedWork, so the SDK's strict decoder fails a successful call with
@@ -496,7 +516,7 @@ func (w *Worker) sessionLive(ctx context.Context, sessionID string) (bool, error
 // destination to **http.Response trips the decoder bypass — the same workaround
 // the reference's own poller applies, for the same reason (anthropic-sdk-go
 // lib/environments/poller.go, stopWork).
-func (w *Worker) forceStop(workID string) {
+func (w *Worker) forceStop(workID, sessionID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
 	var raw *http.Response
@@ -504,7 +524,7 @@ func (w *Worker) forceStop(workID string) {
 		EnvironmentID:                 w.cfg.EnvironmentID,
 		BetaSelfHostedWorkStopRequest: sdk.BetaSelfHostedWorkStopRequestParam{Force: sdk.Bool(true)},
 	}, option.WithResponseBodyInto(&raw)); err != nil && !isStatus(err, 409) {
-		slog.Warn("worker: force-stop failed", "work", workID, "err", err)
+		slog.Warn("worker: force-stop failed", "work", workID, "session", sessionID, "err", err)
 	}
 	if raw != nil && raw.Body != nil {
 		_ = raw.Body.Close()
