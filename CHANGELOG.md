@@ -42,13 +42,17 @@ copy of an entry here.
   guard the call with. The fix rotates the identity instead: `queue.Poll` now mints a fresh `work_`
   id every time it **re**-offers an item — both the lapsed un-acked reservation and the
   dead-worker `starting`/`active` reclaim — so the stale worker's stop, ack and heartbeat all
-  address an id that no longer exists (`404`, which its own loop already reads as a lost lease)
-  while the replacement's item is untouched. The **first** hand-out keeps the id `Enqueue` minted,
+  address an id that no longer exists while the replacement's item is untouched. The three `404`s
+  are safe by different routes, not one: the worker's heartbeat reads a 4xx as a lost lease and
+  cancels the run, a `404` ack is an ordinary poll failure its backoff re-polls past, and a `404`
+  stop is logged and dropped. The **first** hand-out keeps the id `Enqueue` minted,
   so the ordinary poll → ack → run → stop lifecycle stays id-stable; a rotation is the same
   row under a new name, carrying its metadata, trace context and `created_at` over unchanged
   (`work_items.id` has no incoming foreign key). Ids are opaque to the client, so no wire field,
-  status or shape changes — the divergence registry records the one observable delta, that a
-  client holding an id whose hand-out lapsed must re-poll rather than reuse it. The platform
+  status or shape changes — the divergence registry records the two observable deltas: a client
+  holding an id whose hand-out lapsed must re-poll rather than reuse it, and an item that rotates
+  between pages of `ListWork` can repeat (or, on a `created_at` tie, be skipped), its keyset cursor
+  being `(created_at, id)`. The platform
   executor's `Claim` path needed nothing: its lease-equality proof already closed the same race
   there. Covered by a queue-level test of the whole stale-identity set (stop, ack and heartbeat
   under the old id all not-found while the replacement stays `active`) and an end-to-end worker

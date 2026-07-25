@@ -238,9 +238,12 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // generation/version field — so re-offering the same id let a hung-then-revived
 // worker's force-stop land on whatever worker held the item next, re-stranding
 // the session. Under a rotated id that worker's stop, ack, and heartbeat all
-// address an id that no longer exists (ErrWorkNotFound → 404, which its loop
-// already reads as a lost lease) while the replacement's item is untouched; the
-// row, and with it the item's metadata and trace context, carries over unchanged.
+// address an id that no longer exists (ErrWorkNotFound → 404) while the
+// replacement's item is untouched. The three 404s are safe by different routes,
+// not one: our worker's heartbeat reads a 4xx as a lost lease and cancels the
+// run, a 404 ack is an ordinary poll failure its backoff re-polls past, and a
+// 404 stop is logged and dropped. The row, and with it the item's metadata and
+// trace context, carries over unchanged.
 // The FIRST hand-out keeps the id enqueue minted — no worker has ever held it, so
 // there is nothing to invalidate, and a client that listed the queued item can
 // still address it. That is exactly the lease_expires_at IS NULL case: every

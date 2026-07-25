@@ -483,7 +483,13 @@ func TestStaleWorkerStopCannotStrandTheReplacement(t *testing.T) {
 	w, done := h.newWorker(Config{})
 	cancel, errc := runWorker(w)
 	defer cancel() // so a failure below still unblocks the held tool via ctx
-	<-sb.entered
+	select {
+	case <-sb.entered:
+	case <-time.After(15 * time.Second):
+		// Bounded, so a regression anywhere before the tool (poll, ack, liveness,
+		// provisioning) fails here instead of hanging to the package timeout.
+		t.Fatal("the replacement never reached its tool")
+	}
 	if got := h.workID(t); got == stale.ID.String() {
 		t.Fatalf("reclaim re-offered the stale work id %s", got)
 	}
