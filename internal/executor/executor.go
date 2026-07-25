@@ -34,6 +34,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gatetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
@@ -60,6 +61,14 @@ type Config struct {
 	Workdir      string
 	LeaseTTL     time.Duration
 	PollInterval time.Duration
+	// ControlplaneURL and GateImage configure the per-session egress gate. A
+	// session is gated when its networking is `limited` or it has vaults attached;
+	// its gate container (GateImage) fetches that session's egress config from
+	// ControlplaneURL. Both are required for gated sessions and unused otherwise —
+	// a gated session provisioned without them fails closed rather than running
+	// with unrestricted egress.
+	ControlplaneURL string
+	GateImage       string
 }
 
 func (c Config) withDefaults() Config {
@@ -252,12 +261,14 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve vault credentials: %w", err)
 	}
+	gate := e.gateSpec(sess)
 	sb, err := e.provider.Provision(ctx, sandbox.Spec{
 		SessionID:  item.SessionID,
 		Image:      e.cfg.Image,
 		Workdir:    e.cfg.Workdir,
 		Networking: sess.networking,
 		Env:        env,
+		Gate:       gate,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("provision sandbox: %w", err)
@@ -309,6 +320,46 @@ func (e *Executor) sandboxEnv(ctx context.Context, sessionID domain.ID, vaultIDs
 		env[b.SecretName] = b.Placeholder
 	}
 	return env, nil
+}
+
+// gateSpec decides whether to ask the provider for a per-session egress gate. A
+// session wants one when its egress is `limited` (only its allowed_hosts may
+// leave) or it has vaults attached (their credentials are injected at the gate,
+// never handed to the sandbox). It returns a GateSpec only when a gate is both
+// wanted and configured (GateImage + ControlplaneURL). When the executor has no
+// gate configured — the K8s deployments, and any Docker deployment that has not
+// opted in — it returns nil and the backend applies its own fail-closed
+// networking instead: the Docker provider gives a `limited` sandbox no egress at
+// all (NetworkMode "none"), the K8s provider its init-container isolation, and a
+// vault-attached sandbox keeps the inert placeholders that egress literally with
+// no gate to substitute them. That is the pre-gate behavior, so an un-opted-in
+// deployment is unchanged rather than forced into a provision that never
+// completes. The backend that runs the gate wires the sandbox to it and injects
+// the proxy variables (a deployment detail), so gateSpec stays backend-agnostic
+// and never touches the env.
+func (e *Executor) gateSpec(sess sessionRun) *sandbox.GateSpec {
+	wantsGate := sess.networking.Type == domain.NetLimited || len(sess.vaultIDs) > 0
+	if !wantsGate || e.cfg.GateImage == "" || e.cfg.ControlplaneURL == "" {
+		return nil
+	}
+	return &sandbox.GateSpec{
+		Image:           e.cfg.GateImage,
+		ControlplaneURL: e.cfg.ControlplaneURL,
+		TokenMinter:     gateTokenMinter{pool: e.pool},
+	}
+}
+
+// gateTokenMinter implements sandbox.GateTokenMinter over the executor's pool.
+// Generate returns a fresh in-memory token; Persist records it as the session's
+// live gate token, and the provider calls Persist only after it has won the
+// create race for the gate container — so a re-provision that adopts a running
+// gate never revokes the token that gate is authenticating with.
+type gateTokenMinter struct{ pool *pgxpool.Pool }
+
+func (m gateTokenMinter) Generate() string { return gatetoken.Mint() }
+
+func (m gateTokenMinter) Persist(ctx context.Context, sessionID domain.ID, token string) error {
+	return gatetoken.Ensure(ctx, m.pool, sessionID.String(), token)
 }
 
 // runTools runs each unanswered tool use in order, returning the result events

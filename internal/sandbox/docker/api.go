@@ -145,10 +145,24 @@ type containerInfo struct {
 	ID    string `json:"Id"`
 	State struct {
 		Running bool `json:"Running"`
+		// Health is present only for a container whose image declares a
+		// HEALTHCHECK (the gate image does). Status is "starting" | "healthy" |
+		// "unhealthy"; absent → "". The gate pair waits for "healthy" before it
+		// admits the sandbox, so a gate that failed to fail-close never serves.
+		Health struct {
+			Status string `json:"Status"`
+		} `json:"Health"`
 	} `json:"State"`
 	Config struct {
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
+	// HostConfig.NetworkMode is the container's fixed-at-create networking. A
+	// gated sandbox must be `container:<gateID>`; adoption checks it so a sandbox
+	// paired with a since-removed gate (or a pre-gate `bridge` sandbox) is rebuilt
+	// rather than adopted with the wrong egress path.
+	HostConfig struct {
+		NetworkMode string `json:"NetworkMode"`
+	} `json:"HostConfig"`
 }
 
 func (c *apiClient) inspectContainer(ctx context.Context, ref string) (containerInfo, error) {
@@ -160,11 +174,26 @@ func (c *apiClient) inspectContainer(ctx context.Context, ref string) (container
 type hostConfig struct {
 	NetworkMode string `json:"NetworkMode"`
 	Init        bool   `json:"Init"`
+	// CapAdd/CapDrop/SecurityOpt harden the pair: the gate adds NET_ADMIN (to
+	// install iptables before it drops privileges); the sandbox drops NET_RAW
+	// (an AF_PACKET socket bypasses the OUTPUT hook) and SETUID/SETGID and gains
+	// no-new-privileges, so it cannot become the gate's uid and slip past the
+	// owner-match rule. Omitted when empty so an ungated container is unchanged.
+	CapAdd      []string `json:"CapAdd,omitempty"`
+	CapDrop     []string `json:"CapDrop,omitempty"`
+	SecurityOpt []string `json:"SecurityOpt,omitempty"`
 }
 
 type containerConfig struct {
-	Image      string            `json:"Image"`
-	Env        []string          `json:"Env,omitempty"`
+	Image string   `json:"Image"`
+	Env   []string `json:"Env,omitempty"`
+	// Entrypoint/Cmd/WorkingDir keep no omitempty because nil and empty must reach
+	// the daemon distinctly: the gate leaves all three unset (JSON null → inherit
+	// the image's /gate entrypoint, "" → image default), while the sandbox sets
+	// Entrypoint and an explicit empty Cmd ([] → clear the image CMD, not inherit
+	// it). Both containers run as root — the sandbox safely so, since it drops
+	// SETUID/SETGID and gains no-new-privileges (see sandboxConfig) — so there is
+	// no User field.
 	Entrypoint []string          `json:"Entrypoint"`
 	Cmd        []string          `json:"Cmd"`
 	WorkingDir string            `json:"WorkingDir"`

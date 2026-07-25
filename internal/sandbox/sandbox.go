@@ -81,6 +81,50 @@ type Spec struct {
 	// egress gate relies on this by minting stable per-session placeholders and
 	// resolving their live values at egress rather than re-injecting them.
 	Env map[string]string
+	// Gate, when non-nil, tells the provider to run a per-session egress gate
+	// sidecar: a gate container (Gate.Image, on the deploy network, holding
+	// CAP_NET_ADMIN) that owns the network namespace and installs owner-match
+	// iptables, with the sandbox joining that namespace and reaching the network
+	// only through the gate's loopback proxy (the provider points the sandbox's
+	// HTTP_PROXY there — a deployment detail it owns, not the caller's env). nil =
+	// the sandbox networks directly (unrestricted, no vault
+	// credentials). The executor sets it for sessions that are `limited` or
+	// vault-attached. Optional so a backend that does not yet run a sidecar (the
+	// K8s provider until slice 4d) ignores it and stays contract-compatible.
+	Gate *GateSpec
+}
+
+// GateSpec configures a session's egress-gate sidecar. The provider mints the
+// gate's per-session token via TokenMinter, and only when it creates the pair
+// (never when it adopts an existing one) — so a re-provision, which is the normal
+// path for every tool call after the first, does not revoke the token a
+// still-running gate is using. The token is therefore not carried here.
+type GateSpec struct {
+	Image           string          // the gate container image (built with `docker build --target gate`)
+	ControlplaneURL string          // the gate fetches its per-session config from here
+	TokenMinter     GateTokenMinter // mints the gate token on create; see GateTokenMinter
+}
+
+// GateTokenMinter mints a per-session gate token in two steps so the provider can
+// persist it only after it wins the create race for the gate container. Generate
+// returns a fresh plaintext token in memory without any durable effect; the
+// provider puts it in the new container's GATE_TOKEN and, only once the create
+// succeeds, calls Persist to record its hash as the session's live token. A
+// provider that instead adopts an existing gate (the normal path for every tool
+// call after the first) never calls either method, so it never revokes the token
+// the running gate is already authenticating with — and a create that loses the
+// race (409) discards its generated token unpersisted, leaving the winner's
+// intact. It lives on GateSpec rather than on the provider because Persist needs
+// the executor's DB pool (constructed after the provider) and both backends mint
+// identically; the executor supplies an implementation backed by
+// internal/gatetoken (a random token from Generate, its hash written by Ensure in
+// Persist, over its pool).
+type GateTokenMinter interface {
+	// Generate returns a fresh gate token in memory, with no durable effect.
+	Generate() string
+	// Persist records token as sessionID's live gate token (by hash). The provider
+	// calls it only after creating the gate container with that token.
+	Persist(ctx context.Context, sessionID domain.ID, token string) error
 }
 
 // ValidateEnv reports whether every key in a Spec.Env map is a valid
@@ -104,12 +148,15 @@ func ValidateEnv(env map[string]string) error {
 // exec, so overriding it with a placeholder makes the container exit before it
 // serves work — a reclaim-loop. LD_PRELOAD/LD_LIBRARY_PATH/LD_AUDIT are dynamic
 // loader hooks and BASH_ENV/ENV are shell-startup hooks — process-injection
-// surfaces. (The egress-proxy variables the gate injects are the platform's own,
-// set after this filter, and are reserved against a credential overriding them
-// in the slice that adds them.)
+// surfaces. The egress-proxy variables the gate injects (HTTP_PROXY/HTTPS_PROXY/
+// NO_PROXY, upper- and lower-case) are the platform's own, set after this filter;
+// they are reserved here so a vault credential's secret_name cannot shadow them
+// and divert or cut the sandbox's route to its gate.
 var reservedEnvNames = map[string]struct{}{
 	"PATH": {}, "LD_PRELOAD": {}, "LD_LIBRARY_PATH": {}, "LD_AUDIT": {},
 	"BASH_ENV": {}, "ENV": {}, "IFS": {},
+	"HTTP_PROXY": {}, "HTTPS_PROXY": {}, "NO_PROXY": {},
+	"http_proxy": {}, "https_proxy": {}, "no_proxy": {},
 }
 
 // ReservedEnvName reports whether k is an environment variable the platform

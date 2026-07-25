@@ -21,6 +21,10 @@ type Config struct {
 
 	// docker: empty Host falls back to DOCKER_HOST and then the well-known socket.
 	DockerHost string
+	// docker: the network a session's egress-gate container joins (the deploy
+	// network reaching the control plane and the outside). Empty defaults to
+	// "bridge". Unused for ungated sessions.
+	DockerGateNetwork string
 
 	// k8s: empty Kubeconfig and Context use in-cluster config (the executor
 	// running as a Deployment), then the standard kubeconfig loading rules.
@@ -34,7 +38,7 @@ type Config struct {
 func New(cfg Config) (sandbox.Provider, error) {
 	switch cfg.Backend {
 	case "", "docker":
-		return docker.New(docker.Config{Host: cfg.DockerHost})
+		return docker.New(docker.Config{Host: cfg.DockerHost, GateNetwork: cfg.DockerGateNetwork})
 	case "k8s":
 		return k8s.New(k8s.Config{
 			Kubeconfig:    cfg.K8sKubeconfig,

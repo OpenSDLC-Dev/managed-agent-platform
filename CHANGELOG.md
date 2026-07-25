@@ -27,6 +27,38 @@ copy of an entry here.
 
 ### Added
 
+- **Docker provider provisions the egress-gate pair** (plan 12 slice 4, #50). The Docker sandbox
+  backend now runs a per-session gate alongside the sandbox for any session that is `limited` or
+  vault-attached. The gate is created **first** on the deploy network (`SANDBOX_DOCKER_GATE_NETWORK`,
+  default `bridge`) holding `CAP_NET_ADMIN` so it owns the network namespace and installs its
+  owner-match firewall; only once its HEALTHCHECK reports **healthy** — i.e. the firewall took and the
+  proxy is listening — is the sandbox created inside that namespace (`NetworkMode: container:<gateID>`)
+  with its `HTTP(S)_PROXY` pointed at the gate's loopback proxy. The sandbox is hardened so it cannot
+  forge the gate's egress identity: `CapDrop [NET_RAW, SETUID, SETGID]` + `no-new-privileges`. **This
+  is what lets the sandbox stay root** — with `SETUID`/`SETGID` dropped, even a root process cannot
+  `setuid` to the gate's uid to match the owner-`ACCEPT` rule, so no distinct sandbox uid, `chown`, or
+  workdir change is needed (a refinement of the earlier "distinct non-root uid" plan). Egress is the
+  gate's to allow and vault credentials are substituted there, never handed to the sandbox. The
+  per-session gate token is minted in two steps — a `Generate`d in-memory token put in the container,
+  `Persist`ed only after **winning** the create — so a re-provision that adopts the running gate (the
+  normal path on every tool call after the first) never revokes the token the live gate is using, and a
+  lost create race discards its token unpersisted. Provisioning fails **closed**: a gate that never
+  becomes healthy aborts rather than admitting a sandbox; a fresh gate whose sandbox half then fails is
+  torn down rather than leaked, and `Destroy` removes both halves. Adoption is gate-aware for recovery:
+  a running gate is waited healthy before it admits a sandbox, a stopped gate is recreated (its token
+  may be unpersisted or revoked) rather than restarted, a sandbox not paired with the current gate is
+  rebuilt in its namespace, and a sandbox that fails to start is removed so a dead-gate network
+  reference cannot poison later retries. The proxy address is a single shared constant
+  (`gaterun.DefaultProxyAddr`) so `cmd/gate`'s listener and the injected `HTTP_PROXY` cannot drift.
+  **Opt-in and non-breaking:** the gate runs only where the executor sets `CONTROLPLANE_URL` +
+  `EXECUTOR_GATE_IMAGE`. Where it is not configured — the Kubernetes backend (its own sidecar is slice
+  4d), and any Docker deployment that has not opted in — no gate is requested and each backend keeps its
+  existing fail-closed networking: a Docker `limited` sandbox gets no egress (`NetworkMode: none`), a
+  K8s `limited` sandbox its init-container isolation, and a vault-attached sandbox its inert
+  placeholders — exactly the pre-gate behavior, so an un-opted-in deployment is unchanged rather than
+  faulted. The stock compose/Helm deployments are not yet gate-wired; that and the real-egress permit
+  path and contract-suite rows land in the next sub-PR.
+
 - **Egress-gate runtime — `cmd/gate` + `internal/gaterun`** (plan 12 slice 4, #50). The per-session
   sidecar that runs `internal/gate`'s forward proxy, split ports-and-adapters so all decision logic is
   testable and only raw syscalls sit in `cmd/`. On startup it **replaces** the `OUTPUT` chain on both

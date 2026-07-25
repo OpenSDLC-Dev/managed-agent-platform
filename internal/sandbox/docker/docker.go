@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -111,11 +112,18 @@ const (
 // to the well-known socket.
 type Config struct {
 	Host string
+	// GateNetwork is the Docker network a session's egress-gate container joins
+	// — the deploy network that carries real egress and reaches the control
+	// plane. The sandbox does not join it; it shares the gate's netns and reaches
+	// the world only through the gate's proxy. Empty defaults to "bridge". Unused
+	// for sessions with no Spec.Gate (unrestricted, no vault credentials).
+	GateNetwork string
 }
 
 // Provider provisions per-session containers.
 type Provider struct {
-	api *apiClient
+	api         *apiClient
+	gateNetwork string
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -123,7 +131,11 @@ func New(cfg Config) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Provider{api: api}, nil
+	gateNetwork := cfg.GateNetwork
+	if gateNetwork == "" {
+		gateNetwork = "bridge"
+	}
+	return &Provider{api: api, gateNetwork: gateNetwork}, nil
 }
 
 func containerName(sessionID domain.ID) string { return "map-" + string(sessionID) }
@@ -131,7 +143,13 @@ func containerName(sessionID domain.ID) string { return "map-" + string(sessionI
 // Provision returns the session's container, creating and starting it only if
 // none exists. Two executors racing on the same session converge: the loser of
 // the create race adopts the winner's container.
-func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
+//
+// When spec.Gate is set the sandbox is one half of a pair: the gate container is
+// ensured first (it owns the network namespace the sandbox joins and enforces
+// its egress), and only once it is healthy is the sandbox created inside its
+// netns. If a fresh gate was created here and the sandbox half then fails, the
+// gate is torn down rather than leaked.
+func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox.Sandbox, err error) {
 	if spec.SessionID.IsZero() {
 		return nil, errors.New("docker: provision needs a session id")
 	}
@@ -147,25 +165,134 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	}
 	name := containerName(spec.SessionID)
 
-	info, err := p.api.inspectContainer(ctx, name)
-	switch {
-	case err == nil:
-		if err := ours(info, spec.SessionID); err != nil {
-			return nil, err
+	var gateID string
+	if spec.Gate != nil {
+		id, created, gerr := p.ensureGate(ctx, spec)
+		if gerr != nil {
+			return nil, gerr
 		}
-		if !info.State.Running {
-			if err := p.api.startContainer(ctx, info.ID); err != nil {
-				return nil, err
-			}
+		gateID = id
+		if created {
+			// The gate is live but the sandbox half is not yet. Any error return
+			// below (a lost adopt, a failed create/start) leaves this gate an
+			// orphan no one adopts, so tear it down. This is scoped to a gate this
+			// call created; a rare concurrent-adopt race (another executor adopts
+			// this gate and pairs a sandbox to it while this call then errors) can
+			// still break that sandbox's netns, but it is fail-closed and
+			// self-healing — the broken sandbox's next tool call faults, reclaims,
+			// and re-provisions, and the NetworkMode-aware adoption below rebuilds
+			// it against a fresh gate. The standalone teardown reaper (a separate
+			// issue) is the race-safe long-term owner of orphan cleanup.
+			defer func() {
+				if err != nil {
+					p.removeDetached(gateID)
+				}
+			}()
 		}
-		return p.attach(info.ID, workdir), nil
-	case !statusIs(err, 404):
-		return nil, err
 	}
 
-	cfg := containerConfig{
+	info, ierr := p.api.inspectContainer(ctx, name)
+	switch {
+	case ierr == nil:
+		if oerr := ours(info, spec.SessionID); oerr != nil {
+			return nil, oerr
+		}
+		if pairedWithGate(info, gateID) {
+			// Adopt: ungated, or already paired with this session's current gate.
+			if !info.State.Running {
+				if serr := p.api.startContainer(ctx, info.ID); serr != nil {
+					return nil, serr
+				}
+			}
+			return p.attach(info.ID, workdir, gateID), nil
+		}
+		// Gated, but the sandbox is attached to a different (or since-removed) gate
+		// — a stale pairing (a recreated gate, or a pre-gate `bridge` sandbox from
+		// before this session was gated). Remove it and recreate it in the current
+		// gate's namespace rather than adopt a sandbox with the wrong egress path.
+		if rerr := p.api.removeContainer(ctx, info.ID); rerr != nil && !statusIs(rerr, 404) {
+			return nil, rerr
+		}
+	case !statusIs(ierr, 404):
+		return nil, ierr
+	}
+
+	cfg := sandboxConfig(spec, workdir, gateID)
+	id, cerr := p.api.createContainer(ctx, name, cfg)
+	if statusIs(cerr, 404) { // the image is not on this host yet
+		if perr := p.api.pullImage(ctx, spec.Image); perr != nil {
+			return nil, perr
+		}
+		id, cerr = p.api.createContainer(ctx, name, cfg)
+	}
+	createdSandbox := cerr == nil
+	if statusIs(cerr, 409) { // another executor created it first
+		winner, werr := p.api.inspectContainer(ctx, name)
+		if werr != nil {
+			return nil, werr
+		}
+		if oerr := ours(winner, spec.SessionID); oerr != nil {
+			return nil, oerr
+		}
+		if !pairedWithGate(winner, gateID) {
+			// The race winner is not paired with this session's gate. Fail closed
+			// rather than adopt a sandbox with the wrong egress path; the retry's
+			// adoption above removes and rebuilds the stale winner.
+			return nil, fmt.Errorf("docker: raced sandbox %s for session %s is not paired with gate %s",
+				winner.ID, spec.SessionID, gateID)
+		}
+		id, cerr = winner.ID, nil
+	}
+	if cerr != nil {
+		return nil, cerr
+	}
+	if serr := p.api.startContainer(ctx, id); serr != nil {
+		if createdSandbox {
+			// Remove the sandbox we just created. Its immutable network mode
+			// references a gate this call is about to tear down (the deferred gate
+			// cleanup), so a stopped leftover would poison every later retry —
+			// adopting it and failing to start against the vanished gate forever.
+			p.removeDetached(id)
+		}
+		return nil, serr
+	}
+	return p.attach(id, workdir, gateID), nil
+}
+
+// pairedWithGate reports whether an existing sandbox is networked through this
+// session's current gate, so a gated session never adopts a sandbox with the
+// wrong egress path (a stale gate reference, or a pre-gate `bridge` sandbox). An
+// ungated session (gateID == "") is trivially paired.
+func pairedWithGate(info containerInfo, gateID string) bool {
+	return gateID == "" || info.HostConfig.NetworkMode == "container:"+gateID
+}
+
+// sandboxConfig is the session container's create config. When gateID is set the
+// sandbox joins the gate's network namespace (container:<gateID>) and is hardened
+// so it cannot forge the gate's egress identity: it drops NET_RAW (no raw or
+// AF_PACKET socket that would bypass the OUTPUT hook) and SETUID/SETGID (so even
+// a root process cannot setuid to the gate's uid and match the owner-ACCEPT rule)
+// and runs no-new-privileges (no setuid-binary escalation back to those caps).
+// Its HTTP(S)_PROXY is pointed at the gate's loopback proxy — the gate is where
+// egress is filtered and vault credentials are substituted. With no gate it
+// networks directly per its Networking (unrestricted, or none — fail-closed —
+// for limited).
+func sandboxConfig(spec sandbox.Spec, workdir, gateID string) containerConfig {
+	// Tools background processes and orphan them; an init process reaps them
+	// instead of letting them pile up as zombies for the session's whole life.
+	host := hostConfig{Init: true}
+	env := spec.Env
+	if gateID != "" {
+		host.NetworkMode = "container:" + gateID
+		host.CapDrop = []string{"NET_RAW", "SETUID", "SETGID"}
+		host.SecurityOpt = []string{"no-new-privileges"}
+		env = withProxyEnv(env)
+	} else {
+		host.NetworkMode = networkMode(spec.Networking)
+	}
+	return containerConfig{
 		Image: spec.Image,
-		Env:   envSlice(spec.Env),
+		Env:   envSlice(env),
 		// Hold the container open and guarantee the workdir exists. Nothing
 		// else runs here: every tool call is its own exec.
 		Entrypoint: []string{"/bin/bash", "-c",
@@ -173,39 +300,28 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		Cmd:        []string{},
 		WorkingDir: workdir,
 		Labels:     map[string]string{sessionLabel: string(spec.SessionID)},
-		HostConfig: hostConfig{
-			NetworkMode: networkMode(spec.Networking),
-			// Tools background processes and orphan them; an init process reaps
-			// them instead of letting them pile up as zombies for the session's
-			// whole lifetime.
-			Init: true,
-		},
+		HostConfig: host,
 	}
+}
 
-	id, err := p.api.createContainer(ctx, name, cfg)
-	if statusIs(err, 404) { // the image is not on this host yet
-		if err := p.api.pullImage(ctx, spec.Image); err != nil {
-			return nil, err
-		}
-		id, err = p.api.createContainer(ctx, name, cfg)
+// withProxyEnv returns a copy of env with the sandbox's egress-proxy variables
+// set to the gate's loopback proxy — upper and lower case, for the Go net/http
+// and the curl conventions both. The platform's proxy vars win over any
+// collision, but there is none to win: the executor has already dropped every
+// vault credential whose secret_name is a reserved name (sandbox.ReservedEnvName,
+// which includes these). The address is the gate's, so it lives here in the
+// provider that runs the gate rather than leaking into the backend-agnostic
+// executor.
+func withProxyEnv(env map[string]string) map[string]string {
+	out := make(map[string]string, len(env)+4)
+	for k, v := range env {
+		out[k] = v
 	}
-	if statusIs(err, 409) { // another executor created it first
-		info, ierr := p.api.inspectContainer(ctx, name)
-		if ierr != nil {
-			return nil, ierr
-		}
-		if ierr := ours(info, spec.SessionID); ierr != nil {
-			return nil, ierr
-		}
-		id, err = info.ID, nil
+	proxyURL := "http://" + gaterun.DefaultProxyAddr
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		out[k] = proxyURL
 	}
-	if err != nil {
-		return nil, err
-	}
-	if err := p.api.startContainer(ctx, id); err != nil {
-		return nil, err
-	}
-	return p.attach(id, workdir), nil
+	return out
 }
 
 // ours refuses a container that merely wears this session's name. The name is
@@ -227,9 +343,12 @@ func ours(info containerInfo, sessionID domain.ID) error {
 	return nil
 }
 
-func (p *Provider) attach(id, workdir string) *container {
+// attach builds the sandbox handle. gateID is the session's egress-gate
+// container when the sandbox is half of a pair, "" otherwise; Destroy uses it to
+// tear the gate down alongside the sandbox.
+func (p *Provider) attach(id, workdir, gateID string) *container {
 	return &container{
-		api: p.api, id: id, workdir: workdir,
+		api: p.api, id: id, workdir: workdir, gateID: gateID,
 		killGrace: defaultKillGrace, overrunSlop: defaultOverrunSlop,
 		exitBudget: defaultExitBudget, probeLead: defaultProbeLead,
 	}
@@ -268,6 +387,7 @@ type container struct {
 	api         *apiClient
 	id          string
 	workdir     string
+	gateID      string // the session's egress-gate container, or "" when ungated
 	killGrace   time.Duration
 	overrunSlop time.Duration
 	exitBudget  time.Duration
@@ -672,15 +792,29 @@ func (c *container) mkdirAll(ctx context.Context, dir string) error {
 	return nil
 }
 
-// Destroy takes any 404 as success, not just containerGone's: removal has one
-// way to miss, and the container's absence is the outcome asked for. No path
-// travels this endpoint, so no message can be spoofed into it.
+// Destroy removes the sandbox and, when it is half of a pair, its egress gate.
+// Any 404 is success, not just containerGone's: removal has one way to miss, and
+// the container's absence is the outcome asked for. No path travels this
+// endpoint, so no message can be spoofed into it. The gate is removed after the
+// sandbox — the sandbox shares the gate's netns, so the gate must outlive it —
+// and both removals are attempted even if the first errors, so a stuck sandbox
+// never strands its gate.
 func (c *container) Destroy(ctx context.Context) error {
-	err := c.api.removeContainer(ctx, c.id)
-	if statusIs(err, 404) {
-		return nil
+	err := removeIgnoring404(ctx, c.api, c.id)
+	if c.gateID != "" {
+		if gerr := removeIgnoring404(ctx, c.api, c.gateID); err == nil {
+			err = gerr
+		}
 	}
 	return err
+}
+
+// removeIgnoring404 removes a container, treating its absence as success.
+func removeIgnoring404(ctx context.Context, api *apiClient, id string) error {
+	if err := api.removeContainer(ctx, id); err != nil && !statusIs(err, 404) {
+		return err
+	}
+	return nil
 }
 
 // wrap turns "the container is gone" into the contract's sentinel; every other

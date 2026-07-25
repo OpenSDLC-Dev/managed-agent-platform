@@ -44,9 +44,13 @@ func TestValidateEnv(t *testing.T) {
 
 func TestReservedEnvName(t *testing.T) {
 	// Reserved: injecting an opaque value over one of these breaks the sandbox
-	// (PATH — the bootstrap and every tool exec resolve binaries through it) or is
-	// a process-injection hook (the loader/shell variables).
-	reserved := []string{"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "IFS"}
+	// (PATH — the bootstrap and every tool exec resolve binaries through it), is a
+	// process-injection hook (the loader/shell variables), or diverts/cuts the
+	// sandbox's route to its gate (the egress-proxy variables, both cases).
+	reserved := []string{
+		"PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "IFS",
+		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+	}
 	for _, k := range reserved {
 		if !sandbox.ReservedEnvName(k) {
 			t.Errorf("ReservedEnvName(%q) = false, want true", k)
@@ -57,8 +61,8 @@ func TestReservedEnvName(t *testing.T) {
 			t.Errorf("reserved name %q should still be grammatically valid", k)
 		}
 	}
-	// Ordinary secret names — including a lookalike — are not reserved.
-	for _, k := range []string{"API_KEY", "DB_URL", "MY_PATH", "PATH_", "path"} {
+	// Ordinary secret names — including lookalikes — are not reserved.
+	for _, k := range []string{"API_KEY", "DB_URL", "MY_PATH", "PATH_", "path", "HTTP_PROXY_URL", "MY_HTTP_PROXY"} {
 		if sandbox.ReservedEnvName(k) {
 			t.Errorf("ReservedEnvName(%q) = true, want false", k)
 		}
