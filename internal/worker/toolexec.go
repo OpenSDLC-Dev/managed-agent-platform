@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -49,8 +50,8 @@ type toolUse struct {
 // gone) stops the set with the rest left for the reclaim.
 //
 // The sandbox is provisioned only when there is unanswered work, so a call
-// against an already-answered session (a redundant reclaim) is a cheap couple of
-// reads with nothing to run.
+// against an already-answered session (a redundant reclaim) is one bounded read
+// with nothing to run.
 //
 // Session liveness is the caller's gate, not this driver's. The platform
 // executor refuses to run a stale session's tools by loading its status under
@@ -101,6 +102,17 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 	return nil
 }
 
+// toolScanPageSize is how many events one page of the scan below requests. The
+// walk reads the trailing turn only, which for a turn of N parallel tools is
+// N+1 events on a fresh suspension (the uses plus the boundary result) and at
+// most 2N+1 on a reclaim (their answered results are on the wire too) — so one
+// page of 20 finishes in a single round trip up to N=19 fresh, N=9 reclaimed,
+// and anything wider simply pages on. The size caps what a page over-reads,
+// which is the cost that matters: tool inputs and results carry file contents.
+// It is sent explicitly rather than left to the server's default: the bound is
+// this worker's, and it holds against any wire-compatible control plane.
+const toolScanPageSize = 20
+
 // unansweredToolUses reads the session's event log over the wire and returns the
 // agent.tool_use events still lacking a result, oldest first — the work this
 // call must run. It mirrors the executor's diff exactly: an agent.tool_use is
@@ -116,70 +128,74 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 // Events are parsed from each event's raw wire JSON into a minimal local shape
 // rather than the SDK's typed event union: the union tracks the live API's tip
 // and carries post-slice surface the worker has no need for, so decoding only
-// the three fields this diff needs keeps a schema drift from breaking it.
+// the four fields this diff needs keeps a schema drift from breaking it.
 //
-// Cost: with no unanswered-only wire endpoint, this pages the session's full
-// agent.tool_use and result history on every call to find the outstanding few —
-// O(history) per tool batch, where the executor's DB does it in one EXISTS. The
-// outstanding set is always the last suspended turn's, so a future optimization
-// could read newest-first and stop early; the simple full scan is correct and is
-// what this first cut ships.
+// Cost: the worker has no database, so it cannot ask the executor's one EXISTS
+// and there is no unanswered-only wire endpoint to ask instead. It bounds the
+// read by walking newest-first and stopping at the trailing turn, rather than
+// paging the session's whole tool history (#76). Two platform invariants make
+// that exact for a turn that suspended on its tools: the brain commits a turn's
+// tool_use events in ONE append (brain.commitTurn), and no later turn's uses
+// reach the log until every outstanding one is answered — every enqueue of a
+// model_turn that follows tool work is gated on events.HasUnansweredToolUse. So
+// in this three-type stream the unanswered set is the newest contiguous run of
+// tool uses, and the first result older than that run is the boundary —
+// everything beyond it is answered. A result always outranks the use it answers
+// (per-session seq is assigned under the session row lock, and a result may only
+// reference a committed use), so walking down, every use meets its answer first.
+//
+// One path can strand a use outside that run, and this scan deliberately does
+// not reach it: a turn whose stop reason is not tool_use commits its tool_use
+// events but enqueues no tool_exec, and the API's user.message-on-idle resume is
+// the one enqueue site not gated on the unanswered set (#181). No bounded scan
+// can find an arbitrarily old stranded use; the executor's DB-side diff still
+// returns one, so the two halves differ on that shape alone. Fixing it belongs
+// to the brain, not here.
 func unansweredToolUses(ctx context.Context, client sdk.Client, sessionID string) ([]toolUse, error) {
-	uses, err := listRawEvents(ctx, client, sessionID, string(domain.EventAgentToolUse))
-	if err != nil {
-		return nil, fmt.Errorf("list tool uses: %w", err)
-	}
-	results, err := listRawEvents(ctx, client, sessionID,
-		string(domain.EventAgentToolResult), string(domain.EventUserToolResult))
-	if err != nil {
-		return nil, fmt.Errorf("list tool results: %w", err)
-	}
-
-	answered := make(map[string]bool, len(results))
-	for _, r := range results {
-		var ref struct {
-			ToolUseID string `json:"tool_use_id"`
-		}
-		if err := json.Unmarshal(r, &ref); err != nil {
-			return nil, fmt.Errorf("parse tool result: %w", err)
-		}
-		answered[ref.ToolUseID] = true
-	}
-
-	var out []toolUse
-	for _, u := range uses {
-		var body struct {
-			ID    string          `json:"id"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
-		}
-		if err := json.Unmarshal(u, &body); err != nil {
-			return nil, fmt.Errorf("parse tool use: %w", err)
-		}
-		if answered[body.ID] {
-			continue
-		}
-		out = append(out, toolUse{id: domain.ID(body.ID), name: body.Name, input: body.Input})
-	}
-	return out, nil
-}
-
-// listRawEvents returns the raw wire JSON of every event of the given types for
-// the session, oldest first (the API's default order), following pagination to
-// completion. Reading the raw bytes lets the caller decode only the fields it
-// needs; see unansweredToolUses.
-func listRawEvents(ctx context.Context, client sdk.Client, sessionID string, types ...string) ([]json.RawMessage, error) {
 	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
-		Types: types,
+		Types: []string{
+			string(domain.EventAgentToolUse),
+			string(domain.EventAgentToolResult),
+			string(domain.EventUserToolResult),
+		},
+		Order: sdk.BetaSessionEventListParamsOrderDesc,
+		Limit: sdk.Int(toolScanPageSize),
 	})
-	var out []json.RawMessage
+	answered := map[string]bool{}
+	var out []toolUse
+	var sawUse bool
+scan:
 	for iter.Next() {
-		ev := iter.Current()
-		out = append(out, json.RawMessage(ev.RawJSON()))
+		var ev struct {
+			ID        string          `json:"id"`
+			Type      string          `json:"type"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+			ToolUseID string          `json:"tool_use_id"`
+		}
+		if err := json.Unmarshal([]byte(iter.Current().RawJSON()), &ev); err != nil {
+			return nil, fmt.Errorf("parse session event: %w", err)
+		}
+		switch domain.EventType(ev.Type) {
+		case domain.EventAgentToolUse:
+			sawUse = true
+			// Not "stop at the first answered use": a turn's tools can be
+			// answered out of order — a denial's result lands at once while an
+			// allowed sibling is still outstanding — so the whole run is read.
+			if !answered[ev.ID] {
+				out = append(out, toolUse{id: domain.ID(ev.ID), name: ev.Name, input: ev.Input})
+			}
+		case domain.EventAgentToolResult, domain.EventUserToolResult:
+			if sawUse {
+				break scan // older than the trailing turn: everything past here is answered
+			}
+			answered[ev.ToolUseID] = true
+		}
 	}
 	if err := iter.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list session events: %w", err)
 	}
+	slices.Reverse(out) // the walk collected newest-first; run them in log order
 	return out, nil
 }
 

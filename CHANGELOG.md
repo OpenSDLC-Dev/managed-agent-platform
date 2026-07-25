@@ -271,6 +271,33 @@ copy of an entry here.
 
 ### Changed
 
+- **The BYOC worker's unanswered-tool scan is bounded by the trailing turn**
+  ([#76](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/76)). The worker has no
+  database, so it re-derives its work over the wire — and it did so with two oldest-first walks over
+  the session's *entire* `agent.tool_use` and tool-result history, diffed to find the outstanding
+  few. Every polled work item therefore cost a scan that grew with session age: on a session with
+  sixty answered tool calls behind it, seven paged requests before a single tool ran.
+  `worker.unansweredToolUses` now makes one newest-first pass (`order=desc`, an explicit page size)
+  and stops at the trailing turn's boundary — a constant one request in that same scenario. Two
+  platform invariants make the early stop exact rather than heuristic for a turn that suspended on
+  its tools: the brain commits a turn's `agent.tool_use` events in a single append, and no later
+  turn's uses reach the log until every outstanding one is answered (every `model_turn` enqueue
+  following tool work is gated on `HasUnansweredToolUse`), so the unanswered set is the newest
+  contiguous run of tool uses and the first result older than that run is the boundary. The walk
+  deliberately reads the *whole* run rather than stopping at the first answered use it meets: a
+  turn's tools can be answered out of order (a denial's `agent.tool_result` lands at once while an
+  allowed sibling is still outstanding), and stopping early there would strand the earlier tool
+  forever. No wire surface was added — the SDK's documented `order` / `types` / `limit` list params
+  do the work — and the tool-running behavior is unchanged under those invariants: the same tools
+  run, in log order, and a reclaiming pass still re-derives exactly the still-unanswered ones. The
+  one shape that does change is a use *stranded* outside the trailing run, which the old full scan
+  re-ran by accident and no bounded scan can reach; the platform hole that produces one (a
+  non-`tool_use` stop reason committing tool uses with no `tool_exec`, plus the one ungated resume
+  path) is now tracked as
+  [#181](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/181). Pinned by tests for
+  the bound (request count flat against a long history), for a turn wider than one page (the desc
+  cursor keeps its direction across the page break, and order is preserved), and for the
+  out-of-order answer.
 - **`anthropic-sdk-go` pinned at v1.59.0**, up from v1.58.0 — and unlike the v1.58.0 bump, this one
   was not contract-neutral. CLAUDE.md makes the pinned SDK this project's authoritative typed wire
   schema, so moving the pin changes what the repo is measured against; the field-by-field
