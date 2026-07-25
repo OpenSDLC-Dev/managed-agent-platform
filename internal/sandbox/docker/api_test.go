@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -741,8 +742,13 @@ func TestStaleExecIsNotAMissingSandbox(t *testing.T) {
 	}
 }
 
+// The shape of one buffered write: the archive endpoint is tried first and only a
+// refusal costs a `mkdir`, and the entry lands under a temporary name that a
+// second exec renames onto the target — the two execs are the write's whole cost,
+// and the rename is what makes it atomic.
 func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
-	var puts, execs int
+	var puts int
+	var commands []string
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
@@ -756,7 +762,12 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 				t.Errorf("archive path = %q", got)
 			}
 		case strings.HasSuffix(r.URL.Path, "/exec"):
-			execs++
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			// The wrapper takes the command as an argument, not as script text.
+			commands = append(commands, body.Cmd[len(body.Cmd)-2])
 			io.WriteString(w, `{"Id":"e1"}`)
 		case r.URL.Path == "/exec/e1/start":
 		case r.URL.Path == "/exec/e1/json":
@@ -769,8 +780,16 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 	if err := c.WriteFile(context.Background(), "/workspace/a/b/f.txt", []byte("x")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if puts != 2 || execs != 1 {
-		t.Errorf("puts=%d execs=%d — want one failed put, one mkdir, one retry", puts, execs)
+	if puts != 2 || len(commands) != 2 {
+		t.Fatalf("puts=%d execs=%d (%q) — want one failed put, a mkdir, a retry, and a rename",
+			puts, len(commands), commands)
+	}
+	if !strings.Contains(commands[0], "mkdir -p '/workspace/a/b'") {
+		t.Errorf("first exec = %q, want the mkdir the 404 asked for", commands[0])
+	}
+	if !strings.Contains(commands[1], "mv -f '/workspace/a/b/"+sandbox.TempPrefix) ||
+		!strings.Contains(commands[1], "'/workspace/a/b/f.txt'") {
+		t.Errorf("second exec = %q, want the temporary file renamed onto the target", commands[1])
 	}
 }
 

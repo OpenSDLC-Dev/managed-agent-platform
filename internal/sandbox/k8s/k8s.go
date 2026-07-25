@@ -851,6 +851,8 @@ func (pd *pod) ReadFile(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s is not a regular file: %w", path, sandbox.ErrNotRegularFile)
 	case readTooLarge:
 		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileTooLarge)
+	case sandbox.ExitPathNotDirectory:
+		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrNotDirectory)
 	default:
 		return nil, fmt.Errorf("k8s: read %s: exit %d", path, res.code)
 	}
@@ -898,7 +900,8 @@ func (pd *pod) WriteFile(ctx context.Context, path string, data []byte) error {
 // case: src is a bytes.Reader over the whole payload.
 func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error {
 	dir := gopath.Dir(path)
-	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir, strconv.FormatInt(size, 10)}
+	tmp := gopath.Join(dir, sandbox.TempName())
+	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir, strconv.FormatInt(size, 10), tmp}
 	res, err := pd.client.exec(ctx, pd.name, containerName, argv, src, io.Discard, io.Discard)
 	if err != nil {
 		return pd.execErr(ctx, err)
@@ -910,13 +913,19 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 		// Fewer bytes reached the pod than we handed the stream, and every call in
 		// the chain still finished cleanly — see writeScript. Nothing else in the
 		// path can notice, so this is the only place a truncated write can be
-		// turned into the error it is rather than a silent half-written file.
+		// turned into the error it is rather than a silent half-written file. The
+		// script has already removed what did arrive, so the target still holds
+		// what it held.
 		return fmt.Errorf("k8s: write %s: short write (exec stdin did not deliver all %d bytes)", path, size)
+	case sandbox.ExitPathNotDirectory:
+		return fmt.Errorf("%s: %w", dir, sandbox.ErrNotDirectory)
+	case sandbox.ExitPathIsDirectory:
+		return fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
 	default:
-		// The write failed in the pod — a directory where a file was meant to go, a
-		// read-only path, a full disk. A clean exec that exited non-zero wrote
-		// nothing; the docker backend surfaces the daemon's error here, so this
-		// must not read as a successful write.
+		// The write failed in the pod for a reason that is the sandbox's, not the
+		// path's — a read-only mount, a full disk. A clean exec that exited
+		// non-zero wrote nothing to the target; the docker backend surfaces the
+		// daemon's error here, so this must not read as a successful write.
 		return fmt.Errorf("k8s: write %s: exit %d", path, res.code)
 	}
 }
@@ -924,6 +933,10 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 // shellQuote makes a path a single, literal shell word.
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
+// This backend's own script exit codes. 15 and 16 are missing from the run
+// because they are not this backend's to assign: they are the codes the shared
+// path-fault shell both backends embed uses (sandbox.ExitPathNotDirectory and
+// sandbox.ExitPathIsDirectory), and the scripts below spell them as literals.
 const (
 	readNotExist   = 10
 	readIsDir      = 11
@@ -974,10 +987,15 @@ const (
 // nothing else: codes 10-14 are one flat namespace shared with writeScript, and
 // the filesystem is agent-controlled, so a `cat` left to exit 13 on its own would
 // be reported to the model as a file too large.
-const readScript = `
+//
+// A path that does not exist is asked *why* before it is reported as missing: a
+// non-directory somewhere above it is a different answer, and the model can act on
+// it. The parent is what the shared shell is given, because the leaf not existing
+// is the premise here, and only this branch pays for the walk (#71).
+const readScript = sandbox.PathFaultShell + `
 f="$1"
 if [ -h "$f" ]; then exit 12; fi
-if [ ! -e "$f" ]; then exit 10; fi
+if [ ! -e "$f" ]; then __map_path_fault "$(dirname "$f")"; exit 10; fi
 if [ -d "$f" ]; then exit 11; fi
 if [ ! -f "$f" ]; then exit 12; fi
 sz=$(stat -c %s "$f") || exit 1
@@ -986,8 +1004,29 @@ cat "$f" || exit 1
 printf %s "$3"
 `
 
-// writeScript makes $2 (the parent dir), writes stdin to $1, and checks that
-// exactly $3 bytes landed.
+// writeScript makes $2 (the parent dir), writes stdin to $4 (a temporary file in
+// it), checks that exactly $3 bytes landed, and renames it onto $1.
+//
+// The temporary name and the rename are what make the write atomic: a stream that
+// fails part way through takes its own residue with it — every failure path here
+// removes $4 — and the target keeps what it held rather than being truncated to
+// whatever arrived (#71). The docker backend writes the same way, for the same
+// reason. Being a rename, it replaces the name at $1 rather than writing through
+// it, so a symlink or a device node there is supplanted by a regular file; that is
+// what the docker daemon's extraction has always done, and the two backends now
+// agree on it.
+//
+// The rename is also what decides the one target that must be refused: `mv -f file
+// dir` moves the file *into* the directory, so a target that is a directory exits
+// 16 (sandbox.ExitPathIsDirectory) and the directory is left whole. That check sits
+// after the length check rather than before it so stdin is always drained first —
+// a script that exited without reading it would leave client-go's stdin copy to
+// fail into runtime.HandleError, and the exit code is the only thing that reaches
+// the caller from here.
+//
+// A `mkdir -p` that fails asks the shared path-fault shell whether a
+// non-directory is why, so a blocked path is the model's to fix (15,
+// sandbox.ExitPathNotDirectory) instead of reading as the sandbox breaking.
 //
 // Both departures from the obvious `exec cat > "$1"` are deliberate, and they
 // are the same fix seen from two sides (issue #103).
@@ -1007,23 +1046,24 @@ printf %s "$3"
 // a tail. Only the pod can count what actually arrived, so it does.
 //
 // The count is taken from the stream, not from the file: `tee` passes the bytes
-// through to `wc` on their way to disk. Re-reading the target instead would ask
-// a different question — what the path holds now — and get it wrong wherever
-// that is not what we just sent: a destination that keeps nothing (`/dev/null`
-// and other device nodes), a file writable but not readable by the sandbox
-// user, or a path another process in the same sandbox is also writing. Each of
-// those is a successful write, and each would fail a re-stat. Counting the
-// stream also measures exactly what went missing in the bug this guards.
+// through to `wc` on their way to disk. That measures the delivery, which is what
+// #103 lost, rather than what a path holds afterwards — a different question, and
+// one that answers wrongly wherever what the path holds is not what we sent (a
+// file writable but not readable by the sandbox user, a path another process in
+// the same sandbox is also writing). Both are successful writes, and both would
+// fail a re-stat.
 //
-// `set -o pipefail` so a `tee` that cannot open the target still fails the
-// command substitution — otherwise the pipeline would report only `wc`'s
-// status, and an unwritable path would come back as a short write instead of
+// `set -o pipefail` so a `tee` that cannot create the temporary file still fails
+// the command substitution — otherwise the pipeline would report only `wc`'s
+// status, and an unwritable directory would come back as a short write instead of
 // the write failure it is. `-eq` tolerates the leading padding BSD `wc` emits.
-const writeScript = `
-mkdir -p "$2" || exit 1
+const writeScript = sandbox.PathFaultShell + `
+mkdir -p "$2" || { __map_path_fault "$2"; exit 1; }
 set -o pipefail
-sz=$(tee "$1" | wc -c) || exit 1
-[ "$sz" -eq "$3" ] || exit 14
+sz=$(tee "$4" | wc -c) || { rm -f "$4"; exit 1; }
+[ "$sz" -eq "$3" ] || { rm -f "$4"; exit 14; }
+if [ -d "$1" ]; then rm -f "$4"; exit 16; fi
+mv -f "$4" "$1" || { rm -f "$4"; exit 1; }
 `
 
 // cappedBuffer keeps at most limit bytes and records whether more arrived. A

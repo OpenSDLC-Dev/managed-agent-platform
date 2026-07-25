@@ -122,9 +122,9 @@ func TestDestroyedSandboxIsABackendFault(t *testing.T) {
 	}
 }
 
-// The file sentinels are the model's to see: a missing file, a directory, an
-// oversize read are all things the model can recover from by trying something
-// else, so they are tool results and not errors.
+// The file sentinels are the model's to see: a missing file, a directory, a path
+// blocked by a file, an oversize read are all things the model can recover from by
+// trying something else, so they are tool results and not errors.
 func TestFileSentinelsAreToolErrors(t *testing.T) {
 	cases := []struct {
 		name string
@@ -134,6 +134,7 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 		{"missing", sandbox.ErrFileNotExist, "no such file"},
 		{"directory", sandbox.ErrIsDirectory, "not a regular file"},
 		{"non-regular", sandbox.ErrNotRegularFile, "not a regular file"},
+		{"not a directory", sandbox.ErrNotDirectory, "not a directory"},
 		{"too large", sandbox.ErrFileTooLarge, "limit"},
 	}
 	for _, tc := range cases {
@@ -149,6 +150,29 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 				if !res.IsError || !strings.Contains(res.Content, tc.want) {
 					t.Fatalf("%s: result = %+v, want an error result mentioning %q", tool.name, res, tc.want)
 				}
+			}
+
+			// The write side answers the same way. Two of these sentinels reach the
+			// toolset only from a write — a path blocked by a file, and a target that
+			// is a directory — and a write left unclassified is the one the executor
+			// retries into a doomed loop (#71).
+			res, err := run(t, &fakeSandbox{writeErr: tc.err}, "write", `{"file_path":"a.txt","content":"x"}`)
+			if err != nil {
+				t.Fatalf("write: err = %v, want a tool result", err)
+			}
+			if !res.IsError || !strings.Contains(res.Content, tc.want) {
+				t.Fatalf("write: result = %+v, want an error result mentioning %q", res, tc.want)
+			}
+
+			// And through `edit`, whose write follows a read that worked: the file it
+			// found is not the file it can replace.
+			sb := &fakeSandbox{files: map[string]string{sandbox.DefaultWorkdir + "/a.txt": "a"}, writeErr: tc.err}
+			res, err = run(t, sb, "edit", `{"file_path":"a.txt","old_string":"a","new_string":"b"}`)
+			if err != nil {
+				t.Fatalf("edit: err = %v, want a tool result", err)
+			}
+			if !res.IsError || !strings.Contains(res.Content, tc.want) {
+				t.Fatalf("edit: result = %+v, want an error result mentioning %q", res, tc.want)
 			}
 		})
 	}

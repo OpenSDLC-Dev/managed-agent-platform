@@ -64,16 +64,6 @@ func liveSandbox(t *testing.T) sandbox.Sandbox {
 	return sb
 }
 
-// A write that fails inside the pod must surface as an error, not a silent
-// success: the docker backend surfaces the daemon's error the same way.
-func TestK8sWriteFileSurfacesFailure(t *testing.T) {
-	sb := liveSandbox(t)
-	// The workdir is a directory; writing a file over it cannot succeed.
-	if err := sb.WriteFile(context.Background(), sandbox.DefaultWorkdir, []byte("x")); err == nil {
-		t.Error("WriteFile onto a directory returned nil, want an error")
-	}
-}
-
 // A symlink is not a regular file. Following it would let a short link past the
 // size gate to a target of any size, so ReadFile rejects it — as the docker
 // backend rejects a non-regular archive entry.

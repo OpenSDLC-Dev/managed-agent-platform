@@ -610,6 +610,103 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// A write is atomic: the bytes land under a temporary name in the target's own
+	// directory and are renamed into place, so a transfer that fails part way
+	// through leaves the target as it was. Without that, the failed write's own
+	// residue is what the next read returns — and `edit` writes back what it read,
+	// so a truncation handed to the model is a truncation committed to disk
+	// (issue #71). A short src is the reachable way to fail a transfer mid-flight.
+	t.Run("WriteThatFailsLeavesTheTargetAlone", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		kept := workdir + "/kept.txt"
+		if err := sb.WriteFile(ctx, kept, []byte("original")); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := sb.WriteFileStream(ctx, kept, strings.NewReader("hi"), 100); err == nil {
+			t.Error("stream write with a short src returned nil, want an error")
+		}
+		if got, err := sb.ReadFile(ctx, kept); err != nil || string(got) != "original" {
+			t.Errorf("after a failed write the target holds %q, %v; want %q untouched", got, err, "original")
+		}
+
+		// And a failed write of a file that did not exist creates none: a
+		// half-written file is not a file the model should find.
+		fresh := workdir + "/never.txt"
+		if err := sb.WriteFileStream(ctx, fresh, strings.NewReader("hi"), 100); err == nil {
+			t.Error("stream write with a short src returned nil, want an error")
+		}
+		if _, err := sb.ReadFile(ctx, fresh); !errors.Is(err, sandbox.ErrFileNotExist) {
+			t.Errorf("after a failed write of a new file: err = %v, want ErrFileNotExist", err)
+		}
+
+		// Nor does the residue linger beside the target: a 500 MB mount that dies
+		// part way through must not leave 400 of them in the sandbox.
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{
+			Command: "ls -A " + workdir + " | grep -c '^" + sandbox.TempPrefix + "' || true",
+		})
+		if err != nil {
+			t.Fatalf("list the workdir: %v", err)
+		}
+		if got := strings.TrimSpace(res.Stdout); got != "0" {
+			t.Errorf("%s files left in the workdir = %s, want 0", sandbox.TempPrefix, got)
+		}
+	})
+
+	// A path blocked by something that is not a directory is the model naming a
+	// path that cannot exist, not the sandbox failing: every backend says so with
+	// ErrNotDirectory, so the tool hands the model an error it can act on instead
+	// of faulting the executor into abandoning the work item and retrying the same
+	// doomed call (issue #71). The block is tested at two distances, because the
+	// backends' underlying failures differ between them.
+	t.Run("WriteUnderNonDirectory", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		plain := workdir + "/plain.txt"
+		if err := sb.WriteFile(ctx, plain, []byte("i am a file")); err != nil {
+			t.Fatalf("stage a regular file: %v", err)
+		}
+		for _, path := range []string{plain + "/child", plain + "/deeper/child"} {
+			if err := sb.WriteFile(ctx, path, []byte("x")); !errors.Is(err, sandbox.ErrNotDirectory) {
+				t.Errorf("write %s: err = %v, want ErrNotDirectory", path, err)
+			}
+			if err := sb.WriteFileStream(ctx, path, strings.NewReader("x"), 1); !errors.Is(err, sandbox.ErrNotDirectory) {
+				t.Errorf("stream write %s: err = %v, want ErrNotDirectory", path, err)
+			}
+			// A read of such a path is the same mistake, answered the same way —
+			// `edit` reads before it writes, so both halves must be recoverable.
+			if _, err := sb.ReadFile(ctx, path); !errors.Is(err, sandbox.ErrNotDirectory) {
+				t.Errorf("read %s: err = %v, want ErrNotDirectory", path, err)
+			}
+		}
+		if got, err := sb.ReadFile(ctx, plain); err != nil || string(got) != "i am a file" {
+			t.Errorf("the file in the way holds %q, %v; want it untouched", got, err)
+		}
+	})
+
+	// A write *onto* a directory fails, and leaves the directory whole. The docker
+	// daemon's archive extraction does the opposite when left to itself: it deletes
+	// the directory, puts the file in its place, and reports success — everything
+	// the directory held, gone on a write the model thought it was making to one
+	// file (issue #71).
+	t.Run("WriteOntoDirectory", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		dir := workdir + "/adir"
+		if err := sb.WriteFile(ctx, dir+"/inside.txt", []byte("kept")); err != nil {
+			t.Fatalf("stage a directory with a file in it: %v", err)
+		}
+		if err := sb.WriteFile(ctx, dir, []byte("clobber")); !errors.Is(err, sandbox.ErrIsDirectory) {
+			t.Errorf("write onto a directory: err = %v, want ErrIsDirectory", err)
+		}
+		if err := sb.WriteFileStream(ctx, dir, strings.NewReader("clobber"), 7); !errors.Is(err, sandbox.ErrIsDirectory) {
+			t.Errorf("stream write onto a directory: err = %v, want ErrIsDirectory", err)
+		}
+		if got, err := sb.ReadFile(ctx, dir+"/inside.txt"); err != nil || string(got) != "kept" {
+			t.Errorf("the file inside the directory holds %q, %v; want it untouched", got, err)
+		}
+	})
+
 	// Files and commands see one filesystem — the whole point of the sandbox.
 	t.Run("FilesAndExecShareTheFilesystem", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)

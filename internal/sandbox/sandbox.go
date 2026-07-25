@@ -45,8 +45,15 @@ var (
 	ErrNotFound = errors.New("sandbox: no such sandbox")
 	// ErrFileNotExist reports a read of a path that does not exist.
 	ErrFileNotExist = errors.New("sandbox: no such file")
-	// ErrIsDirectory reports a file read of a directory.
+	// ErrIsDirectory reports a file read of a directory, or a write onto one.
 	ErrIsDirectory = errors.New("sandbox: path is a directory")
+	// ErrNotDirectory reports a path blocked by something that is not a directory
+	// — a write to `/a/file/child`, or a read of it — the kernel's ENOTDIR. Like
+	// ErrIsDirectory it describes the path the caller asked for, so a tool hands
+	// it to the model, which can pick another path; left unclassified it would
+	// reach the executor as a sandbox fault and the same doomed call would be
+	// retried until the lease ran out (#71).
+	ErrNotDirectory = errors.New("sandbox: path is not a directory")
 	// ErrNotRegularFile reports a file read of a device, FIFO, socket, or other
 	// non-regular file. Like ErrIsDirectory it describes the path the caller
 	// asked for, not the sandbox failing, so a tool surfaces it to the model
@@ -239,13 +246,27 @@ type Sandbox interface {
 	ReadFile(ctx context.Context, path string) ([]byte, error)
 	// WriteFile writes data, creating parent directories and overwriting any
 	// existing file.
+	//
+	// The write is atomic: the bytes land under a temporary name in the target's
+	// own directory (TempName) and are renamed into place, so a transfer that
+	// fails part way through leaves the target holding what it held before — or
+	// nothing, where there was nothing — never a truncated file. The path itself
+	// is answered rather than the sandbox blamed: a path blocked by a
+	// non-directory is ErrNotDirectory, and a target that is a directory is
+	// ErrIsDirectory (the directory is left intact, never replaced).
+	//
+	// Being a rename, it replaces the name: a target that is a symlink, a device
+	// node or another non-regular file is *supplanted* by a regular file rather
+	// than written through, and the parent directory must be writable even when
+	// the target itself already is.
 	WriteFile(ctx context.Context, path string, data []byte) error
 	// WriteFileStream writes exactly size bytes read from src to path, creating
-	// parent directories and overwriting any existing file. Unlike WriteFile it
-	// never buffers the whole payload in the caller, so a large mounted file (up
-	// to the Files API's 500 MB cap) streams straight through from object
-	// storage. size must equal the number of bytes src yields: a short or long
-	// stream is an error, not a silently truncated file.
+	// parent directories and overwriting any existing file, atomically and with
+	// the same path sentinels as WriteFile. Unlike WriteFile it never buffers the
+	// whole payload in the caller, so a large mounted file (up to the Files API's
+	// 500 MB cap) streams straight through from object storage. size must equal
+	// the number of bytes src yields: a short or long stream is an error, not a
+	// silently truncated file.
 	WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error
 	// Destroy removes the sandbox. It is idempotent: destroying an already
 	// destroyed sandbox is not an error.

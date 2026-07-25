@@ -91,6 +91,47 @@ copy of an entry here.
 
 ### Fixed
 
+- **A write to a blocked path is now the model's error, a write onto a directory no longer destroys
+  it, and both backends' writes are atomic** ([#71](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/71)).
+  Three defects in the sandbox file primitives, all of them where the two backends had drifted apart:
+  - **A path blocked by a non-directory** (`write file_path="/a/regular/file/child"`) reached
+    `internal/toolset`'s `fileFault` as an unclassified backend error — the docker daemon's raw
+    `http 400: extraction point is not a directory`, its `http 500: not a directory` one level
+    deeper, a bare `exit 1` from the k8s pod — so the executor read a *path* mistake as the sandbox
+    failing: it stopped the tool set and abandoned the work item to lease reclaim, and the same
+    doomed write was retried until the lease ran out. It is now `sandbox.ErrNotDirectory`, the
+    ENOTDIR of the existing `ErrFileNotExist`/`ErrIsDirectory`/`ErrNotRegularFile` family, and a
+    tool result the model can act on. Reads answer alike, where the backends had disagreed outright
+    (docker raised the daemon's lstat error, k8s called it a plain absence) — `edit` reads before it
+    writes, so both halves had to be recoverable.
+  - **A write *onto* an existing directory** returned `nil` from the docker backend, and the
+    daemon's archive extraction had deleted the directory and put the file where it stood: every
+    file it held, gone, on a write the tool reported as a success. It is now `ErrIsDirectory` and
+    the directory is left whole. (The k8s backend refused it already, but as an unclassified
+    `exit 1`.)
+  - **Neither backend's write was atomic.** Bytes went straight at the target — docker extracting a
+    tar entry over it, k8s `tee`-ing into it — so a transfer that failed part way through left the
+    target truncated to whatever had arrived: a seeded file holding `original` came back holding
+    `hi` after a failed 100-byte write, and a failed write of a *new* file created one. Both now
+    land the bytes under a temporary name in the target's own directory and `rename` them into
+    place (the reference's temp-write-and-rename), so a failed write leaves the target as it was —
+    or absent, where it was absent — and every failure path removes its own residue rather than
+    stranding a partial mount on the sandbox's disk.
+
+  What the two backends must not drift on lives in one place, `internal/sandbox/filefault.go`: the
+  `__map_path_fault` shell they both embed (it walks to the nearest existing component of a path and
+  exits on a non-directory, because the block can be any distance above the leaf) and the temporary
+  name they both write under. The shared `sandboxtest` contract suite pins all of it on both
+  backends — three new rows, which failed on both before the fix — and the k8s script tests pin the
+  same decisions against a real shell. One k8s-only test went away with the fix: it asserted that a
+  write onto a directory fails there *because* "the docker backend surfaces the daemon's error the
+  same way", which was never true; the shared row now holds both backends to it.
+
+  Two behavior changes come with the rename, and are the backends *converging* on what docker's
+  extraction always did rather than a new limitation: a target that is a symlink, device node or
+  other non-regular file is supplanted by a regular file instead of being written through, and the
+  parent directory must be writable even when the target already is.
+
 - **The unreachable-credential advisory no longer rides the gate-config response** (plan 12
   follow-up, #50). `credential_host_unreachable_error` detection ran synchronously inside
   `GET /internal/v1/gate/config` — a dedupe query plus an event append per conflicting credential,
