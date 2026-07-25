@@ -19,7 +19,10 @@ import (
 // for) the suite. That is the discipline the evals writeup argues for: the
 // transcript is the primary artifact, and a summary nobody can inspect is a
 // score, not evidence.
-const artifactsDir = "artifacts"
+// A var, not a const, only so the report's own tests can point it somewhere
+// disposable — writing into the real directory would clobber the artifacts of
+// whatever run the developer was reading.
+var artifactsDir = "artifacts"
 
 // failure is one grader's verdict on one trial.
 type failure struct {
@@ -70,6 +73,7 @@ var recorder struct {
 	mu      sync.Mutex
 	rep     report
 	secrets []string // scrubbed from every artifact before it is written
+	swept   bool     // a prior run's transcripts have been cleared, once per run
 }
 
 func recordMeta(cfg modeltest.Config) {
@@ -80,10 +84,27 @@ func recordMeta(cfg modeltest.Config) {
 	recorder.secrets = secretsOf(cfg)
 }
 
+// recordTrial adds a trial's outcome to the run and flushes the artifacts.
+//
+// Flushing here rather than once at the end is what makes the artifacts survive
+// a wedged run. `go test -timeout` fires from testing's alarm goroutine and
+// panics the process, so m.Run never returns and anything after it is
+// unreachable — which would leave the run whose evidence someone actually needs,
+// the one that hung, with nothing on disk but the panic's stack dump. Rewriting
+// the whole report once per trial is invisible against trials that take minutes.
+//
+// The write happens outside the lock: writeArtifacts takes the same mutex.
 func recordTrial(rec record) {
 	recorder.mu.Lock()
-	defer recorder.mu.Unlock()
 	recorder.rep.Records = append(recorder.rep.Records, rec)
+	recorder.mu.Unlock()
+
+	// Not fatal, for the same reason the end-of-run write was not: the tests'
+	// own verdict is the run's verdict, and a report that could not be written
+	// must not turn a green run red.
+	if err := writeArtifacts(); err != nil {
+		os.Stderr.WriteString("evals: writing artifacts failed: " + err.Error() + "\n")
+	}
 }
 
 // endpointHost reduces a base URL to host:port, dropping userinfo, path and
@@ -197,10 +218,31 @@ func writeArtifacts() error {
 	// this run. report.json and summary.md are overwritten below, but transcripts
 	// are named per session and would otherwise accumulate — a stale one sitting
 	// beside a fresh green summary reads as a failure of the run that just passed.
-	if old, err := filepath.Glob(filepath.Join(artifactsDir, "transcript-*.json")); err == nil {
-		for _, f := range old {
-			_ = os.Remove(f)
+	//
+	// Once per run, not once per flush. This is called after every trial now, and
+	// a glob-delete that repeated would re-open a window after each one in which
+	// transcripts already safely on disk are gone — losing, if the run wedged
+	// right there, exactly the evidence the per-trial flush exists to keep. This
+	// run's own transcripts need no sweeping: their names are deterministic, so
+	// the rewrite below overwrites them in place.
+	//
+	// Latched only once the sweep actually succeeded, so a removal that failed is
+	// retried by the next flush instead of leaving a prior run's transcript
+	// beside this run's fresh summary for good. A failure is not propagated: the
+	// artifacts this call is about to write matter more than a leftover, and
+	// returning here would trade a stale file for no report at all.
+	if !recorder.swept {
+		swept := true
+		old, err := filepath.Glob(filepath.Join(artifactsDir, "transcript-*.json"))
+		if err != nil {
+			swept = false
 		}
+		for _, f := range old {
+			if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+				swept = false
+			}
+		}
+		recorder.swept = swept
 	}
 	// Every artifact is scrubbed of known secrets on its way to disk (see
 	// secretsOf): the scrub runs over the final rendered bytes, so a credential

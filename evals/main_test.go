@@ -56,12 +56,10 @@ func TestMain(m *testing.M) {
 		os.Stderr.WriteString("evals: pre-pull of " + evalImage + " failed, continuing: " +
 			err.Error() + "\n" + string(out) + "\n")
 	}
-	// pgtest.Main runs the suite and returns its exit code, so the artifacts are
-	// written here — after every trial has recorded itself, and whether the run
-	// was green or red. A red run is the one whose transcripts someone needs.
-	code := pgtest.Main(m)
-	if err := writeArtifacts(); err != nil {
-		os.Stderr.WriteString("evals: writing artifacts failed: " + err.Error() + "\n")
-	}
-	os.Exit(code)
+	// No artifact write here. recordTrial flushes after every trial instead, so
+	// the report reflects the run whether it ended green, red, or not at all:
+	// `go test -timeout` panics from testing's alarm goroutine, and anything
+	// written after m.Run returns would never run for exactly the wedged run
+	// whose transcripts someone needs.
+	os.Exit(pgtest.Main(m))
 }

@@ -630,6 +630,13 @@ new backend inherits the whole battery. The queue still has one production imple
 extraction. The merge gate is `make verify`
 (build, linux/arm cross-compile, vet, gofmt, `go test -count=1`, and **≥90% total
 statement coverage** over the logic packages of `./internal/...`). On top sits the eval
-system (`make eval`, [plan 02](./plan/02_evals-system.md)): ten deterministic regression
+system (`make eval`, [plan 02](./plan/02_evals-system.md)): twelve deterministic regression
 tasks driving whole sessions through the public API against a real model, graded
-code-only with per-trial nonces and Platform/Model/Either failure classing.
+code-only with per-trial nonces and Platform/Model/Either failure classing. It stays out
+of the merge gate — it spends money and minutes — but a scheduled workflow
+(`.github/workflows/evals.yml`, daily plus manual dispatch) runs it against the `MODEL_*`
+secrets of the `evals` deployment environment — which admits only the default branch, so a
+dispatch cannot borrow the credential onto an unreviewed ref — and a break in the
+whole-session path therefore surfaces on the next scheduled run instead of at whoever's next
+manual one. That job carries the same fail-not-skip rule: with the secrets unset it is red,
+never green-and-silent, so it is red until a maintainer configures them.
