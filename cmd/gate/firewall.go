@@ -113,14 +113,7 @@ func outputRules(ctx context.Context, bin string) ([][]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s -S OUTPUT: %w", bin, err)
 	}
-	var rules [][]string
-	for _, ln := range strings.Split(string(out), "\n") {
-		f := strings.Fields(ln)
-		if len(f) >= 2 && f[0] == "-A" && f[1] == "OUTPUT" {
-			rules = append(rules, f[2:])
-		}
-	}
-	return rules, nil
+	return gaterun.AppendedRules(string(out), "OUTPUT"), nil
 }
 
 func (iptablesFirewall) List(ctx context.Context) (v4, v6 gaterun.Listing, err error) {

@@ -103,7 +103,7 @@ type PrivDropper interface {
 // steady state fail-closed by itself, whatever the policies say.
 func CheckListing(l Listing, gateUID int) error {
 	want := Ruleset(gateUID)
-	got := appendedRules(l.Chain, ChainName)
+	got := AppendedRules(l.Chain, ChainName)
 	if len(got) != len(want) {
 		return fmt.Errorf("%s chain has %d rules, want exactly the %d-rule owner-match set", ChainName, len(got), len(want))
 	}
@@ -112,7 +112,7 @@ func CheckListing(l Listing, gateUID int) error {
 			return fmt.Errorf("%s rule %d is %v, want %v", ChainName, i, got[i], []string(want[i]))
 		}
 	}
-	out := appendedRules(l.Output, "OUTPUT")
+	out := AppendedRules(l.Output, "OUTPUT")
 	if len(out) == 0 {
 		return fmt.Errorf("OUTPUT chain has no rules — the -j %s jump is missing", ChainName)
 	}
@@ -122,9 +122,11 @@ func CheckListing(l Listing, gateUID int) error {
 	return nil
 }
 
-// appendedRules extracts the `-A <chain>` rules of one `iptables -S` listing,
-// in order, as their token slices (the arguments after "-A <chain>").
-func appendedRules(listing, chain string) [][]string {
+// AppendedRules extracts the `-A <chain>` rules of one `iptables -S` listing,
+// in order, as their token slices (the arguments after "-A <chain>"). Shared
+// with the cmd/gate adapter, which parses OUTPUT the same way to reconcile the
+// jump position — one parser, so the two can never disagree on what a rule is.
+func AppendedRules(listing, chain string) [][]string {
 	var got [][]string
 	for _, ln := range strings.Split(listing, "\n") {
 		f := strings.Fields(ln)
