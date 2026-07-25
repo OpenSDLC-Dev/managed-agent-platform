@@ -175,7 +175,8 @@ copy of an entry here.
   uncovered hostnames (non-secret), and `retry_status` `{"type": "retrying"}` (the conflict heals on
   edit). Emission is best-effort once per (session, credential) via an events-table
   check-then-append dedupe (a concurrent duplicate fetch can rarely double-emit), post-commit —
-  an append failure is warn-logged and never fails the config a live gate is waiting for. The gate's `OnUnreachable` seam stays diagnostic-only and deliberately unwired; the comments
+  an append failure is warn-logged and never fails the config a live gate is waiting for. The
+  gate's `OnUnreachable` seam stays diagnostic-only and deliberately unwired; the comments
   in `internal/gate`, `internal/gaterun`, and `internal/gateconfig` that promised it would become
   the wire error are corrected, and the inferred residuals (emission point, cadence, `retry_status`
   choice, message wording, wildcard-vs-wildcard coverage) are recorded INFERRED in DIVERGENCES.
