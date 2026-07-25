@@ -85,7 +85,11 @@ tests and the reference design commits to.
   gate admits CONNECT and plain-HTTP requests only for the environment's
   `allowed_hosts`, and an iptables **owner-match** ruleset lets only the gate's
   dropped-to UID leave the namespace — traffic that ignores the proxy is
-  dropped, not routed. Where the gate does not run, the platform still refuses
+  dropped, not routed. The ruleset lives in a chain the gate owns
+  (`MAP-GATE-EGRESS`), jumped to first from `OUTPUT`, applied by *reconciling*
+  rather than flushing — pre-existing rules (a CNI's or service mesh's, in a
+  shared Kubernetes pod netns) survive below the jump, where the chain's
+  terminal verdicts make them unreachable. Where the gate does not run, the platform still refuses
   to guess: an un-opted-in `limited` Docker sandbox gets `NetworkMode: none`
   (no route out at all), and a `limited` Kubernetes sandbox gets an init
   container that flushes the pod netns routing table and **fails the pod** if

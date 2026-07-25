@@ -8,13 +8,25 @@ import (
 	"strings"
 )
 
-// Rule is one OUTPUT-chain firewall rule, expressed as the arguments that follow
-// "-A OUTPUT". The same rules apply to both the IPv4 (iptables) and IPv6
-// (ip6tables) tables — the adapter owns that duplication.
+// Rule is one rule in the gate's own firewall chain (ChainName), expressed as
+// the arguments that follow "-A MAP-GATE-EGRESS". The same rules apply to both
+// the IPv4 (iptables) and IPv6 (ip6tables) tables — the adapter owns that
+// duplication.
 type Rule []string
 
-// Ruleset is the gate's OUTPUT-chain owner-match policy, in evaluation order.
-// iptables is first-match-wins, so the two ACCEPTs precede the catch-all DROP:
+// ChainName is the filter-table chain the gate owns outright. The owner-match
+// rules live here — not inlined into OUTPUT — so the gate can coexist with a
+// netns whose OUTPUT chain already carries foreign rules (a service mesh's
+// redirects in a Kubernetes pod, a CNI's filters): OUTPUT gets exactly one
+// jump into this chain, inserted first, and everything else in OUTPUT is left
+// alone. Every verdict in the chain is terminal (ACCEPT or DROP, nothing
+// RETURNs), so with the jump first no packet ever reaches a foreign OUTPUT
+// rule — the policy semantics are identical to owning the whole chain.
+const ChainName = "MAP-GATE-EGRESS"
+
+// Ruleset is the gate's owner-match policy — the contents of ChainName — in
+// evaluation order. iptables is first-match-wins, so the two ACCEPTs precede
+// the catch-all DROP:
 //
 //  1. all loopback traffic — the sandbox reaches the proxy, and curls its own
 //     localhost dev servers, over lo (the operator-approved intra-netns loopback
@@ -40,18 +52,28 @@ func Ruleset(gateUID int) []Rule {
 	}
 }
 
-// Firewall is the OS firewall the gate applies on startup. Apply replaces the
-// OUTPUT chain of both the IPv4 and IPv6 tables with exactly these rules, and
-// must do so fail-closed — no egress may slip through the (non-atomic) rebuild —
-// so the post-apply listing is deterministic no matter what the chain started
-// with (a fresh netns is empty, but the gate must not depend on that for a
-// fail-closed guarantee). List returns each table's current OUTPUT rules in
-// `iptables -S OUTPUT` form for the post-apply verification. The real adapter
-// (iptables/ip6tables via os/exec, policy DROP then flush then append) lives in
-// cmd/gate; tests supply a fake.
+// Listing is one family's firewall state as read back for verification: the
+// gate's own chain and the OUTPUT chain, each in `iptables -S <chain>` form.
+type Listing struct {
+	Chain  string // `-S MAP-GATE-EGRESS`
+	Output string // `-S OUTPUT`
+}
+
+// Firewall is the OS firewall the gate applies on startup. Apply RECONCILES on
+// both the IPv4 and IPv6 tables: it (re)builds ChainName to exactly these rules
+// atomically, then ensures a single jump into it sits first in OUTPUT — never
+// flushing OUTPUT, never touching its policy, so foreign rules a CNI or service
+// mesh installed in a shared pod netns survive below the jump (where the
+// terminal chain verdicts make them unreachable). Ordering is the fail-closed
+// guarantee: the chain is complete before any jump steers traffic into it, so
+// there is no instant where a partial policy is live, and a re-apply over a
+// previous incarnation's rules (a restarted sidecar in a live pod) is a no-op
+// rather than a duplicate. List returns each family's chain and OUTPUT listings
+// for the post-apply verification. The real adapter (iptables/ip6tables +
+// iptables-restore via os/exec) lives in cmd/gate; tests supply a fake.
 type Firewall interface {
 	Apply(ctx context.Context, rules []Rule) error
-	List(ctx context.Context) (v4, v6 string, err error)
+	List(ctx context.Context) (v4, v6 Listing, err error)
 }
 
 // PrivDropper drops the process to the gate's unprivileged UID/GID after the
@@ -62,40 +84,57 @@ type PrivDropper interface {
 	Drop() error
 }
 
-// CheckListing verifies one table's `-S OUTPUT` listing is EXACTLY the gate's
-// owner-match policy and nothing else: the ordered `-A OUTPUT` rules must equal
-// Ruleset(gateUID) token-for-token. Exactness is the security property — a
-// relative-order or substring check is not enough. A foreign ACCEPT before the
-// DROP would leave egress fail-open (first-match-wins) yet still contain our
-// three rules in order; a rule that only resembles ours changes the firewall's
-// meaning while passing a loose match — `--uid-owner 1000` when the gate is uid
-// 100, `-o lo0` or `! -o lo` for the loopback rule, or an extra match clause.
-// Apply establishes the exact state by replacing the chain, so on a real (empty)
-// startup the listing is precisely these rules; this reads it back and refuses
-// to serve on anything else. It is the post-apply gate that aborts startup when
-// the firewall did not take — the analogue of the K8s route-flush's survivor
-// re-count. The chain *policy* is deliberately not asserted: the verified
-// explicit catch-all `-A OUTPUT -j DROP` makes the steady-state chain fail-closed
-// by itself, so `-P` lines in the listing are ignored (the policy's own job is
-// fail-closing Apply's non-atomic rebuild window, not the steady state).
-func CheckListing(listing string, gateUID int) error {
+// CheckListing verifies one family took the owner-match policy, in two halves.
+// (a) The gate's own chain is EXACTLY Ruleset(gateUID) and nothing else: the
+// ordered `-A MAP-GATE-EGRESS` rules must equal it token-for-token. Exactness
+// is the security property — a relative-order or substring check is not enough:
+// a foreign ACCEPT before the DROP would leave egress fail-open
+// (first-match-wins) yet still contain our three rules in order, and a rule
+// that only resembles ours changes the firewall's meaning while passing a loose
+// match — `--uid-owner 1000` when the gate is uid 100, `-o lo0` or `! -o lo`
+// for the loopback rule, or an extra match clause. (b) The FIRST appended
+// OUTPUT rule is exactly the jump into the chain: a foreign rule above the jump
+// would decide traffic before the policy sees it (fail-open for an ACCEPT),
+// while foreign rules BELOW the jump are tolerated — every chain verdict is
+// terminal, so they are unreachable — which is what lets the gate coexist with
+// CNI/mesh rules instead of flushing them. It is the post-apply gate that
+// aborts startup when the firewall did not take. `-P` policy and `-N` chain
+// declaration lines are ignored: the verified explicit catch-all DROP makes the
+// steady state fail-closed by itself, whatever the policies say.
+func CheckListing(l Listing, gateUID int) error {
 	want := Ruleset(gateUID)
-	var got [][]string
-	for _, ln := range strings.Split(listing, "\n") {
-		f := strings.Fields(ln)
-		if len(f) >= 2 && f[0] == "-A" && f[1] == "OUTPUT" {
-			got = append(got, f[2:]) // the rule tokens after "-A OUTPUT"
-		}
-	}
+	got := AppendedRules(l.Chain, ChainName)
 	if len(got) != len(want) {
-		return fmt.Errorf("OUTPUT chain has %d appended rules, want exactly the %d-rule owner-match set", len(got), len(want))
+		return fmt.Errorf("%s chain has %d rules, want exactly the %d-rule owner-match set", ChainName, len(got), len(want))
 	}
 	for i := range want {
 		if !slices.Equal(got[i], []string(want[i])) {
-			return fmt.Errorf("OUTPUT rule %d is %v, want %v", i, got[i], []string(want[i]))
+			return fmt.Errorf("%s rule %d is %v, want %v", ChainName, i, got[i], []string(want[i]))
 		}
 	}
+	out := AppendedRules(l.Output, "OUTPUT")
+	if len(out) == 0 {
+		return fmt.Errorf("OUTPUT chain has no rules — the -j %s jump is missing", ChainName)
+	}
+	if !slices.Equal(out[0], []string{"-j", ChainName}) {
+		return fmt.Errorf("first OUTPUT rule is %v, want the -j %s jump first (a rule above it would decide traffic before the owner-match policy)", out[0], ChainName)
+	}
 	return nil
+}
+
+// AppendedRules extracts the `-A <chain>` rules of one `iptables -S` listing,
+// in order, as their token slices (the arguments after "-A <chain>"). Shared
+// with the cmd/gate adapter, which parses OUTPUT the same way to reconcile the
+// jump position — one parser, so the two can never disagree on what a rule is.
+func AppendedRules(listing, chain string) [][]string {
+	var got [][]string
+	for _, ln := range strings.Split(listing, "\n") {
+		f := strings.Fields(ln)
+		if len(f) >= 2 && f[0] == "-A" && f[1] == chain {
+			got = append(got, f[2:])
+		}
+	}
+	return got
 }
 
 // maxGateID caps the gate's uid/gid. uid_t/gid_t are 32-bit; an int that does
@@ -136,7 +175,10 @@ func Setup(ctx context.Context, fw Firewall, pd PrivDropper, gateUID int) error 
 	if err != nil {
 		return fmt.Errorf("gaterun: list firewall: %w", err)
 	}
-	for _, tbl := range []struct{ name, listing string }{{"iptables", v4}, {"ip6tables", v6}} {
+	for _, tbl := range []struct {
+		name    string
+		listing Listing
+	}{{"iptables", v4}, {"ip6tables", v6}} {
 		if err := CheckListing(tbl.listing, gateUID); err != nil {
 			return fmt.Errorf("gaterun: %s verification: %w", tbl.name, err)
 		}
