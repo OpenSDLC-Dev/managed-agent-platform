@@ -410,6 +410,20 @@ the query guards the vault's own `archived_at` directly, not only the credential
 stale credential row. This package does the store read and cipher call; `internal/egress` stays
 I/O-free.
 
+### internal/gatetoken
+
+The scoped bearer credential a session's egress gate presents to the controlplane's internal
+gate-config endpoint (docs/plan/12_vaults-credentials.md slice 4). `Mint` issues an opaque `gtk_`
+value (256 bits of CSPRNG entropy, Crockford base32) — internal-only, never on the `/v1` wire, so
+`gtk_`/`gatetok_` are deliberately absent from `domain`'s wire-prefix set (the `apikey_`/`envkey_`
+precedent). `Ensure` stores only the token's hash (`session_gate_tokens`) as the session's one live
+token, revoking any predecessor in the same transaction — a replacement gate re-mints, and a partial
+unique index backstops one-live-per-session. `Authenticate` resolves a token to its session, joined
+against `sessions` so it fails closed once the session is archived; there is no wall-clock expiry
+(validity is the session's lifetime), so a controlplane outage longer than any TTL cannot be misread
+as a revocation, and a deleted session's token cascades away. Hash-only storage mirrors
+`internal/api`'s environment-key issuance.
+
 ### internal/gate
 
 The per-session egress gate (docs/plan/12_vaults-credentials.md, D3): a forward proxy the sandbox
