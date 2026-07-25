@@ -44,7 +44,7 @@ copy of an entry here.
   repo secrets.** It runs only on the schedule and on manual dispatch, so pull-request CI is untouched.
   Serialized through a `concurrency` group (a run spends real money and wants the runner's Docker
   daemon to itself) and capped at 75 minutes — above the suite's own 60-minute test timeout, so the
-  timeout that fires is the one that names the trial that hung and still writes the artifacts. This was
+  timeout that fires is the suite's, which panics naming the trial that hung. This was
   [plan 02](./docs/plan/02_evals-system.md)'s last deferred item, held back until the secrets existed.
 
 - **Docker provider provisions the egress-gate pair** (plan 12 slice 4, #50). The Docker sandbox

@@ -6,7 +6,9 @@ name: evals
 # against the endpoint in their .env. That is a real regression net, but one that
 # only fires when someone remembers to pull it — so a break anywhere along the
 # API -> brain -> queue -> executor -> sandbox path can sit undiscovered until the
-# next manual run. This workflow is what makes it surface within a day.
+# next manual run. This workflow is what makes it surface on the next scheduled
+# run instead. (Scheduled runs are best-effort on GitHub's side: under load they
+# are delayed, and can be dropped. Daily is the cadence asked for, not an SLA.)
 #
 # Deferred from plan 02 until a maintainer could set the repo secrets it needs;
 # filed and delivered as #96. It calls a real model and starts real containers,
@@ -35,8 +37,11 @@ jobs:
     name: evals
     runs-on: ubuntu-latest
     # `make eval` caps the test binary at 60m, and that is the timeout worth
-    # hitting — it names the trial that hung and still writes the artifacts. This
-    # is only the outer backstop, so it must sit above it.
+    # hitting: it panics naming the trial that hung. This is only the outer
+    # backstop, so it must sit above it. Neither timeout leaves artifacts behind
+    # — a binary-timeout panic never returns from m.Run, so evals/main_test.go's
+    # writeArtifacts is never reached. The harness's own per-turn timeout is the
+    # one that fails a trial inspectably; these two only stop a wedged run.
     timeout-minutes: 75
     env:
       # The endpoint, from repo secrets and nowhere else. No .env is written here,
