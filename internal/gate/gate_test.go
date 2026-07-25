@@ -644,7 +644,8 @@ func TestGateConnectIdleTunnelClosedAfterDeadline(t *testing.T) {
 		// This deadline must sit far beyond the select's 3s wait below: were it
 		// shorter, ReadAll would return from the origin's OWN deadline and fire
 		// originClosed regardless of the gate, making the origin-side assertion
-		// vacuous — a watchdog that closed only the client conn would slip by.
+		// vacuous. At 30s, originClosed can only fire from gate-driven teardown
+		// — the watchdog's close, or the half-close cascade it triggers.
 		_ = c.SetReadDeadline(time.Now().Add(30 * time.Second))
 		_, _ = io.ReadAll(c) // returns when the gate closes the upstream side
 		close(originClosed)
