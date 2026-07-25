@@ -1,11 +1,104 @@
 package evals
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modeltest"
 )
+
+// withScratchRecorder points the artifacts at a temp directory and empties the
+// run-wide recorder, restoring both afterwards.
+//
+// The restore is not tidiness. These tests and a live eval run share one process
+// when both are opted in, and recordTrial flushes on every trial: an unrestored
+// artifactsDir would send that run's artifacts into a deleted temp directory
+// (os.MkdirAll silently recreates it, so nothing would even complain), and
+// unrestored records would seed its report.json with these fixtures' fake
+// trials.
+//
+// Today nothing bites: TestEvals is the binary's first test and its trials are
+// serial, so every live flush is done before these fixtures touch the recorder.
+// That is an accident of declaration order, which Go guarantees nothing about —
+// `-shuffle`, `-count` above 1, or a future recording test declared before this
+// file is all it takes.
+func withScratchRecorder(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	oldDir, oldRep, oldSecrets, oldSwept := artifactsDir, recorder.rep, recorder.secrets, recorder.swept
+	artifactsDir = dir
+	recorder.rep, recorder.secrets, recorder.swept = report{}, nil, false
+	t.Cleanup(func() {
+		artifactsDir = oldDir
+		recorder.rep, recorder.secrets, recorder.swept = oldRep, oldSecrets, oldSwept
+	})
+	return dir
+}
+
+// A run that wedges until `go test -timeout` fires never returns from m.Run, so
+// TestMain's writeArtifacts is unreachable and the run most in need of evidence
+// is the one that leaves none. The defence is that every trial's artifacts are
+// already on disk by the time the next one starts, which is what this pins:
+// recordTrial alone, with no end-of-run write, must leave a readable report.
+func TestRecordTrialFlushesArtifactsWithoutTheEndOfRunWrite(t *testing.T) {
+	dir := withScratchRecorder(t)
+
+	recordTrial(record{Task: "first", Session: "sesn_1", Pass: true})
+	recordTrial(record{
+		Task: "second", Session: "sesn_2", Pass: false,
+		Failures: []failure{{Grader: "g", Class: string(Platform), Error: "boom"}},
+		events:   []map[string]any{{"type": "session.error"}},
+	})
+
+	rendered, err := os.ReadFile(filepath.Join(dir, "report.json"))
+	if err != nil {
+		t.Fatalf("no report.json after two recorded trials: %v", err)
+	}
+	for _, want := range []string{"first", "second"} {
+		if !strings.Contains(string(rendered), want) {
+			t.Errorf("report.json is missing trial %q: %s", want, rendered)
+		}
+	}
+	if _, err := os.ReadFile(filepath.Join(dir, "summary.md")); err != nil {
+		t.Errorf("no summary.md after two recorded trials: %v", err)
+	}
+	// The failed trial's transcript is the artifact triage actually opens.
+	if _, err := os.ReadFile(filepath.Join(dir, "transcript-second-sesn_2.json")); err != nil {
+		t.Errorf("no transcript for the failed trial: %v", err)
+	}
+}
+
+// The transcript sweep clears a PRIOR run's leftovers, and must happen once per
+// run rather than once per flush. Repeating it would delete transcripts already
+// safely on disk at the start of every trial's flush — a window in which a run
+// that wedged would lose exactly the evidence the per-trial flush is for. These
+// two halves are one rule: the first flush sweeps, later flushes do not.
+func TestTranscriptSweepHappensOncePerRun(t *testing.T) {
+	dir := withScratchRecorder(t)
+	stale := filepath.Join(dir, "transcript-gone-sesn_old.json")
+	if err := os.WriteFile(stale, []byte(`["a prior run"]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	recordTrial(record{Task: "first", Session: "sesn_1", Pass: true})
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the first flush left a prior run's transcript in place (err=%v)", err)
+	}
+
+	// A file the sweep would take if it ran again. Nothing in a real run creates
+	// one, which is the point: it stands in for a transcript an earlier trial in
+	// THIS run had already written.
+	survivor := filepath.Join(dir, "transcript-earlier-sesn_1.json")
+	if err := os.WriteFile(survivor, []byte(`["this run"]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recordTrial(record{Task: "second", Session: "sesn_2", Pass: true})
+	if _, err := os.Stat(survivor); err != nil {
+		t.Errorf("a later flush swept a transcript this run had already written: %v", err)
+	}
+}
 
 func TestScrubRedactsConfiguredSecrets(t *testing.T) {
 	cfg := modeltest.Config{

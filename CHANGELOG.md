@@ -15,6 +15,27 @@ copy of an entry here.
 
 ### Security
 
+- **Actions supply-chain hardening: SHA-pinned workflows, Dependabot, and an environment-scoped model
+  credential** (#96 review follow-ups). Three changes that only matter together, prompted by adding the
+  first workflow in this repository that holds a live credential.
+  **(1)** Every `uses:` in `.github/workflows/` is now pinned to a commit SHA with the release in a
+  trailing comment (`actions/checkout@11d5960… # v4.4.0` and so on) instead of a mutable major tag; a
+  retargeted `v4` would otherwise run attacker-chosen code in a job that can read secrets. The pins are
+  the *current* major of each action — pinning is not an upgrade, and silently jumping checkout from v4
+  to v7 would smuggle a behavior change into a security change. Every `actions/checkout` in the
+  repository also gained `persist-credentials: false`: no CI job pushes, so `GITHUB_TOKEN` has no
+  reason to sit in `.git/config` as an extraheader for the rest of the job.
+  **(2)** A new `.github/dependabot.yml` enrolls `github-actions` weekly, because a pin with nobody
+  refreshing it is how a workflow ends up running two-year-old code with known holes; the two are a
+  pair. Go modules are deliberately not enrolled.
+  **(3)** The four `MODEL_*` secrets live in a new `evals` deployment environment rather than at
+  repository level, and the eval job declares `environment: evals`. The environment admits only the
+  default branch, which closes what a plain repo secret cannot: `workflow_dispatch` runs the workflow
+  file from whichever ref is selected, so without the policy a modified branch could rewrite the eval
+  step and walk off with the credential. The environment deliberately has **no required reviewers** — an
+  approval gate on an unattended nightly job means it waits for a human every night, which defeats the
+  point of having it.
+
 - **`mcp_oauth_validate` probe no longer follows HTTP redirects** (plan 12, #50). The SSRF guard on
   the validate probe vets each dial's resolved IP, but the client still followed 3xx redirects — and a
   307/308 from a credential-supplied token endpoint replays the POST body (the `refresh_token`, and a
@@ -52,6 +73,31 @@ copy of an entry here.
   in `internal/gate`, `internal/gaterun`, and `internal/gateconfig` that promised it would become
   the wire error are corrected, and the inferred residuals (emission point, cadence, `retry_status`
   choice, message wording, wildcard-vs-wildcard coverage) are recorded INFERRED in DIVERGENCES.
+
+- **Daily scheduled eval run** (`.github/workflows/evals.yml`, #96). The end-to-end eval suite now runs
+  in CI on a daily cron (plus `workflow_dispatch`) instead of only when a developer remembers to pull
+  it — a regression net that fires on demand does not catch the break that lands on a quiet Tuesday.
+  The job injects `MODEL_PROTOCOL` / `MODEL_BASE_URL` / `MODEL_API_KEY` / `MODEL_ID` from the `evals`
+  deployment environment (see the Security entry above)
+  as the environment the suite reads (never written to a `.env`: `internal/modeltest` resolves the
+  environment first and only falls back to the file), scoped to the `make eval` step alone so that no
+  third-party action in the job — checkout, setup-go, upload-artifact — is ever handed the live
+  credential. It runs `make eval` unchanged — the Makefile already
+  scopes `RUN_EVALS=1` to that one command — uploads `evals/artifacts/` as a run artifact, and renders
+  `summary.md` into the job's step summary. Both publishing steps run on failure too, since a red run
+  is the one whose transcripts someone needs; everything they publish was already scrubbed of the API
+  key and of the base URL's userinfo and query string on its way to disk. There is deliberately **no
+  "are the secrets configured?" precheck**: once `RUN_EVALS` is set, `modeltest.Endpoint` fails rather
+  than skips and names every variable it wanted, and the tempting shape for a precheck — skip when
+  unconfigured — is the exact failure this workflow exists to prevent, a net that reads green while
+  testing nothing. The consequence is deliberate: **the job is red until the environment's four secrets
+  are set.** It runs only on the schedule and on manual dispatch, so pull-request CI is untouched.
+  Serialized through a `concurrency` group (a run spends real money and wants the runner's Docker
+  daemon to itself) and capped at 75 minutes — above the suite's own 60-minute test timeout, so the
+  timeout that fires is the suite's, which panics naming the trial that hung.
+  [Plan 02](./docs/plan/02_evals-system.md) deferred this workflow to "its own PR once someone
+  configures the secrets"; it lands ahead of them instead, so the wiring is already there the moment
+  they are set. That plan's other leftovers — phase 1.5 on #30, sandbox reaping on #64 — stay open.
 
 - **`limited` egress is live end-to-end on Docker: only `allowed_hosts`, through the gate**
   (plan 12 slice 4, #50). The permit path the 4-i pair provisioning prepared is now proven and
@@ -415,6 +461,26 @@ copy of an entry here.
   and now reads `api.md:683`.
 
 ### Fixed
+
+- **A wedged eval run no longer loses its artifacts** (#96 review follow-up). `writeArtifacts` was
+  called once, after `pgtest.Main(m)` returned in the suite's `TestMain` — and Go implements
+  `go test -timeout` as a panic raised from `testing`'s alarm goroutine, so `m.Run` never returns and
+  nothing after it executes. The run that most needed a transcript, the one that hung, was exactly the
+  run that left none: a `go test` panic dump and an empty `evals/artifacts/`. `recordTrial` now flushes
+  the whole report after each trial instead, so every trial that finished is already on disk when the
+  alarm fires, and the end-of-run write is gone rather than duplicated. Each flush rewrites
+  `report.json`, `summary.md` and every failed trial's transcript so far — more work than "write the
+  report" suggests, and still invisible against trials that take minutes.
+  Pinned by a test that records two trials and
+  reads `report.json`, `summary.md` and the failed trial's transcript back **without** any end-of-run
+  write — it fails against the previous code with "no report.json". `artifactsDir` became a `var` so
+  that test can write to a temp directory rather than clobbering the artifacts of whatever run the
+  developer was reading. The transcript sweep that clears a *prior* run's leftovers now runs once per
+  run rather than once per write: repeated, it would delete transcripts already safely on disk at the
+  start of every trial's flush, so a run that wedged in that window would lose exactly the evidence
+  this change exists to keep. This run's own transcripts need no sweeping — their names are
+  deterministic and the rewrite overwrites them in place. Pinned by its own test, which fails against
+  the sweep-every-time version.
 
 - **A stop reason other than `tool_use` stranded the tool calls the same response carried**
   ([#181](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/181)) — `turnEvents`

@@ -14,8 +14,12 @@ jobs:
     name: ci
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in CI pushes, so the token has no reason to outlive this
+          # step in .git/config as an extraheader.
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       # The gate commands live in the Makefile — the single executable source
@@ -37,8 +41,12 @@ jobs:
       CHART: deploy/helm/managed-agent-platform
       VALUES: deploy/helm/managed-agent-platform/ci/example-values.yaml
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in CI pushes, so the token has no reason to outlive this
+          # step in .git/config as an extraheader.
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: helm lint
         run: helm lint "$CHART" -f "$VALUES"
       - name: helm template renders (smoke)
@@ -104,7 +112,11 @@ jobs:
       run:
         working-directory: deploy/compose
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in CI pushes, so the token has no reason to outlive this
+          # step in .git/config as an extraheader.
+          persist-credentials: false
       - name: seed local env from the committed example
         # model-providers.json is intentionally NOT created: the brain mount
         # defaults to the committed example, so this also exercises that default.
@@ -182,8 +194,12 @@ jobs:
     name: coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in CI pushes, so the token has no reason to outlive this
+          # step in .git/config as an extraheader.
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       # The Kubernetes sandbox backend's contract test runs against a real
@@ -192,7 +208,7 @@ jobs:
       # context, which the test picks up by default; its pods pull their images
       # from the runner's network.
       - name: create kind cluster (k8s sandbox contract test)
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: map-ci
       # Both steps live in the Makefile — the single executable source of the
@@ -221,7 +237,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: upload coverage profile
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-profile
           path: coverage.out
