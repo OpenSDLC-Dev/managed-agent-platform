@@ -91,8 +91,10 @@ func NewEngine(creds []Credential) *Engine {
 // A credential enabled for loc whose placeholder appears in s is substituted
 // with its secret when host is admitted by the credential's allowed_hosts;
 // when it is not, the placeholder is left literal (the opaque token, never the
-// secret, reaches the third party) and the credential is returned in
-// unreachable so the caller can emit credential_host_unreachable_error. A
+// secret, reaches the third party — the reference's documented behavior, not an
+// error) and the credential is returned in unreachable as a diagnostic; the
+// wire-visible credential_host_unreachable_error is a config conflict the
+// controlplane emits at gate-config render, never a per-request report. A
 // placeholder whose credential is not enabled for loc is left literal and is
 // not unreachable — the documented "a disabled injection_location is neither
 // substituted nor stripped". Each unreachable credential is reported once.

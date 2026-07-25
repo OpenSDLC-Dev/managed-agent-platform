@@ -48,6 +48,32 @@ copy of an entry here.
 
 ### Added
 
+- **`credential_host_unreachable_error` is emitted — as the config conflict the SDK defines, not the
+  runtime miss the plan sketched** (plan 12 slice 4c-2c, #50). Resolving the wire shape against the
+  reference first (the rule that exists for exactly this) corrected the plan's reading before it was
+  built: the SDK (`betasessionevent.go`, identical at the pinned v1.59.0 and the checkout's
+  v1.61.0) defines the error as a *static configuration
+  conflict* — "an environment_variable credential's auth.networking.allowed_hosts includes a host
+  that the environment's network policy does not permit" — while the runtime case plan 12 had tied it
+  to (a placeholder egressing to a non-allowed host) is separately documented as normal,
+  non-erroring behavior: the placeholder simply rides through literally. Per "Anthropic's domain
+  model is the single source of truth", the SDK semantics are implemented and the plan's sketch is
+  corrected, not followed. The controlplane detects the conflict when rendering the gate config
+  (`getGateConfig` — the first point that observes both halves for a session whose gate is live, so
+  detection re-runs every fetch and vault/policy edits track without a restart): under a `limited`
+  environment policy, every restricted credential's `allowed_hosts` entries are probed with the new
+  `egress.HostSet.CoversEntry` (an exact entry iff the policy matches it; a `*.` entry — a whole
+  subdomain family — only by a policy wildcard at or above it), and an uncovered entry appends a
+  `session.error` event whose error names the SDK's required fields: `credential_id` and `vault_id`
+  (`vaultresolve.Credential` now carries the containing vault's id), a `message` listing the
+  uncovered hostnames (non-secret), and `retry_status` `{"type": "retrying"}` (the conflict heals on
+  edit). Emission is once per (session, credential) via an events-table dedupe, post-commit and
+  best-effort — an append failure is warn-logged and never fails the config a live gate is waiting
+  for. The gate's `OnUnreachable` seam stays diagnostic-only and deliberately unwired; the comments
+  in `internal/gate`, `internal/gaterun`, and `internal/gateconfig` that promised it would become
+  the wire error are corrected, and the inferred residuals (emission point, cadence, `retry_status`
+  choice, message wording, wildcard-vs-wildcard coverage) are recorded INFERRED in DIVERGENCES.
+
 - **Daily scheduled eval run** (`.github/workflows/evals.yml`, #96). The end-to-end eval suite now runs
   in CI on a daily cron (plus `workflow_dispatch`) instead of only when a developer remembers to pull
   it — a regression net that fires on demand does not catch the break that lands on a quiet Tuesday.
@@ -210,7 +236,9 @@ copy of an entry here.
   host with its safety blocklist deferred and recorded INFERRED, an unknown type fails closed); a
   credential's own `allowed_hosts` is the second half, enforced by the engine. A credential the
   request host may not use is left as its literal placeholder (never the secret) and surfaced
-  through an `OnUnreachable` seam the deployment wiring turns into `credential_host_unreachable_error`.
+  through an `OnUnreachable` diagnostic seam — which the deployment wiring leaves unset: the wire
+  `credential_host_unreachable_error` was later resolved to a controlplane-emitted config conflict
+  (see the 4c-2c entry above).
   Forwarding is RFC 7230-clean: hop-by-hop headers — including any named across the `Connection`
   field lines (repeats honored) — are stripped from both the forwarded request and the returned
   response, `Content-Length` is
@@ -272,7 +300,9 @@ copy of an entry here.
   `Engine.Substitute(host, location, s)`, which replaces a credential's placeholder with its secret
   only when the request host is admitted and the credential's `injection_location` is enabled —
   otherwise leaving the opaque placeholder literal (never the secret) and reporting the credential as
-  host-unreachable so the caller can emit `credential_host_unreachable_error`. Secrets live only in
+  host-unreachable — a diagnostic: the wire `credential_host_unreachable_error` was later resolved
+  to a controlplane-emitted config conflict, never a per-request report (see the 4c-2c entry
+  above). Secrets live only in
   the substitution call path; a disabled location is neither substituted nor stripped (matching the
   documented behavior). Pure and exhaustively unit-tested; nothing consumes it until the gate lands.
 

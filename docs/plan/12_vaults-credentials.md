@@ -112,8 +112,12 @@ live recording was possible; everything only a recording can settle is pre-liste
   in the sandbox unredacted.
 - **Two-level gate**: credential `allowed_hosts` decides which requests *use* the
   secret; the environment's networking decides which requests are *allowed*. Both must
-  admit the host; the mismatch surfaces as the `credential_host_unreachable_error`
-  session error event (`credential_id`, `vault_id`, `message`, `retry_status`).
+  admit the host. [Corrected during slice 4c-2c against the SDK:] the
+  `credential_host_unreachable_error` session error event (`credential_id`, `vault_id`,
+  `message`, `retry_status`) reports the *config-level* conflict — a credential
+  `allowed_hosts` entry the environment's policy does not permit — not a request-time
+  miss; at request time an unadmitted host simply sees the literal placeholder
+  (documented, non-erroring).
 - **`injection_location` is asymmetric**: on create, omitting the whole object enables
   both locations, while a provided object defaults omitted fields to `false`; on update,
   fields merge individually. Disabling both locations is a 400; explicit `null` (object
@@ -192,8 +196,11 @@ credential-resolution, injected as `secret_name=<placeholder>` env vars at sandb
 provision. This needs the one seam neither backend has today: an `Env` field on
 `sandbox.Spec` threaded into the Docker container config and the K8s pod spec. The
 substitution engine — placeholder registry, `allowed_hosts` matcher (exact / `*.`
-subdomain-not-apex), `injection_location` scoping, `credential_host_unreachable_error`
-emission — lands as one shared internal package consumed by the gate (plain HTTP), by
+subdomain-not-apex), `injection_location` scoping, host-unreachable diagnostics
+(`credential_host_unreachable_error` itself is a config-conflict event emitted
+controlplane-side, per the 4c-2c correction under "Hard semantics" above, not by
+this engine) — lands as one
+shared internal package consumed by the gate (plain HTTP), by
 #47's tools, by #166's TLS-terminating phase, and by #165's worker: written once here,
 never forked per consumer.
 
@@ -272,7 +279,9 @@ on, since its enforcement depends on the cluster's CNI);
 `HTTP(S)_PROXY` injection; the read-time resolution package (attached vaults → active
 env-var credentials, first-vault-wins, per D5); placeholder minting + env injection per
 D4; the substitution engine package with plain-HTTP substitution live in the gate;
-`credential_host_unreachable_error` emission; sandboxtest contract rows updated from
+`credential_host_unreachable_error` emission (controlplane-side, at gate-config
+render — the 4c-2c correction under "Hard semantics" above); sandboxtest contract
+rows updated from
 "limited = no route" to "limited = only allowed_hosts through the gate"; DIVERGENCES.md:42
 superseded, self-hosted-security.md's reserved-work section rewritten. *Verify: contract
 suite — limited sandbox curls an allowed host through the gate and is refused a

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
@@ -156,6 +157,161 @@ func TestGateConfigNoVaultsIsEmptyCredentials(t *testing.T) {
 	}
 	if len(cfg.Credentials) != 0 {
 		t.Errorf("credentials = %d, want 0", len(cfg.Credentials))
+	}
+}
+
+// unreachableErrors lists the session's credential_host_unreachable_error
+// session.error events as seen on the management events wire.
+func unreachableErrors(t *testing.T, s *tserver, sessionID string) []map[string]any {
+	t.Helper()
+	status, res := s.do(http.MethodGet, "/v1/sessions/"+sessionID+"/events", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list events: status %d", status)
+	}
+	var out []map[string]any
+	for _, e := range res["data"].([]any) {
+		ev := e.(map[string]any)
+		if ev["type"] != "session.error" {
+			continue
+		}
+		errObj, _ := ev["error"].(map[string]any)
+		if errObj["type"] == "credential_host_unreachable_error" {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// TestGateConfigEmitsCredentialHostUnreachableError: a credential whose
+// allowed_hosts includes a host the environment's networking policy does not
+// permit (the SDK's documented trigger) surfaces a session.error carrying the
+// credential_host_unreachable_error variant — once, not once per fetch.
+func TestGateConfigEmitsCredentialHostUnreachableError(t *testing.T) {
+	s := newTestServer(t)
+	agent := createAgent(t, s, map[string]any{"name": "a", "model": "claude-opus-4-8", "system": "base"})
+	env := createEnvironment(t, s, map[string]any{
+		"name": "gated-env",
+		"config": map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "limited", "allowed_hosts": []any{"env.example.com"}},
+		},
+	})
+	vaultID := createVault(t, s, "creds")
+	cred := createCredential(t, s, vaultID, map[string]any{
+		"type": "environment_variable", "secret_name": "API_KEY", "secret_value": "v",
+		// env.example.com is reachable; blocked.example.com is outside the
+		// environment's policy — the credential can never be used there.
+		"networking":         map[string]any{"type": "limited", "allowed_hosts": []any{"env.example.com", "blocked.example.com"}},
+		"injection_location": map[string]any{"header": true, "body": false},
+	})
+	sess := createSession(t, s, map[string]any{
+		"agent": agent["id"], "environment_id": env["id"], "vault_ids": []any{vaultID},
+	})
+	sessionID := sess["id"].(string)
+	token := mintGateToken(t, s, sessionID)
+
+	if _, err := gateconfig.NewClient(s.url, token, nil).Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+
+	evs := unreachableErrors(t, s, sessionID)
+	if len(evs) != 1 {
+		t.Fatalf("unreachable-error events = %d, want 1", len(evs))
+	}
+	ev := evs[0]
+	if id, _ := ev["id"].(string); len(id) < 6 || id[:5] != "sevt_" {
+		t.Errorf("event id = %v, want an sevt_ id", ev["id"])
+	}
+	if ev["processed_at"] == nil {
+		t.Error("event has no processed_at")
+	}
+	errObj := ev["error"].(map[string]any)
+	if errObj["credential_id"] != cred["id"] {
+		t.Errorf("credential_id = %v, want %v", errObj["credential_id"], cred["id"])
+	}
+	if errObj["vault_id"] != vaultID {
+		t.Errorf("vault_id = %v, want %v", errObj["vault_id"], vaultID)
+	}
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "blocked.example.com") {
+		t.Errorf("message %q does not name the conflicting entry", msg)
+	}
+	rs, _ := errObj["retry_status"].(map[string]any)
+	if rs["type"] != "retrying" {
+		t.Errorf("retry_status = %v, want {type: retrying}", errObj["retry_status"])
+	}
+
+	// A second fetch re-detects the same conflict but must not re-emit.
+	if _, err := gateconfig.NewClient(s.url, token, nil).Fetch(context.Background()); err != nil {
+		t.Fatalf("second Fetch: %v", err)
+	}
+	if evs := unreachableErrors(t, s, sessionID); len(evs) != 1 {
+		t.Errorf("after second fetch, unreachable-error events = %d, want still 1", len(evs))
+	}
+}
+
+// TestGateConfigNoConflictEmitsNothing: a credential wholly inside the
+// environment's policy — or on an unrestricted environment, or itself
+// unrestricted — is not a conflict.
+func TestGateConfigNoConflictEmitsNothing(t *testing.T) {
+	s := newTestServer(t)
+
+	// gatedSession: credential allowed_hosts == environment allowed_hosts.
+	sessionID, _, _ := gatedSession(t, s)
+	token := mintGateToken(t, s, sessionID)
+	if _, err := gateconfig.NewClient(s.url, token, nil).Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if evs := unreachableErrors(t, s, sessionID); len(evs) != 0 {
+		t.Errorf("aligned credential emitted %d unreachable errors, want 0", len(evs))
+	}
+
+	// Unrestricted environment: everything is permitted, nothing conflicts.
+	agent := createAgent(t, s, map[string]any{"name": "b", "model": "claude-opus-4-8", "system": "base"})
+	env := createEnvironment(t, s, map[string]any{"name": "open-env"})
+	vaultID := createVault(t, s, "creds2")
+	createCredential(t, s, vaultID, map[string]any{
+		"type": "environment_variable", "secret_name": "TOKEN", "secret_value": "v",
+		"networking":         map[string]any{"type": "limited", "allowed_hosts": []any{"anywhere.example.com"}},
+		"injection_location": map[string]any{"header": true, "body": false},
+	})
+	sess := createSession(t, s, map[string]any{
+		"agent": agent["id"], "environment_id": env["id"], "vault_ids": []any{vaultID},
+	})
+	token2 := mintGateToken(t, s, sess["id"].(string))
+	if _, err := gateconfig.NewClient(s.url, token2, nil).Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if evs := unreachableErrors(t, s, sess["id"].(string)); len(evs) != 0 {
+		t.Errorf("unrestricted environment emitted %d unreachable errors, want 0", len(evs))
+	}
+
+	// Unrestricted credential on a limited environment: it has no allowed_hosts
+	// of its own, so the SDK's trigger sentence cannot apply — how far it
+	// reaches is the environment policy's call, not a conflict.
+	agent2 := createAgent(t, s, map[string]any{"name": "c", "model": "claude-opus-4-8", "system": "base"})
+	env2 := createEnvironment(t, s, map[string]any{
+		"name": "narrow-env",
+		"config": map[string]any{
+			"type":       "cloud",
+			"networking": map[string]any{"type": "limited", "allowed_hosts": []any{"only.example.com"}},
+		},
+	})
+	vaultID2 := createVault(t, s, "creds3")
+	createCredential(t, s, vaultID2, map[string]any{
+		"type": "environment_variable", "secret_name": "WIDE", "secret_value": "v",
+		"networking":         map[string]any{"type": "unrestricted"},
+		"injection_location": map[string]any{"header": true, "body": false},
+	})
+	sess2 := createSession(t, s, map[string]any{
+		"agent": agent2["id"], "environment_id": env2["id"], "vault_ids": []any{vaultID2},
+	})
+	token3 := mintGateToken(t, s, sess2["id"].(string))
+	if _, err := gateconfig.NewClient(s.url, token3, nil).Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if evs := unreachableErrors(t, s, sess2["id"].(string)); len(evs) != 0 {
+		t.Errorf("unrestricted credential emitted %d unreachable errors, want 0", len(evs))
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 // config response body — never logged, never stored (docs/plan/12, D1).
 type Credential struct {
 	CredentialID string   // vcrd_… — non-secret; the substitution span's credential_id (plan 12)
+	VaultID      string   // vlt_… — the containing vault; a credential_host_unreachable_error names both ids
 	SecretName   string   // the sandbox env-var name; the winner key
 	Placeholder  string   // egress.Placeholder(sessionID, SecretName) — identical to the Binding's token
 	Secret       string   // plaintext secret_value; memory-only
@@ -104,6 +105,7 @@ func Credentials(ctx context.Context, q Querier, cipher secrets.Cipher, sessionI
 		}
 		out = append(out, Credential{
 			CredentialID: w.id,
+			VaultID:      w.vaultID,
 			SecretName:   w.secretName,
 			Placeholder:  egress.Placeholder(sessionID, w.secretName),
 			Secret:       secret,
@@ -121,6 +123,7 @@ func Credentials(ctx context.Context, q Querier, cipher secrets.Cipher, sessionI
 // auth document, carried so each caller parses only the fields it needs.
 type credRow struct {
 	id         string
+	vaultID    string
 	secretName string
 	authDoc    []byte
 	ciphertext []byte
@@ -155,8 +158,7 @@ func winnersFor(ctx context.Context, q Querier, vaultIDs []string) ([]credRow, e
 	byVault := map[string][]credRow{}
 	for rows.Next() {
 		var r credRow
-		var vaultID string
-		if err := rows.Scan(&r.id, &vaultID, &r.authDoc, &r.ciphertext, &r.keyID); err != nil {
+		if err := rows.Scan(&r.id, &r.vaultID, &r.authDoc, &r.ciphertext, &r.keyID); err != nil {
 			return nil, err
 		}
 		var doc struct {
@@ -169,7 +171,7 @@ func winnersFor(ctx context.Context, q Querier, vaultIDs []string) ([]credRow, e
 			continue
 		}
 		r.secretName = doc.SecretName
-		byVault[vaultID] = append(byVault[vaultID], r)
+		byVault[r.vaultID] = append(byVault[r.vaultID], r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
