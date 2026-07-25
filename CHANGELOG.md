@@ -385,8 +385,12 @@ copy of an entry here.
   blocks suspends on them whatever stop reason arrived with it, so the ask-gate, the `tool_exec`
   enqueue and the running-suspend behave as a compliant `tool_use` stop would. `refusal` is the one
   carve-out — terminal, its calls not ours to run — so its blocks are dropped and the turn settles
-  on its text alone, matching the SDK's loop and keeping the log free of an intent nothing may
-  answer. Running the rest is safe because a block truncated mid-input never reaches the
+  on its text alone. That goes one step further than the SDK, which declines to *execute* a refused
+  turn's calls but keeps them in a history it will never send again; this log is replayed by every
+  later turn, so a retained intent would be one nothing may answer — the same hole, re-opened for
+  that one stop reason. The drop is logged rather than silent, and the alternative (committing the
+  intents against synthesized `is_error` results, the shape a denied confirmation uses) is recorded
+  and rejected in DIVERGENCES. Running the rest is safe because a block truncated mid-input never reaches the
   classification: `streamTurn` rejects a tool input that is not a complete JSON object, and a
   proper prefix of an object never parses as one. The one truncation that does get through is a
   block cut before its first input delta, which arrives as `{}` — the tool answers it with its own

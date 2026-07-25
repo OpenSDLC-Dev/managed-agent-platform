@@ -5,10 +5,12 @@
 // invariants of the Provider/Stream contract — what every adapter owes its
 // caller, whether the turn was carried over Anthropic Messages or OpenAI Chat
 // Completions: a stream terminates with exactly one done chunk carrying a stop
-// reason; a well-formed tool turn arrives with stop_reason tool_use — the
-// mapping the adapter owes that label, NOT a promise about the endpoint behind
-// it, which is why the brain classifies a turn on its tool blocks rather than
-// its label (#181); a tool call's input accumulates and defaults to {} when empty; a usage
+// reason; a well-formed tool turn's done chunk carries stop_reason tool_use —
+// which the OpenAI adapter forces from the tool calls it saw while the
+// Anthropic adapter passes the endpoint's label straight through, so what this
+// pins is the two adapters agreeing on a well-formed turn, NOT a promise about
+// either endpoint behind them: the brain classifies a turn on its tool blocks
+// rather than its label (#181); a tool call's input accumulates and defaults to {} when empty; a usage
 // reading is nil only when the endpoint reported none (not when it reported
 // zeroes, #90); a cancelled context surfaces as a stream error rather than a
 // silent completion; and Close releases the stream both after a completed turn

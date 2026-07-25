@@ -298,16 +298,24 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// nothing to chain — settling either way would wedge or spin.
 		return b.failTurn(sctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
 	}
-	if turn.stopReason == "refusal" {
+	if turn.stopReason == "refusal" && len(turn.toolUses) > 0 {
 		// A refusal is terminal, and its tool calls are not ours to run: the
 		// SDK's own agentic loop returns before executing them because they
 		// "belong to a dead conversation — executing them fires side effects
 		// the caller never confirmed and produces tool_results that cannot be
-		// coherently replayed" (betatoolrunner.go executeTools). Dropping the
-		// blocks here rather than in commitTurn is what keeps that true of the
-		// log too: an intent that committed would be one nothing may answer
-		// and nothing may run. The turn settles on its text like any other
-		// non-tool turn.
+		// coherently replayed" (betatoolrunner.go executeTools). Dropping them
+		// goes one step further than the SDK, deliberately: it keeps the
+		// refused message, blocks and all, in a history it has marked complete
+		// and will never send again, while this log is durable and every later
+		// turn replays it — so a committed intent would be one nothing may
+		// answer and nothing may run, which is #181 re-opened for this one
+		// stop reason. The log loses what the model asked for; the drop is
+		// logged so it stays auditable, and the alternative (committing the
+		// intents against synthesized error results, as a denied confirmation
+		// does) is recorded and rejected in docs/DIVERGENCES.md. The turn
+		// settles on its text like any other tool-less turn.
+		slog.WarnContext(sctx, "brain: refusal stop reason, tool blocks dropped unexecuted",
+			"session_id", sid.String(), "tool_blocks", len(turn.toolUses))
 		turn.toolUses = nil
 	}
 
