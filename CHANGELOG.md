@@ -41,9 +41,10 @@ copy of an entry here.
   have gone quiet, so one-way streams survive, and it is owned per tunnel, so config-fetch swaps
   never cut a live one. A real-netns firewall contract test (`cmd/gate/firewall_docker_test.go`)
   runs the gate image under Docker: healthy pins the apply→verify→privdrop chain against real
-  iptables-nft, the `-S` echo is compared token-for-token to `gaterun.Ruleset` on both families,
-  and exec probes prove the packets (root egress dropped, gate-uid egress allowed, loopback
-  allowed). The stock compose stack is gate-wired — a `gate-image` build service, the executor's
+  iptables-nft, the `-S` echo is pinned token-for-token on both families against a deliberately
+  hard-coded copy of the owner-match ruleset (double-entry: an accidental `Ruleset` change fails
+  the pin instead of being followed), and exec probes prove the packets (root egress dropped,
+  gate-uid egress allowed, loopback allowed). The stock compose stack is gate-wired — a `gate-image` build service, the executor's
   `CONTROLPLANE_URL`/`EXECUTOR_GATE_IMAGE` opt-in, and `SANDBOX_DOCKER_GATE_NETWORK` on the stack's
   explicitly-named network so the gate resolves the controlplane by DNS; Helm stays un-wired until
   the K8s sidecar (4d). DIVERGENCES' limited-networking entry is carved down to the two-posture

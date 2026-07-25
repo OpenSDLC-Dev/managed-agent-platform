@@ -518,8 +518,9 @@ admission signal. It ships as a separate image (`--target gate` — iptables + a
 provider provisions as the sandbox's netns peer. A real-daemon contract test
 (`cmd/gate/firewall_docker_test.go`) runs that image end-to-end: reaching healthy proves the
 apply→verify→privdrop chain against real iptables-nft in a real netns, the `-S` echo is pinned
-token-for-token to `gaterun.Ruleset` on both families, and exec probes prove the packets — root
-egress dropped, gate-uid egress allowed, loopback allowed.
+token-for-token on both families against a deliberately hard-coded copy of the ruleset (so an
+accidental `Ruleset` change fails the pin instead of being followed), and exec probes prove the
+packets — root egress dropped, gate-uid egress allowed, loopback allowed.
 
 `deploy/helm/managed-agent-platform` is the chart (controlplane + brain + executor with
 the k8s sandbox backend, optional inline Postgres, MinIO, and OpenBao — all

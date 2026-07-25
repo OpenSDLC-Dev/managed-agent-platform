@@ -183,14 +183,13 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// upstream-ward — and is owned by this handler invocation, not the Gate:
 	// the deployment swaps in a fresh Gate per config fetch while old tunnels
 	// keep running on the gate they started with.
-	last := &atomicTime{}
-	last.Store(time.Now())
+	activity := newTunnelActivity()
 	stop := make(chan struct{})
 	defer close(stop)
-	go tunnelWatchdog(g.tunnelIdle, last, stop, client, upstream)
+	go tunnelWatchdog(g.tunnelIdle, activity, stop, client, upstream)
 	done := make(chan struct{}, 2)
 	cp := func(dst net.Conn, src io.Reader) {
-		_, _ = io.Copy(dst, &activityReader{r: src, last: last})
+		_, _ = io.Copy(dst, &activityReader{r: src, activity: activity})
 		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
@@ -202,24 +201,36 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	<-done
 }
 
-// atomicTime is a last-activity timestamp shared between the two tunnel pumps
-// and the watchdog.
-type atomicTime struct{ ns atomic.Int64 }
+// tunnelActivity is the last-activity instant shared between the two tunnel
+// pumps and the watchdog, kept as a nanosecond offset from a monotonic base so
+// the idle computation is immune to wall-clock steps — a forward NTP jump must
+// not cut an active tunnel, nor a backward one extend an abandoned tunnel.
+type tunnelActivity struct {
+	base time.Time    // carries Go's monotonic reading
+	last atomic.Int64 // last-activity offset from base, in nanoseconds
+}
 
-func (t *atomicTime) Store(v time.Time) { t.ns.Store(v.UnixNano()) }
-func (t *atomicTime) Load() time.Time   { return time.Unix(0, t.ns.Load()) }
+func newTunnelActivity() *tunnelActivity {
+	return &tunnelActivity{base: time.Now()} // offset 0 = active at creation
+}
 
-// activityReader bumps the shared last-activity timestamp on every successful
+func (a *tunnelActivity) bump() { a.last.Store(int64(time.Since(a.base))) }
+
+func (a *tunnelActivity) quiet() time.Duration {
+	return time.Since(a.base) - time.Duration(a.last.Load())
+}
+
+// activityReader bumps the shared last-activity instant on every successful
 // read; both pumps read through one, so traffic in either direction counts.
 type activityReader struct {
-	r    io.Reader
-	last *atomicTime
+	r        io.Reader
+	activity *tunnelActivity
 }
 
 func (a *activityReader) Read(p []byte) (int, error) {
 	n, err := a.r.Read(p)
 	if n > 0 {
-		a.last.Store(time.Now())
+		a.activity.bump()
 	}
 	return n, err
 }
@@ -228,7 +239,7 @@ func (a *activityReader) Read(p []byte) (int, error) {
 // direction for idle; closing them unblocks both pumps, which then finish the
 // handler's join. It re-arms from the last activity rather than polling, and
 // exits when the tunnel closes on its own (stop).
-func tunnelWatchdog(idle time.Duration, last *atomicTime, stop <-chan struct{}, conns ...net.Conn) {
+func tunnelWatchdog(idle time.Duration, activity *tunnelActivity, stop <-chan struct{}, conns ...net.Conn) {
 	timer := time.NewTimer(idle)
 	defer timer.Stop()
 	for {
@@ -236,7 +247,7 @@ func tunnelWatchdog(idle time.Duration, last *atomicTime, stop <-chan struct{}, 
 		case <-stop:
 			return
 		case <-timer.C:
-			quiet := time.Since(last.Load())
+			quiet := activity.quiet()
 			if quiet >= idle {
 				for _, c := range conns {
 					_ = c.Close()

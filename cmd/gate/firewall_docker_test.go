@@ -60,7 +60,10 @@ func TestGateImageOwnerMatchFirewall(t *testing.T) {
 
 	// The kernel's echo of the applied rules must be exactly Ruleset's tokens,
 	// in order, on both families — this pins that iptables-nft does not reorder
-	// or normalize what CheckListing must re-verify at startup.
+	// or normalize what CheckListing must re-verify at startup. `want` is a
+	// deliberate hard-coded copy of gaterun.Ruleset(65532), not a call to it:
+	// an expectation rendered from Ruleset would follow an accidental edit,
+	// where this pin fails it.
 	want := []string{
 		"-A OUTPUT -o lo -j ACCEPT",
 		"-A OUTPUT -m owner --uid-owner 65532 -j ACCEPT",
