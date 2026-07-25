@@ -26,17 +26,20 @@ not override to opus — that was a temporary quota workaround, lifted 2026-07-1
 
 ## /code-review (Claude side)
 
-Run its agents on **Opus 4.8** (user decision, 2026-07-16), not the session model.
-Subagents inherit the main loop's model unless told otherwise, and the code-review
-workflow's `agent()` calls omit `model`, so:
+Run its agents on **Opus 5** (user decision, 2026-07-25, superseding the Opus 4.8 pin of
+2026-07-16), not the session model. Subagents inherit the main loop's model unless told
+otherwise, and the code-review workflow's `agent()` calls omit `model`, so:
 
 1. Launch `/code-review`; the Workflow tool result names the persisted script path.
-2. Edit that script, adding `model: "opus"` to **every** `agent()` opts object.
+2. Edit that script, adding `model: "opus"` to **every** `agent()` opts object — the alias
+   resolves to the current Opus generation.
 3. Re-invoke with `{scriptPath}` only — a fresh run. Never add `resumeFromRunId`: it
    replays cached results from the old model, which defeats the re-run.
 4. Confirm from the run's agent metadata (or the transcripts under
    `~/.claude/projects/<project>/<session>/subagents/workflows/<runId>/`) that agents ran
-   on `claude-opus-4-8`.
+   on `claude-opus-5`. The alias is what makes step 2 short, and the only thing that can
+   go wrong with it: if it resolved to an older Opus, put the exact model id in the
+   `model` field instead and re-run.
 
 ## Codex reviewer
 
