@@ -18,6 +18,12 @@ import (
 // (os.MkdirAll silently recreates it, so nothing would even complain), and
 // unrestored records would seed its report.json with these fixtures' fake
 // trials.
+//
+// Today nothing bites: TestEvals is the binary's first test and its trials are
+// serial, so every live flush is done before these fixtures touch the recorder.
+// That is an accident of declaration order, which Go guarantees nothing about —
+// `-shuffle`, `-count` above 1, or a future recording test declared before this
+// file is all it takes.
 func withScratchRecorder(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
