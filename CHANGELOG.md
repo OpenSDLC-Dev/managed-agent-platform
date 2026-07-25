@@ -32,7 +32,9 @@ copy of an entry here.
   it — a regression net that fires on demand does not catch the break that lands on a quiet Tuesday.
   The job injects the repo secrets `MODEL_PROTOCOL` / `MODEL_BASE_URL` / `MODEL_API_KEY` / `MODEL_ID`
   as the environment the suite reads (never written to a `.env`: `internal/modeltest` resolves the
-  environment first and only falls back to the file), runs `make eval` unchanged — the Makefile already
+  environment first and only falls back to the file), scoped to the `make eval` step alone so that no
+  third-party action in the job — checkout, setup-go, upload-artifact — is ever handed the live
+  credential. It runs `make eval` unchanged — the Makefile already
   scopes `RUN_EVALS=1` to that one command — uploads `evals/artifacts/` as a run artifact, and renders
   `summary.md` into the job's step summary. Both publishing steps run on failure too, since a red run
   is the one whose transcripts someone needs; everything they publish was already scrubbed of the API
