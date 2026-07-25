@@ -422,8 +422,24 @@ unique index backstops one-live-per-session. `Authenticate` resolves a token to 
 against `sessions` so it fails closed once the session is archived; there is no wall-clock expiry
 (validity is the session's lifetime), so a controlplane outage longer than any TTL cannot be misread
 as a revocation, and a deleted session's token cascades away. Hash-only storage mirrors
-`internal/api`'s environment-key issuance. The primitive is currently inert — its consumer,
-the internal gate-config endpoint and the gate that fetches it, lands in a later slice-4 sub-PR.
+`internal/api`'s environment-key issuance. The token authenticates the internal gate-config
+endpoint (`internal/gateconfig`, below); the gate runtime that presents it lands in a later
+slice-4 sub-PR.
+
+### internal/gateconfig
+
+The gate ↔ control-plane config contract and the gate-side client for it (docs/plan/12, slice 4).
+`GET /internal/v1/gate/config` (handled in `internal/api`, on its own `gtk_`-token auth lane —
+`requireGateToken`, selected by path so it never crosses the management or worker lanes) returns one
+session's `Config`: the environment's request-level `Networking` policy and its resolved, decrypted
+vault `Credential`s (placeholder, plaintext secret, the credential's own `allowed_hosts` arm,
+injection locations, and the non-secret `credential_id`). The endpoint decrypts through the same
+`vaultresolve.Credentials` path the gate-side resolution uses, so a leak-safe error (credential ids,
+never secret bytes) is a property of that one function. `Client.Fetch` presents the token as a Bearer
+credential and maps a 401 (revoked token / archived session) to a fail-closed `ErrUnauthorized`,
+distinct from a transient error — the signal a periodic-fetching gate uses to choose between stopping
+and keeping its last-known-good config. Neither the endpoint nor the client is on the public `/v1`
+wire (DIVERGENCES); both are inert until the gate runtime drives them.
 
 ### internal/gate
 

@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
@@ -102,6 +103,16 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) htt
 	mux.HandleFunc("DELETE /v1/files/{id}", s.handle(s.deleteFile))
 	mux.HandleFunc("GET /v1/files/{id}/content", s.downloadFile) // streams the object; not a typed handler
 
+	// Internal gate-config endpoint — not on the public /v1 wire. A session's
+	// egress gate authenticates with its per-session gtk_ token (its own auth
+	// lane in dispatchAuth) and fetches its networking policy + resolved
+	// credentials. The method-less pattern keeps the wire error envelope on a
+	// non-GET.
+	mux.HandleFunc("GET "+gateconfig.Path, s.handle(s.getGateConfig))
+	mux.HandleFunc(gateconfig.Path, func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, r, methodNotAllowed(r))
+	})
+
 	// The mux's built-in 404/405 write plain text; clients expect the wire
 	// error envelope, so register explicit fallbacks: "/" for unknown paths
 	// and a method-less pattern per route for unsupported methods.
@@ -175,6 +186,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) htt
 func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	work := requireEnvironmentKey(pool, next)
 	mgmt := requireAPIKey(pool, next)
+	gate := requireGateToken(pool, next)
 	sessionEvents := dispatchSessionEventsAuth(pool, next)
 	skillReads := dualAuth(requireEnvironmentKey(pool, next), mgmt)
 	fileReads := dualAuth(requireEnvironmentKey(pool, next), mgmt)
@@ -197,6 +209,8 @@ func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 		switch {
 		case isWorkPath(p):
 			work.ServeHTTP(w, r)
+		case isGateConfigPath(p):
+			gate.ServeHTTP(w, r)
 		case isSessionEventsPath(p), r.Method == http.MethodGet && isBareSessionPath(p):
 			sessionEvents.ServeHTTP(w, r)
 		case r.Method == http.MethodGet && isSkillReadPath(p):

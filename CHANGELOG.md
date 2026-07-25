@@ -27,6 +27,18 @@ copy of an entry here.
 
 ### Added
 
+- **Internal gate-config endpoint + client — `GET /internal/v1/gate/config`, `internal/gateconfig`**
+  (plan 12 slice 4, #50). The control-plane endpoint a session's egress gate fetches its policy from,
+  and the gate-side client that fetches it — the two ends of one internal contract, built together so
+  the wire shape is not guessed. The gate authenticates with its per-session `gtk_` token on its own
+  auth lane (`requireGateToken`, selected by path so it never crosses the management `x-api-key`
+  lane); the endpoint returns the environment's request-level networking policy and the session's
+  resolved, decrypted vault credentials (placeholder, secret, the credential's own `allowed_hosts`
+  arm, injection locations, and non-secret `credential_id`). `gateconfig.Client.Fetch` maps a 401
+  (revoked token / archived session) to a fail-closed `ErrUnauthorized` and any other non-200 to a
+  transient error — the distinction a periodic-fetching gate needs to choose between stopping and
+  keeping its last-known-good config. Neither is on the public `/v1` wire (DIVERGENCES). Lands inert —
+  the gate runtime that drives the client arrives in the next slice-4 sub-PR.
 - **Per-session gate tokens — `internal/gatetoken`** (plan 12 slice 4, #50). The scoped bearer
   credential a session's egress gate will present to the controlplane's internal gate-config endpoint.
   `Mint` issues an opaque `gtk_` value (256 bits, internal-only — never on the `/v1` wire); `Ensure`
