@@ -465,7 +465,21 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		MarkProcessedThrough: watermark,
 	}
 
-	if turn.stopReason == "tool_use" {
+	// A turn that called tools suspends on them, whatever stop reason came
+	// with them. For a compliant endpoint the two are one fact — and runTurn
+	// has already failed the empty converse, a tool_use stop with no blocks —
+	// but the Anthropic-protocol provider is pointed at any endpoint speaking
+	// Messages (design principle 4), and such an endpoint may label a
+	// response whose tool block is complete max_tokens, stop_sequence, or a
+	// non-compliant end_turn. The blocks commit either way (turnEvents emits
+	// one agent.tool_use per block), so classifying on the label would idle
+	// the session with a call nothing ever enqueues, and leave every later
+	// replay carrying a tool_use no result answers. A block truncated by the
+	// token limit never reaches here: streamTurn rejects a tool input that is
+	// not a complete JSON object and fails the turn instead. The openai
+	// adapter holds the same invariant one layer down, for the same reason
+	// (docs/DIVERGENCES.md).
+	if len(turn.toolUses) > 0 {
 		if len(askIDs) > 0 {
 			// A confirmation gate: at least one intent's policy is always_ask.
 			// The whole turn suspends — the session idles with a
@@ -523,8 +537,8 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		return b.commitUnderLock(ctx, sid, head, opts)
 	}
 
-	// end_turn (and everything else — max_tokens, stop_sequence — treated
-	// as a completed turn in v1).
+	// A turn that called no tool: end_turn, and everything else —
+	// max_tokens, stop_sequence — treated as a completed turn in v1.
 	return b.settle(ctx, sid, item, watermark, opts, func(chained bool) ([]events.NewEvent, error) {
 		if chained {
 			return head, nil

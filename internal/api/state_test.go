@@ -171,6 +171,52 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 	}
 }
 
+func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
+	// The third enqueue site, gated like its two siblings (#181): a session
+	// that reached idle with a tool_use still unanswered must not be woken on
+	// a user.message. The resumed turn replays an assistant tool_use that no
+	// tool_result answers — a request the model protocol rejects. The message
+	// is still accepted and appended; it replays once the result lands.
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	ctx := context.Background()
+	q := queue.New(s.pool)
+
+	sendEvents(t, s, sessionID, userMessage("run a tool"))
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
+	if err := q.Complete(ctx, s.pool, item); err != nil {
+		t.Fatal(err)
+	}
+	// The stranded state: idle, with the intent unanswered.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE sessions SET status = 'idle' WHERE id = $1`, sessionID); err != nil {
+		t.Fatal(err)
+	}
+
+	sendEvents(t, s, sessionID, userMessage("are you still there?"))
+
+	if got := s.sessionStatus(sessionID); got != "idle" {
+		t.Errorf("status after user.message = %q, want idle (a tool_use is unanswered)", got)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn items = %d, want 0", n)
+	}
+	want := []string{"user.message", "session.status_running", "agent.tool_use", "user.message"}
+	got := s.eventTypes(sessionID)
+	if len(got) != len(want) {
+		t.Fatalf("event log = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("event log = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestParallelToolResultsResumeOnFullSet(t *testing.T) {
 	// The reference protocol requires every tool_use answered before the
 	// conversation continues, so the resume trigger must not fire until the

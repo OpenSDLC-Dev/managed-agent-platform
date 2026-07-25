@@ -1244,6 +1244,56 @@ func TestToolUseStopWithoutBlocksFails(t *testing.T) {
 	}
 }
 
+func TestNonToolUseStopWithToolBlocksRunsThem(t *testing.T) {
+	// The converse direction of the guard above (#181): a stop reason other
+	// than tool_use on a response carrying tool blocks. The blocks commit
+	// either way — turnEvents emits one agent.tool_use per block — so
+	// settling this as a finished turn would idle the session with a tool
+	// call nothing will ever enqueue, and every later replay would carry a
+	// tool_use no result answers. The turn is a tool turn: run them.
+	for _, stop := range []string{"max_tokens", "stop_sequence", "end_turn"} {
+		t.Run(stop, func(t *testing.T) {
+			h := newHarness(t, [][]provider.Chunk{{
+				textChunk(0, "on it"),
+				provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+					ID: "toolu_provider_side", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+				done(stop, 3),
+			}}, nil)
+
+			agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+				"model":{"id":"fixture-model"},"system":"do the task","description":"",
+				"tools":[{"type":"agent_toolset_20260401"}],
+				"mcp_servers":[],"skills":[],"multiagent":null}`
+			if _, err := h.pool.Exec(context.Background(),
+				`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+				t.Fatal(err)
+			}
+
+			h.wake(t, "list the files")
+			h.runOnce(t)
+
+			// Suspended exactly as a tool_use stop would have: no status_idle,
+			// and the tool_exec an executor picks up.
+			want := []string{
+				"user.message", "session.status_running",
+				"span.model_request_start", "agent.message", "agent.tool_use", "span.model_request_end",
+			}
+			if got := h.types(t); !typesEqual(got, want) {
+				t.Fatalf("after %s turn carrying a tool block:\n got %v\nwant %v", stop, got, want)
+			}
+			if got := h.status(t); got != "running" {
+				t.Errorf("status = %q, want running", got)
+			}
+			if n := h.liveOf(t, queue.ToolExec); n != 1 {
+				t.Errorf("tool_exec items = %d, want 1", n)
+			}
+			if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+				t.Errorf("model_turn items still live = %d, want 0", n)
+			}
+		})
+	}
+}
+
 func TestProviderErrorFailsTurnVisibly(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		{textChunk(0, "partial")},
