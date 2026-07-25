@@ -422,7 +422,8 @@ unique index backstops one-live-per-session. `Authenticate` resolves a token to 
 against `sessions` so it fails closed once the session is archived; there is no wall-clock expiry
 (validity is the session's lifetime), so a controlplane outage longer than any TTL cannot be misread
 as a revocation, and a deleted session's token cascades away. Hash-only storage mirrors
-`internal/api`'s environment-key issuance.
+`internal/api`'s environment-key issuance. The primitive is currently inert — its consumer,
+the internal gate-config endpoint and the gate that fetches it, lands in a later slice-4 sub-PR.
 
 ### internal/gate
 

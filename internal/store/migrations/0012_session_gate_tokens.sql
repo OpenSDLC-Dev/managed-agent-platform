@@ -20,3 +20,9 @@ CREATE TABLE session_gate_tokens (
 -- At most one live token per session; revoke-on-re-mint keeps it to one.
 CREATE UNIQUE INDEX session_gate_tokens_one_live
     ON session_gate_tokens (session_id) WHERE revoked_at IS NULL;
+
+-- Supports the session_id cascade (the one_live index above is partial, so it
+-- cannot cover the revoked rows a session delete must also collect); without it
+-- every session delete seq-scans the whole token history — the work_items
+-- precedent.
+CREATE INDEX session_gate_tokens_session_idx ON session_gate_tokens (session_id);

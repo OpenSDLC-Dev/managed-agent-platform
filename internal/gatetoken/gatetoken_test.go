@@ -93,10 +93,18 @@ func TestEnsureRevokesPriorToken(t *testing.T) {
 	}
 
 	// One live token per session: re-minting revokes the predecessor.
-	if got, _ := gatetoken.Authenticate(ctx, pool, first); got != "" {
+	got, err := gatetoken.Authenticate(ctx, pool, first)
+	if err != nil {
+		t.Fatalf("Authenticate(prior): %v", err)
+	}
+	if got != "" {
 		t.Errorf("the prior token still authenticates (%q); it should be revoked", got)
 	}
-	if got, _ := gatetoken.Authenticate(ctx, pool, second); got != sess.String() {
+	got, err = gatetoken.Authenticate(ctx, pool, second)
+	if err != nil {
+		t.Fatalf("Authenticate(current): %v", err)
+	}
+	if got != sess.String() {
 		t.Errorf("the current token = %q, want session %q", got, sess)
 	}
 }
@@ -134,7 +142,11 @@ func TestAuthenticateArchivedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An archived session's gate must fail closed — the token no longer authenticates.
-	if got, _ := gatetoken.Authenticate(ctx, pool, token); got != "" {
+	got, err := gatetoken.Authenticate(ctx, pool, token)
+	if err != nil {
+		t.Fatalf("Authenticate(archived): %v", err)
+	}
+	if got != "" {
 		t.Errorf("archived session's token authenticated to %q, want empty", got)
 	}
 }
