@@ -271,6 +271,35 @@ copy of an entry here.
 
 ### Fixed
 
+- **Concurrent key mints left several live credentials in one rotation slot**
+  ([#72](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/72)) — `EnsureAPIKey`
+  (`internal/api/auth.go`) and `EnsureEnvironmentKey` (`internal/api/envauth.go`) each registered the
+  new key and *then* revoked the slot's others, both inside one transaction. Under READ COMMITTED a
+  concurrent mint cannot see the other transaction's uncommitted insert, so each revoked nothing and
+  all of them committed: the invariant both functions document — one live `x-api-key` per logical
+  name, one live `Authorization: Bearer` credential per environment's work queue — held only because
+  minting happened to be a serialized admin action. Eight racing mints left **six** live environment
+  keys and **five** live api keys, and they stayed live until the next uncontended rotation, so
+  whoever minted one credential had no way to learn the others existed.
+
+  Both functions now revoke before inserting, and migration `0013_key_rotation_one_live` adds the
+  partial unique indexes — `api_keys (name) WHERE revoked_at IS NULL` and `environment_keys
+  (environment_id) WHERE revoked_at IS NULL`, the `session_gate_tokens_one_live` precedent (0012).
+  The ordering is what the index requires: Postgres enforces a unique index per statement, so
+  registering the replacement while the incumbent is still live would fail every rotation. The index
+  is what makes the invariant hold against writers that are not these two functions — the operator
+  issuance surface ([#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)) will
+  make minting an invocable action, at which point "admin actions are serialized" stops being a safe
+  assumption. A mint that loses the race now fails its own transaction instead of sharing the slot.
+
+  The migration collapses any duplicates an existing database already holds before creating the
+  indexes, keeping the newest live row per slot and leaving other slots alone: `Migrate` runs every
+  pending migration inside one transaction, so an unrepaired duplicate would fail the whole startup
+  migration and take the deployment down rather than skip one statement. Tests pin the race outcome
+  for both tables, the schema-level rejection of a second live row (revoked rows and other slots
+  unaffected), and the repair path — the last verified against a build with the repair statements
+  removed, where re-applying the migration fails with `23505` exactly as a real deployment would.
+
 - **`POST /v1/agents/{id}` required `version`, which the reference makes optional** — the pinned SDK
   types the field `param.Opt[int64]`: "Must be at least 1 if specified. When supplied, the request
   fails if it does not match the server's current version; **omit to apply the update

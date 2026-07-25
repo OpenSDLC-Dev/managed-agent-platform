@@ -13,11 +13,14 @@ import (
 )
 
 // EnsureEnvironmentKey makes key the one live worker credential for an
-// environment: it inserts (or un-revokes) the hash and revokes every other
-// unrevoked key for the same environment_id. That gives one live
-// Authorization: Bearer credential per environment's work queue, with
+// environment: in one transaction it revokes every other unrevoked key for the
+// same environment_id, then inserts (or un-revokes) the hash. That gives one
+// live Authorization: Bearer credential per environment's work queue, with
 // rotation-by-re-mint semantics (registering a fresh value revokes the prior
-// one). Only the hash is stored.
+// one). Concurrent mints for one environment race, and
+// environment_keys_one_live resolves that by failing the loser's transaction
+// rather than leaving the queue with two live credentials. Only the hash is
+// stored.
 //
 // Issuance is a deliberate divergence: the reference mints environment keys in
 // its console with no public wire endpoint, so a self-hostable platform owns
@@ -30,10 +33,22 @@ func EnsureEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, environmentID
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Revoke before inserting: environment_keys_one_live admits one unrevoked
+	// row per environment and Postgres enforces it per statement, so registering
+	// the replacement while the incumbent is still live would fail every
+	// rotation.
+	if _, err := tx.Exec(ctx,
+		`UPDATE environment_keys SET revoked_at = now()
+		 WHERE environment_id = $1 AND key_hash <> $2 AND revoked_at IS NULL`,
+		environmentID, hash); err != nil {
+		return err
+	}
 	// Insert or un-revoke this value. A key value is bound to one environment
 	// for life: on conflict we never re-point it (rebinding environment_id would
 	// silently move a live worker credential to a different environment). If the
-	// value already belongs to another environment, reject rather than escalate.
+	// value already belongs to another environment, reject rather than escalate
+	// — the rollback also undoes the revoke above, so a rejected call leaves the
+	// environment's incumbent key untouched.
 	var boundEnv string
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)
@@ -44,12 +59,6 @@ func EnsureEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, environmentID
 	}
 	if boundEnv != environmentID {
 		return fmt.Errorf("api: environment key value is already bound to a different environment")
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE environment_keys SET revoked_at = now()
-		 WHERE environment_id = $1 AND key_hash <> $2 AND revoked_at IS NULL`,
-		environmentID, hash); err != nil {
-		return err
 	}
 	return tx.Commit(ctx)
 }
