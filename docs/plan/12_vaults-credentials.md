@@ -1,9 +1,16 @@
 ---
-status: in-progress
+status: archived
 issue: "#50"
 ---
 
 # Vaults + egress-time credential injection (plan 12)
+
+> **Archived 2026-07-25 — all four slices delivered and the end-to-end acceptance passed.**
+> The delivery record and the acceptance transcript are in docs/HISTORY.md ("Vaults plan —
+> archived" and "Vaults acceptance"); the as-built system is docs/ARCHITECTURE.md. The two
+> deliberately-split-out follow-ons stay open as their own issues: BYOC gate delivery (#165)
+> and TLS-terminating in-sandbox substitution (#166). This file is the original design plan,
+> kept for rationale.
 
 This plan lifts **#50** out of its reserved seam: the wire-compatible `/v1/vaults` and
 nested credentials API with encrypted-at-rest secret storage (OpenBao transit), session
@@ -191,9 +198,12 @@ exist. In-sandbox **HTTPS** bodies/headers keep their placeholders until #166 �
 documented, deliberate gap, not an oversight.
 
 **D4 — Placeholders are ours to mint.** The reference calls the sandbox-visible value an
-"opaque placeholder" and defines no format; we mint `vltph_`-prefixed random tokens per
-credential-resolution, injected as `secret_name=<placeholder>` env vars at sandbox
-provision. This needs the one seam neither backend has today: an `Env` field on
+"opaque placeholder" and defines no format; we mint `vltph_`-prefixed tokens, injected as
+`secret_name=<placeholder>` env vars at sandbox provision. *(As-built supersedes this
+decision's "random per credential-resolution": the placeholder is **deterministic** —
+`vltph_` + 128 bits of SHA-256 over `(session_id, secret_name)` — so it is stable across a
+session's create-bound re-provisions and the gate can recover the exact token; see
+`internal/egress/engine.go` and docs/HISTORY.md.)* This needs the one seam neither backend has today: an `Env` field on
 `sandbox.Spec` threaded into the Docker container config and the K8s pod spec. The
 substitution engine — placeholder registry, `allowed_hosts` matcher (exact / `*.`
 subdomain-not-apex), `injection_location` scoping, host-unreachable diagnostics
@@ -297,9 +307,10 @@ that curls `http://httpbin.org/headers` with the placeholder env var — respons
 the substituted header; curl any other host — refused by the gate;
 `GET /v1/vaults/{id}/credentials/{cid}` never shows `secret_value`; archive the
 credential and assert both revocation halves — a fresh resolution mints no placeholder,
-**and** a request reusing the pre-archive placeholder is no longer substituted (the
-engine resolves at egress time from current rows, and the purged ciphertext cannot
-resolve). Record the transcript in docs/HISTORY.md as the acceptance run.
+**and** a request reusing the pre-archive placeholder is no longer substituted (the gate
+substitutes from a config the controlplane renders from current rows at fetch time, so a
+config fetched after the archive no longer carries the credential or its purged
+ciphertext). Record the transcript in docs/HISTORY.md as the acceptance run.
 
 ## Observability
 
