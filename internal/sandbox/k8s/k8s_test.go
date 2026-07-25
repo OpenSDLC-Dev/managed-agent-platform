@@ -4,9 +4,14 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -31,7 +36,7 @@ func TestK8sProviderContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("contract tests require a Kubernetes cluster: %v", err)
 		}
-		return sandboxtest.Harness{Provider: provider, Image: testImage}
+		return sandboxtest.Harness{Provider: provider, Image: testImage, Gate: k8sGateFixture}
 	})
 }
 
@@ -109,47 +114,91 @@ func TestK8sLimitedNetworkingFailsClosedWhenFlushNoOps(t *testing.T) {
 	}
 }
 
-// recordingMinter counts mints so a test can prove the backend never touched
-// the gate-token seam.
-type recordingMinter struct{ generated int }
+// k8sGateFixture builds the real gate image, makes it visible to the cluster
+// (sideloaded into kind; Docker Desktop's cluster shares the daemon's image
+// store), and stands in for the controlplane + egress origin on one host
+// listener the gate sidecar can reach from a pod.
+func k8sGateFixture(t *testing.T) sandboxtest.GateFixture {
+	image := sandboxtest.BuildGateImage(t)
+	kubeCtx := clusterContext(t)
+	loadGateImage(t, kubeCtx, image)
+	stub := sandboxtest.StartGateStubAt(t, k8sHostAddr(t, kubeCtx))
+	return sandboxtest.GateFixture{
+		Spec: &sandbox.GateSpec{
+			Image:           image,
+			ControlplaneURL: "http://" + stub.Addr,
+			TokenMinter:     stub.Minter(),
+		},
+		AllowedAddr: stub.Addr,
+		DeniedHost:  "denied.invalid",
+		Placeholder: stub.Placeholder,
+		Secret:      stub.Secret,
+	}
+}
 
-func (m *recordingMinter) Generate() string { m.generated++; return "gtk_ignored" }
-
-func (m *recordingMinter) Persist(context.Context, domain.ID, string) error { return nil }
-
-// Until slice 4d wires the K8s gate sidecar, a Spec carrying a Gate must be
-// accepted and ignored — that is Spec.Gate's documented contract. Provision
-// succeeds, the pre-gate fail-closed isolation stands (no route out), and the
-// token seam is never touched.
-func TestK8sIgnoresGateSpecUntilSidecarLands(t *testing.T) {
-	provider, err := k8s.New(k8s.Config{
-		Context:   os.Getenv("MAP_K8S_CONTEXT"),
-		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
-	})
+// clusterContext resolves the kube context the tests run against —
+// MAP_K8S_CONTEXT when set (local), otherwise the kubeconfig's current context
+// (CI, where the kind-action sets it).
+func clusterContext(t *testing.T) string {
+	t.Helper()
+	if ctx := os.Getenv("MAP_K8S_CONTEXT"); ctx != "" {
+		return ctx
+	}
+	cfg, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
 	if err != nil {
-		t.Fatalf("these tests require a Kubernetes cluster: %v", err)
+		t.Fatalf("load kubeconfig for the gate fixture: %v", err)
 	}
-	m := &recordingMinter{}
-	sb, err := provider.Provision(context.Background(), sandbox.Spec{
-		SessionID:  domain.NewID("sesn"),
-		Image:      testImage,
-		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"example.com"}},
-		Gate:       &sandbox.GateSpec{Image: "gate:ignored", ControlplaneURL: "http://cp.invalid", TokenMinter: m},
-	})
+	return cfg.CurrentContext
+}
+
+// loadGateImage sideloads the locally-built gate image into a kind cluster —
+// kind's containerd cannot see the host daemon's images. `docker save
+// --platform` keeps the archive single-platform (a multi-arch manifest breaks
+// `kind load` on darwin; an older docker without the flag falls back to a
+// plain save). Non-kind contexts (Docker Desktop) share the daemon's image
+// store, so there is nothing to load.
+func loadGateImage(t *testing.T, kubeCtx, image string) {
+	t.Helper()
+	cluster, ok := strings.CutPrefix(kubeCtx, "kind-")
+	if !ok {
+		return
+	}
+	tar := filepath.Join(t.TempDir(), "gate.tar")
+	if out, err := exec.Command("docker", "save", "--platform", "linux/"+runtime.GOARCH, "-o", tar, image).CombinedOutput(); err != nil {
+		if out2, err2 := exec.Command("docker", "save", "-o", tar, image).CombinedOutput(); err2 != nil {
+			t.Fatalf("docker save %s: %v\n%s\nfallback: %v\n%s", image, err, out, err2, out2)
+		}
+	}
+	if out, err := exec.Command("kind", "load", "image-archive", tar, "--name", cluster).CombinedOutput(); err != nil {
+		t.Fatalf("kind load image-archive: %v\n%s", err, out)
+	}
+}
+
+// k8sHostAddr answers "an address of the test host reachable from a pod" for
+// the cluster flavors the suite runs on: the kind docker network's IPv4
+// gateway (a kind node routes to the host through it), or Docker Desktop's
+// host.docker.internal. MAP_K8S_HOST_ADDR overrides both for anything else.
+func k8sHostAddr(t *testing.T, kubeCtx string) string {
+	t.Helper()
+	if addr := os.Getenv("MAP_K8S_HOST_ADDR"); addr != "" {
+		return addr
+	}
+	if !strings.HasPrefix(kubeCtx, "kind-") {
+		return "host.docker.internal"
+	}
+	out, err := exec.Command("docker", "network", "inspect", "kind",
+		"-f", `{{range .IPAM.Config}}{{.Gateway}}
+{{end}}`).CombinedOutput()
 	if err != nil {
-		t.Fatalf("provision with Spec.Gate faulted, want it ignored: %v", err)
+		t.Fatalf("docker network inspect kind: %v\n%s", err, out)
 	}
-	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
-	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "cat /proc/net/route"})
-	if err != nil || res.ExitCode != 0 {
-		t.Fatalf("read routes: %+v %v", res, err)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if gw := strings.TrimSpace(line); strings.Count(gw, ".") == 3 {
+			return gw
+		}
 	}
-	if routes := len(strings.Split(strings.TrimSpace(res.Stdout), "\n")) - 1; routes != 0 {
-		t.Errorf("gate-ignoring limited pod has %d routes, want the pre-gate no-route isolation", routes)
-	}
-	if m.generated != 0 {
-		t.Errorf("K8s backend minted %d gate tokens; Spec.Gate must be ignored until 4d", m.generated)
-	}
+	t.Fatalf("no IPv4 gateway on the kind docker network:\n%s", out)
+	return ""
 }
 
 // Untrusted tool commands must not receive the namespace ServiceAccount's token:

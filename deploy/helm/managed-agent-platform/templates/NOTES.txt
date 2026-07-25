@@ -3,7 +3,7 @@
 Processes:
   - controlplane  ({{ .Values.controlplane.replicas }} replica{{ if ne (int .Values.controlplane.replicas) 1 }}s{{ end }}) — REST API on service {{ include "map.fullname" . }}-controlplane:{{ .Values.controlplane.service.port }}
   - brain         ({{ .Values.brain.replicas }} replica{{ if ne (int .Values.brain.replicas) 1 }}s{{ end }}) — model-turn pool
-  - executor      ({{ .Values.executor.replicas }} replica{{ if ne (int .Values.executor.replicas) 1 }}s{{ end }}) — Kubernetes sandbox backend, runs tools in per-session Pods in namespace {{ .Release.Namespace }}
+  - executor      ({{ .Values.executor.replicas }} replica{{ if ne (int .Values.executor.replicas) 1 }}s{{ end }}) — Kubernetes sandbox backend, runs tools in per-session Pods in namespace {{ .Release.Namespace }}{{ if .Values.executor.gateImage }} (egress gate ON: limited / vault-attached sessions get the gate sidecar){{ else }} (egress gate off: set executor.gateImage to enable allowed_hosts enforcement + credential substitution){{ end }}
 {{- if .Values.postgresql.enabled }}
   - postgres      (in-cluster; disable and use externalDatabase.url in production)
 {{- end }}

@@ -91,15 +91,25 @@ type GateStub struct {
 	Secret      string
 }
 
-// StartGateStub starts the stub, cleaned up with the test.
+// StartGateStub starts the stub addressed for a container on the default
+// bridge, cleaned up with the test.
 func StartGateStub(t *testing.T) *GateStub {
+	t.Helper()
+	return StartGateStubAt(t, DockerHostAddr(t))
+}
+
+// StartGateStubAt starts the stub with an explicit host address — the one the
+// backend under test's containers can reach the test host at (the Docker
+// bridge gateway, a kind network gateway, ...). The listener always binds
+// 0.0.0.0; hostAddr only decides how the served config and the fixture name it.
+func StartGateStubAt(t *testing.T, hostAddr string) *GateStub {
 	t.Helper()
 	ln, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatalf("gate stub listen: %v", err)
 	}
 	s := &GateStub{
-		Addr:        net.JoinHostPort(DockerHostAddr(t), strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)),
+		Addr:        net.JoinHostPort(hostAddr, strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)),
 		Token:       "gtk_sandboxtest",
 		Placeholder: "vltph_sandboxtest",
 		Secret:      "sandboxtest-secret-value",

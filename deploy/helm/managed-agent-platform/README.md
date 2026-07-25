@@ -195,6 +195,7 @@ processes; `otlp.insecure=true` to export without TLS.
 | `localCipher.masterKey` | `""` | AES-256-GCM fallback when no OpenBao is configured |
 | `existingSecret` | `""` | reference a pre-created Secret instead of inlining |
 | `executor.sandboxImage` | `debian:stable-slim` | base image for sandbox Pods |
+| `executor.gateImage` | `""` (gate off) | per-session egress-gate sidecar image (`--target gate` build); setting it opts `limited` / vault-attached sessions into the gate — allowed_hosts enforcement plus vault-credential substitution at egress. The sidecar needs `CAP_NET_ADMIN` (no `restricted` Pod Security on the namespace); unset keeps the fail-closed route-flush |
 
 See [`values.yaml`](./values.yaml) for the full set.
 

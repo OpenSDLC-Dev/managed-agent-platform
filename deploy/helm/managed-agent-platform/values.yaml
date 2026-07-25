@@ -75,6 +75,14 @@ executor:
   sandboxWorkdir: "/workspace"
   # -- Image carrying `ip` for the limited-networking init container.
   netSetupImage: "busybox"
+  # -- Per-session egress-gate sidecar image (the `--target gate` build); full
+  # ref. Setting it opts the executor into the gate: `limited` or vault-attached
+  # sessions get the gate sidecar in their sandbox pod (the chart derives
+  # CONTROLPLANE_URL from the controlplane Service). Empty keeps the pre-gate
+  # fail-closed behavior — `limited` = the route-flush init container, no
+  # credential substitution. The sidecar needs CAP_NET_ADMIN, so the release
+  # namespace must not enforce the `restricted` Pod Security level.
+  gateImage: ""
   resources: {}
   nodeSelector: {}
   tolerations: []

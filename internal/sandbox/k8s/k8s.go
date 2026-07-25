@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -29,8 +30,17 @@ import (
 // derived name.
 const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 
-// containerName is the single container in every sandbox pod.
+// containerName is the sandbox container in every sandbox pod.
 const containerName = "sandbox"
+
+// gateContainerName is the egress-gate sidecar in a gated pod (plan 12 slice
+// 4d) — a native sidecar: an init container with restartPolicy Always, so the
+// kubelet starts it (and waits out its startup probe — the admission signal,
+// the Docker HEALTHCHECK's analogue) before the sandbox container runs, and
+// restarts it independently for the pod's life. On a cluster too old for
+// native sidecars the gate never leaves the init phase and the pod never
+// starts — fail-closed, not fail-open.
+const gateContainerName = "gate"
 
 // readyTimeout bounds how long Provision waits for a freshly-created pod to
 // schedule and start. A pull of a cold image is the slow case.
@@ -93,6 +103,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		workdir = sandbox.DefaultWorkdir
 	}
 	name := podName(spec.SessionID)
+	gated := spec.Gate != nil
 	pods := p.client.cs.CoreV1().Pods(p.client.namespace)
 
 	existing, err := pods.Get(ctx, name, metav1.GetOptions{})
@@ -101,15 +112,31 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		if aerr := ours(existing, spec.SessionID); aerr != nil {
 			return nil, aerr
 		}
-		if err := p.waitReady(ctx, name); err != nil {
-			return nil, err
+		if hasGateSidecar(existing) == gated {
+			if err := p.waitReady(ctx, name, gated); err != nil {
+				return nil, err
+			}
+			return p.attach(name, workdir), nil
 		}
-		return p.attach(name, workdir), nil
+		// The pod's gate shape no longer matches the session's (a pre-gate pod
+		// for a now-gated session, or the reverse) — a pod spec is immutable, so
+		// replace it and fall through to the create below. Mirrors the Docker
+		// provider's stale-pairing rebuild.
+		if derr := p.deleteAndWaitGone(ctx, name, existing.UID); derr != nil {
+			return nil, derr
+		}
 	case !apierrors.IsNotFound(err):
 		return nil, fmt.Errorf("k8s: get pod %s: %w", name, err)
 	}
 
-	created, createErr := pods.Create(ctx, p.podSpec(name, workdir, spec), metav1.CreateOptions{})
+	// The gate token is minted in memory before the create (the pod spec must
+	// carry it) and persisted only after winning it — an adoption never mints,
+	// so it never revokes the token a running gate is authenticating with.
+	var gateToken string
+	if gated {
+		gateToken = spec.Gate.TokenMinter.Generate()
+	}
+	created, createErr := pods.Create(ctx, p.podSpec(name, workdir, spec, gateToken), metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(createErr) { // another executor created it first
 		existing, gerr := pods.Get(ctx, name, metav1.GetOptions{})
 		if gerr != nil {
@@ -118,10 +145,25 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		if aerr := ours(existing, spec.SessionID); aerr != nil {
 			return nil, aerr
 		}
+		if hasGateSidecar(existing) != gated {
+			// The race winner has the wrong gate shape; fail closed and let the
+			// next attempt replace it rather than serve a mismatched sandbox.
+			return nil, fmt.Errorf("k8s: pod %s raced into a mismatched gate shape", name)
+		}
+		// The loser's generated token is discarded unpersisted; the winner's stays.
 	} else if createErr != nil {
 		return nil, fmt.Errorf("k8s: create pod %s: %w", name, createErr)
 	}
-	if err := p.waitReady(ctx, name); err != nil {
+	if createErr == nil && gated {
+		if perr := spec.Gate.TokenMinter.Persist(ctx, spec.SessionID, gateToken); perr != nil {
+			// The pod exists but its token was never recorded: its gate can only
+			// ever 401 and terminate. Remove the pod we just created (UID-guarded)
+			// so the next attempt starts clean.
+			p.deleteByUID(name, created.UID)
+			return nil, fmt.Errorf("k8s: persist gate token for %s: %w", name, perr)
+		}
+	}
+	if err := p.waitReady(ctx, name, gated); err != nil {
 		if createErr == nil {
 			// We created this pod and it never came up — a bad image wedges it in
 			// ImagePullBackOff, and RestartPolicyNever never retries. Reclaim it so
@@ -129,11 +171,69 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 			// the wedged pod. reclaimUnready deletes only the exact pod we created
 			// and only while it is still not ready, so it cannot delete a
 			// same-named replacement or one another executor has since adopted.
-			p.reclaimUnready(name, created.UID)
+			p.reclaimUnready(name, created.UID, gated)
 		}
 		return nil, err
 	}
 	return p.attach(name, workdir), nil
+}
+
+// hasGateSidecar reports whether the pod carries the egress-gate sidecar — the
+// shape check behind adopt-or-replace when a session's gate need changes.
+func hasGateSidecar(pod *corev1.Pod) bool {
+	for _, c := range pod.Spec.InitContainers {
+		if c.Name == gateContainerName {
+			return true
+		}
+	}
+	return false
+}
+
+// deleteAndWaitGone removes a pod (UID-guarded, no grace) and waits for the
+// name to free up, so the caller can immediately recreate it — a pod delete is
+// asynchronous and a too-early create answers 409.
+func (p *Provider) deleteAndWaitGone(ctx context.Context, name string, uid types.UID) error {
+	pods := p.client.cs.CoreV1().Pods(p.client.namespace)
+	zero := int64(0)
+	err := pods.Delete(ctx, name, metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+		Preconditions:      &metav1.Preconditions{UID: &uid},
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("k8s: replace pod %s: %w", name, err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, reclaimTimeout)
+	defer cancel()
+	for {
+		got, gerr := pods.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(gerr) || (gerr == nil && got.UID != uid) {
+			return nil // gone, or the name already belongs to a successor
+		}
+		if gerr != nil {
+			return fmt.Errorf("k8s: replace pod %s: %w", name, gerr)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("k8s: replace pod %s: %w", name, ctx.Err())
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// deleteByUID removes a pod this call created, on a detached context (the
+// caller may already be cancelled) with a UID precondition so an ABA cannot
+// remove a replacement. Best-effort, like the Docker provider's removeDetached.
+func (p *Provider) deleteByUID(name string, uid types.UID) {
+	if uid == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), reclaimTimeout)
+	defer cancel()
+	zero := int64(0)
+	_ = p.client.cs.CoreV1().Pods(p.client.namespace).Delete(ctx, name, metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+		Preconditions:      &metav1.Preconditions{UID: &uid},
+	})
 }
 
 // reclaimUnready deletes a pod this call created but could not bring to
@@ -145,7 +245,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 //     one that has since become ready (another executor may be using it);
 //   - a UID precondition on the delete, so an ABA between the Get and the Delete
 //     still cannot remove a replacement.
-func (p *Provider) reclaimUnready(name string, uid types.UID) {
+func (p *Provider) reclaimUnready(name string, uid types.UID, gated bool) {
 	if uid == "" {
 		return // no identity to guard the delete with; leave it for an operator
 	}
@@ -153,7 +253,7 @@ func (p *Provider) reclaimUnready(name string, uid types.UID) {
 	defer cancel()
 	pods := p.client.cs.CoreV1().Pods(p.client.namespace)
 	pod, err := pods.Get(ctx, name, metav1.GetOptions{})
-	if err != nil || pod.UID != uid || podReady(pod) {
+	if err != nil || pod.UID != uid || podReady(pod, gated) {
 		return
 	}
 	zero := int64(0)
@@ -163,10 +263,26 @@ func (p *Provider) reclaimUnready(name string, uid types.UID) {
 	})
 }
 
-// podReady reports whether the sandbox container is running and ready.
-func podReady(pod *corev1.Pod) bool {
+// podReady reports whether the sandbox container is running and ready — and,
+// for a gated pod, whether the gate sidecar is too. The sidecar's readiness
+// probe is the gate's own healthcheck, so a gated pod is never handed to a
+// tool run while its egress gate is down (the Docker provider's adopt-only-
+// healthy rule). A native sidecar reports in InitContainerStatuses.
+func podReady(pod *corev1.Pod, gated bool) bool {
+	sandboxReady := false
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.Name == containerName && cs.Ready {
+			sandboxReady = true
+		}
+	}
+	if !sandboxReady {
+		return false
+	}
+	if !gated {
+		return true
+	}
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if cs.Name == gateContainerName && cs.Ready {
 			return true
 		}
 	}
@@ -186,12 +302,30 @@ func ours(pod *corev1.Pod, sessionID domain.ID) error {
 	return nil
 }
 
-func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec) *corev1.Pod {
+func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken string) *corev1.Pod {
 	// The sandbox runs untrusted tool commands and never calls the Kubernetes
 	// API, so it must not receive the namespace default ServiceAccount's token:
 	// were that account granted any RBAC, the agent's commands would inherit it.
 	// The provider drives the cluster with its own credentials, not the pod's.
 	noAutomount := false
+	env := spec.Env
+	var sandboxSecurity *corev1.SecurityContext
+	if spec.Gate != nil {
+		// The sandbox reaches the network only through the gate: the proxy env
+		// steers well-behaved clients to the sidecar's loopback proxy, and the
+		// hardening is what makes the gate's owner-match firewall hold — without
+		// CAP_SETUID/SETGID (and no privilege escalation) a tool cannot become
+		// the gate's UID, and without CAP_NET_RAW it cannot AF_PACKET past the
+		// netfilter OUTPUT hook. Mirrors the Docker provider's gated hardening.
+		env = withProxyEnv(env)
+		noEscalation := false
+		sandboxSecurity = &corev1.SecurityContext{
+			AllowPrivilegeEscalation: &noEscalation,
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"NET_RAW", "SETUID", "SETGID"},
+			},
+		}
+	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
@@ -213,15 +347,92 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec) *corev1.Pod 
 				// pod is destroyed — cheap, but a divergence noted for a later fix.
 				Command: []string{"/bin/bash", "-c",
 					"mkdir -p " + shellQuote(workdir) + " && while :; do sleep 3600; done"},
-				WorkingDir: workdir,
-				Env:        envVars(spec.Env),
+				WorkingDir:      workdir,
+				Env:             envVars(env),
+				SecurityContext: sandboxSecurity,
 			}},
 		},
 	}
-	if spec.Networking.Type == domain.NetLimited {
+	switch {
+	case spec.Gate != nil:
+		// The gate sidecar replaces the route flush: the pod keeps its routes
+		// (the gate needs them) and the owner-match firewall the gate installs
+		// is the isolation. The flush would strand the gate.
+		pod.Spec.InitContainers = []corev1.Container{gateSidecar(spec.Gate, gateToken)}
+	case spec.Networking.Type == domain.NetLimited:
 		pod.Spec.InitContainers = []corev1.Container{p.netSetup()}
 	}
 	return pod
+}
+
+// gateSidecar is the egress-gate native sidecar (an init container with
+// restartPolicy Always): CAP_NET_ADMIN to install its owner-match firewall
+// before it drops privileges, the gate binary's env contract (cmd/gate), and
+// probes that both run the binary's own `-healthcheck` (a TCP dial of the
+// loopback proxy port — an exec probe, because the kubelet cannot reach a
+// loopback listener with a tcpSocket probe). The startup probe is the
+// admission gate: the kubelet does not start the sandbox container until it
+// passes, and it passes only after the firewall is applied, verified, and
+// privileges dropped — Docker's HEALTHCHECK-gated admission, exactly. The
+// token rides pod-spec env like every other gate input; the pod spec is as
+// readable as the Docker container config carrying the same token.
+func gateSidecar(g *sandbox.GateSpec, token string) corev1.Container {
+	restartAlways := corev1.ContainerRestartPolicyAlways
+	env := []corev1.EnvVar{
+		{Name: "CONTROLPLANE_URL", Value: g.ControlplaneURL},
+		{Name: "GATE_TOKEN", Value: token},
+	}
+	// Only when a collector is configured; an empty endpoint runs the gate
+	// without an exporter, matching the Docker wiring and telemetry.Run.
+	if g.OTelEndpoint != "" {
+		env = append(env, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: g.OTelEndpoint})
+		if g.OTelInsecure {
+			env = append(env, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_INSECURE", Value: "true"})
+		}
+	}
+	healthcheck := corev1.ProbeHandler{
+		Exec: &corev1.ExecAction{Command: []string{"/gate", "-healthcheck"}},
+	}
+	return corev1.Container{
+		Name:            gateContainerName,
+		Image:           g.Image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		RestartPolicy:   &restartAlways,
+		Env:             env,
+		SecurityContext: &corev1.SecurityContext{
+			Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN"}},
+		},
+		StartupProbe: &corev1.Probe{
+			ProbeHandler:     healthcheck,
+			PeriodSeconds:    1,
+			FailureThreshold: 60,
+		},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler:  healthcheck,
+			PeriodSeconds: 5,
+		},
+	}
+}
+
+// withProxyEnv returns a copy of env with the sandbox's egress-proxy variables
+// pointed at the gate sidecar's loopback proxy (the pod's containers share
+// localhost), and NO_PROXY forced empty so nothing the base image baked in
+// bypasses the gate. The Docker provider's identical helper explains the
+// reasoning; the reserved-name filter has already kept vault credentials off
+// these keys.
+func withProxyEnv(env map[string]string) map[string]string {
+	out := make(map[string]string, len(env)+6)
+	for k, v := range env {
+		out[k] = v
+	}
+	proxyURL := "http://" + gaterun.DefaultProxyAddr
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		out[k] = proxyURL
+	}
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		out[k] = ""
+	}
+	return out
 }
 
 // envVars renders Spec.Env as the pod container's Env list, key-sorted so a given
@@ -294,7 +505,7 @@ fi
 // fails, or the deadline passes. A newly-created pod schedules and pulls
 // asynchronously, so unlike the docker backend the sandbox is not usable the
 // moment Provision's create call returns.
-func (p *Provider) waitReady(ctx context.Context, name string) error {
+func (p *Provider) waitReady(ctx context.Context, name string, gated bool) error {
 	ctx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()
 	pods := p.client.cs.CoreV1().Pods(p.client.namespace)
@@ -306,7 +517,7 @@ func (p *Provider) waitReady(ctx context.Context, name string) error {
 		if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 			return fmt.Errorf("k8s: pod %s is %s before it became ready", name, pod.Status.Phase)
 		}
-		if podReady(pod) {
+		if podReady(pod, gated) {
 			return nil
 		}
 		select {

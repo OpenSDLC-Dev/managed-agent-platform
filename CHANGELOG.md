@@ -105,6 +105,35 @@ copy of an entry here.
 
 ### Added
 
+- **The egress gate is live on Kubernetes: the sidecar, the contract proof on a real cluster, and
+  the Helm opt-in** (plan 12 slice 4d, #50). The K8s provider now consumes `Spec.Gate`: a gated
+  session's pod carries the gate as a **native sidecar** — an init container with
+  `restartPolicy: Always`, `CAP_NET_ADMIN`, the cmd/gate env contract, and exec `-healthcheck`
+  startup + readiness probes. The startup probe is the admission signal, Docker's
+  HEALTHCHECK-gating exactly: the kubelet does not start the sandbox container until the gate's
+  firewall is applied, verified (the 4d-i reconcile — CNI/mesh rules survive below the gate's
+  first-position `OUTPUT` jump), and privileges dropped; on a cluster too old for native sidecars
+  the pod never starts, fail-closed. The route-flush init container is omitted for gated pods (it
+  would strand the gate — the owner-match firewall is the isolation, covering the IPv6 and
+  policy-routing egress the flush never could); ungated `limited` pods keep it unchanged. The
+  sandbox container is hardened to Docker parity (`CapDrop [NET_RAW,SETUID,SETGID]`,
+  `allowPrivilegeEscalation: false` — what makes owner-match hold) and its proxy env points at the
+  sidecar's loopback with `NO_PROXY` forced empty. Mint-on-create maps onto the pod create/adopt
+  fork: the token is generated before the create (the immutable pod spec must carry it), persisted
+  only after winning it, never on adoption or a lost race, and a `Persist` failure deletes the
+  just-created pod (its gate could only ever 401). A pod whose gate shape no longer matches the
+  session's need is replaced, not adopted; readiness requires the gate sidecar Ready too. The
+  sandbox contract suite's gated row now runs against a **real cluster**: the K8s harness declares
+  the gate seam, sideloading the locally-built image into kind (`docker save --platform` +
+  `kind load image-archive`; Docker Desktop shares the daemon's store) and addressing the stub
+  controlplane via the kind network's gateway or `host.docker.internal` — allowed host reached
+  through the injected proxy, placeholder substituted on plain HTTP, literal through CONNECT,
+  denied host refused, and a direct dial dropped by the owner-match firewall, end-to-end in a pod.
+  Helm gains the opt-in: `executor.gateImage` set → `EXECUTOR_GATE_IMAGE` plus a `CONTROLPLANE_URL`
+  derived from the controlplane Service (both or neither, mirroring compose); default off keeps
+  the pre-gate fail-closed behavior, and the CI helm job asserts both paths. The
+  `TestK8sIgnoresGateSpecUntilSidecarLands` pin retires with the behavior it pinned.
+
 - **`credential_host_unreachable_error` is emitted — as the config conflict the SDK defines, not the
   runtime miss the plan sketched** (plan 12 slice 4c-2c, #50). Resolving the wire shape against the
   reference first (the rule that exists for exactly this) corrected the plan's reading before it was

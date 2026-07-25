@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	gopath "path"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -952,5 +954,243 @@ func TestDestroySurfacesError(t *testing.T) {
 	}
 	if err := sb.Destroy(context.Background()); err == nil {
 		t.Error("destroy with a failing delete (not a NotFound): want an error")
+	}
+}
+
+// mintRecorder records the mint-on-create seam's calls for the gated tests.
+type mintRecorder struct {
+	generated  int
+	persisted  []string // tokens handed to Persist
+	persistErr error
+}
+
+func (m *mintRecorder) Generate() string { m.generated++; return "gtk_unit_test_token" }
+
+func (m *mintRecorder) Persist(_ context.Context, _ domain.ID, token string) error {
+	if m.persistErr != nil {
+		return m.persistErr
+	}
+	m.persisted = append(m.persisted, token)
+	return nil
+}
+
+func gateSpecFixture(m *mintRecorder) *sandbox.GateSpec {
+	return &sandbox.GateSpec{
+		Image:           "map-gate:test",
+		ControlplaneURL: "http://cp.test:8080",
+		TokenMinter:     m,
+		OTelEndpoint:    "otel.test:4317",
+		OTelInsecure:    true,
+	}
+}
+
+// markPodsReadyOnCreate makes every created pod immediately report both the
+// sandbox container and the gate sidecar ready, so Provision's waitReady
+// returns at once against the fake clientset.
+func markPodsReadyOnCreate(p *Provider) {
+	cs := p.client.cs.(*fake.Clientset)
+	cs.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		pod := action.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.UID = types.UID("uid-" + pod.Name) // the fake clientset assigns none
+		pod.Status = corev1.PodStatus{
+			Phase:                 corev1.PodRunning,
+			ContainerStatuses:     []corev1.ContainerStatus{{Name: containerName, Ready: true}},
+			InitContainerStatuses: []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}},
+		}
+		return false, nil, nil // fall through to the tracker with the status set
+	})
+}
+
+// TestPodSpecGatedShape pins the gated pod: the gate native sidecar (restart
+// Always, NET_ADMIN, exec healthcheck probes, the cmd/gate env contract), no
+// route-flush init container, and the hardened sandbox with proxy env.
+func TestPodSpecGatedShape(t *testing.T) {
+	p := fakeProvider()
+	spec := sandbox.Spec{
+		SessionID:  domain.ID("sesn_gated"),
+		Image:      "img",
+		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"api.example.com"}},
+		Env:        map[string]string{"API_KEY": "vltph_x"},
+		Gate:       gateSpecFixture(&mintRecorder{}),
+	}
+	pod := p.podSpec("map-sesn-gated", "/workdir", spec, "gtk_unit_test_token")
+
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("gated pod has %d init containers, want exactly the gate sidecar", len(pod.Spec.InitContainers))
+	}
+	g := pod.Spec.InitContainers[0]
+	if g.Name != gateContainerName || g.Image != "map-gate:test" {
+		t.Errorf("gate sidecar = %s/%s, want %s/map-gate:test", g.Name, g.Image, gateContainerName)
+	}
+	if g.RestartPolicy == nil || *g.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Error("gate sidecar is not a native sidecar (restartPolicy Always)")
+	}
+	if g.SecurityContext == nil || g.SecurityContext.Capabilities == nil ||
+		len(g.SecurityContext.Capabilities.Add) != 1 || g.SecurityContext.Capabilities.Add[0] != "NET_ADMIN" {
+		t.Errorf("gate sidecar capabilities = %+v, want exactly NET_ADMIN added", g.SecurityContext)
+	}
+	for _, probe := range []*corev1.Probe{g.StartupProbe, g.ReadinessProbe} {
+		if probe == nil || probe.Exec == nil || strings.Join(probe.Exec.Command, " ") != "/gate -healthcheck" {
+			t.Errorf("gate probe = %+v, want exec /gate -healthcheck", probe)
+		}
+	}
+	wantEnv := map[string]string{
+		"CONTROLPLANE_URL":            "http://cp.test:8080",
+		"GATE_TOKEN":                  "gtk_unit_test_token",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "otel.test:4317",
+		"OTEL_EXPORTER_OTLP_INSECURE": "true",
+	}
+	gotEnv := map[string]string{}
+	for _, e := range g.Env {
+		gotEnv[e.Name] = e.Value
+	}
+	for k, v := range wantEnv {
+		if gotEnv[k] != v {
+			t.Errorf("gate env %s = %q, want %q", k, gotEnv[k], v)
+		}
+	}
+	for _, c := range pod.Spec.InitContainers {
+		if c.Name == "netsetup" {
+			t.Error("gated pod still carries the route-flush init container (it would strand the gate)")
+		}
+	}
+
+	sb := pod.Spec.Containers[0]
+	if sb.SecurityContext == nil || sb.SecurityContext.AllowPrivilegeEscalation == nil || *sb.SecurityContext.AllowPrivilegeEscalation {
+		t.Error("gated sandbox allows privilege escalation")
+	}
+	drops := map[corev1.Capability]bool{}
+	if sb.SecurityContext != nil && sb.SecurityContext.Capabilities != nil {
+		for _, c := range sb.SecurityContext.Capabilities.Drop {
+			drops[c] = true
+		}
+	}
+	for _, c := range []corev1.Capability{"NET_RAW", "SETUID", "SETGID"} {
+		if !drops[c] {
+			t.Errorf("gated sandbox does not drop %s", c)
+		}
+	}
+	sbEnv := map[string]string{}
+	for _, e := range sb.Env {
+		sbEnv[e.Name] = e.Value
+	}
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		if sbEnv[k] != "http://127.0.0.1:15080" {
+			t.Errorf("sandbox %s = %q, want the gate loopback proxy", k, sbEnv[k])
+		}
+	}
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		if v, ok := sbEnv[k]; !ok || v != "" {
+			t.Errorf("sandbox %s = %q,%v, want forced empty", k, v, ok)
+		}
+	}
+	if sbEnv["API_KEY"] != "vltph_x" {
+		t.Errorf("sandbox vault placeholder lost: API_KEY = %q", sbEnv["API_KEY"])
+	}
+}
+
+// TestPodSpecUngatedUnchanged pins that a gate-less limited pod keeps the
+// pre-gate shape: route-flush init container, no proxy env, no securityContext.
+func TestPodSpecUngatedUnchanged(t *testing.T) {
+	p := fakeProvider()
+	spec := sandbox.Spec{
+		SessionID:  domain.ID("sesn_plain"),
+		Image:      "img",
+		Networking: domain.Networking{Type: domain.NetLimited},
+	}
+	pod := p.podSpec("map-sesn-plain", "/workdir", spec, "")
+	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].Name != "netsetup" {
+		t.Fatalf("ungated limited pod init containers = %+v, want the netsetup flush", pod.Spec.InitContainers)
+	}
+	sb := pod.Spec.Containers[0]
+	if sb.SecurityContext != nil {
+		t.Errorf("ungated sandbox grew a securityContext: %+v", sb.SecurityContext)
+	}
+	for _, e := range sb.Env {
+		if strings.Contains(strings.ToUpper(e.Name), "PROXY") {
+			t.Errorf("ungated sandbox has proxy env %s", e.Name)
+		}
+	}
+}
+
+// TestProvisionGatedMintsOnlyOnCreate: the create path generates and persists
+// exactly one token (the same one), and adopting an existing gated pod never
+// touches the seam.
+func TestProvisionGatedMintsOnlyOnCreate(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_mint")
+	p := fakeProvider()
+	markPodsReadyOnCreate(p)
+	spec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+	if _, err := p.Provision(context.Background(), spec); err != nil {
+		t.Fatalf("provision (create): %v", err)
+	}
+	if m.generated != 1 || len(m.persisted) != 1 || m.persisted[0] != "gtk_unit_test_token" {
+		t.Fatalf("create path minted %d/persisted %v, want exactly one matching token", m.generated, m.persisted)
+	}
+	if _, err := p.Provision(context.Background(), spec); err != nil {
+		t.Fatalf("provision (adopt): %v", err)
+	}
+	if m.generated != 1 || len(m.persisted) != 1 {
+		t.Errorf("adoption touched the mint seam: generated=%d persisted=%v", m.generated, m.persisted)
+	}
+}
+
+// TestProvisionGateShapeMismatchRebuilds: a pre-gate pod on a now-gated
+// session is replaced by a gated pod (and the reverse), minting only for the
+// gated create.
+func TestProvisionGateShapeMismatchRebuilds(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_reshape")
+	p := fakeProvider(readyPod(sid)) // pre-gate shape, ready
+	markPodsReadyOnCreate(p)
+	spec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+	if _, err := p.Provision(context.Background(), spec); err != nil {
+		t.Fatalf("provision (reshape to gated): %v", err)
+	}
+	pod, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get rebuilt pod: %v", err)
+	}
+	if !hasGateSidecar(pod) {
+		t.Error("rebuilt pod has no gate sidecar")
+	}
+	if m.generated != 1 || len(m.persisted) != 1 {
+		t.Errorf("reshape minted %d/persisted %d, want exactly one", m.generated, len(m.persisted))
+	}
+
+	// The reverse: the session no longer wants a gate — the gated pod is
+	// replaced by a plain one, with no further minting.
+	specUngated := sandbox.Spec{SessionID: sid, Image: "img"}
+	if _, err := p.Provision(context.Background(), specUngated); err != nil {
+		t.Fatalf("provision (reshape to ungated): %v", err)
+	}
+	pod, err = p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get re-rebuilt pod: %v", err)
+	}
+	if hasGateSidecar(pod) {
+		t.Error("ungated reshape kept the gate sidecar")
+	}
+	if m.generated != 1 {
+		t.Errorf("ungated reshape minted (generated=%d)", m.generated)
+	}
+}
+
+// TestProvisionGatedPersistFailureCleansUp: a pod whose token was never
+// recorded can only ever 401 — Provision must fail and remove it.
+func TestProvisionGatedPersistFailureCleansUp(t *testing.T) {
+	m := &mintRecorder{persistErr: errors.New("db down")}
+	sid := domain.ID("sesn_persistfail")
+	p := fakeProvider()
+	markPodsReadyOnCreate(p)
+	spec := sandbox.Spec{SessionID: sid, Image: "img", Gate: gateSpecFixture(m)}
+	if _, err := p.Provision(context.Background(), spec); err == nil {
+		t.Fatal("provision succeeded despite a token-persist failure")
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("pod with an unpersisted token was left behind (get err = %v)", err)
 	}
 }
