@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"time"
@@ -208,6 +209,31 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			opts.Then = enqueueTurn
 		}
 	case hasUserMessage && status == string(domain.SessionIdle) && len(askBlocking) == 0:
+		// Waking on a message must not step past an unanswered tool call, for
+		// the reason the two enqueue sites above gate on the same check: the
+		// resumed turn would replay an assistant tool_use that no tool_result
+		// answers, a request the model protocol rejects. askBlocking catches
+		// only the ask-gated ones, so an allow-policy tool needs this. The
+		// batch's own results count as answered — this runs before the append,
+		// and a client repairing a session posts the outstanding result and
+		// its next message together — exactly as the two siblings pass theirs.
+		//
+		// With the brain classifying every tool-carrying turn as a suspension
+		// (#181), an idle session should have nothing outstanding, so refusing
+		// here means a log stranded before that fix. It is logged rather than
+		// silent: the message appends unprocessed and the session stays idle,
+		// which no later tool result revives (that trigger requires a running
+		// session) — v1 has no escape hatch for a session stuck on an
+		// unanswered tool (#68).
+		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
+		if err != nil {
+			return nil, err
+		}
+		if unanswered {
+			slog.WarnContext(ctx, "user.message not resumed: session is idle with an unanswered tool_use",
+				"session_id", id)
+			break
+		}
 		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
 		running := domain.SessionRunning
 		opts.SetStatus = &running
