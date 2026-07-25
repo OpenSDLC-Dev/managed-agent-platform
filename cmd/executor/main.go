@@ -14,11 +14,12 @@
 //	                         must comfortably exceed a single tool's timeout
 //	EXECUTOR_POLL_INTERVAL   idle queue poll, Go duration (default "500ms")
 //	CONTROLPLANE_URL         where a session's egress gate fetches its config;
-//	                         required for gated (limited or vault-attached)
-//	                         sessions, which otherwise fail closed
+//	                         set with EXECUTOR_GATE_IMAGE to opt into the gate.
+//	                         Unset: no gate runs and each backend keeps its own
+//	                         fail-closed networking (Docker limited -> no egress)
 //	EXECUTOR_GATE_IMAGE      the egress-gate container image (built with
-//	                         `docker build --target gate`); required for gated
-//	                         sessions alongside CONTROLPLANE_URL
+//	                         `docker build --target gate`); opts into the gate
+//	                         together with CONTROLPLANE_URL
 //	SANDBOX_BACKEND          "docker" (default) or "k8s"
 //	DOCKER_HOST              Docker daemon address for the docker backend
 //	                         (falls back to the well-known socket)

@@ -61,12 +61,15 @@ type Config struct {
 	Workdir      string
 	LeaseTTL     time.Duration
 	PollInterval time.Duration
-	// ControlplaneURL and GateImage configure the per-session egress gate. A
-	// session is gated when its networking is `limited` or it has vaults attached;
-	// its gate container (GateImage) fetches that session's egress config from
-	// ControlplaneURL. Both are required for gated sessions and unused otherwise —
-	// a gated session provisioned without them fails closed rather than running
-	// with unrestricted egress.
+	// ControlplaneURL and GateImage opt the deployment into the per-session egress
+	// gate. A session wants a gate when its networking is `limited` or it has
+	// vaults attached; its gate container (GateImage) fetches that session's egress
+	// config from ControlplaneURL. When both are set, a gate-wanting session gets a
+	// gate; when either is empty, no gate is requested and the backend keeps its
+	// own fail-closed networking (Docker `limited` → no egress, K8s → its
+	// init-container isolation, vault-attached → inert placeholders) — the pre-gate
+	// behavior, so an un-opted-in deployment is unchanged rather than faulted. See
+	// gateSpec.
 	ControlplaneURL string
 	GateImage       string
 }
