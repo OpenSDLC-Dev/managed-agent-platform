@@ -68,7 +68,10 @@ copy of an entry here.
   both families, still before the privilege drop. The real-netns contract test re-pins the new
   shape hard-coded, and a second test is the reconcile proof: a netns pre-populated with a foreign
   `OUTPUT` ACCEPT reaches healthy with the rule surviving below the jump — root egress still
-  dropped, non-vacuously — and a container restart in the same netns re-applies idempotently.
+  dropped, non-vacuously — and re-running `/gate` inside the live container (a `docker restart`
+  would recreate the netns, so re-exec is what actually meets populated kernel state) proves both
+  re-apply paths: a foreign rule pushed above the jump is remediated back below it, and a re-apply
+  over an already-correct state is a no-op — no duplicate rules, no duplicate jump.
 
 ### Added
 

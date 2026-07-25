@@ -534,8 +534,10 @@ deliberately hard-coded copy of the ruleset (so an
 accidental `Ruleset` change fails the pin instead of being followed), and exec probes prove the
 packets — root egress dropped, gate-uid egress allowed, loopback allowed. A second test is the
 reconcile proof: a netns pre-populated with a foreign `OUTPUT` rule reaches healthy with the rule
-surviving below the jump (unreachable — root egress still dropped), and a container restart in the
-same netns re-applies idempotently (no duplicate rules, no duplicate jump).
+surviving below the jump (unreachable — root egress still dropped), and `/gate` re-exec'd inside the
+live container (the one way to meet populated kernel state — `docker restart` recreates the netns)
+re-applies idempotently on both divergence paths: a foreign rule pushed above the jump is remediated
+back below it, and an already-correct state is a no-op (no duplicate rules, no duplicate jump).
 
 `deploy/helm/managed-agent-platform` is the chart (controlplane + brain + executor with
 the k8s sandbox backend, optional inline Postgres, MinIO, and OpenBao — all

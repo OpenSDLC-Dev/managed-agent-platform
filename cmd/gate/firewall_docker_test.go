@@ -126,8 +126,12 @@ func appendedLines(listing, prefix string) []string {
 // CNI or mesh rules present before the sidecar starts) must not be flushed.
 // The gate becomes healthy, the foreign rule survives below the gate's jump —
 // unreachable behind the chain's terminal verdicts, so root egress is still
-// dropped — and a container restart (same netns, the restarted-sidecar case)
-// re-applies idempotently: no duplicate chain rules, no duplicate jump.
+// dropped. Re-apply over the LIVE netns (the restarted-sidecar case — note
+// `docker restart` recreates the netns, so the only way to meet populated
+// kernel state is re-running /gate inside the same container) is then proven
+// on both divergence paths: a foreign rule pushed above the jump is remediated
+// (delete + re-insert first), and a re-apply over an already-correct state is
+// a no-op — no duplicate chain rules, no duplicate jump, either way.
 func TestGateImageFirewallReconcilesForeignRules(t *testing.T) {
 	image := sandboxtest.BuildGateImage(t)
 
@@ -172,13 +176,49 @@ func TestGateImageFirewallReconcilesForeignRules(t *testing.T) {
 		t.Errorf("root egress escaped the owner-match DROP with a foreign rule present:\n%s", out)
 	}
 
-	// Restart: same netns, rules still in the kernel — the re-apply must be
-	// idempotent (the restarted-sidecar case on K8s).
-	if out, code := dockerCLI(t, "restart", id); code != 0 {
-		t.Fatalf("docker restart: exit %d\n%s", code, out)
+	// Remediation path: push a foreign ACCEPT ABOVE the jump (the already-
+	// fail-open state a CNI/mesh agent could create at runtime), then re-run
+	// /gate in the SAME netns. Setup re-applies — iptables-restore resets the
+	// populated chain, ensureJumpFirst deletes and re-inserts the jump at 1 —
+	// then the second process exits on the bind conflict with the live gate.
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		if out, code := dockerCLI(t, "exec", "-u", "0", id, bin, "-I", "OUTPUT", "1", "-p", "tcp", "--dport", "19", "-j", "ACCEPT"); code != 0 {
+			t.Fatalf("%s -I OUTPUT 1: exit %d\n%s", bin, code, out)
+		}
 	}
-	waitHealthy(t, id)
+	reExecGate(t, id)
 	assertReconciledShape(t, id)
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		out, _ := dockerCLI(t, "exec", id, bin, "-S", "OUTPUT")
+		if n := countEqual(appendedLines(out, "-A OUTPUT"), "-A OUTPUT -p tcp -m tcp --dport 19 -j ACCEPT"); n != 1 {
+			t.Errorf("%s above-jump foreign rule not preserved below the jump (found %d):\n%s", bin, n, out)
+		}
+	}
+
+	// No-op path: with everything already correct, a further re-apply must
+	// change nothing — no duplicate rules, no duplicate jump.
+	reExecGate(t, id)
+	assertReconciledShape(t, id)
+}
+
+// reExecGate re-runs /gate as root inside the live container — the one way to
+// exercise Apply against the SAME netns with populated kernel state. The
+// second process inherits the container env, runs the full Setup (apply,
+// verify, privdrop), then exits on the bind conflict with the live gate; that
+// bind error is the positive signal Setup completed, and a "gaterun:" error
+// would mean the firewall re-apply itself failed.
+func reExecGate(t *testing.T, id string) {
+	t.Helper()
+	out, code := dockerCLI(t, "exec", "-u", "0", id, "timeout", "20", "/gate")
+	if code == 0 {
+		t.Fatalf("re-exec'd gate exited 0, want a bind-conflict exit:\n%s", out)
+	}
+	if strings.Contains(out, "gaterun:") {
+		t.Fatalf("re-exec'd gate failed in firewall setup, not at bind:\n%s", out)
+	}
+	if !strings.Contains(out, "address already in use") {
+		t.Fatalf("re-exec'd gate did not reach the bind conflict (exit %d):\n%s", code, out)
+	}
 }
 
 // assertReconciledShape asserts the gate shape AND the foreign rule's survival,
