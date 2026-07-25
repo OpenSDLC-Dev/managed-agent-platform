@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
@@ -182,10 +183,37 @@ func unreachableErrors(t *testing.T, s *tserver, sessionID string) []map[string]
 	return out
 }
 
+// waitUnreachableErrors polls for the expected number of unreachable-error
+// events — emission is asynchronous, detached from the config response — and
+// returns them, failing the test if they do not arrive in time.
+func waitUnreachableErrors(t *testing.T, s *tserver, sessionID string, want int) []map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		evs := unreachableErrors(t, s, sessionID)
+		if len(evs) == want {
+			return evs
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unreachable-error events = %d, want %d", len(evs), want)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// settleEmission gives the detached emission goroutine time to land (or not)
+// before an assertion about its absence or its dedupe. A too-short settle can
+// only false-pass an absence check, never flake a run red.
+func settleEmission() { time.Sleep(500 * time.Millisecond) }
+
 // TestGateConfigEmitsCredentialHostUnreachableError: a credential whose
 // allowed_hosts includes a host the environment's networking policy does not
 // permit (the SDK's documented trigger) surfaces a session.error carrying the
-// credential_host_unreachable_error variant — once, not once per fetch.
+// credential_host_unreachable_error variant — best-effort once (deduped
+// against the events table), not once per fetch. The dedupe and no-conflict
+// branches are additionally pinned deterministically by the synchronous
+// white-box tests in gateconfig_internal_test.go; these HTTP tests prove the
+// async wiring.
 func TestGateConfigEmitsCredentialHostUnreachableError(t *testing.T) {
 	s := newTestServer(t)
 	agent := createAgent(t, s, map[string]any{"name": "a", "model": "claude-opus-4-8", "system": "base"})
@@ -214,10 +242,7 @@ func TestGateConfigEmitsCredentialHostUnreachableError(t *testing.T) {
 		t.Fatalf("Fetch: %v", err)
 	}
 
-	evs := unreachableErrors(t, s, sessionID)
-	if len(evs) != 1 {
-		t.Fatalf("unreachable-error events = %d, want 1", len(evs))
-	}
+	evs := waitUnreachableErrors(t, s, sessionID, 1)
 	ev := evs[0]
 	if id, _ := ev["id"].(string); len(id) < 6 || id[:5] != "sevt_" {
 		t.Errorf("event id = %v, want an sevt_ id", ev["id"])
@@ -245,6 +270,7 @@ func TestGateConfigEmitsCredentialHostUnreachableError(t *testing.T) {
 	if _, err := gateconfig.NewClient(s.url, token, nil).Fetch(context.Background()); err != nil {
 		t.Fatalf("second Fetch: %v", err)
 	}
+	settleEmission()
 	if evs := unreachableErrors(t, s, sessionID); len(evs) != 1 {
 		t.Errorf("after second fetch, unreachable-error events = %d, want still 1", len(evs))
 	}
@@ -262,6 +288,7 @@ func TestGateConfigNoConflictEmitsNothing(t *testing.T) {
 	if _, err := gateconfig.NewClient(s.url, token, nil).Fetch(context.Background()); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
+	settleEmission()
 	if evs := unreachableErrors(t, s, sessionID); len(evs) != 0 {
 		t.Errorf("aligned credential emitted %d unreachable errors, want 0", len(evs))
 	}
@@ -282,6 +309,7 @@ func TestGateConfigNoConflictEmitsNothing(t *testing.T) {
 	if _, err := gateconfig.NewClient(s.url, token2, nil).Fetch(context.Background()); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
+	settleEmission()
 	if evs := unreachableErrors(t, s, sess["id"].(string)); len(evs) != 0 {
 		t.Errorf("unrestricted environment emitted %d unreachable errors, want 0", len(evs))
 	}
@@ -310,6 +338,7 @@ func TestGateConfigNoConflictEmitsNothing(t *testing.T) {
 	if _, err := gateconfig.NewClient(s.url, token3, nil).Fetch(context.Background()); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
+	settleEmission()
 	if evs := unreachableErrors(t, s, sess2["id"].(string)); len(evs) != 0 {
 		t.Errorf("unrestricted credential emitted %d unreachable errors, want 0", len(evs))
 	}
