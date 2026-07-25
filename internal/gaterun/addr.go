@@ -5,6 +5,14 @@ import (
 	"net"
 )
 
+// DefaultProxyAddr is the loopback address the gate's egress proxy listens on,
+// and the address the sandbox reaches it at — the two share a network namespace,
+// so the sandbox's localhost is the gate's. It is the one contract between the
+// two ends: cmd/gate binds GATE_ADDR here by default, and the executor points the
+// sandbox's HTTP(S)_PROXY at "http://" + this, so a single constant keeps the
+// listener and the client from drifting apart.
+const DefaultProxyAddr = "127.0.0.1:15080"
+
 // CheckLoopbackListenAddr rejects a proxy listen address whose host is not
 // loopback. The gate's forward proxy is unauthenticated — its only protection is
 // that only the co-resident sandbox, sharing its network namespace, can reach it
