@@ -423,8 +423,8 @@ against `sessions` so it fails closed once the session is archived; there is no 
 (validity is the session's lifetime), so a controlplane outage longer than any TTL cannot be misread
 as a revocation, and a deleted session's token cascades away. Hash-only storage mirrors
 `internal/api`'s environment-key issuance. The token authenticates the internal gate-config
-endpoint (`internal/gateconfig`, below); the gate runtime that presents it lands in a later
-slice-4 sub-PR.
+endpoint (`internal/gateconfig`, below); the gate runtime that presents it is `internal/gaterun` /
+`cmd/gate` (below), still to be wired into a sandbox by a later slice-4 sub-PR.
 
 ### internal/gateconfig
 
@@ -439,21 +439,37 @@ never secret bytes) is a property of that one function. `Client.Fetch` presents 
 credential and maps a 401 (revoked token / archived session) to a fail-closed `ErrUnauthorized`,
 distinct from a transient error — the signal a periodic-fetching gate uses to choose between stopping
 and keeping its last-known-good config. Neither the endpoint nor the client is on the public `/v1`
-wire (DIVERGENCES); both are inert until the gate runtime drives them.
+wire (DIVERGENCES). The gate runtime that drives the client now exists (`internal/gaterun` /
+`cmd/gate`, below); the contract stays inert only until that sidecar is wired into a sandbox (a later
+slice-4 sub-PR).
 
 ### internal/gate
 
 The per-session egress gate (docs/plan/12_vaults-credentials.md, D3): a forward proxy the sandbox
 reaches through `HTTP_PROXY`/`HTTPS_PROXY`, and the enforcement point of the two-level gate. It is
 transport-only — it holds one session's resolved credentials and opens sockets, but reads no store
-and emits no events. It will run as a shared `cmd/gate` container image, a sidecar of the sandbox on
-both backends (a following sub-PR builds that binary, wires it in, and delivers its config and
-secrets).
+and emits no events. It runs inside the `cmd/gate` container image as a sidecar of the sandbox on
+both backends; `internal/gaterun` (below) is the runtime that drives it — firewall, privilege drop,
+and the fetch-and-swap loop that keeps its credential set current. A following sub-PR wires the
+sidecar into the Docker sandbox provider (network namespace, proxy env, teardown).
 
 | File | Contents |
 |---|---|
 | `policy.go` | `policy` — the environment's request-level networking gate (the first of the two levels): `unrestricted` admits every host (its safety blocklist unpublished by the reference, deferred and recorded INFERRED), `limited` admits only `allowed_hosts` (via `egress.HostSet`), an unknown type fails closed. Plus the hop-by-hop header set a forwarding proxy must strip (`removeHopByHop`, honoring the `Connection` header on both the forwarded request and the returned response). |
 | `gate.go` | `Gate` — an `http.Handler` forward proxy. `CONNECT` is host-filtered on its target and, if admitted, tunnelled opaquely (no substitution — the #166 TLS gap): the tunnel forwards bytes the server buffered past the `CONNECT` line, propagates a half-close in either direction, and closes only when both directions do. A plain-HTTP request is host-filtered, then its header values and body are rewritten through `egress.Engine.Substitute` (the second gate level — a credential's own `allowed_hosts`) before it is forwarded and the response streamed back; a credential the host does not admit is left as its literal placeholder (never the secret) and its placeholder — never the `*Credential`, which carries the secret — is surfaced through the `OnUnreachable` seam the wiring turns into `credential_host_unreachable_error`. The body buffered for substitution is bounded by `MaxBodyBytes` (default 10 MiB) — a larger sandbox-controlled body is refused `413` rather than read unbounded. |
+
+### internal/gaterun
+
+The testable runtime of the `cmd/gate` sidecar (docs/plan/12, slice 4): everything the gate does
+that is not a raw syscall, kept out of `cmd/` so the coverage gate reaches it. It owns the firewall
+policy and its verification, the DTO→`gate.Config` conversion, and the fetch-and-swap loop, behind
+`Firewall`/`PrivDropper`/`Fetcher` interfaces the `cmd/gate` adapters satisfy with `iptables`/`syscall`/`gateconfig.Client`.
+
+| File | Contents |
+|---|---|
+| `firewall.go` | `Ruleset(uid)` — the three OUTPUT rules, order load-bearing (first-match-wins): loopback `ACCEPT` (all intra-netns loopback), owner-match `ACCEPT` for the gate's own uid, catch-all `DROP`. `Setup` (which refuses a non-positive or oversized gate uid via `CheckGateID` — uid 0 is a silent no-op drop, an oversized id truncates in the syscall) applies them via the `Firewall` adapter — whose contract is to *replace* the chain (policy `DROP` first so the non-atomic flush→append rebuild stays fail-closed throughout, then flush and append), so the state is deterministic and not reliant on a fresh netns — lists both the v4 and v6 tables back, and `CheckListing` requires each chain to be *exactly* those three rules, token-for-token (a foreign `ACCEPT` ahead of the `DROP`, or a rule that only resembles ours — a colliding uid prefix, `-o lo0`, `! -o lo` — is rejected) before it lets `PrivDropper.Drop` run; a firewall that did not take aborts with the process still root, so it never serves fail-open. This is the egress fail-closed invariant: the sandbox shares the gate's netns, and only the gate's uid may reach the network. |
+| `gaterun.go` | `Convert` maps a fetched `gateconfig.Config` to the transport-layer `gate.Config` (a credential's networking `unrestricted` becomes the `egress` engine's per-credential `Unrestricted`). `SwappableHandler` is the `http.Handler` the server binds: an `atomic.Pointer[gate.Gate]` the fetch loop swaps under live traffic, wrapping each request in an `egress_request` span (`semconv` HTTP method + server address). |
+| `loop.go` | `RunFetchLoop` — fetch immediately, then on a ticker: a good config swaps in a fresh `gate.Gate`; `ErrUnauthorized` (revoked token / archived session) swaps in a deny-all gate and returns terminal so the binary shuts down; any transient error keeps the last-known-good gate serving; ctx-cancel returns nil. |
 
 ### Test support and cmd/
 
@@ -480,6 +496,21 @@ only `DATABASE_URL` + `BLOB_*` and exits instead of serving), `brain`
 `docker` default, `k8s` — via `internal/sandbox/backend` + OTel), and `worker`
 (`ANTHROPIC_BASE_URL` / `ANTHROPIC_ENVIRONMENT_ID` / `ANTHROPIC_ENVIRONMENT_KEY`
 required; no `DATABASE_URL` by design).
+
+A fifth binary, `gate`, is the per-session egress sidecar rather than a server — it holds no store
+and does not share the `service.Run` shape; its testable logic lives in `internal/gaterun` and it is
+the thin exec/`syscall` adapter half (iptables shell-out, `setuid`/`setgid`/`setgroups` privilege
+drop). `CONTROLPLANE_URL` + `GATE_TOKEN` (its `gtk_` bearer) are required; `GATE_ADDR` (loopback
+proxy listen, default `127.0.0.1:15080`), `GATE_UID`/`GATE_GID` (the owner-match + drop identity,
+default 65532), and `GATE_FETCH_INTERVAL` (default 30s) are optional. Those are validated as the
+security controls they are: `GATE_ADDR` must be loopback (the proxy is unauthenticated and
+credential-bearing), `GATE_UID`/`GATE_GID` must be non-root (a root drop is a silent no-op), and the
+interval must be positive; each config fetch is also bounded by a client timeout so a stalled control
+plane cannot suspend the revocation check. It applies and verifies the
+firewall before anything listens, so the Docker `HEALTHCHECK` — the binary's own `-healthcheck`
+probe, which dials the proxy port — cannot pass until egress is fail-closed, making it the sidecar's
+admission signal. It ships as a separate image (`--target gate` — iptables + a dedicated uid), wired
+into a sandbox by the next sub-PR.
 
 `deploy/helm/managed-agent-platform` is the chart (controlplane + brain + executor with
 the k8s sandbox backend, optional inline Postgres, MinIO, and OpenBao — all

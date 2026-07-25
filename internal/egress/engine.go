@@ -48,12 +48,18 @@ const (
 // sandbox-visible Placeholder, the Secret it stands for, the hosts it may be
 // used against, and which injection locations it is enabled for. Secrets live
 // here only for the substitution call path — never logged, never stored.
+//
+// Unrestricted is the credential's own networking arm: when set, the secret may
+// be substituted for any request host and Hosts is ignored (the credential was
+// created with networking "unrestricted"). Otherwise Hosts is the limited
+// allow-list — a nil/empty set matches nothing (fail-closed).
 type Credential struct {
-	Placeholder string
-	Secret      string
-	Hosts       *HostSet
-	Header      bool
-	Body        bool
+	Placeholder  string
+	Secret       string
+	Hosts        *HostSet
+	Unrestricted bool
+	Header       bool
+	Body         bool
 }
 
 func (c *Credential) enabled(loc Location) bool {
@@ -97,7 +103,7 @@ func (e *Engine) Substitute(host string, loc Location, s string) (out string, un
 		if !c.enabled(loc) || !strings.Contains(s, c.Placeholder) {
 			continue
 		}
-		if c.Hosts.Match(host) {
+		if c.Unrestricted || c.Hosts.Match(host) {
 			pairs = append(pairs, c.Placeholder, c.Secret)
 			continue
 		}

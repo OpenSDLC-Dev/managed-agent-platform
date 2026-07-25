@@ -21,7 +21,7 @@ The v1 design plan is [docs/plan/01_v1-managed-agent-platform.md](./docs/plan/01
 
 ## Core architecture — decouple brain / hands / session
 
-An agent is three independently-swappable pieces (a pattern we take from the reference): the **session** — an append-only event log in Postgres, the single source of truth; the **brain/harness** — the stateless, horizontally-scalable loop that calls the model and routes tool calls (a crashed brain loses nothing: any fresh brain replays the log and continues); and the **sandbox ("hands")** — a disposable per-session container that runs tools ("cattle not pets": a dying container is one tool-call error, not a lost session). Four `cmd/` binaries: `controlplane` · `brain` · `executor` · `worker`.
+An agent is three independently-swappable pieces (a pattern we take from the reference): the **session** — an append-only event log in Postgres, the single source of truth; the **brain/harness** — the stateless, horizontally-scalable loop that calls the model and routes tool calls (a crashed brain loses nothing: any fresh brain replays the log and continues); and the **sandbox ("hands")** — a disposable per-session container that runs tools ("cattle not pets": a dying container is one tool-call error, not a lost session). Four server `cmd/` binaries — `controlplane` · `brain` · `executor` · `worker`; a fifth, `cmd/gate`, is the plan-12 egress sidecar (not a server — a per-session forward proxy).
 
 **Execution is fully async through the event log + work queue.** The brain never runs tools in-process — it emits `agent.tool_use`, an executor pulls the work, runs it in a sandbox, posts the result event, and the brain wakes and continues. Platform-managed `cloud` and customer BYOC `self_hosted` are the **same pull protocol at two deployment points**.
 
@@ -53,7 +53,8 @@ Four read-only local reference sources serve as ground truth and design referenc
 ## Repo layout
 
 ```
-cmd/{controlplane,brain,executor,worker}   # the four binaries
+cmd/{controlplane,brain,executor,worker}   # the four server binaries
+cmd/gate                                   # per-session egress sidecar (plan 12)
 internal/
   domain/     # Anthropic-native types — the source of truth; no adk/genai here
   api/        # wire-compatible REST handlers, ID prefixes, auth, work API
