@@ -2,8 +2,8 @@ package gaterun
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -36,11 +36,14 @@ func Ruleset(gateUID int) []Rule {
 	}
 }
 
-// Firewall is the OS firewall the gate applies on startup. Apply installs rules
-// on the OUTPUT chain of both the IPv4 and IPv6 tables; List returns each
-// table's current OUTPUT rules in `iptables -S OUTPUT` form for the post-apply
-// verification. The real adapter (iptables/ip6tables via os/exec) lives in
-// cmd/gate; tests supply a fake.
+// Firewall is the OS firewall the gate applies on startup. Apply replaces the
+// OUTPUT chain of both the IPv4 and IPv6 tables with exactly these rules — it
+// flushes the chain, then appends them in order — so the post-apply listing is
+// deterministic no matter what the chain started with (a fresh netns is empty,
+// but the gate must not depend on that for a fail-closed guarantee). List
+// returns each table's current OUTPUT rules in `iptables -S OUTPUT` form for the
+// post-apply verification. The real adapter (iptables/ip6tables via os/exec)
+// lives in cmd/gate; tests supply a fake.
 type Firewall interface {
 	Apply(ctx context.Context, rules []Rule) error
 	List(ctx context.Context) (v4, v6 string, err error)
@@ -54,40 +57,35 @@ type PrivDropper interface {
 	Drop() error
 }
 
-// CheckListing verifies one table's `-S OUTPUT` listing enforces the fail-closed
-// owner-match policy: a loopback ACCEPT and the gate-UID ACCEPT both present and
-// both preceding a catch-all DROP. A missing DROP (egress not fail-closed), a
-// missing gate ACCEPT (the gate itself blocked), or a DROP ordered before an
-// ACCEPT (drops everything) each fail. This is the post-apply gate that refuses
-// to serve on a firewall that did not take — the analogue of the K8s
+// CheckListing verifies one table's `-S OUTPUT` listing is EXACTLY the gate's
+// owner-match policy and nothing else: the ordered `-A OUTPUT` rules must equal
+// Ruleset(gateUID) token-for-token. Exactness is the security property — a
+// relative-order or substring check is not enough. A foreign ACCEPT before the
+// DROP would leave egress fail-open (first-match-wins) yet still contain our
+// three rules in order; a rule that only resembles ours changes the firewall's
+// meaning while passing a loose match — `--uid-owner 1000` when the gate is uid
+// 100, `-o lo0` or `! -o lo` for the loopback rule, or an extra match clause.
+// Apply establishes the exact state by flushing the chain before it appends, so
+// on a real (empty) startup the listing is precisely these rules; this reads it
+// back and refuses to serve on anything else. It is the post-apply gate that
+// aborts startup when the firewall did not take — the analogue of the K8s
 // route-flush's survivor re-count.
 func CheckListing(listing string, gateUID int) error {
-	loopIdx, gateIdx, dropIdx := -1, -1, -1
-	uidMatch := "--uid-owner " + strconv.Itoa(gateUID)
-	for i, ln := range strings.Split(listing, "\n") {
-		ln = strings.TrimSpace(ln)
-		if !strings.HasPrefix(ln, "-A OUTPUT") {
-			continue
-		}
-		accept := strings.HasSuffix(ln, "-j ACCEPT")
-		switch {
-		case accept && strings.Contains(ln, "-o lo"):
-			loopIdx = i
-		case accept && strings.Contains(ln, uidMatch):
-			gateIdx = i
-		case ln == "-A OUTPUT -j DROP":
-			dropIdx = i
+	want := Ruleset(gateUID)
+	var got [][]string
+	for _, ln := range strings.Split(listing, "\n") {
+		f := strings.Fields(ln)
+		if len(f) >= 2 && f[0] == "-A" && f[1] == "OUTPUT" {
+			got = append(got, f[2:]) // the rule tokens after "-A OUTPUT"
 		}
 	}
-	switch {
-	case loopIdx < 0:
-		return errors.New("loopback ACCEPT rule missing")
-	case gateIdx < 0:
-		return fmt.Errorf("gate uid-owner ACCEPT rule (uid %d) missing", gateUID)
-	case dropIdx < 0:
-		return errors.New("catch-all DROP rule missing — egress is not fail-closed")
-	case dropIdx < loopIdx || dropIdx < gateIdx:
-		return errors.New("catch-all DROP precedes an ACCEPT — rules out of order")
+	if len(got) != len(want) {
+		return fmt.Errorf("OUTPUT chain has %d appended rules, want exactly the %d-rule owner-match set", len(got), len(want))
+	}
+	for i := range want {
+		if !slices.Equal(got[i], []string(want[i])) {
+			return fmt.Errorf("OUTPUT rule %d is %v, want %v", i, got[i], []string(want[i]))
+		}
 	}
 	return nil
 }
@@ -97,7 +95,14 @@ func CheckListing(listing string, gateUID int) error {
 // begins serving (so the HEALTHCHECK that gates admission cannot pass until the
 // firewall is in force). A verification failure aborts startup fail-closed: the
 // gate never serves on a firewall that did not take.
+//
+// gateUID must be a positive non-root uid: dropping to uid 0 is a silent no-op
+// (the process stays root, keeps CAP_NET_ADMIN, and can still rewrite the chain),
+// so a root gateUID is refused here rather than serving as un-dropped root.
 func Setup(ctx context.Context, fw Firewall, pd PrivDropper, gateUID int) error {
+	if gateUID <= 0 {
+		return fmt.Errorf("gaterun: gate uid must be a positive non-root uid, got %d", gateUID)
+	}
 	if err := fw.Apply(ctx, Ruleset(gateUID)); err != nil {
 		return fmt.Errorf("gaterun: apply firewall: %w", err)
 	}

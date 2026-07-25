@@ -38,6 +38,13 @@ const (
 	defaultAddr          = "127.0.0.1:15080"
 	defaultGateUID       = 65532
 	defaultFetchInterval = 30 * time.Second
+	// fetchTimeout bounds one config fetch. Without it a control plane that
+	// accepts the connection but never responds would wedge the fetch loop
+	// indefinitely — and the loop's periodic 401->deny-all revocation check only
+	// fires when a fetch returns, so an unbounded stall would keep a revoked
+	// session's gate serving. A bounded fetch fails as a transient error, keeping
+	// last-known-good, and the next tick can still observe a revocation.
+	fetchTimeout = 10 * time.Second
 )
 
 func main() {
@@ -88,6 +95,11 @@ func run(ctx context.Context) error {
 	if addr == "" {
 		addr = defaultAddr
 	}
+	// The forward proxy is unauthenticated and credential-bearing; it must bind
+	// loopback so only the co-netns sandbox can reach it.
+	if err := gaterun.CheckLoopbackListenAddr(addr); err != nil {
+		return err
+	}
 	gateUID, err := intEnv("GATE_UID", defaultGateUID)
 	if err != nil {
 		return err
@@ -96,10 +108,20 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if gateUID <= 0 || gateGID <= 0 {
+		// A root uid/gid makes the privilege drop a silent no-op (Setgid/Setuid(0)
+		// return nil while already root), leaving the gate root with CAP_NET_ADMIN.
+		return errors.New("GATE_UID and GATE_GID must be positive non-root ids")
+	}
 	interval := defaultFetchInterval
 	if v := os.Getenv("GATE_FETCH_INTERVAL"); v != "" {
 		if interval, err = time.ParseDuration(v); err != nil {
 			return errors.New("GATE_FETCH_INTERVAL must be a Go duration")
+		}
+		if interval <= 0 {
+			// time.NewTicker panics on a non-positive duration; reject it here as a
+			// clean config error rather than crashing after the firewall is up.
+			return errors.New("GATE_FETCH_INTERVAL must be positive")
 		}
 	}
 
@@ -121,7 +143,7 @@ func run(ctx context.Context) error {
 	go func() { srvErr <- srv.ListenAndServe() }()
 	slog.Info("gate listening", "addr", addr, "uid", gateUID)
 
-	client := gateconfig.NewClient(controlplaneURL, token, nil)
+	client := gateconfig.NewClient(controlplaneURL, token, &http.Client{Timeout: fetchTimeout})
 	loopDone := make(chan error, 1)
 	go func() { loopDone <- gaterun.RunFetchLoop(ctx, client, handler, interval) }()
 

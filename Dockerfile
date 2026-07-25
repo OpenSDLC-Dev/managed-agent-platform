@@ -32,11 +32,13 @@ HEALTHCHECK --interval=2s --timeout=3s --start-period=2s --retries=15 \
     CMD ["/gate", "-healthcheck"]
 ENTRYPOINT ["/gate"]
 
-# The default (last) stage is the server image carrying all four server binaries.
+# The default (last) stage is the server image carrying the four server binaries.
 FROM debian:stable-slim AS server
 # ca-certificates lets the binaries reach TLS model endpoints and OTLP collectors.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /out/ /
+# Copy only the four server binaries — the gate binary has its own image (above)
+# and does not belong in the server image.
+COPY --from=build /out/controlplane /out/brain /out/executor /out/worker /
 # No default command: each service sets one of /controlplane|/brain|/executor|/worker.

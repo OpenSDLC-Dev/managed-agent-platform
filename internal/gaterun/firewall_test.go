@@ -32,10 +32,11 @@ func TestRuleset(t *testing.T) {
 	}
 }
 
-const goodListing = `-P OUTPUT ACCEPT
--A OUTPUT -o lo -j ACCEPT
+const goodBody = `-A OUTPUT -o lo -j ACCEPT
 -A OUTPUT -m owner --uid-owner 100 -j ACCEPT
 -A OUTPUT -j DROP`
+
+const goodListing = "-P OUTPUT ACCEPT\n" + goodBody
 
 func TestCheckListing(t *testing.T) {
 	if err := gaterun.CheckListing(goodListing, 100); err != nil {
@@ -52,6 +53,17 @@ func TestCheckListing(t *testing.T) {
 		"wrong uid":           {goodListing, 999},
 		"DROP before ACCEPT":  {"-A OUTPUT -j DROP\n-A OUTPUT -o lo -j ACCEPT\n-A OUTPUT -m owner --uid-owner 100 -j ACCEPT", 100},
 		"empty":               {"", 100},
+		// A foreign ACCEPT ahead of ours leaves egress fail-open (first-match-wins)
+		// even though our three rules are all present in order — exact-count catches it.
+		"extra foreign ACCEPT first": {"-A OUTPUT -j ACCEPT\n" + goodBody, 100},
+		// uid substring collision: the gate ACCEPT is for 1000, not 100.
+		"uid prefix collision": {"-A OUTPUT -o lo -j ACCEPT\n-A OUTPUT -m owner --uid-owner 1000 -j ACCEPT\n-A OUTPUT -j DROP", 100},
+		// A negated interface match accepts every non-loopback interface.
+		"negated loopback": {"-A OUTPUT ! -o lo -j ACCEPT\n-A OUTPUT -m owner --uid-owner 100 -j ACCEPT\n-A OUTPUT -j DROP", 100},
+		// A different interface (lo0) is not loopback lo.
+		"lo0 not lo": {"-A OUTPUT -o lo0 -j ACCEPT\n-A OUTPUT -m owner --uid-owner 100 -j ACCEPT\n-A OUTPUT -j DROP", 100},
+		// An extra match clause on the loopback rule changes its meaning.
+		"extra match clause": {"-A OUTPUT -o lo -p tcp -j ACCEPT\n-A OUTPUT -m owner --uid-owner 100 -j ACCEPT\n-A OUTPUT -j DROP", 100},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -135,5 +147,24 @@ func TestSetupDropErrorSurfaces(t *testing.T) {
 	err := gaterun.Setup(context.Background(), fw, pd, 100)
 	if err == nil || !strings.Contains(err.Error(), "drop privileges") {
 		t.Fatalf("Setup err = %v, want a drop-privileges error", err)
+	}
+}
+
+func TestSetupRejectsRootUID(t *testing.T) {
+	// Dropping to uid 0 is a silent no-op that leaves the gate root. Setup must
+	// refuse before touching the firewall, so a misconfigured gate fails closed
+	// (never applies rules, never "drops" to root, never serves).
+	for _, uid := range []int{0, -1} {
+		fw := &fakeFirewall{v4: goodListing, v6: goodListing}
+		pd := &fakePriv{}
+		if err := gaterun.Setup(context.Background(), fw, pd, uid); err == nil {
+			t.Errorf("Setup accepted gateUID %d, want a non-root-uid error", uid)
+		}
+		if fw.applied != nil {
+			t.Errorf("Setup applied rules for gateUID %d before rejecting it", uid)
+		}
+		if pd.dropped {
+			t.Errorf("Setup dropped privileges for gateUID %d", uid)
+		}
 	}
 }

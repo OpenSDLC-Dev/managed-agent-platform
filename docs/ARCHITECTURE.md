@@ -465,7 +465,7 @@ policy and its verification, the DTO→`gate.Config` conversion, and the fetch-a
 
 | File | Contents |
 |---|---|
-| `firewall.go` | `Ruleset(uid)` — the three OUTPUT rules, order load-bearing (first-match-wins): loopback `ACCEPT` (all intra-netns loopback), owner-match `ACCEPT` for the gate's own uid, catch-all `DROP`. `Setup` applies them via the `Firewall` adapter, lists both the v4 and v6 tables back, and `CheckListing` re-parses each (`iptables -S OUTPUT`) to confirm both `ACCEPT`s precede the `DROP` before it lets `PrivDropper.Drop` run — a half-applied firewall aborts with the process still root, so it never serves fail-open. This is the egress fail-closed invariant: the sandbox shares the gate's netns, and only the gate's uid may reach the network. |
+| `firewall.go` | `Ruleset(uid)` — the three OUTPUT rules, order load-bearing (first-match-wins): loopback `ACCEPT` (all intra-netns loopback), owner-match `ACCEPT` for the gate's own uid, catch-all `DROP`. `Setup` (which refuses a root gate uid outright) applies them via the `Firewall` adapter — whose contract is to *replace* the chain (flush, then append), so the state is deterministic and not reliant on a fresh netns — lists both the v4 and v6 tables back, and `CheckListing` requires each chain to be *exactly* those three rules, token-for-token (a foreign `ACCEPT` ahead of the `DROP`, or a rule that only resembles ours — a colliding uid prefix, `-o lo0`, `! -o lo` — is rejected) before it lets `PrivDropper.Drop` run; a firewall that did not take aborts with the process still root, so it never serves fail-open. This is the egress fail-closed invariant: the sandbox shares the gate's netns, and only the gate's uid may reach the network. |
 | `gaterun.go` | `Convert` maps a fetched `gateconfig.Config` to the transport-layer `gate.Config` (a credential's networking `unrestricted` becomes the `egress` engine's per-credential `Unrestricted`). `SwappableHandler` is the `http.Handler` the server binds: an `atomic.Pointer[gate.Gate]` the fetch loop swaps under live traffic, wrapping each request in an `egress_request` span (`semconv` HTTP method + server address). |
 | `loop.go` | `RunFetchLoop` — fetch immediately, then on a ticker: a good config swaps in a fresh `gate.Gate`; `ErrUnauthorized` (revoked token / archived session) swaps in a deny-all gate and returns terminal so the binary shuts down; any transient error keeps the last-known-good gate serving; ctx-cancel returns nil. |
 
@@ -500,7 +500,11 @@ and does not share the `service.Run` shape; its testable logic lives in `interna
 the thin exec/`syscall` adapter half (iptables shell-out, `setuid`/`setgid`/`setgroups` privilege
 drop). `CONTROLPLANE_URL` + `GATE_TOKEN` (its `gtk_` bearer) are required; `GATE_ADDR` (loopback
 proxy listen, default `127.0.0.1:15080`), `GATE_UID`/`GATE_GID` (the owner-match + drop identity,
-default 65532), and `GATE_FETCH_INTERVAL` (default 30s) are optional. It applies and verifies the
+default 65532), and `GATE_FETCH_INTERVAL` (default 30s) are optional. Those are validated as the
+security controls they are: `GATE_ADDR` must be loopback (the proxy is unauthenticated and
+credential-bearing), `GATE_UID`/`GATE_GID` must be non-root (a root drop is a silent no-op), and the
+interval must be positive; each config fetch is also bounded by a client timeout so a stalled control
+plane cannot suspend the revocation check. It applies and verifies the
 firewall before anything listens, so the Docker `HEALTHCHECK` — the binary's own `-healthcheck`
 probe, which dials the proxy port — cannot pass until egress is fail-closed, making it the sidecar's
 admission signal. It ships as a separate image (`--target gate` — iptables + a dedicated uid), wired
