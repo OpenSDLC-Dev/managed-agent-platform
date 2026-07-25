@@ -159,7 +159,10 @@ func (w *Worker) Run(ctx context.Context) error {
 // recovers. Force-stopping it would instead move it to the terminal stopped
 // state that no reclaim recovers, permanently stranding the session's
 // outstanding tool work over a single hiccup. Run's backoff keeps a genuinely
-// un-ackable item from hot-looping.
+// un-ackable item from hot-looping. A 404 here is the one non-transient case: an
+// ack so delayed that the control plane re-offered the item under a fresh
+// identity (#62), which another worker now owns — dropping it and re-polling,
+// which the backoff already does, is exactly right.
 func (w *Worker) pollAck(ctx context.Context) (*sdk.BetaSelfHostedWork, map[string]string, error) {
 	var resp *http.Response
 	work, err := w.client.Beta.Environments.Work.Poll(ctx, w.cfg.EnvironmentID, sdk.BetaEnvironmentWorkPollParams{
@@ -235,9 +238,10 @@ const (
 //     now own the item and stopping it could terminate that worker's run. This
 //     !lostLease guard covers the common case; the tightest residual race (a
 //     worker whose delayed ack let a second worker reclaim, then completes before
-//     its own claim-beat 412s) is NOT closed by it and cannot be closed by the
-//     reclaim alone — the wire's stop carries no ownership proof, so fully
-//     closing it needs a fresh work identity per reclaim (a later hardening).
+//     its own claim-beat 412s) is not closed by it — the wire's stop carries no
+//     ownership proof — and is closed on the control-plane side instead, where
+//     every re-hand-out mints a fresh work id (#62): once another worker holds
+//     the item, a stop under the identity this one was handed can only 404.
 //   - reclaim: leave the item live (mirrors the executor completing only when
 //     faultErr is nil).
 func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, parent map[string]string) {
@@ -489,6 +493,9 @@ func (w *Worker) sessionLive(ctx context.Context, sessionID string) (bool, error
 // forceStop stops the work item, ignoring a 409 (already stopping/stopped, which
 // the reference also ignores). It runs on a fresh background context so the item
 // is still stopped even when the worker is shutting down and ctx is cancelled.
+// A 404 is logged rather than ignored: it means this worker hung long enough for
+// the control plane to re-offer its item under a fresh identity (#62), so the
+// stop reached nothing — which is the point, but is worth an operator's eye.
 //
 // Stop answers a bodiless 204, but the generated method is typed
 // *BetaSelfHostedWork, so the SDK's strict decoder fails a successful call with

@@ -449,6 +449,76 @@ func TestWorkerReclaimsStrandedItem(t *testing.T) {
 	waitExit(t, cancel, errc)
 }
 
+// TestStaleWorkerStopCannotStrandTheReplacement is #62's acceptance, over the
+// real wire: a hung-then-revived worker force-stops its item under the identity
+// it was handed, while a replacement worker is mid-tool on the same item under
+// the fresh identity the reclaim minted. The stale stop 404s instead of landing
+// on the replacement's live item, so the run finishes, its result is posted, and
+// the session resumes — where reusing the id would have re-stranded it.
+func TestStaleWorkerStopCannotStrandTheReplacement(t *testing.T) {
+	ctx := context.Background()
+	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	h := newHarness(t, sb)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+
+	// A worker polls, acks and claims the lease — then hangs, and its lease lapses.
+	q := queue.New(h.pool)
+	stale, err := q.Poll(ctx, h.envID, time.Minute)
+	if err != nil || stale == nil {
+		t.Fatalf("seed poll: %+v %v", stale, err)
+	}
+	if _, err := q.Ack(ctx, h.envID, stale.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Heartbeat(ctx, h.envID, stale.ID, queue.NoHeartbeat, 30); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, stale.ID.String()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The replacement reclaims the item and is held mid-tool, holding the lease.
+	w, done := h.newWorker(Config{})
+	cancel, errc := runWorker(w)
+	defer cancel() // so a failure below still unblocks the held tool via ctx
+	<-sb.entered
+	if got := h.workID(t); got == stale.ID.String() {
+		t.Fatalf("reclaim re-offered the stale work id %s", got)
+	}
+
+	// The stale worker revives and force-stops under its old identity.
+	var raw *http.Response
+	_, err = h.client.Beta.Environments.Work.Stop(ctx, stale.ID.String(), sdk.BetaEnvironmentWorkStopParams{
+		EnvironmentID:                 h.envID.String(),
+		BetaSelfHostedWorkStopRequest: sdk.BetaSelfHostedWorkStopRequestParam{Force: sdk.Bool(true)},
+	}, option.WithResponseBodyInto(&raw))
+	if raw != nil && raw.Body != nil {
+		_ = raw.Body.Close()
+	}
+	if !isStatus(err, 404) {
+		t.Fatalf("stale force-stop = %v, want a 404 (its identity is gone)", err)
+	}
+
+	close(sb.gate) // release the held tool: the replacement finishes its run
+	waitDone(t, done)
+
+	if got := len(h.results(t)); got != 1 {
+		t.Errorf("user.tool_result = %d, want 1 (the replacement's run was not stopped)", got)
+	}
+	if sb.files["/workspace/out.txt"] != "hi" {
+		t.Errorf("sandbox file = %q, want the replacement's tool to have run", sb.files["/workspace/out.txt"])
+	}
+	if got := h.liveModelTurns(t); got != 1 {
+		t.Errorf("model_turn = %d, want 1 (the completed set resumes the session)", got)
+	}
+	if got := h.workState(t); got != "stopped" {
+		t.Errorf("work item state = %q, want stopped (the replacement completed it)", got)
+	}
+	waitExit(t, cancel, errc)
+}
+
 // TestWorkerEmptyQueueIdlesUntilCancel: with no work, the worker polls, finds
 // nothing, and idles — returning nil promptly once cancelled, having provisioned
 // nothing.

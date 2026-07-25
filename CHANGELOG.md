@@ -29,6 +29,32 @@ copy of an entry here.
   deliberately-split-out follow-ons stay open as their own issues: BYOC gate delivery (#165) and
   TLS-terminating in-sandbox substitution (#166).
 
+### Fixed
+
+- **A hung-then-revived BYOC worker can no longer force-stop the item a replacement worker is
+  running** ([#62](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/62)). The wire's
+  work lifecycle carries no ownership proof — stop's body is `{force}` only, and the work object
+  has no generation or version field — so while a reclaim re-offered the **same** `work_` id, a
+  worker that hung past its lease and then finished its tools before its next heartbeat could `412`
+  would force-stop whatever worker held the item next, moving it to the terminal `stopped` state no
+  reclaim recovers and re-stranding the session's outstanding tool work. The lease loop's
+  `!lostLease` guard narrowed that window but could not close it, and the wire offers nothing to
+  guard the call with. The fix rotates the identity instead: `queue.Poll` now mints a fresh `work_`
+  id every time it **re**-offers an item — both the lapsed un-acked reservation and the
+  dead-worker `starting`/`active` reclaim — so the stale worker's stop, ack and heartbeat all
+  address an id that no longer exists (`404`, which its own loop already reads as a lost lease)
+  while the replacement's item is untouched. The **first** hand-out keeps the id `Enqueue` minted,
+  so the ordinary poll → ack → run → stop lifecycle stays id-stable; a rotation is the same
+  row under a new name, carrying its metadata, trace context and `created_at` over unchanged
+  (`work_items.id` has no incoming foreign key). Ids are opaque to the client, so no wire field,
+  status or shape changes — the divergence registry records the one observable delta, that a
+  client holding an id whose hand-out lapsed must re-poll rather than reuse it. The platform
+  executor's `Claim` path needed nothing: its lease-equality proof already closed the same race
+  there. Covered by a queue-level test of the whole stale-identity set (stop, ack and heartbeat
+  under the old id all not-found while the replacement stays `active`) and an end-to-end worker
+  test that force-stops over the real wire under the old id while the replacement is held
+  mid-tool, then shows the run finishing, its result posted and the session resuming.
+
 ### Security
 
 - **The pinned actions moved to their current majors** (Dependabot's first batch:

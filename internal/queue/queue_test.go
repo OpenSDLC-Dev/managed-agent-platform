@@ -384,14 +384,18 @@ func TestPollReservesWithoutTransition(t *testing.T) {
 	if got, err := q.Poll(ctx, envID, time.Minute); err != nil || got != nil {
 		t.Fatalf("poll inside reclaim window: %+v %v", got, err)
 	}
-	// Reservation lapses: a later poll reclaims the same still-queued item.
+	// Reservation lapses: a later poll re-offers the same still-queued item — the
+	// same row, under a fresh identity (TestEveryReHandOutMintsAFreshWorkIdentity).
 	time.Sleep(60 * time.Millisecond)
 	re, err := q.Poll(ctx, envID, time.Minute)
 	if err != nil || re == nil {
 		t.Fatalf("poll after reclaim window: %+v %v", re, err)
 	}
-	if re.ID != w.ID {
-		t.Errorf("reclaimed a different item: %s vs %s", re.ID, w.ID)
+	if re.SessionID != w.SessionID || !re.CreatedAt.Equal(w.CreatedAt) {
+		t.Errorf("re-offered a different item: %+v vs %+v", re, w)
+	}
+	if re.ID == w.ID {
+		t.Errorf("re-offered under the same id %s, want a fresh one", re.ID)
 	}
 }
 
