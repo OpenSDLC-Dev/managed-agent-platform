@@ -15,6 +15,14 @@ copy of an entry here.
 
 ### Changed
 
+- **The `/code-review` reviewer pin moved to Opus 5** (`.claude/skills/run-reviews/SKILL.md`,
+  CLAUDE.md), superseding the Opus 4.8 pin recorded when the review procedure moved into that
+  skill. The mechanics are unchanged — edit the persisted workflow script, `model: "opus"` on
+  every `agent()` opts object, a fresh run, never `resumeFromRunId` — so only the model the alias
+  must land on changes: step 4's confirmation is now `claude-opus-5`, with an explicit fallback for
+  an alias that resolves to an older generation. The pin exists because a reviewer weaker than the
+  implementer finds nothing, and its silence reads like a clean bill of health.
+
 - **Plan 12 (vaults + egress-time credential injection, #50) is complete and archived.** The
   end-to-end acceptance passed on the full compose stack driven by the real `ant` CLI: an
   `environment_variable` credential attached to a `limited` session, a bash tool call curling an
