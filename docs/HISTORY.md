@@ -1097,3 +1097,100 @@ finding's deeper point — that `wantFields` checks presence only, so no test wo
 renamed field — is a property of the test harness that predates this branch and is not this bump's to
 redesign; the get path's `secret` assertion was added because that one was a genuine gap between the
 record's wording and the test.
+
+## Sandbox file primitives (#71) — review-hardening record (2026-07-26)
+
+The fix itself is in [CHANGELOG.md](../CHANGELOG.md); this is what the dual review changed about it,
+and what it decided not to change.
+
+**The setup.** Codex on `gpt-5.6-sol` at the config's `ultra` effort, told explicitly not to run the
+test suite (an earlier Codex pass in this session left a background `make verify` running in the
+worktree, contending with the verifier's own for the Docker daemon and the kind cluster). The
+verifier ran on **Opus 5, not its pinned `claude-fable-5`**: that model's quota was exhausted
+mid-session and the first dispatch died on it. The `run-reviews` skill's "do not override to opus"
+note dates from when the quota problem was believed over; a verifier that cannot run at all is worse
+than one on a different strong model, and the override is disclosed on the PR. The Claude-side
+`/code-review` is `disable-model-invocation` and was not run.
+
+**What the review proved that the implementation had not.** The verifier replayed HEAD's tests
+against `main`'s backends — every new contract row red on both, reproducing the quoted messages
+including the destroyed directory — then broke six specific things in throwaway copies (dropping
+`[ -h ]` from the walk, flattening the walk to one level, dropping either backend's `-d` guard,
+making `discard` a no-op, deleting the `fileFault` case) and confirmed each breaks a test. That is
+the evidence that the new rows are not tautologies, and it is not something the implementer's own
+green run can establish.
+
+**Fixed in the same PR.** Both reviewers arrived at the same seam from different directions:
+
+- **The path classifier resolved `dirname` through the agent's PATH.** The sandbox filesystem is the
+  agent's, so `dirname` is the agent's too. Measured against the pre-fix shell with a `dirname` that
+  echoes its argument: the walk was **still spinning after 4 seconds**, and the file-tool exec that
+  runs it carries no timeout of its own. Rewritten in bash builtins alone (`case`, `${p%/*}`), which
+  no file on PATH can shadow. `mv` and `rm` have no builtin equivalent and remain resolvable — an
+  agent can still make its *own* file tools misreport — which is the sandbox being the agent's own
+  rather than a boundary between sessions, and is now what the docs say.
+- **A component whose name ends in a newline was walked as its newline-less sibling**, because
+  `$(dirname …)` strips trailing newlines and the tools accept such names (only NUL is rejected).
+  Confirmed against the old shell: it called `…/block\n/x/y` clear while a regular file was in the
+  way. The builtin expansion is byte-exact, and the k8s read path stopped computing a parent through
+  a second substitution.
+- **`[ -d target ]` followed by `mv` is a TOCTOU.** Something in the sandbox can make the target a
+  directory in between, and then `mv` puts the file *inside* it and exits 0 — a reported success
+  that wrote nothing where the caller asked. Both backends now ask again after the move, remove what
+  went in, and refuse the same way. The race itself cannot be interleaved from a test, so the k8s
+  script test stages its *outcome* instead: a shimmed `mv` on PATH that does what a racing `mv`
+  would — create the target as a directory and move the file inside it — and the script is held to
+  answering `ErrIsDirectory` and leaving nothing behind.
+- **The interface promised more than the rename delivers.** A symlink *to a directory* satisfies
+  `-d`, so it is refused as a directory rather than supplanted. The docs were corrected and a
+  contract row now pins what both backends actually do with a symlink target.
+- **Two documents claimed the file primitives were shell-free** — `docs/ARCHITECTURE.md`'s toolset
+  row, and the bash tool's restart comment, which justified writing the restart's `head` through
+  `WriteFile` on exactly that ground. The k8s backend has read and written through a script since it
+  existed; this change put docker in the same position. Both now say what is true.
+- **Residue and coverage.** Docker sheds its landed temporary file on the two failure paths that
+  kept it, and a fake-daemon test pins the buffered case the live suite cannot reach (the streaming
+  half is reachable through a short src; the buffered half needs a put that fails *after* landing
+  bytes, which a real daemon will not do on demand).
+
+**A second verification pass over the hardening itself.** Re-dispatched after those fixes, the
+verifier returned PASS with eight findings, none of them behavior: three of the branch's own new
+guards had nothing that failed without them (both docker discards, and the post-move recheck), a read
+row for a newline-named blocker existed only for the shared shell and not for the k8s script, and
+four written claims were imprecise — the permission-bit comparison attributed to "the reference"
+rather than to the harness snapshot it came from, a CHANGELOG sentence placing the newline and
+`dirname` tests in the k8s package where they are not, the shared shell's test helper claiming every
+backend passes a path as an argument when docker interpolates it shell-quoted into the script text,
+and a coverage figure quoted from an earlier run. All eight are answered; every assertion added for
+the first three was checked by removing the guard it covers and watching that test alone go red.
+That a hardening pass needs its own hardening pass is the point of the rule that the implementer
+never certifies their own work — these were guards written *in response to a review*, and they still
+arrived untested.
+
+**Evaluated, and deliberately left for their own issues.** Each is real and measured; none is what
+#71 asked for, and each would widen the change in a way a bug fix should not:
+
+- **[#204] The target's permission bits are not preserved** (`755` → `644` on k8s; docker's tar
+  header has always been a fixed `0644`, so this is convergence rather than a one-sided regression).
+  The Claude Code harness's own atomic write stats the target and chmods the temp before renaming
+  (`src/utils/file.ts:392,430,437` in the local snapshot — a harness-design observation, which is all
+  that source is authority for, and not a wire behavior of the managed-agents reference). Doing the
+  same means both backends or neither — otherwise the contract suite is back to papering over a
+  divergence — and it grows the docker image contract by a `stat -c`.
+- **[#205] A target that cannot be renamed onto fails unclassified.** A bind-mounted file
+  (`/etc/hosts`) went from a k8s success to `exit 1` with no sentinel, which is #71's own failure
+  mode one path further down. Device nodes are the one target the two backends still answer
+  differently (k8s replaces the node; docker cannot land its temp under a mounted `/dev`). The two
+  candidate shapes — classify it, or fall back to writing through where a rename is impossible —
+  trade against the atomicity guarantee itself, which is a decision, not a fix.
+- **[#206] A docker write costs one extra exec**: 2.2 ms → 15.3 ms per buffered write, measured on a
+  warm directory. Skill materialization writes one file at a time and `internal/skills` accepts
+  10,000 members, so a large-but-valid skill pays it 10,000 times. The seam that fixes it is a bulk
+  write on `sandbox.Sandbox` — a new interface method and a new contract row.
+
+**Reproducing the acceptance on macOS.** The gated k8s contract rows need
+`MAP_K8S_HOST_ADDR=host.docker.internal`. `k8sHostAddr`'s kind branch returns the docker network's
+IPv4 gateway, which on darwin lives inside the Docker VM rather than on the host where the fixture's
+stub listens; the row fails identically on `main` without the override (verified at 79b8ac6) and
+passes in ~14 s with it. The cluster must also be created from a shell with no `HTTP_PROXY` set, or
+kind bakes it into the node and nothing can be pulled.
