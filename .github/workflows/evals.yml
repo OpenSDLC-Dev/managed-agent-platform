@@ -1,0 +1,90 @@
+name: evals
+
+# The live end-to-end eval suite, on a schedule.
+#
+# Phase 1 of the eval system ships as `make eval`, which a developer runs by hand
+# against the endpoint in their .env. That is a real regression net, but one that
+# only fires when someone remembers to pull it — so a break anywhere along the
+# API -> brain -> queue -> executor -> sandbox path can sit undiscovered until the
+# next manual run. This workflow is what makes it surface within a day.
+#
+# Deferred from plan 02 until a maintainer could set the repo secrets it needs;
+# filed and delivered as #96. It calls a real model and starts real containers,
+# so every run costs money — hence daily rather than per-push, and one at a time.
+on:
+  schedule:
+    # 04:17 UTC daily. Off the hour deliberately: GitHub's scheduler is most
+    # backed up at :00, and a run delayed by an hour is one whose failure is
+    # harder to pin on the day's commits.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One eval run at a time: a run takes tens of minutes, spends real money against
+# a live endpoint, and two concurrent runs would contend for the same runner's
+# Docker daemon. Queued rather than cancelled, so a manual dispatch never kills
+# an in-flight nightly run and loses its artifacts.
+concurrency:
+  group: evals
+  cancel-in-progress: false
+
+jobs:
+  evals:
+    name: evals
+    runs-on: ubuntu-latest
+    # `make eval` caps the test binary at 60m, and that is the timeout worth
+    # hitting — it names the trial that hung and still writes the artifacts. This
+    # is only the outer backstop, so it must sit above it.
+    timeout-minutes: 75
+    env:
+      # The endpoint, from repo secrets and nowhere else. No .env is written here,
+      # on purpose: internal/modeltest resolves MODEL_* from the environment first
+      # and only falls back to the repo-root file, so in CI these four *are* the
+      # whole configuration. An unset secret renders as the empty string, which
+      # modeltest reads as an explicit "unset" no file can quietly refill.
+      MODEL_PROTOCOL: ${{ secrets.MODEL_PROTOCOL }}
+      MODEL_BASE_URL: ${{ secrets.MODEL_BASE_URL }}
+      MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+      MODEL_ID: ${{ secrets.MODEL_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The command lives in the Makefile — the single executable source — and it
+      # scopes RUN_EVALS=1 to this one invocation.
+      #
+      # There is deliberately no "are the secrets set?" precheck step. Once
+      # RUN_EVALS is set, modeltest.Endpoint fails rather than skips, naming every
+      # variable it wanted; a precheck would be a second copy of that rule, and
+      # the tempting shape for one — skip when unconfigured — is exactly the
+      # failure this workflow exists to prevent: green while testing nothing.
+      # So until the four secrets are configured, this job is red by design.
+      - name: eval suite (real model endpoint + Docker sandboxes)
+        run: make eval
+      # Artifacts are written whether the run was green or red, and a red run is
+      # the one whose transcripts someone needs — so both steps below run on
+      # failure too. Everything they publish has already been scrubbed of the API
+      # key and of the base URL's userinfo and query string on its way to disk
+      # (evals/report_test.go), which is what makes it safe to render one into a
+      # page every reader of this repo can see.
+      - name: render the summary
+        if: always()
+        run: |
+          if [ -f evals/artifacts/summary.md ]; then
+            cat evals/artifacts/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No summary.md was written: the run failed before any trial was recorded. See the step log above — an unset MODEL_* repo secret is the likeliest cause.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: upload the run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-artifacts
+          path: evals/artifacts/
+          # Absent exactly when the run failed before recording a trial, which the
+          # summary step above has already reported; this must not pile a second,
+          # less informative failure on top of it.
+          if-no-files-found: warn

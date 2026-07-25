@@ -27,6 +27,26 @@ copy of an entry here.
 
 ### Added
 
+- **Daily scheduled eval run** (`.github/workflows/evals.yml`, #96). The end-to-end eval suite now runs
+  in CI on a daily cron (plus `workflow_dispatch`) instead of only when a developer remembers to pull
+  it — a regression net that fires on demand does not catch the break that lands on a quiet Tuesday.
+  The job injects the repo secrets `MODEL_PROTOCOL` / `MODEL_BASE_URL` / `MODEL_API_KEY` / `MODEL_ID`
+  as the environment the suite reads (never written to a `.env`: `internal/modeltest` resolves the
+  environment first and only falls back to the file), runs `make eval` unchanged — the Makefile already
+  scopes `RUN_EVALS=1` to that one command — uploads `evals/artifacts/` as a run artifact, and renders
+  `summary.md` into the job's step summary. Both publishing steps run on failure too, since a red run
+  is the one whose transcripts someone needs; everything they publish was already scrubbed of the API
+  key and of the base URL's userinfo and query string on its way to disk. There is deliberately **no
+  "are the secrets configured?" precheck**: once `RUN_EVALS` is set, `modeltest.Endpoint` fails rather
+  than skips and names every variable it wanted, and the tempting shape for a precheck — skip when
+  unconfigured — is the exact failure this workflow exists to prevent, a net that reads green while
+  testing nothing. The consequence is deliberate: **the job is red until a maintainer sets the four
+  repo secrets.** It runs only on the schedule and on manual dispatch, so pull-request CI is untouched.
+  Serialized through a `concurrency` group (a run spends real money and wants the runner's Docker
+  daemon to itself) and capped at 75 minutes — above the suite's own 60-minute test timeout, so the
+  timeout that fires is the one that names the trial that hung and still writes the artifacts. This was
+  [plan 02](./docs/plan/02_evals-system.md)'s last deferred item, held back until the secrets existed.
+
 - **Docker provider provisions the egress-gate pair** (plan 12 slice 4, #50). The Docker sandbox
   backend now runs a per-session gate alongside the sandbox for any session that is `limited` or
   vault-attached. The gate is created **first** on the deploy network (`SANDBOX_DOCKER_GATE_NETWORK`,

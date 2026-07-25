@@ -622,4 +622,8 @@ extraction. The merge gate is `make verify`
 statement coverage** over the logic packages of `./internal/...`). On top sits the eval
 system (`make eval`, [plan 02](./plan/02_evals-system.md)): ten deterministic regression
 tasks driving whole sessions through the public API against a real model, graded
-code-only with per-trial nonces and Platform/Model/Either failure classing.
+code-only with per-trial nonces and Platform/Model/Either failure classing. It stays out
+of the merge gate — it spends money and minutes — but a scheduled workflow
+(`.github/workflows/evals.yml`, daily plus manual dispatch) runs it against repo `MODEL_*`
+secrets, so a break in the whole-session path surfaces within a day instead of at
+whoever's next manual run.
