@@ -15,8 +15,10 @@
 //	EXECUTOR_POLL_INTERVAL   idle queue poll, Go duration (default "500ms")
 //	CONTROLPLANE_URL         where a session's egress gate fetches its config;
 //	                         set with EXECUTOR_GATE_IMAGE to opt into the gate.
-//	                         Unset: no gate runs and each backend keeps its own
-//	                         fail-closed networking (Docker limited -> no egress)
+//	                         Unset: no gate runs; a gate-wanting session (limited
+//	                         or vault-attached) falls back to the backend's own
+//	                         fail-closed networking (Docker limited -> no egress),
+//	                         while unrestricted sessions network directly as before
 //	EXECUTOR_GATE_IMAGE      the egress-gate container image (built with
 //	                         `docker build --target gate`); opts into the gate
 //	                         together with CONTROLPLANE_URL

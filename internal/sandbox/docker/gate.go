@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -96,15 +97,15 @@ func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (id string
 	// Won the create. Persist the token before starting, so the gate authenticates
 	// its first config fetch; on any failure remove the container we just created.
 	if err := spec.Gate.TokenMinter.Persist(ctx, spec.SessionID, token); err != nil {
-		p.removeDetached(id)
+		p.removeDetached(ctx, id)
 		return "", false, err
 	}
 	if err := p.api.startContainer(ctx, id); err != nil {
-		p.removeDetached(id)
+		p.removeDetached(ctx, id)
 		return "", false, err
 	}
 	if err := p.waitGateHealthy(ctx, id); err != nil {
-		p.removeDetached(id)
+		p.removeDetached(ctx, id)
 		return "", false, err
 	}
 	return id, true, nil
@@ -137,12 +138,18 @@ func (p *Provider) waitGateHealthy(ctx context.Context, id string) error {
 }
 
 // removeDetached best-effort removes a container on a cleanup path (an orphaned
-// gate or a sandbox that failed to start), under a fresh short-lived context so a
-// cancelled provision still tears down what it created.
-func (p *Provider) removeDetached(id string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// gate or a sandbox that failed to start). It runs under context.WithoutCancel so
+// an already-cancelled provision still tears down what it created, while keeping
+// the caller's trace context so the removal correlates to the provision it
+// unwinds. A failure is logged, not returned — the caller is already unwinding a
+// prior error, and the standalone reaper is the race-safe long-term orphan owner.
+func (p *Provider) removeDetached(ctx context.Context, id string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	_ = p.api.removeContainer(ctx, id)
+	if err := p.api.removeContainer(ctx, id); err != nil && !statusIs(err, 404) {
+		slog.WarnContext(ctx, "docker: best-effort container removal failed; leaving orphan for the reaper",
+			"container", id, "error", err)
+	}
 }
 
 // gateConfig builds the gate container's config: the gate image on the deploy

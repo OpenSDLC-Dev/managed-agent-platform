@@ -185,7 +185,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 			// issue) is the race-safe long-term owner of orphan cleanup.
 			defer func() {
 				if err != nil {
-					p.removeDetached(gateID)
+					p.removeDetached(ctx, gateID)
 				}
 			}()
 		}
@@ -210,7 +210,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		// — a stale pairing (a recreated gate, or a pre-gate `bridge` sandbox from
 		// before this session was gated). Remove it and recreate it in the current
 		// gate's namespace rather than adopt a sandbox with the wrong egress path.
-		if rerr := p.api.removeContainer(ctx, info.ID); rerr != nil && !statusIs(rerr, 404) {
+		if rerr := removeIgnoring404(ctx, p.api, info.ID); rerr != nil {
 			return nil, rerr
 		}
 	case !statusIs(ierr, 404):
@@ -252,7 +252,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 			// references a gate this call is about to tear down (the deferred gate
 			// cleanup), so a stopped leftover would poison every later retry —
 			// adopting it and failing to start against the vanished gate forever.
-			p.removeDetached(id)
+			p.removeDetached(ctx, id)
 		}
 		return nil, serr
 	}
@@ -805,13 +805,12 @@ func (c *container) mkdirAll(ctx context.Context, dir string) error {
 // endpoint, so no message can be spoofed into it. The gate is removed after the
 // sandbox — the sandbox shares the gate's netns, so the gate must outlive it —
 // and both removals are attempted even if the first errors, so a stuck sandbox
-// never strands its gate.
+// never strands its gate. When both fail, both errors surface (errors.Join) so a
+// stuck gate is never masked by the sandbox error.
 func (c *container) Destroy(ctx context.Context) error {
 	err := removeIgnoring404(ctx, c.api, c.id)
 	if c.gateID != "" {
-		if gerr := removeIgnoring404(ctx, c.api, c.gateID); err == nil {
-			err = gerr
-		}
+		err = errors.Join(err, removeIgnoring404(ctx, c.api, c.gateID))
 	}
 	return err
 }

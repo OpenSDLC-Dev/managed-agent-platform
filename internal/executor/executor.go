@@ -65,11 +65,12 @@ type Config struct {
 	// gate. A session wants a gate when its networking is `limited` or it has
 	// vaults attached; its gate container (GateImage) fetches that session's egress
 	// config from ControlplaneURL. When both are set, a gate-wanting session gets a
-	// gate; when either is empty, no gate is requested and the backend keeps its
-	// own fail-closed networking (Docker `limited` → no egress, K8s → its
-	// init-container isolation, vault-attached → inert placeholders) — the pre-gate
-	// behavior, so an un-opted-in deployment is unchanged rather than faulted. See
-	// gateSpec.
+	// gate; when either is empty, no gate is requested and a gate-wanting session
+	// keeps the backend's own fail-closed networking (Docker `limited` → no egress,
+	// K8s → its init-container isolation, vault-attached → inert placeholders) — the
+	// pre-gate behavior, so an un-opted-in deployment is unchanged rather than
+	// faulted. An unrestricted, vault-less session never wanted a gate and networks
+	// directly regardless. See gateSpec.
 	ControlplaneURL string
 	GateImage       string
 	// OTelEndpoint and OTelInsecure are the deployment's OTLP collector config,
