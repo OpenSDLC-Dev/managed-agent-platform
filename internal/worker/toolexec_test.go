@@ -181,10 +181,11 @@ func (h *harness) suspend(t *testing.T, uses ...string) []domain.Event {
 	return out
 }
 
-// answer appends a result for one tool use, as a prior pass would have left it.
-// typ selects which answering type: user.tool_result (a worker's) or
-// agent.tool_result (the platform's, and what a denial synthesizes).
-func (h *harness) answer(t *testing.T, typ domain.EventType, useID domain.ID) {
+// answerAsPlatform appends the agent.tool_result that answers one tool use — the
+// shape a denied confirmation synthesizes, and the other of the two types that
+// count as answering (the worker's own user.tool_result is exercised by
+// answeredHistory and TestAlreadyAnsweredIsNoOp).
+func (h *harness) answerAsPlatform(t *testing.T, useID domain.ID) {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
 		"tool_use_id": useID.String(),
@@ -195,7 +196,7 @@ func (h *harness) answer(t *testing.T, typ domain.EventType, useID domain.ID) {
 		t.Fatal(err)
 	}
 	if _, err := h.log.AppendWith(context.Background(), h.sid,
-		[]events.NewEvent{{Type: typ, Payload: body}}, events.AppendOptions{}); err != nil {
+		[]events.NewEvent{{Type: domain.EventAgentToolResult, Payload: body}}, events.AppendOptions{}); err != nil {
 		t.Fatalf("answer %s: %v", useID, err)
 	}
 }
@@ -512,7 +513,7 @@ func TestOutOfOrderAnswerStillRunsTheEarlierTool(t *testing.T) {
 	h := newHarnessWrapped(t, sb, nil)
 	h.answeredHistory(t, 3)
 	uses := h.suspend(t, writeUse("a.txt", "one"), writeUse("b.txt", "two"))
-	h.answer(t, domain.EventAgentToolResult, uses[1].ID) // the second use, answered first
+	h.answerAsPlatform(t, uses[1].ID) // the second use, answered first
 
 	if err := h.run(); err != nil {
 		t.Fatalf("RunSessionTools: %v", err)

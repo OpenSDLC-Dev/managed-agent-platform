@@ -104,11 +104,13 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 
 // toolScanPageSize is how many events one page of the scan below requests. The
 // walk needs the trailing turn only — its tool uses plus whatever already
-// answers them, at most 2N+1 events for a turn of N parallel tools — so one page
-// covers any realistic batch in a single round trip while capping what a page
-// over-reads (tool inputs and results carry file contents). It is sent
-// explicitly rather than left to the server's default: the bound is this
-// worker's, and it holds against any wire-compatible control plane.
+// answers them, at most 2N+1 events for a turn of N parallel tools — so a single
+// page covers a fresh suspension of up to 19 parallel tools, and a wider turn
+// (or a reclaim whose answered results are on the wire too) simply pages on. The
+// size caps what one page over-reads, which is the cost that matters: tool
+// inputs and results carry file contents. It is sent explicitly rather than left
+// to the server's default: the bound is this worker's, and it holds against any
+// wire-compatible control plane.
 const toolScanPageSize = 20
 
 // unansweredToolUses reads the session's event log over the wire and returns the
@@ -132,15 +134,23 @@ const toolScanPageSize = 20
 // and there is no unanswered-only wire endpoint to ask instead. It bounds the
 // read by walking newest-first and stopping at the trailing turn, rather than
 // paging the session's whole tool history (#76). Two platform invariants make
-// that exact: the brain commits a turn's tool_use events in ONE append
-// (brain.commitTurn), and no later turn's uses reach the log until every
-// outstanding one is answered (events.HasUnansweredToolUse gates the resume).
-// So in this three-type stream the unanswered set is always the newest
-// contiguous run of tool uses, and the first result older than that run is the
-// boundary — everything beyond it is answered. A result always outranks the use
-// it answers (per-session seq is assigned under the session row lock, and a
-// result may only reference a committed use), so walking down, every use meets
-// its answer first.
+// that exact for a turn that suspended on its tools: the brain commits a turn's
+// tool_use events in ONE append (brain.commitTurn), and no later turn's uses
+// reach the log until every outstanding one is answered — every enqueue of a
+// model_turn that follows tool work is gated on events.HasUnansweredToolUse. So
+// in this three-type stream the unanswered set is the newest contiguous run of
+// tool uses, and the first result older than that run is the boundary —
+// everything beyond it is answered. A result always outranks the use it answers
+// (per-session seq is assigned under the session row lock, and a result may only
+// reference a committed use), so walking down, every use meets its answer first.
+//
+// One path can strand a use outside that run, and this scan deliberately does
+// not reach it: a turn whose stop reason is not tool_use commits its tool_use
+// events but enqueues no tool_exec, and the API's user.message-on-idle resume is
+// the one enqueue site not gated on the unanswered set (#181). No bounded scan
+// can find an arbitrarily old stranded use; the executor's DB-side diff still
+// returns one, so the two halves differ on that shape alone. Fixing it belongs
+// to the brain, not here.
 func unansweredToolUses(ctx context.Context, client sdk.Client, sessionID string) ([]toolUse, error) {
 	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
 		Types: []string{
