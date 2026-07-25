@@ -81,7 +81,7 @@ jobs:
           if [ -f evals/artifacts/summary.md ]; then
             cat evals/artifacts/summary.md >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'No summary.md was written: the run failed before any trial was recorded. See the step log above — an unset MODEL_* repo secret is the likeliest cause.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'No summary.md was written, so this run recorded no artifacts. The two ways that happens: it failed before any trial ran (an unset MODEL_* repo secret is the likeliest cause), or it wedged until a timeout. See the step log above.' >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: upload the run artifacts
         if: always()

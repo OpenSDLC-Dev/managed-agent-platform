@@ -626,4 +626,5 @@ code-only with per-trial nonces and Platform/Model/Either failure classing. It s
 of the merge gate — it spends money and minutes — but a scheduled workflow
 (`.github/workflows/evals.yml`, daily plus manual dispatch) runs it against repo `MODEL_*`
 secrets, so a break in the whole-session path surfaces on the next scheduled run instead of
-at whoever's next manual one.
+at whoever's next manual one. That job carries the same fail-not-skip rule: with the secrets
+unset it is red, never green-and-silent, so it is red until a maintainer configures them.

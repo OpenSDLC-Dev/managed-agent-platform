@@ -44,8 +44,10 @@ copy of an entry here.
   repo secrets.** It runs only on the schedule and on manual dispatch, so pull-request CI is untouched.
   Serialized through a `concurrency` group (a run spends real money and wants the runner's Docker
   daemon to itself) and capped at 75 minutes — above the suite's own 60-minute test timeout, so the
-  timeout that fires is the suite's, which panics naming the trial that hung. This was
-  [plan 02](./docs/plan/02_evals-system.md)'s last deferred item, held back until the secrets existed.
+  timeout that fires is the suite's, which panics naming the trial that hung.
+  [Plan 02](./docs/plan/02_evals-system.md) deferred this workflow to "its own PR once someone
+  configures the secrets"; it lands ahead of them instead, so the wiring is already there the moment
+  they are set. That plan's other leftovers — phase 1.5 on #30, sandbox reaping on #64 — stay open.
 
 - **Docker provider provisions the egress-gate pair** (plan 12 slice 4, #50). The Docker sandbox
   backend now runs a per-session gate alongside the sandbox for any session that is `limited` or
