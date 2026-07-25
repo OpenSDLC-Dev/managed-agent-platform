@@ -8,14 +8,17 @@ import (
 	"os/exec"
 	gopath "path"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -952,5 +955,398 @@ func TestDestroySurfacesError(t *testing.T) {
 	}
 	if err := sb.Destroy(context.Background()); err == nil {
 		t.Error("destroy with a failing delete (not a NotFound): want an error")
+	}
+}
+
+// mintRecorder records the mint-on-create seam's calls for the gated tests.
+type mintRecorder struct {
+	generated  int
+	persisted  []string // tokens handed to Persist
+	persistErr error
+}
+
+func (m *mintRecorder) Generate() string { m.generated++; return "gtk_unit_test_token" }
+
+func (m *mintRecorder) Persist(_ context.Context, _ domain.ID, token string) error {
+	if m.persistErr != nil {
+		return m.persistErr
+	}
+	m.persisted = append(m.persisted, token)
+	return nil
+}
+
+func gateSpecFixture(m *mintRecorder) *sandbox.GateSpec {
+	return &sandbox.GateSpec{
+		Image:           "map-gate:test",
+		ControlplaneURL: "http://cp.test:8080",
+		TokenMinter:     m,
+		OTelEndpoint:    "otel.test:4317",
+		OTelInsecure:    true,
+	}
+}
+
+// markPodsReadyOnCreate makes every created pod immediately report both the
+// sandbox container and the gate sidecar ready, so Provision's waitReady
+// returns at once against the fake clientset.
+func markPodsReadyOnCreate(p *Provider) {
+	cs := p.client.cs.(*fake.Clientset)
+	cs.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		pod := action.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		pod.UID = types.UID("uid-" + pod.Name) // the fake clientset assigns none
+		pod.Status = corev1.PodStatus{
+			Phase:                 corev1.PodRunning,
+			ContainerStatuses:     []corev1.ContainerStatus{{Name: containerName, Ready: true}},
+			InitContainerStatuses: []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}},
+		}
+		return false, nil, nil // fall through to the tracker with the status set
+	})
+}
+
+// TestPodSpecGatedShape pins the gated pod: the gate native sidecar (restart
+// Always, NET_ADMIN, exec healthcheck probes, the cmd/gate env contract), no
+// route-flush init container, and the hardened sandbox with proxy env.
+func TestPodSpecGatedShape(t *testing.T) {
+	p := fakeProvider()
+	spec := sandbox.Spec{
+		SessionID:  domain.ID("sesn_gated"),
+		Image:      "img",
+		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"api.example.com"}},
+		Env:        map[string]string{"API_KEY": "vltph_x"},
+		Gate:       gateSpecFixture(&mintRecorder{}),
+	}
+	pod := p.podSpec("map-sesn-gated", "/workdir", spec, "gtk_unit_test_token")
+
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("gated pod has %d init containers, want exactly the gate sidecar", len(pod.Spec.InitContainers))
+	}
+	g := pod.Spec.InitContainers[0]
+	if g.Name != gateContainerName || g.Image != "map-gate:test" {
+		t.Errorf("gate sidecar = %s/%s, want %s/map-gate:test", g.Name, g.Image, gateContainerName)
+	}
+	if g.RestartPolicy == nil || *g.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Error("gate sidecar is not a native sidecar (restartPolicy Always)")
+	}
+	if g.SecurityContext == nil || g.SecurityContext.Capabilities == nil ||
+		len(g.SecurityContext.Capabilities.Add) != 1 || g.SecurityContext.Capabilities.Add[0] != "NET_ADMIN" {
+		t.Errorf("gate sidecar capabilities = %+v, want exactly NET_ADMIN added", g.SecurityContext)
+	}
+	for _, probe := range []*corev1.Probe{g.StartupProbe, g.ReadinessProbe} {
+		if probe == nil || probe.Exec == nil || strings.Join(probe.Exec.Command, " ") != "/gate -healthcheck" {
+			t.Errorf("gate probe = %+v, want exec /gate -healthcheck", probe)
+		}
+	}
+	wantEnv := map[string]string{
+		"CONTROLPLANE_URL":            "http://cp.test:8080",
+		"GATE_TOKEN":                  "gtk_unit_test_token",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "otel.test:4317",
+		"OTEL_EXPORTER_OTLP_INSECURE": "true",
+	}
+	gotEnv := map[string]string{}
+	for _, e := range g.Env {
+		gotEnv[e.Name] = e.Value
+	}
+	for k, v := range wantEnv {
+		if gotEnv[k] != v {
+			t.Errorf("gate env %s = %q, want %q", k, gotEnv[k], v)
+		}
+	}
+	for _, c := range pod.Spec.InitContainers {
+		if c.Name == "netsetup" {
+			t.Error("gated pod still carries the route-flush init container (it would strand the gate)")
+		}
+	}
+
+	sb := pod.Spec.Containers[0]
+	if sb.SecurityContext == nil || sb.SecurityContext.AllowPrivilegeEscalation == nil || *sb.SecurityContext.AllowPrivilegeEscalation {
+		t.Error("gated sandbox allows privilege escalation")
+	}
+	drops := map[corev1.Capability]bool{}
+	if sb.SecurityContext != nil && sb.SecurityContext.Capabilities != nil {
+		for _, c := range sb.SecurityContext.Capabilities.Drop {
+			drops[c] = true
+		}
+	}
+	for _, c := range []corev1.Capability{"NET_RAW", "SETUID", "SETGID"} {
+		if !drops[c] {
+			t.Errorf("gated sandbox does not drop %s", c)
+		}
+	}
+	sbEnv := map[string]string{}
+	for _, e := range sb.Env {
+		sbEnv[e.Name] = e.Value
+	}
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		if sbEnv[k] != "http://127.0.0.1:15080" {
+			t.Errorf("sandbox %s = %q, want the gate loopback proxy", k, sbEnv[k])
+		}
+	}
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		if v, ok := sbEnv[k]; !ok || v != "" {
+			t.Errorf("sandbox %s = %q,%v, want forced empty", k, v, ok)
+		}
+	}
+	if sbEnv["API_KEY"] != "vltph_x" {
+		t.Errorf("sandbox vault placeholder lost: API_KEY = %q", sbEnv["API_KEY"])
+	}
+}
+
+// TestPodSpecUngatedUnchanged pins that a gate-less limited pod keeps the
+// pre-gate shape: route-flush init container, no proxy env, no securityContext.
+func TestPodSpecUngatedUnchanged(t *testing.T) {
+	p := fakeProvider()
+	spec := sandbox.Spec{
+		SessionID:  domain.ID("sesn_plain"),
+		Image:      "img",
+		Networking: domain.Networking{Type: domain.NetLimited},
+	}
+	pod := p.podSpec("map-sesn-plain", "/workdir", spec, "")
+	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].Name != "netsetup" {
+		t.Fatalf("ungated limited pod init containers = %+v, want the netsetup flush", pod.Spec.InitContainers)
+	}
+	sb := pod.Spec.Containers[0]
+	if sb.SecurityContext != nil {
+		t.Errorf("ungated sandbox grew a securityContext: %+v", sb.SecurityContext)
+	}
+	for _, e := range sb.Env {
+		if strings.Contains(strings.ToUpper(e.Name), "PROXY") {
+			t.Errorf("ungated sandbox has proxy env %s", e.Name)
+		}
+	}
+}
+
+// TestProvisionGatedMintsOnlyOnCreate: the create path generates and persists
+// exactly one token (the same one), and adopting an existing gated pod never
+// touches the seam.
+func TestProvisionGatedMintsOnlyOnCreate(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_mint")
+	p := fakeProvider()
+	markPodsReadyOnCreate(p)
+	spec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+	if _, err := p.Provision(context.Background(), spec); err != nil {
+		t.Fatalf("provision (create): %v", err)
+	}
+	if m.generated != 1 || len(m.persisted) != 1 || m.persisted[0] != "gtk_unit_test_token" {
+		t.Fatalf("create path minted %d/persisted %v, want exactly one matching token", m.generated, m.persisted)
+	}
+	if _, err := p.Provision(context.Background(), spec); err != nil {
+		t.Fatalf("provision (adopt): %v", err)
+	}
+	if m.generated != 1 || len(m.persisted) != 1 {
+		t.Errorf("adoption touched the mint seam: generated=%d persisted=%v", m.generated, m.persisted)
+	}
+}
+
+// TestProvisionGateShapeMismatchRebuilds: a pre-gate pod on a now-gated
+// session is replaced by a gated pod (and the reverse), minting only for the
+// gated create.
+func TestProvisionGateShapeMismatchRebuilds(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_reshape")
+	p := fakeProvider(readyPod(sid)) // pre-gate shape, ready
+	markPodsReadyOnCreate(p)
+	spec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+	if _, err := p.Provision(context.Background(), spec); err != nil {
+		t.Fatalf("provision (reshape to gated): %v", err)
+	}
+	pod, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get rebuilt pod: %v", err)
+	}
+	if !hasGateSidecar(pod) {
+		t.Error("rebuilt pod has no gate sidecar")
+	}
+	if m.generated != 1 || len(m.persisted) != 1 {
+		t.Errorf("reshape minted %d/persisted %d, want exactly one", m.generated, len(m.persisted))
+	}
+
+	// The reverse: the session no longer wants a gate — the gated pod is
+	// replaced by a plain one, with no further minting.
+	specUngated := sandbox.Spec{SessionID: sid, Image: "img"}
+	if _, err := p.Provision(context.Background(), specUngated); err != nil {
+		t.Fatalf("provision (reshape to ungated): %v", err)
+	}
+	pod, err = p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get re-rebuilt pod: %v", err)
+	}
+	if hasGateSidecar(pod) {
+		t.Error("ungated reshape kept the gate sidecar")
+	}
+	if m.generated != 1 {
+		t.Errorf("ungated reshape minted (generated=%d)", m.generated)
+	}
+}
+
+// TestProvisionGatedPersistFailureCleansUp: a pod whose token was never
+// recorded can only ever 401 — Provision must fail and remove it.
+func TestProvisionGatedPersistFailureCleansUp(t *testing.T) {
+	m := &mintRecorder{persistErr: errors.New("db down")}
+	sid := domain.ID("sesn_persistfail")
+	p := fakeProvider()
+	markPodsReadyOnCreate(p)
+	spec := sandbox.Spec{SessionID: sid, Image: "img", Gate: gateSpecFixture(m)}
+	if _, err := p.Provision(context.Background(), spec); err == nil {
+		t.Fatal("provision succeeded despite a token-persist failure")
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("pod with an unpersisted token was left behind (get err = %v)", err)
+	}
+}
+
+// TestProvisionGatedAdoptUnreadyReclaims: adopting a gated pod whose gate never
+// becomes ready must reclaim it, not just error. This is the crash-window
+// recovery: an executor that died between the pod create and the token Persist
+// leaves a gate that can only ever 401 and crash-loop, so the pod never turns
+// ready — without the reclaim every retry would re-adopt the same wedged pod
+// forever (the Docker twin recovers by rebuilding a stopped gate; a native
+// sidecar never presents as stopped).
+func TestProvisionGatedAdoptUnreadyReclaims(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_wedged")
+	p := fakeProvider()
+	spec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+
+	// The wedged pod: correct gated shape and session labels (built by podSpec
+	// itself), sandbox ready but the gate sidecar never Ready — the signature of
+	// an unpersisted token. The fake clientset assigns no UID, so set one for
+	// the reclaim's UID-guarded delete to match.
+	wedged := p.podSpec(podName(sid), sandbox.DefaultWorkdir, spec, "gtk_never_persisted")
+	wedged.UID = "uid-wedged"
+	wedged.Status = corev1.PodStatus{
+		Phase:                 corev1.PodRunning,
+		ContainerStatuses:     []corev1.ContainerStatus{{Name: containerName, Ready: true}},
+		InitContainerStatuses: []corev1.ContainerStatus{{Name: gateContainerName, Ready: false}},
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), wedged, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A short deadline stands in for waitReady's 2-minute timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	if _, err := p.Provision(ctx, spec); err == nil {
+		t.Fatal("adopting a never-ready gated pod: want an error")
+	}
+	if m.generated != 0 || len(m.persisted) != 0 {
+		t.Errorf("adoption touched the mint seam: generated=%d persisted=%v", m.generated, m.persisted)
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("wedged gated pod was not reclaimed (get err = %v); the session can never recover", err)
+	}
+}
+
+// TestProvisionGatedCreateRaceAdoptsWinner: a create that loses the 409 race
+// against a same-shape pod adopts the winner, and the loser's generated token
+// is discarded unpersisted — persisting it would revoke the winner's.
+func TestProvisionGatedCreateRaceAdoptsWinner(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_race")
+	p := fakeProvider()
+	spec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+
+	// The winner's pod, gated and ready, is in the tracker — but the loser's
+	// initial existence Get must 404 (it raced ahead of the winner's create),
+	// and its own create must answer 409. The get-reactor 404s exactly once.
+	winner := p.podSpec(podName(sid), sandbox.DefaultWorkdir, spec, "gtk_winners_token")
+	winner.UID = "uid-race-winner"
+	winner.Status = corev1.PodStatus{
+		Phase:                 corev1.PodRunning,
+		ContainerStatuses:     []corev1.ContainerStatus{{Name: containerName, Ready: true}},
+		InitContainerStatuses: []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}},
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), winner, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cs := p.client.cs.(*fake.Clientset)
+	first := true
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if first {
+			first = false
+			return true, nil, apierrors.NewNotFound(corev1.Resource("pods"), podName(sid))
+		}
+		return false, nil, nil
+	})
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("pods"), podName(sid))
+	})
+
+	if _, err := p.Provision(context.Background(), spec); err != nil {
+		t.Fatalf("losing the create race against a same-shape pod should adopt it: %v", err)
+	}
+	if m.generated != 1 {
+		t.Errorf("race loser generated %d tokens, want the 1 minted before its create", m.generated)
+	}
+	if len(m.persisted) != 0 {
+		t.Errorf("race loser persisted %v — that would revoke the winner's live token", m.persisted)
+	}
+}
+
+// TestProvisionGatedCreateRaceMismatchFailsClosed: losing the create race to a
+// pod of the wrong gate shape is a hard error — serving the mismatched pod
+// would run a gated session without its gate. The loser must not persist and
+// must not delete the winner (the next attempt replaces it).
+func TestProvisionGatedCreateRaceMismatchFailsClosed(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_racebad")
+	p := fakeProvider()
+	gatedSpec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+
+	// The winner raced in UNGATED while we are provisioning gated.
+	ungated := gatedSpec
+	ungated.Gate = nil
+	winner := p.podSpec(podName(sid), sandbox.DefaultWorkdir, ungated, "")
+	winner.UID = "uid-racebad-winner"
+	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), winner, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cs := p.client.cs.(*fake.Clientset)
+	first := true
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if first {
+			first = false
+			return true, nil, apierrors.NewNotFound(corev1.Resource("pods"), podName(sid))
+		}
+		return false, nil, nil
+	})
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("pods"), podName(sid))
+	})
+
+	if _, err := p.Provision(context.Background(), gatedSpec); err == nil {
+		t.Fatal("losing the race to a wrong-shape pod: want a fail-closed error")
+	}
+	if len(m.persisted) != 0 {
+		t.Errorf("mismatch race loser persisted %v", m.persisted)
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); err != nil {
+		t.Errorf("mismatch race loser deleted the winner's pod: %v", err)
+	}
+}
+
+// TestPodReadyRequiresGateSidecar pins the gated readiness rule directly: a
+// ready sandbox container alone is not enough when the pod is gated.
+func TestPodReadyRequiresGateSidecar(t *testing.T) {
+	pod := &corev1.Pod{Status: corev1.PodStatus{
+		Phase:             corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{{Name: containerName, Ready: true}},
+		InitContainerStatuses: []corev1.ContainerStatus{
+			{Name: gateContainerName, Ready: false},
+		},
+	}}
+	if podReady(pod, true) {
+		t.Error("gated pod with an unready gate sidecar reported ready")
+	}
+	if !podReady(pod, false) {
+		t.Error("ungated readiness must ignore init container statuses")
+	}
+	pod.Status.InitContainerStatuses[0].Ready = true
+	if !podReady(pod, true) {
+		t.Error("gated pod with both ready reported not ready")
 	}
 }

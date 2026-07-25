@@ -48,6 +48,17 @@ spec:
             - name: EXECUTOR_POLL_INTERVAL
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.executor.gateImage }}
+            {{- if semverCompare "<1.29-0" $.Capabilities.KubeVersion.Version }}
+            {{- fail "executor.gateImage needs Kubernetes >= 1.29: the gate runs as a native sidecar (initContainer restartPolicy Always), which older kubelets reject" }}
+            {{- end }}
+            # Gate opt-in: both variables must be set (either alone keeps the
+            # pre-gate fail-closed behavior), so the chart sets them together.
+            - name: EXECUTOR_GATE_IMAGE
+              value: {{ . | quote }}
+            - name: CONTROLPLANE_URL
+              value: {{ printf "http://%s-controlplane:%v" (include "map.fullname" $) $.Values.controlplane.service.port | quote }}
+            {{- end }}
             {{- include "map.commonEnv" . | nindent 12 }}
             {{- include "map.blobEnv" . | nindent 12 }}
             {{- include "map.secretsEnv" . | nindent 12 }}
