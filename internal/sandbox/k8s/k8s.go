@@ -1070,12 +1070,13 @@ printf %s "$3"
 // the command substitution — otherwise the pipeline would report only `wc`'s
 // status, and an unwritable directory would come back as a short write instead of
 // the write failure it is. `-eq` tolerates the leading padding BSD `wc` emits.
-const writeScript = sandbox.PathFaultShell + `
+const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + `
 mkdir -p "$2" || { __map_path_fault "$2"; exit 1; }
 set -o pipefail
 sz=$(tee "$4" | wc -c) || { rm -f "$4"; exit 1; }
 [ "$sz" -eq "$3" ] || { rm -f "$4"; exit 14; }
 if [ -d "$1" ]; then rm -f "$4"; exit 16; fi
+__map_preserve_mode "$1" "$4"
 mv -f "$4" "$1" || { rm -f "$4"; exit 1; }
 if [ -d "$1" ]; then rm -f "$1/${4##*/}"; exit 16; fi
 `

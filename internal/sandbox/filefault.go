@@ -7,10 +7,11 @@ import (
 
 // This file is the write path's shared shell. Both backends land a file's bytes
 // under a temporary name in the target's own directory and rename it into place,
-// and both name a blocked path the same way — so the piece of that reasoning a
-// shell has to do lives here, embedded by each backend, rather than twice where
-// the copies could drift. The contract suite (internal/sandbox/sandboxtest) pins
-// the behavior from the outside; this keeps one implementation of it.
+// both carry the target's mode over to that temporary file first, and both name a
+// blocked path the same way — so the piece of that reasoning a shell has to do
+// lives here, embedded by each backend, rather than twice where the copies could
+// drift. The contract suite (internal/sandbox/sandboxtest) pins the behavior from
+// the outside; this keeps one implementation of it.
 
 // Exit codes the shell below and the backends' write scripts use to name a path
 // fault. They are a namespace shared by both backends, so a backend's private
@@ -65,6 +66,44 @@ __map_path_fault() {
       *)    return 0 ;;
     esac
   done
+}
+`
+
+// PreserveModeShell defines __map_preserve_mode, which both backends embed. Given
+// a write's target and the temporary file about to be renamed onto it, it puts the
+// target's permission bits on the temporary file, so the rename replaces what a
+// file holds without also replacing what it is allowed to do. Without it the
+// workflow that breaks is an ordinary one: `write` a script, `chmod +x` it in
+// bash, `edit` it, and it no longer runs (#204). The Claude Code harness's own
+// atomic write does the same three steps — stat the target, chmod the temporary
+// file, rename — which is a harness-design observation from the local snapshot,
+// not a wire behavior of the managed-agents reference.
+//
+// Only an existing regular file has a mode worth carrying over, and the symlink is
+// the case worth spelling out: `-h` is tested first because `-f` follows the link,
+// and what the rename replaces is the *link*, not what it points at — taking the
+// pointee's mode would dress the new file in the bits of a file this write never
+// touched. Where there is nothing to carry over the temporary file keeps its own
+// mode, which is the 0644 a fresh write has always landed (the docker backend's
+// tar header, the k8s backend's `tee` under the image's 022 umask).
+//
+// Every failure here is silent, and deliberately so: the bytes are landed and the
+// write is one `mv` from succeeding, so an image whose `stat` cannot do `-c` keeps
+// the mode behavior it had before this existed rather than losing the write. The
+// contract suite is what says the images we do support preserve the mode.
+//
+// `stat` and `chmod` come off the agent's own PATH, as `mkdir`, `tee`, `mv` and
+// `rm` in both write paths already do, and a planted `stat` can therefore choose
+// the mode this puts on the file. That is not a privilege it gains: the mode lands
+// on a file the sandbox user owns, which the same agent could `chmod` directly. The
+// value is one quoted argument to `chmod`, never a word to the shell, so a planted
+// `stat` cannot get a second command out of it either.
+const PreserveModeShell = `
+__map_preserve_mode() {
+  if [ -h "$1" ] || [ ! -f "$1" ]; then return 0; fi
+  __m=$(stat -c %a "$1" 2>/dev/null) || return 0
+  [ -n "$__m" ] || return 0
+  chmod "$__m" "$2" 2>/dev/null || return 0
 }
 `
 

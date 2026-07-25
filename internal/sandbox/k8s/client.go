@@ -3,10 +3,11 @@
 // path (the plan's image contract) plus a userland with `setsid` (the deadline
 // wrapper backgrounds the command in its own session), `tee` and `wc` (the
 // write path counts the bytes the exec stream delivered), `mv` and `rm` (it lands
-// the bytes under a temporary name and renames them into place), and a `stat` that
-// accepts `-c` (GNU or BusyBox) — a shade beyond bare POSIX, but met by any
-// mainstream base image. It is the self-hosted twin of the docker backend and
-// passes the same sandboxtest contract suite.
+// the bytes under a temporary name and renames them into place), and `chmod` plus
+// a `stat` that accepts `-c`, GNU or BusyBox (a read's size gate, and a write
+// carrying the target's mode onto the temporary file) — a shade beyond bare POSIX,
+// but met by any mainstream base image. It is the self-hosted twin of the docker
+// backend and passes the same sandboxtest contract suite.
 package k8s
 
 import (
