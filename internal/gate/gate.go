@@ -66,7 +66,10 @@ type Config struct {
 	// TunnelIdleTimeout closes a CONNECT tunnel after no bytes have moved in
 	// either direction for the window. Activity on one side alone keeps the
 	// tunnel alive — a long download is silent upstream-ward — so this cuts
-	// only truly abandoned tunnels. Zero selects defaultTunnelIdleTimeout.
+	// only tunnels with no end-to-end byte movement for the whole window
+	// (liveness is measured on successful reads; a tunnel both of whose ends
+	// stop draining for the entire window counts as abandoned). Zero selects
+	// defaultTunnelIdleTimeout.
 	TunnelIdleTimeout time.Duration
 }
 
