@@ -516,15 +516,31 @@ copy of an entry here.
   in-pod kill mark is deliberately *not* ported, since Docker's probe is a daemon-host call the
   sandboxed command can neither reach nor forge, and the verdict stays that way.
 
+  Two things this deliberately leaves as they were, both surfaced by review. The fix is scoped to a
+  probe that goes **unanswered**: one that *answers* is still trusted without a timestamp, and `top`
+  describes the container as of whenever the daemon ran its `ps`, so a late-sampled "gone" can still
+  read a punctual kill as an ordinary exit. That is the residual the deadline work accepted in its
+  seventh review round — a degraded daemon weakening the sub-`killGrace` *label*, never the hard
+  bound, with the reserved cgroup limits as its containment — and this change neither widens nor
+  closes it. Second, the honest command that pays for the new reading is one that SIGKILLs itself
+  before its deadline, leaves something backgrounded holding its exec stream open past it, **and**
+  gets no answer out of the daemon: it now reads as a timeout from the deadline rather than from a
+  `overrunSlop` later, which is where the overrun probe's own fail-open rule already put it. Every
+  term still only ever *adds* a timeout.
+
   Pinned by three fake-daemon rows differing only in the daemon's `top` latency and in when the
-  command died: a fast `top` answering inside the lead (the control), the same kill lost to a slow one
-  (which fails against the previous code with the issue's exact `{ExitCode:137 TimedOut:false}` at
-  about the deadline), and — the guard against inventing a timeout instead — a command that SIGKILLs
-  itself inside a widened lead, whose close lands *before* the deadline and must still read as an
-  early exit. Two mutations are caught, each by exactly its own row: dropping the before-deadline
-  check, and comparing against the probe instant rather than the deadline. The real-daemon
-  `ExecTimeoutKillsAndSurvives` stays green over five repetitions with the host under load, but a
-  healthy daemon is not what the bug needed and the deterministic rows are the pin.
+  command died: a fast `top` answering at once (the control), the same kill lost to a slow one (which
+  fails against the previous code with the issue's exact `{ExitCode:137 TimedOut:false}` at about the
+  deadline), and — the guard against inventing a timeout instead — a command that SIGKILLs itself
+  300 ms before the deadline, whose close lands before it and must still read as an early exit. Three
+  mutations are each caught by exactly the row that pins them: the previous code's unconditional
+  "finished early" by the second row, and both ways of getting the new threshold wrong — dropping the
+  before-deadline check, or comparing against the probe instant rather than the deadline — by the
+  third. The rows widen the 50 ms probe lead to 800 ms so that every instant is hundreds of
+  milliseconds from the next and no row turns on whether a loaded runner scheduled a goroutine in
+  time; the default lead stays covered by `TestTimedOutNeedsTheWatchdogsDeadlineNotTheCallers`. The
+  real-daemon `ExecTimeoutKillsAndSurvives` stays green over repeated runs with the host under load,
+  but a healthy daemon is not what the bug needed and the deterministic rows are the pin.
 
 - **A wedged eval run no longer loses its artifacts** (#96 review follow-up). `writeArtifacts` was
   called once, after `pgtest.Main(m)` returned in the suite's `TestMain` — and Go implements

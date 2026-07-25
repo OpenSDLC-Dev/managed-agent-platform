@@ -103,7 +103,9 @@ const (
 	// command is still alive. It has to be before, not at, the deadline: the
 	// watchdog fires at the deadline, and a command already killed by it looks
 	// exactly like one that was never there. The cost is that a command which
-	// SIGKILLs itself within this much of its deadline reads as a timeout.
+	// SIGKILLs itself within this much of its deadline reads as a timeout — and,
+	// when the probe goes unanswered altogether, one that SIGKILLs itself any time
+	// before the deadline and leaves the stream open past it (see alive).
 	defaultProbeLead = 50 * time.Millisecond
 )
 
@@ -483,14 +485,23 @@ func sleepUntil(ctx context.Context, t time.Time) bool {
 }
 
 // alive answers the pre-deadline probe. Its context is the one the stream close
-// cancels, and what that cancellation is worth depends on when it arrived — the
-// instant the daemon side already has, needing nothing from inside the
-// container. Before the deadline it settles the question: nothing that held the
-// stream is left, so the command was gone by the deadline. At or after it the
-// close says nothing about the deadline, because the watchdog's punctual kill is
-// itself what closes the stream, and so is a straggler outliving a command that
-// finished early — an unanswered probe, which is the same thing as a daemon that
-// would not answer.
+// cancels, and what that cancellation is worth depends on when Exec sees it —
+// its own host-side reading, needing nothing from inside the container. Seen
+// before the deadline it settles the question: nothing that held the stream is
+// left, so the command was gone by the deadline. Seen at or after it the close
+// says nothing about the deadline, because the watchdog's punctual kill is itself
+// what closes the stream, and so is a straggler outliving a command that finished
+// early — an unanswered probe, which is the same thing as a daemon that would not
+// answer, and takes the same fail-open answer below.
+//
+// Seen, not recorded: the cancellation is noticed a scheduling hop after the
+// close, so this reads the later case for a close within a hop of the deadline —
+// like the probe lead itself, a cost paid in the direction of the label rather
+// than away from it. What it costs in full is a command that SIGKILLs itself
+// before the deadline, leaves something backgrounded holding its stream past it,
+// and gets no answer out of the daemon: that reads as a timeout. The overrun
+// probe's own fail-open rule already did this to the same command a slop later;
+// this brings it forward to the deadline, and only ever adds a timeout.
 func (c *container) alive(ctx context.Context, pid int, deadlineAt time.Time) bool {
 	for range 2 {
 		alive, err := c.api.processAlive(ctx, c.id, pid)
@@ -499,8 +510,8 @@ func (c *container) alive(ctx context.Context, pid int, deadlineAt time.Time) bo
 		}
 		if ctx.Err() != nil {
 			if time.Now().Before(deadlineAt) {
-				// The stream closed inside the probe's lead, so the process it
-				// was holding is gone, and nobody is waiting on this answer.
+				// The stream closed before the deadline, so the process it was
+				// holding is gone, and nobody is waiting on this answer.
 				return false
 			}
 			break
@@ -654,9 +665,13 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	// Two ways a finished command can have hit its deadline. The watchdog killed
 	// it: SIGKILL, and the command was alive to receive it — a command cannot
 	// survive SIGKILL to fake that, and one that kills itself before the
-	// pre-deadline probe was already gone when we looked. (A self-SIGKILL inside
-	// the probe's short lead reads as the watchdog's: the deliberate cost of
-	// sampling a lead ahead of the deadline, and it errs toward a timeout.) Or it
+	// pre-deadline probe was already gone when we looked, whenever the probe got
+	// an answer to look at. (Two SIGKILLs of the command's own read as the
+	// watchdog's, both erring toward a timeout: one inside the probe's short lead,
+	// the deliberate cost of sampling a lead ahead of the deadline; and one whose
+	// probe went unanswered — see alive — where the command's exec stream, held
+	// open past the deadline by something it backgrounded, is all that is left to
+	// read and it says nothing about the command.) Or it
 	// was still running after the deadline and the
 	// slop, and exited anyway, which on the honest path is impossible, because
 	// the watchdog would have killed it first. (A command the kernel OOM-kills

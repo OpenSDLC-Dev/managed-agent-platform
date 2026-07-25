@@ -1230,51 +1230,54 @@ func TestOverrunDetectedWhenTheFirstProbeStalls(t *testing.T) {
 // finished" reported a real timeout as a plain `{137, TimedOut: false}` (#193).
 //
 // What tells a punctual kill from an early exit is *when* the stream closed,
-// which the daemon side already knows: a command that finished early cannot
-// close its stream after the deadline. The rows below differ only in the
-// daemon's `top` latency and in when the command died.
+// which Exec already knows host-side: a command that finished early cannot close
+// its stream after the deadline. The rows below differ only in the daemon's `top`
+// latency and in when the command died.
+//
+// Every row runs against a one-second deadline with the probe lead widened from
+// the production 50ms to 800ms, so the probe fires at 200ms and each instant that
+// matters — the probe, the command's death, the deadline — is hundreds of
+// milliseconds from the next. The lead's own value is not what these rows pin
+// (TestTimedOutNeedsTheWatchdogsDeadlineNotTheCallers covers the default), and at
+// 50ms a row would turn on whether a loaded runner scheduled one goroutine inside
+// a 50ms window.
 func TestAPunctualKillSurvivesASlowPreDeadlineProbe(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		command      string
 		aliveFor     time.Duration
 		topDelay     time.Duration
-		probeLead    time.Duration
 		wantTimedOut bool
 	}{
-		// The control: the same kill on a daemon that answers inside the lead, so
-		// the probe carries the verdict itself.
+		// The control: the same kill on a daemon that answers at once, so the probe
+		// carries the verdict itself.
 		{
 			name: "a fast top answers before the kill", command: "sleep 300",
 			aliveFor: 1200 * time.Millisecond, wantTimedOut: true,
 		},
-		// The bug: the answer is still in flight when the kill lands, so the probe
-		// is cancelled with nothing to say. The close is past the deadline, which
-		// is not something a command that finished early can do.
+		// The bug: the answer would not have come until 1.4s, so it is still in
+		// flight when the kill closes the stream at 1.2s and the probe is cancelled
+		// with nothing to say. That close is 200ms *past* the deadline, and seeing
+		// it can only slip later — a command that finished early could not have
+		// closed there at all.
 		{
 			name: "a slow top loses its answer to the kill", command: "sleep 300",
-			aliveFor: 1200 * time.Millisecond, topDelay: 500 * time.Millisecond, wantTimedOut: true,
+			aliveFor: 1200 * time.Millisecond, topDelay: 1200 * time.Millisecond, wantTimedOut: true,
 		},
 		// The other direction on that same slow daemon: a command that SIGKILLs
-		// itself inside the lead closes its stream *before* the deadline, and no
+		// itself at 700ms closes its stream 300ms *before* the deadline, and no
 		// answer is needed to know that is an early exit, not a timeout to invent.
-		// The lead is widened so the exit lands inside it, which is the only window
-		// where the probe fires and is then cut short before the deadline. Neither
-		// row rests on a scheduling window: the kill above closes the stream 200ms
-		// *past* the deadline and a cancellation can only be seen later still,
-		// while the exit here is 600ms clear of it — and this daemon would answer
-		// "gone" at 800ms regardless, which is the same verdict.
+		// This is the row that guards the discriminator — and if a stall did push
+		// the probe past the close, or the daemon did answer, the verdict is the
+		// same `false`, so the row cannot flake into a failure either way.
 		{
 			name: "a close before the deadline is still an early exit", command: "kill -9 $$",
-			aliveFor: 400 * time.Millisecond, topDelay: 600 * time.Millisecond,
-			probeLead: 800 * time.Millisecond, wantTimedOut: false,
+			aliveFor: 700 * time.Millisecond, topDelay: 700 * time.Millisecond, wantTimedOut: false,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := execDaemon(t, fakeExec{aliveFor: tc.aliveFor, topDelay: tc.topDelay, code: sigkillExit})
-			if tc.probeLead > 0 {
-				c.probeLead = tc.probeLead
-			}
+			c.probeLead = 800 * time.Millisecond
 			start := time.Now()
 			res, err := c.Exec(context.Background(), sandbox.ExecRequest{
 				Command: tc.command, Timeout: time.Second,
