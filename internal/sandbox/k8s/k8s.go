@@ -249,9 +249,11 @@ func (p *Provider) deleteByUID(name string, uid types.UID) {
 	})
 }
 
-// reclaimUnready deletes a pod this call created but could not bring to
-// readiness, so a retry of the session is not poisoned by re-adopting a wedged
-// pod. It guards three ways against deleting the wrong thing:
+// reclaimUnready deletes a pod that could not be brought to readiness — one
+// this call created, or a gated one it adopted (possibly created by an executor
+// that has since crashed) — so a retry of the session is not poisoned by
+// re-adopting a wedged pod. It guards three ways against deleting the wrong
+// thing:
 //   - its own short, detached context, so a cancelled caller still triggers the
 //     cleanup rather than stranding the wedged pod;
 //   - a re-Get that skips a name now holding a different pod (UID mismatch) or
