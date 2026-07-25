@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1192,5 +1193,160 @@ func TestProvisionGatedPersistFailureCleansUp(t *testing.T) {
 	}
 	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("pod with an unpersisted token was left behind (get err = %v)", err)
+	}
+}
+
+// TestProvisionGatedAdoptUnreadyReclaims: adopting a gated pod whose gate never
+// becomes ready must reclaim it, not just error. This is the crash-window
+// recovery: an executor that died between the pod create and the token Persist
+// leaves a gate that can only ever 401 and crash-loop, so the pod never turns
+// ready — without the reclaim every retry would re-adopt the same wedged pod
+// forever (the Docker twin recovers by rebuilding a stopped gate; a native
+// sidecar never presents as stopped).
+func TestProvisionGatedAdoptUnreadyReclaims(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_wedged")
+	p := fakeProvider()
+	spec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+
+	// The wedged pod: correct gated shape and session labels (built by podSpec
+	// itself), sandbox ready but the gate sidecar never Ready — the signature of
+	// an unpersisted token. The fake clientset assigns no UID, so set one for
+	// the reclaim's UID-guarded delete to match.
+	wedged := p.podSpec(podName(sid), sandbox.DefaultWorkdir, spec, "gtk_never_persisted")
+	wedged.UID = "uid-wedged"
+	wedged.Status = corev1.PodStatus{
+		Phase:                 corev1.PodRunning,
+		ContainerStatuses:     []corev1.ContainerStatus{{Name: containerName, Ready: true}},
+		InitContainerStatuses: []corev1.ContainerStatus{{Name: gateContainerName, Ready: false}},
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), wedged, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A short deadline stands in for waitReady's 2-minute timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	if _, err := p.Provision(ctx, spec); err == nil {
+		t.Fatal("adopting a never-ready gated pod: want an error")
+	}
+	if m.generated != 0 || len(m.persisted) != 0 {
+		t.Errorf("adoption touched the mint seam: generated=%d persisted=%v", m.generated, m.persisted)
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("wedged gated pod was not reclaimed (get err = %v); the session can never recover", err)
+	}
+}
+
+// TestProvisionGatedCreateRaceAdoptsWinner: a create that loses the 409 race
+// against a same-shape pod adopts the winner, and the loser's generated token
+// is discarded unpersisted — persisting it would revoke the winner's.
+func TestProvisionGatedCreateRaceAdoptsWinner(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_race")
+	p := fakeProvider()
+	spec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+
+	// The winner's pod, gated and ready, is in the tracker — but the loser's
+	// initial existence Get must 404 (it raced ahead of the winner's create),
+	// and its own create must answer 409. The get-reactor 404s exactly once.
+	winner := p.podSpec(podName(sid), sandbox.DefaultWorkdir, spec, "gtk_winners_token")
+	winner.UID = "uid-race-winner"
+	winner.Status = corev1.PodStatus{
+		Phase:                 corev1.PodRunning,
+		ContainerStatuses:     []corev1.ContainerStatus{{Name: containerName, Ready: true}},
+		InitContainerStatuses: []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}},
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), winner, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cs := p.client.cs.(*fake.Clientset)
+	first := true
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if first {
+			first = false
+			return true, nil, apierrors.NewNotFound(corev1.Resource("pods"), podName(sid))
+		}
+		return false, nil, nil
+	})
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("pods"), podName(sid))
+	})
+
+	if _, err := p.Provision(context.Background(), spec); err != nil {
+		t.Fatalf("losing the create race against a same-shape pod should adopt it: %v", err)
+	}
+	if m.generated != 1 {
+		t.Errorf("race loser generated %d tokens, want the 1 minted before its create", m.generated)
+	}
+	if len(m.persisted) != 0 {
+		t.Errorf("race loser persisted %v — that would revoke the winner's live token", m.persisted)
+	}
+}
+
+// TestProvisionGatedCreateRaceMismatchFailsClosed: losing the create race to a
+// pod of the wrong gate shape is a hard error — serving the mismatched pod
+// would run a gated session without its gate. The loser must not persist and
+// must not delete the winner (the next attempt replaces it).
+func TestProvisionGatedCreateRaceMismatchFailsClosed(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_racebad")
+	p := fakeProvider()
+	gatedSpec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+
+	// The winner raced in UNGATED while we are provisioning gated.
+	ungated := gatedSpec
+	ungated.Gate = nil
+	winner := p.podSpec(podName(sid), sandbox.DefaultWorkdir, ungated, "")
+	winner.UID = "uid-racebad-winner"
+	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), winner, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cs := p.client.cs.(*fake.Clientset)
+	first := true
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if first {
+			first = false
+			return true, nil, apierrors.NewNotFound(corev1.Resource("pods"), podName(sid))
+		}
+		return false, nil, nil
+	})
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("pods"), podName(sid))
+	})
+
+	if _, err := p.Provision(context.Background(), gatedSpec); err == nil {
+		t.Fatal("losing the race to a wrong-shape pod: want a fail-closed error")
+	}
+	if len(m.persisted) != 0 {
+		t.Errorf("mismatch race loser persisted %v", m.persisted)
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); err != nil {
+		t.Errorf("mismatch race loser deleted the winner's pod: %v", err)
+	}
+}
+
+// TestPodReadyRequiresGateSidecar pins the gated readiness rule directly: a
+// ready sandbox container alone is not enough when the pod is gated.
+func TestPodReadyRequiresGateSidecar(t *testing.T) {
+	pod := &corev1.Pod{Status: corev1.PodStatus{
+		Phase:             corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{{Name: containerName, Ready: true}},
+		InitContainerStatuses: []corev1.ContainerStatus{
+			{Name: gateContainerName, Ready: false},
+		},
+	}}
+	if podReady(pod, true) {
+		t.Error("gated pod with an unready gate sidecar reported ready")
+	}
+	if !podReady(pod, false) {
+		t.Error("ungated readiness must ignore init container statuses")
+	}
+	pod.Status.InitContainerStatuses[0].Ready = true
+	if !podReady(pod, true) {
+		t.Error("gated pod with both ready reported not ready")
 	}
 }

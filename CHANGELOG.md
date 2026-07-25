@@ -119,10 +119,15 @@ copy of an entry here.
   sandbox container is hardened to Docker parity (`CapDrop [NET_RAW,SETUID,SETGID]`,
   `allowPrivilegeEscalation: false` — what makes owner-match hold) and its proxy env points at the
   sidecar's loopback with `NO_PROXY` forced empty. Mint-on-create maps onto the pod create/adopt
-  fork: the token is generated before the create (the immutable pod spec must carry it), persisted
-  only after winning it, never on adoption or a lost race, and a `Persist` failure deletes the
-  just-created pod (its gate could only ever 401). A pod whose gate shape no longer matches the
-  session's need is replaced, not adopted; readiness requires the gate sidecar Ready too. The
+  fork: the token is generated before the create (the immutable pod spec must carry it) and
+  persisted only after winning it — an adoption never touches the mint seam, a race loser
+  discards its generated token unpersisted, and a `Persist` failure deletes the just-created pod
+  (its gate could only ever 401). A pod whose gate shape no longer matches the session's need is
+  replaced, not adopted; readiness requires the gate sidecar Ready too; and adopting a gated pod
+  that never turns ready reclaims it — the crash-window recovery (an executor dying between the
+  create and the `Persist` leaves a 401-crash-looping gate the Docker twin would detect as a
+  stopped container; a native sidecar never presents as stopped, so the unready-adopt reclaim is
+  what lets the next provision rebuild with a fresh token). The
   sandbox contract suite's gated row now runs against a **real cluster**: the K8s harness declares
   the gate seam, sideloading the locally-built image into kind (`docker save --platform` +
   `kind load image-archive`; Docker Desktop shares the daemon's store) and addressing the stub
@@ -131,7 +136,8 @@ copy of an entry here.
   denied host refused, and a direct dial dropped by the owner-match firewall, end-to-end in a pod.
   Helm gains the opt-in: `executor.gateImage` set → `EXECUTOR_GATE_IMAGE` plus a `CONTROLPLANE_URL`
   derived from the controlplane Service (both or neither, mirroring compose); default off keeps
-  the pre-gate fail-closed behavior, and the CI helm job asserts both paths. The
+  the pre-gate fail-closed behavior, the render fails on Kubernetes < 1.29 (no native sidecars),
+  and the CI helm job asserts all three paths. The
   `TestK8sIgnoresGateSpecUntilSidecarLands` pin retires with the behavior it pinned.
 
 - **`credential_host_unreachable_error` is emitted — as the config conflict the SDK defines, not the

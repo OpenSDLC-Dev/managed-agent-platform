@@ -161,6 +161,10 @@ func loadGateImage(t *testing.T, kubeCtx, image string) {
 	t.Helper()
 	cluster, ok := strings.CutPrefix(kubeCtx, "kind-")
 	if !ok {
+		// Not kind: assume the cluster shares the local daemon's image store
+		// (docker-desktop does). Other clusters (minikube, k3d, remote) must have
+		// the image loaded by hand before the run — MAP_K8S_HOST_ADDR fixes only
+		// how pods address the stub controlplane, not image distribution.
 		return
 	}
 	tar := filepath.Join(t.TempDir(), "gate.tar")

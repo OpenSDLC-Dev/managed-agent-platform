@@ -81,7 +81,9 @@ executor:
   # CONTROLPLANE_URL from the controlplane Service). Empty keeps the pre-gate
   # fail-closed behavior — `limited` = the route-flush init container, no
   # credential substitution. The sidecar needs CAP_NET_ADMIN, so the release
-  # namespace must not enforce the `restricted` Pod Security level.
+  # namespace must not enforce the `restricted` Pod Security level — and it is
+  # a native sidecar, so the cluster must be Kubernetes >= 1.29 (the template
+  # fails the render on older clusters).
   gateImage: ""
   resources: {}
   nodeSelector: {}

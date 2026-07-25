@@ -114,6 +114,19 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		}
 		if hasGateSidecar(existing) == gated {
 			if err := p.waitReady(ctx, name, gated); err != nil {
+				if gated {
+					// A gated pod that never turns ready may be wedged for good: an
+					// executor that crashed between the pod create and the token
+					// Persist left a gate that can only ever 401, terminate, and
+					// crash-loop — its startup probe never passes, so without this
+					// reclaim every retry would re-adopt the same dead pod forever.
+					// (The Docker twin rebuilds a stopped gate instead; a native
+					// sidecar never presents as stopped.) reclaimUnready's guards —
+					// re-Get, ready re-check, UID precondition — keep a merely
+					// slow pod another executor just created safe: deleting it
+					// only costs that executor one retried provision.
+					p.reclaimUnready(name, existing.UID, gated)
+				}
 				return nil, err
 			}
 			return p.attach(name, workdir), nil

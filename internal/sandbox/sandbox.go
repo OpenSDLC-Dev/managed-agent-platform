@@ -89,8 +89,8 @@ type Spec struct {
 	// HTTP_PROXY there — a deployment detail it owns, not the caller's env). nil =
 	// the sandbox networks directly (unrestricted, no vault
 	// credentials). The executor sets it for sessions that are `limited` or
-	// vault-attached. Optional so a backend that does not yet run a sidecar (the
-	// K8s provider until slice 4d) ignores it and stays contract-compatible.
+	// vault-attached; both backends consume it — Docker as a gate-pair the
+	// sandbox joins, K8s as a native sidecar in the sandbox's pod.
 	Gate *GateSpec
 }
 

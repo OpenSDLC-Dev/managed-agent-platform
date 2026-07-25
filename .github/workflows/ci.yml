@@ -68,8 +68,12 @@ jobs:
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
           echo "$out" | grep -qE 'EXECUTOR_GATE_IMAGE|CONTROLPLANE_URL' && { echo "default values must not opt the executor into the gate" >&2; exit 1; }
           out="$(helm template t "$CHART" -f "$VALUES" --set executor.gateImage=reg/gate:v1 --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -q 'EXECUTOR_GATE_IMAGE' || { echo "gateImage did not set EXECUTOR_GATE_IMAGE" >&2; exit 1; }
+          echo "$out" | grep -q 'name: EXECUTOR_GATE_IMAGE' || { echo "gateImage did not set EXECUTOR_GATE_IMAGE" >&2; exit 1; }
+          echo "$out" | grep -q 'name: CONTROLPLANE_URL' || { echo "gateImage did not set CONTROLPLANE_URL" >&2; exit 1; }
           echo "$out" | grep -q 'value: "http://t-managed-agent-platform-controlplane:8080"' || { echo "gateImage did not derive CONTROLPLANE_URL from the controlplane Service" >&2; exit 1; }
+          if helm template t "$CHART" -f "$VALUES" --set executor.gateImage=reg/gate:v1 --kube-version 1.26 > /dev/null 2>&1; then
+            echo "gateImage must fail the render on Kubernetes < 1.29 (native sidecars)" >&2; exit 1
+          fi
           echo "ok: gate opt-in paths"
       - name: existingSecret path renders (chart creates no Secret)
         run: |

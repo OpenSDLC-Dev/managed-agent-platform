@@ -154,14 +154,19 @@ platform runs, vault credential storage is unavailable.
   in-cluster services. On a cluster with a policy-enforcing CNI, apply a NetworkPolicy that
   denies sandbox Pods (label `app.kubernetes.io/part-of: managed-agent-platform` is **not**
   set on them; select by the provider's `dev.opensdlc.managed-agent-platform.session-id`
-  label) egress to the control-plane and Postgres Services. A first-class egress proxy is a
-  reserved seam (see the plan), not yet built.
-- **Pod Security Admission and limited networking.** A session whose environment sets
-  `networking.type: limited` gets a sandbox Pod with a `NET_ADMIN` init container (it flushes
-  the Pod's routing table). A namespace enforcing the `baseline` or `restricted` Pod Security
-  Standard will reject that Pod at admission, failing every tool call in the session. Install
-  into a namespace that permits `NET_ADMIN` if you use limited networking; the default
-  unrestricted-networking path needs no added capability.
+  label) egress to the control-plane and Postgres Services. Setting `executor.gateImage`
+  gives `limited` and vault-attached sessions a first-class egress gate (below), which
+  enforces `allowed_hosts` but deliberately does not police in-cluster reachability for
+  unrestricted sessions — the NetworkPolicy advice stands either way.
+- **Pod Security Admission and the gate/limited paths.** With `executor.gateImage` unset, a
+  `networking.type: limited` session gets a sandbox Pod with a `NET_ADMIN` init container
+  (it flushes the Pod's routing table). With it set, `limited` **and vault-attached**
+  sessions instead get the `NET_ADMIN` **gate sidecar** (no route flush) — note that this
+  includes vault-attached sessions with unrestricted networking. Either shape is rejected at
+  admission by a namespace enforcing the `baseline` or `restricted` Pod Security Standard,
+  failing every tool call in those sessions. Install into a namespace that permits
+  `NET_ADMIN` if you use limited networking or the gate; only the plain
+  unrestricted-no-vaults path needs no added capability.
 
 ## Managing your own Secret
 
@@ -195,7 +200,7 @@ processes; `otlp.insecure=true` to export without TLS.
 | `localCipher.masterKey` | `""` | AES-256-GCM fallback when no OpenBao is configured |
 | `existingSecret` | `""` | reference a pre-created Secret instead of inlining |
 | `executor.sandboxImage` | `debian:stable-slim` | base image for sandbox Pods |
-| `executor.gateImage` | `""` (gate off) | per-session egress-gate sidecar image (`--target gate` build); setting it opts `limited` / vault-attached sessions into the gate — allowed_hosts enforcement plus vault-credential substitution at egress. The sidecar needs `CAP_NET_ADMIN` (no `restricted` Pod Security on the namespace); unset keeps the fail-closed route-flush |
+| `executor.gateImage` | `""` (gate off) | per-session egress-gate sidecar image (`--target gate` build); setting it opts `limited` / vault-attached sessions into the gate — allowed_hosts enforcement plus vault-credential substitution at egress. The sidecar needs `CAP_NET_ADMIN` (no `restricted` Pod Security on the namespace) and, as a native sidecar, Kubernetes >= 1.29 (the render fails on older clusters); unset keeps the fail-closed route-flush |
 
 See [`values.yaml`](./values.yaml) for the full set.
 
