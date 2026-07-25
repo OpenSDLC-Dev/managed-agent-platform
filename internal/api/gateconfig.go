@@ -19,18 +19,30 @@ import (
 // response body and the resolving process's memory; the resolution error carries
 // credential ids, never secret bytes (vaultresolve.Credentials).
 func (s *server) getGateConfig(r *http.Request) (any, error) {
-	sessionID := sessionFrom(r.Context())
+	ctx := r.Context()
+	sessionID := sessionFrom(ctx)
+
+	// The session read and the credential resolution run in one transaction that
+	// holds a FOR SHARE lock on the session row, so a session archive (an UPDATE
+	// on that row) cannot commit between the archived_at check and the credential
+	// read. Without the shared lock the two autocommit reads leave a window in
+	// which a session archived mid-request could still be served one last config
+	// with live secrets; with it, an archived (or raced-deleted) session fails
+	// closed. Mirrors the executor's FOR UPDATE OF s session read. The guard is
+	// also re-applied here, not only in requireGateToken's gatetoken.Authenticate.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var configJSON []byte
 	var vaultIDs []string
-	// The archived_at guard is re-applied here, not just in requireGateToken's
-	// gatetoken.Authenticate: a session archived in the window between auth and
-	// this read must still fail closed rather than serve one last config with
-	// live secrets. An archived (or raced-deleted) session yields no row.
-	err := s.pool.QueryRow(r.Context(),
+	err = tx.QueryRow(ctx,
 		`SELECT e.config, s.vault_ids
 		   FROM sessions s JOIN environments e ON e.id = s.environment_id
-		  WHERE s.id = $1 AND s.archived_at IS NULL`,
+		  WHERE s.id = $1 AND s.archived_at IS NULL
+		  FOR SHARE OF s`,
 		sessionID).Scan(&configJSON, &vaultIDs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Authenticated, but the session was archived or deleted between auth and
@@ -46,8 +58,11 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	creds, err := vaultresolve.Credentials(r.Context(), s.pool, s.cipher, sessionID, vaultIDs)
+	creds, err := vaultresolve.Credentials(ctx, tx, s.cipher, sessionID, vaultIDs)
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 

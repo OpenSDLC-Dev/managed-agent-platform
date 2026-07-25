@@ -103,9 +103,9 @@ func (c *Client) Fetch(ctx context.Context) (*Config, error) {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	switch {
-	case resp.StatusCode == http.StatusOK:
-	case resp.StatusCode == http.StatusUnauthorized:
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
 	default:
 		return nil, fmt.Errorf("gateconfig: unexpected status %d", resp.StatusCode)
