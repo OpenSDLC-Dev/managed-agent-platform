@@ -447,7 +447,8 @@ naming `credential_id` and `vault_id` (hostnames only, never a secret), best-eff
 (session, credential): the dedupe is an events-table check-then-append, so a concurrent duplicate
 fetch can rarely double-emit the advisory. Detection re-runs every fetch, so a healed or
 newly-introduced conflict tracks vault edits without a restart; the emission runs detached from the
-request (its own goroutine, uncancellable context), so the config a live gate is waiting for is
+request (its own goroutine, unhooked from the request's cancellation but bounded by its own
+10-second deadline), so the config a live gate is waiting for is
 neither delayed nor failed by it — append failures are logged and swallowed. `Client.Fetch` presents the token as a Bearer
 credential and maps a 401 (revoked token / archived session) to a fail-closed `ErrUnauthorized`,
 distinct from a transient error — the signal a periodic-fetching gate uses to choose between stopping

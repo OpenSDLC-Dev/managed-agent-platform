@@ -86,7 +86,8 @@ copy of an entry here.
   pool's connections — and handed only a non-secret projection of the credentials, so the detached
   work never retains a plaintext secret past the response. Its errors stay warn-logged and
   swallowed; the dedupe and no-conflict branches are additionally pinned by synchronous white-box
-  tests (a fire-and-forget goroutine's absence assertions can otherwise only false-pass). With it, the docs' cadence claim is
+  tests (a fire-and-forget goroutine's absence assertions can otherwise only false-pass). With it,
+  the docs' cadence claim is
   aligned to what the code always did: emission is **best-effort once** per (session, credential)
   — the dedupe is a check-then-append against the events table, so a concurrent duplicate fetch
   can rarely double-emit (a rarity deliberately not worth a uniqueness constraint) — corrected in
