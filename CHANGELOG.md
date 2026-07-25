@@ -30,9 +30,10 @@ copy of an entry here.
 - **Egress-gate runtime — `cmd/gate` + `internal/gaterun`** (plan 12 slice 4, #50). The per-session
   sidecar that runs `internal/gate`'s forward proxy, split ports-and-adapters so all decision logic is
   testable and only raw syscalls sit in `cmd/`. On startup it **replaces** the `OUTPUT` chain on both
-  the v4 and v6 tables — policy `DROP` first, so the rebuild is fail-closed at every instant (a
-  mid-flush crash or a partial append failure denies egress rather than opening it), then flush and
-  append the owner-match rules (loopback `ACCEPT`, gate-uid `ACCEPT`, catch-all `DROP`) — then **lists
+  the v4 and v6 tables — both families' policy set to `DROP` first, then each is flushed and rebuilt,
+  so the rebuild stays fail-closed throughout (a mid-flush crash or a partial append leaves the chain
+  default-deny on both families, given the gate owns its fresh netns chain), appending the owner-match
+  rules (loopback `ACCEPT`, gate-uid `ACCEPT`, catch-all `DROP`) — then **lists
   it back and requires the chain to be exactly those three rules, token-for-token** — a foreign
   `ACCEPT` ahead of the `DROP` or a rule that only resembles ours (a colliding uid prefix, `-o lo0`,
   `! -o lo`) is rejected — before dropping to its unprivileged uid; a firewall that did not take aborts

@@ -25,9 +25,13 @@ type Rule []string
 //     is dropped, so the sandbox can leave the netns only through the proxy,
 //     which then egresses as the gate UID.
 //
-// The sandbox must also CapDrop NET_RAW (an AF_PACKET socket bypasses the
-// netfilter OUTPUT hook, defeating owner-match); that is the sandbox's
-// provisioning concern, enforced in the Docker/K8s wiring, not here.
+// The owner-match only isolates the sandbox if the sandbox cannot become the
+// gate's uid: it must run as a distinct non-root identity and be unable to change
+// uid (drop CAP_SETUID/CAP_SETGID, no-new-privileges), otherwise a tool could
+// setuid to the gate uid and egress directly. It must also CapDrop NET_RAW (an
+// AF_PACKET socket bypasses the netfilter OUTPUT hook, defeating owner-match).
+// Both are the sandbox's provisioning concern, enforced in the Docker/K8s wiring
+// (STATE, sub-PR 4), not here.
 func Ruleset(gateUID int) []Rule {
 	return []Rule{
 		{"-o", "lo", "-j", "ACCEPT"},

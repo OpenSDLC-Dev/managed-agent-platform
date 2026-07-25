@@ -73,11 +73,15 @@ func NewSwappableHandler(initial *gate.Gate) *SwappableHandler {
 // Swap installs g as the gate every subsequent request uses.
 func (h *SwappableHandler) Swap(g *gate.Gate) { h.current.Store(g) }
 
-// ServeHTTP forwards to the current gate under an egress span. The span wraps
-// the whole proxied request or CONNECT tunnel, carrying the method and target
-// host (never a credential — substitution happens inside the gate).
+// ServeHTTP forwards to the current gate under an egress span. The span is made
+// the active span for the forwarded request (so it wraps the whole proxied
+// request or CONNECT tunnel and can parent any spans the gate emits), carrying
+// the method and target host — never a credential, substitution happens inside
+// the gate. The gate forwards through a plain transport that does not inject a
+// traceparent, so making the span active does not leak our trace context to the
+// third-party origin; that boundary is deliberate.
 func (h *SwappableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	_, span := otel.GetTracerProvider().Tracer(tracerName).Start(
+	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(
 		r.Context(), "egress_request",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
@@ -85,5 +89,5 @@ func (h *SwappableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			semconv.ServerAddressKey.String(r.Host),
 		))
 	defer span.End()
-	h.current.Load().ServeHTTP(w, r)
+	h.current.Load().ServeHTTP(w, r.WithContext(ctx))
 }

@@ -141,6 +141,10 @@ func run(ctx context.Context) error {
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// IdleTimeout closes idle keep-alive connections (a Slowloris guard); it
+		// does not affect a hijacked CONNECT tunnel, whose own idle/overall
+		// deadline lands with the go-live wiring (STATE, sub-PR 4).
+		IdleTimeout: 60 * time.Second,
 	}
 
 	srvErr := make(chan error, 1)

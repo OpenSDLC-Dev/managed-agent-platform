@@ -17,21 +17,24 @@ import (
 type iptablesFirewall struct{}
 
 func (iptablesFirewall) Apply(ctx context.Context, rules []gaterun.Rule) error {
-	for _, bin := range []string{"iptables", "ip6tables"} {
-		// Set the chain policy to DROP *before* flushing, so egress is fail-closed
-		// for the entire rebuild. The flush→append sequence is not atomic: with a
-		// default-ACCEPT policy the window between the flush and the catch-all DROP
-		// would be fail-open (an issue on a gate restart while the sandbox is live),
-		// and a partial append failure would leave a permissive chain. With policy
-		// DROP, every instant from here on — a mid-rebuild crash, an append error,
-		// even the gate exiting — denies all egress except what the rules below
-		// re-admit. Then flush and append the exact rule set. This assumes the gate
-		// owns its netns OUTPUT chain — true for the per-session Docker sandbox
-		// netns; the K8s sidecar must reconcile with CNI/mesh rules (STATE, 4d).
-		// -F/-P touch only the filter table's OUTPUT chain; NAT is untouched.
+	bins := []string{"iptables", "ip6tables"}
+	// Lock BOTH families' OUTPUT policy to DROP *before* rebuilding either. The
+	// flush→append sequence is not atomic: under a default-ACCEPT policy the
+	// window between the flush and the catch-all DROP is fail-open, and rebuilding
+	// IPv4 fully before touching IPv6 would leave IPv6 open throughout (and, on an
+	// IPv4 error, indefinitely). Dropping both policies first means every instant
+	// of the rebuild — a mid-flush crash, an append error, even the gate exiting —
+	// denies egress on both families except what the rules below re-admit. This
+	// assumes the gate owns its netns OUTPUT chain, so the chain holds no
+	// pre-existing ACCEPT the policy would not dominate — true for the per-session
+	// Docker sandbox netns; the K8s sidecar must reconcile with CNI/mesh rules
+	// (STATE, 4d). -P/-F touch only the filter table's OUTPUT chain; NAT is untouched.
+	for _, bin := range bins {
 		if out, err := exec.CommandContext(ctx, bin, "-P", "OUTPUT", "DROP").CombinedOutput(); err != nil {
 			return fmt.Errorf("%s -P OUTPUT DROP: %w: %s", bin, err, out)
 		}
+	}
+	for _, bin := range bins {
 		if out, err := exec.CommandContext(ctx, bin, "-F", "OUTPUT").CombinedOutput(); err != nil {
 			return fmt.Errorf("%s -F OUTPUT: %w: %s", bin, err, out)
 		}

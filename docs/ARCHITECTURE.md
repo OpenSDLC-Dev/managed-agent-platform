@@ -423,8 +423,8 @@ against `sessions` so it fails closed once the session is archived; there is no 
 (validity is the session's lifetime), so a controlplane outage longer than any TTL cannot be misread
 as a revocation, and a deleted session's token cascades away. Hash-only storage mirrors
 `internal/api`'s environment-key issuance. The token authenticates the internal gate-config
-endpoint (`internal/gateconfig`, below); the gate runtime that presents it lands in a later
-slice-4 sub-PR.
+endpoint (`internal/gateconfig`, below); the gate runtime that presents it is `internal/gaterun` /
+`cmd/gate` (below), still to be wired into a sandbox by a later slice-4 sub-PR.
 
 ### internal/gateconfig
 
@@ -439,7 +439,9 @@ never secret bytes) is a property of that one function. `Client.Fetch` presents 
 credential and maps a 401 (revoked token / archived session) to a fail-closed `ErrUnauthorized`,
 distinct from a transient error — the signal a periodic-fetching gate uses to choose between stopping
 and keeping its last-known-good config. Neither the endpoint nor the client is on the public `/v1`
-wire (DIVERGENCES); both are inert until the gate runtime drives them.
+wire (DIVERGENCES). The gate runtime that drives the client now exists (`internal/gaterun` /
+`cmd/gate`, below); the contract stays inert only until that sidecar is wired into a sandbox (a later
+slice-4 sub-PR).
 
 ### internal/gate
 
