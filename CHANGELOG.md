@@ -27,6 +27,23 @@ copy of an entry here.
 
 ### Added
 
+- **Egress-gate runtime — `cmd/gate` + `internal/gaterun`** (plan 12 slice 4, #50). The per-session
+  sidecar that runs `internal/gate`'s forward proxy, split ports-and-adapters so all decision logic is
+  testable and only raw syscalls sit in `cmd/`. On startup it installs owner-match `OUTPUT` iptables
+  rules on both the v4 and v6 tables — loopback `ACCEPT`, the gate uid `ACCEPT`, catch-all `DROP` —
+  then **lists them back and re-parses the listing** to confirm both `ACCEPT`s precede the `DROP`
+  before dropping to its unprivileged uid; a firewall that did not take aborts with the process still
+  root, so the gate never serves fail-open. It then serves the proxy on a loopback port (deny-all
+  until the first config arrives) and runs a fetch-and-swap loop against the gate-config endpoint: a
+  good config hot-swaps a fresh gate under live traffic (`atomic.Pointer`), a 401 swaps in deny-all
+  and shuts the binary down (the session was revoked or archived), and a transient error keeps the
+  last-known-good policy serving. Each proxied request is wrapped in an `egress_request` OTel span.
+  The Docker `HEALTHCHECK` invokes the binary's own `-healthcheck` probe (it dials the proxy port),
+  which can only pass once the firewall is verified and the listener is up — so it doubles as the
+  sandbox's fail-closed admission signal. Ships as a dedicated image (`docker build --target gate`:
+  iptables + a distroless-style uid 65532); `internal/egress` gains a per-credential `Unrestricted`
+  arm so an `unrestricted` credential substitutes for any host. Wiring the sidecar into the Docker
+  sandbox provider (netns sharing, proxy env, teardown) is the next slice-4 sub-PR.
 - **Internal gate-config endpoint + client — `GET /internal/v1/gate/config`, `internal/gateconfig`**
   (plan 12 slice 4, #50). The control-plane endpoint a session's egress gate fetches its policy from,
   and the gate-side client that fetches it — the two ends of one internal contract, built together so

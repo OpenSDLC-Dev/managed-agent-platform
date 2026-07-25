@@ -67,6 +67,29 @@ func cred(placeholder, secret string, hosts []string, header, body bool) egress.
 	}
 }
 
+func TestEngineSubstituteUnrestricted(t *testing.T) {
+	// An unrestricted credential's secret may be used against ANY host — even one
+	// no allow-list would admit (Hosts is nil here) — and is never unreachable.
+	eng := egress.NewEngine([]egress.Credential{{
+		Placeholder: "vltph_any", Secret: "S-ANY", Unrestricted: true, Header: true,
+	}})
+	for _, host := range []string{"api.example.com", "anything.evil.test", "10.0.0.1"} {
+		out, unreachable := eng.Substitute(host, egress.LocationHeader, "Bearer vltph_any")
+		if out != "Bearer S-ANY" {
+			t.Errorf("host %s: out = %q, want the secret substituted", host, out)
+		}
+		if len(unreachable) != 0 {
+			t.Errorf("host %s: an unrestricted credential must never be unreachable: %v", host, unreachable)
+		}
+	}
+	// Unrestricted still respects the injection location: a header-only credential
+	// is left literal in a body — not substituted, not unreachable.
+	out, unreachable := eng.Substitute("api.example.com", egress.LocationBody, "x=vltph_any")
+	if out != "x=vltph_any" || len(unreachable) != 0 {
+		t.Errorf("disabled location: out=%q unreachable=%v", out, unreachable)
+	}
+}
+
 func TestEngineSubstitute(t *testing.T) {
 	eng := egress.NewEngine([]egress.Credential{
 		// Header-only, allowed on api.example.com.
