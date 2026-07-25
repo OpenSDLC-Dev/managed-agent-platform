@@ -362,41 +362,55 @@ copy of an entry here.
 ### Fixed
 
 - **A stop reason other than `tool_use` stranded the tool calls the same response carried**
-  ([#181](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/181)) — `turnEvents` emits
-  one `agent.tool_use` event per tool block the model produced, but `commitTurn` routed only
-  `stop_reason: "tool_use"` to the branch that suspends the session and enqueues the `tool_exec`.
-  Every other stop reason fell through to `settle`: the intents committed, the session went
-  **idle**, and nothing ever ran them — leaving a `tool_use` on the append-only log that no
+  ([#181](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/181)) — `turnEvents`
+  commits one tool-intent event per tool block the model produced (`agent.tool_use`, or
+  `agent.custom_tool_use` for a name the agent's toolset does not resolve), but `commitTurn` routed
+  only `stop_reason: "tool_use"` to the branch that suspends the session and enqueues the
+  `tool_exec`. Every other stop reason fell through to `settle`, which finishes a turn: the intents
+  committed and the session idled — or chained straight into the next turn when input was pending —
+  with nothing scheduled to run them, leaving on the append-only log a `tool_use` that no
   `tool_result` will ever answer, which every later replay carries into a Messages request a strict
   endpoint rejects. The existing guard covered only the converse (a `tool_use` stop carrying no
-  blocks). The path is not hypothetical for a self-hosted platform: design principle 4 points the
-  Anthropic-protocol provider at *any* endpoint speaking Messages, and such an endpoint may report
-  `max_tokens`, `stop_sequence`, or a non-compliant `end_turn` on a response whose tool block is
-  complete. The OpenAI adapter was already immune — it forces `tool_use` whenever the stream
-  carried a tool call, for exactly this reason.
+  blocks).
 
-  The brain now classifies a turn on **what it produced, not on the label**: a turn carrying tool
-  blocks suspends on them whatever stop reason arrived with them, so the ask-gate, the `tool_exec`
-  enqueue and the running-suspend behave as a compliant `tool_use` stop would. Running the call is
-  safe because a block truncated by the token limit — the one case Anthropic's own guidance says
-  not to execute — never reaches the classification: `streamTurn` rejects a tool input that is not
-  a complete JSON object and fails the turn visibly, and truncated JSON cannot parse as one. Two
-  alternatives were weighed and rejected in [docs/DIVERGENCES.md](./docs/DIVERGENCES.md): failing
-  the turn (discards a complete, well-formed call and converts a recoverable turn into
-  `session.error`) and dropping the blocks to settle text-only (the same loss, silently). The v1
-  flattening of non-`tool_use` stop reasons to `end_turn` is unchanged for a turn that called no
-  tool ([#78](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/78)); what it no longer
+  Nothing ties the label to the content. Anthropic's published guidance pairs a *complete* client
+  tool call with `tool_use`, but documents `max_tokens` returning a response whose last block is an
+  *incomplete* tool use, and `refusal` as a normal 200 — and the SDK's own agentic loop selects
+  tool blocks by type rather than by label, with an explicit early return on `refusal`. Design
+  principle 4 widens it further: the Anthropic-protocol provider is pointed at *any* endpoint
+  speaking Messages, which need not honor the pairing at all — the OpenAI adapter has always forced
+  `tool_use` whenever a stream carried a tool call for exactly that reason.
+
+  **The brain now classifies a turn on what it produced, not on the label**: a turn carrying tool
+  blocks suspends on them whatever stop reason arrived with it, so the ask-gate, the `tool_exec`
+  enqueue and the running-suspend behave as a compliant `tool_use` stop would. `refusal` is the one
+  carve-out — terminal, its calls not ours to run — so its blocks are dropped and the turn settles
+  on its text alone, matching the SDK's loop and keeping the log free of an intent nothing may
+  answer. Running the rest is safe because a block truncated mid-input never reaches the
+  classification: `streamTurn` rejects a tool input that is not a complete JSON object, and a
+  proper prefix of an object never parses as one. The one truncation that does get through is a
+  block cut before its first input delta, which arrives as `{}` — the tool answers it with its own
+  required-argument error, recoverable where a stranded call is not. Failing the turn, and dropping
+  the blocks for *every* stop reason, were weighed and rejected; the choice, both rejections and
+  the evidence are recorded in [docs/DIVERGENCES.md](./docs/DIVERGENCES.md). The v1 flattening of
+  non-`tool_use` stop reasons to `end_turn` is unchanged for a turn that called no tool
+  ([#78](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/78)); what it no longer
   flattens is the tool-carrying case.
 
-  `POST /v1/sessions/{id}/events` gained the matching gate. Of the three sites that enqueue a
-  `model_turn`, the user-message-on-idle resume was the one not consulting
+  `POST /v1/sessions/{id}/events` gained the matching gate. Of the three branches that can enqueue
+  a `model_turn` there, the user-message-on-idle resume was the one not consulting
   `events.HasUnansweredToolUse` first, and `UnconfirmedAskEvents` — which it does consult — matches
   only uses whose `evaluated_permission` is `ask`, so an allow-policy stranded one was invisible to
-  it. It now leaves the session idle and appends the message (which replays once the result lands)
-  rather than waking a turn whose replay the model protocol rejects. With the brain fix in place no
-  reachable log carries such a use, so this is the backstop, not the cure — and the BYOC worker's
-  bounded trailing-turn scan ([#76](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/76),
-  under Changed) and the executor's DB-side diff agree on every reachable log again.
+  it. It now leaves the session idle, appends the message and logs the refusal rather than waking a
+  turn whose replay the model protocol rejects. The check counts the batch's own results as
+  answered, exactly as its two siblings do, so a client repairing a session by posting the
+  outstanding result and its next message together still resumes. It is a backstop, not a cure: no
+  log the fixed code can produce carries such a use, and one a pre-#181 binary already stranded
+  stays stuck — a result posted on its own does not resume an idle session, and the escape hatch
+  for that is [#68](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/68). With it, the
+  BYOC worker's bounded trailing-turn scan
+  ([#76](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/76), under Changed) and the
+  executor's DB-side diff agree on every log the current code can write.
 
 - **Concurrent key mints left several live credentials in one rotation slot**
   ([#72](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/72)) — `EnsureAPIKey`

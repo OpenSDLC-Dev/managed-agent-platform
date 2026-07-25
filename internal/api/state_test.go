@@ -174,11 +174,14 @@ func TestToolResultWhileRunningEnqueuesNextTurn(t *testing.T) {
 func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 	// The third enqueue site, gated like its two siblings (#181): a session
 	// that reached idle with a tool_use still unanswered must not be woken on
-	// a user.message. The resumed turn replays an assistant tool_use that no
-	// tool_result answers — a request the model protocol rejects. The message
-	// is still accepted and appended; it replays once the result lands.
+	// a user.message. The resumed turn would replay an assistant tool_use that
+	// no tool_result answers — a request the model protocol rejects. The
+	// message is accepted and appended, and the session stays idle; a later
+	// result alone does not revive it (that trigger needs a running session),
+	// but a batch carrying the result *and* the message does, which is why the
+	// check counts the batch's own results as answered.
 	s := newTestServer(t)
-	sessionID := eventsFixture(t, s)
+	sessionID := selfHostedSession(t, s)
 	ctx := context.Background()
 	q := queue.New(s.pool)
 
@@ -187,7 +190,7 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 	if err != nil || item == nil {
 		t.Fatalf("claim: %+v %v", item, err)
 	}
-	appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
+	toolUseID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
 	if err := q.Complete(ctx, s.pool, item); err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +217,21 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("event log = %v, want %v", got, want)
 		}
+	}
+
+	// The repair: the outstanding result and the next message in one batch.
+	// The result answers the use, so the resume fires — gating on the
+	// pre-batch log alone would stall a send that is legal and complete.
+	sendEvents(t, s, sessionID,
+		map[string]any{"type": "user.tool_result", "tool_use_id": toolUseID,
+			"content": []any{map[string]any{"type": "text", "text": "ok"}}},
+		userMessage("carry on"))
+
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status after result+message batch = %q, want running", got)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn items = %d, want 1", n)
 	}
 }
 

@@ -1294,6 +1294,131 @@ func TestNonToolUseStopWithToolBlocksRunsThem(t *testing.T) {
 	}
 }
 
+func TestNonToolUseStopKeepsCustomAndAskRouting(t *testing.T) {
+	// Classifying on the blocks decides only WHICH branch the turn takes; the
+	// routing inside it is untouched. These are the two shapes a mislabelled
+	// stop reason newly reaches: a client-executed custom tool (suspends with
+	// nothing queued — the client answers it) and an ask-gated built-in (the
+	// whole turn waits on confirmation).
+	t.Run("custom tool suspends with nothing queued", func(t *testing.T) {
+		h := newHarness(t, [][]provider.Chunk{{
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_side", Name: "lookup", Input: json.RawMessage(`{"q":"go"}`)}},
+			done("max_tokens", 3),
+		}}, nil)
+
+		agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+			"model":{"id":"fixture-model"},"system":"answer tersely","description":"",
+			"tools":[{"type":"custom","name":"lookup","description":"look things up","input_schema":{"type":"object"}}],
+			"mcp_servers":[],"skills":[],"multiagent":null}`
+		if _, err := h.pool.Exec(context.Background(),
+			`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+			t.Fatal(err)
+		}
+
+		h.wake(t, "what is go?")
+		h.runOnce(t)
+
+		want := []string{
+			"user.message", "session.status_running",
+			"span.model_request_start", "agent.custom_tool_use", "span.model_request_end",
+		}
+		if got := h.types(t); !typesEqual(got, want) {
+			t.Fatalf("after custom-tool turn:\n got %v\nwant %v", got, want)
+		}
+		if got := h.status(t); got != "running" {
+			t.Errorf("status = %q, want running", got)
+		}
+		if n := h.liveWork(t); n != 0 {
+			t.Errorf("%d work items still live, want 0 (the client answers a custom tool)", n)
+		}
+	})
+
+	t.Run("ask-gated tool still gates", func(t *testing.T) {
+		h := newHarness(t, [][]provider.Chunk{{
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_side", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+			done("max_tokens", 3),
+		}}, nil)
+
+		agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+			"model":{"id":"fixture-model"},"system":"do the task","description":"",
+			"tools":[{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"always_ask"}}}],
+			"mcp_servers":[],"skills":[],"multiagent":null}`
+		if _, err := h.pool.Exec(context.Background(),
+			`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+			t.Fatal(err)
+		}
+
+		h.wake(t, "list the files")
+		h.runOnce(t)
+
+		want := []string{
+			"user.message", "session.status_running",
+			"span.model_request_start", "agent.tool_use", "span.model_request_end",
+			"session.status_idle",
+		}
+		if got := h.types(t); !typesEqual(got, want) {
+			t.Fatalf("after ask-gated turn:\n got %v\nwant %v", got, want)
+		}
+		if got := h.status(t); got != "idle" {
+			t.Errorf("status = %q, want idle", got)
+		}
+		idle, _ := h.log.List(context.Background(), h.sessionID,
+			events.ListQuery{Types: []string{"session.status_idle"}})
+		if len(idle) != 1 {
+			t.Fatalf("session.status_idle events = %d, want 1", len(idle))
+		}
+		if got := stopReasonType(t, idle[0].Body); got != "requires_action" {
+			t.Errorf("stop_reason = %q, want requires_action", got)
+		}
+		if n := h.liveWork(t); n != 0 {
+			t.Errorf("%d work items still live, want 0 (gated on confirmation)", n)
+		}
+	})
+}
+
+func TestRefusalDropsItsToolBlocks(t *testing.T) {
+	// The one stop reason whose tool blocks are NOT run: a refusal is
+	// terminal, and the SDK's own agentic loop returns before executing a
+	// refused turn's calls. The blocks must not reach the log either — an
+	// intent nothing may answer and nothing may run wedges every later replay
+	// — so the turn settles on its text alone.
+	h := newHarness(t, [][]provider.Chunk{{
+		textChunk(0, "I can't help with that."),
+		provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: "toolu_side", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+		done("refusal", 3),
+	}}, nil)
+
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+		"model":{"id":"fixture-model"},"system":"do the task","description":"",
+		"tools":[{"type":"agent_toolset_20260401"}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wake(t, "do something")
+	h.runOnce(t)
+
+	want := []string{
+		"user.message", "session.status_running",
+		"span.model_request_start", "agent.message", "span.model_request_end",
+		"session.status_idle",
+	}
+	if got := h.types(t); !typesEqual(got, want) {
+		t.Fatalf("after refusal turn:\n got %v\nwant %v", got, want)
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	if n := h.liveWork(t); n != 0 {
+		t.Errorf("%d work items still live, want 0 (a refused call never runs)", n)
+	}
+}
+
 func TestProviderErrorFailsTurnVisibly(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		{textChunk(0, "partial")},

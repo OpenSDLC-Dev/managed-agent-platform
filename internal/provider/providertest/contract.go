@@ -2,11 +2,13 @@
 // adapter must pass (CLAUDE.md: backend variability lives behind an interface
 // with one shared suite, as internal/sandbox/sandboxtest and internal/blob/
 // blobtest already do for their backends). It asserts the protocol-agnostic
-// invariants of the Provider/Stream contract — the guarantees the brain relies
-// on for every turn, whether the turn was carried over Anthropic Messages or
-// OpenAI Chat Completions: a stream terminates with exactly one done chunk
-// carrying a stop reason; stop_reason is tool_use whenever the turn made a tool
-// call; a tool call's input accumulates and defaults to {} when empty; a usage
+// invariants of the Provider/Stream contract — what every adapter owes its
+// caller, whether the turn was carried over Anthropic Messages or OpenAI Chat
+// Completions: a stream terminates with exactly one done chunk carrying a stop
+// reason; a well-formed tool turn arrives with stop_reason tool_use — the
+// mapping the adapter owes that label, NOT a promise about the endpoint behind
+// it, which is why the brain classifies a turn on its tool blocks rather than
+// its label (#181); a tool call's input accumulates and defaults to {} when empty; a usage
 // reading is nil only when the endpoint reported none (not when it reported
 // zeroes, #90); a cancelled context surfaces as a stream error rather than a
 // silent completion; and Close releases the stream both after a completed turn

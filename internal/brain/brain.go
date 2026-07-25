@@ -298,6 +298,18 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// nothing to chain — settling either way would wedge or spin.
 		return b.failTurn(sctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
 	}
+	if turn.stopReason == "refusal" {
+		// A refusal is terminal, and its tool calls are not ours to run: the
+		// SDK's own agentic loop returns before executing them because they
+		// "belong to a dead conversation — executing them fires side effects
+		// the caller never confirmed and produces tool_results that cannot be
+		// coherently replayed" (betatoolrunner.go executeTools). Dropping the
+		// blocks here rather than in commitTurn is what keeps that true of the
+		// log too: an intent that committed would be one nothing may answer
+		// and nothing may run. The turn settles on its text like any other
+		// non-tool turn.
+		turn.toolUses = nil
+	}
 
 	// Only a turn that actually called a tool needs the name→type and
 	// name→policy maps; a text-only end_turn would otherwise re-expand the
@@ -466,19 +478,23 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	}
 
 	// A turn that called tools suspends on them, whatever stop reason came
-	// with them. For a compliant endpoint the two are one fact — and runTurn
-	// has already failed the empty converse, a tool_use stop with no blocks —
-	// but the Anthropic-protocol provider is pointed at any endpoint speaking
-	// Messages (design principle 4), and such an endpoint may label a
-	// response whose tool block is complete max_tokens, stop_sequence, or a
-	// non-compliant end_turn. The blocks commit either way (turnEvents emits
-	// one agent.tool_use per block), so classifying on the label would idle
-	// the session with a call nothing ever enqueues, and leave every later
-	// replay carrying a tool_use no result answers. A block truncated by the
-	// token limit never reaches here: streamTurn rejects a tool input that is
-	// not a complete JSON object and fails the turn instead. The openai
-	// adapter holds the same invariant one layer down, for the same reason
-	// (docs/DIVERGENCES.md).
+	// with them — the classification is the blocks, not the label. Nothing in
+	// the Messages schema ties the two: max_tokens, stop_sequence, refusal and
+	// a non-compliant end_turn can all arrive over a complete tool block, and
+	// the SDK's own agentic loop reads the blocks for exactly that reason. The
+	// intents commit either way (turnEvents emits one tool-intent event per
+	// block), so classifying on the label would idle the session with calls
+	// nothing ever enqueues and leave every later replay carrying a tool_use
+	// no result answers. runTurn has already resolved the two shapes that are
+	// not tool turns: a tool_use stop with no blocks fails, and a refusal
+	// arrives here with its blocks dropped.
+	//
+	// A block truncated mid-input never reaches here — streamTurn rejects a
+	// tool input that is not a complete JSON object, and a proper prefix of an
+	// object never parses as one. A block cut before its first input delta is
+	// the exception: it arrives as {} and runs, which the tool answers with
+	// its own required-argument error, recoverable where a stranded call is
+	// not (docs/DIVERGENCES.md).
 	if len(turn.toolUses) > 0 {
 		if len(askIDs) > 0 {
 			// A confirmation gate: at least one intent's policy is always_ask.
