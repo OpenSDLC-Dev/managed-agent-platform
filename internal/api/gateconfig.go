@@ -1,11 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
 	"github.com/jackc/pgx/v5"
@@ -66,10 +71,80 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 		return nil, err
 	}
 
+	s.emitUnreachableCredentials(ctx, sessionID, cfg.Networking, creds)
+
 	return gateconfig.Config{
 		Networking:  cfg.Networking,
 		Credentials: toGateCredentials(creds),
 	}, nil
+}
+
+// emitUnreachableCredentials surfaces the reference's
+// credential_host_unreachable_error (a session.error variant): an
+// environment_variable credential whose allowed_hosts includes a host the
+// environment's networking policy does not permit — a configuration conflict
+// the user should hear about, since the credential can never be substituted
+// on those hosts through this environment (SDK betasessionevent.go's
+// documented trigger). Detection runs on every config render (resolution is
+// read-time, so an edit heals or introduces a conflict without a restart) but
+// each (session, credential) conflict is emitted once. Best-effort: the config
+// a live gate is waiting for is never failed over an advisory event, so
+// detection or append errors are logged and swallowed.
+func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID string, net domain.Networking, creds []vaultresolve.Credential) {
+	// Only a limited policy refuses hosts. The zero value is the wire default,
+	// unrestricted; an unknown type never reaches here (the API validates).
+	if net.Type != domain.NetLimited {
+		return
+	}
+	policy := egress.NewHostSet(net.AllowedHosts)
+	for _, c := range creds {
+		if c.Unrestricted {
+			continue // no allowed_hosts of its own; reach is the environment's call
+		}
+		var blocked []string
+		for _, e := range c.AllowedHosts {
+			if !policy.CoversEntry(e) {
+				blocked = append(blocked, e)
+			}
+		}
+		if len(blocked) == 0 {
+			continue
+		}
+		var already bool
+		err := s.pool.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM events
+			 WHERE session_id = $1 AND type = 'session.error'
+			   AND payload->'error'->>'type' = 'credential_host_unreachable_error'
+			   AND payload->'error'->>'credential_id' = $2)`,
+			sessionID, c.CredentialID).Scan(&already)
+		if err != nil {
+			slog.WarnContext(ctx, "gateconfig: unreachable-credential dedupe check failed", "credential", c.CredentialID, "error", err)
+			continue
+		}
+		if already {
+			continue
+		}
+		payload, err := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"type":          "credential_host_unreachable_error",
+				"credential_id": c.CredentialID,
+				"vault_id":      c.VaultID,
+				// Hostnames only — never a secret, never a placeholder.
+				"message": "credential allowed_hosts include hosts the environment's networking policy does not permit: " +
+					strings.Join(blocked, ", "),
+				"retry_status": map[string]any{"type": "retrying"},
+			},
+		})
+		if err != nil {
+			slog.WarnContext(ctx, "gateconfig: unreachable-credential payload", "credential", c.CredentialID, "error", err)
+			continue
+		}
+		if _, err := s.log.Append(ctx, domain.ID(sessionID), []events.NewEvent{{
+			Type: domain.EventSessionError, Payload: payload,
+		}}); err != nil {
+			slog.WarnContext(ctx, "gateconfig: unreachable-credential event append failed", "credential", c.CredentialID, "error", err)
+		}
+	}
 }
 
 // toGateCredentials projects resolved credentials onto the gate wire shape. The

@@ -72,6 +72,35 @@ func (s *HostSet) Match(host string) bool {
 	return false
 }
 
+// CoversEntry reports whether every host an allowed_hosts entry names is
+// admitted by the set — the config-conflict probe behind the reference's
+// credential_host_unreachable_error ("a credential's allowed_hosts includes a
+// host the environment's network policy does not permit"). An exact entry is
+// covered iff the set matches it. A wildcard entry names a whole subdomain
+// family, which only a wildcard of the set can cover: "*.D" is covered iff the
+// set has a suffix S with D == S or D under S — a set's exact host can never
+// cover a family, and a broader wildcard is not covered by a narrower one.
+// A malformed entry covers nothing and is reported uncovered (fail-closed:
+// it names something the policy cannot admit).
+func (s *HostSet) CoversEntry(entry string) bool {
+	if s == nil {
+		return false
+	}
+	entry = normalizeHost(entry)
+	if rest, ok := strings.CutPrefix(entry, "*."); ok {
+		if rest == "" || hasEmptyLabel(rest) {
+			return false
+		}
+		for _, suf := range s.suffixes {
+			if rest == suf || strings.HasSuffix(rest, "."+suf) {
+				return true
+			}
+		}
+		return false
+	}
+	return s.Match(entry)
+}
+
 // normalizeHost lowercases and strips a single trailing FQDN dot so
 // "Example.com." and "example.com" compare equal.
 func normalizeHost(h string) string {

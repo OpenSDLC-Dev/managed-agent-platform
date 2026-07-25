@@ -27,6 +27,31 @@ copy of an entry here.
 
 ### Added
 
+- **`credential_host_unreachable_error` is emitted — as the config conflict the SDK defines, not the
+  runtime miss the plan sketched** (plan 12 slice 4c-2c, #50). Resolving the wire shape against the
+  reference first (the rule that exists for exactly this) corrected the plan's reading before it was
+  built: the SDK (v1.61.0 `betasessionevent.go`) defines the error as a *static configuration
+  conflict* — "an environment_variable credential's auth.networking.allowed_hosts includes a host
+  that the environment's network policy does not permit" — while the runtime case plan 12 had tied it
+  to (a placeholder egressing to a non-allowed host) is separately documented as normal,
+  non-erroring behavior: the placeholder simply rides through literally. Per "Anthropic's domain
+  model is the single source of truth", the SDK semantics are implemented and the plan's sketch is
+  corrected, not followed. The controlplane detects the conflict when rendering the gate config
+  (`getGateConfig` — the first point that observes both halves for a session whose gate is live, so
+  detection re-runs every fetch and vault/policy edits track without a restart): under a `limited`
+  environment policy, every restricted credential's `allowed_hosts` entries are probed with the new
+  `egress.HostSet.CoversEntry` (an exact entry iff the policy matches it; a `*.` entry — a whole
+  subdomain family — only by a policy wildcard at or above it), and an uncovered entry appends a
+  `session.error` event whose error names the SDK's required fields: `credential_id` and `vault_id`
+  (`vaultresolve.Credential` now carries the containing vault's id), a `message` listing the
+  uncovered hostnames (non-secret), and `retry_status` `{"type": "retrying"}` (the conflict heals on
+  edit). Emission is once per (session, credential) via an events-table dedupe, post-commit and
+  best-effort — an append failure is warn-logged and never fails the config a live gate is waiting
+  for. The gate's `OnUnreachable` seam stays diagnostic-only and deliberately unwired; the comments
+  in `internal/gate`, `internal/gaterun`, and `internal/gateconfig` that promised it would become
+  the wire error are corrected, and the inferred residuals (emission point, cadence, `retry_status`
+  choice, message wording, wildcard-vs-wildcard coverage) are recorded INFERRED in DIVERGENCES.
+
 - **`limited` egress is live end-to-end on Docker: only `allowed_hosts`, through the gate**
   (plan 12 slice 4, #50). The permit path the 4-i pair provisioning prepared is now proven and
   shipped. The sandbox contract suite gains a gate seam (`sandboxtest.Harness.Gate` → `GateFixture`)

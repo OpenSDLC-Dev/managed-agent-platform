@@ -38,7 +38,8 @@ type Config struct {
 // needs it: the sandbox-visible Placeholder, the plaintext Secret it stands for,
 // the credential's own networking arm (which hosts the secret may be used
 // against), and the injection locations it is enabled for. CredentialID is
-// non-secret — it names the substitution span in a credential_host_unreachable_error.
+// non-secret — it names the credential in the substitution span's
+// credential_id attribute.
 type Credential struct {
 	CredentialID      string               `json:"credential_id"`
 	Placeholder       string               `json:"placeholder"`

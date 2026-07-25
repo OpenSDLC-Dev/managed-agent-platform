@@ -6,6 +6,36 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 )
 
+func TestHostSetCoversEntry(t *testing.T) {
+	env := egress.NewHostSet([]string{"api.example.com", "*.wild.example.com", "192.0.2.1"})
+	cases := []struct {
+		entry string
+		want  bool
+	}{
+		{"api.example.com", true},      // exact entry, exact match
+		{"API.Example.Com", true},      // case-insensitive
+		{"192.0.2.1", true},            // IPv4 literal
+		{"blocked.example.com", false}, // exact entry outside the set
+		{"a.wild.example.com", true},   // exact entry under the set's wildcard
+		{"*.wild.example.com", true},   // wildcard entry == the set's wildcard
+		{"*.a.wild.example.com", true}, // narrower wildcard, family within the set's
+		{"*.example.com", false},       // broader wildcard: names hosts the set refuses
+		{"*.api.example.com", false},   // exact set entry cannot cover a wildcard's family
+		{"wild.example.com", false},    // the apex is never matched by the set's wildcard
+		{"*.", false},                  // malformed wildcard entry
+		{"", false},                    // malformed entry
+	}
+	for _, c := range cases {
+		if got := env.CoversEntry(c.entry); got != c.want {
+			t.Errorf("CoversEntry(%q) = %v, want %v", c.entry, got, c.want)
+		}
+	}
+	var nilSet *egress.HostSet
+	if nilSet.CoversEntry("api.example.com") {
+		t.Error("nil set covers an entry")
+	}
+}
+
 func TestHostSetMatch(t *testing.T) {
 	set := egress.NewHostSet([]string{
 		"example.com",   // exact hostname

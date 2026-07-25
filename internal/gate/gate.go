@@ -11,8 +11,11 @@
 // The package is transport-only: it holds resolved credentials for the life of
 // one session's gate and opens sockets, but reads no store and emits no events.
 // A credential the request host is not allowed to use is left as its literal
-// placeholder (never the secret) and surfaced through the OnUnreachable seam,
-// which the deployment wiring turns into a credential_host_unreachable_error.
+// placeholder (never the secret) — documented reference behavior, not an error —
+// and surfaced through the diagnostic OnUnreachable seam. The wire-visible
+// credential_host_unreachable_error is a *configuration conflict* (a
+// credential's allowed_hosts vs the environment's networking policy), detected
+// and emitted controlplane-side when the gate config is rendered — never here.
 package gate
 
 import (

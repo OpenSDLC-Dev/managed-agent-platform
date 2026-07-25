@@ -30,8 +30,10 @@ const tracerName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/gate
 // networking policy passes through unchanged, and each resolved credential
 // becomes an egress.Credential — its allowed_hosts a HostSet, its unrestricted
 // arm carried through so the secret substitutes for any host. OnUnreachable is
-// left unset (the unreachable-error channel is a later sub-PR); Dial/Transport/
-// MaxBodyBytes take gate.New's defaults.
+// left unset — the seam is diagnostic-only, and credential_host_unreachable_error
+// is a config-conflict event the controlplane emits when rendering this config,
+// not something the gate reports; Dial/Transport/MaxBodyBytes take gate.New's
+// defaults.
 func Convert(cfg *gateconfig.Config) gate.Config {
 	creds := make([]egress.Credential, 0, len(cfg.Credentials))
 	for _, c := range cfg.Credentials {
