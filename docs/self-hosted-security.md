@@ -23,9 +23,9 @@ deliberate divergences from the reference are in
 |---|---|---|
 | **Sandbox image** | Requires only `/bin/bash` + a POSIX userland; pulls the image you name | Building and pinning a hardened, minimal image; keeping it patched |
 | **Non-root execution** | Sets no user — the container runs as your image's default user | Shipping an image whose default user is unprivileged |
-| **Linux capabilities** | Adds none to the sandbox (one init container adds `NET_ADMIN`, below) | Dropping capabilities at the runtime / orchestrator layer |
+| **Linux capabilities** | Adds none to the sandbox; a **gated** Docker sandbox additionally drops `NET_RAW`/`SETUID`/`SETGID` + `no-new-privileges` (the `NET_ADMIN` holders are the K8s netsetup init container and the Docker gate container, below) | Dropping the remaining capabilities at the runtime / orchestrator layer |
 | **Read-only root filesystem** | Not set | Enforcing it at the runtime layer, with writable mounts for the workdir |
-| **Sandbox egress** | `limited` networking **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
+| **Sandbox egress** | `limited` = only `allowed_hosts`, through the per-session egress gate (Docker, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
 | **Runtime isolation** | Runs tools in a per-session container; no gVisor/Kata wired yet | Choosing a hardened container runtime (gVisor, Kata, userns-remap) |
 | **Environment-key lifecycle** | Hash-only storage, one live key per environment, revoke-on-re-mint, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
 | **Model / tool credentials** | Never enter the sandbox; redacted from error events | Securing the brain's provider config and any egress-time secrets |
@@ -48,8 +48,13 @@ tests and the reference design commits to.
   the request's auth header back cannot land the key in a `session.error` event
   (which is append-only and re-served to clients). A model's *successful* output
   is a trusted boundary and is never redacted — it is the content the session
-  exists to record. Tool-time credentials (vaults, egress injection) are a
-  reserved seam, deferred; see [Reserved seams](#reserved-seams-and-tracked-gaps).
+  exists to record. Tool-time credentials (vaults) never enter the sandbox
+  either: the sandbox sees only an opaque `vltph_` placeholder, and the
+  per-session egress gate substitutes the real value on admitted plain-HTTP
+  egress alone — in-sandbox HTTPS keeps its placeholders until the
+  TLS-terminating phase ([#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)).
+  Live on gate-wired Docker; the K8s sidecar and BYOC delivery are
+  [Reserved seams](#reserved-seams-and-tracked-gaps).
 
 - **Auth is scoped and hashed at rest.** Management calls carry `x-api-key`;
   workers carry an environment key as `Authorization: Bearer`. Both are stored as
@@ -72,17 +77,24 @@ tests and the reference design commits to.
   the sandbox runs with `HostConfig.Init: true` so orphaned tool subprocesses are
   reaped rather than piling up as zombies (`internal/sandbox/docker/docker.go`).
 
-- **`limited` networking fails closed.** A `limited` environment means "only the
-  allowed hosts", which needs the reserved egress proxy. Until that proxy exists,
-  the platform refuses to guess: a `limited` Docker sandbox gets
-  `NetworkMode: none` (no route out at all), and a `limited` Kubernetes sandbox
-  gets an init container that flushes the pod netns routing table and **fails the
-  pod** if any IPv4 route survives — enforced before the sandbox container starts.
-  It never silently falls open to unrestricted egress. (`allowed_hosts` is
-  accepted but not yet honoured — tracked in [#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50).
-  The K8s flush is not equivalent to `NetworkMode: none` on every cluster: raw
-  `AF_PACKET` sockets can still reach the segment, and only the main IPv4 table is
-  inspected, so policy-routing CNIs and IPv6 egress still need the egress proxy.)
+- **`limited` networking is enforced.** A `limited` environment means "only the
+  allowed hosts". On Docker with the egress gate opted in (`CONTROLPLANE_URL` +
+  `EXECUTOR_GATE_IMAGE` on the executor — the stock compose stack ships this)
+  that is enforced literally: the sandbox shares a network namespace with its
+  per-session gate, egress rides the injected `HTTP(S)_PROXY` through it, the
+  gate admits CONNECT and plain-HTTP requests only for the environment's
+  `allowed_hosts`, and an iptables **owner-match** ruleset lets only the gate's
+  dropped-to UID leave the namespace — traffic that ignores the proxy is
+  dropped, not routed. Where the gate does not run, the platform still refuses
+  to guess: an un-opted-in `limited` Docker sandbox gets `NetworkMode: none`
+  (no route out at all), and a `limited` Kubernetes sandbox gets an init
+  container that flushes the pod netns routing table and **fails the pod** if
+  any IPv4 route survives — the K8s gate sidecar is plan 12 slice 4d, tracked
+  in [#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50).
+  It never silently falls open to unrestricted egress. (The K8s flush is not
+  equivalent to `NetworkMode: none` on every cluster: raw `AF_PACKET` sockets
+  can still reach the segment, and only the main IPv4 table is inspected, so
+  policy-routing CNIs and IPv6 egress still need the gate sidecar.)
 
 - **The container is the boundary.** Tools run inside the per-session sandbox
   with no host filesystem access. The built-in file and search tools do **no**
@@ -128,10 +140,15 @@ change — so do it.
 
 ### 3. Dropping Linux capabilities
 
-The platform does not drop capabilities from the sandbox, so it runs with the
-container runtime's **default capability set**. (The sole `SecurityContext` in
-the codebase *adds* `NET_ADMIN` to the short-lived `netsetup` init container that
-enforces `limited` networking — never to the sandbox container itself.)
+The platform does not drop capabilities from an ungated sandbox, so it runs
+with the container runtime's **default capability set**. A **gated** Docker
+sandbox (plan 12) is the exception: the provider drops `NET_RAW`, `SETUID` and
+`SETGID` and sets `no-new-privileges`, so the sandbox can neither craft raw
+packets past the gate's owner-match firewall nor become the gate's UID. The
+`NET_ADMIN` holders are the gate container itself (it installs the firewall,
+then drops privileges) and, on Kubernetes, the short-lived `netsetup` init
+container that enforces gate-less `limited` networking — never the sandbox
+container.
 
 Dropping capabilities is not a per-container toggle the platform exposes yet, so
 enforce it at the layer you control:
@@ -159,9 +176,10 @@ change, not a flag.
 
 ### 5. Egress restriction
 
-For a `limited` environment, egress is already enforced closed by the platform
-(above) — you get no-route-out for free, with the CNI caveats noted. **For the
-default (non-`limited`) case, egress is unrestricted**: a default Docker sandbox
+For a `limited` environment, egress is already enforced by the platform
+(above) — only `allowed_hosts` through the per-session gate where it runs,
+no-route-out elsewhere, with the CNI caveats noted. **For the default
+(non-`limited`) case, egress is unrestricted**: a default Docker sandbox
 gets `NetworkMode: bridge`, and the Kubernetes sandbox pod carries no
 `NetworkPolicy`. If your agents should not reach the open internet or your
 internal network, you must restrict it yourself:
@@ -171,9 +189,11 @@ internal network, you must restrict it yourself:
 - **Docker / hosts:** firewall the sandbox network, or front outbound traffic
   with an egress proxy you control.
 
-Until the reserved egress proxy lands, `allowed_hosts`-style per-host allowlisting
-is not available in-platform; network-layer controls are the mechanism. The
-built-in `web_fetch` / `web_search` tools are deferred for the same reason and
+On gate-wired Docker, `allowed_hosts` per-host allowlisting for `limited`
+environments is enforced in-platform (above). Everywhere else — Kubernetes
+until the 4d sidecar, un-opted-in Docker, and every non-`limited` environment —
+network-layer controls remain the mechanism. The built-in `web_fetch` /
+`web_search` tools are still deferred (not yet wired through the gate) and
 return an error if enabled ([#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)).
 
 ### 6. Environment-key rotation
@@ -260,21 +280,30 @@ daemon and every container on it as one trust domain.
 This model is honest about what is not yet enforced. These are reserved seams
 with tracking issues, not silent omissions:
 
-- **Egress proxy / `allowed_hosts`** — per-host allowlisting for `limited`
-  environments; until then `limited` fails fully closed.
+- **Egress gate on Kubernetes** — per-host allowlisting for `limited`
+  environments is live on gate-wired Docker (the per-session gate, above); the
+  K8s gate sidecar is the remaining half, and until it lands a `limited` K8s
+  pod keeps the fail-closed route flush.
   [#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50)
-- **`web_fetch` / `web_search`** — deferred pending the egress policy above; return
-  an error if enabled.
+- **`web_fetch` / `web_search`** — deferred pending their wiring through the
+  egress gate; return an error if enabled.
   [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)
 - **Environment-key issuance UX** — no operator wire endpoint yet; keys are seeded
   directly.
   [#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)
-- **Sandbox `securityContext` / `runtimeClassName`** — the platform does not yet set
-  capability drops, non-root, read-only rootfs, or a hardened RuntimeClass on the
-  sandbox; these are operator-configured at the runtime layer today, as above.
-- **Tool-time credential injection (vaults)** — the egress-time credential seam is
-  reserved and deferred; the sandbox sees no tool credentials in v1.
-  [#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50)
+- **Sandbox `securityContext` / `runtimeClassName`** — beyond the gated Docker
+  sandbox's drops (above), the platform does not yet set capability drops,
+  non-root, read-only rootfs, or a hardened RuntimeClass on the sandbox; these
+  are operator-configured at the runtime layer today, as above.
+- **Tool-time credential injection (vaults)** — delivered on gate-wired Docker:
+  the sandbox sees only opaque placeholders, substituted at the gate on
+  admitted plain-HTTP egress (in-sandbox HTTPS keeps its placeholders until the
+  TLS-terminating phase,
+  [#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)).
+  BYOC worker delivery is
+  [#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165);
+  the K8s sidecar is
+  [#50](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/50).
 
 ## See also
 

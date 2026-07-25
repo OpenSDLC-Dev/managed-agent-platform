@@ -109,6 +109,49 @@ func TestK8sLimitedNetworkingFailsClosedWhenFlushNoOps(t *testing.T) {
 	}
 }
 
+// recordingMinter counts mints so a test can prove the backend never touched
+// the gate-token seam.
+type recordingMinter struct{ generated int }
+
+func (m *recordingMinter) Generate() string { m.generated++; return "gtk_ignored" }
+
+func (m *recordingMinter) Persist(context.Context, domain.ID, string) error { return nil }
+
+// Until slice 4d wires the K8s gate sidecar, a Spec carrying a Gate must be
+// accepted and ignored — that is Spec.Gate's documented contract. Provision
+// succeeds, the pre-gate fail-closed isolation stands (no route out), and the
+// token seam is never touched.
+func TestK8sIgnoresGateSpecUntilSidecarLands(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{
+		Context:   os.Getenv("MAP_K8S_CONTEXT"),
+		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
+	})
+	if err != nil {
+		t.Fatalf("these tests require a Kubernetes cluster: %v", err)
+	}
+	m := &recordingMinter{}
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{
+		SessionID:  domain.NewID("sesn"),
+		Image:      testImage,
+		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"example.com"}},
+		Gate:       &sandbox.GateSpec{Image: "gate:ignored", ControlplaneURL: "http://cp.invalid", TokenMinter: m},
+	})
+	if err != nil {
+		t.Fatalf("provision with Spec.Gate faulted, want it ignored: %v", err)
+	}
+	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
+	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "cat /proc/net/route"})
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("read routes: %+v %v", res, err)
+	}
+	if routes := len(strings.Split(strings.TrimSpace(res.Stdout), "\n")) - 1; routes != 0 {
+		t.Errorf("gate-ignoring limited pod has %d routes, want the pre-gate no-route isolation", routes)
+	}
+	if m.generated != 0 {
+		t.Errorf("K8s backend minted %d gate tokens; Spec.Gate must be ignored until 4d", m.generated)
+	}
+}
+
 // Untrusted tool commands must not receive the namespace ServiceAccount's token:
 // the sandbox never calls the Kubernetes API, and a mounted token would hand the
 // agent whatever RBAC that account carries.

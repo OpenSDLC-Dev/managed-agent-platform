@@ -298,8 +298,8 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 // variables the sandbox is provisioned with: one secret_name=placeholder entry
 // per active environment_variable credential (vaultresolve). The placeholders
 // are opaque and inert on their own — the per-session gate substitutes the real
-// secrets at egress time (a later slice). No attached vaults, or none carrying
-// env-var credentials, yields a nil map: an ordinary sandbox.
+// secrets at egress time, on admitted plain-HTTP requests. No attached vaults,
+// or none carrying env-var credentials, yields a nil map: an ordinary sandbox.
 //
 // Placeholders are derived per (session, secret_name), so a re-provision of the
 // same session resolves the identical tokens — matching what the create-bound

@@ -95,6 +95,17 @@ compose it uses the **docker** backend and mounts the host Docker socket
 daemon — a local-dev convenience. The production path uses the Kubernetes backend
 (pod-per-session) instead; see the Helm chart.
 
+The stack is gate-wired: a session on a `limited` environment (or with vaults
+attached) gets a per-session **egress gate** — a forward proxy the sandbox's
+`HTTP(S)_PROXY` rides through, admitting only the environment's
+`allowed_hosts` and substituting vault placeholders on plain-HTTP egress. The
+`gate-image` service builds the gate image (`Dockerfile --target gate`) onto
+the host daemon before the executor starts; the executor opts in via
+`CONTROLPLANE_URL` + `EXECUTOR_GATE_IMAGE`, and `SANDBOX_DOCKER_GATE_NETWORK`
+puts the gate on the stack's network so it can fetch its policy from
+`http://controlplane:8080`. Gate containers are siblings on the host daemon,
+same as the sandboxes that join their network namespace.
+
 ## Traces (optional)
 
 ```sh

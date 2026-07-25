@@ -1,0 +1,147 @@
+// This file is the gate-fixture support for backends (and binaries) that test
+// against the real egress-gate image. The pieces are exported separately —
+// image build, host address, stand-in controlplane — because cmd/gate's own
+// real-firewall test composes them differently from the Docker provider's
+// contract harness.
+
+package sandboxtest
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+)
+
+// GateImageTag is the tag BuildGateImage builds the repo's gate image under.
+const GateImageTag = "map-gate:sandboxtest"
+
+var (
+	gateImageOnce sync.Once
+	gateImageErr  error
+)
+
+// BuildGateImage builds the repo's gate image (docker build --target gate)
+// once per test process and returns its tag. A build failure is a hard test
+// failure — the repo convention for a missing daemon, not a skip.
+func BuildGateImage(t *testing.T) string {
+	t.Helper()
+	gateImageOnce.Do(func() {
+		_, file, _, ok := runtime.Caller(0)
+		if !ok {
+			gateImageErr = fmt.Errorf("cannot locate the repo root")
+			return
+		}
+		root := filepath.Join(filepath.Dir(file), "..", "..", "..")
+		out, err := exec.Command("docker", "build", "--target", "gate", "-t", GateImageTag, root).CombinedOutput()
+		if err != nil {
+			gateImageErr = fmt.Errorf("docker build --target gate: %v\n%s", err, out)
+		}
+	})
+	if gateImageErr != nil {
+		t.Fatal(gateImageErr)
+	}
+	return GateImageTag
+}
+
+// DockerHostAddr returns an address of the test host reachable from a
+// container on Docker's default bridge network: host.docker.internal under
+// Docker Desktop (darwin), the bridge gateway IP on Linux. Listeners meant to
+// be reached this way must bind all interfaces, not loopback.
+func DockerHostAddr(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "darwin" {
+		return "host.docker.internal"
+	}
+	out, err := exec.Command("docker", "network", "inspect", "bridge",
+		"--format", "{{(index .IPAM.Config 0).Gateway}}").Output()
+	if err != nil {
+		t.Fatalf("docker network inspect bridge: %v", err)
+	}
+	addr := strings.TrimSpace(string(out))
+	if addr == "" {
+		t.Fatal("docker bridge network reports no gateway")
+	}
+	return addr
+}
+
+// GateStub is a stand-in controlplane and egress origin on one host listener:
+// it serves the gate's config fetch (gateconfig.Path, bearer-authenticated
+// with Token) and an /echo endpoint reflecting the Authorization header and
+// body that egress delivered to the origin. The config's policy admits exactly
+// the stub's own host and carries one header+body env-var credential.
+type GateStub struct {
+	// Addr is host:port reachable from a container on the default bridge.
+	Addr        string
+	Token       string
+	Placeholder string
+	Secret      string
+}
+
+// StartGateStub starts the stub, cleaned up with the test.
+func StartGateStub(t *testing.T) *GateStub {
+	t.Helper()
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("gate stub listen: %v", err)
+	}
+	s := &GateStub{
+		Addr:        net.JoinHostPort(DockerHostAddr(t), strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)),
+		Token:       "gtk_sandboxtest",
+		Placeholder: "vltph_sandboxtest",
+		Secret:      "sandboxtest-secret-value",
+	}
+	host, _, err := net.SplitHostPort(s.Addr)
+	if err != nil {
+		t.Fatalf("gate stub addr: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(gateconfig.Path, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+s.Token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(gateconfig.Config{
+			Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
+			Credentials: []gateconfig.Credential{{
+				CredentialID: "vcrd_sandboxtest",
+				Placeholder:  s.Placeholder,
+				Secret:       s.Secret,
+				Networking: gateconfig.CredentialNetworking{
+					Type: domain.NetLimited, AllowedHosts: []string{host},
+				},
+				InjectionLocation: gateconfig.InjectionLocation{Header: true, Body: true},
+			}},
+		})
+	})
+	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		fmt.Fprintf(w, "authorization=%s\nbody=%s\n", r.Header.Get("Authorization"), body)
+	})
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return s
+}
+
+// Minter returns a GateTokenMinter minting the stub's fixed token; Persist is
+// a no-op — the stub itself is the token's verifier.
+func (s *GateStub) Minter() sandbox.GateTokenMinter { return stubMinter{token: s.Token} }
+
+type stubMinter struct{ token string }
+
+func (m stubMinter) Generate() string                                 { return m.token }
+func (m stubMinter) Persist(context.Context, domain.ID, string) error { return nil }

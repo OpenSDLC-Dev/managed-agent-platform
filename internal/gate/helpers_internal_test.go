@@ -22,6 +22,18 @@ func TestDefaultTransportConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultTunnelIdleTimeout(t *testing.T) {
+	g := New(Config{})
+	if g.tunnelIdle != defaultTunnelIdleTimeout {
+		t.Errorf("default tunnel idle timeout = %v, want %v", g.tunnelIdle, defaultTunnelIdleTimeout)
+	}
+	// The default must tolerate quiet stretches of a long-lived interactive TLS
+	// session; a sub-minute cut would sever them.
+	if defaultTunnelIdleTimeout < time.Minute {
+		t.Errorf("defaultTunnelIdleTimeout = %v is too aggressive for long-lived TLS", defaultTunnelIdleTimeout)
+	}
+}
+
 func TestHostOnly(t *testing.T) {
 	cases := map[string]string{
 		"example.com:443": "example.com",
