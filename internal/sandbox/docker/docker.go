@@ -361,9 +361,10 @@ func (p *Provider) attach(id, workdir, gateID string) *container {
 	}
 }
 
-// networkMode fails closed. `limited` means "only AllowedHosts", which needs
-// the egress proxy the plan reserves; until it exists, a limited sandbox gets
-// no network at all rather than silently unrestricted egress.
+// networkMode fails closed on the ungated path (no Spec.Gate — a deployment
+// not opted into the egress gate): `limited` means "only AllowedHosts", which
+// needs the gate to enforce, so without one a limited sandbox gets no network
+// at all rather than silently unrestricted egress.
 func networkMode(net domain.Networking) string {
 	if net.Type == domain.NetLimited {
 		return "none"
