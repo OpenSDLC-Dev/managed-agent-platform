@@ -87,7 +87,9 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 // on those hosts through this environment (SDK betasessionevent.go's
 // documented trigger). Detection runs on every config render (resolution is
 // read-time, so an edit heals or introduces a conflict without a restart) but
-// each (session, credential) conflict is emitted once. Best-effort: the config
+// each (session, credential) conflict is emitted once — check-then-append, so
+// concurrent duplicate fetches could double-emit an advisory event; that rarity
+// is not worth a uniqueness constraint. Best-effort: the config
 // a live gate is waiting for is never failed over an advisory event, so
 // detection or append errors are logged and swallowed.
 func (s *server) emitUnreachableCredentials(ctx context.Context, sessionID string, net domain.Networking, creds []vaultresolve.Credential) {

@@ -30,7 +30,8 @@ copy of an entry here.
 - **`credential_host_unreachable_error` is emitted — as the config conflict the SDK defines, not the
   runtime miss the plan sketched** (plan 12 slice 4c-2c, #50). Resolving the wire shape against the
   reference first (the rule that exists for exactly this) corrected the plan's reading before it was
-  built: the SDK (v1.61.0 `betasessionevent.go`) defines the error as a *static configuration
+  built: the SDK (`betasessionevent.go`, identical at the pinned v1.59.0 and the checkout's
+  v1.61.0) defines the error as a *static configuration
   conflict* — "an environment_variable credential's auth.networking.allowed_hosts includes a host
   that the environment's network policy does not permit" — while the runtime case plan 12 had tied it
   to (a placeholder egressing to a non-allowed host) is separately documented as normal,
