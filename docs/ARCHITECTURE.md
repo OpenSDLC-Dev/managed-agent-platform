@@ -553,8 +553,8 @@ loopback-bound control plane, optional Jaeger profile).
 
 - **Credentials never enter the sandbox.** Tool credentials (vaults) reach the wire only
   at egress time: the sandbox sees opaque `vltph_` placeholders, and the per-session gate
-  substitutes the real value on admitted plain-HTTP egress alone (gate-wired Docker today;
-  in-sandbox HTTPS keeps its placeholders until #166; both backends when the executor opts in). Model
+  substitutes the real value on admitted plain-HTTP egress alone (both backends when the
+  executor opts in; in-sandbox HTTPS keeps its placeholders until #166). Model
   keys live in the brain's provider config; the sandbox sees none of them. Provider adapters redact the credentials they were configured with
   — the api key, a `base_url` userinfo password, an auth header — out of the errors that
   quote an endpoint (`internal/provider/redact.go`), so an endpoint echoing the request's
