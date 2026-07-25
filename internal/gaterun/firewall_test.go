@@ -36,6 +36,10 @@ const goodBody = `-A OUTPUT -o lo -j ACCEPT
 -A OUTPUT -m owner --uid-owner 100 -j ACCEPT
 -A OUTPUT -j DROP`
 
+// goodListing prefixes the rules with a *permissive* -P OUTPUT ACCEPT policy on
+// purpose: CheckListing must ignore the policy line entirely — the explicit
+// catch-all DROP rule is what makes the chain fail-closed — so the dangerous
+// value is the one that proves the property. The real gate sets -P OUTPUT DROP.
 const goodListing = "-P OUTPUT ACCEPT\n" + goodBody
 
 func TestCheckListing(t *testing.T) {

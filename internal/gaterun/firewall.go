@@ -37,13 +37,14 @@ func Ruleset(gateUID int) []Rule {
 }
 
 // Firewall is the OS firewall the gate applies on startup. Apply replaces the
-// OUTPUT chain of both the IPv4 and IPv6 tables with exactly these rules — it
-// flushes the chain, then appends them in order — so the post-apply listing is
-// deterministic no matter what the chain started with (a fresh netns is empty,
-// but the gate must not depend on that for a fail-closed guarantee). List
-// returns each table's current OUTPUT rules in `iptables -S OUTPUT` form for the
-// post-apply verification. The real adapter (iptables/ip6tables via os/exec)
-// lives in cmd/gate; tests supply a fake.
+// OUTPUT chain of both the IPv4 and IPv6 tables with exactly these rules, and
+// must do so fail-closed — no egress may slip through the (non-atomic) rebuild —
+// so the post-apply listing is deterministic no matter what the chain started
+// with (a fresh netns is empty, but the gate must not depend on that for a
+// fail-closed guarantee). List returns each table's current OUTPUT rules in
+// `iptables -S OUTPUT` form for the post-apply verification. The real adapter
+// (iptables/ip6tables via os/exec, policy DROP then flush then append) lives in
+// cmd/gate; tests supply a fake.
 type Firewall interface {
 	Apply(ctx context.Context, rules []Rule) error
 	List(ctx context.Context) (v4, v6 string, err error)
@@ -65,11 +66,14 @@ type PrivDropper interface {
 // three rules in order; a rule that only resembles ours changes the firewall's
 // meaning while passing a loose match — `--uid-owner 1000` when the gate is uid
 // 100, `-o lo0` or `! -o lo` for the loopback rule, or an extra match clause.
-// Apply establishes the exact state by flushing the chain before it appends, so
-// on a real (empty) startup the listing is precisely these rules; this reads it
-// back and refuses to serve on anything else. It is the post-apply gate that
-// aborts startup when the firewall did not take — the analogue of the K8s
-// route-flush's survivor re-count.
+// Apply establishes the exact state by replacing the chain, so on a real (empty)
+// startup the listing is precisely these rules; this reads it back and refuses
+// to serve on anything else. It is the post-apply gate that aborts startup when
+// the firewall did not take — the analogue of the K8s route-flush's survivor
+// re-count. The chain *policy* is deliberately not asserted: the verified
+// explicit catch-all `-A OUTPUT -j DROP` makes the steady-state chain fail-closed
+// by itself, so `-P` lines in the listing are ignored (the policy's own job is
+// fail-closing Apply's non-atomic rebuild window, not the steady state).
 func CheckListing(listing string, gateUID int) error {
 	want := Ruleset(gateUID)
 	var got [][]string
