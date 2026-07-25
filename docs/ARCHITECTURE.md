@@ -241,7 +241,9 @@ suite, and the persistent shell.
 | `k8s/client.go` | client-go construction and the pod-exec transport; documents the image contract (`/bin/bash`, `setsid`, `tee`/`wc` for the write path's delivered-byte count, and a `stat` accepting `-c`). |
 | `k8s/deadline.go` | The in-pod exec wrapper and pid/exit/mark scripts adapting the Docker deadline discipline to Kubernetes' stream-coupled exec; the watchdog marks its own kill (a `mkdir`, so nothing a tenant plants at the path can block it), which is what classifies a punctual timeout here. |
 | `k8s/probe.go` | The two-instant deadline probes (alive-at-deadline / overran-plus-slop) answered by a second exec reading the pid file; sticky overrun verdict. Reach around the watchdog's mark, not the primary evidence — the probe answers an apiserver round trip late. |
-| `sandboxtest/contract.go` | The one suite every backend must pass: stream capture, exit codes, workdir, timeout-kills-and-survives, a command that kills the deadline's guards and then either runs long or exits clean, a command timed by its own life rather than by a straggler holding its output, output cap, binary file round-trip with parent creation, a megabyte round trip spanning many stream buffers, missing/at-the-cap/oversize/directory/non-regular (FIFO) reads, shared filesystem between `Exec` and the file primitives, provision-time env injection (and invalid-key rejection before anything is created), idempotent provision, final-and-idempotent destroy, and networking isolation. |
+| `sandboxtest/contract.go` | The one suite every backend must pass: stream capture, exit codes, workdir, timeout-kills-and-survives, a command that kills the deadline's guards and then either runs long or exits clean, a command timed by its own life rather than by a straggler holding its output, output cap, binary file round-trip with parent creation, a megabyte round trip spanning many stream buffers, missing/at-the-cap/oversize/directory/non-regular (FIFO) reads, shared filesystem between `Exec` and the file primitives, provision-time env injection (and invalid-key rejection before anything is created), idempotent provision, final-and-idempotent destroy, and networking isolation — ungated `limited` = no route, for every backend. |
+| `sandboxtest/egress.go` | The gated networking row, run only for a backend whose `Harness` declares the gate seam (`Gate` returning a `GateFixture`): a `limited` sandbox paired with the real gate reaches the allowed host through the injected proxy (polled past the pre-first-config deny-all window), plain-HTTP egress substitutes the fixture credential's placeholder, a CONNECT tunnel delivers it literally (the #166 gap), a non-allowed host is refused on both proxy paths, and a direct dial bypassing the proxy is dropped by the owner-match firewall — non-vacuously, since the same target was just reached through the gate. |
+| `sandboxtest/gatefixture.go` | The gate fixture pieces, exported separately so `cmd/gate`'s image test composes them too: `BuildGateImage` (one `docker build --target gate` per test process), `DockerHostAddr` (host address reachable from the default bridge — `host.docker.internal` on Docker Desktop, the bridge gateway on Linux), and `GateStub` (one host listener standing in for the controlplane's gate-config endpoint and the egress echo origin, with a fixed-token minter). |
 | `shell/shell.go` | `Run(ctx, sb, session, id, Request)` — one `bash` tool call. `Request{Command, Restart, Timeout}`, `Result` mirrors `ExecResult` plus `Restarted`. It writes the command to a file, mints a directory for this call's snapshot, `Exec`s the embedded template, and then — only if the call did **not** time out **and** left a complete snapshot (its `done` marker) — points `head` at that directory. The snapshot directory is minted per *call*, not named after the tool id: the executor may retry a tool call under the id it already used, and a retry must not inherit the previous attempt's files, least of all its marker. Restart empties `head` through the sandbox's file API (not a container `rm`, which resolves against the container PATH — a prior call that shadowed `rm` on disk would make the reset exit 0 and reset nothing); its write error, not a command's exit code, gates it — a reset that did not run is not a reset. |
 | `shell/template.sh` | The only bash the tool introduces, embedded once as data. Go substitutes the (quoted) state dir, tool id and snapshot dir; the user's command is **not** here — it is delivered as a file and `source`d, so no command bytes ride the argument or a sentinel. A prologue restores the committed snapshot (errexit forced off first, options applied last); the shell is then snapshotted into *this call's own* directory, preserving the command's own exit status, and the save ends by creating the `done` marker that makes the snapshot committable. |
 
@@ -458,7 +460,7 @@ the sidecar (shared network namespace, proxy env, teardown; slice 4-i); the K8s 
 | File | Contents |
 |---|---|
 | `policy.go` | `policy` — the environment's request-level networking gate (the first of the two levels): `unrestricted` admits every host (its safety blocklist unpublished by the reference, deferred and recorded INFERRED), `limited` admits only `allowed_hosts` (via `egress.HostSet`), an unknown type fails closed. Plus the hop-by-hop header set a forwarding proxy must strip (`removeHopByHop`, honoring the `Connection` header on both the forwarded request and the returned response). |
-| `gate.go` | `Gate` — an `http.Handler` forward proxy. `CONNECT` is host-filtered on its target and, if admitted, tunnelled opaquely (no substitution — the #166 TLS gap): the tunnel forwards bytes the server buffered past the `CONNECT` line, propagates a half-close in either direction, and closes only when both directions do. A plain-HTTP request is host-filtered, then its header values and body are rewritten through `egress.Engine.Substitute` (the second gate level — a credential's own `allowed_hosts`) before it is forwarded and the response streamed back; a credential the host does not admit is left as its literal placeholder (never the secret) and its placeholder — never the `*Credential`, which carries the secret — is surfaced through the `OnUnreachable` seam the wiring turns into `credential_host_unreachable_error`. The body buffered for substitution is bounded by `MaxBodyBytes` (default 10 MiB) — a larger sandbox-controlled body is refused `413` rather than read unbounded. |
+| `gate.go` | `Gate` — an `http.Handler` forward proxy. `CONNECT` is host-filtered on its target and, if admitted, tunnelled opaquely (no substitution — the #166 TLS gap): the tunnel forwards bytes the server buffered past the `CONNECT` line, propagates a half-close in either direction, and closes only when both directions do — bounded by an activity-based idle deadline (`TunnelIdleTimeout`, default 5m) that tears down a tunnel only when **both** directions have gone quiet, so a one-way stream never trips it and gate swaps never touch a running tunnel (the watchdog is owned per handler invocation). A plain-HTTP request is host-filtered, then its header values and body are rewritten through `egress.Engine.Substitute` (the second gate level — a credential's own `allowed_hosts`) before it is forwarded and the response streamed back; a credential the host does not admit is left as its literal placeholder (never the secret) and its placeholder — never the `*Credential`, which carries the secret — is surfaced through the `OnUnreachable` seam the wiring turns into `credential_host_unreachable_error`. The body buffered for substitution is bounded by `MaxBodyBytes` (default 10 MiB) — a larger sandbox-controlled body is refused `413` rather than read unbounded. |
 
 ### internal/gaterun
 
@@ -512,8 +514,13 @@ interval must be positive; each config fetch is also bounded by a client timeout
 plane cannot suspend the revocation check. It applies and verifies the
 firewall before anything listens, so the Docker `HEALTHCHECK` — the binary's own `-healthcheck`
 probe, which dials the proxy port — cannot pass until egress is fail-closed, making it the sidecar's
-admission signal. It ships as a separate image (`--target gate` — iptables + a dedicated uid), wired
-into a sandbox by the next sub-PR.
+admission signal. It ships as a separate image (`--target gate` — iptables + a dedicated uid) that the Docker
+provider provisions as the sandbox's netns peer. A real-daemon contract test
+(`cmd/gate/firewall_docker_test.go`) runs that image end-to-end: reaching healthy proves the
+apply→verify→privdrop chain against real iptables-nft in a real netns, the `-S` echo is pinned
+token-for-token on both families against a deliberately hard-coded copy of the ruleset (so an
+accidental `Ruleset` change fails the pin instead of being followed), and exec probes prove the
+packets — root egress dropped, gate-uid egress allowed, loopback allowed.
 
 `deploy/helm/managed-agent-platform` is the chart (controlplane + brain + executor with
 the k8s sandbox backend, optional inline Postgres, MinIO, and OpenBao — all
@@ -526,9 +533,11 @@ loopback-bound control plane, optional Jaeger profile).
 
 ## Security invariants
 
-- **Credentials never enter the sandbox.** Tool credentials are a reserved egress-time
-  seam (vaults, deferred); model keys live in the brain's provider config; the sandbox
-  sees none of them. Provider adapters redact the credentials they were configured with
+- **Credentials never enter the sandbox.** Tool credentials (vaults) reach the wire only
+  at egress time: the sandbox sees opaque `vltph_` placeholders, and the per-session gate
+  substitutes the real value on admitted plain-HTTP egress alone (gate-wired Docker today;
+  in-sandbox HTTPS keeps its placeholders until #166, K8s until the 4d sidecar). Model
+  keys live in the brain's provider config; the sandbox sees none of them. Provider adapters redact the credentials they were configured with
   — the api key, a `base_url` userinfo password, an auth header — out of the errors that
   quote an endpoint (`internal/provider/redact.go`), so an endpoint echoing the request's
   auth header back cannot land the key in a `session.error` event, which is append-only
@@ -611,7 +620,8 @@ contract).
 
 Backend variability lives behind interfaces, and where more than one backend exists the
 contract is a **shared suite**: every sandbox provider passes
-`internal/sandbox/sandboxtest`, and both model-provider protocol adapters pass
+`internal/sandbox/sandboxtest` (a backend that declares the gate seam also runs the gated
+egress rows against the real gate image), and both model-provider protocol adapters pass
 `internal/provider/providertest` (the cross-provider invariants — stream termination,
 `tool_use` stop, usage-nil-only-when-the-endpoint-reported-none, cancellation, `Close`;
 the wire request shape, redaction, and the OpenAI lossy conversions stay per-package) — a

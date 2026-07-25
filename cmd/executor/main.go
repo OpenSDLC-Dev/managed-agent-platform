@@ -40,8 +40,9 @@
 //	                         the rest of the storage config (as controlplane)
 //	SECRETS_BACKEND          secrets cipher for vault credential material
 //	                         (docs/plan/12): "openbao", "local", or empty to
-//	                         run without one; the egress substitution that
-//	                         consumes it lands in plan 12 slice 4
+//	                         run without one; validated at startup for deploy
+//	                         parity — egress substitution itself decrypts
+//	                         controlplane-side, for the per-session gate
 //	BAO_ADDR / BAO_TOKEN / BAO_TRANSIT_KEY / SECRETS_MASTER_KEY / SECRETS_KEY_ID
 //	                         the rest of the cipher config (as controlplane)
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
@@ -135,15 +136,16 @@ func run(ctx context.Context) error {
 		slog.Info("object storage not configured; skills will not materialize")
 	}
 
-	// Constructed for startup validation (fail fast on a misconfigured or
-	// unreachable backend); the egress substitution engine (plan 12 slice 4)
-	// is its consumer here.
+	// Constructed for startup validation only (fail fast on a misconfigured or
+	// unreachable backend, matching the controlplane's wiring): egress
+	// substitution decrypts controlplane-side — the gate-config endpoint —
+	// never in the executor.
 	cipher, err := secrets.FromEnv(ctx)
 	if err != nil {
 		return err
 	}
 	if cipher == nil {
-		slog.Info("secrets cipher not configured; egress credential substitution will be unavailable")
+		slog.Info("secrets cipher not configured")
 	}
 
 	slog.Info("executor running")

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -32,6 +33,12 @@ import (
 // defaultMaxBodyBytes bounds a plain-HTTP request body the gate buffers for
 // substitution when Config.MaxBodyBytes is unset.
 const defaultMaxBodyBytes = 10 << 20 // 10 MiB
+
+// defaultTunnelIdleTimeout closes a CONNECT tunnel that has moved no bytes in
+// either direction for the window when Config.TunnelIdleTimeout is unset. Wide
+// enough for the quiet stretches of a long-lived interactive TLS session; an
+// abandoned tunnel stops holding its goroutines and sockets once it elapses.
+const defaultTunnelIdleTimeout = 5 * time.Minute
 
 // errBodyTooLarge signals a request body over the substitution size limit; the
 // handler maps it to 413 rather than the generic read-failure 502.
@@ -56,6 +63,14 @@ type Config struct {
 	// memory, since the sandbox controls its size. Zero selects
 	// defaultMaxBodyBytes.
 	MaxBodyBytes int64
+	// TunnelIdleTimeout closes a CONNECT tunnel after no bytes have moved in
+	// either direction for the window. Activity on one side alone keeps the
+	// tunnel alive — a long download is silent upstream-ward — so this cuts
+	// only tunnels with no end-to-end byte movement for the whole window
+	// (liveness is measured on successful reads; a tunnel both of whose ends
+	// stop draining for the entire window counts as abandoned). Zero selects
+	// defaultTunnelIdleTimeout.
+	TunnelIdleTimeout time.Duration
 }
 
 // Gate is one session's forward proxy. It implements http.Handler: an
@@ -68,6 +83,7 @@ type Gate struct {
 	dial          func(ctx context.Context, network, addr string) (net.Conn, error)
 	transport     http.RoundTripper
 	maxBody       int64
+	tunnelIdle    time.Duration
 }
 
 // New builds a Gate from cfg.
@@ -100,6 +116,10 @@ func New(cfg Config) *Gate {
 	if maxBody <= 0 {
 		maxBody = defaultMaxBodyBytes
 	}
+	tunnelIdle := cfg.TunnelIdleTimeout
+	if tunnelIdle <= 0 {
+		tunnelIdle = defaultTunnelIdleTimeout
+	}
 	return &Gate{
 		policy:        newPolicy(cfg.Networking),
 		engine:        egress.NewEngine(cfg.Credentials),
@@ -107,6 +127,7 @@ func New(cfg Config) *Gate {
 		dial:          dial,
 		transport:     transport,
 		maxBody:       maxBody,
+		tunnelIdle:    tunnelIdle,
 	}
 }
 
@@ -158,14 +179,20 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// so a client that shuts its write side and awaits the reply is not
 	// truncated by the other pump being torn down first.
 	//
-	// Phase 1 sets no idle/overall tunnel deadline: an idle tunnel holds its two
-	// goroutines and sockets until a peer closes. The blast radius is one
-	// session's own disposable gate (self-inflicted), so an activity-based idle
-	// timeout is deferred to the cmd/gate server wiring (4c-2b) rather than
-	// hard-coded here, where a too-short cut would break long-lived TLS.
+	// An activity-based idle deadline bounds an abandoned tunnel: when no bytes
+	// move in EITHER direction for tunnelIdle, the watchdog closes both conns
+	// and the pumps unwind. The deadline is shared across directions — a
+	// per-direction cut would sever a long download that is silent
+	// upstream-ward — and is owned by this handler invocation, not the Gate:
+	// the deployment swaps in a fresh Gate per config fetch while old tunnels
+	// keep running on the gate they started with.
+	activity := newTunnelActivity()
+	stop := make(chan struct{})
+	defer close(stop)
+	go tunnelWatchdog(g.tunnelIdle, activity, stop, client, upstream)
 	done := make(chan struct{}, 2)
 	cp := func(dst net.Conn, src io.Reader) {
-		_, _ = io.Copy(dst, src)
+		_, _ = io.Copy(dst, &activityReader{r: src, activity: activity})
 		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
@@ -175,6 +202,64 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	go cp(client, upstream)
 	<-done
 	<-done
+}
+
+// tunnelActivity is the last-activity instant shared between the two tunnel
+// pumps and the watchdog, kept as a nanosecond offset from a monotonic base so
+// the idle computation is immune to wall-clock steps — a forward NTP jump must
+// not cut an active tunnel, nor a backward one extend an abandoned tunnel.
+type tunnelActivity struct {
+	base time.Time    // carries Go's monotonic reading
+	last atomic.Int64 // last-activity offset from base, in nanoseconds
+}
+
+func newTunnelActivity() *tunnelActivity {
+	return &tunnelActivity{base: time.Now()} // offset 0 = active at creation
+}
+
+func (a *tunnelActivity) bump() { a.last.Store(int64(time.Since(a.base))) }
+
+func (a *tunnelActivity) quiet() time.Duration {
+	return time.Since(a.base) - time.Duration(a.last.Load())
+}
+
+// activityReader bumps the shared last-activity instant on every successful
+// read; both pumps read through one, so traffic in either direction counts.
+type activityReader struct {
+	r        io.Reader
+	activity *tunnelActivity
+}
+
+func (a *activityReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p)
+	if n > 0 {
+		a.activity.bump()
+	}
+	return n, err
+}
+
+// tunnelWatchdog closes both tunnel conns once no byte has moved in either
+// direction for idle; closing them unblocks both pumps, which then finish the
+// handler's join. It re-arms from the last activity rather than polling, and
+// exits when the tunnel closes on its own (stop).
+func tunnelWatchdog(idle time.Duration, activity *tunnelActivity, stop <-chan struct{}, conns ...net.Conn) {
+	timer := time.NewTimer(idle)
+	defer timer.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-timer.C:
+			quiet := activity.quiet()
+			if quiet >= idle {
+				for _, c := range conns {
+					_ = c.Close()
+				}
+				return
+			}
+			timer.Reset(idle - quiet)
+		}
+	}
 }
 
 // handlePlain admits or refuses a plain-HTTP request on its host, substitutes

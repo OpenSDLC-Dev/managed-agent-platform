@@ -111,8 +111,11 @@ jobs:
         run: cp .env.example .env
       - name: docker compose config is valid
         run: docker compose config --quiet
-      - name: build the image
-        run: docker compose build controlplane
+      - name: build the images
+        # controlplane covers the shared server stage; gate-image keeps the
+        # gate Docker stage regression-guarded (the executor itself stays out
+        # of the CI stack, so gates never run here).
+        run: docker compose build controlplane gate-image
       - name: control plane serves and the brain loads its config
         run: |
           docker compose up -d postgres minio controlplane brain

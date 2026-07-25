@@ -27,6 +27,31 @@ copy of an entry here.
 
 ### Added
 
+- **`limited` egress is live end-to-end on Docker: only `allowed_hosts`, through the gate**
+  (plan 12 slice 4, #50). The permit path the 4-i pair provisioning prepared is now proven and
+  shipped. The sandbox contract suite gains a gate seam (`sandboxtest.Harness.Gate` → `GateFixture`)
+  and a gated row that runs the **real gate image against the real daemon**: the allowed host is
+  reachable through the injected proxy (polled past the pre-first-config deny-all window),
+  plain-HTTP egress substitutes the vault placeholder, a CONNECT tunnel delivers it literally (the
+  documented #166 gap), a non-allowed host is refused on both proxy paths, and a direct dial
+  bypassing the proxy is dropped by the owner-match firewall — non-vacuously, since the same target
+  was just reached through the gate. K8s declares no gate, and a live test locks that `Spec.Gate`
+  stays ignored non-faultingly until the 4d sidecar. CONNECT tunnels gain an activity-based idle
+  deadline (`gate.Config.TunnelIdleTimeout`, default 5m): it fires only when **both** directions
+  have gone quiet, so one-way streams survive, and it is owned per tunnel, so config-fetch swaps
+  never cut a live one. A real-netns firewall contract test (`cmd/gate/firewall_docker_test.go`)
+  runs the gate image under Docker: healthy pins the apply→verify→privdrop chain against real
+  iptables-nft, the `-S` echo is pinned token-for-token on both families against a deliberately
+  hard-coded copy of the owner-match ruleset (double-entry: an accidental `Ruleset` change fails
+  the pin instead of being followed), and exec probes prove the packets (root egress dropped,
+  gate-uid egress allowed, loopback allowed). The stock compose stack is gate-wired — a `gate-image` build service, the executor's
+  `CONTROLPLANE_URL`/`EXECUTOR_GATE_IMAGE` opt-in, and `SANDBOX_DOCKER_GATE_NETWORK` on the stack's
+  explicitly-named network so the gate resolves the controlplane by DNS; Helm stays un-wired until
+  the K8s sidecar (4d). DIVERGENCES' limited-networking entry is carved down to the two-posture
+  truth (gate-wired = wire-faithful `allowed_hosts`; ungated = fail-closed), docs/self-hosted-security.md
+  is rewritten around it, and 4-i's note-level test gaps are filled (`Destroy` both-fail join,
+  `removeDetached`'s WithoutCancel and warn-log guarantees).
+
 - **Docker provider provisions the egress-gate pair** (plan 12 slice 4, #50). The Docker sandbox
   backend now runs a per-session gate alongside the sandbox for any session that is `limited` or
   vault-attached. The gate is created **first** on the deploy network (`SANDBOX_DOCKER_GATE_NETWORK`,

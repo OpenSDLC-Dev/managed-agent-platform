@@ -1,11 +1,13 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -444,6 +446,70 @@ func TestDestroyRemovesGatePair(t *testing.T) {
 	}
 	if !slices.Contains(removed, "sb1") || !slices.Contains(removed, "gate1") {
 		t.Errorf("destroy did not remove the pair (removed=%v)", removed)
+	}
+}
+
+// TestDestroyBothFailuresSurface: when both halves of the pair fail to remove,
+// the joined error carries both messages — a stuck gate is never masked by the
+// sandbox's own removal error.
+func TestDestroyBothFailuresSurface(t *testing.T) {
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			return
+		}
+		msg := `{"message":"sandbox removal stuck"}`
+		if strings.HasPrefix(r.URL.Path, "/containers/gate1") {
+			msg = `{"message":"gate removal stuck"}`
+		}
+		http.Error(w, msg, http.StatusInternalServerError)
+	})
+	err := p.attach("sb1", "/workspace", "gate1").Destroy(context.Background())
+	if err == nil {
+		t.Fatal("both removals failed but Destroy reported success")
+	}
+	for _, want := range []string{"sandbox removal stuck", "gate removal stuck"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Destroy error %q is missing %q", err, want)
+		}
+	}
+}
+
+// TestRemoveDetachedSurvivesCancelledContext: best-effort cleanup of a detached
+// container must still run when the provisioning context is already cancelled —
+// that is the context.WithoutCancel guarantee the cleanup paths rely on.
+func TestRemoveDetachedSurvivesCancelledContext(t *testing.T) {
+	deleted := false
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/containers/gate1") {
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.removeDetached(ctx, "gate1")
+	if !deleted {
+		t.Error("cancelled context suppressed the detached removal")
+	}
+}
+
+// TestRemoveDetachedLogsAndSwallowsFailure: a failed best-effort removal is
+// warn-logged for the reaper trail and never surfaces — the caller's original
+// error is the one that matters.
+func TestRemoveDetachedLogsAndSwallowsFailure(t *testing.T) {
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"removal in progress"}`, http.StatusInternalServerError)
+	})
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+	p.removeDetached(context.Background(), "gate1")
+	if !strings.Contains(buf.String(), "gate1") || !strings.Contains(buf.String(), "removal in progress") {
+		t.Errorf("removal failure not logged with its container and cause: %q", buf.String())
 	}
 }
 

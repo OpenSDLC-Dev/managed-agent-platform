@@ -142,8 +142,8 @@ func run(ctx context.Context) error {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// IdleTimeout closes idle keep-alive connections (a Slowloris guard); it
-		// does not affect a hijacked CONNECT tunnel, whose own idle/overall
-		// deadline lands with the go-live wiring (STATE, sub-PR 4).
+		// does not affect a hijacked CONNECT tunnel, which the gate bounds with
+		// its own activity-based idle deadline (gate.Config.TunnelIdleTimeout).
 		IdleTimeout: 60 * time.Second,
 	}
 
