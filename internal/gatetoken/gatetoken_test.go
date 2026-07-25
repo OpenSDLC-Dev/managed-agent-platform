@@ -2,6 +2,8 @@ package gatetoken_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"strings"
 	"testing"
@@ -44,6 +46,35 @@ func TestEnsureAndAuthenticate(t *testing.T) {
 	}
 	if got != sess.String() {
 		t.Errorf("Authenticate = %q, want session %q", got, sess)
+	}
+}
+
+func TestEnsureStoresHashNotPlaintext(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	sess, _ := pgtest.NewSession(t, pool, "cloud")
+
+	token := gatetoken.Mint()
+	if err := gatetoken.Ensure(ctx, pool, sess.String(), token); err != nil {
+		t.Fatal(err)
+	}
+
+	var stored string
+	if err := pool.QueryRow(ctx,
+		`SELECT token_hash FROM session_gate_tokens WHERE session_id = $1 AND revoked_at IS NULL`,
+		sess.String()).Scan(&stored); err != nil {
+		t.Fatalf("read token_hash: %v", err)
+	}
+	// The column holds the sha256-hex of the token, never the plaintext: a
+	// regression that stored the token itself would be a credential-at-rest
+	// leak that every round-trip test would still pass (both sides hash
+	// symmetrically), so it is asserted directly here.
+	sum := sha256.Sum256([]byte(token))
+	if want := hex.EncodeToString(sum[:]); stored != want {
+		t.Errorf("token_hash = %q, want sha256-hex %q", stored, want)
+	}
+	if stored == token {
+		t.Error("token_hash stores the plaintext token — credential-at-rest leak")
 	}
 }
 
