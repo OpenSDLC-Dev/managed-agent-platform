@@ -144,13 +144,16 @@ const toolScanPageSize = 20
 // (per-session seq is assigned under the session row lock, and a result may only
 // reference a committed use), so walking down, every use meets its answer first.
 //
-// One path can strand a use outside that run, and this scan deliberately does
-// not reach it: a turn whose stop reason is not tool_use commits its tool_use
-// events but enqueues no tool_exec, and the API's user.message-on-idle resume is
-// the one enqueue site not gated on the unanswered set (#181). No bounded scan
-// can find an arbitrarily old stranded use; the executor's DB-side diff still
-// returns one, so the two halves differ on that shape alone. Fixing it belongs
-// to the brain, not here.
+// One path used to strand a use outside that run — a turn whose stop reason was
+// not tool_use committed its tool_use events but enqueued no tool_exec, and the
+// API's user.message-on-idle resume was the one enqueue after tool work not
+// gated on the unanswered set — and no bounded scan can find an arbitrarily old
+// stranded use, so this scan and the executor's DB-side diff disagreed on that
+// shape alone. Both halves are closed (#181): the brain suspends on tool blocks
+// whatever stop reason arrives with them, and that resume now gates like the
+// others. On any log the current code can produce, the bound is exact and the
+// two diffs agree; a log a pre-#181 binary already stranded is the residue
+// neither reaches.
 func unansweredToolUses(ctx context.Context, client sdk.Client, sessionID string) ([]toolUse, error) {
 	iter := client.Beta.Sessions.Events.ListAutoPaging(ctx, sessionID, sdk.BetaSessionEventListParams{
 		Types: []string{

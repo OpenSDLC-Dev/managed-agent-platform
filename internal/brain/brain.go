@@ -298,6 +298,26 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// nothing to chain — settling either way would wedge or spin.
 		return b.failTurn(sctx, sid, item, span, watermark, "model stopped for tool_use without any tool_use block")
 	}
+	if turn.stopReason == "refusal" && len(turn.toolUses) > 0 {
+		// A refusal is terminal, and its tool calls are not ours to run: the
+		// SDK's own agentic loop returns before executing them because they
+		// "belong to a dead conversation — executing them fires side effects
+		// the caller never confirmed and produces tool_results that cannot be
+		// coherently replayed" (betatoolrunner.go executeTools). Dropping them
+		// goes one step further than the SDK, deliberately: it keeps the
+		// refused message, blocks and all, in a history it has marked complete
+		// and will never send again, while this log is durable and every later
+		// turn replays it — so a committed intent would be one nothing may
+		// answer and nothing may run, which is #181 re-opened for this one
+		// stop reason. The log loses what the model asked for; the drop is
+		// logged so it stays auditable, and the alternative (committing the
+		// intents against synthesized error results, as a denied confirmation
+		// does) is recorded and rejected in docs/DIVERGENCES.md. The turn
+		// settles on its text like any other tool-less turn.
+		slog.WarnContext(sctx, "brain: refusal stop reason, tool blocks dropped unexecuted",
+			"session_id", sid.String(), "tool_blocks", len(turn.toolUses))
+		turn.toolUses = nil
+	}
 
 	// Only a turn that actually called a tool needs the name→type and
 	// name→policy maps; a text-only end_turn would otherwise re-expand the
@@ -465,7 +485,25 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		MarkProcessedThrough: watermark,
 	}
 
-	if turn.stopReason == "tool_use" {
+	// A turn that called tools suspends on them, whatever stop reason came
+	// with them — the classification is the blocks, not the label. Nothing in
+	// the Messages schema ties the two: max_tokens, stop_sequence, refusal and
+	// a non-compliant end_turn can all arrive over a complete tool block, and
+	// the SDK's own agentic loop reads the blocks for exactly that reason. The
+	// intents commit either way (turnEvents emits one tool-intent event per
+	// block), so classifying on the label would idle the session with calls
+	// nothing ever enqueues and leave every later replay carrying a tool_use
+	// no result answers. runTurn has already resolved the two shapes that are
+	// not tool turns: a tool_use stop with no blocks fails, and a refusal
+	// arrives here with its blocks dropped.
+	//
+	// A block truncated mid-input never reaches here — streamTurn rejects a
+	// tool input that is not a complete JSON object, and a proper prefix of an
+	// object never parses as one. A block cut before its first input delta is
+	// the exception: it arrives as {} and runs, which the tool answers with
+	// its own required-argument error, recoverable where a stranded call is
+	// not (docs/DIVERGENCES.md).
+	if len(turn.toolUses) > 0 {
 		if len(askIDs) > 0 {
 			// A confirmation gate: at least one intent's policy is always_ask.
 			// The whole turn suspends — the session idles with a
@@ -523,8 +561,8 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		return b.commitUnderLock(ctx, sid, head, opts)
 	}
 
-	// end_turn (and everything else — max_tokens, stop_sequence — treated
-	// as a completed turn in v1).
+	// A turn that called no tool: end_turn, and everything else —
+	// max_tokens, stop_sequence — treated as a completed turn in v1.
 	return b.settle(ctx, sid, item, watermark, opts, func(chained bool) ([]events.NewEvent, error) {
 		if chained {
 			return head, nil
