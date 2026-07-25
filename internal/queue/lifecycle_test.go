@@ -3,12 +3,14 @@ package queue_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestAckTransitionsQueuedToStarting(t *testing.T) {
@@ -297,7 +299,7 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 		t.Fatal("first poll returned nil")
 	}
 	again, err := q.Poll(ctx, env, time.Minute)
-	if err != nil || again == nil || again.SessionID != first.SessionID {
+	if err != nil || again == nil || !again.CreatedAt.Equal(first.CreatedAt) {
 		t.Fatalf("lapsed queued reservation not re-offered: %+v %v", again, err)
 	}
 	if again.ID == first.ID {
@@ -329,7 +331,7 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 	// under a fresh identity.
 	expireLease(again.ID)
 	reclaimed, err := q.Poll(ctx, env, time.Minute)
-	if err != nil || reclaimed == nil || reclaimed.SessionID != first.SessionID {
+	if err != nil || reclaimed == nil || !reclaimed.CreatedAt.Equal(first.CreatedAt) {
 		t.Fatalf("expired active item not reclaimed: %+v %v", reclaimed, err)
 	}
 	if reclaimed.ID == again.ID {
@@ -363,7 +365,7 @@ func TestPollReclaimsExpiredLeases(t *testing.T) {
 	// first heartbeat — the starting item is reclaimed, under a fresh identity.
 	expireLease(w2.ID)
 	got, err := q.Poll(ctx, env2, time.Minute)
-	if err != nil || got == nil || got.SessionID != sid2 {
+	if err != nil || got == nil || !got.CreatedAt.Equal(w2.CreatedAt) {
 		t.Fatalf("expired starting item not reclaimed: %+v %v", got, err)
 	}
 	if got.ID == w2.ID {
@@ -389,7 +391,16 @@ func TestEveryReHandOutMintsAFreshWorkIdentity(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	q := queue.New(pool)
 	sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
-	if _, err := q.Enqueue(ctx, pool, env, sessionID, queue.ToolExec); err != nil {
+	// Enqueued under an active span, so the rotation can be shown to carry the
+	// trace context over: a reclaimed run that lost it would silently detach from
+	// the turn that produced the work — and the reclaim is the run an operator
+	// most needs traced.
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19},
+		SpanID:     trace.SpanID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		TraceFlags: trace.FlagsSampled,
+	})
+	if _, err := q.Enqueue(trace.ContextWithSpanContext(ctx, sc), pool, env, sessionID, queue.ToolExec); err != nil {
 		t.Fatal(err)
 	}
 	var enqueued string
@@ -437,6 +448,12 @@ func TestEveryReHandOutMintsAFreshWorkIdentity(t *testing.T) {
 	}
 	if fresh.SessionID != sessionID || fresh.EnvironmentID != env || fresh.Metadata["k"] != "v" {
 		t.Errorf("reclaim did not carry the item over: %+v", fresh)
+	}
+	if !fresh.CreatedAt.Equal(stale.CreatedAt) {
+		t.Errorf("reclaim created_at = %s, want the enqueued %s (same row)", fresh.CreatedAt, stale.CreatedAt)
+	}
+	if want := fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID()); fresh.TraceContext["traceparent"] != want {
+		t.Errorf("reclaim trace_context[traceparent] = %q, want %q", fresh.TraceContext["traceparent"], want)
 	}
 	if _, err := q.Ack(ctx, env, fresh.ID); err != nil {
 		t.Fatal(err)

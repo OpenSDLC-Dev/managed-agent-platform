@@ -241,9 +241,10 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // address an id that no longer exists (ErrWorkNotFound → 404) while the
 // replacement's item is untouched. The three 404s are safe by different routes,
 // not one: our worker's heartbeat reads a 4xx as a lost lease and cancels the
-// run, a 404 ack is an ordinary poll failure its backoff re-polls past, and a
-// 404 stop is logged and dropped. The row, and with it the item's metadata and
-// trace context, carries over unchanged.
+// run, a 404 stop is logged and dropped, and a 404 ack is dropped as an empty
+// poll (routine hand-off, not a fault to back off from). The row, and with it
+// the item's metadata and trace context, carries over unchanged.
+//
 // The FIRST hand-out keeps the id enqueue minted — no worker has ever held it, so
 // there is nothing to invalidate, and a client that listed the queued item can
 // still address it. That is exactly the lease_expires_at IS NULL case: every

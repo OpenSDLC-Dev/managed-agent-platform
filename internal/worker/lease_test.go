@@ -57,6 +57,38 @@ func (h *harness) workState(t *testing.T) string {
 	return state
 }
 
+// lastHeartbeat returns the tool_exec work item's current last_heartbeat, which
+// must already be set (the caller waits for the item to reach active first).
+func (h *harness) lastHeartbeat(t *testing.T) time.Time {
+	t.Helper()
+	var ts *time.Time
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT last_heartbeat FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'`,
+		h.sid.String()).Scan(&ts); err != nil {
+		t.Fatalf("read last_heartbeat: %v", err)
+	}
+	if ts == nil {
+		t.Fatal("last_heartbeat is still null")
+	}
+	return *ts
+}
+
+// waitHeartbeatAfter blocks until the item's last_heartbeat advances past mark —
+// the worker's next beat landing on an item that is still active and still its
+// own. An item the control plane has moved to stopping/stopped never advances it
+// (the echo branch re-stamps only while active), so this is a positive proof of
+// liveness, not a sleep.
+func (h *harness) waitHeartbeatAfter(t *testing.T, mark time.Time) {
+	t.Helper()
+	for i := 0; i < 500; i++ {
+		if h.lastHeartbeat(t).After(mark) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the item's heartbeat never advanced past the stale stop")
+}
+
 // newWorker builds a worker over the harness client + provider, tuned for fast
 // tests (short empty-poll sleep and heartbeat interval), and wires onItemDone to
 // signal each fully-handled item on a channel the test waits on.
@@ -402,6 +434,58 @@ func TestWorkerAckFailureLeavesItemQueued(t *testing.T) {
 	waitExit(t, cancel, errc)
 }
 
+// TestWorkerAck404DropsTheItemWithoutFaulting: a 404 ack is the hand-off the
+// fresh-identity-per-re-hand-out rotation creates (#62) — this worker's ack was
+// so late that the control plane re-offered its item under a new id, which
+// another worker now owns. It must be dropped as an empty poll, not reported as
+// a fault: routing it through Run's error path would log a control-plane failure
+// at Error and escalate the poll backoff for routine hand-off. The worker keeps
+// polling, provisions nothing, and never force-stops.
+func TestWorkerAck404DropsTheItemWithoutFaulting(t *testing.T) {
+	var acks atomic.Int32
+	gone := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/ack") {
+				acks.Add(1)
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	h := newHarnessWrapped(t, &fakeSandbox{}, gone)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+
+	warnings := captureWarnings(t)
+	w, _ := h.newWorker(Config{})
+	cancel, errc := runWorker(w)
+
+	// One hand-out is all the queue gives: the poll reserves the item for the
+	// wire's default reclaim window, so the ack is attempted once and every later
+	// poll finds the queue empty.
+	for i := 0; i < 300 && acks.Load() == 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if acks.Load() == 0 {
+		t.Fatal("worker never attempted an ack")
+	}
+	if h.prov.provisions != 0 {
+		t.Errorf("provisions = %d, want 0 (the item was never this worker's)", h.prov.provisions)
+	}
+	if got := h.workState(t); got != "queued" {
+		t.Errorf("work item state = %q, want queued (a dropped item must not be force-stopped)", got)
+	}
+	waitExit(t, cancel, errc)
+	// The discriminator: routed through Run's error path this would be
+	// `ERROR worker: poll failed, backing off`, indistinguishable from a down
+	// control plane and escalating the retry schedule with it.
+	if got := warnings(); strings.Contains(got, "poll failed") {
+		t.Errorf("a 404 ack was reported as a poll failure:\n%s", got)
+	}
+}
+
 // TestWorkerReclaimsStrandedItem is the C3 headline: a dead worker's item, left
 // acked+heartbeating (active) with a lapsed lease, is reclaimed by a fresh worker
 // on the next poll — it re-acks, re-claims, runs the session's still-unanswered
@@ -452,9 +536,12 @@ func TestWorkerReclaimsStrandedItem(t *testing.T) {
 // TestStaleWorkerStopCannotStrandTheReplacement is #62's acceptance, over the
 // real wire: a hung-then-revived worker force-stops its item under the identity
 // it was handed, while a replacement worker is mid-tool on the same item under
-// the fresh identity the reclaim minted. The stale stop 404s instead of landing
-// on the replacement's live item, so the run finishes, its result is posted, and
-// the session resumes — where reusing the id would have re-stranded it.
+// the fresh identity the reclaim minted. Three things are asserted in the order
+// the race would break them — the reclaim did not re-offer the stale id, the
+// stale stop 404s, and the replacement's next heartbeat still lands on a live
+// item — and only then is the tool released, so the run finishing, its result
+// posted and the session resuming are consequences the test has earned rather
+// than a happy path that would hold either way.
 func TestStaleWorkerStopCannotStrandTheReplacement(t *testing.T) {
 	ctx := context.Background()
 	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
@@ -493,6 +580,10 @@ func TestStaleWorkerStopCannotStrandTheReplacement(t *testing.T) {
 	if got := h.workID(t); got == stale.ID.String() {
 		t.Fatalf("reclaim re-offered the stale work id %s", got)
 	}
+	// Let the replacement's claim beat land, so the item is active and the mark
+	// below is a real heartbeat to advance past.
+	waitForState(t, h, "active")
+	mark := h.lastHeartbeat(t)
 
 	// The stale worker revives and force-stops under its old identity.
 	var raw *http.Response
@@ -506,6 +597,14 @@ func TestStaleWorkerStopCannotStrandTheReplacement(t *testing.T) {
 	if !isStatus(err, 404) {
 		t.Fatalf("stale force-stop = %v, want a 404 (its identity is gone)", err)
 	}
+
+	// The strand itself, observed rather than inferred: the replacement's NEXT
+	// heartbeat still lands on a live item. Under a reused id the stale stop had
+	// moved that very item to stopped, where the echo branch no longer re-stamps
+	// last_heartbeat (internal/queue/lifecycle.go) and the loop winds the run
+	// down instead — so this wait is what the race destroys. Released only after,
+	// because letting the tool finish first lets it win that race either way.
+	h.waitHeartbeatAfter(t, mark)
 
 	close(sb.gate) // release the held tool: the replacement finishes its run
 	waitDone(t, done)
