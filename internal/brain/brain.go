@@ -130,8 +130,12 @@ func (b *Brain) RunOnce(ctx context.Context) (found bool, err error) {
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			// Inside the span, so the record lands on the model_turn it is
-			// about — that red span is where an operator asks for it.
-			slog.ErrorContext(ctx, "brain: turn failed, lease left to expire",
+			// about — that red span is where an operator asks for it. The item's
+			// fate is the queue's and is not stated here, because it depends on
+			// how the turn failed: an infra fault leaves the lease to expire and
+			// be reclaimed, while a lost lease means the item is already someone
+			// else's or was cancelled outright by a user.interrupt.
+			slog.ErrorContext(ctx, "brain: turn failed, its output was not committed",
 				"item", item.ID, "session", item.SessionID, "error", err)
 		}
 		span.End()

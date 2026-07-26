@@ -508,7 +508,11 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 // the right *trace*, but only to the enqueuing turn's span — leaving the red
 // tool_exec span, the one an operator clicks, with no log under it.
 func (e *Executor) report(ctx context.Context, item *queue.Item, err error) {
-	slog.ErrorContext(ctx, "executor: tool_exec item faulted, lease left to expire",
+	// The item's fate is the queue's and is not stated here, because it depends on
+	// how the run failed: a backend fault leaves the lease to expire and be
+	// reclaimed, while a lost lease means the item is already another executor's
+	// or was cancelled outright by a user.interrupt.
+	slog.ErrorContext(ctx, "executor: tool_exec item faulted, its results were not committed",
 		"item", item.ID, "session", item.SessionID, "error", err)
 	if e.onFault != nil {
 		e.onFault(item, err)

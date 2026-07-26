@@ -95,10 +95,11 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// set: the model protocol requires every tool_use answered in the next
 	// turn, so partial results of a parallel tool call keep waiting. The
 	// session never left running, so no new status event. A tool confirmation
-	// resolves a requires_action suspension (see the case below). Everything
-	// else only appends (a user.message mid-turn is picked up by the brain's
-	// end-of-turn watermark check).
-	var hasUserMessage, hasToolResult, hasConfirmation bool
+	// resolves a requires_action suspension, and an interrupt ends the turn in
+	// progress — both in the cases below. Everything else only appends (a
+	// user.message mid-turn is picked up by the brain's end-of-turn watermark
+	// check).
+	var hasUserMessage, hasToolResult, hasConfirmation, hasInterrupt bool
 	for _, ev := range newEvents {
 		switch ev.Type {
 		case domain.EventUserMessage:
@@ -107,10 +108,22 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			hasToolResult = true
 		case domain.EventUserToolConfirm:
 			hasConfirmation = true
+		case domain.EventUserInterrupt:
+			hasInterrupt = true
 		}
 	}
 	batch := newEvents
 	var opts events.AppendOptions
+	// The status transitions this batch actually makes, in order, recorded once
+	// the commit that made them lands. Usually one — but an interrupt that a
+	// user.message in the same batch redirects moves the column twice
+	// (running → idle → running), and SetStatus can only carry the final value.
+	var moves []domain.SessionStatus
+	setStatus := func(st domain.SessionStatus) {
+		moves = append(moves, st)
+		final := st
+		opts.SetStatus = &final
+	}
 	// Set when this batch clears the last requires_action gate: the seconds the
 	// session waited on the human, measured in the database so both ends read one
 	// clock, and recorded only after the resuming transaction commits.
@@ -134,10 +147,91 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	// Confirmation handling is checked first: a batch that mixes a confirmation
-	// with a user.message must resolve the gate (and run the confirmed tools),
-	// not wake the turn on the message past a tool the confirmation just cleared.
+	// Order matters twice here. The interrupt comes first because it ends the
+	// turn in progress, so a batch carrying one settles on its terms whatever
+	// else the batch says: a confirmation alongside it does not run its tool (the
+	// user asked to stop), and a user.message alongside it is the documented
+	// redirect, handled inside that case rather than by the message trigger.
+	// Confirmation then comes before the message for the original reason: a batch
+	// that mixes the two must resolve the gate and run the confirmed tools, not
+	// wake the turn on the message past a tool the confirmation just cleared.
+	//
+	// Only the interrupt case ignores askBlocking, because it answers every
+	// outstanding call, gated or not — the set askBlocking would report is
+	// exactly the set that case is about to clear.
 	switch {
+	case hasInterrupt:
+		// Every tool call still outstanding is answered with an error result.
+		// The model protocol requires every tool_use answered before the
+		// conversation continues and the log is append-only, so a call left
+		// abandoned would poison every future replay — which is the dead end the
+		// interrupt exists to escape, not one it may create. The batch's own
+		// results count as answered, exactly as they do for the message trigger.
+		abandoned, err := events.UnansweredToolUses(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
+		if err != nil {
+			return nil, err
+		}
+		// Only the two statuses v1 ever writes can be interrupted. Nothing sets
+		// terminated or rescheduling today, and neither should be settled from
+		// here if something one day does: terminated has ended and reviving it on
+		// the redirect below would make this the one trigger that un-ends a
+		// session — the user.message case guards against exactly that by
+		// requiring idle — while rescheduling would need semantics no code has
+		// defined yet, and guessing them could leave the column disagreeing with
+		// the log.
+		interruptible := status == string(domain.SessionIdle) || status == string(domain.SessionRunning)
+		// Nothing to stop: an idle session with no outstanding call has no turn
+		// to end, so the event is logged and settles nothing. Emitting a
+		// session.status_idle for a session that never left idle would announce a
+		// transition that did not happen.
+		settling := interruptible && (status == string(domain.SessionRunning) || len(abandoned) > 0)
+		if settling {
+			results, err := events.InterruptResults(abandoned)
+			if err != nil {
+				return nil, err
+			}
+			batch = append(batch, results...)
+			// end_turn, not a stop reason of its own: the reference documents an
+			// interrupted turn as ending on the same stop reason as one that
+			// finishes by itself, and the idle stop_reason union has no
+			// interruption variant to carry (docs/DIVERGENCES.md).
+			stop, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "end_turn"}})
+			if err != nil {
+				return nil, err
+			}
+			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: stop})
+			// The event is emitted whenever a turn ends — a stranded or
+			// gate-blocked session is already idle and its clients still need the
+			// new stop reason — but the column only moves when the session was
+			// really running. Writing idle over idle would count a transition
+			// that did not happen, the way a running→running reclaim would.
+			if status == string(domain.SessionRunning) {
+				setStatus(domain.SessionIdle)
+			}
+		}
+		// The interrupt leaves nothing outstanding, so a user.message in the same
+		// batch resumes exactly as it would on any idle session — the documented
+		// way to steer a running agent, in one send.
+		if hasUserMessage && interruptible {
+			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
+			setStatus(domain.SessionRunning)
+		}
+		if settling || (hasUserMessage && interruptible) {
+			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+				// Cancel first, then enqueue: the cancel frees the (session,
+				// kind) slot the redirect's own model_turn needs, and takes the
+				// interrupted turn away from whoever was running it.
+				if settling {
+					if err := s.queue.CancelSession(ctx, tx, domain.ID(id)); err != nil {
+						return err
+					}
+				}
+				if hasUserMessage {
+					return enqueueTurn(ctx, tx)
+				}
+				return nil
+			}
+		}
 	case hasConfirmation && status == string(domain.SessionIdle):
 		// A requires_action suspension resolves. Each denial is answered with
 		// an error result (the model protocol requires every tool_use answered
@@ -163,8 +257,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			break
 		}
 		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
-		running := domain.SessionRunning
-		opts.SetStatus = &running
+		setStatus(domain.SessionRunning)
 		// How long the gate held: the elapsed since the suspension that raised it —
 		// the most recent requires_action idle. Measured under the same row lock the
 		// resume commits under, so it reads a consistent log, and in the database so
@@ -223,8 +316,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// here means a log stranded before that fix. It is logged rather than
 		// silent: the message appends unprocessed and the session stays idle,
 		// which no later tool result revives (that trigger requires a running
-		// session) — v1 has no escape hatch for a session stuck on an
-		// unanswered tool (#68).
+		// session). The way out is a user.interrupt in the same batch or before
+		// it — the case at the top of this switch answers the outstanding call
+		// and hands the session back resumable (#68).
 		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
 		if err != nil {
 			return nil, err
@@ -235,8 +329,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			break
 		}
 		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
-		running := domain.SessionRunning
-		opts.SetStatus = &running
+		setStatus(domain.SessionRunning)
 		opts.Then = enqueueTurn
 	case hasToolResult && status == string(domain.SessionRunning):
 		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
@@ -260,11 +353,12 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	// After the commit: a status change that rolled back did not happen. This is
-	// the production idle→running transition (a user.message waking a session, a
-	// confirmation clearing the last gate).
-	if opts.SetStatus != nil {
-		events.RecordSessionStatus(ctx, *opts.SetStatus)
+	// After the commit: a status change that rolled back did not happen. These are
+	// the production transitions — idle→running (a user.message waking a session,
+	// a confirmation clearing the last gate) and running→idle (an interrupt
+	// ending the turn), in the order the batch made them.
+	for _, st := range moves {
+		events.RecordSessionStatus(ctx, st)
 	}
 	if approvalWaitSeconds != nil {
 		events.RecordApprovalWait(ctx, *approvalWaitSeconds)

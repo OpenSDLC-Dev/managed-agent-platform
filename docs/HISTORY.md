@@ -33,6 +33,59 @@ recorded nowhere else.
 
 ---
 
+## `user.interrupt` semantics (plan 13) — wire resolution and rejected alternatives, archived 2026-07-26
+
+**The wire question the issue raised was answerable, and not from the checkouts.** The typed
+schema cannot pin an interrupt's outcome — `BetaManagedAgentsUserInterruptEvent` carries only
+`{id, type, processed_at, session_thread_id}`, `session.status_idle`'s `stop_reason` union is
+exactly `end_turn | requires_action | retries_exhausted`, and the `ant` CLI never sends one — so
+the resolution came from authority #1, the public docs: an interrupt "stops the agent
+mid-execution", and "the interrupted turn ends with a `session.status_idle` event whose
+`stop_reason` is `end_turn`, the same value as a turn that finishes on its own; there is no stop
+reason specific to interruption." The same page pins the canonical usage as **one** send carrying
+`[{user.interrupt}, {user.message}]`, and the session-operations page makes an interrupt the
+prerequisite for updating, archiving or deleting a `running` session — so the interrupt must
+genuinely leave the session not running. What no source pins is what happens to the calls the
+ended turn left outstanding; that stayed an inference (DIVERGENCES.md).
+
+**Evaluated and rejected: a new `stop_reason`.** An `interrupted` variant would read better on the
+wire and is what the domain type's shape invites. It is wrong twice over: the pinned SDK's idle
+union has no such variant, so a client decoding strictly would fail on it, and the docs state
+positively that there is none.
+
+**Evaluated and rejected: answering every abandoned call with an `agent.tool_result`.** It is what
+the denial synthesis already does and would have been the smaller diff. Rejected for the reason
+`internal/events/toolflow.go` already gives for confining denials to `agent.tool_use`: a result of
+the wrong family is not the answer a client watching that tool is waiting for — a custom tool's
+result is a `user.custom_tool_result` keyed by `custom_tool_use_id`, and a client matching on that
+key would never see an `agent.tool_result` naming the same call.
+
+**Evaluated and rejected: teaching the brain to notice an interrupt at settlement.** The
+alternative to cancelling work items was to leave them alone and have the brain check, under the
+session row lock, whether an interrupt landed after its turn began, then settle differently. It
+costs a new code path in the brain *and* one in the executor, both of which must stay correct
+against every ordering, and it still needs the interrupt to win — so the ownership proof the queue
+already has (`Complete`/`Requeue`/`Assert` re-assert the lease inside the committing transaction)
+does the same job with no new component logic: cancel the items under the lock, and the claimant's
+whole settlement rolls back on its own.
+
+**Evaluated and rejected: closing the interrupted turn's `span.model_request_start`.** The
+reference emits the terminal `span.model_request_end` for a request that ends early; ours does not,
+because the rollback that discards the turn discards that event with it. Synthesizing one from the
+interrupt's transaction was considered and dropped on two grounds: it cannot be made airtight — a
+turn that opens its span *after* the interrupt commits is unreachable from it, and that window is
+real (a brain claims, then replays before calling the model) — and the usage such an event would
+report is invented, since the interrupt knows nothing of what the model spent. Recorded as a
+CONFIRMED divergence instead.
+
+**Accepted consequence: an interrupted turn logs like a lost claim.** Cancelling a live
+`model_turn` makes the brain's settlement fail its lease proof, which it reports as a red
+`model_turn` span and a `turn failed` log — the signal `internal/brain/telemetry_test.go`
+deliberately pins for the reclaim case. Distinguishing "cancelled by an interrupt" from "reclaimed
+after expiry" needs a reason code the `work_items` state machine does not carry, which is queue
+surface beyond this issue. Only the log's wording changed: it no longer claims the lease was left
+to expire, which is false for an item that was cancelled outright.
+
 ## Vaults slice 1 (plan 12, PR #168) — review hardening, 2026-07-24
 
 **The dual review converged on the transit trust boundary.** The Codex pass (`gpt-5.6-sol`,

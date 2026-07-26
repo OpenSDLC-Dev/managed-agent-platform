@@ -880,15 +880,18 @@ func TestUnconfirmedAskEvents(t *testing.T) {
 		}
 	})
 
-	// The query is confirmation-aware, not result-aware: an ask that somehow
-	// carries a result but no confirmation is still blocking. The API refuses
-	// to create that state; this pins which signal the query reads.
-	t.Run("a result does not clear an ask", func(t *testing.T) {
+	// The query reads both signals, because the API creates this state on
+	// purpose: a user.interrupt answers every outstanding call, gated ones
+	// included, without asking anyone (#68). An ask still counted as blocking
+	// after its call was answered would hold the session on the very resume the
+	// interrupt exists to restore, and no confirmation could ever release it —
+	// ValidateToolConfirmations refuses one for an answered call.
+	t.Run("an answered ask stops blocking", func(t *testing.T) {
 		sid := newSession(t, pool)
 		id := ask(t, log, sid)
 		answerWith(t, log, sid, domain.EventAgentToolResult, "tool_use_id", id)
-		if got := list(t, sid, nil); !slices.Equal(got, []string{id.String()}) {
-			t.Errorf("ids = %v, want %s still blocking", got, id)
+		if got := list(t, sid, nil); got != nil {
+			t.Errorf("ids = %v, want nil: %s is answered and no longer blocking", got, id)
 		}
 	})
 

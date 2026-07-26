@@ -13,6 +13,63 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Added
+
+- **`user.interrupt` now ends the turn it names — the escape hatch for a session nothing will
+  finish** ([#68](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/68)). The event was
+  accepted, validated and appended, and then nothing acted on it, so a session suspended on a tool
+  result that never arrives stayed `running` forever: a `self_hosted` session whose BYOC worker
+  never comes back, or a custom tool the client never answers. Two more logs hold the same dead end
+  while `idle` — one stranded by a pre-#181 binary with a tool intent nothing was ever scheduled to
+  run, and one waiting on a `user.tool_confirmation` nobody will send. None of the three could be
+  revived: a `user.message` is refused by the resume gate rather than replay a `tool_use` no result
+  answers, and a result posted later needs a running session to trigger on.
+
+  `POST /events` now decides an interrupt before every other trigger, in the transaction that
+  already holds the session row lock. It answers **every** outstanding tool call with an
+  `is_error:true` result — in the family that matches the call, so a custom tool's answer is a
+  `user.custom_tool_result` and not an `agent.tool_result` — appends `session.status_idle` carrying
+  `stop_reason.end_turn`, and settles the session `idle`. `end_turn` is the reference's own answer,
+  not a choice: the public docs say an interrupted turn ends on the same stop reason as one that
+  finishes by itself and that there is no stop reason specific to interruption, which the typed
+  schema corroborates — its idle `stop_reason` union has no interruption variant. A `user.message`
+  in the same batch then flips the session back to `running` and enqueues the redirect turn, which
+  is the documented way to steer a working agent in one request. An interrupt on an idle session
+  with nothing outstanding appends only: there is no turn to end, and a `session.status_idle` there
+  would announce a transition that did not happen.
+
+  Answering the calls is what makes the session resumable rather than merely idle. The log is
+  append-only and every later turn replays it, so a call left unanswered would make every future
+  request one the model protocol rejects — the interrupt would trade one dead end for another.
+
+  The turn also has to stop being worked, or a brain mid-stream would commit fresh tool intents
+  onto a session that is now idle and an executor mid-tool would write a second result for a call
+  already answered. Rather than teach either component a new code path, the interrupt uses the
+  ownership proof the queue already has: `queue.CancelSession` stops every live work item of the
+  session in the same transaction, and because every claimant re-asserts its lease inside the
+  transaction that commits its work, the claimant's whole settlement rolls back. Serializing on the
+  session row lock makes that a decision instead of a race in both orderings — interrupt first and
+  the claimant commits nothing; claimant first and the interrupt answers what it left outstanding.
+  What the cancel takes away is the claimant's ability to *commit*, immediately and for good; it
+  does not reach into the claimant to stop it working. A model stream keeps generating and a tool
+  keeps running in its sandbox until the lease keeper's next `Extend` fails (at TTL/3, ≈40s on the
+  2-minute default), which is when the work is actually torn down. Interrupting faster would mean a
+  control-plane-to-claimant wake-up channel the pull protocol deliberately does not have, and the
+  outcome does not depend on it: nothing that claimant settles can land either way.
+
+  Two checks learned about a state the API previously refused to create, a gated call answered
+  without a confirmation: an answered ask no longer counts as blocking its `requires_action` gate
+  (or the gate would outlive the call and wedge the resume the interrupt exists to restore), and a
+  `user.tool_confirmation` naming an already-answered call is now a `400` (or a denial would write a
+  second result for one call onto the append-only log). The interrupt acts only on the two statuses
+  v1 writes, `idle` and `running`: a review pass caught that without that guard a one-send
+  `[interrupt, message]` would make this the one trigger that revives a `terminated` session, which
+  the sibling `user.message` trigger refuses by requiring `idle`. The result shape, the wording, and the
+  ordering of the platform's reaction within the batch are inferences — the docs pin the interrupt's
+  outcome, not what it writes for the calls it abandons — and are recorded in
+  docs/DIVERGENCES.md, along with the one thing the reference does that this does not: emit the
+  interrupted request's terminal `span.model_request_end`, which our rollback takes with it.
+
 ### Fixed
 
 - **A hung-then-revived BYOC worker can no longer force-stop the item a replacement worker is
