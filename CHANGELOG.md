@@ -72,6 +72,34 @@ copy of an entry here.
 
 ### Fixed
 
+- **The chart's bundled MinIO goes Ready only once its object layer can serve S3**
+  ([#216](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/216)). Its `readinessProbe`
+  was `/minio/health/ready`, whose handler writes `StatusOK` unconditionally and reports a nil
+  object layer only in the `x-minio-server-status` header it sets alongside that 200 — the same weak
+  signal that flaked the blob contract suite below (#208), one layer out: in the deployment wiring
+  rather than in the test harness. The chart's MinIO Service is headless and resolves straight to
+  the pod, so pod readiness is the whole admission signal, and both `cmd/controlplane` and
+  `cmd/executor` build their store eagerly at startup (`s3.FromEnv` → `s3.New` → `BucketExists`) and
+  exit rather than serve when it fails. A pod scheduled into that window exits and is restarted by
+  the kubelet — self-healing, with no data at risk, but on a fresh install it surfaces as
+  `CrashLoopBackOff`, which reads like a misconfiguration rather than a race.
+
+  The probe is now `/minio/health/cluster`, whose `ClusterCheckHandler` answers 503 while the object
+  layer is nil. Raced against the pinned release (`RELEASE.2025-09-07T16-13-09Z`) on the chart's own
+  shape — `server /data`, one node, one drive — the window is real and one-sided: polled from
+  container start, `/minio/health/ready`'s first answer is a 200 (it never returns 503), while
+  `/minio/health/cluster` answers 503 at that same instant and 200 some 36ms later. Sampling all
+  three on a single connection inside that window, at t+0.338s: `/minio/health/ready` → 200 with
+  `x-minio-server-status: offline`, `/minio/health/cluster` → 503, and `GET /map-blob/?location=` —
+  the bucket-location lookup `s3.New` issues first — → `503 XMinioServerNotInitialized`, "Server not
+  initialized yet, please try again", which is verbatim the failure #208 chased.
+
+  A helm CI step renders the chart and fails if the probe is not `/minio/health/cluster`, or if
+  `/minio/health/ready` reappears anywhere in that template: chart content has no unit-test surface,
+  so the render check is the regression guard. Both of its branches were confirmed to fail before
+  the fix and pass after. `deploy/compose` needed no change — it gates `controlplane` on
+  `mc ready local`, which is already the stronger signal.
+
 - **The blob contract suite waits for MinIO's object layer, not for a readiness endpoint that
   answers before it** ([#208](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/208)).
   `blobtest`'s harness admitted the suite as soon as `GET /minio/health/ready` returned 200, and
@@ -108,9 +136,10 @@ copy of an entry here.
   against the pre-fix gate, which returned after 0 S3 requests; the check that the refusal survives
   additionally fails against a loop that sleeps into its own deadline.
 
-  The same weak signal is still wired into the helm chart's MinIO `readinessProbe`, where it can
-  restart a controlplane pod on a fresh install; that is deployment rather than test scope and is
-  tracked as [#216](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/216).
+  The same weak signal was also wired into the helm chart's MinIO `readinessProbe`, where it could
+  restart a controlplane pod on a fresh install; that is deployment rather than test scope and was
+  tracked, and fixed, separately as
+  [#216](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/216) (entry above).
   `deploy/compose` is unaffected — it gates on `mc ready local`, which is the stronger signal.
 
 - **Materializing a skill now costs a fixed couple of sandbox execs instead of one per file**

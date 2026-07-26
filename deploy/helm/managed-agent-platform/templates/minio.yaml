@@ -56,7 +56,12 @@ spec:
                   key: blob-secret-key
           readinessProbe:
             httpGet:
-              path: /minio/health/ready
+              # /cluster, not /ready: /ready answers 200 before the object layer
+              # exists, and an S3 call in that window gets
+              # XMinioServerNotInitialized. The Service above is headless, so
+              # this probe is what admits the controlplane and executor, each of
+              # which builds its store at startup and exits when that fails (#216).
+              path: /minio/health/cluster
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10

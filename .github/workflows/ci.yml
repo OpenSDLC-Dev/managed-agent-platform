@@ -108,6 +108,14 @@ jobs:
             echo "expected the openbao-vs-localCipher ambiguity guard to fail the render" >&2; exit 1
           fi
           echo "ok: cipher paths (positive and guards)"
+      - name: bundled MinIO gates readiness on its object layer
+        run: |
+          out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/minio.yaml)"
+          echo "$out" | grep -q 'path: /minio/health/cluster' \
+            || { echo "MinIO's readinessProbe must gate on /minio/health/cluster" >&2; exit 1; }
+          echo "$out" | grep -q '/minio/health/ready' \
+            && { echo "/minio/health/ready answers 200 before the object layer can serve S3 (#216)" >&2; exit 1; }
+          echo "ok: minio readiness probe"
       - name: required-value guard fires (missing controlplane.apiKey)
         run: |
           if helm template t "$CHART" --set image.tag=x \
