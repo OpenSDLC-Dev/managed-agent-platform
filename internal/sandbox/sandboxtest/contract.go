@@ -778,11 +778,15 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		// A target that did not exist has no mode to carry over, and every backend
 		// lands the same one — the convergence the preservation is built on. It is
 		// 0644 by two different routes, and the platform fixes both: the docker
-		// backend's tar header says so, and the k8s write script sets `umask 022`
-		// before its `tee` creates the file. Until #212 the k8s half of that came
-		// from the image instead, so this row held there by the coincidence of the
-		// suite's image running a 022 umask; now an image running any other one
-		// answers the same.
+		// backend's tar header says so, and the k8s write script creates the file
+		// itself and chmods it to 0644 before the bytes stream, under a `umask 022`
+		// it sets for what the chmod cannot reach. Until #212 the k8s half of that
+		// came from the image instead, so this row held there by the coincidence of
+		// the suite's image running a 022 umask; the umask alone then still lost to
+		// a parent directory's default POSIX ACL, which the chmod answers (#213).
+		// Neither is visible from here — this image runs 022 and carries no ACLs —
+		// so what this row pins is the convergence, and the k8s script's own suite
+		// pins the mechanism.
 		if got := fileMode(t, sb, script); got != "644" {
 			t.Errorf("a file that did not exist lands mode %s, want 644", got)
 		}

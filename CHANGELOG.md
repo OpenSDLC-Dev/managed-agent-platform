@@ -72,6 +72,65 @@ copy of an entry here.
 
 ### Fixed
 
+- **A parent directory's default POSIX ACL no longer decides what mode a k8s sandbox write lands**
+  ([#213](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/213)).
+  [#212](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/212) made a created file's
+  `0644` the platform's answer rather than the image's by having the k8s write script set `umask
+  022` before its `tee` — but a umask is not the only input the kernel takes. Where the parent
+  directory carries a **default POSIX ACL**, a created file's bits come from the ACL and the umask
+  is ignored, so k8s landed what the ACL said while docker's tar header still said `0644`: the
+  cross-backend divergence #212 closed, reopened by another route.
+
+  The script now creates the temporary file empty and chmods it to `0644` before the bytes stream,
+  so a created file's mode is **set rather than inherited** — which is what the reference's own
+  host-side runner does (`agenttoolset`'s `atomicWriteFile` chmods its temporary file to `0o644`
+  before renaming). Measured against the script itself on Linux (debian, as root and as a non-root
+  sandbox user): a directory carrying `setfacl -d -m u::rw-,g::rw-,o::rw-` landed a fresh write
+  `0666` and one carrying `u::rw-,g::r--,o::---` landed it `0640`; both now land `0644`, and an
+  existing target's own `0700` still survives a rewrite, because `__map_preserve_mode` chmods over
+  this afterwards (#204). The `umask 022` stays alongside it, and is not a fallback for *this* case:
+  an image with no `chmod` on its PATH still gets #212's answer from the umask, and still loses to a
+  default ACL — the degradation stated rather than papered over, the same shape as the one
+  `__map_preserve_mode` already documents for an image whose `stat` cannot do `-c`. The `chmod` is
+  not a new trust surface: the preservation step already reaches for the same binary off the agent's
+  PATH on every rewrite, with the agent's own credentials, on a file in a directory the agent
+  already writes.
+
+  Doing it *before* the stream rather than after also keeps the temporary file from holding the
+  bytes at a mode the platform did not choose — under a permissive default ACL it would otherwise
+  have been world-writable for the length of a 500 MB write, where docker's is `0644` for the whole
+  transfer.
+
+  The **bulk** write had the same defect by a second route, found in review. A `tar` extracting as
+  **root** restores the header's mode by itself, which is why a first measurement said the batch was
+  immune; a **non-root** one does not, and then the ACL decides — `-p` does not help either, because
+  tar assumes the `open` it asked for got the mode and skips the chmod. Measured end to end against
+  the script itself, GNU tar 1.35 and BusyBox 1.36 alike: under `setfacl -d -m u::rwx,g::---,o::---`
+  a batch member landed `0600` on k8s where the docker daemon's host-side untar landed `0644` for
+  the same batch — the same cross-backend divergence, on the path that materializes every skill. The
+  shared `__map_bulk_rename` now chmods the delivered members to `0644` before it renames any of
+  them, a hundred at a time so the pass costs a process per hundred members rather than one per
+  member (100 for the 10,000 a skill upload may carry, against a batch that already takes seconds).
+  A hundred rather than the whole list because this failure would be a silent one — `chmod`'s status
+  is deliberately ignored, so a chunk that overflowed the command line would leave its members on
+  the ACL's bits with the batch still reporting success — and 100 × `PATH_MAX` is 400 KB against the
+  2 MB a Linux command line holds, so the bound holds for pathological paths and not only for the
+  ones a real skill carries. All twelve measured cells — root and non-root, restrictive and
+  permissive ACLs and none, both tars — now land `0644`, and an existing target's bits still win
+  through the per-member `__map_preserve_mode`.
+
+  Three new rows. `ADefaultACLDoesNotDecideAFreshFilesMode` stages the real cause with `setfacl` and
+  proves the staging bites — a control file created under the ACL comes out `0666` — before trusting
+  what the script lands; it skips where there is no `setfacl`, since macOS has no POSIX ACLs at all,
+  so it runs on Linux and on CI's ubuntu image, which ships `acl`. `AFreshFilesModeIsSetNotInherited`
+  stages the *condition* rather than the cause — the temporary file already holding a mode the
+  platform did not choose when the bytes reach it — so the property is held on a macOS dev host too;
+  it fails against the pre-fix script (`mode 600 ... want 644`). It also plants a `tee` that records
+  the mode of the file it is about to fill, because what a write *lands* answers the same whether
+  the chmod runs before the stream or after it: moving the chmod below the `tee` leaves every mode
+  assertion green and fails only this one. `TestBulkRenameShellSetsAFreshMembersMode` does the same
+  for the batch, staged as a mode rather than an ACL for the same host-portability reason, and fails
+  against the pre-fix shell (`mode 600 ... want 644`).
 - **The chart's bundled MinIO goes Ready only once its object layer can serve S3**
   ([#216](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/216)). Its `readinessProbe`
   was `/minio/health/ready`, whose status code says nothing about whether S3 can be served — a nil
@@ -253,7 +312,7 @@ copy of an entry here.
   Setting one takes the agent's own `setfacl` or a deliberate image build, both of which can set the
   mode anyway, and chmod'ing over it would move a created file's mode onto a binary from the agent's
   PATH to hold a case the contract suite cannot see. Registered in DIVERGENCES.md and tracked as
-  #213.
+  #213 — since closed, by the entry above.
 
   `AFreshFileIgnoresTheImagesUmask` runs the k8s write script under a `077` umask — the hardened
   case — and asserts the created file is `0644` anyway, the directory the write created is still
