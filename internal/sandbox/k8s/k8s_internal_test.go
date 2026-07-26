@@ -1646,12 +1646,21 @@ func TestBulkScriptsClassifyAnArchiveThatDidNotArrive(t *testing.T) {
 		t.Errorf("bytes that are not an archive: exit %d, want ExitBulkExtract (%d)",
 			got, sandbox.ExitBulkExtract)
 	}
-	for name, stdin := range map[string][]byte{
-		"an empty stream":  nil,
-		"a block of zeros": bytes.Repeat([]byte{0}, 512),
-	} {
-		if got := run(stdin); got != sandbox.ExitBulkIncomplete {
-			t.Errorf("%s: exit %d, want ExitBulkIncomplete (%d)", name, got, sandbox.ExitBulkIncomplete)
-		}
+	// A block of zeros is an end-of-archive marker, so every tar accepts it as a
+	// valid *empty* archive and exits 0. Nothing was delivered, so the rename
+	// script's own guard is what has to catch it.
+	if got := run(bytes.Repeat([]byte{0}, 512)); got != sandbox.ExitBulkIncomplete {
+		t.Errorf("an empty archive: exit %d, want ExitBulkIncomplete (%d)",
+			got, sandbox.ExitBulkIncomplete)
+	}
+	// A stream carrying nothing at all is the one case the two tars disagree
+	// about — GNU refuses it as not an archive (measured on CI), BSD takes it for
+	// an empty one — so which of the two codes comes back is the image's to
+	// decide, not ours. What must hold on every image is that it is one of them:
+	// a delivery that brought no manifest can never read as a batch that wrote
+	// what it was given.
+	if got := run(nil); got != sandbox.ExitBulkExtract && got != sandbox.ExitBulkIncomplete {
+		t.Errorf("an empty stream: exit %d, want ExitBulkExtract (%d) or ExitBulkIncomplete (%d) — never a success",
+			got, sandbox.ExitBulkExtract, sandbox.ExitBulkIncomplete)
 	}
 }
