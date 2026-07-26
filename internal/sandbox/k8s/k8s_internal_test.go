@@ -399,6 +399,41 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 		gone(t, tmp)
 	})
 
+	// `stat` comes off the agent's own PATH, so it chooses what mode the write
+	// applies — which is why the value has to be octal digits before it reaches
+	// `chmod`. Without that check the planted value need not be a mode at all:
+	// a symbolic one (`a+rwx` here) or an option (`--reference=` some setuid
+	// binary) is accepted by `chmod` just as happily, and the write lands bits no
+	// file involved ever had. Planted here because the guard is otherwise
+	// invisible to the suite — removing it leaves every other row green (#204).
+	t.Run("ANonOctalModeIsRefused", func(t *testing.T) {
+		path := dir + "/planted.sh"
+		if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+			t.Fatalf("stage the target: %v", err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatalf("give the target a mode worth carrying: %v", err)
+		}
+		bin := t.TempDir()
+		shim := "#!/bin/sh\necho a+rwx\n"
+		if err := os.WriteFile(bin+"/stat", []byte(shim), 0o755); err != nil {
+			t.Fatalf("plant the stat: %v", err)
+		}
+		code, tmp := run(t, []byte("new"), 3, path,
+			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if code != 0 {
+			t.Fatalf("exit %d, want 0 — a planted stat costs the mode, never the write", code)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat the written target: %v", err)
+		}
+		if got := info.Mode().Perm(); got&0o777 == 0o777 {
+			t.Errorf("mode = %o, want the planted a+rwx refused rather than applied", got)
+		}
+		gone(t, tmp)
+	})
+
 	// A path blocked by a non-directory is the caller's to fix, and `mkdir -p` is
 	// where that shows up: the shared shell names it so the model gets a tool error
 	// rather than the executor getting a sandbox fault (#71).

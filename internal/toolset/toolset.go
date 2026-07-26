@@ -27,9 +27,11 @@
 //     sandbox already requires.
 //   - The tools carry no state between calls except bash's, which is the
 //     shell package's snapshot; there is no per-runner session object to close.
-//   - write and edit preserve the permission bits of a file they replace, where
-//     the reference writes a fixed 0644 (its atomicWriteFile chmods the temporary
-//     file to that constant before renaming). The Claude Code harness preserves
+//   - write and edit preserve the permission bits of an existing regular file they
+//     replace, where the reference writes a fixed 0644 (its atomicWriteFile chmods
+//     the temporary file to that constant before renaming). Where nothing is
+//     carried over — a new file, a symlink, a docker sandbox whose user cannot
+//     chmod the temporary file (#209) — 0644 is what lands here too. The Claude Code harness preserves
 //     them, and the workflow that decided it is ordinary — `chmod +x` a script in
 //     bash, edit it, run it (#204). The rename that makes the write atomic is the
 //     sandbox backends'; both carry the mode over (internal/sandbox/filefault.go).

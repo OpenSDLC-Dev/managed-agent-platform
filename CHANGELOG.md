@@ -58,10 +58,12 @@ copy of an entry here.
   rewrites it through `WriteFile`, and asserts both that the mode survived and that the script still
   *runs* — then rewrites it again through `WriteFileStream`, which shares the rename. The row fails
   on the pre-fix code on both backends (docker: mode `644`, exit `126` `Permission denied`), and the
-  k8s write script's own host-shell test pins the shell half without needing a cluster. The symlink
-  guard is pinned too, in `WriteOntoSymlink`: the file replacing a link lands `0644` while the
-  pointee keeps its `0600` — without that assertion the guard could be deleted with the whole suite
-  staying green, landing a world-writable file on an agent-controlled filesystem.
+  k8s write script's own host-shell test pins the shell half without needing a cluster. Both guards
+  are pinned the same way, because a guard whose removal no test notices is a guard that will be
+  removed: `WriteOntoSymlink` now asserts the file replacing a link lands `0644` while the pointee
+  keeps its `0600` (delete the `-h` test and it lands `0777`), and `ANonOctalModeIsRefused` plants a
+  `stat` emitting `a+rwx` (delete the octal check and that lands `0777` too — a planted `stat` need
+  not emit a mode at all).
 
 - **A hung-then-revived BYOC worker can no longer force-stop the item a replacement worker is
   running** ([#62](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/62)). The wire's

@@ -125,22 +125,26 @@ The sandbox image is **your** choice, not baked into the platform: the executor
 and worker launch whatever image `EXECUTOR_IMAGE` / `WORKER_IMAGE` names, defaulting
 to `debian:stable-slim` for local development (`cmd/executor/main.go`,
 `cmd/worker/main.go`). The contract the platform imposes is a POSIX userland with
-`/bin/bash`; the Kubernetes backend additionally needs `setsid` and `tee`/`wc`
-for its exec and write paths (`internal/sandbox/k8s/client.go` is the exact list).
-The `grep` built-in expects GNU grep/coreutils — a busybox-only image gets a clear
-tool error, not degraded behaviour.
+`/bin/bash`. The **Kubernetes** backend needs more, and needs it hard: `setsid`
+for its exec wrapper, `tee`/`wc` for the write path's delivered-byte count, and a
+`stat` accepting `-c` (GNU or BusyBox), on which every file **read** exits —
+`internal/sandbox/k8s/client.go` is the exact list. On **Docker** that same `stat`
+is only wanted, not required (below). The `grep` built-in expects GNU
+grep/coreutils — a busybox-only image gets a clear tool error, not degraded
+behaviour.
 
 Two things do degrade silently rather than fail, both about file **modes** and
-neither about correctness of content. A write preserves the target's permission
-bits by reading them with `stat -c %a` (so a script kept executable across an
-edit); an image whose `stat` does not accept `-c` writes the file `0644` instead,
-as every write did before that was added. And on the Docker backend the temporary
-file a write lands under is extracted by the daemon rather than created by the
-sandbox user, so an image whose default user is **not** root cannot re-apply the
-mode and also gets `0644` — the Kubernetes backend preserves it there
-([#209](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/209)). If
-you run a non-root image (recommended below) and depend on the executable bit
-surviving a rewrite, that is the case to know about.
+neither about the correctness of a file's contents. A write preserves the target's
+permission bits by reading them with `stat -c %a` (so a script stays executable
+across an edit); where that cannot run — a Docker image whose `stat` does not
+accept `-c` — the file is written `0644` instead, as every write did before this
+existed. And on Docker the temporary file a write lands under is extracted by the
+daemon rather than created by the sandbox user, so an image whose default user is
+**not** root cannot re-apply the mode and also gets `0644`, where Kubernetes
+preserves it
+([#209](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/209)). If you
+run a non-root image (recommended below) and depend on the executable bit surviving
+a rewrite, that is the case to know about.
 
 For production, build a minimal, pinned image: only the interpreters and tools
 your agents actually need, a non-root default user (below), no build toolchain or
