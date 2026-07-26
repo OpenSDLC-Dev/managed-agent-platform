@@ -268,9 +268,11 @@ type Sandbox interface {
 	//     (#204). Only an existing *regular* target has bits worth carrying: one
 	//     that does not exist lands 0644 on either backend, fixed by the platform
 	//     rather than by the image (a tar header on docker, a `umask 022` the write
-	//     script sets on k8s — #212), and a symlink, FIFO or device node lands
-	//     0644 too — what the rename replaces is the name, and a link's own mode
-	//     is 0777. One case still differs between the backends: docker's temporary
+	//     script sets on k8s — #212; a default POSIX ACL on the parent directory is
+	//     the one thing that still answers otherwise there, #213), and a symlink,
+	//     FIFO or device node lands 0644 too — what the rename replaces is the
+	//     name, and a link's own mode is 0777.
+	//     One case still differs between the backends: docker's temporary
 	//     file is extracted by the daemon, so an image whose default user is not
 	//     root cannot chmod it and the write lands 0644 where k8s preserves the
 	//     mode (#209). (The Claude Code harness's atomic write does the same three
