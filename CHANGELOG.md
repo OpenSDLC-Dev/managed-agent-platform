@@ -110,7 +110,8 @@ copy of an entry here.
   the kubelet's backoff outlasts MinIO's startup.
 
   A helm CI step renders the chart and asserts two things: that the `readinessProbe` path is exactly
-  `/minio/health/cluster`, and that no probe of any kind gates on `/minio/health/ready`. Both read
+  `/minio/health/cluster`, and that no probe gates on `/minio/health/ready` in the plain block style
+  every probe in this chart is written in — a quoted or flow-style scalar would evade it. Both read
   rendered `path:` keys rather than grepping the template for a substring, because a substring
   search also reads the comment that explains the choice — so documenting the rejected endpoint
   there would fail the job, reproduced against the first version of this guard. Chart content has no

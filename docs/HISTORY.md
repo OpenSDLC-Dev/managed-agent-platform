@@ -1320,8 +1320,11 @@ and is labelled as a stand-in rather than as `/code-review`.
   and asserts it exactly, which is also structurally anchored to the probe rather than to the file.
   That exact assertion is narrower than the substring it replaced — a `/minio/health/ready`
   reintroduced under a *different* probe would have slipped past it — so the verifier's catch of that
-  narrowing was answered by a second assertion over rendered `path:` keys, which restores the dropped
-  coverage while staying immune to the comment wording that caused the original defect. Three cases
+  narrowing was answered by a second assertion over rendered `path:` keys, which restores that
+  coverage for the plain block style every probe in this chart is written in — a quoted
+  (`path: "/minio/health/ready"`) or flow-style (`httpGet: {path: …}`) scalar evades it, which the
+  re-verification pass measured and is recorded here rather than answered with quote-stripping in a
+  CI `awk` — while staying immune to the comment wording that caused the original defect. Three cases
   were exercised against the final step: the pre-fix chart, `/minio/health/ready` reintroduced as a
   `livenessProbe`, and a correct chart whose comment names the old path (the first two red, the last
   green).
