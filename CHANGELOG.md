@@ -94,30 +94,32 @@ copy of an entry here.
   so unlike the `stat` and `chmod` the preservation step reaches for, nothing planted on the agent's
   PATH can answer for it.
 
-  What it costs, stated rather than discovered: an operator can no longer have a hardened k8s sandbox
-  image default agent-written files to `0600`, and the move is not only in the tighter direction — a
-  group-oriented `007` image landed `0660` and now lands `0644`, adding other-read as it drops
-  group-write. The mode a sandbox write lands is now the platform's answer on both backends — which
-  is also what the reference's own host-side runner gives (`agenttoolset`'s
-  `atomicWriteFile(path, data, 0o644)`). A `chmod` inside the sandbox still sets whatever mode is
-  wanted, and a rewrite preserves it from there. The write path this governs is not only the
-  `write`/`edit` tools: session-resource mounts, uploaded skill files and the persistent shell's
-  state files land through it too, which docs/self-hosted-security.md now says.
+  What it costs, stated rather than discovered: an operator can no longer have a hardened k8s
+  sandbox image default agent-written files to `0600`, and every umask whose **write** bits differ
+  from `022`'s moves, not only tighter ones — a group-oriented `007` image landed `0660` and now
+  lands `0644`, adding other-read as it drops group-write. The mode a sandbox write lands is now the
+  platform's answer on both backends — which is also what the reference's own host-side runner gives
+  (`agenttoolset`'s `atomicWriteFile(path, data, 0o644)`). A `chmod` inside the sandbox still sets
+  whatever mode is wanted, and a rewrite preserves it from there. The write path this governs is not
+  only the `write`/`edit` tools: session-resource mounts, uploaded skill files and the persistent
+  shell's state files land through it too, which docs/self-hosted-security.md now says.
 
-  One route still answers otherwise and is left standing rather than papered over: a parent directory
-  carrying a **default POSIX ACL** supplies a created file's bits and has the umask ignored, so k8s
-  lands what the ACL says while docker's tar header still says `0644` (measured on alpine with
-  `setfacl -d -m o::rw-`: `0666` under a `077` umask, where a plain directory gives `0600`). Setting
-  one takes the agent's own `setfacl` or a deliberate image build, both of which can set the mode
-  anyway, and chmod'ing over it would move a created file's mode onto a binary from the agent's PATH
-  to hold a case the contract suite cannot see. Registered in DIVERGENCES.md and tracked as #213.
+  One route still answers otherwise and is left standing rather than papered over: a parent
+  directory carrying a **default POSIX ACL** supplies a created file's bits and has the umask
+  ignored, so k8s lands what the ACL says while docker's tar header still says `0644` (measured on
+  alpine with `setfacl -d -m u::rw-,g::rw-,o::rw-`: `0666` under a `077` umask, where a plain
+  directory gives `0600`; a restrictive default ACL tightens the same way under an `022` one).
+  Setting one takes the agent's own `setfacl` or a deliberate image build, both of which can set the
+  mode anyway, and chmod'ing over it would move a created file's mode onto a binary from the agent's
+  PATH to hold a case the contract suite cannot see. Registered in DIVERGENCES.md and tracked as
+  #213.
 
   `AFreshFileIgnoresTheImagesUmask` runs the k8s write script under a `077` umask — the hardened
-  case; every umask but `022` moves — and asserts the created file is `0644` anyway, the directory
-  the write created is still `0700` (the placement: the umask sits after the `mkdir -p`, and moving
-  it above fails that assertion with `mode 755`), and that a `0600` target rewritten under the same
-  umask keeps its `0600`, which is what an unconditional `chmod 644` after the preservation would
-  break. It fails against the pre-fix script (`mode 600 ... want 644`). The `WriteFile` contract in
+  case — and asserts the created file is `0644` anyway, the directory the write created is still
+  `0700` (the placement: the umask sits after the `mkdir -p`, and moving it above fails that
+  assertion with `mode 755`), and that a `0600` target rewritten under the same umask keeps its
+  `0600`, which is what an unconditional `chmod 644` after the preservation would break. It fails
+  against the pre-fix script (`mode 600 ... want 644`). The `WriteFile` contract in
   `internal/sandbox/sandbox.go`, `PreserveModeShell`'s comment, the contract row's own comment,
   ARCHITECTURE.md, DIVERGENCES.md and the operator-facing docs/self-hosted-security.md all lose the
   "the image's umask on k8s" qualifier.

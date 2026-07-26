@@ -415,8 +415,9 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 	// tar header says 0644 whatever the image thinks (#212). The script sets the
 	// umask itself so the two backends answer this the same way, and the answer is
 	// the sandbox's rather than the image's. Staged at 077 as the hardened case;
-	// every umask but 022 moves, in both directions — a group-oriented 007 landed
-	// 0660 and now lands 0644, dropping group-write and adding other-read.
+	// every umask whose write bits differ from 022's moves, in both directions — a
+	// group-oriented 007 landed 0660 and now lands 0644, dropping group-write and
+	// adding other-read. (The execute bits are inert: a create asks for 0666.)
 	t.Run("AFreshFileIgnoresTheImagesUmask", func(t *testing.T) {
 		fresh := dir + "/hardened/created.txt"
 		code, tmp := runScript(t, "umask 077\n", []byte("new"), 3, fresh, gnuStatEnv(t)...)
@@ -448,10 +449,11 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 		// And the umask is a floor for fresh files only: a target that *does* have
 		// bits worth carrying still gets them back. What this half catches is the
 		// plausible alternative fix — an unconditional `chmod 644` on the temporary
-		// file after __map_preserve_mode, which lands 644 here and passes every
-		// other row. (It does not pin the umask's own position: moved below the
-		// preservation, the umask would leave this rewrite at 600 all the same, and
-		// the fresh-file assertion above is what fails.)
+		// file after __map_preserve_mode, which lands 644 here; ModeOfTheTargetSurvives
+		// and the live contract row catch that one too, so this is the fast local
+		// signal rather than the only one. (It does not pin the umask's own
+		// position: moved below the preservation, the umask would leave this rewrite
+		// at 600 all the same, and the fresh-file assertion above is what fails.)
 		if err := os.Chmod(fresh, 0o600); err != nil {
 			t.Fatalf("give the target a mode worth carrying: %v", err)
 		}

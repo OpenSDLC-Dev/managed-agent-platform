@@ -1090,8 +1090,9 @@ printf %s "$3"
 // ACL** supplies a created file's bits and the umask is ignored, so the file lands
 // what the ACL says while docker's tar header still says 0644 — the divergence
 // this closes, reopened by another route. Measured on Linux (alpine + setfacl):
-// under a 077 umask, a default ACL granting o::rw- lands 0666 where a plain
-// directory lands 0600. Left standing rather than chmod'd over: setting one takes
+// under a 077 umask, a directory carrying `setfacl -d -m u::rw-,g::rw-,o::rw-`
+// lands 0666 where a plain one lands 0600 — and a restrictive default ACL tightens
+// the same way under an 022 umask. Left standing rather than chmod'd over: setting one takes
 // the agent's own setfacl on its own filesystem or an operator's deliberate image
 // build, both of which can set the mode anyway, so it costs the uniformity of the
 // answer and no boundary — and putting the mode back with a `chmod` would move a
@@ -1100,10 +1101,11 @@ printf %s "$3"
 //
 // The temporary file is 0644 while the bytes stream, where a hardened image used
 // to give it the image's umask before __map_preserve_mode narrowed it back. That
-// is convergence, not a new exposure of its own: docker's temporary file is
-// extracted at 0644 and stays there for its whole life, so the window it opens —
+// is convergence, not a new exposure of its own: docker's is extracted at 0644 and
+// holds the bytes at that mode for the whole transfer as well (it is chmod'd to an
+// existing target's mode only at the end, just before the `mv`), so the window —
 // another UID inside the same sandbox reading a replacement mid-stream — is one
-// the backends now share rather than one k8s alone has.
+// the backends share rather than one k8s alone has.
 const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + `
 mkdir -p "$2" || { __map_path_fault "$2"; exit 1; }
 umask 022

@@ -154,7 +154,8 @@ path is not only the agent's `write`/`edit` tools — session-resource mounts,
 uploaded skill files and the persistent shell's own state files all land through
 it — so an image whose default umask is tighter does **not** make any of them
 `0600`; a `chmod` inside the sandbox does, and a later rewrite then preserves it.
-Any umask other than `022` moves, not only a tighter one: a group-oriented `007`
+Any umask whose **write** bits differ from `022`'s moves, not only a tighter one
+(the execute bits are inert — a file create asks for `0666`): a group-oriented `007`
 image landed `0660` and now lands `0644`, which **adds** other-read as it drops
 group-write. The **directories** on the way there are not covered: both backends
 `mkdir -p` them under the image's umask, so a hardened image still gets `0700`
