@@ -96,6 +96,18 @@ func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.R
 	}
 	return f.WriteFile(ctx, path, data)
 }
+
+// WriteFiles is the batch every backend lands for one exec; the fake keeps the
+// same observable semantics by writing the members in order and stopping at the
+// first failure.
+func (f *fakeSandbox) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
+	for _, w := range files {
+		if err := f.WriteFile(ctx, w.Path, w.Data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 func (f *fakeSandbox) Destroy(context.Context) error { return nil }
 
 type fakeProvider struct {

@@ -23,6 +23,15 @@ const (
 	ExitPathNotDirectory = 15
 	// ExitPathIsDirectory: the target of a write is itself a directory.
 	ExitPathIsDirectory = 16
+	// ExitBulkIncomplete: a bulk write's archive did not deliver every member it
+	// promised — the manifest names a temporary file that is not there.
+	ExitBulkIncomplete = 17
+	// ExitBulkExtract: a bulk write's archive could not be extracted by the
+	// sandbox itself. Only a backend that extracts in-sandbox can report it (the
+	// docker daemon extracts on the host, and answers over HTTP instead), but the
+	// number is reserved here with the rest so no backend's private codes collide
+	// with it.
+	ExitBulkExtract = 18
 )
 
 // TempPrefix names the file a write lands under before it is renamed into place.

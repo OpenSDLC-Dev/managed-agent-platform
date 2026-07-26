@@ -72,6 +72,39 @@ copy of an entry here.
 
 ### Fixed
 
+- **Materializing a skill now costs one sandbox exec instead of one per file**
+  ([#206](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/206)). Making the docker
+  backend's write atomic (#71) added a rename step, and a rename is a second round trip: measured
+  against a real daemon on a warm directory, a buffered `WriteFile` costs 20.4ms of which 13.8ms is
+  that exec — about two thirds of a small write. Nothing batched, and both materializers wrote an
+  extracted skill **one file at a time**, so a large-but-valid skill (`internal/skills` accepts up
+  to 10,000 members) spent something like two extra minutes in execs alone. The k8s backend absorbed
+  the rename into the script it already ran, so it paid nothing extra per write — but its write *is*
+  one exec, so it paid one per file all the same.
+
+  `sandbox.Sandbox` gained **`WriteFiles`**, a bulk write: the whole set travels as one archive and
+  lands for one exec. Measured on the same daemon, 200 files across 8 directories go from **4.149s
+  one at a time to 255ms in one batch (16.3×)** on docker, and from **3.627s to 253ms (14.3×)** on
+  k8s. Every member is still atomic exactly as a single write is — its bytes land under a temporary
+  name **in its own target's directory**, so the rename stays inside one filesystem; a target that
+  is a directory is refused with `ErrIsDirectory` and left whole; an existing target's permission
+  bits are carried over (#204); nothing is left behind on any outcome. What is deliberately *not*
+  promised is batch atomicity: the first failure stops the run and what already landed stays, which
+  is what the loop of writes it replaces did, and the skills sentinel already records only what
+  landed so the next pass re-runs the skill.
+
+  The two backends share the archive, the manifest and the rename shell
+  (`internal/sandbox/bulkwrite.go`), and differ only in who extracts: the docker daemon on the host,
+  or `tar` inside the pod — which is why the k8s image contract now carries `tar` alongside
+  `/bin/bash`, `mv`, `rm`, `stat` and the rest. The archive carries no directory entries on purpose:
+  both untars create the parents an entry needs at `0755` with the file at `0644` — the same answer
+  `mkdir -p` and the single write's tar header already gave — where an explicit directory entry
+  would chmod a directory that already exists. Four new contract rows hold both backends to the
+  same answers — the round trip and the modes it lands, stopping at the first failure, a blocked
+  parent path, and an existing target's mode — and the destroyed-sandbox row now asks a bulk write
+  the same question it asks a read. Planned in
+  [docs/plan/14_bulk-sandbox-write.md](./docs/plan/14_bulk-sandbox-write.md).
+
 - **A file a sandbox write creates lands `0644` on both backends, instead of on the image's umask on
   one of them** ([#212](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/212)). The two
   backends reached that mode by different routes and only one of them was the platform's: docker

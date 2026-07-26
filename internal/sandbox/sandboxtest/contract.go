@@ -21,7 +21,10 @@ import (
 )
 
 // Harness is one backend under test. Image must name a Linux image carrying
-// /bin/bash (the plan's image contract) and a POSIX userland.
+// /bin/bash (the plan's image contract) and a POSIX userland — plus `tar`, which
+// a backend that extracts a bulk write's archive inside the sandbox needs (the
+// k8s backend does; the docker daemon extracts on the host, so that backend does
+// not).
 //
 // Gate, when non-nil, declares that the backend runs the per-session egress
 // gate: it is called once per gated subtest and returns the fixture those rows
@@ -809,6 +812,184 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// A bulk write lands a whole set of files for one exec, and every member must
+	// land exactly as WriteFile lands one: parents created, bytes verbatim,
+	// overwrites truncating. The shape is a skill being materialized — many small
+	// files across nested directories — with one large member, because the batch
+	// travels as a single archive and a member spanning many stream buffers is
+	// where a truncated one would hide (#206).
+	t.Run("BulkWriteRoundTrip", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+
+		// An empty batch is a no-op, not an error: a caller with nothing to write
+		// must not have to check first.
+		if err := sb.WriteFiles(ctx, nil); err != nil {
+			t.Errorf("empty batch: err = %v, want nil", err)
+		}
+
+		root := workdir + "/skills/pack"
+		large := make([]byte, 1<<20)
+		x := uint32(0xC0FFEE11)
+		for i := range large {
+			x ^= x << 13
+			x ^= x >> 17
+			x ^= x << 5
+			large[i] = byte(x)
+		}
+		batch := []sandbox.FileWrite{
+			// Bytes no shell round-trip would survive, as the single write's row uses.
+			{Path: root + "/SKILL.md", Data: []byte{0x00, 0x01, 0xff, 0xfe, 'h', 'i', 0x00}},
+			{Path: root + "/scripts/run.sh", Data: []byte("#!/bin/sh\necho hi\n")},
+			{Path: root + "/deep/nested/dir/blob.bin", Data: large},
+			{Path: root + "/empty", Data: nil},
+		}
+		for i := 0; i < 20; i++ {
+			batch = append(batch, sandbox.FileWrite{
+				Path: root + "/many/f" + strconv.Itoa(i),
+				Data: []byte("member " + strconv.Itoa(i)),
+			})
+		}
+		if err := sb.WriteFiles(ctx, batch); err != nil {
+			t.Fatalf("bulk write %d files: %v", len(batch), err)
+		}
+		for _, f := range batch {
+			got, err := sb.ReadFile(ctx, f.Path)
+			if err != nil {
+				t.Errorf("read %s: %v", f.Path, err)
+				continue
+			}
+			if !bytes.Equal(got, f.Data) {
+				t.Errorf("%s read back %d bytes, want %d; first difference at %d",
+					f.Path, len(got), len(f.Data), firstDiff(got, f.Data))
+			}
+		}
+
+		// A file the batch creates lands 0644 and a directory it creates 0755 —
+		// the same answer `mkdir -p` and the single write's own tar header give,
+		// so a tree written in bulk is indistinguishable from one written a file
+		// at a time. Both backends extract the same archive; only the untar
+		// differs, and this is where the two would drift.
+		if got := fileMode(t, sb, root+"/SKILL.md"); got != "644" {
+			t.Errorf("a file the batch created has mode %s, want 644", got)
+		}
+		if got := fileMode(t, sb, root+"/deep/nested"); got != "755" {
+			t.Errorf("a directory the batch created has mode %s, want 755", got)
+		}
+
+		// Overwriting truncates rather than merging, and a second batch over the
+		// first is the ordinary re-materialization case.
+		if err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: root + "/SKILL.md", Data: []byte("x")},
+			{Path: root + "/scripts/run.sh", Data: []byte("#!/bin/sh\necho rewritten\n")},
+		}); err != nil {
+			t.Fatalf("second batch: %v", err)
+		}
+		if got, err := sb.ReadFile(ctx, root+"/SKILL.md"); err != nil || string(got) != "x" {
+			t.Errorf("after overwrite = %q, %v; want %q", got, err, "x")
+		}
+
+		// Nothing of the machinery is left behind: neither the temporary files nor
+		// the manifest the batch travelled with.
+		assertNoWriteResidue(t, sb, workdir, root, root+"/many")
+	})
+
+	// The batch is not a transaction, and this row pins what it is instead: the
+	// first failure stops the run, what already landed stays, and the rest is
+	// never written. A target that is a directory is the reachable way to fail one
+	// member — the same fault WriteOntoDirectory pins for a single write — and the
+	// error must name *which* member, since the caller handed over a set.
+	t.Run("BulkWriteStopsAtTheFirstFailure", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		dir := workdir + "/batch/adir"
+		if err := sb.WriteFile(ctx, dir+"/inside.txt", []byte("kept")); err != nil {
+			t.Fatalf("stage a directory with a file in it: %v", err)
+		}
+		before := workdir + "/batch/before.txt"
+		after := workdir + "/batch/after.txt"
+		err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: before, Data: []byte("landed")},
+			{Path: dir, Data: []byte("clobber")},
+			{Path: after, Data: []byte("never")},
+		})
+		if !errors.Is(err, sandbox.ErrIsDirectory) {
+			t.Errorf("bulk write onto a directory: err = %v, want ErrIsDirectory", err)
+		}
+		if err != nil && !strings.Contains(err.Error(), dir) {
+			t.Errorf("err = %v, want it to name the member it stopped on (%s)", err, dir)
+		}
+		if got, err := sb.ReadFile(ctx, dir+"/inside.txt"); err != nil || string(got) != "kept" {
+			t.Errorf("the file inside the directory holds %q, %v; want it untouched", got, err)
+		}
+		if got, err := sb.ReadFile(ctx, before); err != nil || string(got) != "landed" {
+			t.Errorf("the member before the failure holds %q, %v; want %q", got, err, "landed")
+		}
+		if _, err := sb.ReadFile(ctx, after); !errors.Is(err, sandbox.ErrFileNotExist) {
+			t.Errorf("the member after the failure: err = %v, want ErrFileNotExist", err)
+		}
+		assertNoWriteResidue(t, sb, workdir, workdir+"/batch", dir)
+	})
+
+	// A batch whose parent path is blocked by a non-directory is the same mistake
+	// a single write makes there, and gets the same sentinel — so the caller can
+	// tell a path it named wrongly from the sandbox breaking. Nothing of the batch
+	// lands, and the file in the way is untouched.
+	t.Run("BulkWriteUnderNonDirectory", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		plain := workdir + "/blocker.txt"
+		if err := sb.WriteFile(ctx, plain, []byte("i am a file")); err != nil {
+			t.Fatalf("stage a regular file: %v", err)
+		}
+		err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: workdir + "/fine.txt", Data: []byte("x")},
+			{Path: plain + "/deeper/child", Data: []byte("x")},
+		})
+		if !errors.Is(err, sandbox.ErrNotDirectory) {
+			t.Errorf("bulk write under a non-directory: err = %v, want ErrNotDirectory", err)
+		}
+		if got, err := sb.ReadFile(ctx, plain); err != nil || string(got) != "i am a file" {
+			t.Errorf("the file in the way holds %q, %v; want it untouched", got, err)
+		}
+		// The member the batch could have written lands nowhere: the delivery is
+		// refused as a whole, and what it had staged is shed with it.
+		if _, err := sb.ReadFile(ctx, workdir+"/fine.txt"); !errors.Is(err, sandbox.ErrFileNotExist) {
+			t.Errorf("the batch's other member: err = %v, want ErrFileNotExist", err)
+		}
+		assertNoWriteResidue(t, sb, workdir)
+	})
+
+	// A batch renames its members into place like every other write, so it must
+	// put the target's mode back the same way: `write` a script, `chmod +x` it,
+	// re-materialize the skill, and it still runs (#204).
+	t.Run("BulkWriteKeepsTheTargetsMode", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		script := workdir + "/bulk/run.sh"
+		if err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: script, Data: []byte("#!/bin/sh\necho first\n")},
+		}); err != nil {
+			t.Fatalf("stage the script: %v", err)
+		}
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "chmod 0755 " + script}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("chmod the script executable: %+v, %v", res, err)
+		}
+		if err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: script, Data: []byte("#!/bin/sh\necho edited\n")},
+			{Path: workdir + "/bulk/other.txt", Data: []byte("x")},
+		}); err != nil {
+			t.Fatalf("rewrite the script in a batch: %v", err)
+		}
+		if got := fileMode(t, sb, script); got != "755" {
+			t.Errorf("after a bulk rewrite the mode is %s, want 755", got)
+		}
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: script}); err != nil ||
+			res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "edited" {
+			t.Errorf("run the rewritten script: %+v, %v; want it executable and printing %q", res, err, "edited")
+		}
+	})
+
 	// Files and commands see one filesystem — the whole point of the sandbox.
 	t.Run("FilesAndExecShareTheFilesystem", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
@@ -959,6 +1140,14 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if _, err := sb.ReadFile(ctx, workdir+"/anything"); !errors.Is(err, sandbox.ErrNotFound) {
 			t.Errorf("read after destroy: %v, want ErrNotFound", err)
 		}
+		// A bulk write is two round trips where a single one is one, so it has two
+		// places to notice the sandbox is gone; both must say so with the sentinel
+		// the executor reads as a sandbox fault rather than as the path's fault.
+		if err := sb.WriteFiles(ctx, []sandbox.FileWrite{
+			{Path: workdir + "/anything", Data: []byte("x")},
+		}); !errors.Is(err, sandbox.ErrNotFound) {
+			t.Errorf("bulk write after destroy: %v, want ErrNotFound", err)
+		}
 	})
 
 	// Without a gate (a backend not yet gate-wired, or a deployment not opted
@@ -1016,6 +1205,25 @@ func fileMode(t *testing.T, sb sandbox.Sandbox, path string) string {
 		t.Fatalf("stat %s: exit %d: %s", path, res.ExitCode, res.Stderr)
 	}
 	return strings.TrimSpace(res.Stdout)
+}
+
+// assertNoWriteResidue fails unless every named directory is free of the
+// temporary files a write travels under — the members' own, and the manifest a
+// bulk write's archive carries. Whatever a write's outcome, what it leaves in the
+// sandbox is the file it was asked for and nothing else.
+func assertNoWriteResidue(t *testing.T, sb sandbox.Sandbox, dirs ...string) {
+	t.Helper()
+	for _, dir := range dirs {
+		res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+			Command: "ls -A " + dir + " 2>/dev/null | grep -c '^" + sandbox.TempPrefix + "' || true",
+		})
+		if err != nil {
+			t.Fatalf("list %s: %v", dir, err)
+		}
+		if got := strings.TrimSpace(res.Stdout); got != "0" {
+			t.Errorf("%s files left in %s = %s, want 0", sandbox.TempPrefix, dir, got)
+		}
+	}
 }
 
 // countProcesses counts live processes in the sandbox whose command line starts

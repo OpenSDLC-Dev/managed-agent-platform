@@ -294,6 +294,28 @@ type Sandbox interface {
 	// the number of bytes src yields: a short or long stream is an error, not a
 	// silently truncated file.
 	WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error
+	// WriteFiles writes a whole set of files, each exactly as WriteFile writes
+	// one — creating parent directories, overwriting, landing under a temporary
+	// name in the target's own directory and renaming into place, carrying an
+	// existing target's mode over, and answering the same path sentinels. An
+	// empty batch writes nothing. A member's Path must be absolute and clean; a
+	// batch naming the same target twice lands them in order, so the last wins.
+	//
+	// What it buys is round trips: the whole batch travels as one archive and
+	// lands for one exec, where the same files written one at a time cost one
+	// exec each — about 14ms apiece against a local daemon, which is most of what
+	// a small write costs (#206). A skill of ten thousand files is the case that
+	// made it worth a method.
+	//
+	// The batch is NOT a transaction, and deliberately not: the first failure
+	// stops the run, the members that already landed stay landed, and the rest
+	// are never written. That is what a loop of WriteFile calls did, and the one
+	// caller of either — materializing a skill — re-runs the whole skill next
+	// time rather than reasoning about what got through. Every member is still
+	// atomic on its own, so a failure leaves each target holding what it held,
+	// never a truncated file, and leaves no temporary file behind. The error
+	// names the member it stopped on.
+	WriteFiles(ctx context.Context, files []FileWrite) error
 	// Destroy removes the sandbox. It is idempotent: destroying an already
 	// destroyed sandbox is not an error.
 	Destroy(ctx context.Context) error

@@ -33,6 +33,57 @@ recorded nowhere else.
 
 ---
 
+## A bulk sandbox write (plan 14) — archived 2026-07-26, delivered in one PR
+
+The measurements the design rests on, taken on this branch against a real Docker daemon and a
+local kind cluster with `debian:stable-slim`, since they are what a reviewer would otherwise have
+to re-derive:
+
+**The cost being removed.** A buffered `WriteFile` on the docker backend: 20 calls in 409ms
+(20.4ms each), of which a bare `Exec` is 13.8ms — so the rename step #71 added is ~68% of a small
+write. At `skills.MaxMembers` (10,000) that is ~138s of exec overhead for one skill.
+
+**The cost after.** 200 files across 8 directories, same sandbox: docker 4.149s one at a time →
+255ms in one batch (16.3×); k8s 3.627s → 253ms (14.3×).
+
+**Two facts that fixed the archive's shape**, measured with docker 28 and GNU tar 1.35:
+
+| | implicit parent dirs | file entry |
+|---|---|---|
+| docker daemon untar (`PUT /archive`) | 0755 | 0644 |
+| in-container `tar -x` under `umask 022` | 0755 | 0644 |
+
+The two agree with each other and with what `mkdir -p` and the single write's tar header already
+gave, so the archive need say nothing about directories — and must not: an **explicit** directory
+entry chmods a directory that already exists (0700 → 0755 under both untars), which a write must
+never do to a directory it merely passes through.
+
+**Decisions evaluated and rejected.**
+
+- *Batch atomicity (all-or-nothing).* Rejected: nothing asks for it, and it would be new behavior
+  wearing a bug fix's clothes. The batch is a drop-in for the loop it replaces, whose first failure
+  also stopped the run and left what had landed; the skills sentinel records only what landed, so
+  the next pass re-runs the skill regardless.
+- *Staging every member in one directory and moving from there.* Rejected: it breaks the guarantee
+  the change is required to preserve. A temporary file must be in its **target's own** directory or
+  the rename can cross a filesystem, and `mv` across one copies onto the destination name — exactly
+  the non-atomic truncation #71 removed.
+- *Carrying the manifest in the script instead of the archive.* Rejected as impossible at the sizes
+  that matter: Linux caps a single `execve` argument at `MAX_ARG_STRLEN` (128 KiB) and a
+  10,000-member batch's generated script is on the order of 800 KB.
+- *A k8s framing that avoids `tar`* (a length-prefixed stdin protocol read with `head -c`, or bash's
+  `read -N`). Rejected: `read` cannot hold NUL bytes so it is binary-unsafe, and a per-member `head`
+  is one process per file — trading the exec-per-file for a fork-per-file. `tar` costs one process
+  for the batch and joins an image contract that already names `/bin/bash`, `mv`, `rm`, `stat`,
+  `tee` and `wc`.
+- *Naming the failing member by printing its path.* Rejected in favour of a marker line carrying its
+  **index**: an image's own noise shares that stream, and a number the caller can index into what it
+  already holds cannot be confused with it.
+
+**Not done, deliberately.** `internal/sandbox/shell/shell.go`'s two-or-three writes per bash call,
+which #206 also counts. They bracket an exec — the command file before it, the head pointer after
+— so they cannot be batched; only the restart pair could, saving one exec on restart calls alone.
+
 ## `user.interrupt` semantics (plan 13) — wire resolution and rejected alternatives, archived 2026-07-26
 
 **The wire question the issue raised was answerable, and not from the checkouts.** The typed

@@ -856,6 +856,85 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 	return c.rename(ctx, tmp, path)
 }
 
+// WriteFiles lands a whole batch for one exec: the archive goes to the daemon in
+// one PUT, which extracts every member under a temporary name in its own target's
+// directory, and a single exec then renames them all into place. The per-write
+// exec that made a small write cost 14ms is paid once for the batch instead of
+// once per member (#206).
+//
+// A refused PUT takes the same recovery a single write takes when its own PUT is
+// refused — make the directories, which is also what classifies a path blocked by
+// a non-directory, then deliver once more — over the whole batch and still for one
+// exec. The manifest is the archive's first entry and lands in the workdir, which
+// exists, so a PUT that failed on a later member has already delivered what the
+// recovery reads. When the second attempt fails too, the recovery pass runs again
+// to shed whatever landed: the caller's error is the one that matters, so its own
+// failure is not reported over it.
+func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
+	if len(files) == 0 {
+		return nil
+	}
+	b, err := sandbox.NewBulkWrite(c.workdir, files)
+	if err != nil {
+		return err
+	}
+	if err := c.putBulk(ctx, b); err != nil {
+		if containerGone(err) {
+			return c.gone()
+		}
+		if rErr := c.recoverBulk(ctx, b); rErr != nil {
+			return rErr
+		}
+		if err := c.putBulk(ctx, b); err != nil {
+			_ = c.recoverBulk(ctx, b)
+			if containerGone(err) {
+				return c.gone()
+			}
+			return err
+		}
+	}
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.BulkRenameShell +
+		fmt.Sprintf("__map_bulk_rename %s %s", shellQuote(b.Manifest), shellQuote(b.DirList))})
+	if err != nil {
+		// The bytes are landed and unnamed, and this exec is how they were to be
+		// named; shed them rather than leave the sandbox carrying a payload nothing
+		// will ever claim.
+		_ = c.recoverBulk(ctx, b)
+		return err
+	}
+	if res.ExitCode == 0 {
+		return nil
+	}
+	return b.Fault("docker", res.ExitCode, res.Stderr)
+}
+
+// putBulk streams the batch's archive to the daemon, which extracts it at the
+// container's root. The tar is built on the fly over a pipe rather than buffered,
+// as the streaming single write's is: the members are already in memory, and a
+// second copy of a large skill is not worth having.
+func (c *container) putBulk(ctx context.Context, b *sandbox.BulkWrite) error {
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(b.Archive(pw)) }()
+	err := c.api.putArchive(ctx, c.id, "/", pr)
+	pr.CloseWithError(err)
+	return err
+}
+
+// recoverBulk runs the shared recovery pass over a batch whose delivery failed:
+// shed what landed, make the directories, and say whether a non-directory is what
+// blocked the path.
+func (c *container) recoverBulk(ctx context.Context, b *sandbox.BulkWrite) error {
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.BulkRecoverShell +
+		fmt.Sprintf("__map_bulk_recover %s %s", shellQuote(b.Manifest), shellQuote(b.DirList))})
+	if err != nil {
+		return err
+	}
+	if res.ExitCode == 0 {
+		return nil
+	}
+	return b.Fault("docker", res.ExitCode, res.Stderr)
+}
+
 // rename puts a landed temporary file at its target — the step that makes a write
 // atomic — after refusing the one target a rename would quietly do the wrong thing
 // with. `mv -f file dir` moves the file *into* the directory, so a target that is
