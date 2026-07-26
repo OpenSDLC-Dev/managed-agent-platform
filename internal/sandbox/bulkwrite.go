@@ -245,12 +245,39 @@ func (b *BulkWrite) blamed(stderr string) string {
 // It is the bulk half of what the single write's own rename does, member by
 // member and for one exec instead of N.
 //
-// Each member is the single write's sequence exactly — refuse a target that is a
-// directory, carry the target's mode onto the temporary file, move, then ask
-// again in case something made the target a directory in between — so a batch
-// and a loop of writes land a file identically. Only the batch's *shape* is new:
-// the first failure stops the run, and the members that already landed stay
-// landed, because that is what the loop this replaces did.
+// Each member is the single write's sequence exactly — set a created file's mode
+// to 0644, refuse a target that is a directory, carry an existing target's mode
+// onto the temporary file, move, then ask again in case something made the target
+// a directory in between — so a batch and a loop of writes land a file
+// identically. Only the batch's *shape* is new: the first failure stops the run,
+// and the members that already landed stay landed, because that is what the loop
+// this replaces did.
+//
+// The `chmod 0644` is the batch's half of #213, and it is the delivery it answers
+// for rather than the rename: where the target's parent directory carries a
+// **default POSIX ACL**, the kernel takes a created file's bits from the ACL and
+// ignores the umask the delivery set, and a **non-root** `tar` does not chmod over
+// it — measured, GNU tar 1.35 and BusyBox 1.36 alike, a member extracted under
+// `setfacl -d -m u::rwx,g::---,o::---` landing 0600 where the docker daemon's
+// host-side untar, which chmods, lands 0644 for the same batch. (A root `tar`
+// restores the header's mode by itself, which is why the divergence is a non-root
+// image's; `-p` does not close it, because tar then assumes the `open` it asked
+// for got the mode and skips the chmod.) An existing target's own bits still win:
+// __map_preserve_mode chmods over this, per member, just as it does in the single
+// write.
+//
+// It runs before the loop rather than inside it, so the pass costs a process per
+// hundred members instead of one per member — 100 for the 10,000 a skill upload
+// may carry, against a batch that already takes seconds. A hundred rather than the
+// whole list because this one failure would be a **silent** one: `chmod` reports
+// E2BIG like anything else, and its status is deliberately ignored here, so a
+// chunk that overflowed the command line would leave its members on the ACL's bits
+// with the batch still reporting success. A hundred paths cannot overflow it —
+// 100 × PATH_MAX is 400 KB against the 2 MB a Linux command line holds, so the
+// bound holds for pathological paths and not only for the ones a skill really
+// carries. (The prepare pass hands its whole directory list to one `mkdir` on a
+// looser argument, that a real batch's directories run to a few hundred kilobytes;
+// it can afford to, because an over-long `mkdir` fails the batch out loud.)
 //
 // A temporary file the manifest lists but that is not there is the delivery having
 // lost it, and stops the run at that member (ExitBulkIncomplete). That is the k8s
@@ -285,6 +312,11 @@ __map_bulk_rename() {
     printf 'map-bulk-fail %d\n' "$__bad" >&2
     return 17
   fi
+  __i=0
+  while [ "$__i" -lt "${#__tmps[@]}" ]; do
+    chmod 0644 "${__tmps[@]:$__i:100}" 2>/dev/null
+    __i=$((__i+100))
+  done
   __code=0; __bad=0; __i=0
   while [ "$__i" -lt "${#__tmps[@]}" ]; do
     __t=${__tmps[$__i]}; __d=${__dsts[$__i]}; __at=$__i; __i=$((__i+1))

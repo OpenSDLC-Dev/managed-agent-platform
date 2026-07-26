@@ -1036,6 +1036,14 @@ func (pd *pod) bulkExec(ctx context.Context, script string, b *sandbox.BulkWrite
 // deliberately unlike the single write's `mkdir -p`, which takes the image's umask.
 // sandbox.BulkWrite.Archive carries the whole argument.
 //
+// The umask is not the whole answer here either, for the reason the single write
+// below has a `chmod` for (#213): where the target's parent carries a **default
+// POSIX ACL** the kernel takes a created file's bits from the ACL and ignores the
+// umask, and a non-root `tar` — unlike a root one, and unlike the docker daemon's
+// host-side untar — does not chmod over what it opened. The `chmod 0644` that
+// answers it is in the shared __map_bulk_rename rather than here, one batched pass
+// before the renames; sandbox.BulkRenameShell carries the measurement.
+//
 // An extraction that fails is its own exit code rather than a write failure,
 // because it is the one failure the caller can do something about: it retries
 // after making the directories. `tar` comes off the agent's own PATH, as `mkdir`,
@@ -1164,7 +1172,11 @@ printf %s "$3"
 // stdin copy to fail into runtime.HandleError, and the exit code is the only thing
 // that reaches the caller from here. (The `mkdir` branch above still exits without
 // draining; that is measured to work — the exit code arrives and the copy's failure
-// is logged — but it is not what this ordering rests on.)
+// is logged — but it is not what this ordering rests on. The `: >` beside it does
+// not merely join that class, it moves a case into it: a directory the sandbox user
+// cannot write used to fail inside `tee`, which drains the stream before reporting,
+// and now fails before a byte is read. Measured through the real backend with a
+// 64 MiB body — exit 1 arrives in ~25ms, undrained, with no hang and no residue.)
 //
 // A `mkdir -p` that fails asks the shared path-fault shell whether a
 // non-directory is why, so a blocked path is the model's to fix (15,
@@ -1195,49 +1207,73 @@ printf %s "$3"
 // the same sandbox is also writing). Both are successful writes, and both would
 // fail a re-stat.
 //
-// `set -o pipefail` so a `tee` that cannot create the temporary file still fails
-// the command substitution — otherwise the pipeline would report only `wc`'s
-// status, and an unwritable directory would come back as a short write instead of
-// the write failure it is. `-eq` tolerates the leading padding BSD `wc` emits.
+// `set -o pipefail` so a `tee` that fails part way — the filesystem filling under
+// it — still fails the command substitution, rather than the pipeline reporting
+// only `wc`'s status and a failed write coming back as a short one. Creating the
+// file is no longer where that shows up: the `: >` above does that, so a directory
+// the sandbox user cannot write fails there instead. `-eq` tolerates the leading
+// padding BSD `wc` emits.
 //
-// `umask 022` is what makes a file the write *creates* land 0644 here, as the
-// docker backend's fixed tar header makes it land 0644 there (#212). `tee` creates
-// the temporary file under the exec process's umask — the image's — so without
-// this the answer to "what mode does a file an agent wrote come out as" would be
-// 0644 on one backend and whatever the image chose on the other, and the shared
-// contract row asserting 0644 would be passing here by coincidence. It is set
-// deliberately: the mode a sandbox write lands is the platform's answer on both
-// backends, not something an image can quietly change under one of them. It sits
-// *after* the `mkdir -p` on purpose, so the directories a write creates keep
-// taking the image's umask — which is what docker's own `mkdir -p` exec does too,
-// and moving it earlier would trade a file divergence for a directory one. An
-// existing target's bits still win: __map_preserve_mode runs later and chmods
-// over this. `umask` is a bash builtin, so unlike the `stat` and `chmod` that
-// step reaches for, nothing on the agent's PATH can answer for it.
+// `umask 022` and the `chmod 0644` beside it are what make a file the write
+// *creates* land 0644 here, as the docker backend's fixed tar header makes it land
+// 0644 there (#212). A file is otherwise created under the exec process's umask —
+// the image's — so without them the answer to "what mode does a file an agent
+// wrote come out as" would be 0644 on one backend and whatever the image chose on
+// the other, and the shared contract row asserting 0644 would be passing here by
+// coincidence. It is fixed deliberately: the mode a sandbox write lands is the
+// platform's answer on both backends, not something an image can quietly change
+// under one of them. The umask sits *after* the `mkdir -p` on purpose, so the
+// directories a write creates keep taking the image's umask — which is what
+// docker's own `mkdir -p` exec does too, and moving it earlier would trade a file
+// divergence for a directory one.
 //
-// One case it cannot answer for: a parent directory carrying a **default POSIX
-// ACL** supplies a created file's bits and the umask is ignored, so the file lands
-// what the ACL says while docker's tar header still says 0644 — the divergence
-// this closes, reopened by another route. Measured on Linux (alpine + setfacl):
-// under a 077 umask, a directory carrying `setfacl -d -m u::rw-,g::rw-,o::rw-`
-// lands 0666 where a plain one lands 0600 — and a restrictive default ACL tightens
-// the same way under an 022 umask. Left standing rather than chmod'd over: setting one takes
-// the agent's own setfacl on its own filesystem or an operator's deliberate image
-// build, both of which can set the mode anyway, so it costs the uniformity of the
-// answer and no boundary — and putting the mode back with a `chmod` would move a
-// created file's mode onto a binary from the agent's PATH to hold a case the
-// contract suite cannot see. Registered in docs/DIVERGENCES.md (#213).
+// The `chmod` is there because a umask is not the only thing that decides a
+// created file's bits (#213). Where the parent directory carries a **default POSIX
+// ACL** the kernel takes them from the ACL and ignores the umask, so the file
+// landed what the ACL said while docker's tar header still said 0644 — the
+// divergence #212 closed, reopened by another route. Measured on Linux under an
+// 022 umask (debian + alpine, GNU coreutils and BusyBox alike): a directory
+// carrying `setfacl -d -m u::rw-,g::rw-,o::rw-` lands a created file 0666 where a
+// plain one lands 0644, a restrictive default ACL tightens the same way, and where
+// the default ACL carries named entries the file inherits an extended ACL whose
+// mask the `chmod` clamps to `r--`, so those entries come out effective r-- too.
+// Setting a created file's mode rather than inheriting it is also what the
+// reference's own host-side runner does (`agenttoolset`'s `atomicWriteFile` chmods
+// its temporary file to 0o644 before renaming). The umask stays alongside it, and
+// is not a fallback for *this* case: an image with no `chmod` on its PATH still
+// gets #212's answer from the umask, and still loses to a default ACL. That is the
+// degradation, stated rather than papered over — the same shape as the one
+// __map_preserve_mode already documents, where an image whose `stat` cannot do `-c`
+// keeps the mode behavior it had before any of this existed.
 //
-// The temporary file is 0644 while the bytes stream, where a hardened image used
-// to give it the image's umask before __map_preserve_mode narrowed it back. That
-// is convergence, not a new exposure of its own: docker's is extracted at 0644 and
-// holds the bytes at that mode for the whole transfer as well (it is chmod'd to an
-// existing target's mode only at the end, just before the `mv`), so the window —
-// another UID inside the same sandbox reading a replacement mid-stream — is one
-// the backends share rather than one k8s alone has.
+// The file is created empty and chmod'd *before* the bytes stream rather than
+// after, so it never holds them at a mode the platform did not choose: docker's is
+// extracted at 0644 and holds the bytes at that mode for the whole transfer, and a
+// permissive default ACL would otherwise have left k8s's world-writable for the
+// length of a 500 MB write. `tee` truncates the file it finds rather than
+// recreating it, so the mode set here is the mode the rename carries over. What it
+// widens is a window the write path already had and already bounds: between this
+// create and `tee`'s own open, something in the sandbox that can see the temporary
+// name can swap a symlink in and take the bytes elsewhere, where before it could
+// only redirect the `mv`. The name is `.map-write-` plus eight random bytes, and
+// the bound is the one BulkRenameShell already states for the manifest — every
+// step runs with the agent's own credentials, so a redirected write reaches
+// nothing the agent could not have written with its own hands.
+//
+// An existing target's bits still win: __map_preserve_mode runs later and chmods
+// over this. `umask` is a bash builtin, so nothing on the agent's PATH can answer
+// for it; `chmod` is not, but that is not a new bound — the preservation step
+// already reaches for the same binary on every rewrite, with the agent's own
+// credentials, on a file in a directory the agent already writes, so a planted one
+// chooses a created file's mode and reaches nothing the agent could not reach with
+// its own `chmod`. Its failure is silent for the same reason every step in
+// __map_preserve_mode is: the bytes are one `mv` from being landed, so a `chmod`
+// that cannot run costs the mode rather than the write.
 const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + `
 mkdir -p "$2" || { __map_path_fault "$2"; exit 1; }
 umask 022
+: > "$4" || exit 1
+chmod 0644 "$4" 2>/dev/null
 set -o pipefail
 sz=$(tee "$4" | wc -c) || { rm -f "$4"; exit 1; }
 [ "$sz" -eq "$3" ] || { rm -f "$4"; exit 14; }

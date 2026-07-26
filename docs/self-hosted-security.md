@@ -164,10 +164,23 @@ group-write. The **directories** on the way there are not covered: both backends
 `mkdir -p` them under the image's umask, so a hardened image still gets `0700`
 parents and its directory-level gating stands — which is where to put the
 protection if you were relying on the file bits. A **default POSIX ACL** on a
-directory is the one remaining lever over a created file's own bits on Kubernetes:
-the kernel takes them from the ACL and ignores the umask, so a write lands what the
-ACL says (Docker's tar header is unaffected — the two backends answer differently
-there, [#213](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/213)).
+directory does not move a created file's own bits either, on either backend: the
+kernel would take them from the ACL and ignore the umask, so the Kubernetes write
+script chmods the file it creates to `0644` outright rather than only lowering what
+a create asks for, and a bulk write — the path every uploaded skill lands through —
+chmods its delivered members the same way before renaming them
+([#213](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/213)). The
+batch needed it because a `tar` extracting as a **non-root** sandbox user does not
+restore the header's mode, where a root one and Docker's daemon-side untar both do.
+
+What a default ACL *does* still decide is the **directories** — which is the same
+fallback the paragraph above points you at, so read the two together. A directory
+the write or the batch creates inherits its parent's default ACL and takes the
+ACL's bits rather than the umask's, on both backends and all the way down the tree
+as the ACL propagates: measured, under `setfacl -d -m u::rwx,g::rwx,o::rwx` a
+hardened `077` image gets `0777` parents, not the `0700` the umask alone would have
+given. So where a default ACL is in play, set it to what you want those directories
+to be; the image's umask will not answer for them.
 
 For production, build a minimal, pinned image: only the interpreters and tools
 your agents actually need, a non-root default user (below), no build toolchain or

@@ -98,7 +98,9 @@ __map_path_fault() {
 // same way. Where there is nothing to carry over, the temporary file keeps its own
 // mode — 0644 on both backends, by two routes the platform fixes rather than the
 // image: the docker backend's tar header says so, and the k8s write script sets
-// `umask 022` before its `tee` creates the file (#212).
+// `umask 022` and then chmods the file it creates to 0644 outright, because a
+// parent directory's default POSIX ACL decides those bits over the umask (#212,
+// #213).
 //
 // Every failure here is silent, and deliberately so: the bytes are landed and the
 // write is one `mv` from succeeding, so a step that cannot run costs the mode

@@ -267,11 +267,11 @@ type Sandbox interface {
 	//     move, and a script made executable in bash survives being rewritten
 	//     (#204). Only an existing *regular* target has bits worth carrying: one
 	//     that does not exist lands 0644 on either backend, fixed by the platform
-	//     rather than by the image (a tar header on docker, a `umask 022` the write
-	//     script sets on k8s — #212; a default POSIX ACL on the parent directory is
-	//     the one thing that still answers otherwise there, #213), and a symlink,
-	//     FIFO or device node lands 0644 too — what the rename replaces is the
-	//     name, and a link's own mode is 0777.
+	//     rather than by the image (a tar header on docker; on k8s a `umask 022`
+	//     the write script sets — #212 — and a `chmod 0644` beside it, because a
+	//     parent directory's default POSIX ACL decides those bits over the umask,
+	//     #213), and a symlink, FIFO or device node lands 0644 too — what the
+	//     rename replaces is the name, and a link's own mode is 0777.
 	//     One case still differs between the backends: docker's temporary
 	//     file is extracted by the daemon, so an image whose default user is not
 	//     root cannot chmod it and the write lands 0644 where k8s preserves the

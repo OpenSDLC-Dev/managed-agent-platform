@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,6 +108,58 @@ func TestBulkRenameShell(t *testing.T) {
 		got, err := os.ReadFile(dir + "/" + name)
 		if err != nil || string(got) != want {
 			t.Errorf("%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	assertNoTemps(t, dir)
+}
+
+// A member the batch *creates* lands 0644, whatever mode the file holding its
+// bytes had when the rename found it (#213). The mode is the delivery's to choose
+// and it does not always choose the platform's: where the target's parent carries
+// a **default POSIX ACL** the kernel takes a created file's bits from the ACL and
+// ignores the umask the delivery set, and a non-root `tar` — unlike a root one,
+// and unlike the docker daemon's host-side untar — does not chmod over what it
+// opened, so a member landed 0600 on k8s and 0644 on docker for the same batch.
+//
+// Staged here as a mode on the temporary file rather than as a real ACL, for the
+// reason the k8s write script's own suite states: a macOS dev host has no POSIX
+// ACLs at all, and a row that could only run on Linux would prove nothing on the
+// machine the change is written on. What both stagings put in front of the rename
+// is the same thing — a delivered file at a mode the platform did not choose —
+// and unlike the preservation step this one reaches for no `stat`, so it holds
+// on either host.
+func TestBulkRenameShellSetsAFreshMembersMode(t *testing.T) {
+	dir := t.TempDir()
+	// More members than the chmod pass takes in one go, so the loop that walks the
+	// list a hundred at a time is exercised rather than assumed: with two members
+	// the arithmetic could be wrong in either direction and every mode still land.
+	members := make(map[string]string, 150)
+	for i := 0; i < 150; i++ {
+		members["f"+strconv.Itoa(i)+".txt"] = "member " + strconv.Itoa(i)
+	}
+	manifest, dirList := stageBatch(t, dir, members, nil)
+
+	tmps, err := filepath.Glob(dir + "/" + sandbox.TempPrefix + "batch-*")
+	if err != nil || len(tmps) != len(members) {
+		t.Fatalf("staged temporary files = %v (%v), want %d", tmps, err, len(members))
+	}
+	for _, tmp := range tmps {
+		if err := os.Chmod(tmp, 0o600); err != nil {
+			t.Fatalf("stage %s at 0600: %v", tmp, err)
+		}
+	}
+
+	code, stderr := bulkShell(t, sandbox.BulkRenameShell, "__map_bulk_rename", manifest, dirList)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stderr: %s", code, stderr)
+	}
+	for name := range members {
+		info, err := os.Stat(dir + "/" + name)
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if got := info.Mode().Perm(); got != 0o644 {
+			t.Errorf("a member the batch created has mode %o, want 644 — set, not inherited", got)
 		}
 	}
 	assertNoTemps(t, dir)

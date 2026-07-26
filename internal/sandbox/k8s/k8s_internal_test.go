@@ -410,14 +410,17 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 
 	// The other half of that answer, and the one the image gets a vote in: a file
 	// the write *creates* has no mode to carry over, so it lands whatever created
-	// it. `tee` creates it under the exec process's umask, which is the image's —
-	// 0644 on the usual 022, 0600 on a hardened 077 — where the docker backend's
-	// tar header says 0644 whatever the image thinks (#212). The script sets the
-	// umask itself so the two backends answer this the same way, and the answer is
-	// the sandbox's rather than the image's. Staged at 077 as the hardened case;
-	// every umask whose write bits differ from 022's moves, in both directions — a
-	// group-oriented 007 landed 0660 and now lands 0644, dropping group-write and
-	// adding other-read. (The execute bits are inert: a create asks for 0666.)
+	// it: under the exec process's umask, which is the image's, 0644 on the usual
+	// 022 and 0600 on a hardened 077, where the docker backend's tar header says
+	// 0644 whatever the image thinks (#212). The script sets the umask itself so the
+	// two backends answer this the same way, and the answer is the sandbox's rather
+	// than the image's. (The umask is no longer the only thing holding it: the script
+	// chmods the file it creates to 0644 as well, because a default POSIX ACL decides
+	// those bits over a umask — #213, the row after next.) Staged at 077 as the
+	// hardened case; every umask whose write bits differ from 022's moves, in both
+	// directions — a group-oriented 007 landed 0660 and now lands 0644, dropping
+	// group-write and adding other-read. (The execute bits are inert: a create asks
+	// for 0666.)
 	t.Run("AFreshFileIgnoresTheImagesUmask", func(t *testing.T) {
 		fresh := dir + "/hardened/created.txt"
 		code, tmp := runScript(t, "umask 077\n", []byte("new"), 3, fresh, gnuStatEnv(t)...)
@@ -446,14 +449,15 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 		}
 		gone(t, tmp)
 
-		// And the umask is a floor for fresh files only: a target that *does* have
-		// bits worth carrying still gets them back. What this half catches is the
-		// plausible alternative fix — an unconditional `chmod 644` on the temporary
-		// file after __map_preserve_mode, which lands 644 here; ModeOfTheTargetSurvives
-		// and the live contract row catch that one too, so this is the fast local
-		// signal rather than the only one. (It does not pin the umask's own
-		// position: moved below the preservation, the umask would leave this rewrite
-		// at 600 all the same, and the fresh-file assertion above is what fails.)
+		// And what the script fixes is a floor for fresh files only: a target that
+		// *does* have bits worth carrying still gets them back. What this half
+		// catches is the script's own `chmod 0644` (#213) drifting *below*
+		// __map_preserve_mode, where it would overwrite the mode the preservation
+		// had just put back and land 644 here; ModeOfTheTargetSurvives and the live
+		// contract row catch that too, so this is the fast local signal rather than
+		// the only one. (It does not pin the umask's own position: moved below the
+		// preservation, the umask would leave this rewrite at 600 all the same, and
+		// the fresh-file assertion above is what fails.)
 		if err := os.Chmod(fresh, 0o600); err != nil {
 			t.Fatalf("give the target a mode worth carrying: %v", err)
 		}
@@ -466,6 +470,107 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 		}
 		if got := info.Mode().Perm(); got != 0o600 {
 			t.Errorf("after the rewrite the mode is %o, want the target's own 600", got)
+		}
+		gone(t, tmp)
+	})
+
+	// A umask is not the only thing that decides a created file's bits, so the
+	// script sets them outright rather than only lowering what a create asks for
+	// (#213). This row stages the *condition* — the temporary file already holding
+	// a mode the platform did not choose when the bytes reach it — and it stages it
+	// with a lever rather than the real cause, because the real cause is a default
+	// POSIX ACL and a macOS dev host has none to stage. Nothing in the real path
+	// pre-creates that file; its name is random per write. What it pins is the
+	// property the ACL case rests on: the mode is *set*, not inherited from
+	// whatever the file happened to be created as. The row below runs the real
+	// cause wherever the host can.
+	t.Run("AFreshFilesModeIsSetNotInherited", func(t *testing.T) {
+		// $4 is the temporary file the script is about to write through, so the
+		// prologue leaves it already there and already 0600 — which is what a
+		// default ACL leaves behind for the script to find, by another route.
+		const staged = `: > "$4"
+chmod 600 "$4"
+`
+		fresh := dir + "/set-not-inherited.txt"
+		record := dir + "/tee-saw-mode"
+		code, tmp := runScript(t, staged, []byte("new"), 3, fresh, teeRecordingEnv(t, record)...)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0", code)
+		}
+		info, err := os.Stat(fresh)
+		if err != nil {
+			t.Fatalf("stat the created file: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o644 {
+			t.Errorf("a file the write created has mode %o, want 644 — set, not inherited", got)
+		}
+		// And it was set *before* the bytes reached it: the planted `tee` recorded
+		// what the file it was about to fill already held. The landed mode alone
+		// answers the same whether the chmod runs before the stream or after it, so
+		// without this the `: >` and the chmod's position could both drift with
+		// every mode assertion still green — and a large write would hold its bytes
+		// at whatever the ACL chose for the length of the transfer.
+		saw, err := os.ReadFile(record)
+		if err != nil {
+			t.Fatalf("the planted tee recorded nothing: %v", err)
+		}
+		if got := strings.TrimSpace(string(saw)); got != "644" {
+			t.Errorf("tee found the temporary file at mode %q, want 644 before the bytes stream", got)
+		}
+		gone(t, tmp)
+	})
+
+	// The real cause, wherever the host can stage it: a parent directory carrying a
+	// **default POSIX ACL** supplies a created file's bits and the kernel ignores
+	// the umask, so before #213 a write into one landed what the ACL said here
+	// while the docker backend's tar header still said 0644. Skipped rather than
+	// faked where there is no `setfacl` — macOS has no POSIX ACLs at all — and run
+	// for real on Linux, including CI's ubuntu image, which ships `acl`.
+	t.Run("ADefaultACLDoesNotDecideAFreshFilesMode", func(t *testing.T) {
+		if _, err := exec.LookPath("setfacl"); err != nil {
+			t.Skip("no setfacl on this host, so a default POSIX ACL cannot be staged")
+		}
+		aclDir := dir + "/defaultacl"
+		if err := os.Mkdir(aclDir, 0o755); err != nil {
+			t.Fatalf("stage the directory: %v", err)
+		}
+		// Past the skip, every failure is fatal rather than another way to skip. A
+		// `setfacl` on the PATH means the acl package is installed, which on Linux
+		// all but means the filesystem carries them; a staging step that then fails
+		// is a broken environment or a broken row, and the repo's standing on that
+		// is the one `make test` takes for a missing Docker daemon — a hard failure,
+		// not a skip. Silently skipping here would lose the only real-ACL coverage
+		// in CI without anything saying so.
+		if out, err := exec.Command("setfacl", "-d", "-m", "u::rw-,g::rw-,o::rw-", aclDir).CombinedOutput(); err != nil {
+			t.Fatalf("stage a default POSIX ACL on %s: %v: %s", aclDir, err, out)
+		}
+		// Prove the staging bites before trusting what the script lands: under the
+		// same 022 umask the script sets, a file created here by anything else comes
+		// out 0666 rather than 0644. Without this the row would pass unchanged on a
+		// filesystem that accepted the setfacl and then ignored it, and prove
+		// nothing at all. Fatal for the same reason the staging above is.
+		control := aclDir + "/control"
+		if err := exec.Command("/bin/bash", "-c", `umask 022; : > "$1"`, "map-acl-control", control).Run(); err != nil {
+			t.Fatalf("stage the control file: %v", err)
+		}
+		info, err := os.Stat(control)
+		if err != nil {
+			t.Fatalf("stat the control file: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o666 {
+			t.Fatalf("the default ACL did not take: a file created under it is %o, want 666", got)
+		}
+
+		fresh := aclDir + "/created.txt"
+		code, tmp := runScript(t, "", []byte("new"), 3, fresh, gnuStatEnv(t)...)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0", code)
+		}
+		if info, err = os.Stat(fresh); err != nil {
+			t.Fatalf("stat the created file: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o644 {
+			t.Errorf("a file created under a default POSIX ACL has mode %o, want 644", got)
 		}
 		gone(t, tmp)
 	})
@@ -579,6 +684,38 @@ func gnuStatEnv(t *testing.T) []string {
 		t.Fatalf("stage stat shim: %v", err)
 	}
 	return append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// teeRecordingEnv plants a `tee` on the PATH the write script will use, which
+// records the mode of the file it is about to fill before handing off to the real
+// one. What a write *lands* answers the same whether the script's `chmod 0644`
+// runs before the stream or after it, so the reason the file is created empty and
+// chmod'd first — that it never holds the bytes at a mode the platform did not
+// choose — is otherwise invisible to the suite, exactly as __map_preserve_mode's
+// octal check is without a planted `stat` (#213).
+//
+// It layers on gnuStatEnv's environment rather than replacing it, and its own
+// directory carries only `tee`, so the `stat` the shim calls is still whichever
+// one speaks `-c` on this host.
+func teeRecordingEnv(t *testing.T, record string) []string {
+	t.Helper()
+	base := gnuStatEnv(t)
+	if base == nil {
+		base = os.Environ()
+	}
+	bin := t.TempDir()
+	shim := "#!/bin/sh\nstat -c %a \"$1\" > " + record + " 2>/dev/null\nexec /usr/bin/tee \"$@\"\n"
+	if err := os.WriteFile(bin+"/tee", []byte(shim), 0o755); err != nil {
+		t.Fatalf("stage the tee shim: %v", err)
+	}
+	env := make([]string, 0, len(base))
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "PATH=") {
+			kv = "PATH=" + bin + string(os.PathListSeparator) + strings.TrimPrefix(kv, "PATH=")
+		}
+		env = append(env, kv)
+	}
+	return env
 }
 
 // readScript's marker is what makes a short exec stdout stream visible, so its
