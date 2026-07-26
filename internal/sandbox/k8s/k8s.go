@@ -1017,11 +1017,13 @@ func (pd *pod) bulkExec(ctx context.Context, script string, b *sandbox.BulkWrite
 
 // bulkWriteScript extracts a bulk write's archive at the pod's root and renames
 // every member into place. `umask 022` before the extraction is what makes the
-// files and directories it creates land 0644 and 0755 — the same answer the docker
-// daemon's own untar gives, and the same one `mkdir -p` and the single write's tar
-// header already gave, so a tree written in bulk is indistinguishable from one
-// written a file at a time whichever backend wrote it (#212 for the single write's
-// half of the same reasoning).
+// files it creates land 0644 — measured, a non-root sandbox user extracting under
+// a 077 umask lands them 0600 without it, where #212 requires 0644 whatever the
+// image chose. It also fixes the directories the extraction creates at 0755, which
+// is what the docker daemon's untar gives whatever the image says, and therefore
+// the only mode the two backends can agree on without a round trip of its own —
+// deliberately unlike the single write's `mkdir -p`, which takes the image's umask.
+// sandbox.BulkWrite.Archive carries the whole argument.
 //
 // An extraction that fails is its own exit code rather than a write failure,
 // because it is the one failure the caller can do something about: it retries

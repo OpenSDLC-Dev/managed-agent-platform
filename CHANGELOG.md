@@ -88,7 +88,13 @@ copy of an entry here.
   k8s. Every member is still atomic exactly as a single write is — its bytes land under a temporary
   name **in its own target's directory**, so the rename stays inside one filesystem; a target that
   is a directory is refused with `ErrIsDirectory` and left whole; an existing target's permission
-  bits are carried over (#204); nothing is left behind on any outcome. What is deliberately *not*
+  bits are carried over (#204); a batch that fails inside the sandbox sheds its temporary files
+  rather than leaving them (one whose exec could not be run at all, or whose shell was killed before
+  it could clean up, leaves what it delivered — as a single write in the same position already does,
+  at one file rather than N). A delivery that arrived **short** is the one failure that lands nothing
+  at all: the rename script checks every member is present in a pass of its own before it moves any
+  of them, which is also what stops a manifest deleted underneath it from reading as a batch that
+  succeeded and wrote nothing. What is deliberately *not*
   promised is batch atomicity: the first failure stops the run and what already landed stays, which
   is what the loop of writes it replaces did, and the skills sentinel already records only what
   landed so the next pass re-runs the skill.
@@ -96,10 +102,15 @@ copy of an entry here.
   The two backends share the archive, the manifest and the rename shell
   (`internal/sandbox/bulkwrite.go`), and differ only in who extracts: the docker daemon on the host,
   or `tar` inside the pod — which is why the k8s image contract now carries `tar` alongside
-  `/bin/bash`, `mv`, `rm`, `stat` and the rest. The archive carries no directory entries on purpose:
-  both untars create the parents an entry needs at `0755` with the file at `0644` — the same answer
-  `mkdir -p` and the single write's tar header already gave — where an explicit directory entry
-  would chmod a directory that already exists. Four new contract rows hold both backends to the
+  `/bin/bash`, `mv`, `rm`, `stat` and the rest. The archive carries no directory entries on purpose —
+  an explicit one chmods a directory that already exists — so the parents a member needs are left to
+  the untar, which creates them `0755` with the file at `0644` on both backends. Those `0755`
+  directories are the platform's answer rather than the image's, and deliberately not the single
+  write's: `mkdir -p` runs in the sandbox under the image's umask, so a hardened image gets `0700`
+  there and `0755` here. The docker daemon extracts on the host and fixes `0755` whatever the image
+  says, so the backends can agree only by fixing it too — and the `umask 022` that does it on k8s is
+  load-bearing anyway, since a **non-root** sandbox user extracting under a `077` umask lands the
+  file `0600` without it, where #212 requires `0644`. Four new contract rows hold both backends to the
   same answers — the round trip and the modes it lands, stopping at the first failure, a blocked
   parent path, and an existing target's mode — and the destroyed-sandbox row now asks a bulk write
   the same question it asks a read. Planned in

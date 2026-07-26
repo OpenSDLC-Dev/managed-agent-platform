@@ -313,8 +313,23 @@ type Sandbox interface {
 	// caller of either — materializing a skill — re-runs the whole skill next
 	// time rather than reasoning about what got through. Every member is still
 	// atomic on its own, so a failure leaves each target holding what it held,
-	// never a truncated file, and leaves no temporary file behind. The error
-	// names the member it stopped on.
+	// never a truncated file. The single exception is a delivery that arrived
+	// short, which lands nothing at all: every member is checked to be present
+	// before any of them is moved.
+	//
+	// A batch that reached the sandbox and failed there sheds its temporary
+	// files. One whose exec could not be run, or whose shell was killed before it
+	// could clean up, leaves what it had delivered — as a single write in the
+	// same position already does, at one file rather than N.
+	//
+	// The error names the member it stopped on, with two honest limits. Where
+	// more than one member would have failed it names one of them, and a path
+	// blocked by a non-directory is preferred over the delivery's own failure
+	// because it is the one a caller can act on. And the naming rides a marker on
+	// the sandbox's stderr, which the sandbox can flood or forge: it is a
+	// diagnostic, not a guarantee, and it degrades to naming no member rather
+	// than the wrong one where the marker is unusable. The error's *class* — the
+	// sentinels below — does not depend on it.
 	WriteFiles(ctx context.Context, files []FileWrite) error
 	// Destroy removes the sandbox. It is idempotent: destroying an already
 	// destroyed sandbox is not an error.

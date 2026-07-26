@@ -100,10 +100,22 @@ Measured, `debian:stable-slim`, docker 28 / GNU tar 1.35:
 | docker daemon untar (`PUT /archive`) | 0755 | 0644 |
 | in-container `tar -x` under `umask 022` | 0755 | 0644 |
 
-The two agree, and they agree with what `mkdir -p` gives today, so nothing has to be said
-about directories at all. The archive therefore carries **no directory entries** — measured,
-an explicit dir entry chmods a directory that already exists (0700 → 0755 under both
-untars), and a write must not change the mode of a directory it happens to pass through.
+The two agree with each other, so the archive carries **no directory entries** — measured, an
+explicit dir entry chmods a directory that already exists (0700 → 0755 under both untars), and
+a write must not change the mode of a directory it happens to pass through.
+
+What those 0755 directories are *not* is what the single write gives. Its `mkdir -p` runs
+inside the sandbox under the image's umask, so a hardened image gets 0700 there and 0755 here
+(measured: `umask 077; mkdir -p` → 0700; `umask 077; tar -x` → 0700 too, so it is the k8s
+script's own `umask 022` that lifts it). That `umask 022` is not optional: without it a
+**non-root** sandbox user extracting under a 077 umask lands the *file* 0600, where #212
+requires 0644 whatever the image chose (measured; as root the tar header survives either way).
+One umask governs both, and the docker daemon — extracting on the host — creates a missing
+parent 0755 whatever the image says. So the choice is between the two backends agreeing with
+each other and a bulk tree matching a singly-written one, and cross-backend agreement wins:
+it is the property the shared contract suite exists to hold, and the difference it costs is
+one only a second UID inside the same sandbox can see. Following the image's umask on both
+would take a round trip of its own to pre-create the directories.
 
 ### D5 — both backends: deliver, then rename; classify only on failure
 
@@ -115,9 +127,10 @@ untars), and a write must not change the mode of a directory it happens to pass 
 When delivery fails, both run the same recovery the docker `WriteFile` already runs for a
 single file — `mkdir -p` the directories, which is also what classifies a path blocked by a
 non-directory (`__map_path_fault` → `ErrNotDirectory`) — then retry the delivery once, then
-rename. The manifest is the archive's first entry and both untars extract in order and abort
-on the first error, so a delivery that failed on a later entry has already landed the
-manifest the recovery exec needs. A recovery that cannot make the directories, or a retry
+rename. The manifest is the archive's first entry and both untars extract in order, so a delivery
+that failed on a later entry has already landed the manifest the recovery exec needs. (The
+docker daemon stops at the first failing entry; GNU tar carries on and exits non-zero at the
+end — measured. The argument holds either way, and rests only on the manifest coming first.) A recovery that cannot make the directories, or a retry
 that fails too, sheds every temp the manifest lists and returns. Every path is O(1) round
 trips.
 
@@ -134,10 +147,13 @@ writes, and reaches nothing the agent could not reach with its own hands.
 
 The k8s write path cannot see a truncated stdin stream — client-go hands a failed stdin copy
 to `runtime.HandleError` and never to the caller — which is why a single write counts its
-bytes (`tee | wc -c`). A batch gets the same guarantee from its shape: the rename loop
-refuses to move a temp file that is not there, so a stream that ended early fails as a short
-write instead of landing a subset. `tar` fails on a truncated member as well; the existence
-check is what the guarantee rests on.
+bytes (`tee | wc -c`). A batch gets the same guarantee from its shape: the rename script walks the manifest **twice**,
+and the first pass moves nothing — it only checks that every member the manifest names is
+actually there. So a stream that ended early is refused whole, before any member is renamed,
+which is the one failure in this design that lands nothing at all (every other one is D2's
+ordinary non-transactional stop). The same pass is what stops a manifest that is missing or
+empty from reading as a batch that succeeded and wrote nothing. `tar` fails on a truncated
+member as well; the existence check is what the guarantee rests on.
 
 ### D8 — the failing member is named
 

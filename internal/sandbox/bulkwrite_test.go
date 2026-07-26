@@ -168,7 +168,11 @@ func TestBulkWriteNamesAreUnique(t *testing.T) {
 // A path that is not absolute and clean is refused rather than normalized: it
 // also names an entry in the archive, where `..` would mean something else again.
 func TestBulkWriteRejectsUnusablePaths(t *testing.T) {
-	for _, path := range []string{"", "relative/path", "/a/../b", "/a/b/", "/a//b", "/", "."} {
+	// A NUL would split the path's own manifest record and land the member on a
+	// path the caller never named — the one refusal that is about the manifest's
+	// framing rather than about the path being usable.
+	for _, path := range []string{"", "relative/path", "/a/../b", "/a/b/", "/a//b", "/", ".",
+		"/workspace/a\x00b", "/workspace/\x00"} {
 		if _, err := sandbox.NewBulkWrite("/workspace", []sandbox.FileWrite{{Path: path}}); err == nil {
 			t.Errorf("NewBulkWrite(%q) = nil error, want a refusal", path)
 		}

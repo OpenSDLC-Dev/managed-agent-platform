@@ -68,6 +68,15 @@ func NewBulkWrite(workdir string, files []FileWrite) (*BulkWrite, error) {
 		if f.Path == "" || f.Path[0] != '/' || f.Path == "/" || gopath.Clean(f.Path) != f.Path {
 			return nil, fmt.Errorf("sandbox: bulk write path %q is not an absolute, clean path", f.Path)
 		}
+		// A NUL is what separates the manifest's fields, so a path carrying one
+		// would split its own record: the shell would read the bytes before it as
+		// the whole target, rename the member onto THAT path, and take the
+		// remainder for the next record — a write landing somewhere the caller
+		// never named, reported as a success. No such path can exist on a POSIX
+		// filesystem anyway, so refusing costs nothing and closes the misroute.
+		if strings.ContainsRune(f.Path, 0) {
+			return nil, fmt.Errorf("sandbox: bulk write path %q contains a NUL byte", f.Path)
+		}
 		dir := gopath.Dir(f.Path)
 		tmp := gopath.Join(dir, nonce+"-"+strconv.Itoa(i))
 		b.tmps = append(b.tmps, tmp)
@@ -89,13 +98,24 @@ func NewBulkWrite(workdir string, files []FileWrite) (*BulkWrite, error) {
 // one entry per member under its temporary name. Entry names are relative, so
 // both untars extract it at `/`.
 //
-// It carries no directory entries, and that is deliberate. Both untars create
-// the parents an entry needs — measured, the docker daemon and GNU tar under
-// `umask 022` both create them 0755 and land the file 0644, which is what
-// `mkdir -p` and the single write's tar header already give. An explicit
-// directory entry would instead chmod a directory that already exists (0700 →
-// 0755 under either untar), and a write must not change the mode of a directory
-// it merely passes through.
+// It carries no directory entries, and that is deliberate: an explicit directory
+// entry chmods a directory that already exists (measured, 0700 → 0755 under both
+// untars), and a write must not change the mode of a directory it merely passes
+// through. The parents an entry needs are left to the untar, which creates them —
+// 0755 on both backends, with the file at 0644.
+//
+// Those 0755 directories are the platform's answer rather than the image's, and
+// they are NOT what the single write gives: its `mkdir -p` runs inside the sandbox
+// and takes the image's umask, so a hardened image gets 0700 there and 0755 here.
+// The docker daemon extracts on the host and creates a missing parent 0755
+// whatever the image's umask says, so the two backends can agree only by fixing
+// the answer, and cross-backend agreement is the property the contract suite
+// exists to hold. The k8s script's `umask 022` matches it — and is load-bearing
+// for the file mode besides: measured, a non-root sandbox user extracting under a
+// 077 umask lands the file 0600 without it, where #212 requires 0644. Following
+// the image's umask on both instead would take a round trip of its own to
+// pre-create the directories, to buy a difference only a second UID inside the
+// same sandbox can see.
 func (b *BulkWrite) Archive(w io.Writer) error {
 	tw := tar.NewWriter(w)
 	if err := tarEntry(tw, b.Manifest, b.manifest, 0o600); err != nil {
@@ -189,11 +209,14 @@ func (b *BulkWrite) blamed(stderr string) string {
 // the first failure stops the run, and the members that already landed stay
 // landed, because that is what the loop this replaces did.
 //
-// A temporary file the manifest lists but that is not there is the delivery
-// having lost it, and is refused before anything is moved (ExitBulkIncomplete).
-// That is the k8s backend's short-stream guard, restated for a batch: nothing
-// downstream of client-go can see a stdin stream that ended early, so a batch
-// that arrived short must fail rather than land a subset.
+// A temporary file the manifest lists but that is not there is the delivery having
+// lost it, and stops the run at that member (ExitBulkIncomplete). That is the k8s
+// backend's short-stream guard, restated for a batch: nothing downstream of
+// client-go can see a stdin stream that ended early, so a batch that arrived short
+// has to be noticed here or not at all. What it costs is what any other failure
+// mid-batch costs — the members ahead of the gap are already renamed and stay,
+// exactly as D2 says — and what it buys is that the call fails instead of
+// reporting success over a tree with holes in it.
 //
 // Everything the loop drops on the way out is a temporary file nobody will ever
 // claim: the member that failed, and every member after it, are removed rather
@@ -207,16 +230,27 @@ func (b *BulkWrite) blamed(stderr string) string {
 // nothing the agent could not have written with its own `mv`.
 const BulkRenameShell = PreserveModeShell + `
 __map_bulk_rename() {
-  __i=-1; __code=0; __bad=0
+  __tmps=(); __dsts=(); __bad=-1
   while IFS= read -r -d '' __t && IFS= read -r -d '' __d; do
-    __i=$((__i+1))
-    if [ "$__code" -ne 0 ]; then rm -f "$__t"; continue; fi
-    if [ ! -f "$__t" ]; then __code=17; __bad=$__i; continue; fi
-    if [ -d "$__d" ]; then rm -f "$__t"; __code=16; __bad=$__i; continue; fi
-    __map_preserve_mode "$__d" "$__t"
-    mv -f "$__t" "$__d" || { rm -f "$__t"; __code=1; __bad=$__i; continue; }
-    if [ -d "$__d" ]; then rm -f "$__d/${__t##*/}"; __code=16; __bad=$__i; continue; fi
+    if [ ! -f "$__t" ] && [ "$__bad" -lt 0 ]; then __bad=${#__tmps[@]}; fi
+    __tmps+=("$__t"); __dsts+=("$__d")
   done < "$1"
+  [ "${#__tmps[@]}" -eq 0 ] && __bad=0
+  if [ "$__bad" -ge 0 ]; then
+    [ "${#__tmps[@]}" -eq 0 ] || rm -f "${__tmps[@]}"
+    rm -f "$1" "$2"
+    printf 'map-bulk-fail %d\n' "$__bad" >&2
+    return 17
+  fi
+  __code=0; __bad=0; __i=0
+  while [ "$__i" -lt "${#__tmps[@]}" ]; do
+    __t=${__tmps[$__i]}; __d=${__dsts[$__i]}; __at=$__i; __i=$((__i+1))
+    if [ "$__code" -ne 0 ]; then rm -f "$__t"; continue; fi
+    if [ -d "$__d" ]; then rm -f "$__t"; __code=16; __bad=$__at; continue; fi
+    __map_preserve_mode "$__d" "$__t"
+    mv -f "$__t" "$__d" || { rm -f "$__t"; __code=1; __bad=$__at; continue; }
+    if [ -d "$__d" ]; then rm -f "$__d/${__t##*/}"; __code=16; __bad=$__at; continue; fi
+  done
   rm -f "$1" "$2"
   [ "$__code" -eq 0 ] || printf 'map-bulk-fail %d\n' "$__bad" >&2
   return "$__code"
@@ -255,6 +289,7 @@ __map_bulk_recover() {
   [ "${#__tmps[@]}" -eq 0 ] || rm -f "${__tmps[@]}"
   rm -f "$1" "$2"
   [ "${#__dirs[@]}" -eq 0 ] && return 0
+  umask 022
   mkdir -p "${__dirs[@]}" && return 0
   for __d in "${__dirs[@]}"; do __map_path_fault "$__d"; done
   return 1
