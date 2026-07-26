@@ -104,8 +104,9 @@ copy of an entry here.
   200 from the first request the way MinIO does, header and all: one that refuses S3 twice and then
   serves (the gate must keep going — proved by the S3 request count, and by the bucket-location
   lookup among them, which a region-configured probe would silently stop making), and one whose
-  object layer never comes up (the gate must fail, on the server's own words). All three assertions
-  fail against the pre-fix gate, which returned after 0 S3 requests.
+  object layer never comes up (the gate must fail, on the server's own words). Each of those fails
+  against the pre-fix gate, which returned after 0 S3 requests; the check that the refusal survives
+  additionally fails against a loop that sleeps into its own deadline.
 
   The same weak signal is still wired into the helm chart's MinIO `readinessProbe`, where it can
   restart a controlplane pod on a fresh install; that is deployment rather than test scope and is
