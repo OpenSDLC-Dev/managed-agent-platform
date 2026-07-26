@@ -130,6 +130,8 @@ These bias toward caution over speed. For trivial changes, use judgment.
 
 **Surgical changes.** Every changed line should trace directly to the request. Don't "improve" adjacent code, comments, or formatting; match the existing style even where you'd choose differently. Clean up orphans *your* change created (now-unused imports, functions); leave pre-existing dead code alone — mention it instead of deleting it.
 
+**Leave the machine as you found it.** Whatever a run spawns, it owns. `pgtest` and `blobtest` remove their per-test-binary container in a `defer` a killed run never reaches, so interrupting `make verify` leaks one Postgres or MinIO container per binary — six of them on 2026-07-26, all created within the same six seconds, which is how to attribute them afterwards. Background load, servers, and probes are the same. Before reporting done, look at what you started (`ps`, `docker ps -a`) rather than trusting that a `kill` worked, and remove only what is yours: a parallel session's fixtures and the local kind cluster are indistinguishable from yours in `docker ps`.
+
 **Goal-driven execution.** Turn each task into a verifiable goal before writing code, and state the plan as steps with their checks:
 
 ```

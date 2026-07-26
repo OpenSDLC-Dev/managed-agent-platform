@@ -308,15 +308,28 @@ copy of an entry here.
 
 ### Changed
 
-- **The verifier now has to reap what it starts** (`.claude/agents/verifier.md`). Rungs 2 and 3 tell
-  it to spawn scratch copies, containers and load generators, and nothing told it to clean them up
-  or, more to the point, to check that its cleanup worked. Verifying the fix above, a stress probe
+- **Whatever a run spawns, it owns** (`.claude/agents/verifier.md`, CLAUDE.md, AGENTS.md). Nothing
+  said so, and two leaks in one afternoon showed the cost. Verifying the fix above, a stress probe
   ended with `LOADPIDS=$(jobs -p); kill $LOADPIDS` — which collects nothing, because the command
   substitution runs in a subshell holding no jobs of its own — and twelve orphaned busy loops
-  outlived the PASS by two hours at a core each. The new ground rule is the general one, not a
-  patch for that snippet: every process and container it starts is its own to reap, the reap is
-  confirmed with `ps` / `docker ps` rather than with the exit status of a `kill`, pids are captured
-  with `$!` at spawn time, and anything deliberately left running is named in the report.
+  outlived the PASS by two hours at a core each. Separately, killing a `make verify` mid-run leaked
+  six fixture containers, because `pgtest` and `blobtest` remove theirs in a `defer` a SIGTERM never
+  reaches.
+
+  The verifier's new ground rule is the general one rather than a patch for that snippet: every
+  process and container it starts is its own to reap, and the reap is confirmed by looking (`ps`,
+  and `docker ps -a`, since a stopped-but-unremoved container still counts) rather than by a
+  `kill`'s exit status. Two traps are named because both were measured: hoisting `jobs -p` out of
+  the substitution does not fix it either, since zsh prints job lines and not bare pids; and `$!`
+  names only the process started, not what it spawned, so killing the pid of `( sleep 40 & wait ) &`
+  leaves the `sleep` orphaned — reap the job or the process group and re-check by pattern. Anything
+  left running deliberately goes in the report.
+
+  The container leak was the *maker's*, not the verifier's, so the same ownership rule lands in
+  CLAUDE.md's working conventions, with the sweep and the one caveat that matters: a parallel
+  session's fixtures and the local kind cluster are indistinguishable from your own in `docker ps`,
+  so remove only what your run started. AGENTS.md picks up the same warning where it already
+  describes the gate's Docker requirements.
 
 - **The `/code-review` reviewer pin moved to Opus 5** (`.claude/skills/run-reviews/SKILL.md`,
   CLAUDE.md), superseding the Opus 4.8 pin recorded when the review procedure moved into that
