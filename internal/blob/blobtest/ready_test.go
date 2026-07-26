@@ -92,7 +92,11 @@ func TestWaitReadyWaitsForTheObjectLayer(t *testing.T) {
 // not a green one that hands the suite a container it cannot use.
 func TestWaitReadyFailsWhileTheObjectLayerIsDown(t *testing.T) {
 	stub := newStubMinIO(t, 1<<30)
-	err := waitReady(stub.endpoint, 300*time.Millisecond)
+	// Three attempts' worth of budget rather than two: the last one starts a
+	// full poll interval before the deadline, so the request that has to carry
+	// the refusal back is not racing the context that would replace it with a
+	// bare timeout. This test exists to end a flake, not to become one.
+	err := waitReady(stub.endpoint, 600*time.Millisecond)
 	if err == nil {
 		t.Fatal("waitReady passed a server whose object layer never came up")
 	}
