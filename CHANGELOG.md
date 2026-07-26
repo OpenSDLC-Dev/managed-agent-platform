@@ -310,9 +310,9 @@ copy of an entry here.
 
 - **Whatever a run spawns, it owns** (`.claude/agents/verifier.md`, CLAUDE.md, AGENTS.md). Nothing
   said so, and two leaks in one afternoon showed the cost. Verifying the fix above, a stress probe
-  ended with `LOADPIDS=$(jobs -p); kill $LOADPIDS` — which collects nothing, because the command
-  substitution runs in a subshell holding no jobs of its own — and twelve orphaned busy loops
-  outlived the PASS by two hours at a core each. Separately, killing a `make verify` mid-run leaked
+  ended with `LOADPIDS=$(jobs -p); kill $LOADPIDS` — which under zsh, the shell those tool calls
+  run, collects nothing at all, because the command substitution runs in a subshell holding no jobs
+  of its own — and twelve orphaned busy loops outlived the PASS by two hours at a core each. Separately, killing a `make verify` mid-run leaked
   six fixture containers, because `pgtest` and `blobtest` remove theirs in a `defer` a SIGTERM never
   reaches.
 
@@ -320,10 +320,13 @@ copy of an entry here.
   process and container it starts is its own to reap, and the reap is confirmed by looking (`ps`,
   and `docker ps -a`, since a stopped-but-unremoved container still counts) rather than by a
   `kill`'s exit status. Two traps are named because both were measured: hoisting `jobs -p` out of
-  the substitution does not fix it either, since zsh prints job lines and not bare pids; and `$!`
+  the substitution does not fix the zsh case either, since zsh prints job lines and not bare pids
+  (bash's `$(jobs -p)` does return them, which is what makes the trap easy to walk into); and `$!`
   names only the process started, not what it spawned, so killing the pid of `( sleep 40 & wait ) &`
-  leaves the `sleep` orphaned — reap the job or the process group and re-check by pattern. Anything
-  left running deliberately goes in the report.
+  leaves the `sleep` orphaned — reap the job or the whole process group. Ownership is established by
+  recording it, not by inferring it later: note what is already running before starting, keep the
+  pids you spawn, and leave anything you cannot attribute alone. Anything left running deliberately
+  goes in the report.
 
   The container leak was the *maker's*, not the verifier's, so the same ownership rule lands in
   CLAUDE.md's working conventions, with the sweep and the one caveat that matters: a parallel
