@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -21,6 +20,10 @@ import (
 // end_turn, settles the session idle, and cancels the session's work items — all
 // in the one transaction, so a claimant serialized behind the same lock sees the
 // whole decision or none of it.
+//
+// The answers come from the same events.UnansweredToolUses/InterruptResults pair
+// the API calls, not a copy: a stand-in that synthesized its own results would
+// keep passing through a regression in the family matching or the stamping.
 func (h *harness) interrupt(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -36,20 +39,12 @@ func (h *harness) interrupt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("interrupt: %v", err)
 	}
-	now := time.Now().UTC()
-	batch := []events.NewEvent{{Type: domain.EventUserInterrupt, Payload: []byte(`{"session_thread_id":null}`)}}
-	for _, use := range abandoned {
-		payload, err := json.Marshal(map[string]any{
-			"tool_use_id": use.ID,
-			"content":     []map[string]string{{"type": "text", "text": "interrupted"}},
-			"is_error":    true,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		batch = append(batch, events.NewEvent{
-			Type: domain.EventAgentToolResult, Payload: payload, ProcessedAt: &now})
+	results, err := events.InterruptResults(abandoned)
+	if err != nil {
+		t.Fatalf("interrupt: %v", err)
 	}
+	batch := []events.NewEvent{{Type: domain.EventUserInterrupt, Payload: []byte(`{"session_thread_id":null}`)}}
+	batch = append(batch, results...)
 	batch = append(batch, events.NewEvent{
 		Type:    domain.EventSessionStatusIdle,
 		Payload: []byte(`{"stop_reason":{"type":"end_turn"}}`)})

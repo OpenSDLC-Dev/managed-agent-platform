@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -364,4 +365,78 @@ func payloadString(payload json.RawMessage, key string) (string, error) {
 		return "", fmt.Errorf("%s must be a string", key)
 	}
 	return s, nil
+}
+
+// interruptAnswer maps a tool-use event type to the result event that answers it
+// when a user.interrupt abandons the call, and to the field that names the call.
+// The families have to match — a custom tool's result is a
+// user.custom_tool_result keyed by custom_tool_use_id, an MCP tool's an
+// agent.mcp_tool_result keyed by mcp_tool_use_id — for the reason the denial
+// synthesis is confined to agent.tool_use (confirmableToolUseTypes above): a
+// result of the wrong shape is not the answer a client watching that tool's
+// family is waiting for. thread marks the one shape whose wire object carries a
+// session_thread_id; the two agent.* results have no such field (verified
+// against the SDK's event types).
+var interruptAnswer = map[domain.EventType]struct {
+	result domain.EventType
+	refKey string
+	thread bool
+}{
+	domain.EventAgentToolUse:       {domain.EventAgentToolResult, "tool_use_id", false},
+	domain.EventAgentCustomToolUse: {domain.EventUserCustomToolRes, "custom_tool_use_id", true},
+	domain.EventAgentMCPToolUse:    {domain.EventAgentMCPToolResult, "mcp_tool_use_id", false},
+}
+
+// InterruptResultText is what an abandoned call is answered with. Never an empty
+// text block: a Messages endpoint rejects one, and that request is what every
+// later replay of this session sends.
+const InterruptResultText = "The user interrupted this tool call before it returned a result."
+
+// InterruptResults answers each tool call a user.interrupt abandons — the set
+// UnansweredToolUses returns — with an error result. The turn cannot end without
+// them: the model protocol requires every tool_use answered before the
+// conversation continues, so an abandoned call on the append-only log would make
+// every future replay a request the model rejects — the wedge the interrupt
+// exists to undo.
+//
+// The results are stamped processed on the spot. The platform wrote them, and
+// the one that lands under an inbound type would otherwise render with a null
+// processed_at, indistinguishable from a client event still queued behind
+// earlier ones, and would look to a settling brain like input to chain a turn on.
+//
+// It lives here rather than beside the control plane's denial synthesis because
+// what it encodes is event-shape knowledge this package already owns — which
+// result type answers which use type, under which reference key — and because
+// one definition is what keeps a second caller (the brain's tests drive the same
+// trigger) from drifting from the first.
+//
+// That an interrupt answers the calls at all, and in this shape, is an inference:
+// the reference documents the interrupt's stop reason, not what it writes for
+// the calls it abandons (docs/DIVERGENCES.md).
+func InterruptResults(uses []ToolUseRef) ([]NewEvent, error) {
+	now := time.Now().UTC()
+	out := make([]NewEvent, 0, len(uses))
+	for _, use := range uses {
+		answer, ok := interruptAnswer[use.Type]
+		if !ok {
+			// Unreachable while this map and toolUseTypes agree; the check is
+			// what keeps them agreeing, since a new tool-use type with no answer
+			// here would strand exactly the call this function exists to release.
+			return nil, fmt.Errorf("no result event answers a %s tool use", use.Type)
+		}
+		fields := map[string]any{
+			answer.refKey: use.ID,
+			"content":     []map[string]any{{"type": "text", "text": InterruptResultText}},
+			"is_error":    true,
+		}
+		if answer.thread {
+			fields["session_thread_id"] = nil
+		}
+		payload, err := json.Marshal(fields)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, NewEvent{Type: answer.result, Payload: payload, ProcessedAt: &now})
+	}
+	return out, nil
 }

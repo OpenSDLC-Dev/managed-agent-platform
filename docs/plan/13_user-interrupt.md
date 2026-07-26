@@ -9,9 +9,10 @@ issue: https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/68
 > The narrative is in CHANGELOG.md, the rejected alternatives in
 > [docs/HISTORY.md](../HISTORY.md) § "`user.interrupt` semantics — wire resolution and
 > rejected alternatives", the new inference in
-> [docs/DIVERGENCES.md](../DIVERGENCES.md). **Everything below describes the state of the
-> repository *before* that PR** — read it as the argument for the design, not as a
-> description of the result.
+> [docs/DIVERGENCES.md](../DIVERGENCES.md). **"The gap" and "What has to be resolved" below
+> describe the state of the repository *before* that PR** — read them as the argument for
+> the design, not as a description of the result. "Design", "Acceptance" and "Known
+> consequences" describe what landed.
 
 ## Why this needs a plan file
 

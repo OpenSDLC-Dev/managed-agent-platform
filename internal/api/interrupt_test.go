@@ -2,7 +2,9 @@ package api_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,28 @@ func (s *tserver) environmentID(sessionID string) string {
 		s.t.Fatalf("get session: %d %v", status, res)
 	}
 	return res["environment_id"].(string)
+}
+
+// abandonedText reads the one text block off a synthesized interrupt result and
+// checks it says what happened. The block matters beyond its prose: an absent or
+// empty content array is a request the Messages endpoint rejects, and that
+// request is what every later replay of this session sends. The assertion is on
+// the shape and the subject, not the exact wording, so rephrasing the sentence
+// stays a docs change rather than a test change.
+func abandonedText(t *testing.T, ev map[string]any) {
+	t.Helper()
+	blocks, ok := ev["content"].([]any)
+	if !ok || len(blocks) != 1 {
+		t.Fatalf("interrupt result content = %v, want exactly one block", ev["content"])
+	}
+	block, ok := blocks[0].(map[string]any)
+	if !ok || block["type"] != "text" {
+		t.Fatalf("interrupt result content block = %v, want a text block", blocks[0])
+	}
+	text, _ := block["text"].(string)
+	if !strings.Contains(strings.ToLower(text), "interrupt") {
+		t.Errorf("interrupt result text = %q, want it to say the call was interrupted", text)
+	}
 }
 
 // stopReasonType reads the stop_reason.type off a session.status_idle event.
@@ -92,6 +116,7 @@ func TestInterruptEndsATurnStuckOnAnUnansweredToolUse(t *testing.T) {
 	if result["is_error"] != true {
 		t.Errorf("agent.tool_result is_error = %v, want true", result["is_error"])
 	}
+	abandonedText(t, result)
 	if result["processed_at"] == nil {
 		t.Errorf("platform-emitted agent.tool_result has a null processed_at")
 	}
@@ -145,6 +170,10 @@ func TestInterruptAnswersEachToolFamilyInItsOwnShape(t *testing.T) {
 	if customResult["is_error"] != true {
 		t.Errorf("user.custom_tool_result is_error = %v, want true", customResult["is_error"])
 	}
+	// Both families carry the same answer, and a client reading either one is
+	// told why the call has no real result.
+	abandonedText(t, agentResult)
+	abandonedText(t, customResult)
 	// The platform wrote this answer, so it is processed on arrival — not left
 	// looking like a client event still queued behind earlier ones.
 	if customResult["processed_at"] == nil {
@@ -291,8 +320,8 @@ func TestInterruptCancelsALiveModelTurn(t *testing.T) {
 	}
 	// The claimant's lease proof is gone with the item, so its settlement can
 	// no longer commit the turn it was running.
-	if err := q.Complete(ctx, s.pool, item); err == nil {
-		t.Error("completing a cancelled item succeeded, want a lost-lease error")
+	if err := q.Complete(ctx, s.pool, item); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Errorf("Complete on a cancelled item = %v, want ErrLeaseLost", err)
 	}
 }
 

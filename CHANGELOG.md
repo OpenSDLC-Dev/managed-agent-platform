@@ -50,6 +50,12 @@ copy of an entry here.
   transaction that commits its work, the claimant's whole settlement rolls back. Serializing on the
   session row lock makes that a decision instead of a race in both orderings — interrupt first and
   the claimant commits nothing; claimant first and the interrupt answers what it left outstanding.
+  What the cancel takes away is the claimant's ability to *commit*, immediately and for good; it
+  does not reach into the claimant to stop it working. A model stream keeps generating and a tool
+  keeps running in its sandbox until the lease keeper's next `Extend` fails (at TTL/3, ≈40s on the
+  2-minute default), which is when the work is actually torn down. Interrupting faster would mean a
+  control-plane-to-claimant wake-up channel the pull protocol deliberately does not have, and the
+  outcome does not depend on it: nothing that claimant settles can land either way.
 
   Two checks learned about a state the API previously refused to create, a gated call answered
   without a confirmation: an answered ask no longer counts as blocking its `requires_action` gate

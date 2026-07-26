@@ -564,6 +564,12 @@ func TestCancelSessionTakesEveryLiveItem(t *testing.T) {
 	if err != nil || item == nil {
 		t.Fatalf("claim: %+v %v", item, err)
 	}
+	// Two sessions have a model_turn queued, so pin which one this claim holds:
+	// the lost-lease assertions below only mean anything about the cancel if the
+	// claimed item is the cancelled session's.
+	if item.SessionID != sessionID {
+		t.Fatalf("claimed item session = %s, want the session about to be cancelled %s", item.SessionID, sessionID)
+	}
 
 	if err := q.CancelSession(ctx, pool, sessionID); err != nil {
 		t.Fatalf("CancelSession: %v", err)
