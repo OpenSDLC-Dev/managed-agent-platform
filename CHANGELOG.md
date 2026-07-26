@@ -72,6 +72,38 @@ copy of an entry here.
 
 ### Fixed
 
+- **The blob contract suite waits for MinIO's object layer, not for a readiness endpoint that
+  answers before it** ([#208](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/208)).
+  `blobtest`'s harness admitted the suite as soon as `GET /minio/health/ready` returned 200, and
+  MinIO's handler returns 200 whether or not the object layer exists — a nil one is reported only in
+  the `x-minio-server-status` header it sets alongside that 200 (`ReadinessCheckHandler`, verbatim in
+  the pinned release). The suite then ran against a server that could not serve S3 yet and every
+  subtest died in `s3.New` on "Server not initialized yet, please try again". It failed that way on
+  PR [#203](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/203)'s coverage job, on a
+  diff of one Go comment and four markdown files; a rerun of the same commit was green.
+
+  Each subtest failed in 0.00s, which is what identifies the request that broke: minio-go retries a
+  503 on the bucket `HEAD` that `BucketExists` issues, but not on the region lookup that precedes it
+  for a client with no region configured (`GET /bucket/?location=`). That one fails through
+  `newRequest`, where only minio-go's `retryableS3Codes` are retried and `ServerNotInitialized` is
+  not among them — so the very first thing `s3.New` did returned instantly, having never reached the
+  request the client would have retried.
+
+  The gate is now that same call: one `BucketExists` against a bucket name no test uses, retried
+  under the one 120s deadline the health poll had, with the client built the way a backend under
+  test builds it (no region) so the probe covers the location lookup too. The health endpoint is no
+  longer consulted — passing it was never the question. On a warm container this costs one round
+  trip. Two stub-server tests pin the behavior, each fed a server that answers `/minio/health/ready`
+  with 200 from the first request the way MinIO does: one that refuses S3 twice and then serves
+  (the gate must keep going, and it is the S3 request count that proves it did), and one whose
+  object layer never comes up (the gate must fail rather than hand the suite an unusable container).
+  Both fail against the pre-fix gate, which returned after 0 S3 requests.
+
+  The same weak signal is still wired into the helm chart's MinIO `readinessProbe`, where it can
+  restart a controlplane pod on a fresh install; that is deployment rather than test scope and is
+  tracked as [#216](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/216).
+  `deploy/compose` is unaffected — it gates on `mc ready local`, which is the stronger signal.
+
 - **A file a sandbox write creates lands `0644` on both backends, instead of on the image's umask on
   one of them** ([#212](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/212)). The two
   backends reached that mode by different routes and only one of them was the platform's: docker
