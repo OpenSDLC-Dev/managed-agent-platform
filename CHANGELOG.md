@@ -83,15 +83,18 @@ copy of an entry here.
   `BucketExists`) and exit rather than serve when it fails.
 
   The probe is now `/minio/health/cluster`, whose `ClusterCheckHandler` answers 503 while the object
-  layer is nil, while bucket metadata is offline, or while IAM is offline — the three states in
-  which an S3 call cannot be served. Raced against the pinned release
+  layer is nil, while bucket metadata or IAM is offline, and while write quorum is lost — the states
+  in which an S3 call cannot be served. Raced against the pinned release
   (`RELEASE.2025-09-07T16-13-09Z`) on the chart's own shape — `server /data`, one node, one drive —
   the window is real and one-sided: polled from container start, `/minio/health/ready`'s first
   answer is a 200 and not once across the run did it report the uninitialized layer in its status
-  code, while `/minio/health/cluster` answers 503 at that same instant and 200 some 36ms later. Sampling all three on a single connection inside that window, at
-  t+0.338s: `/minio/health/ready` → 200 with `x-minio-server-status: offline`,
-  `/minio/health/cluster` → 503, and `GET /map-blob/?location=` — the bucket-location lookup
-  `s3.New` issues first — → `503 XMinioServerNotInitialized`, verbatim the failure #208 chased.
+  code, while `/minio/health/cluster` answers 503 at that same instant and 200 a few tens of
+  milliseconds later (36ms on the machine that measured it, 9ms on another, and out to ~230ms with
+  the container CPU-throttled — the ordering reproduces, the number does not travel). Sampling all
+  three on a single connection inside that window, at t+0.338s: `/minio/health/ready` → 200 with
+  `x-minio-server-status: offline`, `/minio/health/cluster` → 503, and `GET /map-blob/?location=` —
+  the bucket-location lookup `s3.New` issues first — → `503 XMinioServerNotInitialized`, verbatim
+  the failure #208 chased.
 
   This hardens a latent defect rather than repairing a routinely-observed one, and the distinction is
   worth stating. On the measured shape the object layer serves about 0.3s in, while the probe's
@@ -106,13 +109,15 @@ copy of an entry here.
   Ready finds no endpoint behind the headless Service and exits by the same fail-fast path, until
   the kubelet's backoff outlasts MinIO's startup.
 
-  A helm CI step renders the chart and asserts the probe path is exactly `/minio/health/cluster` —
-  asserted rather than grepped for, because a substring search over the template also reads the
-  comment that explains the choice, so documenting the rejected endpoint there would fail the job
-  (reproduced against the first version of this guard). Chart content has no unit-test surface, so
-  the render check is the regression guard; it fails against the pre-fix chart and against any other
-  rendered path. `deploy/compose` needed no change — it gates `controlplane` on `mc ready local`,
-  which is already the stronger signal.
+  A helm CI step renders the chart and asserts two things: that the `readinessProbe` path is exactly
+  `/minio/health/cluster`, and that no probe of any kind gates on `/minio/health/ready`. Both read
+  rendered `path:` keys rather than grepping the template for a substring, because a substring
+  search also reads the comment that explains the choice — so documenting the rejected endpoint
+  there would fail the job, reproduced against the first version of this guard. Chart content has no
+  unit-test surface, so the render check is the regression guard; it was exercised against the
+  pre-fix chart, against `/minio/health/ready` reintroduced as a `livenessProbe`, and against a
+  correct chart whose comment names the old path. `deploy/compose` needed no change — it gates
+  `controlplane` on `mc ready local`, which is already the stronger signal.
 
 - **The blob contract suite waits for MinIO's object layer, not for a readiness endpoint that
   answers before it** ([#208](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/208)).

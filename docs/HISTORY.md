@@ -1318,6 +1318,13 @@ and is labelled as a stand-in rather than as `/code-review`.
   comment spells the old path fails the job — so the natural reaction to a CI failure, documenting
   the rejected endpoint, breaks the build. The step now extracts the rendered `readinessProbe` path
   and asserts it exactly, which is also structurally anchored to the probe rather than to the file.
+  That exact assertion is narrower than the substring it replaced — a `/minio/health/ready`
+  reintroduced under a *different* probe would have slipped past it — so the verifier's catch of that
+  narrowing was answered by a second assertion over rendered `path:` keys, which restores the dropped
+  coverage while staying immune to the comment wording that caused the original defect. Three cases
+  were exercised against the final step: the pre-fix chart, `/minio/health/ready` reintroduced as a
+  `livenessProbe`, and a correct chart whose comment names the old path (the first two red, the last
+  green).
 - **The entry attributed a fresh-install `CrashLoopBackOff` to this probe, and it does not follow.**
   `initialDelaySeconds: 5` keeps the kubelet from marking the pod Ready before t+5s, while the
   object layer serves ~0.3 s in on the measured shape — so the old probe's Ready was accidentally
@@ -1338,9 +1345,10 @@ nothing and merely breaks DNS for running clients. The mechanism is real; the ma
 Measured against the pinned release with 3,000 objects on the drive and sustained `mc` write+list
 load: `/minio/health/cluster` p50 1.6 ms, p99 2.2 ms, max 2.4 ms — indistinguishable from
 `/minio/health/ready` at p50 1.6 ms / p99 2.1 ms, and 0 of 200 probes within two orders of magnitude
-of the 1 s default. Against that margin, adding the knob would also break the chart's uniform probe
-convention: every probe in this chart is `initialDelaySeconds: 5` + `periodSeconds: 10` and none sets
-a timeout, OpenBao's own strict health endpoint included.
+of the 1 s default. Against that margin, adding the knob would also break the chart's probe
+convention: every *readiness* probe in this chart is `initialDelaySeconds: 5` + `periodSeconds: 10`
+(the controlplane's liveness probe is the one 10/20 outlier), and not one probe of either kind sets a
+timeout — OpenBao's own strict health endpoint included.
 
 **Evaluated and rejected: `/minio/health/cluster/read`.** `/cluster` gates on write quorum and
 `/cluster/read` on read quorum, which is the milder gate when a StatefulSet has several pods. At one

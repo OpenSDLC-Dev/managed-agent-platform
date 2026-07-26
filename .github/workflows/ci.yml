@@ -109,14 +109,17 @@ jobs:
           fi
           echo "ok: cipher paths (positive and guards)"
       - name: bundled MinIO gates readiness on its object layer
-        # The probe path is asserted exactly, not grepped for: a substring match
-        # over the whole template also reads the comment that explains the
-        # choice, so documenting the rejected endpoint there would fail the job.
+        # Both assertions read rendered `path:` keys rather than grepping the
+        # template for a substring: a substring match also reads the comment
+        # that explains the choice, so documenting the rejected endpoint there
+        # would fail the job.
         run: |
-          p="$(helm template t "$CHART" -f "$VALUES" --show-only templates/minio.yaml \
-            | awk '/readinessProbe:/ { probe = 1 } probe && $1 == "path:" { print $2; exit }')"
+          rendered="$(helm template t "$CHART" -f "$VALUES" --show-only templates/minio.yaml)"
+          p="$(echo "$rendered" | awk '/readinessProbe:/ { probe = 1 } probe && $1 == "path:" { print $2; exit }')"
           [ "$p" = "/minio/health/cluster" ] \
             || { echo "MinIO's readinessProbe must gate on /minio/health/cluster (#216); rendered: ${p:-<none>}" >&2; exit 1; }
+          echo "$rendered" | awk '$1 == "path:" && $2 == "/minio/health/ready" { exit 1 }' \
+            || { echo "/minio/health/ready answers 200 before the object layer can serve S3; no probe may gate on it (#216)" >&2; exit 1; }
           echo "ok: minio readiness probe is $p"
       - name: required-value guard fires (missing controlplane.apiKey)
         run: |
