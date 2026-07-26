@@ -55,8 +55,11 @@ spec:
                   name: {{ include "map.secretName" . }}
                   key: blob-secret-key
           readinessProbe:
+            # The cluster endpoint, not /minio/health/ready: only this one
+            # answers 503 while the object layer cannot serve S3, so the
+            # headless Service above resolves only when usable (#216).
             httpGet:
-              path: /minio/health/ready
+              path: /minio/health/cluster
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10

@@ -1298,3 +1298,64 @@ IPv4 gateway, which on darwin lives inside the Docker VM rather than on the host
 stub listens; the row fails identically on `main` without the override (verified at 79b8ac6) and
 passes in ~14 s with it. The cluster must also be created from a shell with no `HTTP_PROXY` set, or
 kind bakes it into the node and nothing can be pulled.
+
+## MinIO chart readiness probe (#216) — review-hardening record (2026-07-26)
+
+The fix itself is in [CHANGELOG.md](../CHANGELOG.md); this is what the dual review changed about it,
+and the two things it decided not to change.
+
+**The setup.** Codex on `gpt-5.6-sol` at the config's `ultra` effort, read-only. The verifier ran on
+**Opus 5, not its pinned `claude-fable-5`** — that quota was exhausted and the first dispatch died on
+it, the same override and the same reasoning as the #71 record above, disclosed on the PR. The
+Claude-side `/code-review` is `disable-model-invocation`; an Opus 5 adversarial pass stood in for it
+and is labelled as a stand-in rather than as `/code-review`.
+
+**Fixed in the same PR.** The two reviewers converged on the causal story and split on the rest:
+
+- **The CI guard was coupled to the prose of the comment beside it.** The first version grepped the
+  whole rendered template for the substring `/minio/health/ready`, which also reads the comment that
+  explains why that endpoint was rejected. Reproduced: a chart with the **correct** probe whose
+  comment spells the old path fails the job — so the natural reaction to a CI failure, documenting
+  the rejected endpoint, breaks the build. The step now extracts the rendered `readinessProbe` path
+  and asserts it exactly, which is also structurally anchored to the probe rather than to the file.
+  That exact assertion is narrower than the substring it replaced — a `/minio/health/ready`
+  reintroduced under a *different* probe would have slipped past it — so the verifier's catch of that
+  narrowing was answered by a second assertion over rendered `path:` keys, which restores that
+  coverage for the plain block style every probe in this chart is written in — a quoted
+  (`path: "/minio/health/ready"`) or flow-style (`httpGet: {path: …}`) scalar evades it, which the
+  re-verification pass measured and is recorded here rather than answered with quote-stripping in a
+  CI `awk` — while staying immune to the comment wording that caused the original defect. Three cases
+  were exercised against the final step: the pre-fix chart, `/minio/health/ready` reintroduced as a
+  `livenessProbe`, and a correct chart whose comment names the old path (the first two red, the last
+  green).
+- **The entry attributed a fresh-install `CrashLoopBackOff` to this probe, and it does not follow.**
+  `initialDelaySeconds: 5` keeps the kubelet from marking the pod Ready before t+5s, while the
+  object layer serves ~0.3 s in on the measured shape — so the old probe's Ready was accidentally
+  truthful, guaranteed by the delay rather than established by the probe. The change hardens a latent
+  defect (init slower than the delay: a populated drive, a heal, a cold or slow PVC, a contended
+  node) and makes readiness honest for `helm install --wait` and rollout gates. Both reviewers
+  separately noted that the crashloop which *does* occur on a fresh install is an ordering gap this
+  does not close: nothing orders the controlplane after MinIO, so it exits by the same fail-fast path
+  when the headless Service publishes no endpoint at all. The entry now says both things.
+- **Comment placement.** `openbao.yaml` has the identical construct — a readiness probe whose
+  endpoint choice needs justifying — and puts a three-line comment above `httpGet:`. Matched.
+
+**Evaluated and rejected: an explicit `timeoutSeconds` on the probe.** Codex's strongest finding was
+that `/minio/health/cluster` reaches the drive where `/minio/health/ready` does not, and Kubernetes
+defaults `timeoutSeconds` to 1 — so on a stalled network-backed PVC three consecutive probes could
+time out and withdraw the only endpoint of a single-replica headless Service, which routes around
+nothing and merely breaks DNS for running clients. The mechanism is real; the magnitude is not.
+Measured against the pinned release with 3,000 objects on the drive and sustained `mc` write+list
+load: `/minio/health/cluster` p50 1.6 ms, p99 2.2 ms, max 2.4 ms — indistinguishable from
+`/minio/health/ready` at p50 1.6 ms / p99 2.1 ms, and 0 of 200 probes within two orders of magnitude
+of the 1 s default. Against that margin, adding the knob would also break the chart's probe
+convention: every *readiness* probe in this chart is `initialDelaySeconds: 5` + `periodSeconds: 10`
+(the controlplane's liveness probe is the one 10/20 outlier), and not one probe of either kind sets a
+timeout — OpenBao's own strict health endpoint included.
+
+**Evaluated and rejected: `/minio/health/cluster/read`.** `/cluster` gates on write quorum and
+`/cluster/read` on read quorum, which is the milder gate when a StatefulSet has several pods. At one
+node with one drive the default parity is zero, so both quorums are 1 and the two endpoints are
+equivalent — confirmed from the live headers (`X-Minio-Write-Quorum: 1`, `X-Minio-Read-Quorum: 1`).
+The chart hardcodes `replicas: 1` with no value to raise it, so the multi-node trap the milder gate
+would avoid is not reachable from the chart's own surface.
