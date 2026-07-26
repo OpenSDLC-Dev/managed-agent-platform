@@ -308,6 +308,16 @@ copy of an entry here.
 
 ### Changed
 
+- **The verifier now has to reap what it starts** (`.claude/agents/verifier.md`). Rungs 2 and 3 tell
+  it to spawn scratch copies, containers and load generators, and nothing told it to clean them up
+  or, more to the point, to check that its cleanup worked. Verifying the fix above, a stress probe
+  ended with `LOADPIDS=$(jobs -p); kill $LOADPIDS` — which collects nothing, because the command
+  substitution runs in a subshell holding no jobs of its own — and twelve orphaned busy loops
+  outlived the PASS by two hours at a core each. The new ground rule is the general one, not a
+  patch for that snippet: every process and container it starts is its own to reap, the reap is
+  confirmed with `ps` / `docker ps` rather than with the exit status of a `kill`, pids are captured
+  with `$!` at spawn time, and anything deliberately left running is named in the report.
+
 - **The `/code-review` reviewer pin moved to Opus 5** (`.claude/skills/run-reviews/SKILL.md`,
   CLAUDE.md), superseding the Opus 4.8 pin recorded when the review procedure moved into that
   skill. The mechanics are unchanged — edit the persisted workflow script, `model: "opus"` on
