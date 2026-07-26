@@ -85,19 +85,27 @@ copy of an entry here.
   Each subtest failed in 0.00s, which is what identifies the request that broke: minio-go retries a
   503 on the bucket `HEAD` that `BucketExists` issues, but not on the region lookup that precedes it
   for a client with no region configured (`GET /bucket/?location=`). That one fails through
-  `newRequest`, where only minio-go's `retryableS3Codes` are retried and `ServerNotInitialized` is
-  not among them — so the very first thing `s3.New` did returned instantly, having never reached the
-  request the client would have retried.
+  `newRequest`, where only minio-go's `retryableS3Codes` are retried and MinIO's
+  `XMinioServerNotInitialized` is not among them — so the very first thing `s3.New` did returned
+  instantly, having never reached the request the client would have retried.
 
   The gate is now that same call: one `BucketExists` against a bucket name no test uses, retried
   under the one 120s deadline the health poll had, with the client built the way a backend under
   test builds it (no region) so the probe covers the location lookup too. The health endpoint is no
-  longer consulted — passing it was never the question. On a warm container this costs one round
-  trip. Two stub-server tests pin the behavior, each fed a server that answers `/minio/health/ready`
-  with 200 from the first request the way MinIO does: one that refuses S3 twice and then serves
-  (the gate must keep going, and it is the S3 request count that proves it did), and one whose
-  object layer never comes up (the gate must fail rather than hand the suite an unusable container).
-  Both fail against the pre-fix gate, which returned after 0 S3 requests.
+  longer consulted — passing it was never the question. On a warm container the probe costs a single
+  round trip: MinIO answers the location lookup for a bucket nothing created with a 404
+  `NoSuchBucket`, which minio-go reports as a plain "no", and no `HEAD` follows (traced against the
+  pinned image). The loop stops one poll interval short of the deadline rather than spending its
+  last attempt on an already-expired context, so what a failed gate prints is the server's own
+  refusal instead of a bare `context deadline exceeded` — the line that made this issue diagnosable
+  in the first place.
+
+  Two stub-server tests pin the behavior, each fed a server that answers `/minio/health/ready` with
+  200 from the first request the way MinIO does, header and all: one that refuses S3 twice and then
+  serves (the gate must keep going — proved by the S3 request count, and by the bucket-location
+  lookup among them, which a region-configured probe would silently stop making), and one whose
+  object layer never comes up (the gate must fail, on the server's own words). All three assertions
+  fail against the pre-fix gate, which returned after 0 S3 requests.
 
   The same weak signal is still wired into the helm chart's MinIO `readinessProbe`, where it can
   restart a controlplane pod on a fresh install; that is deployment rather than test scope and is

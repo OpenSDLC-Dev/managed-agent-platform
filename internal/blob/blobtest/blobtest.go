@@ -119,6 +119,7 @@ func waitReady(endpoint string, timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
+	const poll = 250 * time.Millisecond
 	deadline := time.Now().Add(timeout)
 	// One deadline for the whole gate: minio-go's own retries stop with it
 	// rather than outliving the loop that started them.
@@ -128,10 +129,15 @@ func waitReady(endpoint string, timeout time.Duration) error {
 		if _, err = client.BucketExists(ctx, "blobtest-probe"); err == nil {
 			return nil
 		}
-		if time.Now().After(deadline) {
+		// Give up while the error is still one a request produced. Sleeping
+		// into the deadline instead would spend the last attempt on a context
+		// the shared deadline has already expired, and Main would report
+		// "context deadline exceeded" rather than what the server said — the
+		// line that made #208 diagnosable at all.
+		if time.Now().Add(poll).After(deadline) {
 			return err
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(poll)
 	}
 }
 
