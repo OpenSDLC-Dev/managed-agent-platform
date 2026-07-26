@@ -82,8 +82,8 @@ copy of an entry here.
   the rename into the script it already ran, so it paid nothing extra per write — but its write *is*
   one exec, so it paid one per file all the same.
 
-  `sandbox.Sandbox` gained **`WriteFiles`**, a bulk write: the whole set travels as one archive and
-  lands for one exec. Measured on the same daemon, 200 files across 8 directories go from **4.149s
+  `sandbox.Sandbox` gained **`WriteFiles`**, a bulk write: the whole set travels as an archive and
+  costs a fixed couple of execs — one on k8s, two on docker — instead of one per file. Measured on the same daemon, 200 files across 8 directories go from **4.149s
   one at a time to 255ms in one batch (16.3×)** on docker, and from **3.627s to 253ms (14.3×)** on
   k8s. Every member is still atomic exactly as a single write is — its bytes land under a temporary
   name **in its own target's directory**, so the rename stays inside one filesystem; a target that
@@ -99,10 +99,16 @@ copy of an entry here.
   is what the loop of writes it replaces did, and the skills sentinel already records only what
   landed so the next pass re-runs the skill.
 
-  The two backends share the archive, the manifest and the rename shell
+  The two backends share the archive, the manifest and the shells
   (`internal/sandbox/bulkwrite.go`), and differ only in who extracts: the docker daemon on the host,
   or `tar` inside the pod — which is why the k8s image contract now carries `tar` alongside
-  `/bin/bash`, `mv`, `rm`, `stat` and the rest. The archive carries no directory entries on purpose —
+  `/bin/bash`, `mv`, `rm`, `stat` and the rest. That difference is also why docker pays a second
+  exec. A host-side untar creates a missing parent directory owned by **root**, and a sandbox whose
+  image runs as anyone else can then rename nothing into it — measured on a `USER app` image, the
+  batch failed outright with `mv: Permission denied` where the file-at-a-time loop it replaces
+  succeeded, because that loop's own `mkdir -p` ran inside the sandbox. So the batch delivers its
+  bookkeeping first and makes the members' directories from it *in the sandbox*, exactly as the
+  single write always did, before the members are delivered and renamed. The archive carries no directory entries on purpose —
   an explicit one chmods a directory that already exists — so the parents a member needs are left to
   the untar, which creates them `0755` with the file at `0644` on both backends. Those `0755`
   directories are the platform's answer rather than the image's, and deliberately not the single

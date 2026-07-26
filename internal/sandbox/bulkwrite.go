@@ -44,6 +44,10 @@ type BulkWrite struct {
 	tmps     []string
 	manifest []byte
 	dirs     []byte
+	// stamp is taken once so the archive is byte-identical every time it is
+	// built: a delivery that failed is retried from this same value, and a tar
+	// header carrying a fresh clock would make the retry a different archive.
+	stamp time.Time
 }
 
 // NewBulkWrite prepares files for delivery into a sandbox whose workdir is
@@ -91,54 +95,85 @@ func NewBulkWrite(workdir string, files []FileWrite) (*BulkWrite, error) {
 		}
 	}
 	b.manifest, b.dirs = manifest.Bytes(), dirs.Bytes()
+	b.stamp = time.Now()
 	return b, nil
 }
 
-// Archive streams the batch's tar to w: the manifest, the directory list, then
-// one entry per member under its temporary name. Entry names are relative, so
-// both untars extract it at `/`.
+// Archive streams the whole batch as one tar: the bookkeeping, then one entry per
+// member under its temporary name. It is what a backend whose sandbox extracts for
+// itself delivers, in one stream.
 //
-// It carries no directory entries, and that is deliberate: an explicit directory
-// entry chmods a directory that already exists (measured, 0700 → 0755 under both
-// untars), and a write must not change the mode of a directory it merely passes
-// through. The parents an entry needs are left to the untar, which creates them —
-// 0755 on both backends, with the file at 0644.
+// Entry names are relative, so both untars extract it at `/`. It carries no
+// directory entries, and that is deliberate: an explicit directory entry chmods a
+// directory that already exists (measured, 0700 → 0755 under both untars), and a
+// write must not change the mode of a directory it merely passes through.
 //
-// Those 0755 directories are the platform's answer rather than the image's, and
-// they are NOT what the single write gives: its `mkdir -p` runs inside the sandbox
-// and takes the image's umask, so a hardened image gets 0700 there and 0755 here.
-// The docker daemon extracts on the host and creates a missing parent 0755
-// whatever the image's umask says, so the two backends can agree only by fixing
-// the answer, and cross-backend agreement is the property the contract suite
-// exists to hold. The k8s script's `umask 022` matches it — and is load-bearing
-// for the file mode besides: measured, a non-root sandbox user extracting under a
-// 077 umask lands the file 0600 without it, where #212 requires 0644. Following
-// the image's umask on both instead would take a round trip of its own to
-// pre-create the directories, to buy a difference only a second UID inside the
-// same sandbox can see.
+// The parents a member needs are made by Bookkeeping + the prepare pass rather
+// than left to the untar, because *who* makes them decides whether the write can
+// finish. An untar running on the host makes them root's, and a sandbox whose
+// image runs as anyone else then cannot rename anything into them — measured: on
+// a non-root image the whole batch fails where a file-at-a-time loop succeeds.
+// Made inside the sandbox they belong to the sandbox user, exactly as the single
+// write's own `mkdir -p` makes them.
 func (b *BulkWrite) Archive(w io.Writer) error {
 	tw := tar.NewWriter(w)
-	if err := tarEntry(tw, b.Manifest, b.manifest, 0o600); err != nil {
+	if err := b.bookkeeping(tw); err != nil {
 		return err
 	}
-	if err := tarEntry(tw, b.DirList, b.dirs, 0o600); err != nil {
+	if err := b.members(tw); err != nil {
 		return err
-	}
-	for i, f := range b.files {
-		if err := tarEntry(tw, b.tmps[i], f.Data, 0o644); err != nil {
-			return err
-		}
 	}
 	return tw.Close()
 }
 
-func tarEntry(tw *tar.Writer, path string, data []byte, mode int64) error {
+// Bookkeeping streams a tar carrying only the manifest and the directory list —
+// the first of the two deliveries a backend makes when the sandbox cannot extract
+// for itself. Both land in the workdir, which exists, so this delivery needs no
+// directory made for it; what it carries is the list of the ones that must be.
+func (b *BulkWrite) Bookkeeping(w io.Writer) error {
+	tw := tar.NewWriter(w)
+	if err := b.bookkeeping(tw); err != nil {
+		return err
+	}
+	return tw.Close()
+}
+
+// Members streams a tar carrying only the members, under their temporary names.
+// It is delivered after the prepare pass has made the directories they land in.
+func (b *BulkWrite) Members(w io.Writer) error {
+	tw := tar.NewWriter(w)
+	if err := b.members(tw); err != nil {
+		return err
+	}
+	return tw.Close()
+}
+
+// The bookkeeping is world-readable, unlike a temporary file whose bytes are the
+// caller's: a host-side untar lands it owned by root, and the sandbox user has to
+// be able to read it to act on it. It names paths the sandbox can already list.
+func (b *BulkWrite) bookkeeping(tw *tar.Writer) error {
+	if err := b.entry(tw, b.Manifest, b.manifest, 0o644); err != nil {
+		return err
+	}
+	return b.entry(tw, b.DirList, b.dirs, 0o644)
+}
+
+func (b *BulkWrite) members(tw *tar.Writer) error {
+	for i, f := range b.files {
+		if err := b.entry(tw, b.tmps[i], f.Data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *BulkWrite) entry(tw *tar.Writer, path string, data []byte, mode int64) error {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     strings.TrimPrefix(path, "/"),
 		Mode:     mode,
 		Size:     int64(len(data)),
 		Typeflag: tar.TypeReg,
-		ModTime:  time.Now(),
+		ModTime:  b.stamp,
 	}); err != nil {
 		return fmt.Errorf("sandbox: build bulk archive: %w", err)
 	}
@@ -257,41 +292,54 @@ __map_bulk_rename() {
 }
 `
 
-// BulkRecoverShell defines __map_bulk_recover, the bulk path's answer to what
-// the single write does when its own delivery is refused: make the directories,
-// which is also what says whether a non-directory is what blocked the path
-// (ExitPathNotDirectory), and shed what the failed attempt left behind. The
-// caller then delivers once more. It is the same dance `WriteFile` already does
-// with `mkdirAll`, over a whole batch and still for one exec.
+// BulkPrepareShell defines __map_bulk_prepare, which both backends embed: given
+// the directory list ($1) an already-delivered bookkeeping pass landed, it makes
+// every directory the batch's members need, and says whether a non-directory is
+// what blocked the path (ExitPathNotDirectory) rather than letting that read as
+// the sandbox breaking.
 //
-// A manifest that is not there is a delivery that failed before landing
-// anything, and there is nothing to recover: the caller's own error stands.
+// It runs INSIDE the sandbox, and that is the whole point of it rather than an
+// implementation detail. A host-side untar makes a missing parent root's, and a
+// sandbox whose image runs as anyone else cannot then rename a member into it —
+// measured on a non-root image, the batch fails where a file-at-a-time loop
+// succeeds, because the loop's own `mkdir -p` ran in here too. Made here, the
+// directories belong to whoever the sandbox runs as, exactly as they did before.
 //
-// It takes the manifest and the directory list with it, having read them, so a
-// batch that ends here leaves the sandbox holding nothing of itself whichever way
-// it ends. A retry can afford that: they are the archive's first two entries, so
-// the next delivery brings them back.
+// `umask 022` so the directories a batch creates land 0755 whatever the image's
+// umask is, matching what a host-side untar gives on the other backend; the
+// argument for fixing that answer rather than following the image is on Archive.
 //
-// Both lists are handed to one `rm` and one `mkdir` rather than one per member,
-// so the pass costs a process each however large the batch is. That is bounded
-// by ARG_MAX rather than unbounded, and comfortably: the whole batch is capped
-// at 10,000 members by what may be uploaded, whose paths run to a few hundred
-// kilobytes against the couple of megabytes a command line holds. The walk that
-// classifies a blocked path is all shell builtins, so it costs nothing at all.
-const BulkRecoverShell = PathFaultShell + `
-__map_bulk_recover() {
+// The whole list is handed to one `mkdir` rather than one per directory, so the
+// pass costs a process however large the batch is — bounded by ARG_MAX, and
+// comfortably: a batch is capped at 10,000 members by what may be uploaded, and
+// their distinct directories run to a few hundred kilobytes against the couple of
+// megabytes a command line holds. The walk that classifies a blocked path is all
+// shell builtins, so it costs nothing at all.
+const BulkPrepareShell = PathFaultShell + `
+__map_bulk_prepare() {
   [ -f "$1" ] || return 0
-  __tmps=(); __dirs=()
-  while IFS= read -r -d '' __t && IFS= read -r -d '' __d; do __tmps+=("$__t"); done < "$1"
-  if [ -f "$2" ]; then
-    while IFS= read -r -d '' __d; do __dirs+=("$__d"); done < "$2"
-  fi
-  [ "${#__tmps[@]}" -eq 0 ] || rm -f "${__tmps[@]}"
-  rm -f "$1" "$2"
+  __dirs=()
+  while IFS= read -r -d '' __d; do __dirs+=("$__d"); done < "$1"
   [ "${#__dirs[@]}" -eq 0 ] && return 0
   umask 022
   mkdir -p "${__dirs[@]}" && return 0
   for __d in "${__dirs[@]}"; do __map_path_fault "$__d"; done
   return 1
+}
+`
+
+// BulkDiscardShell defines __map_bulk_discard, which both backends embed: given
+// the manifest ($1) and the directory list ($2), it sheds every member the batch
+// delivered and then the two files themselves, so a batch that ends badly leaves
+// the sandbox holding nothing of itself. A manifest that is not there took the
+// list of what to shed with it; the rest still goes.
+const BulkDiscardShell = `
+__map_bulk_discard() {
+  if [ -f "$1" ]; then
+    __tmps=()
+    while IFS= read -r -d '' __t && IFS= read -r -d '' __d; do __tmps+=("$__t"); done < "$1"
+    [ "${#__tmps[@]}" -eq 0 ] || rm -f "${__tmps[@]}"
+  fi
+  rm -f "$1" "$2"
 }
 `

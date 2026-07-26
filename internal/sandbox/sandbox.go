@@ -301,11 +301,11 @@ type Sandbox interface {
 	// empty batch writes nothing. A member's Path must be absolute and clean; a
 	// batch naming the same target twice lands them in order, so the last wins.
 	//
-	// What it buys is round trips: the whole batch travels as one archive and
-	// lands for one exec, where the same files written one at a time cost one
-	// exec each — about 14ms apiece against a local daemon, which is most of what
-	// a small write costs (#206). A skill of ten thousand files is the case that
-	// made it worth a method.
+	// What it buys is round trips: the whole batch travels as an archive and costs
+	// a fixed couple of execs — one on the k8s backend, two on docker — where the
+	// same files written one at a time cost one exec each, about 14ms apiece
+	// against a local daemon, which is most of what a small write costs (#206). A
+	// skill of ten thousand files is the case that made it worth a method.
 	//
 	// The batch is NOT a transaction, and deliberately not: the first failure
 	// stops the run, the members that already landed stay landed, and the rest

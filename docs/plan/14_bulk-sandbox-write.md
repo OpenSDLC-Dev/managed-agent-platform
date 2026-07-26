@@ -30,7 +30,7 @@ place. The rename is a second round trip — one container exec per write — an
 the cost of a small file. Measured on this branch against a real daemon, warm directory,
 `debian:stable-slim`:
 
-```
+```text
 WriteFile: 20 calls in 409ms (20.4ms each)
 bare Exec: 20 calls in 276ms (13.8ms each)
 ```
@@ -91,7 +91,7 @@ The manifest travels as a file rather than in the script because it cannot trave
 script: Linux caps a single `execve` argument at `MAX_ARG_STRLEN` = 128 KiB, and a
 10,000-entry batch's generated script is on the order of 800 KB.
 
-### D4 — file entries only; the untar creates the parents
+### D4 — file entries only; the sandbox makes the parents
 
 Measured, `debian:stable-slim`, docker 28 / GNU tar 1.35:
 
@@ -100,39 +100,48 @@ Measured, `debian:stable-slim`, docker 28 / GNU tar 1.35:
 | docker daemon untar (`PUT /archive`) | 0755 | 0644 |
 | in-container `tar -x` under `umask 022` | 0755 | 0644 |
 
-The two agree with each other, so the archive carries **no directory entries** — measured, an
-explicit dir entry chmods a directory that already exists (0700 → 0755 under both untars), and
-a write must not change the mode of a directory it happens to pass through.
+The archive carries **no directory entries** — measured, an explicit dir entry chmods a directory
+that already exists (0700 → 0755 under both untars), and a write must not change the mode of a
+directory it happens to pass through.
 
-What those 0755 directories are *not* is what the single write gives. Its `mkdir -p` runs
-inside the sandbox under the image's umask, so a hardened image gets 0700 there and 0755 here
-(measured: `umask 077; mkdir -p` → 0700; `umask 077; tar -x` → 0700 too, so it is the k8s
-script's own `umask 022` that lifts it). That `umask 022` is not optional: without it a
-**non-root** sandbox user extracting under a 077 umask lands the *file* 0600, where #212
-requires 0644 whatever the image chose (measured; as root the tar header survives either way).
-One umask governs both, and the docker daemon — extracting on the host — creates a missing
-parent 0755 whatever the image says. So the choice is between the two backends agreeing with
-each other and a bulk tree matching a singly-written one, and cross-backend agreement wins:
-it is the property the shared contract suite exists to hold, and the difference it costs is
-one only a second UID inside the same sandbox can see. Following the image's umask on both
-would take a round trip of its own to pre-create the directories.
+But *who* makes a missing parent turns out to decide whether the write can finish at all, and it
+is not the untar. The docker daemon extracts on the **host, as root**, so the directories it
+creates for the members belong to root — and a sandbox whose image runs as anyone else can then
+rename nothing into them. Measured on an image with `USER app` and a user-owned workdir: a
+file-at-a-time loop succeeds (its own `mkdir -p` runs inside the sandbox) and a batch that let the
+daemon make the directories fails outright with `mv: Permission denied`. Skill materialization
+would have stopped working on every non-root docker image.
 
-### D5 — both backends: deliver, then rename; classify only on failure
+So the batch makes its own directories, inside the sandbox, in a pass of its own — which is what
+the single write always did. The k8s backend needs no such pass: its `tar` runs in the pod, so
+everything it creates is already the sandbox user's.
 
-- **docker**: `putArchive(path=/)` with the whole archive, then one exec running the shared
-  rename script. Two round trips, one exec.
-- **k8s**: one exec, `tar -x -C /` reading the archive from the exec's stdin, then the same
-  rename script inline. One round trip, one exec.
+Those directories land 0755, which is *not* what the single write's `mkdir -p` gives — that takes
+the image's umask, so a hardened image gets 0700 there. The prepare pass sets `umask 022`
+deliberately, to match what a host-side untar gives on the other backend: cross-backend agreement
+is the property the shared contract suite exists to hold, and the difference it costs is one only
+a second UID inside the same sandbox can see. (The k8s write script's own `umask 022` is
+load-bearing besides: measured, a **non-root** user extracting under a 077 umask lands the *file*
+0600, where #212 requires 0644.)
 
-When delivery fails, both run the same recovery the docker `WriteFile` already runs for a
-single file — `mkdir -p` the directories, which is also what classifies a path blocked by a
-non-directory (`__map_path_fault` → `ErrNotDirectory`) — then retry the delivery once, then
-rename. The manifest is the archive's first entry and both untars extract in order, so a delivery
-that failed on a later entry has already landed the manifest the recovery exec needs. (The
-docker daemon stops at the first failing entry; GNU tar carries on and exits non-zero at the
-end — measured. The argument holds either way, and rests only on the manifest coming first.) A recovery that cannot make the directories, or a retry
-that fails too, sheds every temp the manifest lists and returns. Every path is O(1) round
-trips.
+### D5 — deliver, prepare, deliver, rename
+
+- **docker**: `putArchive` the bookkeeping (it lands in the workdir, which exists), one exec to
+  make the members' directories from it, `putArchive` the members, one exec to rename them all.
+  Four round trips of which **two are execs** — O(1), against one exec *per member* before.
+- **k8s**: one exec, `tar -x -C /` reading the whole archive from the exec's stdin, then the same
+  rename script inline. One round trip, one exec, because the extraction is already inside the
+  sandbox and needs nothing pre-created.
+
+A failure after the bookkeeping has landed sheds what the batch put in the sandbox
+(`__map_bulk_discard`) on the way out. On k8s an extraction that fails runs the same prepare pass
+— which is also what classifies a path blocked by a non-directory — and delivers once more. The
+bookkeeping is the archive's first entries and lands in the workdir, so an extraction that failed
+on a later member has already delivered what that pass reads.
+
+The bookkeeping is written 0644 rather than 0600, and that is not cosmetic: on docker it is
+extracted by the daemon and therefore owned by root, and the sandbox user has to be able to read
+it. It names paths the sandbox can already list.
 
 ### D6 — the k8s sandbox image must carry `tar`
 

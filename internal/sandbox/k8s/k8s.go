@@ -934,16 +934,21 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 // into a `tar` that extracts every member under a temporary name in its own
 // target's directory, and the same exec then renames them all into place. Where
 // the docker backend hands its archive to the daemon, this one hands it to the
-// pod — which is why the image contract carries `tar` (#206). Both run the same
-// rename afterwards, so a batch lands identically on either backend.
+// pod — which is why the image contract carries `tar` (#206).
 //
-// An extraction that fails takes the same recovery the docker backend takes for a
-// refused PUT — make the directories, which is also what classifies a path blocked
-// by a non-directory, then deliver once more. The manifest is the archive's first
-// entry and lands in the workdir, which exists, so an extraction that failed on a
-// later member has already delivered what the recovery reads; one that failed
-// before any member landed leaves nothing to recover and the caller's own error
-// stands.
+// One exec, where docker needs two, and for the reason that decides both: the
+// extraction happens INSIDE the sandbox here, so the directories it creates and
+// the files it lands already belong to whoever the sandbox runs as, and nothing
+// has to be pre-created for the rename to be allowed. The docker backend's daemon
+// extracts on the host, as root, and has to make the directories separately.
+//
+// An extraction that fails is answered the way the docker backend answers a
+// refused delivery — make the directories, which is also what classifies a path
+// blocked by a non-directory, then deliver once more. The bookkeeping is the
+// archive's first entries and lands in the workdir, which exists, so an extraction
+// that failed on a later member has already delivered what that pass reads; one
+// that failed before anything landed leaves nothing to prepare and the caller's own
+// error stands.
 func (pd *pod) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
 	if len(files) == 0 {
 		return nil
@@ -957,14 +962,15 @@ func (pd *pod) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error 
 		return err
 	}
 	if code == sandbox.ExitBulkExtract {
-		if rErr := pd.recoverBulk(ctx, b); rErr != nil {
-			return rErr
+		if pErr := pd.prepareBulk(ctx, b); pErr != nil {
+			pd.discardBulk(ctx, b)
+			return pErr
 		}
 		if code, stderr, err = pd.deliverBulk(ctx, b); err != nil {
 			return err
 		}
 		if code == sandbox.ExitBulkExtract {
-			_ = pd.recoverBulk(ctx, b)
+			pd.discardBulk(ctx, b)
 			return fmt.Errorf("k8s: bulk write: the pod could not extract the archive: %s",
 				strings.TrimSpace(stderr))
 		}
@@ -975,11 +981,10 @@ func (pd *pod) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error 
 	return b.Fault("k8s", code, stderr)
 }
 
-// recoverBulk runs the shared recovery pass over a batch whose extraction failed:
-// shed what landed, make the directories, and say whether a non-directory is what
-// blocked the path.
-func (pd *pod) recoverBulk(ctx context.Context, b *sandbox.BulkWrite) error {
-	code, stderr, err := pd.bulkExec(ctx, bulkRecoverScript, b, nil)
+// prepareBulk makes the members' directories, which is also where a path blocked
+// by a non-directory is named.
+func (pd *pod) prepareBulk(ctx context.Context, b *sandbox.BulkWrite) error {
+	code, stderr, err := pd.bulkExec(ctx, bulkPrepareScript, b, nil)
 	if err != nil {
 		return err
 	}
@@ -987,6 +992,12 @@ func (pd *pod) recoverBulk(ctx context.Context, b *sandbox.BulkWrite) error {
 		return nil
 	}
 	return b.Fault("k8s", code, stderr)
+}
+
+// discardBulk sheds what a failed batch left in the pod. Its own failure is not
+// worth reporting over the write's.
+func (pd *pod) discardBulk(ctx context.Context, b *sandbox.BulkWrite) {
+	_, _, _ = pd.bulkExec(ctx, bulkDiscardScript, b, nil)
 }
 
 // deliverBulk runs the write script with the batch's archive on the exec's stdin,
@@ -1003,8 +1014,8 @@ func (pd *pod) deliverBulk(ctx context.Context, b *sandbox.BulkWrite) (int, stri
 // bulkExec runs one of the bulk scripts, with the batch's bookkeeping paths in
 // argv — never the batch itself, which would not fit: Linux caps one execve
 // argument at 128 KiB and a ten-thousand-member batch's manifest is far past it,
-// which is why it travels in the archive as a file instead. The recovery script
-// reads no stdin and is given none.
+// which is why it travels in the archive as a file instead. Only the write script
+// reads stdin; the others are given none.
 func (pd *pod) bulkExec(ctx context.Context, script string, b *sandbox.BulkWrite, stdin io.Reader) (int, string, error) {
 	stderr := &cappedBuffer{limit: sandbox.MaxOutputBytes}
 	argv := []string{"/bin/bash", "-c", script, "map-bulk-write", b.Manifest, b.DirList}
@@ -1037,9 +1048,15 @@ tar -xf - -C / || exit 18
 __map_bulk_rename "$1" "$2"
 `
 
-// bulkRecoverScript is the shared recovery pass, run when an extraction failed.
-const bulkRecoverScript = sandbox.BulkRecoverShell + `
-__map_bulk_recover "$1" "$2"
+// bulkPrepareScript makes the members' directories, run when an extraction failed
+// and again before the retry. $2 is the directory list.
+const bulkPrepareScript = sandbox.BulkPrepareShell + `
+__map_bulk_prepare "$2"
+`
+
+// bulkDiscardScript sheds what a batch that ended badly left behind.
+const bulkDiscardScript = sandbox.BulkDiscardShell + `
+__map_bulk_discard "$1" "$2"
 `
 
 // shellQuote makes a path a single, literal shell word.

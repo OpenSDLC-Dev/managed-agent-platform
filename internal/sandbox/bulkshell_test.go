@@ -193,56 +193,81 @@ func TestBulkRenameShellRefusesADirectoryTarget(t *testing.T) {
 	assertNoTemps(t, dir)
 }
 
-// The recovery pass sheds what a refused delivery landed, makes the directories
-// the batch needs, and takes its own bookkeeping with it — so a batch that ends
-// there leaves the sandbox holding nothing of itself.
-func TestBulkRecoverShell(t *testing.T) {
+// The prepare pass makes the directories a batch's members need, and makes them
+// INSIDE the sandbox — which is the whole reason it exists as a step of its own.
+// A host-side untar would make them root's, and a sandbox running as anyone else
+// could then rename nothing into them.
+func TestBulkPrepareShell(t *testing.T) {
 	dir := t.TempDir()
 	manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
-	// A directory the delivery would have needed and that does not exist yet.
+	_ = manifest
 	if err := os.WriteFile(dirList, []byte(dir+"\x00"+dir+"/deep/nested\x00"), 0o600); err != nil {
 		t.Fatalf("stage the directory list: %v", err)
 	}
 
-	code, stderr := bulkShell(t, sandbox.BulkRecoverShell, "__map_bulk_recover", manifest, dirList)
+	code, stderr := bulkShell(t, sandbox.BulkPrepareShell, "__map_bulk_prepare", dirList, "")
 	if code != 0 {
 		t.Fatalf("exit %d, want 0; stderr: %s", code, stderr)
 	}
-	if fi, err := os.Stat(dir + "/deep/nested"); err != nil || !fi.IsDir() {
-		t.Errorf("the recovery did not make the directory the batch needs: %v", err)
+	fi, err := os.Stat(dir + "/deep/nested")
+	if err != nil || !fi.IsDir() {
+		t.Fatalf("the prepare pass did not make the directory the batch needs: %v", err)
 	}
-	assertNoTemps(t, dir)
-	// A manifest that is not there is a delivery that landed nothing: there is
-	// nothing to recover and the caller's own error stands.
-	if code, _ := bulkShell(t, sandbox.BulkRecoverShell, "__map_bulk_recover",
-		dir+"/no-such-manifest", dirList); code != 0 {
-		t.Errorf("recovery with no manifest exited %d, want 0", code)
+	// 0755 whatever the umask the pass inherits, so the answer matches the one a
+	// host-side untar gives on the other backend.
+	if got := fi.Mode().Perm(); got != 0o755 {
+		t.Errorf("a directory the batch created has mode %o, want 755", got)
+	}
+	// A directory list that is not there is a delivery that landed nothing: there
+	// is nothing to prepare, and the caller's own error stands.
+	if code, _ := bulkShell(t, sandbox.BulkPrepareShell, "__map_bulk_prepare", dir+"/no-such-list", ""); code != 0 {
+		t.Errorf("prepare with no directory list exited %d, want 0", code)
 	}
 }
 
 // A directory the batch needs that is blocked by a non-directory is the path's
-// fault, not the sandbox's, and the recovery names it as such — the sentinel a
+// fault, not the sandbox's, and the prepare pass names it as such — the sentinel a
 // tool hands the model rather than one the executor retries on.
-func TestBulkRecoverShellClassifiesABlockedPath(t *testing.T) {
+func TestBulkPrepareShellClassifiesABlockedPath(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(dir+"/blocker", []byte("i am a file"), 0o644); err != nil {
 		t.Fatalf("stage a regular file: %v", err)
 	}
-	manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
+	dirList := dir + "/" + sandbox.TempPrefix + "dirs"
 	if err := os.WriteFile(dirList, []byte(dir+"/blocker/deeper\x00"), 0o600); err != nil {
 		t.Fatalf("stage the directory list: %v", err)
 	}
 
-	code, _ := bulkShell(t, sandbox.BulkRecoverShell, "__map_bulk_recover", manifest, dirList)
+	code, _ := bulkShell(t, sandbox.BulkPrepareShell, "__map_bulk_prepare", dirList, "")
 	if code != sandbox.ExitPathNotDirectory {
 		t.Errorf("exit %d, want ExitPathNotDirectory (%d)", code, sandbox.ExitPathNotDirectory)
 	}
 	if got, err := os.ReadFile(dir + "/blocker"); err != nil || string(got) != "i am a file" {
-		t.Errorf("the file in the way = %q, %v; want it untouched", got, err)
+		t.Errorf("the file in the way holds %q, %v; want it untouched", got, err)
 	}
-	// It sheds the batch's temporary files before it classifies, so the terminal
-	// path leaves nothing behind either.
+}
+
+// The discard pass is what a batch that ended badly leaves behind with: every
+// member it delivered, and then the two bookkeeping files themselves.
+func TestBulkDiscardShell(t *testing.T) {
+	dir := t.TempDir()
+	manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA", "b.txt": "BBB"}, nil)
+
+	if code, stderr := bulkShell(t, sandbox.BulkDiscardShell, "__map_bulk_discard", manifest, dirList); code != 0 {
+		t.Fatalf("exit %d, want 0; stderr: %s", code, stderr)
+	}
 	assertNoTemps(t, dir)
+	// Nothing was renamed into place: discarding is not a write.
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if _, err := os.Stat(dir + "/" + name); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: %v, want the discard to have written nothing", name, err)
+		}
+	}
+	// A manifest that is gone takes the list of members with it; the rest still
+	// goes, and the pass does not fail over it.
+	if code, _ := bulkShell(t, sandbox.BulkDiscardShell, "__map_bulk_discard", manifest, dirList); code != 0 {
+		t.Errorf("discarding twice exited %d, want 0", code)
+	}
 }
 
 // assertNoTemps fails unless dir holds no file named with the write path's
