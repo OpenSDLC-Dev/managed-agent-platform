@@ -332,9 +332,10 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		sendEvents(t, s, sid, userMessage(fmt.Sprintf("m%d", i)))
 	}
 	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
-	// The first user.message also woke the idle session, so the log carries
-	// one platform event on top of the six posted ones:
-	// m0, session.status_running, m1..m4, user.interrupt.
+	// Two platform events sit on top of the six posted ones: the first
+	// user.message woke the idle session, and the interrupt ended the turn that
+	// woke — m0, session.status_running, m1..m4, user.interrupt,
+	// session.status_idle.
 
 	// Default: chronological asc, everything, next_page null.
 	status, res := s.do(http.MethodGet, path, nil)
@@ -342,8 +343,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Fatalf("list: %d %v", status, res)
 	}
 	all := listData(t, res)
-	if len(all) != 7 {
-		t.Fatalf("listed %d, want 7", len(all))
+	if len(all) != 8 {
+		t.Fatalf("listed %d, want 8", len(all))
 	}
 	if all[0]["content"].([]any)[0].(map[string]any)["text"] != "m0" {
 		t.Errorf("default order is not chronological: first = %v", all[0])
@@ -374,8 +375,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 			t.Fatal("cursor walk did not terminate")
 		}
 	}
-	if len(walked) != 7 {
-		t.Errorf("cursor walk saw %d events, want 7", len(walked))
+	if len(walked) != 8 {
+		t.Errorf("cursor walk saw %d events, want 8", len(walked))
 	}
 	for i, ev := range all {
 		if walked[i] != ev["id"].(string) {
@@ -386,8 +387,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 	// desc reverses.
 	_, res = s.do(http.MethodGet, path+"?order=desc", nil)
 	desc := listData(t, res)
-	if desc[0]["id"] != all[6]["id"] {
-		t.Errorf("desc first = %v, want %v", desc[0]["id"], all[6]["id"])
+	if desc[0]["id"] != all[7]["id"] {
+		t.Errorf("desc first = %v, want %v", desc[0]["id"], all[7]["id"])
 	}
 
 	// types filter, both spellings.
@@ -413,8 +414,8 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, res = s.do(http.MethodGet, path+"?created_at[gt]="+midCreated, nil)
-	if got := listData(t, res); len(got) != 4 {
-		t.Errorf("created_at[gt] mid returned %d, want 4", len(got))
+	if got := listData(t, res); len(got) != 5 {
+		t.Errorf("created_at[gt] mid returned %d, want 5", len(got))
 	}
 	_, res = s.do(http.MethodGet, path+"?created_at[lte]="+midCreated, nil)
 	if got := listData(t, res); len(got) != 3 {
@@ -585,13 +586,15 @@ func TestStreamLiveTail(t *testing.T) {
 		t.Errorf("streamed text = %v", text)
 	}
 
-	// Batches arrive in order.
+	// Batches arrive in order, the platform's reaction to them included: the
+	// interrupt ends the running turn and the message in the same batch starts
+	// the next one, so both status events follow the two posted events.
 	sendEvents(t, s, sid, userMessage("after-2"), map[string]any{"type": "user.interrupt"})
-	if f := st.next(t); f.name != "user.message" {
-		t.Errorf("frame 2 = %q", f.name)
-	}
-	if f := st.next(t); f.name != "user.interrupt" {
-		t.Errorf("frame 3 = %q", f.name)
+	for i, want := range []string{"user.message", "user.interrupt",
+		"session.status_idle", "session.status_running"} {
+		if f := st.next(t); f.name != want {
+			t.Errorf("frame %d = %q, want %q", i+2, f.name, want)
+		}
 	}
 	st.expectNone(t)
 }

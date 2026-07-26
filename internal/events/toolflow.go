@@ -55,12 +55,71 @@ var (
 	}
 )
 
+// answeredBy renders the one definition of "this tool call has been answered":
+// some result event in the same session references the tool-use row aliased tu,
+// by whichever of the three reference keys its own shape uses. typesParam is the
+// placeholder the caller binds the result-type list to (the session is always
+// $1). Four queries ask this question — is anything outstanding, what is, may
+// this result land, is this ask still blocking — and a drift between them would
+// wedge a session, so they share one text.
+func answeredBy(typesParam int) string {
+	return fmt.Sprintf(`EXISTS (
+		       SELECT 1 FROM events r
+		       WHERE r.session_id = $1 AND r.type = ANY($%d)
+		         AND COALESCE(r.payload->>'tool_use_id',
+		                      r.payload->>'custom_tool_use_id',
+		                      r.payload->>'mcp_tool_use_id') = tu.id
+		     )`, typesParam)
+}
+
+// unansweredToolUse is one outstanding tool call, for the two queries that ask
+// about it (does any exist, and which ones): a tool-use event of one of $2's
+// types that no result of $3's types answers, and that $4 does not pre-answer.
+// Written against the alias tu.
+var unansweredToolUse = `
+		   tu.session_id = $1 AND tu.type = ANY($2)
+		     AND tu.id != ALL($4)
+		     AND NOT ` + answeredBy(3)
+
 // HasUnansweredToolUse reports whether any tool-use event in the session
 // still lacks a matching result. extraRefs are treated as answered: the ids
 // referenced by results that are validated but not yet inserted, so the API
 // trigger can decide its batch before appending it.
 func HasUnansweredToolUse(ctx context.Context, q Querier, sessionID domain.ID, extraRefs []string) (bool, error) {
 	return hasUnansweredToolUse(ctx, q, sessionID, toolUseTypes, extraRefs)
+}
+
+// ToolUseRef names one outstanding tool call: the tool-use event's id and its
+// type, which together decide the shape of the result that answers it.
+type ToolUseRef struct {
+	ID   string
+	Type domain.EventType
+}
+
+// UnansweredToolUses lists, in log order, the tool calls HasUnansweredToolUse
+// only counts — the set a user.interrupt has to answer before the session can be
+// resumed, since the model protocol requires every tool_use answered and the log
+// is append-only. extraRefs are treated as answered, exactly as above.
+func UnansweredToolUses(ctx context.Context, q Querier, sessionID domain.ID, extraRefs []string) ([]ToolUseRef, error) {
+	if extraRefs == nil {
+		extraRefs = []string{}
+	}
+	rows, err := q.Query(ctx,
+		`SELECT tu.id, tu.type FROM events tu WHERE`+unansweredToolUse+` ORDER BY tu.seq`,
+		sessionID.String(), toolUseTypes, toolResultTypes, extraRefs)
+	if err != nil {
+		return nil, fmt.Errorf("unanswered tool_use list: %w", err)
+	}
+	defer rows.Close()
+	var out []ToolUseRef
+	for rows.Next() {
+		var ref ToolUseRef
+		if err := rows.Scan(&ref.ID, &ref.Type); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
 }
 
 // HasUnansweredPlatformToolUse reports whether any platform-executed built-in
@@ -79,18 +138,7 @@ func hasUnansweredToolUse(ctx context.Context, q Querier, sessionID domain.ID, u
 	}
 	var unanswered bool
 	err := q.QueryRow(ctx,
-		`SELECT EXISTS (
-		   SELECT 1 FROM events tu
-		   WHERE tu.session_id = $1 AND tu.type = ANY($2)
-		     AND tu.id != ALL($4)
-		     AND NOT EXISTS (
-		       SELECT 1 FROM events r
-		       WHERE r.session_id = $1 AND r.type = ANY($3)
-		         AND COALESCE(r.payload->>'tool_use_id',
-		                      r.payload->>'custom_tool_use_id',
-		                      r.payload->>'mcp_tool_use_id') = tu.id
-		     )
-		 )`,
+		`SELECT EXISTS (SELECT 1 FROM events tu WHERE`+unansweredToolUse+`)`,
 		sessionID.String(), useTypes, toolResultTypes, extraRefs).Scan(&unanswered)
 	if err != nil {
 		return false, fmt.Errorf("unanswered tool_use check: %w", err)
@@ -143,13 +191,7 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		err = q.QueryRow(ctx,
 			`SELECT tu.type,
 			        COALESCE(tu.payload->>'evaluated_permission', ''),
-			        EXISTS (
-			          SELECT 1 FROM events r
-			          WHERE r.session_id = $1 AND r.type = ANY($3)
-			            AND COALESCE(r.payload->>'tool_use_id',
-			                         r.payload->>'custom_tool_use_id',
-			                         r.payload->>'mcp_tool_use_id') = tu.id
-			        ),
+			        `+answeredBy(3)+`,
 			        EXISTS (
 			          SELECT 1 FROM events c
 			          WHERE c.session_id = $1 AND c.type = $4
@@ -216,17 +258,19 @@ func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.
 		seen[ref] = true
 
 		var perm string
-		var confirmed bool
+		var confirmed, answered bool
 		err = q.QueryRow(ctx,
 			`SELECT COALESCE(tu.payload->>'evaluated_permission', ''),
 			        EXISTS (
 			          SELECT 1 FROM events c
 			          WHERE c.session_id = $1 AND c.type = $4
 			            AND c.payload->>'tool_use_id' = tu.id
-			        )
+			        ),
+			        `+answeredBy(5)+`
 			 FROM events tu
 			 WHERE tu.session_id = $1 AND tu.id = $2 AND tu.type = ANY($3)`,
-			sessionID.String(), ref, confirmableToolUseTypes, string(domain.EventUserToolConfirm)).Scan(&perm, &confirmed)
+			sessionID.String(), ref, confirmableToolUseTypes, string(domain.EventUserToolConfirm),
+			toolResultTypes).Scan(&perm, &confirmed, &answered)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("events[%d]: tool_use_id %q does not name a tool use in this session", i, ref)
 		}
@@ -239,6 +283,14 @@ func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.
 		if confirmed {
 			return fmt.Errorf("events[%d]: tool use %q is already confirmed", i, ref)
 		}
+		// A gated call that already has a result was abandoned by a
+		// user.interrupt, which answers everything outstanding without asking
+		// anyone. Confirming it now would let a denial synthesize a second
+		// result for the same call onto the append-only log — the double-answer
+		// ValidateToolResults refuses from the other direction.
+		if answered {
+			return fmt.Errorf("events[%d]: tool use %q was already answered and can no longer be confirmed", i, ref)
+		}
 	}
 	return nil
 }
@@ -250,6 +302,12 @@ func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.
 // decide its resume before appending: an empty result means every ask is
 // answered and the session may run; a non-empty result is the remainder to
 // re-emit on session.status_idle.
+//
+// A gated call that already carries a result is not blocking either, however it
+// got one. Only a user.interrupt produces that (it abandons everything
+// outstanding without asking anyone), and the gate has to let go of it: an ask
+// left "blocked" forever after its call was answered would wedge the session on
+// the very resume the interrupt exists to restore.
 func UnconfirmedAskEvents(ctx context.Context, q Querier, sessionID domain.ID, extraConfirmed []string) ([]string, error) {
 	if extraConfirmed == nil {
 		extraConfirmed = []string{}
@@ -264,9 +322,10 @@ func UnconfirmedAskEvents(ctx context.Context, q Querier, sessionID domain.ID, e
 		     WHERE c.session_id = $1 AND c.type = $5
 		       AND c.payload->>'tool_use_id' = tu.id
 		   )
+		   AND NOT `+answeredBy(6)+`
 		 ORDER BY tu.seq`,
 		sessionID.String(), confirmableToolUseTypes, string(domain.EvalPermAsk),
-		extraConfirmed, string(domain.EventUserToolConfirm))
+		extraConfirmed, string(domain.EventUserToolConfirm), toolResultTypes)
 	if err != nil {
 		return nil, fmt.Errorf("unconfirmed ask events: %w", err)
 	}

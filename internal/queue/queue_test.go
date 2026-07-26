@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -536,4 +537,68 @@ func TestClaimAndPollAreExclusiveByEnvironmentKind(t *testing.T) {
 	if mt.EnvironmentID != selfEnv {
 		t.Errorf("model_turn env = %s, want %s", mt.EnvironmentID, selfEnv)
 	}
+}
+
+func TestCancelSessionTakesEveryLiveItem(t *testing.T) {
+	// What a user.interrupt does to the turn it ends: every item the session
+	// still has in flight is stopped, whoever holds it. A claimant's lease proof
+	// dies with the item, which is what stops a brain or executor still working
+	// the interrupted turn from committing anything, and the freed slot lets the
+	// redirect's own turn be enqueued in the same transaction.
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "cloud")
+	other, otherEnv := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+
+	for _, kind := range []queue.Kind{queue.ModelTurn, queue.ToolExec} {
+		if _, err := q.Enqueue(ctx, pool, envID, sessionID, kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := q.Enqueue(ctx, pool, otherEnv, other, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	// One claimed (active), one still queued.
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+
+	if err := q.CancelSession(ctx, pool, sessionID); err != nil {
+		t.Fatalf("CancelSession: %v", err)
+	}
+
+	if err := q.Complete(ctx, pool, item); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Errorf("Complete after cancel = %v, want ErrLeaseLost", err)
+	}
+	if err := q.Assert(ctx, pool, item); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Errorf("Assert after cancel = %v, want ErrLeaseLost", err)
+	}
+	if got := liveItems(t, pool, sessionID); got != 0 {
+		t.Errorf("live items after cancel = %d, want 0", got)
+	}
+	// The slot is free again, so the redirect turn schedules immediately.
+	created, err := q.Enqueue(ctx, pool, envID, sessionID, queue.ModelTurn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Error("enqueue after cancel was suppressed, so no turn would run")
+	}
+	// Another session's work is untouched.
+	if got := liveItems(t, pool, other); got != 1 {
+		t.Errorf("other session's live items = %d, want 1", got)
+	}
+}
+
+func liveItems(t *testing.T, pool *pgxpool.Pool, sessionID domain.ID) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM work_items WHERE session_id = $1 AND state <> 'stopped'`,
+		sessionID.String()).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

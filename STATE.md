@@ -4,7 +4,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** The backlog lives in GitHub issues; the last plan (12 — vaults + egress gate) archived 2026-07-25 (docs/HISTORY.md).
+**None.** The backlog lives in GitHub issues; the last plan (13 — `user.interrupt`, #68) archived 2026-07-26 (docs/HISTORY.md).
 
 ## Tasks
 

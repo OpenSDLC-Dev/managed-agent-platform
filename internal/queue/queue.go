@@ -348,6 +348,33 @@ func (q *Queue) Assert(ctx context.Context, db DB, item *Item) error {
 	return nil
 }
 
+// CancelSession stops every work item this session still has in flight, inside
+// the caller's transaction — what a user.interrupt does to the turn it ends.
+// Unlike Complete it carries no lease proof, because it is not a claimant
+// finishing its own work: it takes the work away from whoever holds it. That is
+// the point. A claimant only ever writes under a lease it re-asserts in the same
+// transaction (Complete, Requeue, Assert), so a brain or executor still running
+// the interrupted turn finds its item gone and rolls its whole settlement back,
+// which is what keeps a stale half-turn — duplicate tool results, tool intents
+// nothing may answer — off the append-only log. Cancelling under the session row
+// lock the interrupt already holds is what makes that a decision and not a race.
+//
+// It also frees the (session, kind) slot Enqueue is idempotent on, so a
+// user.message in the same batch can schedule the redirect turn immediately.
+func (q *Queue) CancelSession(ctx context.Context, db DB, sessionID domain.ID) error {
+	if _, err := db.Exec(ctx,
+		`UPDATE work_items
+		 SET state             = 'stopped',
+		     stop_requested_at = COALESCE(stop_requested_at, now()),
+		     stopped_at        = now(),
+		     lease_expires_at  = NULL,
+		     updated_at        = now()
+		 WHERE session_id = $1 AND state <> 'stopped'`, sessionID); err != nil {
+		return fmt.Errorf("queue: cancel session %s: %w", sessionID, err)
+	}
+	return nil
+}
+
 // Complete marks the item finished, in the caller's transaction when one is
 // passed (a turn's settlement completes its item atomically with the state
 // it writes, so a concurrent trigger serialized behind the same session lock

@@ -95,10 +95,11 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// set: the model protocol requires every tool_use answered in the next
 	// turn, so partial results of a parallel tool call keep waiting. The
 	// session never left running, so no new status event. A tool confirmation
-	// resolves a requires_action suspension (see the case below). Everything
-	// else only appends (a user.message mid-turn is picked up by the brain's
-	// end-of-turn watermark check).
-	var hasUserMessage, hasToolResult, hasConfirmation bool
+	// resolves a requires_action suspension, and an interrupt ends the turn in
+	// progress — both in the cases below. Everything else only appends (a
+	// user.message mid-turn is picked up by the brain's end-of-turn watermark
+	// check).
+	var hasUserMessage, hasToolResult, hasConfirmation, hasInterrupt bool
 	for _, ev := range newEvents {
 		switch ev.Type {
 		case domain.EventUserMessage:
@@ -107,10 +108,22 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			hasToolResult = true
 		case domain.EventUserToolConfirm:
 			hasConfirmation = true
+		case domain.EventUserInterrupt:
+			hasInterrupt = true
 		}
 	}
 	batch := newEvents
 	var opts events.AppendOptions
+	// The status transitions this batch actually makes, in order, recorded once
+	// the commit that made them lands. Usually one — but an interrupt that a
+	// user.message in the same batch redirects moves the column twice
+	// (running → idle → running), and SetStatus can only carry the final value.
+	var moves []domain.SessionStatus
+	setStatus := func(st domain.SessionStatus) {
+		moves = append(moves, st)
+		final := st
+		opts.SetStatus = &final
+	}
 	// Set when this batch clears the last requires_action gate: the seconds the
 	// session waited on the human, measured in the database so both ends read one
 	// clock, and recorded only after the resuming transaction commits.
@@ -134,10 +147,82 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	// Confirmation handling is checked first: a batch that mixes a confirmation
-	// with a user.message must resolve the gate (and run the confirmed tools),
-	// not wake the turn on the message past a tool the confirmation just cleared.
+	// Order matters twice here. The interrupt comes first because it ends the
+	// turn in progress, so a batch carrying one settles on its terms whatever
+	// else the batch says: a confirmation alongside it does not run its tool (the
+	// user asked to stop), and a user.message alongside it is the documented
+	// redirect, handled inside that case rather than by the message trigger.
+	// Confirmation then comes before the message for the original reason: a batch
+	// that mixes the two must resolve the gate and run the confirmed tools, not
+	// wake the turn on the message past a tool the confirmation just cleared.
+	//
+	// Only the interrupt case ignores askBlocking, because it answers every
+	// outstanding call, gated or not — the set askBlocking would report is
+	// exactly the set that case is about to clear.
 	switch {
+	case hasInterrupt:
+		// Every tool call still outstanding is answered with an error result.
+		// The model protocol requires every tool_use answered before the
+		// conversation continues and the log is append-only, so a call left
+		// abandoned would poison every future replay — which is the dead end the
+		// interrupt exists to escape, not one it may create. The batch's own
+		// results count as answered, exactly as they do for the message trigger.
+		abandoned, err := events.UnansweredToolUses(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
+		if err != nil {
+			return nil, err
+		}
+		// Nothing to stop: an idle session with no outstanding call has no turn
+		// to end, so the event is logged and settles nothing. Emitting a
+		// session.status_idle for a session that never left idle would announce a
+		// transition that did not happen.
+		settling := status == string(domain.SessionRunning) || len(abandoned) > 0
+		if settling {
+			results, err := interruptToolResults(abandoned)
+			if err != nil {
+				return nil, err
+			}
+			batch = append(batch, results...)
+			// end_turn, not a stop reason of its own: the reference documents an
+			// interrupted turn as ending on the same stop reason as one that
+			// finishes by itself, and the idle stop_reason union has no
+			// interruption variant to carry (docs/DIVERGENCES.md).
+			stop, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "end_turn"}})
+			if err != nil {
+				return nil, err
+			}
+			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: stop})
+			// The event is emitted whenever a turn ends — a stranded or
+			// gate-blocked session is already idle and its clients still need the
+			// new stop reason — but the column only moves when the session was
+			// really running. Writing idle over idle would count a transition
+			// that did not happen, the way a running→running reclaim would.
+			if status == string(domain.SessionRunning) {
+				setStatus(domain.SessionIdle)
+			}
+		}
+		// The interrupt leaves nothing outstanding, so a user.message in the same
+		// batch resumes exactly as it would on any idle session — the documented
+		// way to steer a running agent, in one send.
+		if hasUserMessage {
+			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
+			setStatus(domain.SessionRunning)
+		}
+		if settling || hasUserMessage {
+			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+				// Cancel first, then enqueue: the cancel frees the (session,
+				// kind) slot the redirect's own model_turn needs, and takes the
+				// interrupted turn away from whoever was running it.
+				if settling {
+					if err := s.queue.CancelSession(ctx, tx, domain.ID(id)); err != nil {
+						return err
+					}
+				}
+				if hasUserMessage {
+					return enqueueTurn(ctx, tx)
+				}
+				return nil
+			}
+		}
 	case hasConfirmation && status == string(domain.SessionIdle):
 		// A requires_action suspension resolves. Each denial is answered with
 		// an error result (the model protocol requires every tool_use answered
@@ -163,8 +248,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			break
 		}
 		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
-		running := domain.SessionRunning
-		opts.SetStatus = &running
+		setStatus(domain.SessionRunning)
 		// How long the gate held: the elapsed since the suspension that raised it —
 		// the most recent requires_action idle. Measured under the same row lock the
 		// resume commits under, so it reads a consistent log, and in the database so
@@ -235,8 +319,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			break
 		}
 		batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
-		running := domain.SessionRunning
-		opts.SetStatus = &running
+		setStatus(domain.SessionRunning)
 		opts.Then = enqueueTurn
 	case hasToolResult && status == string(domain.SessionRunning):
 		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
@@ -260,11 +343,12 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	// After the commit: a status change that rolled back did not happen. This is
-	// the production idle→running transition (a user.message waking a session, a
-	// confirmation clearing the last gate).
-	if opts.SetStatus != nil {
-		events.RecordSessionStatus(ctx, *opts.SetStatus)
+	// After the commit: a status change that rolled back did not happen. These are
+	// the production transitions — idle→running (a user.message waking a session,
+	// a confirmation clearing the last gate) and running→idle (an interrupt
+	// ending the turn), in the order the batch made them.
+	for _, st := range moves {
+		events.RecordSessionStatus(ctx, st)
 	}
 	if approvalWaitSeconds != nil {
 		events.RecordApprovalWait(ctx, *approvalWaitSeconds)
@@ -328,6 +412,74 @@ func denyToolResults(evs []events.NewEvent) ([]events.NewEvent, []string, error)
 		deniedIDs = append(deniedIDs, c.ToolUseID)
 	}
 	return results, deniedIDs, nil
+}
+
+// interruptAnswer maps a tool-use event type to the result event that answers it
+// when a user.interrupt abandons the call, and to the field that names the call.
+// The families have to match — a custom tool's result is a
+// user.custom_tool_result keyed by custom_tool_use_id, an MCP tool's an
+// agent.mcp_tool_result keyed by mcp_tool_use_id — for the reason the denial
+// synthesis is confined to agent.tool_use (internal/events/toolflow.go): a
+// result of the wrong shape is not the answer a client watching that tool's
+// family is waiting for. thread marks the one shape whose wire object carries a
+// session_thread_id; the two agent.* results have no such field (verified
+// against the SDK's event types).
+var interruptAnswer = map[domain.EventType]struct {
+	result domain.EventType
+	refKey string
+	thread bool
+}{
+	domain.EventAgentToolUse:       {domain.EventAgentToolResult, "tool_use_id", false},
+	domain.EventAgentCustomToolUse: {domain.EventUserCustomToolRes, "custom_tool_use_id", true},
+	domain.EventAgentMCPToolUse:    {domain.EventAgentMCPToolResult, "mcp_tool_use_id", false},
+}
+
+// interruptResultText is what an abandoned call is answered with. Never an empty
+// text block: a Messages endpoint rejects one, and that request is what every
+// later replay of this session sends.
+const interruptResultText = "The user interrupted this tool call before it returned a result."
+
+// interruptToolResults answers each tool call a user.interrupt abandons with an
+// error result. The turn cannot end without them: the model protocol requires
+// every tool_use answered before the conversation continues, so an unanswered
+// call on the append-only log would make every future replay a request the model
+// rejects — the wedge the interrupt exists to undo.
+//
+// The results are stamped processed on the spot. The platform wrote them, and
+// the one that lands under an inbound type would otherwise render with a null
+// processed_at, indistinguishable from a client event still queued behind
+// earlier ones, and would look to a settling brain like input to chain a turn on.
+//
+// That an interrupt answers the calls at all, and in this shape, is an inference:
+// the reference documents the interrupt's stop reason, not what it writes for
+// the calls it abandons (docs/DIVERGENCES.md).
+func interruptToolResults(uses []events.ToolUseRef) ([]events.NewEvent, error) {
+	now := time.Now().UTC()
+	out := make([]events.NewEvent, 0, len(uses))
+	for _, use := range uses {
+		answer, ok := interruptAnswer[use.Type]
+		if !ok {
+			// Unreachable while this map and the events package's tool-use
+			// taxonomy agree; the check is what keeps them agreeing, since a new
+			// tool-use type with no answer here would strand exactly the call
+			// this function exists to release.
+			return nil, fmt.Errorf("no result event answers a %s tool use", use.Type)
+		}
+		fields := map[string]any{
+			answer.refKey: use.ID,
+			"content":     []map[string]any{{"type": "text", "text": interruptResultText}},
+			"is_error":    true,
+		}
+		if answer.thread {
+			fields["session_thread_id"] = nil
+		}
+		payload, err := json.Marshal(fields)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, events.NewEvent{Type: answer.result, Payload: payload, ProcessedAt: &now})
+	}
+	return out, nil
 }
 
 // listSessionEvents implements GET /v1/sessions/{id}/events with the
