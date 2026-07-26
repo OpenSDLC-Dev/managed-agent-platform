@@ -113,6 +113,11 @@ carries a `user.interrupt`:
 4. Otherwise nothing: an idle session with nothing outstanding has no turn to end, and a
    `session.status_idle` there would announce a transition that did not happen.
 
+Steps 2 and 3 apply only to the two statuses v1 ever writes, `idle` and `running`.
+`terminated` has ended and the redirect must not revive it — the `user.message` trigger
+guards the same thing by requiring `idle` — and `rescheduling` is a state nothing writes,
+so settling it would invent semantics.
+
 ## Acceptance
 
 Posting `user.interrupt` to a session stuck awaiting a tool result ends the turn and
@@ -129,9 +134,13 @@ uncommittable, immediately; what actually tears the work down is the lease keepe
 its next `Extend` fail, which it attempts at TTL/3 (≈40s on the 2-minute default). So an
 interrupted model stream can keep generating tokens for up to that long, and an
 interrupted tool keeps running in its sandbox with whatever side effects it has left. The
-outcome is unaffected either way — nothing that work produces can commit — and cancelling
-faster means a wake-up channel from the control plane to a claimant, which the pull
-protocol deliberately does not have.
+outcome is unaffected either way — nothing the claimant *settles* can commit — and
+cancelling faster means a wake-up channel from the control plane to a claimant, which the
+pull protocol deliberately does not have. The cancel binds settlements, not every append:
+`agent.thinking` and `span.model_request_start` are written mid-stream without a lease
+proof, so an interrupted turn can still land a stray thinking event after its
+`session.status_idle`. Replay reconstructs nothing from either, and both are already
+registered as the brain's crash-window residue in docs/DIVERGENCES.md.
 
 
 Cancelling a live `model_turn` makes the brain's settlement fail its lease proof, which the

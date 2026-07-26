@@ -308,3 +308,91 @@ func sameStrings(got, want []string) bool {
 	}
 	return true
 }
+
+func TestInterruptFreesASessionStrandedIdleOnAPlainToolUse(t *testing.T) {
+	// The second dead end, and the only one with no gate to point at: a log
+	// stranded by a pre-#181 binary — a tool intent committed with nothing ever
+	// scheduled to run it, on a session that then went idle. The resume gate
+	// refuses a user.message there rather than replay a tool_use no result
+	// answers, and no later result revives it, so before the interrupt this
+	// session could never run again.
+	s := newTestServer(t)
+	sessionID := selfHostedSession(t, s)
+	ctx := context.Background()
+	q := queue.New(s.pool)
+
+	sendEvents(t, s, sessionID, userMessage("run a tool"))
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim: %+v %v", item, err)
+	}
+	toolUseID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
+	if err := q.Complete(ctx, s.pool, item); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE sessions SET status = 'idle' WHERE id = $1`, sessionID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stranded: the message is accepted, appended, and changes nothing.
+	sendEvents(t, s, sessionID, userMessage("are you still there?"))
+	if got := s.sessionStatus(sessionID); got != "idle" {
+		t.Fatalf("status before the interrupt = %q, want idle (stranded)", got)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Fatalf("live model_turn items before the interrupt = %d, want 0", n)
+	}
+
+	sendEvents(t, s, sessionID, map[string]any{"type": "user.interrupt"})
+
+	// The call is answered and the turn is declared over, though the session
+	// never left idle — so the status column does not move and the event still
+	// carries the stop reason its clients need.
+	if got := s.sessionStatus(sessionID); got != "idle" {
+		t.Errorf("status after the interrupt = %q, want idle", got)
+	}
+	if got := lastEventOfType(t, s, sessionID, "agent.tool_result")["tool_use_id"]; got != toolUseID {
+		t.Errorf("agent.tool_result tool_use_id = %v, want %v", got, toolUseID)
+	}
+	if got := stopReasonType(t, lastEventOfType(t, s, sessionID, "session.status_idle")); got != "end_turn" {
+		t.Errorf("stop_reason.type = %q, want end_turn", got)
+	}
+
+	sendEvents(t, s, sessionID, userMessage("try again"))
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status after the follow-up message = %q, want running", got)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn items = %d, want 1", n)
+	}
+}
+
+func TestInterruptDoesNotReviveATerminatedSession(t *testing.T) {
+	// A terminated session has ended. The interrupt must not become the one
+	// trigger that un-ends it: the sibling user.message trigger resumes only an
+	// idle session, and the redirect inside the interrupt case has to be at
+	// least as strict. Nothing writes this status in v1 — the guard is what
+	// keeps that true if something one day does.
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'terminated' WHERE id = $1`, sessionID); err != nil {
+		t.Fatal(err)
+	}
+
+	sendEvents(t, s, sessionID,
+		map[string]any{"type": "user.interrupt"},
+		userMessage("carry on"))
+
+	if got := s.sessionStatus(sessionID); got != "terminated" {
+		t.Errorf("status = %q, want terminated", got)
+	}
+	want := []string{"agent.tool_use", "user.interrupt", "user.message"}
+	if got := s.eventTypes(sessionID); !sameStrings(got, want) {
+		t.Errorf("event log = %v, want %v (append only)", got, want)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn items = %d, want 0", n)
+	}
+}

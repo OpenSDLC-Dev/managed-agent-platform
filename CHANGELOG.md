@@ -55,7 +55,10 @@ copy of an entry here.
   without a confirmation: an answered ask no longer counts as blocking its `requires_action` gate
   (or the gate would outlive the call and wedge the resume the interrupt exists to restore), and a
   `user.tool_confirmation` naming an already-answered call is now a `400` (or a denial would write a
-  second result for one call onto the append-only log). The result shape, the wording, and the
+  second result for one call onto the append-only log). The interrupt acts only on the two statuses
+  v1 writes, `idle` and `running`: a review pass caught that without that guard a one-send
+  `[interrupt, message]` would make this the one trigger that revives a `terminated` session, which
+  the sibling `user.message` trigger refuses by requiring `idle`. The result shape, the wording, and the
   ordering of the platform's reaction within the batch are inferences — the docs pin the interrupt's
   outcome, not what it writes for the calls it abandons — and are recorded in
   docs/DIVERGENCES.md, along with the one thing the reference does that this does not: emit the

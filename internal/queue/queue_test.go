@@ -575,6 +575,12 @@ func TestCancelSessionTakesEveryLiveItem(t *testing.T) {
 	if err := q.Assert(ctx, pool, item); !errors.Is(err, queue.ErrLeaseLost) {
 		t.Errorf("Assert after cancel = %v, want ErrLeaseLost", err)
 	}
+	// Requeue is the third lease-asserted write — a brain chaining its own item
+	// into the next turn — and must fail with the other two, or a cancelled turn
+	// could hand itself back to the queue and run on.
+	if err := q.Requeue(ctx, pool, item); !errors.Is(err, queue.ErrLeaseLost) {
+		t.Errorf("Requeue after cancel = %v, want ErrLeaseLost", err)
+	}
 	if got := liveItems(t, pool, sessionID); got != 0 {
 		t.Errorf("live items after cancel = %d, want 0", got)
 	}

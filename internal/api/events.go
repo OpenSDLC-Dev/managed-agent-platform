@@ -171,11 +171,20 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Only the two statuses v1 ever writes can be interrupted. Nothing sets
+		// terminated or rescheduling today, and neither should be settled from
+		// here if something one day does: terminated has ended and reviving it on
+		// the redirect below would make this the one trigger that un-ends a
+		// session — the user.message case guards against exactly that by
+		// requiring idle — while rescheduling would need semantics no code has
+		// defined yet, and guessing them could leave the column disagreeing with
+		// the log.
+		interruptible := status == string(domain.SessionIdle) || status == string(domain.SessionRunning)
 		// Nothing to stop: an idle session with no outstanding call has no turn
 		// to end, so the event is logged and settles nothing. Emitting a
 		// session.status_idle for a session that never left idle would announce a
 		// transition that did not happen.
-		settling := status == string(domain.SessionRunning) || len(abandoned) > 0
+		settling := interruptible && (status == string(domain.SessionRunning) || len(abandoned) > 0)
 		if settling {
 			results, err := interruptToolResults(abandoned)
 			if err != nil {
@@ -203,11 +212,11 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// The interrupt leaves nothing outstanding, so a user.message in the same
 		// batch resumes exactly as it would on any idle session — the documented
 		// way to steer a running agent, in one send.
-		if hasUserMessage {
+		if hasUserMessage && interruptible {
 			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
 			setStatus(domain.SessionRunning)
 		}
-		if settling || hasUserMessage {
+		if settling || (hasUserMessage && interruptible) {
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 				// Cancel first, then enqueue: the cancel frees the (session,
 				// kind) slot the redirect's own model_turn needs, and takes the
@@ -307,8 +316,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// here means a log stranded before that fix. It is logged rather than
 		// silent: the message appends unprocessed and the session stays idle,
 		// which no later tool result revives (that trigger requires a running
-		// session) — v1 has no escape hatch for a session stuck on an
-		// unanswered tool (#68).
+		// session). The way out is a user.interrupt in the same batch or before
+		// it — the case at the top of this switch answers the outstanding call
+		// and hands the session back resumable (#68).
 		unanswered, err := events.HasUnansweredToolUse(ctx, tx, domain.ID(id), events.ToolResultRefs(newEvents))
 		if err != nil {
 			return nil, err
