@@ -112,6 +112,15 @@ func TestMaterializesSkills(t *testing.T) {
 	if sb.files["/workspace/out.txt"] != "hello" {
 		t.Errorf("tool write = %q", sb.files["/workspace/out.txt"])
 	}
+	// The whole two-file tree went in ONE batched call, which is the point of
+	// #206: written a file at a time it would cost one sandbox exec per member,
+	// and a skill may hold ten thousand. The fake cannot see execs, but the call
+	// count is what decides them, so this is where a regression to the old loop
+	// is caught without a container.
+	if len(sb.bulkSizes) != 1 || sb.bulkSizes[0] != 2 {
+		t.Errorf("materializing a two-file skill made WriteFiles calls of sizes %v, want exactly one of size 2",
+			sb.bulkSizes)
+	}
 	// The sentinel records the resolved concrete version.
 	sentinel := sb.files["/workspace/skills/"+skills.SentinelName]
 	if !strings.Contains(sentinel, `"skill_mat_one"`) || !strings.Contains(sentinel, `"100"`) {

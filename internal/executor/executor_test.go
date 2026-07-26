@@ -41,6 +41,10 @@ type fakeSandbox struct {
 	// hold a tool mid-run to observe the lease keeper renew.
 	entered chan struct{}
 	gate    chan struct{}
+	// bulkSizes records the member count of every WriteFiles call, so a test can
+	// hold a materializer to one batched call carrying a skill's whole tree,
+	// rather than one write per file (#206).
+	bulkSizes []int
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
@@ -107,6 +111,19 @@ func (f *fakeSandbox) WriteFileStream(ctx context.Context, path string, src io.R
 		return err
 	}
 	return f.WriteFile(ctx, path, data)
+}
+
+// WriteFiles is the batch every backend lands for a fixed couple of execs
+// however many members it carries; the fake keeps the same observable semantics
+// by writing the members in order and stopping at the first failure.
+func (f *fakeSandbox) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
+	f.bulkSizes = append(f.bulkSizes, len(files))
+	for _, w := range files {
+		if err := f.WriteFile(ctx, w.Path, w.Data); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (f *fakeSandbox) Destroy(context.Context) error { return nil }
 

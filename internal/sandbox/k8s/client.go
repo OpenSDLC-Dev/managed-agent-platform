@@ -3,7 +3,10 @@
 // path (the plan's image contract) plus a userland with `setsid` (the deadline
 // wrapper backgrounds the command in its own session), `tee` and `wc` (the
 // write path counts the bytes the exec stream delivered), `mv` and `rm` (it lands
-// the bytes under a temporary name and renames them into place), and a `stat` that
+// the bytes under a temporary name and renames them into place), `tar` (a bulk
+// write's archive is extracted inside the pod here, where the docker backend hands
+// its own to the daemon and needs nothing — so an image without one loses skill
+// materialization outright, #206), and a `stat` that
 // accepts `-c`, GNU or BusyBox — required here rather than merely wanted as it is
 // on docker, because a read's size gate exits on it. (`chmod` and that same `stat`
 // also carry the target's mode onto the temporary file on a write, but that step

@@ -294,6 +294,43 @@ type Sandbox interface {
 	// the number of bytes src yields: a short or long stream is an error, not a
 	// silently truncated file.
 	WriteFileStream(ctx context.Context, path string, src io.Reader, size int64) error
+	// WriteFiles writes a whole set of files, each exactly as WriteFile writes
+	// one — creating parent directories, overwriting, landing under a temporary
+	// name in the target's own directory and renaming into place, carrying an
+	// existing target's mode over, and answering the same path sentinels. An
+	// empty batch writes nothing. A member's Path must be absolute and clean; a
+	// batch naming the same target twice lands them in order, so the last wins.
+	//
+	// What it buys is round trips: the whole batch travels as an archive and costs
+	// a fixed couple of execs — one on the k8s backend, two on docker — where the
+	// same files written one at a time cost one exec each, about 14ms apiece
+	// against a local daemon, which is most of what a small write costs (#206). A
+	// skill of ten thousand files is the case that made it worth a method.
+	//
+	// The batch is NOT a transaction, and deliberately not: the first failure
+	// stops the run, the members that already landed stay landed, and the rest
+	// are never written. That is what a loop of WriteFile calls did, and the one
+	// caller of either — materializing a skill — re-runs the whole skill next
+	// time rather than reasoning about what got through. Every member is still
+	// atomic on its own, so a failure leaves each target holding what it held,
+	// never a truncated file. The single exception is a delivery that arrived
+	// short, which lands nothing at all: every member is checked to be present
+	// before any of them is moved.
+	//
+	// A batch that reached the sandbox and failed there sheds its temporary
+	// files. One whose exec could not be run, or whose shell was killed before it
+	// could clean up, leaves what it had delivered — as a single write in the
+	// same position already does, at one file rather than N.
+	//
+	// The error names the member it stopped on, with two honest limits. Where
+	// more than one member would have failed it names one of them, and a path
+	// blocked by a non-directory is preferred over the delivery's own failure
+	// because it is the one a caller can act on. And the naming rides a marker on
+	// the sandbox's stderr, which the sandbox can flood or forge: it is a
+	// diagnostic, not a guarantee, and it degrades to naming no member rather
+	// than the wrong one where the marker is unusable. The error's *class* — the
+	// sentinels below — does not depend on it.
+	WriteFiles(ctx context.Context, files []FileWrite) error
 	// Destroy removes the sandbox. It is idempotent: destroying an already
 	// destroyed sandbox is not an error.
 	Destroy(ctx context.Context) error

@@ -1611,3 +1611,56 @@ func TestPodReadyRequiresGateSidecar(t *testing.T) {
 		t.Error("gated pod with both ready reported not ready")
 	}
 }
+
+// The bulk write's two script exit codes, pinned against a real shell the way the
+// single write's are: the numbers the scripts spell as literals must be the
+// constants the Go side classifies on, or a drift renames a recoverable extraction
+// failure into an unclassified one and the retry that answers it never runs.
+//
+// The archive is delivered on stdin, so a failed extraction is the one failure this
+// backend can have that the docker backend cannot — its daemon extracts on the host
+// and answers over HTTP instead. The split between the two codes is `tar`'s to
+// make, and it is not the obvious one: bytes that are not an archive fail the
+// extraction (18), but an empty stream, or one truncated to a block of zeros, is a
+// perfectly valid *empty* archive to GNU tar, which exits 0. What catches that is
+// the rename script refusing a manifest that never arrived (17) — the same guard
+// that stops a batch whose manifest was deleted underneath it from reading as a
+// success that wrote nothing.
+func TestBulkScriptsClassifyAnArchiveThatDidNotArrive(t *testing.T) {
+	dir := t.TempDir()
+	run := func(stdin []byte) int {
+		t.Helper()
+		cmd := exec.Command("/bin/bash", "-c", bulkWriteScript, "map-bulk-write",
+			dir+"/manifest", dir+"/dirs")
+		cmd.Stdin = bytes.NewReader(stdin)
+		if err := cmd.Run(); err != nil {
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Fatalf("run bulkWriteScript: %v", err)
+			}
+			return ee.ExitCode()
+		}
+		return 0
+	}
+	if got := run([]byte("this is not a tar archive at all\n")); got != sandbox.ExitBulkExtract {
+		t.Errorf("bytes that are not an archive: exit %d, want ExitBulkExtract (%d)",
+			got, sandbox.ExitBulkExtract)
+	}
+	// A block of zeros is an end-of-archive marker, so every tar accepts it as a
+	// valid *empty* archive and exits 0. Nothing was delivered, so the rename
+	// script's own guard is what has to catch it.
+	if got := run(bytes.Repeat([]byte{0}, 512)); got != sandbox.ExitBulkIncomplete {
+		t.Errorf("an empty archive: exit %d, want ExitBulkIncomplete (%d)",
+			got, sandbox.ExitBulkIncomplete)
+	}
+	// A stream carrying nothing at all is the one case the two tars disagree
+	// about — GNU refuses it as not an archive (measured on CI), BSD takes it for
+	// an empty one — so which of the two codes comes back is the image's to
+	// decide, not ours. What must hold on every image is that it is one of them:
+	// a delivery that brought no manifest can never read as a batch that wrote
+	// what it was given.
+	if got := run(nil); got != sandbox.ExitBulkExtract && got != sandbox.ExitBulkIncomplete {
+		t.Errorf("an empty stream: exit %d, want ExitBulkExtract (%d) or ExitBulkIncomplete (%d) — never a success",
+			got, sandbox.ExitBulkExtract, sandbox.ExitBulkIncomplete)
+	}
+}
