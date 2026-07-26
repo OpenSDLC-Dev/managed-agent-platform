@@ -146,6 +146,15 @@ preserves it
 run a non-root image (recommended below) and depend on the executable bit surviving
 a rewrite, that is the case to know about.
 
+A file a write **creates** has no bits to preserve, and lands `0644` on both
+backends — the platform's answer rather than the image's: Docker's tar header fixes
+it, and the Kubernetes write script sets `umask 022` before creating the file
+([#212](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/212)). An
+image whose default umask is tighter does **not** make agent-written files `0600`;
+`chmod` from inside the sandbox does, and a later rewrite then preserves it. The
+directories a write creates are not covered by that: both backends `mkdir -p` them
+under the image's umask.
+
 For production, build a minimal, pinned image: only the interpreters and tools
 your agents actually need, a non-root default user (below), no build toolchain or
 package manager left in the final layer, and a patch cadence you control. The

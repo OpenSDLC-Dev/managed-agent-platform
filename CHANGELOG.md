@@ -72,6 +72,42 @@ copy of an entry here.
 
 ### Fixed
 
+- **A file a sandbox write creates lands `0644` on both backends, instead of on the image's umask on
+  one of them** ([#212](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/212)). The two
+  backends reached that mode by different routes and only one of them was the platform's: docker
+  extracts the temporary file from a tar whose header mode is a fixed `0o644`, while k8s creates it
+  with `tee`, which honors the exec process's **umask** — `0644` on an image running the usual `022`,
+  `0600` on a hardened `077`. The same `write` came back with different bits depending on which
+  backend ran it, and the shared contract row asserting `0644` for a created file
+  (`WriteKeepsTheTargetsMode`) was structural on docker but held on k8s only because the suite's
+  image runs `022` — a suite asserting a contract one backend meets by coincidence, which is the
+  failure mode [#204](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/204) was careful
+  to avoid. It predates the atomic-rename work rather than regressing out of it: `tee` created the
+  target directly before [#71](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/71) and
+  creates the temporary file after it, and the umask applied either way.
+
+  The k8s write script now sets `umask 022` itself, after its `mkdir -p` and before the `tee`. The
+  placement is deliberate on both sides: an existing regular target's own bits still win, because
+  `__map_preserve_mode` chmods over it later (#204); and the directories a write creates keep taking
+  the image's umask, which is what the docker backend's own `mkdir -p` exec does too — moving the
+  line earlier would have traded a file divergence for a directory one. `umask` is a bash builtin,
+  so unlike the `stat` and `chmod` the preservation step reaches for, nothing planted on the agent's
+  PATH can answer for it.
+
+  What it costs, stated rather than discovered: an operator can no longer have a hardened k8s sandbox
+  image default agent-written files to `0600`. The mode a sandbox write lands is now the platform's
+  answer on both backends — which is also what the reference's own host-side runner gives
+  (`agenttoolset`'s `atomicWriteFile(path, data, 0o644)`). A `chmod` inside the sandbox still sets
+  whatever mode is wanted, and a rewrite preserves it from there.
+
+  `AFreshFileIgnoresTheImagesUmask` runs the k8s write script under a `077` umask — the only case
+  where a script that sets one differs from a script that does not — and asserts the created file is
+  `0644` anyway, then that a `0600` target rewritten under the same umask keeps its `0600`, pinning
+  the two steps in the order the script puts them in. It fails against the pre-fix script
+  (`mode 600 ... want 644`). The `WriteFile` contract in `internal/sandbox/sandbox.go`,
+  `PreserveModeShell`'s comment, the contract row's own comment, ARCHITECTURE.md, DIVERGENCES.md and
+  the operator-facing docs/self-hosted-security.md all lose the "the image's umask on k8s" qualifier.
+
 - **A rewritten file keeps the permission bits it had**
   ([#204](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/204)). Both sandbox backends
   make a write atomic by landing the bytes under a temporary name and renaming them into place
@@ -88,7 +124,8 @@ copy of an entry here.
   `internal/sandbox/filefault.go`'s `__map_preserve_mode`, beside the `__map_path_fault` the same two
   already embed, so the copies cannot drift. An existing regular target's `stat -c %a` mode is
   `chmod`'d onto the temporary file; nothing is carried where there is nothing to carry, so a target
-  that did not exist still lands `0644` (a fixed tar header on docker, the image's umask on k8s), and
+  that did not exist still lands `0644` (a fixed tar header on docker, the image's umask on k8s —
+  since made uniform, above), and
   a symlink's own mode is not taken — `stat -c %a` is an lstat, so taking it would dress the file
   replacing the link in the link's own **`0777`**. The mode is checked to be octal digits and passed
   as one quoted argument, so a `stat` planted on the agent's PATH can choose only a mode the agent

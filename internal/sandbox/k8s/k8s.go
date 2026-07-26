@@ -1070,8 +1070,24 @@ printf %s "$3"
 // the command substitution — otherwise the pipeline would report only `wc`'s
 // status, and an unwritable directory would come back as a short write instead of
 // the write failure it is. `-eq` tolerates the leading padding BSD `wc` emits.
+//
+// `umask 022` is what makes a file the write *creates* land 0644 here, as the
+// docker backend's fixed tar header makes it land 0644 there (#212). `tee` creates
+// the temporary file under the exec process's umask — the image's — so without
+// this the answer to "what mode does a file an agent wrote come out as" would be
+// 0644 on one backend and whatever the image chose on the other, and the shared
+// contract row asserting 0644 would be passing here by coincidence. It is set
+// deliberately: the mode a sandbox write lands is the platform's answer on both
+// backends, not something an image can quietly change under one of them. It sits
+// *after* the `mkdir -p` on purpose, so the directories a write creates keep
+// taking the image's umask — which is what docker's own `mkdir -p` exec does too,
+// and moving it earlier would trade a file divergence for a directory one. An
+// existing target's bits still win: __map_preserve_mode runs later and chmods
+// over this. `umask` is a bash builtin, so unlike the `stat` and `chmod` that
+// step reaches for, nothing on the agent's PATH can answer for it.
 const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + `
 mkdir -p "$2" || { __map_path_fault "$2"; exit 1; }
+umask 022
 set -o pipefail
 sz=$(tee "$4" | wc -c) || { rm -f "$4"; exit 1; }
 [ "$sz" -eq "$3" ] || { rm -f "$4"; exit 14; }

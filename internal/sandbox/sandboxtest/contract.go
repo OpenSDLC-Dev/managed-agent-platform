@@ -774,10 +774,12 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 		// A target that did not exist has no mode to carry over, and every backend
 		// lands the same one — the convergence the preservation is built on. It is
-		// 0644 by two different routes, and only one of them is fixed: the docker
-		// backend's tar header says so, while the k8s backend's `tee` derives it
-		// from the image's umask. An image running a umask other than 022 would
-		// fail here on k8s alone — which is the divergence itself, reported.
+		// 0644 by two different routes, and the platform fixes both: the docker
+		// backend's tar header says so, and the k8s write script sets `umask 022`
+		// before its `tee` creates the file. Until #212 the k8s half of that came
+		// from the image instead, so this row held there by the coincidence of the
+		// suite's image running a 022 umask; now an image running any other one
+		// answers the same.
 		if got := fileMode(t, sb, script); got != "644" {
 			t.Errorf("a file that did not exist lands mode %s, want 644", got)
 		}

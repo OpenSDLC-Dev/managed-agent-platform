@@ -228,10 +228,15 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 	// The temporary file the script writes through is named by Go, exactly as
 	// WriteFileStream names it, and handed back so a test can assert it is gone:
 	// every failure path in the script has to take its own residue with it.
-	run := func(t *testing.T, stdin []byte, declared int, path string, env ...string) (int, string) {
+	//
+	// The prologue runs ahead of the script in the same shell. It is how the one
+	// row that needs the image's umask stages it: a umask is a property of the
+	// process the exec starts, not something an argument or the environment can
+	// carry, so it has to be set by a shell the script then inherits from.
+	runScript := func(t *testing.T, prologue string, stdin []byte, declared int, path string, env ...string) (int, string) {
 		t.Helper()
 		tmp := gopath.Join(gopath.Dir(path), sandbox.TempName())
-		cmd := exec.Command("/bin/bash", "-c", writeScript, "map-write", path,
+		cmd := exec.Command("/bin/bash", "-c", prologue+writeScript, "map-write", path,
 			gopath.Dir(path), strconv.Itoa(declared), tmp)
 		cmd.Env = env // nil inherits, which is what every row but the shimmed one wants
 		cmd.Stdin = bytes.NewReader(stdin)
@@ -243,6 +248,10 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 			return ee.ExitCode(), tmp
 		}
 		return 0, tmp
+	}
+	run := func(t *testing.T, stdin []byte, declared int, path string, env ...string) (int, string) {
+		t.Helper()
+		return runScript(t, "", stdin, declared, path, env...)
 	}
 	// gone asserts the script left no temporary file behind, whatever it decided.
 	gone := func(t *testing.T, tmp string) {
@@ -395,6 +404,49 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 		}
 		if got, err := os.ReadFile(path); err != nil || string(got) != "new" {
 			t.Errorf("target = %q, %v; want the bytes just written", got, err)
+		}
+		gone(t, tmp)
+	})
+
+	// The other half of that answer, and the one the image gets a vote in: a file
+	// the write *creates* has no mode to carry over, so it lands whatever created
+	// it. `tee` creates it under the exec process's umask, which is the image's —
+	// 0644 on the usual 022, 0600 on a hardened 077 — where the docker backend's
+	// tar header says 0644 whatever the image thinks (#212). The script sets the
+	// umask itself so the two backends answer this the same way, and the answer is
+	// the sandbox's rather than the image's. Staged with the umask a hardened image
+	// would run, which is the only case where a script that did not set one differs
+	// from one that did.
+	t.Run("AFreshFileIgnoresTheImagesUmask", func(t *testing.T) {
+		fresh := dir + "/hardened/created.txt"
+		code, tmp := runScript(t, "umask 077\n", []byte("new"), 3, fresh, gnuStatEnv(t)...)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0", code)
+		}
+		info, err := os.Stat(fresh)
+		if err != nil {
+			t.Fatalf("stat the created file: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o644 {
+			t.Errorf("a file the write created has mode %o under a 077 umask, want 644", got)
+		}
+		gone(t, tmp)
+
+		// And the umask is a floor for fresh files only: a target that *does* have
+		// bits worth carrying still gets them back, so the two steps compose in the
+		// order the script puts them in rather than the later one winning.
+		if err := os.Chmod(fresh, 0o600); err != nil {
+			t.Fatalf("give the target a mode worth carrying: %v", err)
+		}
+		code, tmp = runScript(t, "umask 077\n", []byte("two"), 3, fresh, gnuStatEnv(t)...)
+		if code != 0 {
+			t.Fatalf("exit %d rewriting it, want 0", code)
+		}
+		if info, err = os.Stat(fresh); err != nil {
+			t.Fatalf("stat the rewritten target: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("after the rewrite the mode is %o, want the target's own 600", got)
 		}
 		gone(t, tmp)
 	})
