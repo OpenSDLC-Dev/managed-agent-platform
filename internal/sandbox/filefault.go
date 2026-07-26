@@ -77,32 +77,43 @@ __map_path_fault() {
 // bash, `edit` it, and it no longer runs (#204). The Claude Code harness's own
 // atomic write does the same three steps — stat the target, chmod the temporary
 // file, rename — which is a harness-design observation from the local snapshot,
-// not a wire behavior of the managed-agents reference.
+// not a wire behavior of the managed-agents reference. (The SDK's own host-side
+// agenttoolset writes a fixed 0644 instead; that divergence is in the registry.)
 //
-// Only an existing regular file has a mode worth carrying over, and the symlink is
-// the case worth spelling out: `-h` is tested first because `-f` follows the link,
-// and what the rename replaces is the *link*, not what it points at — taking the
-// pointee's mode would dress the new file in the bits of a file this write never
-// touched. Where there is nothing to carry over the temporary file keeps its own
-// mode, which is the 0644 a fresh write has always landed (the docker backend's
-// tar header, the k8s backend's `tee` under the image's 022 umask).
+// Only an existing regular file has a mode worth carrying over. The symlink is the
+// case worth spelling out, and `-h` is tested first because `-f` follows a link
+// while `stat` does not: `stat -c %a` is an lstat, so a link reports its own 0777
+// (measured, GNU coreutils and BusyBox alike) and an unguarded preservation would
+// land the replacing file world-writable. What the rename replaces is the link, and
+// a link has no mode worth having. A FIFO, socket or device node is skipped the
+// same way. Where there is nothing to carry over, the temporary file keeps its own
+// mode — the 0644 a fresh write lands from the docker backend's tar header, and
+// from the k8s backend's `tee` under an image umask of 022.
 //
 // Every failure here is silent, and deliberately so: the bytes are landed and the
-// write is one `mv` from succeeding, so an image whose `stat` cannot do `-c` keeps
-// the mode behavior it had before this existed rather than losing the write. The
-// contract suite is what says the images we do support preserve the mode.
+// write is one `mv` from succeeding, so a step that cannot run costs the mode
+// rather than the write. Two paths reach it. An image whose `stat` cannot do `-c`
+// keeps the mode behavior it had before this existed. And on the docker backend the
+// temporary file is extracted by the daemon rather than created by the sandbox
+// user, so an image whose default user is not root cannot chmod it and the write
+// still lands 0644 — where the k8s backend, whose `tee` creates the file as the
+// sandbox user, preserves the mode. That residual divergence is measured and
+// tracked (#209); the contract suite runs root-default images, so it does not see
+// it.
 //
 // `stat` and `chmod` come off the agent's own PATH, as `mkdir`, `tee`, `mv` and
-// `rm` in both write paths already do, and a planted `stat` can therefore choose
-// the mode this puts on the file. That is not a privilege it gains: the mode lands
-// on a file the sandbox user owns, which the same agent could `chmod` directly. The
-// value is one quoted argument to `chmod`, never a word to the shell, so a planted
-// `stat` cannot get a second command out of it either.
+// `rm` in both write paths already do, so a planted `stat` chooses what mode this
+// applies. Two things bound that. The value is checked to be octal digits and
+// passed as one quoted argument, so it can be neither an option (`--reference=` on
+// some setuid binary) nor a second command. And the chmod runs with the agent's own
+// credentials on a file in a directory the agent already writes — so even a planted
+// `stat` that steers it, or a symlink swapped in for the temporary file (chmod
+// follows one), reaches nothing the agent could not reach with its own `chmod`.
 const PreserveModeShell = `
 __map_preserve_mode() {
   if [ -h "$1" ] || [ ! -f "$1" ]; then return 0; fi
   __m=$(stat -c %a "$1" 2>/dev/null) || return 0
-  [ -n "$__m" ] || return 0
+  case "$__m" in *[!0-7]*|'') return 0 ;; esac
   chmod "$__m" "$2" 2>/dev/null || return 0
 }
 `

@@ -27,6 +27,12 @@
 //     sandbox already requires.
 //   - The tools carry no state between calls except bash's, which is the
 //     shell package's snapshot; there is no per-runner session object to close.
+//   - write and edit preserve the permission bits of a file they replace, where
+//     the reference writes a fixed 0644 (its atomicWriteFile chmods the temporary
+//     file to that constant before renaming). The Claude Code harness preserves
+//     them, and the workflow that decided it is ordinary — `chmod +x` a script in
+//     bash, edit it, run it (#204). The rename that makes the write atomic is the
+//     sandbox backends'; both carry the mode over (internal/sandbox/filefault.go).
 package toolset
 
 import (

@@ -1,8 +1,10 @@
 // Package docker is the v1 sandbox backend: one disposable container per
 // session, driven over the Docker Engine API. The image must carry /bin/bash
-// at that exact path (the plan's image contract) and a POSIX userland, plus a
-// `stat` accepting `-c` (GNU or BusyBox) for the write path's mode preservation —
-// the one requirement here beyond POSIX, and one the k8s backend already had.
+// at that exact path (the plan's image contract) and a POSIX userland. A `stat`
+// accepting `-c` (GNU or BusyBox) is wanted rather than required: the write path
+// reads the target's mode with it, and an image without one still writes — it
+// lands the file 0644, as every write did before #204. The k8s backend asks for
+// more, and asks harder (internal/sandbox/k8s/client.go).
 package docker
 
 import (

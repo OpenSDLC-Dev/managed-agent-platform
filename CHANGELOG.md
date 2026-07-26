@@ -30,23 +30,38 @@ copy of an entry here.
   Both backends now carry the bits over before the move, through **one** shared shell function —
   `internal/sandbox/filefault.go`'s `__map_preserve_mode`, beside the `__map_path_fault` the same two
   already embed, so the copies cannot drift. An existing regular target's `stat -c %a` mode is
-  `chmod`'d onto the temporary file; nothing is carried over where there is nothing to carry, so a
-  target that did not exist still lands `0644` on both backends, and a symlink's own mode is not
-  taken — what the rename replaces is the link, not what it points at. Every failure of that step is
-  silent by design: the bytes are landed and the write is one `mv` from succeeding, so an image whose
-  `stat` cannot do `-c` keeps the mode behavior it had before rather than losing the write itself.
-  These are the same three steps the Claude Code harness's own atomic write takes (a harness-design
-  observation from the local snapshot, not a wire behavior of the managed-agents reference), and they
-  close the first of the two residual divergences #71 left behind — #205, a target that cannot be
-  renamed onto at all, still stands. The docker image contract grows by the `stat` accepting `-c`
-  that the k8s one already required.
+  `chmod`'d onto the temporary file; nothing is carried where there is nothing to carry, so a target
+  that did not exist still lands `0644` (a fixed tar header on docker, the image's umask on k8s), and
+  a symlink's own mode is not taken — `stat -c %a` is an lstat, so taking it would dress the file
+  replacing the link in the link's own **`0777`**. The mode is checked to be octal digits and passed
+  as one quoted argument, so a `stat` planted on the agent's PATH can choose only a mode the agent
+  could set itself with `chmod`, never an option (`--reference=`) or a second command. These are the
+  same three steps the Claude Code harness's own atomic write takes — a harness-design observation
+  from the local snapshot, not a wire behavior of the managed-agents reference, and the opposite of
+  what the SDK's own host-side `agenttoolset` does (a fixed `0644`), now both recorded in
+  DIVERGENCES.md.
+
+  **Where it does not apply, measured rather than assumed.** Every failure of the step is silent by
+  design — the bytes are landed and the write is one `mv` from succeeding, so a step that cannot run
+  costs the mode, not the write. Two paths reach it. An image whose `stat` cannot do `-c` keeps the
+  mode behavior it had before. And on docker the temporary file is extracted by the **daemon** rather
+  than created by the sandbox user, so an image whose default user is not root cannot `chmod` it and
+  the write lands `0644` where k8s preserves the mode — a residual divergence reproduced on a live
+  daemon and tracked as
+  [#209](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/209), which carries the
+  measured `copyUIDGID` candidate fix. This closes the first of the two residuals #71 left behind;
+  #205, a target that cannot be renamed onto at all, still stands. The docker image contract grows a
+  `stat` accepting `-c` — wanted rather than required, since a write without one still succeeds.
 
   Pinned where a divergence would show: a shared contract row (`WriteKeepsTheTargetsMode`) both
   backends run stages a script, asserts a file that did not exist lands `0644`, `chmod 0755`s it,
   rewrites it through `WriteFile`, and asserts both that the mode survived and that the script still
   *runs* — then rewrites it again through `WriteFileStream`, which shares the rename. The row fails
   on the pre-fix code on both backends (docker: mode `644`, exit `126` `Permission denied`), and the
-  k8s write script's own host-shell test pins the shell half without needing a cluster.
+  k8s write script's own host-shell test pins the shell half without needing a cluster. The symlink
+  guard is pinned too, in `WriteOntoSymlink`: the file replacing a link lands `0644` while the
+  pointee keeps its `0600` — without that assertion the guard could be deleted with the whole suite
+  staying green, landing a world-writable file on an agent-controlled filesystem.
 
 - **A hung-then-revived BYOC worker can no longer force-stop the item a replacement worker is
   running** ([#62](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/62)). The wire's
