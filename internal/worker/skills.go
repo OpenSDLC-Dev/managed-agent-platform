@@ -33,7 +33,7 @@ var skillDigitsRe = regexp.MustCompile(`^[0-9]+$`)
 // session GET with the environment key, per skill an alias resolution over
 // the versions list (newest numeric wins), a version GET for the name, the
 // /content download, and extraction under the reference guards — all wire,
-// no database, writing through sandbox.WriteFile instead of the host
+// no database, writing through the sandbox file API instead of the host
 // filesystem. Per-skill failure is logged and skipped, never fatal; only the
 // session read fails the call, mirroring the reference. A sentinel under
 // {workdir}/skills/ records the resolved set so a reclaiming pass over a
@@ -216,10 +216,11 @@ func materializeSkill(ctx context.Context, client sdk.Client, sb sandbox.Sandbox
 		return err
 	}
 	root := path.Join(workdir, "skills", r.Dir)
-	for _, f := range files {
-		if err := sb.WriteFile(ctx, path.Join(root, f.Path), f.Data); err != nil {
-			return err
-		}
+	batch := make([]sandbox.FileWrite, len(files))
+	for i, f := range files {
+		batch[i] = sandbox.FileWrite{Path: path.Join(root, f.Path), Data: f.Data}
 	}
-	return nil
+	// One call for the whole tree, for the reason the executor's twin gives:
+	// a file at a time costs one sandbox exec per member (#206).
+	return sb.WriteFiles(ctx, batch)
 }

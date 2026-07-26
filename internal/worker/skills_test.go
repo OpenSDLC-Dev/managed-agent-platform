@@ -111,6 +111,13 @@ func TestSetupSkillsOverTheWire(t *testing.T) {
 	if sb.files["/workspace/out.txt"] != "hello" {
 		t.Errorf("tool write = %q", sb.files["/workspace/out.txt"])
 	}
+	// The whole two-file tree went in ONE batched call, as the executor's twin
+	// asserts for the same reason (#206): a file at a time is one sandbox exec
+	// per member, and a skill may hold ten thousand.
+	if len(sb.bulkSizes) != 1 || sb.bulkSizes[0] != 2 {
+		t.Errorf("materializing a two-file skill made WriteFiles calls of sizes %v, want exactly one of size 2",
+			sb.bulkSizes)
+	}
 	// "latest" resolved client-side to the newest numeric version.
 	sentinel := sb.files["/workspace/skills/"+skills.SentinelName]
 	if !strings.Contains(sentinel, `"100"`) {

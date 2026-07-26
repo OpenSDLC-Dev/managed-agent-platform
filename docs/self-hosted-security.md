@@ -126,10 +126,13 @@ and worker launch whatever image `EXECUTOR_IMAGE` / `WORKER_IMAGE` names, defaul
 to `debian:stable-slim` for local development (`cmd/executor/main.go`,
 `cmd/worker/main.go`). The contract the platform imposes is a POSIX userland with
 `/bin/bash`. The **Kubernetes** backend needs more, and needs it hard: `setsid`
-for its exec wrapper, `tee`/`wc` for the write path's delivered-byte count, and a
-`stat` accepting `-c` (GNU or BusyBox), on which every file **read** exits —
-`internal/sandbox/k8s/client.go` is the exact list. On **Docker** that same `stat`
-is only wanted, not required (below). The `grep` built-in expects GNU
+for its exec wrapper, `tee`/`wc` for the write path's delivered-byte count, a
+`stat` accepting `-c` (GNU or BusyBox), on which every file **read** exits, and
+`tar`, which it extracts a bulk write's archive with inside the pod — an image
+without one loses skill materialization outright, where Docker hands the same
+archive to the daemon and needs nothing (#206). `internal/sandbox/k8s/client.go`
+is the exact list. On **Docker** that same `stat` is only wanted, not required
+(below). The `grep` built-in expects GNU
 grep/coreutils — a busybox-only image gets a clear tool error, not degraded
 behaviour.
 

@@ -856,6 +856,97 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 	return c.rename(ctx, tmp, path)
 }
 
+// WriteFiles lands a whole batch for two execs rather than one per member: the
+// members travel as a single archive the daemon extracts, and one exec then
+// renames them all into place. That is what #206 asked for — a small write's cost
+// here is mostly the exec, and a skill may hold ten thousand files.
+//
+// It is four steps, and the first two are what make it work on a sandbox that does
+// not run as root. The bookkeeping is delivered first, into the workdir, which
+// exists; an exec then makes the members' directories from it, INSIDE the sandbox,
+// so they belong to whoever the sandbox runs as. Only then are the members
+// delivered, and renamed. Letting the daemon make those directories instead would
+// make them root's, and a non-root sandbox could rename nothing into them —
+// measured: the whole batch fails there, where the file-at-a-time loop this
+// replaces succeeded because its own `mkdir -p` ran inside the sandbox too.
+//
+// Whatever fails after the bookkeeping has landed, the batch sheds what it put in
+// the sandbox on the way out; the caller's error is the one that matters, so the
+// shedding's own failure is never reported over it.
+func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error {
+	if len(files) == 0 {
+		return nil
+	}
+	b, err := sandbox.NewBulkWrite(c.workdir, files)
+	if err != nil {
+		return err
+	}
+	if err := c.putBulk(ctx, b.Bookkeeping); err != nil {
+		if containerGone(err) {
+			return c.gone()
+		}
+		c.discardBulk(ctx, b)
+		return err
+	}
+	if err := c.prepareBulk(ctx, b); err != nil {
+		c.discardBulk(ctx, b)
+		return err
+	}
+	if err := c.putBulk(ctx, b.Members); err != nil {
+		c.discardBulk(ctx, b)
+		if containerGone(err) {
+			return c.gone()
+		}
+		return err
+	}
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.BulkRenameShell +
+		fmt.Sprintf("__map_bulk_rename %s %s", shellQuote(b.Manifest), shellQuote(b.DirList))})
+	if err != nil {
+		// The bytes are landed and unnamed, and this exec is how they were to be
+		// named; shed them rather than leave the sandbox carrying a payload nothing
+		// will ever claim.
+		c.discardBulk(ctx, b)
+		return c.wrap(err)
+	}
+	if res.ExitCode == 0 {
+		return nil
+	}
+	return b.Fault("docker", res.ExitCode, res.Stderr)
+}
+
+// putBulk streams one of the batch's archives to the daemon, which extracts it at
+// the container's root. The tar is built on the fly over a pipe rather than
+// buffered, as the streaming single write's is: the members are already in memory,
+// and a second copy of a large skill is not worth having.
+func (c *container) putBulk(ctx context.Context, archive func(io.Writer) error) error {
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(archive(pw)) }()
+	err := c.api.putArchive(ctx, c.id, "/", pr)
+	pr.CloseWithError(err)
+	return err
+}
+
+// prepareBulk makes the members' directories inside the sandbox, which is also
+// where a path blocked by a non-directory is named.
+func (c *container) prepareBulk(ctx context.Context, b *sandbox.BulkWrite) error {
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.BulkPrepareShell +
+		fmt.Sprintf("__map_bulk_prepare %s", shellQuote(b.DirList))})
+	if err != nil {
+		return c.wrap(err)
+	}
+	if res.ExitCode == 0 {
+		return nil
+	}
+	return b.Fault("docker", res.ExitCode, res.Stderr)
+}
+
+// discardBulk sheds what a failed batch left in the sandbox. Its own failure is not
+// worth reporting over the write's, exactly as the single write's discard is not.
+func (c *container) discardBulk(ctx context.Context, b *sandbox.BulkWrite) {
+	_, _ = c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.BulkDiscardShell +
+		fmt.Sprintf("__map_bulk_discard %s %s", shellQuote(b.Manifest), shellQuote(b.DirList))})
+}
+
 // rename puts a landed temporary file at its target — the step that makes a write
 // atomic — after refusing the one target a rename would quietly do the wrong thing
 // with. `mv -f file dir` moves the file *into* the directory, so a target that is
