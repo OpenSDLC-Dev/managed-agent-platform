@@ -367,6 +367,73 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 		gone(t, tmp)
 	})
 
+	// The rename replaces the name, so the mode the target had goes with it unless
+	// the script puts it back on the temporary file first — `write` a script,
+	// `chmod +x` it, `edit` it, and it no longer runs (#204). This is the shell
+	// half of that; holding both backends to the same answer is the contract
+	// suite's job.
+	t.Run("ModeOfTheTargetSurvives", func(t *testing.T) {
+		path := dir + "/run.sh"
+		if err := os.WriteFile(path, []byte("old"), 0o755); err != nil {
+			t.Fatalf("stage an executable target: %v", err)
+		}
+		// Chmod'd rather than left to the create mode, which the host's umask
+		// would take the bits out of on a machine that runs with a tight one.
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatalf("make the target executable: %v", err)
+		}
+		code, tmp := run(t, []byte("new"), 3, path, gnuStatEnv(t)...)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0", code)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat the rewritten target: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o755 {
+			t.Errorf("mode = %o after the rewrite, want 755", got)
+		}
+		if got, err := os.ReadFile(path); err != nil || string(got) != "new" {
+			t.Errorf("target = %q, %v; want the bytes just written", got, err)
+		}
+		gone(t, tmp)
+	})
+
+	// `stat` comes off the agent's own PATH, so it chooses what mode the write
+	// applies — which is why the value has to be octal digits before it reaches
+	// `chmod`. Without that check the planted value need not be a mode at all:
+	// a symbolic one (`a+rwx` here) or an option (`--reference=` some setuid
+	// binary) is accepted by `chmod` just as happily, and the write lands bits no
+	// file involved ever had. Planted here because the guard is otherwise
+	// invisible to the suite — removing it leaves every other row green (#204).
+	t.Run("ANonOctalModeIsRefused", func(t *testing.T) {
+		path := dir + "/planted.sh"
+		if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+			t.Fatalf("stage the target: %v", err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatalf("give the target a mode worth carrying: %v", err)
+		}
+		bin := t.TempDir()
+		shim := "#!/bin/sh\necho a+rwx\n"
+		if err := os.WriteFile(bin+"/stat", []byte(shim), 0o755); err != nil {
+			t.Fatalf("plant the stat: %v", err)
+		}
+		code, tmp := run(t, []byte("new"), 3, path,
+			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if code != 0 {
+			t.Fatalf("exit %d, want 0 — a planted stat costs the mode, never the write", code)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat the written target: %v", err)
+		}
+		if got := info.Mode().Perm(); got&0o777 == 0o777 {
+			t.Errorf("mode = %o, want the planted a+rwx refused rather than applied", got)
+		}
+		gone(t, tmp)
+	})
+
 	// A path blocked by a non-directory is the caller's to fix, and `mkdir -p` is
 	// where that shows up: the shared shell names it so the model gets a tool error
 	// rather than the executor getting a sandbox fault (#71).
@@ -419,8 +486,8 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 	})
 }
 
-// gnuStatEnv supplies a `stat -c %s` shim when — and only when — the host's own
-// stat rejects `-c`, which BSD stat does. readScript reaches its size gate before
+// gnuStatEnv supplies a `stat -c` shim when — and only when — the host's own stat
+// rejects `-c`, which BSD stat does. readScript reaches its size gate before
 // anything under test here, so on a macOS dev host the script would die there and
 // the tests below would cover nothing; on Linux and in CI the real binary the
 // image contract names still runs. It returns the environment to hand the script,
@@ -431,8 +498,12 @@ func gnuStatEnv(t *testing.T) []string {
 		return nil
 	}
 	bin := t.TempDir()
-	// readScript's one and only stat invocation is `stat -c %s "$f"`.
-	shim := "#!/bin/sh\nexec /usr/bin/stat -f %z \"$3\"\n"
+	// The two formats the scripts ask for: `%s` is readScript's size gate, `%a`
+	// the shared preserve-mode shell's. BSD `%Lp` is the permission bits alone —
+	// it drops the setuid/setgid/sticky bits GNU `%a` would show, which no row
+	// here stages.
+	shim := "#!/bin/sh\ncase \"$2\" in\n  %s) exec /usr/bin/stat -f %z \"$3\" ;;\n" +
+		"  %a) exec /usr/bin/stat -f %Lp \"$3\" ;;\nesac\nexit 1\n"
 	if err := os.WriteFile(bin+"/stat", []byte(shim), 0o755); err != nil {
 		t.Fatalf("stage stat shim: %v", err)
 	}

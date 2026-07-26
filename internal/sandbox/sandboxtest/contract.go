@@ -722,7 +722,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 			t.Fatalf("stage the link's target: %v", err)
 		}
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{
-			Command: "mkdir -p adir && ln -s pointee.txt tolink && ln -s adir todir",
+			Command: "mkdir -p adir && ln -s pointee.txt tolink && ln -s adir todir && chmod 0600 pointee.txt",
 		})
 		if err != nil || res.ExitCode != 0 {
 			t.Fatalf("stage the symlinks: %+v, %v", res, err)
@@ -742,9 +742,68 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		} else if strings.TrimSpace(res.Stdout) != "" {
 			t.Errorf("the name is still a symlink; want a regular file in its place")
 		}
+		// The mode says the same thing from the other side, and it is the half that
+		// would fail silently: a link carries no mode worth having, so the file
+		// replacing it is a fresh one. `stat -c %a` on a symlink is an lstat, so a
+		// preservation that did not skip links would land the *link's* own 0777 here
+		// — world-writable, on an agent-controlled filesystem (#204).
+		if got := fileMode(t, sb, workdir+"/tolink"); got != "644" {
+			t.Errorf("the file replacing the symlink has mode %s, want 644", got)
+		}
+		if got := fileMode(t, sb, workdir+"/pointee.txt"); got != "600" {
+			t.Errorf("what the link pointed at has mode %s, want 600 — untouched", got)
+		}
 
 		if err := sb.WriteFile(ctx, workdir+"/todir", []byte("x")); !errors.Is(err, sandbox.ErrIsDirectory) {
 			t.Errorf("write onto a symlink to a directory: err = %v, want ErrIsDirectory", err)
+		}
+	})
+
+	// The other thing a rename replaces if nothing stops it: the target's mode.
+	// The file that lands carries the *temporary* file's bits, so the workflow
+	// that breaks is an ordinary one — `write` a script, `chmod +x` it in bash,
+	// `edit` it, and it no longer runs (issue #204). Both backends put the
+	// target's mode back on the temporary file before the move, or this row is
+	// papering over a divergence rather than pinning a contract.
+	t.Run("WriteKeepsTheTargetsMode", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		script := workdir + "/run.sh"
+		if err := sb.WriteFile(ctx, script, []byte("#!/bin/sh\necho first\n")); err != nil {
+			t.Fatalf("stage the script: %v", err)
+		}
+		// A target that did not exist has no mode to carry over, and every backend
+		// lands the same one — the convergence the preservation is built on. It is
+		// 0644 by two different routes, and only one of them is fixed: the docker
+		// backend's tar header says so, while the k8s backend's `tee` derives it
+		// from the image's umask. An image running a umask other than 022 would
+		// fail here on k8s alone — which is the divergence itself, reported.
+		if got := fileMode(t, sb, script); got != "644" {
+			t.Errorf("a file that did not exist lands mode %s, want 644", got)
+		}
+
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "chmod 0755 " + script}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("chmod the script executable: %+v, %v", res, err)
+		}
+		if err := sb.WriteFile(ctx, script, []byte("#!/bin/sh\necho edited\n")); err != nil {
+			t.Fatalf("rewrite the script: %v", err)
+		}
+		if got := fileMode(t, sb, script); got != "755" {
+			t.Errorf("after a rewrite the mode is %s, want 755", got)
+		}
+		// Which is the whole point of the bits: the thing still runs.
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: script}); err != nil ||
+			res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "edited" {
+			t.Errorf("run the rewritten script: %+v, %v; want it executable and printing %q", res, err, "edited")
+		}
+
+		// The streaming write shares the rename, so it must share the answer.
+		streamed := "#!/bin/sh\necho streamed\n"
+		if err := sb.WriteFileStream(ctx, script, strings.NewReader(streamed), int64(len(streamed))); err != nil {
+			t.Fatalf("stream-write the script: %v", err)
+		}
+		if got := fileMode(t, sb, script); got != "755" {
+			t.Errorf("after a streamed rewrite the mode is %s, want 755", got)
 		}
 	})
 
@@ -939,6 +998,22 @@ func firstDiff(a, b []byte) int {
 		}
 	}
 	return min(len(a), len(b))
+}
+
+// fileMode reads a path's permission bits from inside the sandbox, as the octal
+// digits `stat -c %a` prints them. The image contract carries a `stat` accepting
+// `-c` for the write path itself, so asking this way costs the suite nothing the
+// backends do not already require.
+func fileMode(t *testing.T, sb sandbox.Sandbox, path string) string {
+	t.Helper()
+	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "stat -c %a " + path})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("stat %s: exit %d: %s", path, res.ExitCode, res.Stderr)
+	}
+	return strings.TrimSpace(res.Stdout)
 }
 
 // countProcesses counts live processes in the sandbox whose command line starts

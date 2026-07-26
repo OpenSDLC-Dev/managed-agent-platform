@@ -1,6 +1,10 @@
 // Package docker is the v1 sandbox backend: one disposable container per
 // session, driven over the Docker Engine API. The image must carry /bin/bash
-// at that exact path (the plan's image contract) and a POSIX userland.
+// at that exact path (the plan's image contract) and a POSIX userland. A `stat`
+// accepting `-c` (GNU or BusyBox) is wanted rather than required: the write path
+// reads the target's mode with it, and an image without one still writes — it
+// lands the file 0644, as every write did before #204. The k8s backend asks for
+// more, and asks harder (internal/sandbox/k8s/client.go).
 package docker
 
 import (
@@ -858,9 +862,14 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 // one is answered with the sentinel a read of a directory gets, and the temporary
 // file is removed rather than left behind. The daemon's own extraction, given the
 // same target, deletes the directory and puts the file where it was (#71).
+//
+// The move is also where the target's permission bits would otherwise be lost, so
+// the shared __map_preserve_mode carries them onto the temporary file first — the
+// k8s backend's write script calls the same function at the same point (#204).
 func (c *container) rename(ctx context.Context, tmp, path string) error {
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: fmt.Sprintf(
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.PreserveModeShell + fmt.Sprintf(
 		"if [ -d %[2]s ]; then rm -f %[1]s; exit %[3]d; fi\n"+
+			"__map_preserve_mode %[2]s %[1]s\n"+
 			"mv -f %[1]s %[2]s || { rm -f %[1]s; exit 1; }\n"+
 			// Asked again, because the first answer describes a moment that has
 			// passed: something in the sandbox can make the target a directory in

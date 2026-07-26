@@ -72,6 +72,56 @@ copy of an entry here.
 
 ### Fixed
 
+- **A rewritten file keeps the permission bits it had**
+  ([#204](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/204)). Both sandbox backends
+  make a write atomic by landing the bytes under a temporary name and renaming them into place
+  ([#71](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/71)), and a rename replaces
+  the *name* — so the file that ended up at the target carried the **temporary** file's mode
+  (`0644`), not the mode the target had. Measured on the k8s backend, a `755` script came back `644`
+  and `./run.sh` answered `Permission denied`; the workflow that breaks is an ordinary one — `write`
+  a script, `chmod +x` it in bash, `edit` it, and it no longer runs. (The docker backend has always
+  written `0644`, its tar header being a fixed `0o644`, so the atomic-write change converged k8s onto
+  docker rather than regressing one backend against the other — which is why it was recorded as a
+  residual there rather than treated as a blocker.)
+
+  Both backends now carry the bits over before the move, through **one** shared shell function —
+  `internal/sandbox/filefault.go`'s `__map_preserve_mode`, beside the `__map_path_fault` the same two
+  already embed, so the copies cannot drift. An existing regular target's `stat -c %a` mode is
+  `chmod`'d onto the temporary file; nothing is carried where there is nothing to carry, so a target
+  that did not exist still lands `0644` (a fixed tar header on docker, the image's umask on k8s), and
+  a symlink's own mode is not taken — `stat -c %a` is an lstat, so taking it would dress the file
+  replacing the link in the link's own **`0777`**. The mode is checked to be octal digits and passed
+  as one quoted argument, so a `stat` planted on the agent's PATH can choose only a mode the agent
+  could set itself with `chmod`, never an option (`--reference=`) or a second command. These are the
+  same three steps the Claude Code harness's own atomic write takes — a harness-design observation
+  from the local snapshot, not a wire behavior of the managed-agents reference, and the opposite of
+  what the SDK's own host-side `agenttoolset` does (a fixed `0644`), now both recorded in
+  DIVERGENCES.md.
+
+  **Where it does not apply, measured rather than assumed.** Every failure of the step is silent by
+  design — the bytes are landed and the write is one `mv` from succeeding, so a step that cannot run
+  costs the mode, not the write. Two paths reach it. An image whose `stat` cannot do `-c` keeps the
+  mode behavior it had before. And on docker the temporary file is extracted by the **daemon** rather
+  than created by the sandbox user, so an image whose default user is not root cannot `chmod` it and
+  the write lands `0644` where k8s preserves the mode — a residual divergence reproduced on a live
+  daemon and tracked as
+  [#209](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/209), which carries the
+  measured `copyUIDGID` candidate fix. This closes the first of the two residuals #71 left behind;
+  #205, a target that cannot be renamed onto at all, still stands. The docker image contract grows a
+  `stat` accepting `-c` — wanted rather than required, since a write without one still succeeds.
+
+  Pinned where a divergence would show: a shared contract row (`WriteKeepsTheTargetsMode`) both
+  backends run stages a script, asserts a file that did not exist lands `0644`, `chmod 0755`s it,
+  rewrites it through `WriteFile`, and asserts both that the mode survived and that the script still
+  *runs* — then rewrites it again through `WriteFileStream`, which shares the rename. The row fails
+  on the pre-fix code on both backends (docker: mode `644`, exit `126` `Permission denied`), and the
+  k8s write script's own host-shell test pins the shell half without needing a cluster. Both guards
+  are pinned the same way, because a guard whose removal no test notices is a guard that will be
+  removed: `WriteOntoSymlink` now asserts the file replacing a link lands `0644` while the pointee
+  keeps its `0600` (delete the `-h` test and it lands `0777`), and `ANonOctalModeIsRefused` plants a
+  `stat` emitting `a+rwx` (delete the octal check and that lands `0777` too — a planted `stat` need
+  not emit a mode at all).
+
 - **A hung-then-revived BYOC worker can no longer force-stop the item a replacement worker is
   running** ([#62](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/62)). The wire's
   work lifecycle carries no ownership proof — stop's body is `{force}` only, and the work object
