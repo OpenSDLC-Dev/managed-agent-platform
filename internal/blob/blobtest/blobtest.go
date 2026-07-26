@@ -7,15 +7,18 @@
 package blobtest
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // Image is the pinned MinIO the harness runs — the same release deploy/compose
@@ -97,22 +100,44 @@ func hostPort(containerID string) (string, error) {
 	return first[idx+1:], nil
 }
 
+// waitReady blocks until the container answers an S3 request, which is a
+// strictly stronger signal than its readiness endpoint gives: MinIO's
+// /minio/health/ready handler returns 200 even when the object layer is nil,
+// reporting that state only in an x-minio-server-status header it sets
+// alongside the 200. A suite admitted in that window fails its first call with
+// "Server not initialized yet, please try again", instantly — minio-go retries
+// that 503 on the bucket HEAD but not on the bucket-location lookup that
+// precedes it, which is the request s3.New actually died on (#208).
+//
+// So gate on the call the suite itself makes, against a bucket name no test
+// uses. The client is built the way a backend under test builds it — no region
+// configured — so the probe covers the same location lookup.
 func waitReady(endpoint string, timeout time.Duration) error {
+	client, err := minio.New(endpoint, &minio.Options{
+		Creds: credentials.NewStaticV4(RootUser, RootPassword, ""),
+	})
+	if err != nil {
+		return err
+	}
+	const poll = 250 * time.Millisecond
 	deadline := time.Now().Add(timeout)
-	client := &http.Client{Timeout: 2 * time.Second}
+	// One deadline for the whole gate: minio-go's own retries stop with it
+	// rather than outliving the loop that started them.
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
 	for {
-		resp, err := client.Get("http://" + endpoint + "/minio/health/ready")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
-			err = fmt.Errorf("health status %d", resp.StatusCode)
+		if _, err = client.BucketExists(ctx, "blobtest-probe"); err == nil {
+			return nil
 		}
-		if time.Now().After(deadline) {
+		// Give up while the error is still one a request produced. Sleeping
+		// into the deadline instead would spend the last attempt on a context
+		// the shared deadline has already expired, and Main would report
+		// "context deadline exceeded" rather than what the server said — the
+		// line that made #208 diagnosable at all.
+		if time.Now().Add(poll).After(deadline) {
 			return err
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(poll)
 	}
 }
 

@@ -72,6 +72,47 @@ copy of an entry here.
 
 ### Fixed
 
+- **The blob contract suite waits for MinIO's object layer, not for a readiness endpoint that
+  answers before it** ([#208](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/208)).
+  `blobtest`'s harness admitted the suite as soon as `GET /minio/health/ready` returned 200, and
+  MinIO's handler returns 200 whether or not the object layer exists — a nil one is reported only in
+  the `x-minio-server-status` header it sets alongside that 200 (`ReadinessCheckHandler`, verbatim in
+  the pinned release). The suite then ran against a server that could not serve S3 yet and every
+  subtest died in `s3.New` on "Server not initialized yet, please try again". It failed that way on
+  PR [#203](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/203)'s coverage job, on a
+  diff of one Go comment and four markdown files; a rerun of the same commit was green.
+
+  Each subtest failed in 0.00s, which is what identifies the request that broke: minio-go retries a
+  503 on the bucket `HEAD` that `BucketExists` issues, but not on the region lookup that precedes it
+  for a client with no region configured (`GET /bucket/?location=`). That one fails through
+  `newRequest`, where only minio-go's `retryableS3Codes` are retried and MinIO's
+  `XMinioServerNotInitialized` is not among them — so the very first thing `s3.New` did returned
+  instantly, having never reached the request the client would have retried.
+
+  The gate is now that same call: one `BucketExists` against a bucket name no test uses, retried
+  under the one 120s deadline the health poll had, with the client built the way a backend under
+  test builds it (no region) so the probe covers the location lookup too. The health endpoint is no
+  longer consulted — passing it was never the question. On a warm container the probe costs a single
+  round trip: MinIO answers the location lookup for a bucket nothing created with a 404
+  `NoSuchBucket`, which minio-go reports as a plain "no", and no `HEAD` follows (traced against the
+  pinned image). The loop stops one poll interval short of the deadline rather than spending its
+  last attempt on an already-expired context, so what a failed gate prints is the server's own
+  refusal instead of a bare `context deadline exceeded` — the line that made this issue diagnosable
+  in the first place.
+
+  Two stub-server tests pin the behavior, each fed a server that answers `/minio/health/ready` with
+  200 from the first request the way MinIO does, header and all: one that refuses S3 twice and then
+  serves (the gate must keep going — proved by the S3 request count, and by the bucket-location
+  lookup among them, which a region-configured probe would silently stop making), and one whose
+  object layer never comes up (the gate must fail, on the server's own words). Each of those fails
+  against the pre-fix gate, which returned after 0 S3 requests; the check that the refusal survives
+  additionally fails against a loop that sleeps into its own deadline.
+
+  The same weak signal is still wired into the helm chart's MinIO `readinessProbe`, where it can
+  restart a controlplane pod on a fresh install; that is deployment rather than test scope and is
+  tracked as [#216](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/216).
+  `deploy/compose` is unaffected — it gates on `mc ready local`, which is the stronger signal.
+
 - **Materializing a skill now costs a fixed couple of sandbox execs instead of one per file**
   ([#206](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/206)). Making the docker
   backend's write atomic (#71) added a rename step, and a rename is a second round trip: measured
@@ -266,6 +307,32 @@ copy of an entry here.
   with their id assertions relaxed, so neither rests on a happy path that would hold either way.
 
 ### Changed
+
+- **Whatever a run spawns, it owns** (`.claude/agents/verifier.md`, CLAUDE.md, AGENTS.md). Nothing
+  said so, and two leaks in one afternoon showed the cost. Verifying the fix above, a stress probe
+  ended with `LOADPIDS=$(jobs -p); kill $LOADPIDS` — which under zsh, the shell those tool calls
+  run, collects nothing at all, because the command substitution runs in a subshell holding no jobs
+  of its own — and twelve orphaned busy loops outlived the PASS by two hours at a core each. Separately, killing a `make verify` mid-run leaked
+  six fixture containers, because `pgtest` and `blobtest` remove theirs in a `defer` a SIGTERM never
+  reaches.
+
+  The verifier's new ground rule is the general one rather than a patch for that snippet: every
+  process and container it starts is its own to reap, and the reap is confirmed by looking (`ps`,
+  and `docker ps -a`, since a stopped-but-unremoved container still counts) rather than by a
+  `kill`'s exit status. Two traps are named because both were measured: hoisting `jobs -p` out of
+  the substitution does not fix the zsh case either, since zsh prints job lines and not bare pids
+  (bash's `$(jobs -p)` does return them, which is what makes the trap easy to walk into); and `$!`
+  names only the process started, not what it spawned, so killing the pid of `( sleep 40 & wait ) &`
+  leaves the `sleep` orphaned — reap the job or the whole process group. Ownership is established by
+  recording it, not by inferring it later: note what is already running before starting, keep the
+  pids you spawn, and leave anything you cannot attribute alone. Anything left running deliberately
+  goes in the report.
+
+  The container leak was the *maker's*, not the verifier's, so the same ownership rule lands in
+  CLAUDE.md's working conventions, with the sweep and the one caveat that matters: a parallel
+  session's fixtures and the local kind cluster are indistinguishable from your own in `docker ps`,
+  so remove only what your run started. AGENTS.md picks up the same warning where it already
+  describes the gate's Docker requirements.
 
 - **The `/code-review` reviewer pin moved to Opus 5** (`.claude/skills/run-reviews/SKILL.md`,
   CLAUDE.md), superseding the Opus 4.8 pin recorded when the review procedure moved into that
