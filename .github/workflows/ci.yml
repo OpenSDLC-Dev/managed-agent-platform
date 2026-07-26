@@ -109,13 +109,15 @@ jobs:
           fi
           echo "ok: cipher paths (positive and guards)"
       - name: bundled MinIO gates readiness on its object layer
+        # The probe path is asserted exactly, not grepped for: a substring match
+        # over the whole template also reads the comment that explains the
+        # choice, so documenting the rejected endpoint there would fail the job.
         run: |
-          out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/minio.yaml)"
-          echo "$out" | grep -q 'path: /minio/health/cluster' \
-            || { echo "MinIO's readinessProbe must gate on /minio/health/cluster" >&2; exit 1; }
-          echo "$out" | grep -q '/minio/health/ready' \
-            && { echo "/minio/health/ready answers 200 before the object layer can serve S3 (#216)" >&2; exit 1; }
-          echo "ok: minio readiness probe"
+          p="$(helm template t "$CHART" -f "$VALUES" --show-only templates/minio.yaml \
+            | awk '/readinessProbe:/ { probe = 1 } probe && $1 == "path:" { print $2; exit }')"
+          [ "$p" = "/minio/health/cluster" ] \
+            || { echo "MinIO's readinessProbe must gate on /minio/health/cluster (#216); rendered: ${p:-<none>}" >&2; exit 1; }
+          echo "ok: minio readiness probe is $p"
       - name: required-value guard fires (missing controlplane.apiKey)
         run: |
           if helm template t "$CHART" --set image.tag=x \

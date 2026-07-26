@@ -55,12 +55,10 @@ spec:
                   name: {{ include "map.secretName" . }}
                   key: blob-secret-key
           readinessProbe:
+            # The cluster endpoint, not /minio/health/ready: only this one
+            # answers 503 while the object layer cannot serve S3, so the
+            # headless Service above resolves only when usable (#216).
             httpGet:
-              # /cluster, not /ready: /ready answers 200 before the object layer
-              # exists, and an S3 call in that window gets
-              # XMinioServerNotInitialized. The Service above is headless, so
-              # this probe is what admits the controlplane and executor, each of
-              # which builds its store at startup and exits when that fails (#216).
               path: /minio/health/cluster
               port: http
             initialDelaySeconds: 5
