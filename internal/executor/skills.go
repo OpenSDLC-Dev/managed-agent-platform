@@ -217,7 +217,7 @@ func (e *Executor) materializeSkill(ctx context.Context, sb sandbox.Sandbox, wor
 	}
 	// One call for the whole tree: written a file at a time, a skill costs one
 	// sandbox exec per member — about 14ms each, and up to 10,000 members
-	// (#206) — where the batch costs one for all of them. The failure semantics
+	// (#206) — where the batch costs a fixed couple for all of them. The failure semantics
 	// are the same either way (the first failure stops the run and what landed
 	// stays), so this skill is skipped and re-materialized on the next pass.
 	return sb.WriteFiles(ctx, batch)

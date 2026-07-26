@@ -72,7 +72,7 @@ copy of an entry here.
 
 ### Fixed
 
-- **Materializing a skill now costs one sandbox exec instead of one per file**
+- **Materializing a skill now costs a fixed couple of sandbox execs instead of one per file**
   ([#206](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/206)). Making the docker
   backend's write atomic (#71) added a rename step, and a rename is a second round trip: measured
   against a real daemon on a warm directory, a buffered `WriteFile` costs 20.4ms of which 13.8ms is
@@ -108,15 +108,16 @@ copy of an entry here.
   batch failed outright with `mv: Permission denied` where the file-at-a-time loop it replaces
   succeeded, because that loop's own `mkdir -p` ran inside the sandbox. So the batch delivers its
   bookkeeping first and makes the members' directories from it *in the sandbox*, exactly as the
-  single write always did, before the members are delivered and renamed. The archive carries no directory entries on purpose —
-  an explicit one chmods a directory that already exists — so the parents a member needs are left to
-  the untar, which creates them `0755` with the file at `0644` on both backends. Those `0755`
-  directories are the platform's answer rather than the image's, and deliberately not the single
-  write's: `mkdir -p` runs in the sandbox under the image's umask, so a hardened image gets `0700`
-  there and `0755` here. The docker daemon extracts on the host and fixes `0755` whatever the image
-  says, so the backends can agree only by fixing it too — and the `umask 022` that does it on k8s is
-  load-bearing anyway, since a **non-root** sandbox user extracting under a `077` umask lands the
-  file `0600` without it, where #212 requires `0644`. Four new contract rows hold both backends to the
+  single write always did, before the members are delivered and renamed. The archive carries no
+  directory entries on purpose — an explicit one chmods a directory that already exists — so a
+  member's parents are made by that prepare pass on docker and by the untar on k8s, `0755` either
+  way, with the file at `0644` on both backends. Those `0755` directories are the platform's answer
+  rather than the image's, and deliberately not the single write's: its `mkdir -p` takes the image's
+  umask, so a hardened image gets `0700` there and `0755` here. Both scripts fix `umask 022` to get
+  it — a host-side untar creates `0755` whatever the image says, so agreeing with it was the only
+  way for the two backends to agree at all — and that umask is load-bearing besides, since a
+  **non-root** sandbox user extracting under a `077` umask lands the file `0600` without it, where
+  #212 requires `0644`. Four new contract rows hold both backends to the
   same answers — the round trip and the modes it lands, stopping at the first failure, a blocked
   parent path, and an existing target's mode — and the destroyed-sandbox row now asks a bulk write
   the same question it asks a read. Planned in

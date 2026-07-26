@@ -31,11 +31,17 @@ import (
 // staged on the host, and returns its exit code and stderr. The paths travel as
 // arguments, the form the k8s backend uses and the one that leaves the shell
 // nothing to expand.
+//
+// The shell is invoked under a hostile `umask 077`, which is what a hardened
+// image gives it. Inheriting the test process's own 022 would let the prepare
+// pass's mode assertion pass on the ambient umask rather than on the `umask 022`
+// the pass sets, so the one line the plan calls load-bearing could be deleted
+// with the suite still green.
 func bulkShell(t *testing.T, shell, fn, manifest, dirList string) (int, string) {
 	t.Helper()
 	var stderr bytes.Buffer
 	cmd := exec.Command("/bin/bash", "-c",
-		shell+"\n"+fn+" \"$1\" \"$2\"", "map-bulk-test", manifest, dirList)
+		"umask 077\n"+shell+"\n"+fn+" \"$1\" \"$2\"", "map-bulk-test", manifest, dirList)
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err == nil {
@@ -213,8 +219,8 @@ func TestBulkPrepareShell(t *testing.T) {
 	if err != nil || !fi.IsDir() {
 		t.Fatalf("the prepare pass did not make the directory the batch needs: %v", err)
 	}
-	// 0755 whatever the umask the pass inherits, so the answer matches the one a
-	// host-side untar gives on the other backend.
+	// 0755 whatever the umask the pass inherits — bulkShell hands it 077 — so the
+	// answer matches the one a host-side untar gives on the other backend.
 	if got := fi.Mode().Perm(); got != 0o755 {
 		t.Errorf("a directory the batch created has mode %o, want 755", got)
 	}

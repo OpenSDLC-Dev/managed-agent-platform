@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
@@ -121,10 +122,16 @@ func TestBulkWriteArchiveShape(t *testing.T) {
 	}
 
 	// A batch is replayable: a delivery that failed is retried from the same value.
+	// The two builds straddle a second boundary on purpose. A tar header's mtime
+	// has one-second granularity, so two archives built microseconds apart match
+	// even when every entry stamps its own clock — the assertion would hold
+	// against the bug it exists to catch, and pin nothing.
 	var first, second bytes.Buffer
 	if err := b.Archive(&first); err != nil {
 		t.Fatalf("re-archive: %v", err)
 	}
+	now := time.Now()
+	time.Sleep(now.Truncate(time.Second).Add(time.Second + 10*time.Millisecond).Sub(now))
 	if err := b.Archive(&second); err != nil {
 		t.Fatalf("re-archive: %v", err)
 	}

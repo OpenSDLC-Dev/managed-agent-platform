@@ -812,8 +812,8 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
-	// A bulk write lands a whole set of files for one exec, and every member must
-	// land exactly as WriteFile lands one: parents created, bytes verbatim,
+	// A bulk write lands a whole set of files for a fixed couple of execs, and
+	// every member must land exactly as WriteFile lands one: parents created, bytes verbatim,
 	// overwrites truncating. The shape is a skill being materialized — many small
 	// files across nested directories — with one large member, because the batch
 	// travels as a single archive and a member spanning many stream buffers is

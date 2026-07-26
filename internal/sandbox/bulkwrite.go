@@ -12,11 +12,19 @@ import (
 )
 
 // This file is the bulk write path's shared half, as filefault.go is the single
-// write's. Both backends land a batch the same way — one archive carrying a
-// manifest and one temporary file per member, then one exec that renames every
-// member into place — so the archive, the manifest format and the shell live
-// here once. What differs is only how the archive travels: the docker daemon
-// extracts it, the k8s backend pipes it through `tar` inside the pod.
+// write's. Both backends land a batch the same way — an archive carrying a
+// manifest and one temporary file per member, then the exec that renames every
+// member into place — so the archive, the manifest format and the shells live
+// here once.
+//
+// What differs is who extracts the archive, and that decides who owns what it
+// creates. The k8s backend pipes it through `tar` inside the pod, so the members
+// and their parents are the sandbox user's, and one exec does the whole batch.
+// The docker daemon extracts on the host as root, so parents it created would
+// belong to root and a non-root sandbox could rename nothing into them: that
+// backend delivers the bookkeeping, runs BulkPrepareShell to make the
+// directories inside the sandbox, then delivers the members — two execs,
+// still a fixed cost rather than one per member.
 
 // FileWrite is one member of a bulk write. Path must be absolute and clean
 // (`/a/b`, never `/a/../b` or `/a/b/`), because it also names an entry in the
