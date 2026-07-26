@@ -72,6 +72,58 @@ copy of an entry here.
 
 ### Fixed
 
+- **A file a sandbox write creates lands `0644` on both backends, instead of on the image's umask on
+  one of them** ([#212](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/212)). The two
+  backends reached that mode by different routes and only one of them was the platform's: docker
+  extracts the temporary file from a tar whose header mode is a fixed `0o644`, while k8s creates it
+  with `tee`, which honors the exec process's **umask** — `0644` on an image running the usual `022`,
+  `0600` on a hardened `077`. The same `write` came back with different bits depending on which
+  backend ran it, and the shared contract row asserting `0644` for a created file
+  (`WriteKeepsTheTargetsMode`) was structural on docker but held on k8s only because the suite's
+  image runs `022` — a suite asserting a contract one backend meets by coincidence, which is the
+  failure mode [#204](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/204) was careful
+  to avoid. It predates the atomic-rename work rather than regressing out of it: `tee` created the
+  target directly before [#71](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/71) and
+  creates the temporary file after it, and the umask applied either way.
+
+  The k8s write script now sets `umask 022` itself, after its `mkdir -p` and before the `tee`. The
+  placement is deliberate on both sides: an existing regular target's own bits still win, because
+  `__map_preserve_mode` chmods over it later (#204); and the directories a write creates keep taking
+  the image's umask, which is what the docker backend's own `mkdir -p` exec does too — moving the
+  line earlier would have traded a file divergence for a directory one. `umask` is a bash builtin,
+  so unlike the `stat` and `chmod` the preservation step reaches for, nothing planted on the agent's
+  PATH can answer for it.
+
+  What it costs, stated rather than discovered: an operator can no longer have a hardened k8s
+  sandbox image default agent-written files to `0600`, and every umask whose **write** bits differ
+  from `022`'s moves, not only tighter ones — a group-oriented `007` image landed `0660` and now
+  lands `0644`, adding other-read as it drops group-write. The mode a sandbox write lands is now the
+  platform's answer on both backends — which is also what the reference's own host-side runner gives
+  (`agenttoolset`'s `atomicWriteFile(path, data, 0o644)`). A `chmod` inside the sandbox still sets
+  whatever mode is wanted, and a rewrite preserves it from there. The write path this governs is not
+  only the `write`/`edit` tools: session-resource mounts, uploaded skill files and the persistent
+  shell's state files land through it too, which docs/self-hosted-security.md now says.
+
+  One route still answers otherwise and is left standing rather than papered over: a parent
+  directory carrying a **default POSIX ACL** supplies a created file's bits and has the umask
+  ignored, so k8s lands what the ACL says while docker's tar header still says `0644` (measured on
+  alpine with `setfacl -d -m u::rw-,g::rw-,o::rw-`: `0666` under a `077` umask, where a plain
+  directory gives `0600`; a restrictive default ACL tightens the same way under an `022` one).
+  Setting one takes the agent's own `setfacl` or a deliberate image build, both of which can set the
+  mode anyway, and chmod'ing over it would move a created file's mode onto a binary from the agent's
+  PATH to hold a case the contract suite cannot see. Registered in DIVERGENCES.md and tracked as
+  #213.
+
+  `AFreshFileIgnoresTheImagesUmask` runs the k8s write script under a `077` umask — the hardened
+  case — and asserts the created file is `0644` anyway, the directory the write created is still
+  `0700` (the placement: the umask sits after the `mkdir -p`, and moving it above fails that
+  assertion with `mode 755`), and that a `0600` target rewritten under the same umask keeps its
+  `0600`, which is what an unconditional `chmod 644` after the preservation would break. It fails
+  against the pre-fix script (`mode 600 ... want 644`). The `WriteFile` contract in
+  `internal/sandbox/sandbox.go`, `PreserveModeShell`'s comment, the contract row's own comment,
+  ARCHITECTURE.md, DIVERGENCES.md and the operator-facing docs/self-hosted-security.md all lose the
+  "the image's umask on k8s" qualifier.
+
 - **A rewritten file keeps the permission bits it had**
   ([#204](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/204)). Both sandbox backends
   make a write atomic by landing the bytes under a temporary name and renaming them into place
@@ -85,18 +137,18 @@ copy of an entry here.
   residual there rather than treated as a blocker.)
 
   Both backends now carry the bits over before the move, through **one** shared shell function —
-  `internal/sandbox/filefault.go`'s `__map_preserve_mode`, beside the `__map_path_fault` the same two
-  already embed, so the copies cannot drift. An existing regular target's `stat -c %a` mode is
+  `internal/sandbox/filefault.go`'s `__map_preserve_mode`, beside the `__map_path_fault` the same
+  two already embed, so the copies cannot drift. An existing regular target's `stat -c %a` mode is
   `chmod`'d onto the temporary file; nothing is carried where there is nothing to carry, so a target
-  that did not exist still lands `0644` (a fixed tar header on docker, the image's umask on k8s), and
-  a symlink's own mode is not taken — `stat -c %a` is an lstat, so taking it would dress the file
-  replacing the link in the link's own **`0777`**. The mode is checked to be octal digits and passed
-  as one quoted argument, so a `stat` planted on the agent's PATH can choose only a mode the agent
-  could set itself with `chmod`, never an option (`--reference=`) or a second command. These are the
-  same three steps the Claude Code harness's own atomic write takes — a harness-design observation
-  from the local snapshot, not a wire behavior of the managed-agents reference, and the opposite of
-  what the SDK's own host-side `agenttoolset` does (a fixed `0644`), now both recorded in
-  DIVERGENCES.md.
+  that did not exist still lands `0644` (a fixed tar header on docker, the image's umask on k8s —
+  since made uniform, above), and a symlink's own mode is not taken — `stat -c %a` is an lstat, so
+  taking it would dress the file replacing the link in the link's own **`0777`**. The mode is
+  checked to be octal digits and passed as one quoted argument, so a `stat` planted on the agent's
+  PATH can choose only a mode the agent could set itself with `chmod`, never an option
+  (`--reference=`) or a second command. These are the same three steps the Claude Code harness's own
+  atomic write takes — a harness-design observation from the local snapshot, not a wire behavior of
+  the managed-agents reference, and the opposite of what the SDK's own host-side `agenttoolset` does
+  (a fixed `0644`), now both recorded in DIVERGENCES.md.
 
   **Where it does not apply, measured rather than assumed.** Every failure of the step is silent by
   design — the bytes are landed and the write is one `mv` from succeeding, so a step that cannot run

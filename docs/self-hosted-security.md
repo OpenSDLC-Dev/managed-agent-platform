@@ -146,6 +146,26 @@ preserves it
 run a non-root image (recommended below) and depend on the executable bit surviving
 a rewrite, that is the case to know about.
 
+A file a write **creates** has no bits to preserve, and lands `0644` on both
+backends — the platform's answer rather than the image's: Docker's tar header fixes
+it, and the Kubernetes write script sets `umask 022` before creating the file
+([#212](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/212)). That
+path is not only the agent's `write`/`edit` tools — session-resource mounts,
+uploaded skill files and the persistent shell's own state files all land through
+it — so an image whose default umask is tighter does **not** make any of them
+`0600`; a `chmod` inside the sandbox does, and a later rewrite then preserves it.
+Any umask whose **write** bits differ from `022`'s moves, not only a tighter one
+(the execute bits are inert — a file create asks for `0666`): a group-oriented `007`
+image landed `0660` and now lands `0644`, which **adds** other-read as it drops
+group-write. The **directories** on the way there are not covered: both backends
+`mkdir -p` them under the image's umask, so a hardened image still gets `0700`
+parents and its directory-level gating stands — which is where to put the
+protection if you were relying on the file bits. A **default POSIX ACL** on a
+directory is the one remaining lever over a created file's own bits on Kubernetes:
+the kernel takes them from the ACL and ignores the umask, so a write lands what the
+ACL says (Docker's tar header is unaffected — the two backends answer differently
+there, [#213](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/213)).
+
 For production, build a minimal, pinned image: only the interpreters and tools
 your agents actually need, a non-root default user (below), no build toolchain or
 package manager left in the final layer, and a patch cadence you control. The

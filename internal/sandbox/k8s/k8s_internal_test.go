@@ -228,10 +228,15 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 	// The temporary file the script writes through is named by Go, exactly as
 	// WriteFileStream names it, and handed back so a test can assert it is gone:
 	// every failure path in the script has to take its own residue with it.
-	run := func(t *testing.T, stdin []byte, declared int, path string, env ...string) (int, string) {
+	//
+	// The prologue runs ahead of the script in the same shell. It is how the one
+	// row that needs the image's umask stages it: a umask is a property of the
+	// process the exec starts, not something an argument or the environment can
+	// carry, so it has to be set by a shell the script then inherits from.
+	runScript := func(t *testing.T, prologue string, stdin []byte, declared int, path string, env ...string) (int, string) {
 		t.Helper()
 		tmp := gopath.Join(gopath.Dir(path), sandbox.TempName())
-		cmd := exec.Command("/bin/bash", "-c", writeScript, "map-write", path,
+		cmd := exec.Command("/bin/bash", "-c", prologue+writeScript, "map-write", path,
 			gopath.Dir(path), strconv.Itoa(declared), tmp)
 		cmd.Env = env // nil inherits, which is what every row but the shimmed one wants
 		cmd.Stdin = bytes.NewReader(stdin)
@@ -243,6 +248,10 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 			return ee.ExitCode(), tmp
 		}
 		return 0, tmp
+	}
+	run := func(t *testing.T, stdin []byte, declared int, path string, env ...string) (int, string) {
+		t.Helper()
+		return runScript(t, "", stdin, declared, path, env...)
 	}
 	// gone asserts the script left no temporary file behind, whatever it decided.
 	gone := func(t *testing.T, tmp string) {
@@ -395,6 +404,68 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 		}
 		if got, err := os.ReadFile(path); err != nil || string(got) != "new" {
 			t.Errorf("target = %q, %v; want the bytes just written", got, err)
+		}
+		gone(t, tmp)
+	})
+
+	// The other half of that answer, and the one the image gets a vote in: a file
+	// the write *creates* has no mode to carry over, so it lands whatever created
+	// it. `tee` creates it under the exec process's umask, which is the image's —
+	// 0644 on the usual 022, 0600 on a hardened 077 — where the docker backend's
+	// tar header says 0644 whatever the image thinks (#212). The script sets the
+	// umask itself so the two backends answer this the same way, and the answer is
+	// the sandbox's rather than the image's. Staged at 077 as the hardened case;
+	// every umask whose write bits differ from 022's moves, in both directions — a
+	// group-oriented 007 landed 0660 and now lands 0644, dropping group-write and
+	// adding other-read. (The execute bits are inert: a create asks for 0666.)
+	t.Run("AFreshFileIgnoresTheImagesUmask", func(t *testing.T) {
+		fresh := dir + "/hardened/created.txt"
+		code, tmp := runScript(t, "umask 077\n", []byte("new"), 3, fresh, gnuStatEnv(t)...)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0", code)
+		}
+		info, err := os.Stat(fresh)
+		if err != nil {
+			t.Fatalf("stat the created file: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o644 {
+			t.Errorf("a file the write created has mode %o under a 077 umask, want 644", got)
+		}
+		// The directories on the way there are the other side of that answer, and
+		// they keep the image's umask: the `umask` sits after the `mkdir -p`, so a
+		// hardened image still gets its 0700 parents — which is what docker's own
+		// in-container `mkdir -p` gives too. Asserted because the file mode alone
+		// would not notice the line being tidied up to the top of the script, and
+		// then a hardened image would silently lose that. Measured: with the umask
+		// set first, this directory is 0755.
+		if info, err = os.Stat(gopath.Dir(fresh)); err != nil {
+			t.Fatalf("stat the directory the write created: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Errorf("the directory the write created has mode %o under a 077 umask, want 700", got)
+		}
+		gone(t, tmp)
+
+		// And the umask is a floor for fresh files only: a target that *does* have
+		// bits worth carrying still gets them back. What this half catches is the
+		// plausible alternative fix — an unconditional `chmod 644` on the temporary
+		// file after __map_preserve_mode, which lands 644 here; ModeOfTheTargetSurvives
+		// and the live contract row catch that one too, so this is the fast local
+		// signal rather than the only one. (It does not pin the umask's own
+		// position: moved below the preservation, the umask would leave this rewrite
+		// at 600 all the same, and the fresh-file assertion above is what fails.)
+		if err := os.Chmod(fresh, 0o600); err != nil {
+			t.Fatalf("give the target a mode worth carrying: %v", err)
+		}
+		code, tmp = runScript(t, "umask 077\n", []byte("two"), 3, fresh, gnuStatEnv(t)...)
+		if code != 0 {
+			t.Fatalf("exit %d rewriting it, want 0", code)
+		}
+		if info, err = os.Stat(fresh); err != nil {
+			t.Fatalf("stat the rewritten target: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("after the rewrite the mode is %o, want the target's own 600", got)
 		}
 		gone(t, tmp)
 	})

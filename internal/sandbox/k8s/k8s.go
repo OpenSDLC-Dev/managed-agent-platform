@@ -1070,8 +1070,45 @@ printf %s "$3"
 // the command substitution — otherwise the pipeline would report only `wc`'s
 // status, and an unwritable directory would come back as a short write instead of
 // the write failure it is. `-eq` tolerates the leading padding BSD `wc` emits.
+//
+// `umask 022` is what makes a file the write *creates* land 0644 here, as the
+// docker backend's fixed tar header makes it land 0644 there (#212). `tee` creates
+// the temporary file under the exec process's umask — the image's — so without
+// this the answer to "what mode does a file an agent wrote come out as" would be
+// 0644 on one backend and whatever the image chose on the other, and the shared
+// contract row asserting 0644 would be passing here by coincidence. It is set
+// deliberately: the mode a sandbox write lands is the platform's answer on both
+// backends, not something an image can quietly change under one of them. It sits
+// *after* the `mkdir -p` on purpose, so the directories a write creates keep
+// taking the image's umask — which is what docker's own `mkdir -p` exec does too,
+// and moving it earlier would trade a file divergence for a directory one. An
+// existing target's bits still win: __map_preserve_mode runs later and chmods
+// over this. `umask` is a bash builtin, so unlike the `stat` and `chmod` that
+// step reaches for, nothing on the agent's PATH can answer for it.
+//
+// One case it cannot answer for: a parent directory carrying a **default POSIX
+// ACL** supplies a created file's bits and the umask is ignored, so the file lands
+// what the ACL says while docker's tar header still says 0644 — the divergence
+// this closes, reopened by another route. Measured on Linux (alpine + setfacl):
+// under a 077 umask, a directory carrying `setfacl -d -m u::rw-,g::rw-,o::rw-`
+// lands 0666 where a plain one lands 0600 — and a restrictive default ACL tightens
+// the same way under an 022 umask. Left standing rather than chmod'd over: setting one takes
+// the agent's own setfacl on its own filesystem or an operator's deliberate image
+// build, both of which can set the mode anyway, so it costs the uniformity of the
+// answer and no boundary — and putting the mode back with a `chmod` would move a
+// created file's mode onto a binary from the agent's PATH to hold a case the
+// contract suite cannot see. Registered in docs/DIVERGENCES.md (#213).
+//
+// The temporary file is 0644 while the bytes stream, where a hardened image used
+// to give it the image's umask before __map_preserve_mode narrowed it back. That
+// is convergence, not a new exposure of its own: docker's is extracted at 0644 and
+// holds the bytes at that mode for the whole transfer as well (it is chmod'd to an
+// existing target's mode only at the end, just before the `mv`), so the window —
+// another UID inside the same sandbox reading a replacement mid-stream — is one
+// the backends share rather than one k8s alone has.
 const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + `
 mkdir -p "$2" || { __map_path_fault "$2"; exit 1; }
+umask 022
 set -o pipefail
 sz=$(tee "$4" | wc -c) || { rm -f "$4"; exit 1; }
 [ "$sz" -eq "$3" ] || { rm -f "$4"; exit 14; }

@@ -87,8 +87,9 @@ __map_path_fault() {
 // land the replacing file world-writable. What the rename replaces is the link, and
 // a link has no mode worth having. A FIFO, socket or device node is skipped the
 // same way. Where there is nothing to carry over, the temporary file keeps its own
-// mode — the 0644 a fresh write lands from the docker backend's tar header, and
-// from the k8s backend's `tee` under an image umask of 022.
+// mode — 0644 on both backends, by two routes the platform fixes rather than the
+// image: the docker backend's tar header says so, and the k8s write script sets
+// `umask 022` before its `tee` creates the file (#212).
 //
 // Every failure here is silent, and deliberately so: the bytes are landed and the
 // write is one `mv` from succeeding, so a step that cannot run costs the mode
