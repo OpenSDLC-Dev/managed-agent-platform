@@ -87,8 +87,8 @@ copy of an entry here.
   which an S3 call cannot be served. Raced against the pinned release
   (`RELEASE.2025-09-07T16-13-09Z`) on the chart's own shape — `server /data`, one node, one drive —
   the window is real and one-sided: polled from container start, `/minio/health/ready`'s first
-  answer is a 200 and it never returns 503, while `/minio/health/cluster` answers 503 at that same
-  instant and 200 some 36ms later. Sampling all three on a single connection inside that window, at
+  answer is a 200 and not once across the run did it report the uninitialized layer in its status
+  code, while `/minio/health/cluster` answers 503 at that same instant and 200 some 36ms later. Sampling all three on a single connection inside that window, at
   t+0.338s: `/minio/health/ready` → 200 with `x-minio-server-status: offline`,
   `/minio/health/cluster` → 503, and `GET /map-blob/?location=` — the bucket-location lookup
   `s3.New` issues first — → `503 XMinioServerNotInitialized`, verbatim the failure #208 chased.
