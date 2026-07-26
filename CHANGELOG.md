@@ -121,19 +121,18 @@ copy of an entry here.
   residual there rather than treated as a blocker.)
 
   Both backends now carry the bits over before the move, through **one** shared shell function —
-  `internal/sandbox/filefault.go`'s `__map_preserve_mode`, beside the `__map_path_fault` the same two
-  already embed, so the copies cannot drift. An existing regular target's `stat -c %a` mode is
+  `internal/sandbox/filefault.go`'s `__map_preserve_mode`, beside the `__map_path_fault` the same
+  two already embed, so the copies cannot drift. An existing regular target's `stat -c %a` mode is
   `chmod`'d onto the temporary file; nothing is carried where there is nothing to carry, so a target
   that did not exist still lands `0644` (a fixed tar header on docker, the image's umask on k8s —
-  since made uniform, above), and
-  a symlink's own mode is not taken — `stat -c %a` is an lstat, so taking it would dress the file
-  replacing the link in the link's own **`0777`**. The mode is checked to be octal digits and passed
-  as one quoted argument, so a `stat` planted on the agent's PATH can choose only a mode the agent
-  could set itself with `chmod`, never an option (`--reference=`) or a second command. These are the
-  same three steps the Claude Code harness's own atomic write takes — a harness-design observation
-  from the local snapshot, not a wire behavior of the managed-agents reference, and the opposite of
-  what the SDK's own host-side `agenttoolset` does (a fixed `0644`), now both recorded in
-  DIVERGENCES.md.
+  since made uniform, above), and a symlink's own mode is not taken — `stat -c %a` is an lstat, so
+  taking it would dress the file replacing the link in the link's own **`0777`**. The mode is
+  checked to be octal digits and passed as one quoted argument, so a `stat` planted on the agent's
+  PATH can choose only a mode the agent could set itself with `chmod`, never an option
+  (`--reference=`) or a second command. These are the same three steps the Claude Code harness's own
+  atomic write takes — a harness-design observation from the local snapshot, not a wire behavior of
+  the managed-agents reference, and the opposite of what the SDK's own host-side `agenttoolset` does
+  (a fixed `0644`), now both recorded in DIVERGENCES.md.
 
   **Where it does not apply, measured rather than assumed.** Every failure of the step is silent by
   design — the bytes are landed and the write is one `mv` from succeeding, so a step that cannot run

@@ -430,6 +430,19 @@ func TestWriteScriptVerifiesDeliveredLength(t *testing.T) {
 		if got := info.Mode().Perm(); got != 0o644 {
 			t.Errorf("a file the write created has mode %o under a 077 umask, want 644", got)
 		}
+		// The directories on the way there are the other side of that answer, and
+		// they keep the image's umask: the `umask` sits after the `mkdir -p`, so a
+		// hardened image still gets its 0700 parents — which is what docker's own
+		// in-container `mkdir -p` gives too. Asserted because the file mode alone
+		// would not notice the line being tidied up to the top of the script, and
+		// then a hardened image would silently lose that. Measured: with the umask
+		// set first, this directory is 0755.
+		if info, err = os.Stat(gopath.Dir(fresh)); err != nil {
+			t.Fatalf("stat the directory the write created: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Errorf("the directory the write created has mode %o under a 077 umask, want 700", got)
+		}
 		gone(t, tmp)
 
 		// And the umask is a floor for fresh files only: a target that *does* have

@@ -1084,7 +1084,11 @@ printf %s "$3"
 // and moving it earlier would trade a file divergence for a directory one. An
 // existing target's bits still win: __map_preserve_mode runs later and chmods
 // over this. `umask` is a bash builtin, so unlike the `stat` and `chmod` that
-// step reaches for, nothing on the agent's PATH can answer for it.
+// step reaches for, nothing on the agent's PATH can answer for it. The one thing
+// it cannot answer for is a parent directory carrying a default POSIX ACL, which
+// supplies a created file's bits and has the umask ignored — reachable only by the
+// agent's own `setfacl` on its own filesystem, and it can chmod the result either
+// way, so it costs the uniformity of the answer rather than any boundary.
 const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + `
 mkdir -p "$2" || { __map_path_fault "$2"; exit 1; }
 umask 022
