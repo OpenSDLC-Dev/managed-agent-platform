@@ -667,6 +667,13 @@ func TestWorkerControlPlaneStopWindsDown(t *testing.T) {
 	cancel, errc := runWorker(w)
 
 	<-sb.entered // the tool is held open, mid-run
+	// Wait for the claim beat before stopping, or the test can prove nothing: a
+	// stop landing on a still-starting item takes the control plane's own
+	// stopped-outright path (internal/queue/lifecycle.go), which satisfies every
+	// assertion below with the worker's wind-down never exercised. Tool entry
+	// costs several round trips against the claim's one, so the beat wins in
+	// practice — this makes it certain.
+	waitForState(t, h, "active")
 	// The control plane asks the item to stop. The next heartbeat sees the
 	// stopping state and cancels the run; the held tool unblocks via ctx and
 	// never completes, so no result is posted.
@@ -677,6 +684,71 @@ func TestWorkerControlPlaneStopWindsDown(t *testing.T) {
 	waitDone(t, done)
 	if got := len(h.results(t)); got != 0 {
 		t.Errorf("user.tool_result = %d, want 0 (the run was wound down)", got)
+	}
+	// Winding the run down is only half the contract. The graceful stop's second
+	// phase — stopping → stopped — belongs to the worker that was asked to stop:
+	// Poll never re-offers a stopping item, so nothing else would ever finish the
+	// transition and the item would sit non-terminal with a null stopped_at (#25).
+	if got := h.workState(t); got != "stopped" {
+		t.Errorf("work item state = %q, want stopped (the worker finishes the stop it was asked for)", got)
+	}
+	stoppedAt, lease := h.stopFinality(t)
+	if stoppedAt == nil {
+		t.Error("stopped_at is null, want the finished stop stamped")
+	}
+	if lease != nil {
+		t.Error("lease_expires_at survived the stop, want it cleared")
+	}
+	close(sb.gate) // release, though the tool already returned via cancellation
+	waitExit(t, cancel, errc)
+}
+
+// stopFinality reads the two row fields a finished stop settles and the wire's
+// work object either renders (stopped_at) or does not carry at all
+// (lease_expires_at) — both null-until-set, hence the pointers.
+func (h *harness) stopFinality(t *testing.T) (stoppedAt, leaseExpiresAt *time.Time) {
+	t.Helper()
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT stopped_at, lease_expires_at FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'`,
+		h.sid.String()).Scan(&stoppedAt, &leaseExpiresAt); err != nil {
+		t.Fatalf("read stop finality: %v", err)
+	}
+	return stoppedAt, leaseExpiresAt
+}
+
+// TestWorkerLeaseLossDoesNotStopTheItem is the counterweight to the wind-down
+// above, and the reason the worker cannot simply stop every item it lets go of.
+// A heartbeat rejected with 412 means the row moved out from under this worker —
+// the reclaim race — so another worker may now hold the item and stopping it
+// would terminate that worker's run. Only a stop the control plane actually
+// asked for is finished by the worker; a lease merely lost leaves the item live
+// for reclaim.
+func TestWorkerLeaseLossDoesNotStopTheItem(t *testing.T) {
+	sb := &fakeSandbox{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	h := newHarness(t, sb)
+	h.suspend(t, writeUse("out.txt", "hi"))
+	h.enqueueWork(t)
+
+	w, done := h.newWorker(Config{})
+	cancel, errc := runWorker(w)
+
+	<-sb.entered // the tool is held open, mid-run
+	waitForState(t, h, "active")
+	// Move last_heartbeat out from under the worker, which is exactly what a
+	// reclaim does: its next beat echoes a value the row no longer carries, and
+	// the control plane answers the mismatch with a 412.
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE work_items SET last_heartbeat = now() + interval '1 second'
+		 WHERE session_id = $1 AND kind = 'tool_exec'`, h.sid.String()); err != nil {
+		t.Fatalf("displace the heartbeat: %v", err)
+	}
+
+	waitDone(t, done)
+	if got := h.workState(t); got != "active" {
+		t.Errorf("work item state = %q, want it left active for reclaim (a lost lease must not stop it)", got)
+	}
+	if got := len(h.results(t)); got != 0 {
+		t.Errorf("user.tool_result = %d, want 0 (the run was cancelled)", got)
 	}
 	close(sb.gate) // release, though the tool already returned via cancellation
 	waitExit(t, cancel, errc)

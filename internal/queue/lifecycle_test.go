@@ -10,6 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -140,45 +141,240 @@ func TestHeartbeatOnStoppingLearnsWithoutExtending(t *testing.T) {
 	}
 }
 
+// claimedItem drives a fresh tool_exec item through the worker handshake —
+// enqueue, poll, ack, first heartbeat — leaving it active under a claimed lease,
+// and returns its environment and id. That is the one state a graceful stop has
+// a worker to wind down from, so it is the shared setup of the stopping tests.
+func claimedItem(t *testing.T, pool *pgxpool.Pool, q *queue.Queue) (domain.ID, domain.ID) {
+	t.Helper()
+	ctx := context.Background()
+	sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
+	if _, err := q.Enqueue(ctx, pool, env, sessionID, queue.ToolExec); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	w, err := q.Poll(ctx, env, time.Minute)
+	if err != nil || w == nil {
+		t.Fatalf("poll: %+v %v", w, err)
+	}
+	if _, err := q.Ack(ctx, env, w.ID); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if _, err := q.Heartbeat(ctx, env, w.ID, queue.NoHeartbeat, 30); err != nil {
+		t.Fatalf("claim heartbeat: %v", err)
+	}
+	return env, w.ID
+}
+
+// leaseHeld reports whether the item still carries a lease. The wire work object
+// has no lease field, so Work does not project one and a stop's lease clearing is
+// observable only on the row.
+func leaseHeld(t *testing.T, pool *pgxpool.Pool, id domain.ID) bool {
+	t.Helper()
+	var lease *time.Time
+	if err := pool.QueryRow(context.Background(),
+		`SELECT lease_expires_at FROM work_items WHERE id = $1`, id).Scan(&lease); err != nil {
+		t.Fatalf("read lease: %v", err)
+	}
+	return lease != nil
+}
+
 func TestStopForceAndGraceful(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
 	q := queue.New(pool)
 
-	// Graceful stop of a live item → stopping; force then escalates → stopped.
-	sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
-	if _, err := q.Enqueue(ctx, pool, env, sessionID, queue.ToolExec); err != nil {
-		t.Fatal(err)
-	}
-	w, _ := q.Poll(ctx, env, time.Minute)
+	// Graceful stop of an item a worker holds → stopping; force then escalates →
+	// stopped.
+	env, id := claimedItem(t, pool, q)
 	// Stop returns the updated item to in-process callers; the wire answers 204,
 	// so the API handler discards it.
-	stopped, err := q.Stop(ctx, env, w.ID, false)
+	stopped, err := q.Stop(ctx, env, id, false)
 	if err != nil {
 		t.Fatalf("graceful stop: %v", err)
 	}
-	if stopped.State != "stopping" || stopped.StopRequestedAt == nil {
-		t.Errorf("graceful stop returned %+v, want stopping with stop_requested_at", stopped)
+	if stopped.State != "stopping" || stopped.StopRequestedAt == nil || stopped.StoppedAt != nil {
+		t.Errorf("graceful stop returned %+v, want stopping with stop_requested_at and no stopped_at", stopped)
+	}
+	// The lease stays: the worker holds it while it winds down, and its lapsing is
+	// what tells the control plane the wind-down was abandoned.
+	if !leaseHeld(t, pool, id) {
+		t.Error("graceful stop cleared the lease the winding-down worker still holds")
 	}
 	// Re-graceful-stopping a stopping item is a conflict.
-	if _, err := q.Stop(ctx, env, w.ID, false); !errors.Is(err, queue.ErrWorkConflict) {
+	if _, err := q.Stop(ctx, env, id, false); !errors.Is(err, queue.ErrWorkConflict) {
 		t.Errorf("re-graceful-stop = %v, want ErrWorkConflict", err)
 	}
 	// force escalates stopping → stopped.
-	stopped, err = q.Stop(ctx, env, w.ID, true)
+	stopped, err = q.Stop(ctx, env, id, true)
 	if err != nil {
 		t.Fatalf("force stop: %v", err)
 	}
 	if stopped.State != "stopped" || stopped.StoppedAt == nil {
 		t.Errorf("force stop returned %+v, want stopped with stopped_at", stopped)
 	}
+	if leaseHeld(t, pool, id) {
+		t.Error("force stop left a lease behind, want it cleared")
+	}
 	// Stopping an already-stopped item is a conflict.
-	if _, err := q.Stop(ctx, env, w.ID, true); !errors.Is(err, queue.ErrWorkConflict) {
+	if _, err := q.Stop(ctx, env, id, true); !errors.Is(err, queue.ErrWorkConflict) {
 		t.Errorf("stop of stopped = %v, want ErrWorkConflict", err)
 	}
 	// A missing item is not-found.
 	if _, err := q.Stop(ctx, env, domain.NewID("work"), true); !errors.Is(err, queue.ErrWorkNotFound) {
 		t.Errorf("stop unknown = %v, want ErrWorkNotFound", err)
+	}
+}
+
+// TestGracefulStopWithoutALeaseHolderStopsOutright: stopping is a state only a
+// live lease holder can leave — the worker learns of it from its next heartbeat,
+// winds its tools down, and stops the item. An item no worker holds has no such
+// actor: still queued (nobody acked it), or acked but never heartbeated (its
+// first beat can only be the claim, which a stopping item refuses). Parking one
+// in stopping would leave it non-terminal forever with a null stopped_at, and
+// Poll deliberately never re-offers a stopping item, so nothing would ever
+// finish it (#25). A graceful stop of one therefore finalizes it outright —
+// there is nothing in flight to wind down.
+func TestGracefulStopWithoutALeaseHolderStopsOutright(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+
+	for _, tc := range []struct {
+		name string
+		poll bool
+		ack  bool
+	}{
+		// Never handed out is the starkest case: no worker has even seen the item,
+		// and with no lease to lapse not even a timeout could rescue it later.
+		{"queued, never handed out", false, false},
+		{"queued, polled but not acked", true, false},
+		{"starting", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
+			if _, err := q.Enqueue(ctx, pool, env, sessionID, queue.ToolExec); err != nil {
+				t.Fatal(err)
+			}
+			// An un-polled item's id is the one Enqueue minted; a client that listed
+			// the environment's queue can address it, and so stop it.
+			var id domain.ID
+			if err := pool.QueryRow(ctx,
+				`SELECT id FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'`,
+				sessionID).Scan(&id); err != nil {
+				t.Fatalf("read enqueued id: %v", err)
+			}
+			if tc.poll {
+				w, err := q.Poll(ctx, env, time.Minute)
+				if err != nil || w == nil {
+					t.Fatalf("poll: %+v %v", w, err)
+				}
+				id = w.ID
+			}
+			if tc.ack {
+				if _, err := q.Ack(ctx, env, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stopped, err := q.Stop(ctx, env, id, false)
+			if err != nil {
+				t.Fatalf("graceful stop: %v", err)
+			}
+			if stopped.State != "stopped" || stopped.StoppedAt == nil || stopped.StopRequestedAt == nil {
+				t.Errorf("graceful stop of a %s item returned %+v, want stopped with both timestamps", tc.name, stopped)
+			}
+			// The poll reservation, or the ack's startup lease, is released with it.
+			if leaseHeld(t, pool, id) {
+				t.Error("the finalized item still carries a lease, want it cleared")
+			}
+		})
+	}
+}
+
+// TestPollFinalizesAnAbandonedWindDown: the worker asked to wind down normally
+// stops the item itself, but one that dies mid-wind-down (SIGKILL, a panic, an
+// unreachable control plane) never does — and Poll deliberately never re-offers a
+// stopping item, so nothing else would move it. Its lease still lapses, and that
+// is the signal: the next poll of the environment finalizes the abandoned item
+// rather than leaving it non-terminal forever (#25). It is finalized, never
+// handed back as work — the caller asked for it to stop.
+func TestPollFinalizesAnAbandonedWindDown(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	env, id := claimedItem(t, pool, q)
+	if _, err := q.Stop(ctx, env, id, false); err != nil {
+		t.Fatalf("graceful stop: %v", err)
+	}
+
+	// While the lease is live the wind-down is still its worker's to finish, so a
+	// poll must leave the item alone. This is what makes the finalize below a
+	// consequence of the lapsed lease rather than of the stopping state.
+	if next, err := q.Poll(ctx, env, time.Minute); err != nil || next != nil {
+		t.Fatalf("poll during a live wind-down = %+v %v, want no work", next, err)
+	}
+	if w, err := q.GetWork(ctx, env, id); err != nil || w.State != "stopping" {
+		t.Fatalf("item during a live wind-down = %+v %v, want it left stopping", w, err)
+	}
+
+	// The worker dies without finishing the wind-down: its lease lapses.
+	if _, err := pool.Exec(ctx,
+		`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	next, err := q.Poll(ctx, env, time.Minute)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if next != nil {
+		t.Fatalf("poll handed back %+v, want no work (an abandoned stop is finalized, not re-offered)", next)
+	}
+	w, err := q.GetWork(ctx, env, id)
+	if err != nil {
+		t.Fatalf("get work: %v", err)
+	}
+	if w.State != "stopped" || w.StoppedAt == nil {
+		t.Errorf("abandoned wind-down = %+v, want stopped with stopped_at", w)
+	}
+	if leaseHeld(t, pool, id) {
+		t.Error("the finalized item still carries a lease, want it cleared")
+	}
+}
+
+// TestPollFinalizesALeaselessWindDown covers the one stopping row the current
+// state machine never writes but a rolling upgrade can still produce: until #25 a
+// graceful stop parked a never-polled queued item — which carries no lease at all
+// — in stopping, so a not-yet-upgraded replica can keep writing one after
+// migration 0014 has repaired the rows that predate it. With no lease to lapse,
+// only the finalizer's null arm can ever reach it.
+func TestPollFinalizesALeaselessWindDown(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
+	if _, err := q.Enqueue(ctx, pool, env, sessionID, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	// What the old state machine wrote: stopping, never handed out, no lease.
+	var id domain.ID
+	if err := pool.QueryRow(ctx,
+		`UPDATE work_items SET state = 'stopping', stop_requested_at = now()
+		 WHERE session_id = $1 AND kind = 'tool_exec' RETURNING id`, sessionID).Scan(&id); err != nil {
+		t.Fatalf("stage the legacy row: %v", err)
+	}
+
+	next, err := q.Poll(ctx, env, time.Minute)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if next != nil {
+		t.Fatalf("poll handed back %+v, want no work", next)
+	}
+	w, err := q.GetWork(ctx, env, id)
+	if err != nil {
+		t.Fatalf("get work: %v", err)
+	}
+	if w.State != "stopped" || w.StoppedAt == nil {
+		t.Errorf("leaseless wind-down = %+v, want stopped with stopped_at", w)
 	}
 }
 

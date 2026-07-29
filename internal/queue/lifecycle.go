@@ -202,8 +202,34 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 // Stop stops a work item and returns the updated item, which the wire never
 // carries: Stop answers a bodiless 204, unlike ack/heartbeat, so the API handler
 // discards it and only this package's state-machine tests read it. force
-// stops any not-yet-stopped item immediately (→ stopped); a graceful stop moves
-// a live (queued/starting/active) item to stopping so the worker can wind down.
+// stops any not-yet-stopped item immediately (→ stopped); a graceful stop asks
+// the item's worker to wind down, so it moves the item to stopping only when a
+// worker has claimed the lease with a heartbeat (active). Whether that worker is
+// still alive is not knowable here, and does not need to be: an abandoned
+// wind-down is finalized by the next Poll of the environment (see Poll).
+//
+// An item no worker has claimed is stopped outright instead, because it has no
+// way back out of stopping. That state is left by the holder learning of it from
+// its next heartbeat, winding its tools down and stopping the item
+// (internal/worker/lease.go). A still-queued item has no holder to learn; an
+// acked-but-never-heartbeated (starting) one does have a worker, but no channel
+// left to be told on — its only remaining beat is the claim, which Heartbeat
+// refuses once the row is no longer starting. Parking either in stopping would
+// strand it there forever with a null stopped_at: Poll never re-offers a stopping
+// item, and nothing else would ever finish the transition (#25). Neither has
+// anything in flight to wind down, so the graceful stop simply completes.
+//
+// Completing it can outrun a worker that was handed the item by one round trip:
+// the worker starts its run concurrently with its claim beat (the reference's own
+// ordering), so one that polled and acked may already be provisioning when the
+// beat comes back 412 and cancels it. That window costs nothing — a stopped item
+// is never re-offered by Poll, so no second worker can be handed it, and it is
+// the same window force: true has always had ("immediately stop work without
+// graceful shutdown"). Parking the item in stopping instead would not shorten it
+// by a microsecond, since the worker cancels when its beat returns whatever the
+// answer is, and would reintroduce #25 in miniature: an item whose worker then
+// died would wait on a poll an emptied environment may never see.
+//
 // Stopping an item that is already past the requested transition (e.g.
 // graceful-stopping a stopping item, or stopping a stopped one) is
 // ErrWorkConflict; an item not visible to the work API is ErrWorkNotFound.
@@ -219,9 +245,15 @@ func (q *Queue) Stop(ctx context.Context, envID, workID domain.ID, force bool) (
 		       WHERE id = $1 AND environment_id = $2` + workAPIScope + ` AND state <> 'stopped'
 		       RETURNING ` + workColumns
 	} else {
+		// Every CASE reads the row's pre-update state, so all four agree on which
+		// branch they are in. An active item keeps its lease: the worker holds it
+		// while it winds down, and its lapsing is what tells the control plane the
+		// wind-down was abandoned (see Poll).
 		sql = `UPDATE work_items
-		       SET state             = 'stopping',
+		       SET state             = CASE WHEN state = 'active' THEN 'stopping' ELSE 'stopped' END,
 		           stop_requested_at = COALESCE(stop_requested_at, now()),
+		           stopped_at        = CASE WHEN state = 'active' THEN stopped_at ELSE now() END,
+		           lease_expires_at  = CASE WHEN state = 'active' THEN lease_expires_at ELSE NULL END,
 		           updated_at        = now()
 		       WHERE id = $1 AND environment_id = $2` + workAPIScope + `
 		         AND state IN ('queued', 'starting', 'active')

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,7 +31,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 13
+const wantMigrations = 14
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -459,6 +460,65 @@ func TestMigrateSurfacesFailures(t *testing.T) {
 			t.Errorf("agents table exists after failed recording; run was not atomic")
 		}
 	})
+}
+
+// TestStrandedStopMigrationFinalizesExistingWindDowns: 0014 repairs the rows the
+// pre-#25 state machine stranded. A graceful stop used to park a queued, starting
+// or active item in stopping with nothing able to finish it, and the new code
+// cannot rescue all of them on its own — a never-polled queued item carries no
+// lease, so the poll's lapsed-lease finalizer never matches it. Every stopping
+// row predating the migration is therefore finalized, and rows in other states
+// are left exactly as they are.
+func TestStrandedStopMigrationFinalizesExistingWindDowns(t *testing.T) {
+	ctx := context.Background()
+	pool := open(t, pgtest.FreshDB(t))
+	seedSessionChain(t, pool)
+
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM schema_migrations WHERE version = '0014_finalize_stranded_stops.sql'`); err != nil {
+		t.Fatalf("rewind 0014: %v", err)
+	}
+	// The two shapes the old state machine left behind — one with the lease its
+	// holder claimed, one with none at all (a never-polled queued item) — plus a
+	// live neighbour the repair must not touch.
+	for _, q := range []string{
+		`INSERT INTO work_items (id, environment_id, session_id, kind, state, stop_requested_at, lease_expires_at)
+		 VALUES ('work_leased', 'env_1', 'sesn_1', 'tool_exec', 'stopping', now(), now() + interval '1 hour')`,
+		`INSERT INTO work_items (id, environment_id, session_id, kind, state, stop_requested_at)
+		 VALUES ('work_leaseless', 'env_1', 'sesn_1', 'tool_exec', 'stopping', now())`,
+		`INSERT INTO work_items (id, environment_id, session_id, kind, state, lease_expires_at)
+		 VALUES ('work_live', 'env_1', 'sesn_1', 'tool_exec', 'active', now() + interval '1 hour')`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("stage %q: %v", q, err)
+		}
+	}
+
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("re-applying 0014 over stranded rows must repair them, not fail: %v", err)
+	}
+
+	for _, tc := range []struct {
+		id, wantState string
+		wantStopped   bool
+		wantLease     bool
+	}{
+		{"work_leased", "stopped", true, false},
+		{"work_leaseless", "stopped", true, false},
+		{"work_live", "active", false, true}, // untouched: the repair is scoped to stopping
+	} {
+		var state string
+		var stoppedAt, lease *time.Time
+		if err := pool.QueryRow(ctx,
+			`SELECT state, stopped_at, lease_expires_at FROM work_items WHERE id = $1`, tc.id).
+			Scan(&state, &stoppedAt, &lease); err != nil {
+			t.Fatalf("%s: %v", tc.id, err)
+		}
+		if state != tc.wantState || (stoppedAt != nil) != tc.wantStopped || (lease != nil) != tc.wantLease {
+			t.Errorf("%s = state %q stopped_at set %v lease set %v, want %q / %v / %v",
+				tc.id, state, stoppedAt != nil, lease != nil, tc.wantState, tc.wantStopped, tc.wantLease)
+		}
+	}
 }
 
 func TestOpenRejectsUnreachableDatabase(t *testing.T) {
