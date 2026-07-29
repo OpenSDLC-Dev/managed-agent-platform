@@ -219,6 +219,17 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 // item, and nothing else would ever finish the transition (#25). Neither has
 // anything in flight to wind down, so the graceful stop simply completes.
 //
+// Completing it can outrun a worker that was handed the item by one round trip:
+// the worker starts its run concurrently with its claim beat (the reference's own
+// ordering), so one that polled and acked may already be provisioning when the
+// beat comes back 412 and cancels it. That window costs nothing — a stopped item
+// is never re-offered by Poll, so no second worker can be handed it, and it is
+// the same window force: true has always had ("immediately stop work without
+// graceful shutdown"). Parking the item in stopping instead would not shorten it
+// by a microsecond, since the worker cancels when its beat returns whatever the
+// answer is, and would reintroduce #25 in miniature: an item whose worker then
+// died would wait on a poll an emptied environment may never see.
+//
 // Stopping an item that is already past the requested transition (e.g.
 // graceful-stopping a stopping item, or stopping a stopped one) is
 // ErrWorkConflict; an item not visible to the work API is ErrWorkNotFound.

@@ -247,7 +247,12 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // catches the ones written during it. The finalize rides along as a data-modifying CTE, which
 // Postgres runs to completion whether or not the main query selects anything, and
 // takes its rows with SKIP LOCKED so concurrent polls of one environment never
-// block on each other. It needs no environment-kind guard of its own: only the
+// block on each other. It is bounded so a poll costs a bounded write even in the
+// pathological case (an environment whose whole fleet died mid-wind-down across
+// many sessions); the remainder drains on the polls that follow, and no row can
+// starve because a finalized one leaves the set. No ORDER BY: every row in the
+// set is equally abandoned, so which 50 go first does not matter, and ordering
+// would buy a sort the bound exists to avoid. It needs no environment-kind guard of its own: only the
 // work API's Stop produces a stopping row, and that is already scoped to a
 // self_hosted tool_exec item.
 //
@@ -282,6 +287,7 @@ func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration
 		    WHERE environment_id = $1 AND kind = 'tool_exec'
 		      AND state = 'stopping'
 		      AND (lease_expires_at IS NULL OR lease_expires_at < now())
+		    LIMIT 50
 		    FOR UPDATE SKIP LOCKED
 		 ),
 		 finalized AS (
