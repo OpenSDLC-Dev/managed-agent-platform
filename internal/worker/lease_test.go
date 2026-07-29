@@ -667,6 +667,13 @@ func TestWorkerControlPlaneStopWindsDown(t *testing.T) {
 	cancel, errc := runWorker(w)
 
 	<-sb.entered // the tool is held open, mid-run
+	// Wait for the claim beat before stopping, or the test can prove nothing: a
+	// stop landing on a still-starting item takes the control plane's own
+	// stopped-outright path (internal/queue/lifecycle.go), which satisfies every
+	// assertion below with the worker's wind-down never exercised. Tool entry
+	// costs several round trips against the claim's one, so the beat wins in
+	// practice — this makes it certain.
+	waitForState(t, h, "active")
 	// The control plane asks the item to stop. The next heartbeat sees the
 	// stopping state and cancels the run; the held tool unblocks via ctx and
 	// never completes, so no result is posted.

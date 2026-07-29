@@ -203,18 +203,21 @@ func (q *Queue) Heartbeat(ctx context.Context, envID, workID domain.ID, expected
 // carries: Stop answers a bodiless 204, unlike ack/heartbeat, so the API handler
 // discards it and only this package's state-machine tests read it. force
 // stops any not-yet-stopped item immediately (→ stopped); a graceful stop asks
-// the item's worker to wind down, so it moves the item to stopping only when
-// there is such a worker — one that claimed the lease with a heartbeat (active).
+// the item's worker to wind down, so it moves the item to stopping only when a
+// worker has claimed the lease with a heartbeat (active). Whether that worker is
+// still alive is not knowable here, and does not need to be: an abandoned
+// wind-down is finalized by the next Poll of the environment (see Poll).
 //
-// An item nobody is running is stopped outright instead. `stopping` is a state
-// only its lease holder can leave: the worker learns of it from its next
-// heartbeat, winds its tools down and stops the item (internal/worker/lease.go).
-// A still-queued item has no holder at all, and an acked-but-never-heartbeated
-// (starting) one has only its claim beat left, which a stopping item refuses —
-// so parking either in stopping would strand it there forever with a null
-// stopped_at: Poll never re-offers a stopping item, and nothing else would ever
-// finish the transition (#25). There is nothing in flight to wind down in either
-// case, so the graceful stop simply completes.
+// An item no worker has claimed is stopped outright instead, because it has no
+// way back out of stopping. That state is left by the holder learning of it from
+// its next heartbeat, winding its tools down and stopping the item
+// (internal/worker/lease.go). A still-queued item has no holder to learn; an
+// acked-but-never-heartbeated (starting) one does have a worker, but no channel
+// left to be told on — its only remaining beat is the claim, which Heartbeat
+// refuses once the row is no longer starting. Parking either in stopping would
+// strand it there forever with a null stopped_at: Poll never re-offers a stopping
+// item, and nothing else would ever finish the transition (#25). Neither has
+// anything in flight to wind down, so the graceful stop simply completes.
 //
 // Stopping an item that is already past the requested transition (e.g.
 // graceful-stopping a stopping item, or stopping a stopped one) is

@@ -340,6 +340,44 @@ func TestPollFinalizesAnAbandonedWindDown(t *testing.T) {
 	}
 }
 
+// TestPollFinalizesALeaselessWindDown covers the one stopping row the current
+// state machine never writes but a rolling upgrade can still produce: until #25 a
+// graceful stop parked a never-polled queued item — which carries no lease at all
+// — in stopping, so a not-yet-upgraded replica can keep writing one after
+// migration 0014 has repaired the rows that predate it. With no lease to lapse,
+// only the finalizer's null arm can ever reach it.
+func TestPollFinalizesALeaselessWindDown(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	q := queue.New(pool)
+	sessionID, env := pgtest.NewSession(t, pool, "self_hosted")
+	if _, err := q.Enqueue(ctx, pool, env, sessionID, queue.ToolExec); err != nil {
+		t.Fatal(err)
+	}
+	// What the old state machine wrote: stopping, never handed out, no lease.
+	var id domain.ID
+	if err := pool.QueryRow(ctx,
+		`UPDATE work_items SET state = 'stopping', stop_requested_at = now()
+		 WHERE session_id = $1 AND kind = 'tool_exec' RETURNING id`, sessionID).Scan(&id); err != nil {
+		t.Fatalf("stage the legacy row: %v", err)
+	}
+
+	next, err := q.Poll(ctx, env, time.Minute)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if next != nil {
+		t.Fatalf("poll handed back %+v, want no work", next)
+	}
+	w, err := q.GetWork(ctx, env, id)
+	if err != nil {
+		t.Fatalf("get work: %v", err)
+	}
+	if w.State != "stopped" || w.StoppedAt == nil {
+		t.Errorf("leaseless wind-down = %+v, want stopped with stopped_at", w)
+	}
+}
+
 func TestGetWorkScopingAndFields(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)

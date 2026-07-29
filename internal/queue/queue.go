@@ -240,7 +240,11 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // it, so the poll settles it terminally (→ stopped, stopped_at stamped, lease
 // cleared) instead of leaving it non-terminal forever (#25). Such an item always
 // carries a lease to lapse, because a graceful stop only enters stopping from
-// active (see Stop). The finalize rides along as a data-modifying CTE, which
+// active (see Stop) — the null-lease arm is not for it, but for the one row the
+// new state machine does not write: during a rolling upgrade a not-yet-upgraded
+// replica can still park a never-polled queued item, which has no lease at all,
+// in stopping. Migration 0014 finalizes the ones written before the upgrade; this
+// catches the ones written during it. The finalize rides along as a data-modifying CTE, which
 // Postgres runs to completion whether or not the main query selects anything, and
 // takes its rows with SKIP LOCKED so concurrent polls of one environment never
 // block on each other. It needs no environment-kind guard of its own: only the
@@ -276,7 +280,8 @@ func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration
 		`WITH abandoned AS (
 		    SELECT id FROM work_items
 		    WHERE environment_id = $1 AND kind = 'tool_exec'
-		      AND state = 'stopping' AND lease_expires_at < now()
+		      AND state = 'stopping'
+		      AND (lease_expires_at IS NULL OR lease_expires_at < now())
 		    FOR UPDATE SKIP LOCKED
 		 ),
 		 finalized AS (

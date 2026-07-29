@@ -91,8 +91,9 @@ copy of an entry here.
   not a fault, and `Poll` never re-offering a `stopping` item is precisely what guarantees the item
   is still exclusively this worker's — so it force-stops, on the same fresh bounded context a clean
   finish already used. A **lease genuinely lost** — a 412, any other fatal 4xx, a lease the control
-  plane declined to extend, the staleness ceiling — keeps today's behavior exactly and stops
-  nothing. The reference worker reaches the same end state by force-stopping unconditionally on exit
+  plane declined to extend, the staleness ceiling — changes nothing at all: the item is left exactly
+  as before, stopped only if draining a dead session already called for it. The reference worker
+  reaches the same end state by force-stopping unconditionally on exit
   (anthropic-sdk-go `lib/environments/worker.go`); distinguishing the two is what lets ours get
   there without giving up the reclaim-race safety that unconditional stop lacks.
 
@@ -110,6 +111,15 @@ copy of an entry here.
   data-modifying CTE, which Postgres runs to completion whether or not the poll itself returns work,
   taking its rows with `SKIP LOCKED` so concurrent polls of one environment never block on each
   other.
+
+  Databases carrying rows the old state machine stranded are repaired on upgrade (migration
+  `0014_finalize_stranded_stops.sql`). Fixing the code is not enough for them: a graceful stop used
+  to park a **never-polled** queued item in `stopping`, and such a row has no lease at all, so the
+  lapsed-lease finalizer could never match it. Every `stopping` row predating the migration was
+  written by a state machine no worker will ever finish one under, so all of them are settled; a
+  worker genuinely still winding one down finds its own force-stop already done, which is the 409 it
+  ignores. The finalizer additionally accepts a null lease, which is not for anything the new code
+  writes but for the rolling-upgrade window in which a not-yet-upgraded replica can still park one.
 
 - **A parent directory's default POSIX ACL no longer decides what mode a k8s sandbox write lands**
   ([#213](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/213)).
