@@ -241,12 +241,18 @@ const (
 //
 // Force-stop discipline — the worker force-stops only an item it may safely
 // stop:
+//   - stop requested: the control plane moved the item to stopping, so the stop
+//     is one it asked for and finishing it (stopping → stopped) is this worker's
+//     job, whatever the run's own outcome — the cancellation that ended the run
+//     WAS the wind-down, not a fault. Nothing else would finish it: Poll never
+//     re-offers a stopping item, which is also why the item is still exclusively
+//     this worker's and stopping it can disrupt no one (#25).
 //   - drain: the session is dead, so stopping its item disrupts nothing live.
 //   - complete: every tool was answered — force-stop to clear the item (which
 //     otherwise lingers active and blocks the session's next tool turn), UNLESS
 //     the heartbeat observed losing the lease, in which case another worker may
 //     now own the item and stopping it could terminate that worker's run. This
-//     !lostLease guard covers the common case; the tightest residual race (a
+//     lease-lost guard covers the common case; the tightest residual race (a
 //     worker whose delayed ack let a second worker reclaim, then completes before
 //     its own claim-beat 412s) is not closed by it — the wire's stop carries no
 //     ownership proof — and is closed on the control-plane side instead, where
@@ -257,7 +263,7 @@ const (
 func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, parent map[string]string) {
 	sessCtx, cancel := context.WithCancel(ctx)
 	hbDone := make(chan struct{})
-	var hb hbResult
+	var hb hbExit
 	go func() {
 		defer close(hbDone)
 		hb = w.heartbeat(sessCtx, cancel, work.ID)
@@ -289,19 +295,24 @@ func (w *Worker) handleItem(ctx context.Context, work *sdk.BetaSelfHostedWork, p
 	cancel()
 	<-hbDone
 
-	switch outcome {
-	case outcomeDrain:
+	if hb == hbExitStopRequested {
+		// The run has wound down; finish the stop the control plane asked for.
 		w.forceStop(work.ID, work.Data.ID)
-	case outcomeComplete:
-		if hb.lostLease {
-			// runCtx, not ctx: the span has ended but its context has not, so the
-			// record still lands on the tool_exec span it is about.
-			slog.WarnContext(runCtx, "worker: completed work but observed losing the lease, not stopping", "work", work.ID)
-		} else {
+	} else {
+		switch outcome {
+		case outcomeDrain:
 			w.forceStop(work.ID, work.Data.ID)
+		case outcomeComplete:
+			if hb == hbExitLeaseLost {
+				// runCtx, not ctx: the span has ended but its context has not, so the
+				// record still lands on the tool_exec span it is about.
+				slog.WarnContext(runCtx, "worker: completed work but observed losing the lease, not stopping", "work", work.ID)
+			} else {
+				w.forceStop(work.ID, work.Data.ID)
+			}
+		case outcomeReclaim:
+			// leave the item live for reclaim
 		}
-	case outcomeReclaim:
-		// leave the item live for reclaim
 	}
 	if w.onItemDone != nil {
 		w.onItemDone(work.ID)
@@ -378,28 +389,44 @@ func reclaimFault(ctx context.Context, err error) error {
 	return err
 }
 
-// hbResult reports how the heartbeat loop ended, so handleItem can decide
-// whether it still owns the item. lostLease is true if the loop gave the lease
-// up (the control plane stopped it, declined to extend, a fatal precondition, or
-// the staleness ceiling) rather than exiting because handleItem cancelled it
-// after the run finished.
-type hbResult struct {
-	lostLease bool
-}
+// hbExit reports why the heartbeat loop ended, so handleItem can tell a stop the
+// control plane deliberately asked for from a lease this worker merely lost.
+// Both cancel the run identically, but they are opposite instructions about the
+// item afterwards: the first must be finished, the second must be left alone.
+type hbExit int
+
+const (
+	// hbExitCancelled: the loop's context ended it — handleItem cancelled it once
+	// the run finished, or the worker is shutting down. The lease was never lost.
+	hbExitCancelled hbExit = iota
+	// hbExitStopRequested: the control plane moved the item to stopping/stopped.
+	// The item is still exclusively this worker's — Poll never re-offers a
+	// stopping item — so finishing the stop is this worker's job (see handleItem).
+	// The already-stopped half needs no finishing, and needs no branch of its own
+	// either: the stop it provokes is the 409 forceStop already ignores.
+	hbExitStopRequested
+	// hbExitLeaseLost: ownership is gone or unprovable — a 412 (another worker
+	// reclaimed it), any other fatal 4xx, a lease the control plane declined to
+	// extend, or the staleness ceiling. The item may be another worker's now, so
+	// this worker must not stop it.
+	hbExitLeaseLost
+)
 
 // heartbeat keeps the item's lease alive on the wire's optimistic-concurrency
 // protocol: the first beat sends NO_HEARTBEAT to claim the lease (starting →
 // active), each later beat echoes the server's prior last_heartbeat to extend
-// it. It cancels the run (via cancel) and returns when the lease is lost — the
-// control plane moved the item to stopping/stopped, declined to extend, or
-// rejected the precondition (412, another worker reclaimed it) — or on any other
-// fatal 4xx. A transient error is retried, but only until the lease's TTL has
+// it. It cancels the run (via cancel) and returns when the item stops being this
+// worker's to run — the control plane moved it to stopping/stopped, declined to
+// extend the lease, or rejected the precondition (412, another worker reclaimed
+// it) — or on any other fatal 4xx. Which of those it was is the return value
+// (see hbExit): only the control plane's own stop leaves the item this worker's
+// to finish. A transient error is retried, but only until the lease's TTL has
 // elapsed with no successful beat: past that staleness ceiling the lease has
 // lapsed server-side and may be reclaimed, so the run is cancelled rather than
 // left executing against a lease this worker no longer holds. While retrying
 // transiently, the wait shrinks so the ceiling is checked right at the deadline,
 // not up to a full interval late. The first beat fires immediately.
-func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workID string) hbResult {
+func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workID string) hbExit {
 	last := noHeartbeat
 	interval := heartbeatCap
 	if w.cfg.HeartbeatInterval > 0 {
@@ -409,7 +436,6 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workI
 	// Both start at the default before the first response refines them.
 	ttl := heartbeatCap
 	lastSuccess := time.Now()
-	var res hbResult
 	for {
 		// Bound each call so a hung heartbeat cannot silently let the lease lapse,
 		// but never below a second: the derived interval is already clamped to
@@ -426,21 +452,19 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workI
 		wait := interval
 		if err != nil {
 			if ctx.Err() != nil {
-				return res
+				return hbExitCancelled
 			}
 			if isFatalHeartbeat(err) {
 				slog.Warn("worker: heartbeat lost the lease", "work", workID, "err", err)
-				res.lostLease = true
 				cancel()
-				return res
+				return hbExitLeaseLost
 			}
 			if leaseLapsed(time.Since(lastSuccess), ttl) {
 				// The lease TTL elapsed with no successful beat: it has lapsed
 				// server-side and may be reclaimed, so stop running against it.
 				slog.Warn("worker: heartbeat stale beyond lease TTL, releasing", "work", workID, "err", err)
-				res.lostLease = true
 				cancel()
-				return res
+				return hbExitLeaseLost
 			}
 			slog.Warn("worker: transient heartbeat error, retrying", "work", workID, "err", err)
 			// Shrink the wait so the next iteration re-checks the ceiling at the
@@ -451,15 +475,13 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workI
 		} else {
 			if resp.State == "stopping" || resp.State == "stopped" {
 				slog.Info("worker: control plane stopped the item, winding down", "work", workID, "state", string(resp.State))
-				res.lostLease = true
 				cancel()
-				return res
+				return hbExitStopRequested
 			}
 			if !resp.LeaseExtended {
 				slog.Warn("worker: lease not extended, winding down", "work", workID)
-				res.lostLease = true
 				cancel()
-				return res
+				return hbExitLeaseLost
 			}
 			last = resp.LastHeartbeat
 			lastSuccess = time.Now()
@@ -475,7 +497,7 @@ func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, workI
 			}
 		}
 		if sleep(ctx, wait) != nil {
-			return res
+			return hbExitCancelled
 		}
 	}
 }

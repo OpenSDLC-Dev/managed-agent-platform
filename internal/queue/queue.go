@@ -232,6 +232,21 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // the wire). The C2a driver re-derives work from the still-unanswered tool uses,
 // so a reclaimed run re-executes only unanswered tools.
 //
+// Poll also FINALIZES the one stranded item it must never re-offer. A graceful
+// stop is finished by the worker that was asked for it, but a worker that dies
+// mid-wind-down never gets there, and re-offering a stopping item would resurrect
+// work a caller asked to stop. Its lease lapses like any other holder's, and that
+// is the signal: a stopping item whose lease has lapsed has nobody left to finish
+// it, so the poll settles it terminally (→ stopped, stopped_at stamped, lease
+// cleared) instead of leaving it non-terminal forever (#25). Such an item always
+// carries a lease to lapse, because a graceful stop only enters stopping from
+// active (see Stop). The finalize rides along as a data-modifying CTE, which
+// Postgres runs to completion whether or not the main query selects anything, and
+// takes its rows with SKIP LOCKED so concurrent polls of one environment never
+// block on each other. It needs no environment-kind guard of its own: only the
+// work API's Stop produces a stopping row, and that is already scoped to a
+// self_hosted tool_exec item.
+//
 // Every RE-hand-out mints a fresh work id (#62). A work item's identity is stable
 // only while one worker holds it, because the wire's lifecycle calls carry no
 // ownership proof — stop's body is {force} only, and the work object has no
@@ -258,7 +273,23 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 // if an environment key were misconfigured against a cloud environment.
 func (q *Queue) Poll(ctx context.Context, envID domain.ID, reclaim time.Duration) (*Work, error) {
 	w, err := scanWork(q.pool.QueryRow(ctx,
-		`WITH picked AS (
+		`WITH abandoned AS (
+		    SELECT id FROM work_items
+		    WHERE environment_id = $1 AND kind = 'tool_exec'
+		      AND state = 'stopping' AND lease_expires_at < now()
+		    FOR UPDATE SKIP LOCKED
+		 ),
+		 finalized AS (
+		    UPDATE work_items f
+		    SET state            = 'stopped',
+		        stopped_at       = now(),
+		        lease_expires_at = NULL,
+		        updated_at       = now()
+		    FROM abandoned a
+		    WHERE f.id = a.id
+		    RETURNING f.id
+		 ),
+		 picked AS (
 		    SELECT w.id AS pid FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id
 		    WHERE w.environment_id = $1 AND e.kind = 'self_hosted'

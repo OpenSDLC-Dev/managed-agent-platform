@@ -72,6 +72,45 @@ copy of an entry here.
 
 ### Fixed
 
+- **A graceful work stop now reaches `stopped` instead of parking in `stopping` forever**
+  ([#25](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/25)). The wire's stop has two
+  phases — `active` → `stopping` while the worker winds its tools down, then `stopping` → `stopped`
+  once it has. Only the first was implemented. The BYOC worker's heartbeat did see the stop and
+  cancel the in-flight tool, but it reported that to the loop as the same generic lost lease a 412
+  reclaim produces, and that outcome deliberately stops nothing: a worker that may have been
+  reclaimed must never force-stop an item another worker now owns
+  ([#62](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/62)). Nothing else finished
+  the transition either — `Poll` excludes `stopping` from reclaim by design. So the item sat
+  non-terminal with a null `stopped_at` and an unreleased lease, a repeat graceful stop answered
+  409, and anything waiting for `stopped` waited forever; the caller's only exit was to notice the
+  condition and send a second request with `force: true`.
+
+  The heartbeat now reports *why* it ended rather than a `lostLease` boolean, because the two
+  reasons are opposite instructions about the item. A **stop the control plane asked for** is this
+  worker's to finish: the run has wound down, the cancellation that ended it *was* the wind-down and
+  not a fault, and `Poll` never re-offering a `stopping` item is precisely what guarantees the item
+  is still exclusively this worker's — so it force-stops, on the same fresh bounded context a clean
+  finish already used. A **lease genuinely lost** — a 412, any other fatal 4xx, a lease the control
+  plane declined to extend, the staleness ceiling — keeps today's behavior exactly and stops
+  nothing. The reference worker reaches the same end state by force-stopping unconditionally on exit
+  (anthropic-sdk-go `lib/environments/worker.go`); distinguishing the two is what lets ours get
+  there without giving up the reclaim-race safety that unconditional stop lacks.
+
+  Two entry states could strand an item with no worker able to finish it at all, so the control
+  plane no longer puts them there. `stopping` is a state only a lease holder can leave, and a
+  graceful stop now enters it only from `active`: a still-`queued` item has no holder, and an
+  acked-but-never-heartbeated (`starting`) one has only its claim beat left, which a `stopping` item
+  refuses. Neither has anything in flight to wind down, so the stop completes outright — `stopped`,
+  `stopped_at` stamped, lease released.
+
+  A worker can still die *during* a wind-down (SIGKILL, a panic, a control plane unreachable for the
+  stop's ten seconds), and its item would strand as before. Its lease lapses like any other holder's,
+  and that is now the signal: `Poll` finalizes a `stopping` item whose lease has lapsed instead of
+  re-offering it, since re-offering would resurrect work a caller asked to stop. It rides along as a
+  data-modifying CTE, which Postgres runs to completion whether or not the poll itself returns work,
+  taking its rows with `SKIP LOCKED` so concurrent polls of one environment never block on each
+  other.
+
 - **A parent directory's default POSIX ACL no longer decides what mode a k8s sandbox write lands**
   ([#213](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/213)).
   [#212](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/212) made a created file's

@@ -495,24 +495,35 @@ func TestWorkHeartbeatClaimsLeaseAndExtends(t *testing.T) {
 // even though the generated SDK method is typed *BetaSelfHostedWork, which is
 // exactly why its work poller bypasses the strict decoder (anthropic-sdk-go
 // lib/environments/poller.go, stopWork). The resulting state is read back with
-// GET: a graceful stop moves the item to stopping, re-stopping a stopping item
-// is 409, and force escalates it to stopped.
+// GET: a graceful stop moves an item a worker holds to stopping, re-stopping a
+// stopping item is 409, and force escalates it to stopped.
 func TestWorkStopGracefulThenForce(t *testing.T) {
 	s := newTestServer(t)
 	const key = "ek-stop"
 	envID, sessionID := selfHostedWorker(t, s, key)
 	workID := s.enqueueAndPoll(t, envID, sessionID, key)
-	stop := "/v1/environments/" + envID + "/work/" + workID + "/stop"
 	get := "/v1/environments/" + envID + "/work/" + workID
+	stop := get + "/stop"
+
+	// Ack and claim the lease first. A graceful stop asks the item's *worker* to
+	// wind down, so only a claimed item has anyone to leave the stopping state
+	// again; one no worker holds is stopped outright instead (#25).
+	if res, _, raw := s.workReq(t, http.MethodPost, get+"/ack", key, nil); res.StatusCode != http.StatusOK {
+		t.Fatalf("ack status = %d, want 200 (body %q)", res.StatusCode, raw)
+	}
+	res, body, raw := s.workReq(t, http.MethodPost, get+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", key, nil)
+	if res.StatusCode != http.StatusOK || body["state"] != "active" {
+		t.Fatalf("claim heartbeat = %d %v (body %q), want 200 with state active", res.StatusCode, body, raw)
+	}
 
 	wantNoContent(t, s, stop, key, nil)
-	_, body, _ := s.workReq(t, http.MethodGet, get, key, nil)
+	_, body, _ = s.workReq(t, http.MethodGet, get, key, nil)
 	if body["type"] != "work" || body["state"] != "stopping" || body["stop_requested_at"] == nil {
 		t.Errorf("after graceful stop GET returned %v, want a work object in state stopping", body)
 	}
 
 	// Re-graceful-stopping a stopping item is a conflict — errors keep the JSON envelope.
-	res, body, _ := s.workReq(t, http.MethodPost, stop, key, nil)
+	res, body, _ = s.workReq(t, http.MethodPost, stop, key, nil)
 	wantErr(t, res.StatusCode, body, http.StatusConflict, "invalid_request_error")
 
 	// force escalates stopping → stopped, again with no response body.
