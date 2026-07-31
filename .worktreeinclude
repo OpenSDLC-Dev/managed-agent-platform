@@ -14,9 +14,9 @@
 # its own source file), so an uncopied .env is simply absent rather than
 # inherited from the main checkout. It has to be here because the opt-in
 # contract is deliberately fail-closed: `make test` still passes without it (no
-# consent variable, no paid call), but opting in with RUN_LIVE_MODEL_TESTS=1 or
-# RUN_EVALS=1 then FAILS rather than skips — a missing endpoint must never look
-# like a green build. So a worktree without this file looks perfectly healthy
+# consent variable, no paid call), but opting in with RUN_LIVE_MODEL_TESTS=1,
+# RUN_EVALS=1 or RUN_LIVE_WEB_TESTS=1 then FAILS rather than skips — a missing
+# endpoint must never look like a green build. So a worktree without this file looks perfectly healthy
 # right up until you ask it to reach a model.
 .env
 

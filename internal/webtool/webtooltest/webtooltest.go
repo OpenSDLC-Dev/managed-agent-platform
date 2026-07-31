@@ -20,6 +20,7 @@ package webtooltest
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,10 +29,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/webtool"
 )
@@ -113,13 +116,18 @@ func RunSearcherContract(t *testing.T, b SearcherBackend) {
 		srv := serve(t, http.StatusOK, body, ct)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if _, err := b.New(srv.URL, contractKey).Search(ctx, "q"); err == nil {
-			t.Fatal("a cancelled context did not surface as an error")
+		_, err := b.New(srv.URL, contractKey).Search(ctx, "q")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want one wrapping context.Canceled", err)
 		}
 	})
 
 	t.Run("a torn response body is an error", func(t *testing.T) {
-		srv := serveTorn(t)
+		// The delivered prefix is a VALID response, so a backend that
+		// swallows the read error decodes it cleanly and returns hits
+		// without one — this subtest exists to catch exactly that.
+		body, _ := b.Render([]webtool.SearchResult{{Title: "t", URL: "https://a.example/", Content: "c"}})
+		srv := serveTorn(t, body)
 		if _, err := b.New(srv.URL, contractKey).Search(context.Background(), "q"); err == nil {
 			t.Fatal("a mid-body connection close did not surface as an error")
 		}
@@ -163,8 +171,30 @@ func RunFetcherContract(t *testing.T, b FetcherBackend) {
 		if !got.Truncated {
 			t.Error("an oversized page did not report truncated")
 		}
-		if len(got.Content) > webtool.MaxContentBytes {
-			t.Errorf("len(Content) = %d, past the cap", len(got.Content))
+		// The truncation is a PREFIX of the wire body at (or within a rune of)
+		// the cap — a Fetcher that drops, pads, or rewrites the content under
+		// truncation must not pass on the flag alone.
+		if len(got.Content) > webtool.MaxContentBytes || len(got.Content) < webtool.MaxContentBytes-utf8.UTFMax+1 {
+			t.Errorf("len(Content) = %d, want within a rune of the cap %d", len(got.Content), webtool.MaxContentBytes)
+		}
+		if !strings.HasPrefix(body, got.Content) {
+			t.Error("the truncated content is not a prefix of the body")
+		}
+	})
+
+	t.Run("a truncation cut never splits a rune", func(t *testing.T) {
+		content := strings.Repeat("界", webtool.MaxContentBytes/3+1)
+		body, ct := b.Render(content)
+		srv := serve(t, http.StatusOK, body, ct)
+		got, err := b.New(srv.URL, contractKey).Fetch(context.Background(), "https://example.com/")
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if !got.Truncated {
+			t.Error("an oversized page did not report truncated")
+		}
+		if !utf8.ValidString(got.Content) {
+			t.Error("the truncation cut left invalid UTF-8")
 		}
 	})
 
@@ -202,26 +232,30 @@ func RunFetcherContract(t *testing.T, b FetcherBackend) {
 		srv := serve(t, http.StatusOK, body, ct)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if _, err := b.New(srv.URL, contractKey).Fetch(ctx, "https://example.com/"); err == nil {
-			t.Fatal("a cancelled context did not surface as an error")
+		_, err := b.New(srv.URL, contractKey).Fetch(ctx, "https://example.com/")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want one wrapping context.Canceled", err)
 		}
 	})
 
 	t.Run("a torn response body is an error", func(t *testing.T) {
-		srv := serveTorn(t)
+		body, _ := b.Render("a page the reader never finished sending")
+		srv := serveTorn(t, body)
 		if _, err := b.New(srv.URL, contractKey).Fetch(context.Background(), "https://example.com/"); err == nil {
 			t.Fatal("a mid-body connection close did not surface as an error")
 		}
 	})
 }
 
-// serveTorn starts a server that promises a body and closes mid-stream, so
-// the adapter's read fails after a clean 200.
-func serveTorn(t *testing.T) *httptest.Server {
+// serveTorn starts a server that promises more than it sends and closes
+// mid-stream, so the adapter's read fails after a clean 200. The delivered
+// prefix is the caller's — a valid body, so a backend that swallows the read
+// error cannot pass by failing to decode garbage instead.
+func serveTorn(t *testing.T, prefix string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Length", "1000")
-		io.WriteString(w, "short")
+		w.Header().Set("Content-Length", strconv.Itoa(len(prefix)+1000))
+		io.WriteString(w, prefix)
 	}))
 	t.Cleanup(srv.Close)
 	return srv

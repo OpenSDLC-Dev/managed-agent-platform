@@ -1,8 +1,10 @@
 package webtool
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestReadCapped(t *testing.T) {
@@ -31,6 +33,35 @@ func TestReadCapped(t *testing.T) {
 		}
 		if len(data) != MaxContentBytes {
 			t.Errorf("len(data) = %d, want %d", len(data), MaxContentBytes)
+		}
+	})
+
+	t.Run("the cut never splits a rune", func(t *testing.T) {
+		// "世" (3 bytes) straddles the cap: its first byte is the cap's last.
+		src := strings.Repeat("a", MaxContentBytes-1) + "世"
+		data, truncated, err := ReadCapped(strings.NewReader(src))
+		if err != nil {
+			t.Fatalf("ReadCapped: %v", err)
+		}
+		if !truncated {
+			t.Error("a straddling body did not report truncated")
+		}
+		if len(data) != MaxContentBytes-1 {
+			t.Errorf("len(data) = %d, want %d (the split rune dropped)", len(data), MaxContentBytes-1)
+		}
+		if !utf8.Valid(data) {
+			t.Error("the cut left invalid UTF-8")
+		}
+	})
+
+	t.Run("a binary body keeps the raw cut", func(t *testing.T) {
+		src := bytes.Repeat([]byte{0x80}, MaxContentBytes+1)
+		data, truncated, err := ReadCapped(bytes.NewReader(src))
+		if err != nil {
+			t.Fatalf("ReadCapped: %v", err)
+		}
+		if !truncated || len(data) != MaxContentBytes {
+			t.Errorf("truncated=%v len=%d, want true/%d: no rune boundary to back to", truncated, len(data), MaxContentBytes)
 		}
 	})
 
@@ -63,6 +94,15 @@ func TestHTTPError(t *testing.T) {
 		}
 	})
 
+	t.Run("redacts the status line too", func(t *testing.T) {
+		// The reason phrase is server-supplied text: "500 <key>" must not
+		// carry the key past redaction.
+		err := HTTPError("op", "500 leaked k-123", []byte("body"), "k-123")
+		if strings.Contains(err.Error(), "k-123") {
+			t.Errorf("credential leaked via the status line: %v", err)
+		}
+	})
+
 	t.Run("redacts before the excerpt is cut", func(t *testing.T) {
 		// The credential straddles the excerpt boundary: cutting first would
 		// keep its head.
@@ -71,6 +111,13 @@ func TestHTTPError(t *testing.T) {
 		err := HTTPError("op", "500", []byte(body), secret)
 		if strings.Contains(err.Error(), "sssss") {
 			t.Errorf("credential fragment leaked: %v", err)
+		}
+	})
+
+	t.Run("the excerpt cut never splits a rune", func(t *testing.T) {
+		err := HTTPError("op", "500", []byte(strings.Repeat("x", maxSnippet-1)+"世"), "")
+		if !utf8.ValidString(err.Error()) {
+			t.Errorf("excerpt cut left invalid UTF-8: %q", err)
 		}
 	})
 

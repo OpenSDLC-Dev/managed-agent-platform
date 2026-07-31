@@ -11,7 +11,16 @@ func mapGetenv(m map[string]string) func(string) string {
 
 func TestLiveKeyGate(t *testing.T) {
 	t.Run("not opted in skips without reading a key", func(t *testing.T) {
-		_, skip, err := liveKey(mapGetenv(map[string]string{TavilyKeyEnv: "tvly-x"}), TavilyKeyEnv)
+		// The getenv is poisoned for everything but the tier variable: the
+		// "the file is never opened" promise rests on the key not being
+		// resolved at all when consent is absent.
+		getenv := func(k string) string {
+			if k != LiveEnv {
+				t.Errorf("resolved %q while not opted in", k)
+			}
+			return ""
+		}
+		_, skip, err := liveKey(getenv, TavilyKeyEnv)
 		if err != nil {
 			t.Fatalf("liveKey: %v", err)
 		}
@@ -84,6 +93,30 @@ func TestLookup(t *testing.T) {
 			t.Errorf("lookup = %q, want empty", got)
 		}
 	})
+}
+
+// TestParseValue pins the copied parser to every case modeltest pins its own
+// to — the two read the same hand-written file, so the copy drifting on a case
+// the original handles is exactly the risk the duplication takes on.
+func TestParseValue(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"plain", `some-value`, "some-value"},
+		{"space-delimited comment", `some-value # pinned`, "some-value"},
+		{"tab-delimited comment", "some-value\t# pinned", "some-value"},
+		{"hash inside the value", `sk-abc#def`, "sk-abc#def"},
+		{"double-quoted", `"https://gateway.example/api"`, "https://gateway.example/api"},
+		{"single-quoted", `'sk-secret'`, "sk-secret"},
+		{"quoted, then a comment", `"abc" # note`, "abc"},
+		{"hash inside quotes", `"value # pinned"`, "value # pinned"},
+		{"hash inside quotes, then a comment", `"value # pinned" # note`, "value # pinned"},
+		{"unbalanced quote", `"abc`, `"abc`},
+		{"empty", ``, ""},
+		{"surrounding space", `  spaced  `, "spaced"},
+	} {
+		if got := parseValue(tc.in); got != tc.want {
+			t.Errorf("%s: parseValue(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
 }
 
 func TestParseDotEnv(t *testing.T) {

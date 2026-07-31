@@ -89,6 +89,12 @@ func (c *Client) Search(ctx context.Context, query string) ([]webtool.SearchResu
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("tavily search: decoding response: %w", err)
 	}
+	// max_results is a request, not a guarantee — the answer's count is the
+	// backend's word, and the bounded result size the constant promises must
+	// not depend on it.
+	if len(out.Results) > MaxResults {
+		out.Results = out.Results[:MaxResults]
+	}
 	hits := make([]webtool.SearchResult, len(out.Results))
 	for i, r := range out.Results {
 		hits[i] = webtool.SearchResult{Title: r.Title, URL: r.URL, Content: r.Content}

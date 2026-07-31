@@ -79,6 +79,29 @@ func TestSearchRequestShape(t *testing.T) {
 	}
 }
 
+func TestSearchCapsTheHitCount(t *testing.T) {
+	// max_results is a request; a backend answering with more must not have
+	// its word taken for the bounded result size.
+	var over []webtool.SearchResult
+	for i := 0; i < tavily.MaxResults+2; i++ {
+		over = append(over, webtool.SearchResult{Title: "t", URL: "https://a.example/", Content: "c"})
+	}
+	body, ct := renderHits(over)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", ct)
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	hits, err := tavily.New(srv.URL, "k").Search(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != tavily.MaxResults {
+		t.Errorf("len(hits) = %d, want capped at %d", len(hits), tavily.MaxResults)
+	}
+}
+
 func TestSearchRejectsMalformedJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("not json"))

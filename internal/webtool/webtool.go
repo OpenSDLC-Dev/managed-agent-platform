@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // SearchResult is one search hit — the fields the wire's search_result block
@@ -56,16 +57,30 @@ const maxSnippet = 200
 
 // ReadCapped reads r up to MaxContentBytes and reports whether the source held
 // more. The one-past-the-cap read is how "more" is detected without draining
-// an unbounded stream.
+// an unbounded stream. The cut backs off a rune split across the cap, so a
+// truncated page never reaches the event log ending in a replacement
+// character (toolset's truncation rule, restated for this seam).
 func ReadCapped(r io.Reader) (data []byte, truncated bool, err error) {
 	data, err = io.ReadAll(io.LimitReader(r, MaxContentBytes+1))
 	if err != nil {
 		return nil, false, err
 	}
 	if len(data) > MaxContentBytes {
-		return data[:MaxContentBytes], true, nil
+		return runeCut(data, MaxContentBytes), true, nil
 	}
 	return data, false, nil
+}
+
+// runeCut cuts b at n, backing off past a multi-byte rune the cut would
+// split. At most utf8.UTFMax-1 bytes are dropped; when no rune boundary is
+// that close (a binary body), the raw cut stands. len(b) must exceed n.
+func runeCut(b []byte, n int) []byte {
+	for back := 0; back < utf8.UTFMax; back++ {
+		if utf8.RuneStart(b[n-back]) {
+			return b[:n-back]
+		}
+	}
+	return b[:n]
 }
 
 // HTTPError is the error for a non-2xx backend response: the operation, the
@@ -78,9 +93,12 @@ func HTTPError(op, status string, body []byte, secret string) error {
 	snippet := string(body)
 	if secret != "" {
 		snippet = strings.ReplaceAll(snippet, secret, "[redacted]")
+		// The status line is server-supplied text too: an endpoint answering
+		// "500 <key>" must not carry the key past redaction in it.
+		status = strings.ReplaceAll(status, secret, "[redacted]")
 	}
 	if len(snippet) > maxSnippet {
-		snippet = snippet[:maxSnippet]
+		snippet = string(runeCut([]byte(snippet), maxSnippet))
 	}
 	return fmt.Errorf("%s: %s: %s", op, status, snippet)
 }

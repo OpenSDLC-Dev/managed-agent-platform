@@ -8,7 +8,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Tasks
 
-- [x] Slice 1 — `internal/webtool` seam: Searcher/Fetcher, tavily/jina adapters, contract suite, env contract + live tier (PR #221; live tier green against real Tavily/Jina 2026-07-31)
+- [x] Slice 1 — `internal/webtool` seam: Searcher/Fetcher, tavily/jina adapters, contract suite, consent-gated live tier (PR #221; live tier green against real Tavily/Jina 2026-07-31; the production env wiring is slice 3's)
 - [ ] Slice 2 — wire surface: domain `SearchResultBlock`, `Result` blocks field, definitions, brain offering
 - [ ] Slice 3 — routing + execution: `web_exec` queue kind, trigger hold-back, executor driver
 - [ ] Slice 4 — docs: DIVERGENCES entries, self-hosted-security.md, README

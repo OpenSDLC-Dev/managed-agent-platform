@@ -158,16 +158,19 @@ Live-tier tests follow the `modeltest` contract: `RUN_LIVE_WEB_TESTS=1` is conse
 
 ## Slices
 
-1. **`internal/webtool`** — interfaces, tavily/jina adapters, contract suite, env
-   contract, live tier. → verify: `make verify`; live tier manually with filled keys.
+1. **`internal/webtool`** — interfaces, tavily/jina adapters, contract suite, and the
+   consent-gated live tier. The env table above is this slice's *naming* contract only —
+   the production processes read nothing yet; the executor consumes it in slice 3.
+   → verify: `make verify`; live tier manually with filled keys.
 2. **Wire surface** — domain `SearchResultBlock` + `Result` blocks field + definitions +
    brain offering/policies; its INFERRED DIVERGENCES entries (input schemas, fetch-block
    choice) land in the same PR — the registry rule is same-PR, never batched to slice 4.
    → verify: round-trip tests against the SDK types; enabling `web_search` puts it in
    the model request.
 3. **Routing + execution** — `web_exec` kind, trigger logic (hold-back + name filters),
-   executor driver, telemetry; the mixed-turn hold-back INFERRED entry lands in the
-   same PR. → verify: queue/executor contract tests; end-to-end acceptance: a
+   executor driver wiring the env table above, telemetry; the mixed-turn hold-back
+   INFERRED entry lands in the same PR. → verify: queue/executor contract tests;
+   end-to-end acceptance: a
    local-stack session (real keys) runs "search X, fetch the top hit" and the event log
    shows `agent.tool_use` → `agent.tool_result{search_result}` / `{text}`.
 4. **Docs** — the remaining DIVERGENCES entries (egress origin: deliberate;

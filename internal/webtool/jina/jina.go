@@ -51,8 +51,12 @@ func (c *Client) Fetch(ctx context.Context, target string) (webtool.FetchResult,
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return webtool.FetchResult{}, fmt.Errorf("web_fetch: not an http(s) URL: %q", target)
 	}
-	// Jina Reader's shape: the full target URL rides verbatim as the path.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/"+target, nil)
+	// Jina Reader's shape: the full target URL rides as the request path —
+	// percent-encoded as one segment, because concatenated raw, everything
+	// from the target's first '#' would parse as the OUTER URL's fragment and
+	// silently never be sent (the reader decodes the segment and keeps the
+	// fragment; verified against the live endpoint).
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/"+url.PathEscape(target), nil)
 	if err != nil {
 		return webtool.FetchResult{}, fmt.Errorf("jina fetch: %w", err)
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/webtool"
@@ -36,12 +38,31 @@ func TestFetchRequestShape(t *testing.T) {
 	if _, err := jina.New(srv.URL+"/", "jina-k1").Fetch(context.Background(), target); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	// Jina Reader takes the target URL verbatim as the request path.
-	if uri != "/"+target {
-		t.Errorf("request URI = %q, want %q", uri, "/"+target)
+	// The target URL rides percent-encoded as one path segment.
+	if want := "/" + url.PathEscape(target); uri != want {
+		t.Errorf("request URI = %q, want %q", uri, want)
 	}
 	if auth != "Bearer jina-k1" {
 		t.Errorf("Authorization = %q, want Bearer jina-k1", auth)
+	}
+}
+
+func TestFetchKeepsTheFragment(t *testing.T) {
+	// Concatenated raw, everything from the target's '#' would become the
+	// outer URL's fragment and silently never reach the reader — a
+	// hash-routed page would fetch as its landing page.
+	var uri string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uri = r.RequestURI
+		w.Write([]byte("page"))
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := jina.New(srv.URL, "k").Fetch(context.Background(), "https://docs.example.com/#/api/auth"); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if !strings.Contains(uri, "%23") {
+		t.Errorf("request URI %q lost the target's fragment", uri)
 	}
 }
 

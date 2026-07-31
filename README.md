@@ -82,10 +82,12 @@ itself when its credentials rot is not a safety net.
 | Unit & contract | — | logic, wire shapes, scripted provider streams |
 | Dependency integration | — | real Postgres, Docker, and Kubernetes (hard-fail without them) |
 | Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn against your endpoint, through the adapter whose protocol it speaks (the other adapter's test skips) |
+| Live web backends | `RUN_LIVE_WEB_TESTS=1` | one real Tavily search and one real Jina Reader fetch through the web-tool adapters (`TAVILY_API_KEY` / `JINA_API_KEY`) |
 | Live-system evals | `RUN_EVALS=1` (`make eval`) | whole sessions: API → brain → real model → sandbox → SSE, deterministically graded. [Twelve regression tasks](./docs/plan/02_evals-system.md) spanning the built-in toolset, permission allow/deny, single- and multi-turn, and skill injection; results land in `evals/artifacts/`. CI also runs this tier daily on a schedule ([`evals.yml`](./.github/workflows/evals.yml)), reading the same four variables from the `evals` deployment environment's secrets — and failing rather than skipping while they are unset |
 
 Configure the endpoint once in a gitignored repo-root `.env` — `MODEL_PROTOCOL`
-(`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID` — and the live tiers
+(`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID`, plus
+`TAVILY_API_KEY` / `JINA_API_KEY` for the web-backend tier — and the live tiers
 read it (the environment wins over the file). Never commit real credentials.
 
 **Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres, MinIO, and OpenBao (and an optional Jaeger):
