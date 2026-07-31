@@ -15,6 +15,18 @@ copy of an entry here.
 
 ### Added
 
+- **The web-tools design plan** ([docs/plan/15_web-tools.md](./docs/plan/15_web-tools.md), draft,
+  [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)). `web_fetch` and
+  `web_search` — the last two `agent_toolset_20260401` tools, so far a registered deferral that
+  resolves an enabled tool to nothing — get their design: executed in the **executor process on
+  both deployment modes** (the official `ant` worker implements only the six sandbox tools, so
+  self_hosted web calls must never reach it; the environment's networking policy explicitly does
+  not govern the web tools, so they bypass the session gate), returning the wire's
+  `search_result`/`text` blocks (`betasessionevent.go`'s closed four-variant result union), backed
+  by Tavily (search) and Jina Reader (fetch) behind an `internal/webtool` seam with an env-driven
+  config contract. Ground truth resolved against the public managed-agents docs and the pinned SDK;
+  the three behaviors only a real `ant` recording can settle are carried as INFERRED.
+
 - **`user.interrupt` now ends the turn it names — the escape hatch for a session nothing will
   finish** ([#68](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/68)). The event was
   accepted, validated and appended, and then nothing acted on it, so a session suspended on a tool
