@@ -7,7 +7,9 @@
 # worktree cannot regenerate for itself.
 
 # The model endpoint for the live tiers: MODEL_PROTOCOL / MODEL_BASE_URL /
-# MODEL_API_KEY / MODEL_ID. internal/modeltest opens this from the *repo root*,
+# MODEL_API_KEY / MODEL_ID — plus the web-tool backend keys TAVILY_API_KEY /
+# JINA_API_KEY read the same way by internal/webtool/webtooltest (plan 15).
+# internal/modeltest opens this from the *repo root*,
 # which inside a worktree is the worktree's own root (it resolves the path from
 # its own source file), so an uncopied .env is simply absent rather than
 # inherited from the main checkout. It has to be here because the opt-in

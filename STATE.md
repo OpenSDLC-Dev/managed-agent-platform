@@ -4,8 +4,11 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** The backlog lives in GitHub issues; the last plan (14 — a bulk sandbox write, #206) archived 2026-07-26 ([docs/HISTORY.md](./docs/HISTORY.md)).
+**Plan 15 — web_fetch + web_search built-in tools** ([docs/plan/15_web-tools.md](./docs/plan/15_web-tools.md), [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)): executor-executed on both deployment modes, Tavily/Jina backends.
 
 ## Tasks
 
-**None.**
+- [x] Slice 1 — `internal/webtool` seam: Searcher/Fetcher, tavily/jina adapters, contract suite, env contract + live tier (PR #221; live tier green against real Tavily/Jina 2026-07-31)
+- [ ] Slice 2 — wire surface: domain `SearchResultBlock`, `Result` blocks field, definitions, brain offering
+- [ ] Slice 3 — routing + execution: `web_exec` queue kind, trigger hold-back, executor driver
+- [ ] Slice 4 — docs: DIVERGENCES entries, self-hosted-security.md, README
