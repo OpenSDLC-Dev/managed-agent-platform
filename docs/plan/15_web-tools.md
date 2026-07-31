@@ -18,11 +18,12 @@ Deliberately **not** in this plan, each with its own tracker or a follow-up to f
 - **Tool-level domain allowlisting**: the reference has per-tool "allowed domains" for the
   web tools (its environments doc names them; no wire field configures them — see Ground
   truth). v1 ships without a filter; a follow-up issue will add an operator-side allowlist
-  config. Recorded INFERRED in DIVERGENCES.
+  config. Its INFERRED registry entry lands with slice 4.
 - **The 100k-character spill-to-sandbox-file behavior**: the reference writes oversized
   tool output to a sandbox file and hands the model a preview + path. That couples web
-  results back into the sandbox; we keep today's `capOutput` truncation and record the
-  divergence. Applies to all tools, so it is its own issue, not a web-tools rider.
+  results back into the sandbox; we keep today's `capOutput` truncation, and slice 4
+  records the divergence. Applies to all tools, so it is its own issue, not a web-tools
+  rider.
 - **Delegating to model endpoints that support server-side web tools**: rejected for v1 —
   design principle 4 requires any Anthropic-protocol endpoint to work, so a
   server-tool passthrough could only ever be an optimization, and it would bypass the

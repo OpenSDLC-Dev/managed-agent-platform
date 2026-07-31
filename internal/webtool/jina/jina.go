@@ -54,8 +54,10 @@ func (c *Client) Fetch(ctx context.Context, target string) (webtool.FetchResult,
 	// Jina Reader's shape: the full target URL rides as the request path —
 	// percent-encoded as one segment, because concatenated raw, everything
 	// from the target's first '#' would parse as the OUTER URL's fragment and
-	// silently never be sent (the reader decodes the segment and keeps the
-	// fragment; verified against the live endpoint).
+	// silently never be sent. The reader accepts the encoded form and
+	// receives the whole target (verified live); what its conversion then
+	// does with a fragment is the reader's own business — this adapter's
+	// contract is only that the model's URL reaches the wire intact.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/"+url.PathEscape(target), nil)
 	if err != nil {
 		return webtool.FetchResult{}, fmt.Errorf("jina fetch: %w", err)

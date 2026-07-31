@@ -16,8 +16,9 @@
 # contract is deliberately fail-closed: `make test` still passes without it (no
 # consent variable, no paid call), but opting in with RUN_LIVE_MODEL_TESTS=1,
 # RUN_EVALS=1 or RUN_LIVE_WEB_TESTS=1 then FAILS rather than skips — a missing
-# endpoint must never look like a green build. So a worktree without this file looks perfectly healthy
-# right up until you ask it to reach a model.
+# endpoint must never look like a green build. So a worktree without this file
+# looks perfectly healthy right up until you ask it to reach a model or a web
+# backend.
 .env
 
 # A filled-in copy of model-providers.example.json, mounted by the compose stack
