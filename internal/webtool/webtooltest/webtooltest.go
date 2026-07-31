@@ -93,8 +93,16 @@ func RunSearcherContract(t *testing.T, b SearcherBackend) {
 	})
 
 	t.Run("an oversized response is refused", func(t *testing.T) {
-		srv := serve(t, http.StatusOK,
-			strings.Repeat("x", webtool.MaxContentBytes+1), "application/json")
+		// A VALID body padded past the cap with whitespace: an adapter that
+		// forgot the refusal decodes the truncated payload cleanly and
+		// returns hits without an error, so this subtest can actually catch
+		// the regression — raw garbage would fail the decode anyway and pass
+		// for the wrong reason.
+		body, ct := b.Render([]webtool.SearchResult{{Title: "t", URL: "https://a.example/", Content: "c"}})
+		if pad := webtool.MaxContentBytes + 1 - len(body); pad > 0 {
+			body += strings.Repeat(" ", pad)
+		}
+		srv := serve(t, http.StatusOK, body, ct)
 		if _, err := b.New(srv.URL, contractKey).Search(context.Background(), "q"); err == nil {
 			t.Fatal("a response past MaxContentBytes did not surface as an error")
 		}

@@ -281,6 +281,20 @@ The built-in tools — what an `agent_toolset_20260401` entry enables.
 | `search.go` | `glob` and `grep` as bash scripts in the container. glob expands the pattern with bash's own **globstar** — which is where doublestar semantics already live (`**` spans directories, `*` does not cross a separator, dotglob makes a leading dot ordinary) — then stamps mtimes and sorts newest first, capped at 200. The whole glob pipeline is **NUL-delimited** (`stat --printf … \0` / `sort -z`), so a matched filename that itself contains a newline stays one record and cannot inject a fabricated path; `pipefail` is on so a broken pipeline (an image whose `stat` lacks `--printf`, a missing tool the up-front `command -v` guard also names) is a reported error rather than a silent "no matches". grep uses the image's GNU grep, PCRE where it has it (a model writes `\d` far more readily than `[0-9]`), ERE where it does not; exit 1 is the answer "no matches", not a failure. |
 | `telemetry.go` | The tool-run duration metric — deliberately the platform's own metric name, not a `gen_ai.*` one. |
 
+### internal/webtool
+
+The web_fetch / web_search backend seam (docs/plan/15_web-tools.md, #47): the tools execute
+in the executor's own process on both deployment modes — never the sandbox, never the BYOC
+worker, never the session gate (the environment's networking policy deliberately does not
+govern them). Nothing consumes the seam yet — the definitions, routing and executor driver
+are the plan's slices 2–3.
+
+| File | Contents |
+|---|---|
+| `webtool.go` | `Searcher` / `Fetcher` — the interfaces the executor will drive — plus the shared adapter helpers: `MaxContentBytes` (4 MiB; a response body is untrusted-length input, capped the way sandbox file reads are), `ReadCapped` (reads one past the cap so "more" is detected without draining an unbounded stream; a fetch truncates and says so, a search refuses — truncated JSON decodes as nothing), and `HTTPError` (a non-2xx error carrying a short body excerpt with the credential redacted **before** the cut, so an endpoint that echoes its Authorization header back cannot land the key in a tool-result event). |
+| `tavily/tavily.go` | The Tavily `web_search` adapter: one `POST {base}/search` per call, Bearer-authenticated, fixed `max_results` 5 (the tool's input schema is deliberately just `{query}`; a bounded, deterministic result size belongs to the platform, not the model), hits mapped onto `SearchResult` in order. Base URL configurable with `DefaultBaseURL` as the public endpoint — never hard-coded in a caller. |
+| `jina/jina.go` | The Jina Reader `web_fetch` adapter: one GET with the target URL riding verbatim as the request path, `Authorization` sent only when a key is configured (the rate-limited free tier takes none), and the model-supplied target validated to an absolute http(s) URL before anything touches the network. |
+
 ### internal/executor
 
 The `tool_exec` consumer — the platform-managed half of the pull protocol.
@@ -503,6 +517,12 @@ seam (see above).
 `internal/secrets/secretstest` is the OpenBao twin for the
 secrets-cipher seam: one dev-mode OpenBao per test binary with the transit engine
 mounted, per-test key names, and the shared cipher contract suite.
+`internal/webtool/webtooltest` is the webtool seam's suite-and-consent twin: the shared
+Searcher/Fetcher contract suites (hit mapping, credential-never-in-an-error, cap
+semantics, torn bodies, zero-network URL rejection) plus the `RUN_LIVE_WEB_TESTS=1`
+live tier, reading `TAVILY_API_KEY`/`JINA_API_KEY` from the environment or the
+repo-root `.env` under modeltest's consent rules — restated rather than imported, so
+modeltest's MODEL_*-only contract stays closed.
 `internal/modeltest` owns the live-tier opt-in contract: `.env` supplies configuration,
 `RUN_LIVE_MODEL_TESTS`/`RUN_EVALS` supply consent, and opted-in-but-misconfigured fails
 rather than skips (`TierEnabled` serves `TestMain` callers). All of them are deliberately

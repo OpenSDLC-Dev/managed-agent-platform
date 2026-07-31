@@ -161,18 +161,21 @@ Live-tier tests follow the `modeltest` contract: `RUN_LIVE_WEB_TESTS=1` is conse
 1. **`internal/webtool`** — interfaces, tavily/jina adapters, contract suite, env
    contract, live tier. → verify: `make verify`; live tier manually with filled keys.
 2. **Wire surface** — domain `SearchResultBlock` + `Result` blocks field + definitions +
-   brain offering/policies. → verify: round-trip tests against the SDK types; enabling
-   `web_search` puts it in the model request.
+   brain offering/policies; its INFERRED DIVERGENCES entries (input schemas, fetch-block
+   choice) land in the same PR — the registry rule is same-PR, never batched to slice 4.
+   → verify: round-trip tests against the SDK types; enabling `web_search` puts it in
+   the model request.
 3. **Routing + execution** — `web_exec` kind, trigger logic (hold-back + name filters),
-   executor driver, telemetry. → verify: queue/executor contract tests; end-to-end
-   acceptance: a local-stack session (real keys) runs "search X, fetch the top hit" and
-   the event log shows `agent.tool_use` → `agent.tool_result{search_result}` /
-   `{text}`.
-4. **Docs** — DIVERGENCES (egress origin: deliberate; input schemas, allowed-domains
-   config, mixed-turn hold-back, fetch-block choice: INFERRED; spill-file: deferred),
+   executor driver, telemetry; the mixed-turn hold-back INFERRED entry lands in the
+   same PR. → verify: queue/executor contract tests; end-to-end acceptance: a
+   local-stack session (real keys) runs "search X, fetch the top hit" and the event log
+   shows `agent.tool_use` → `agent.tool_result{search_result}` / `{text}`.
+4. **Docs** — the remaining DIVERGENCES entries (egress origin: deliberate;
+   allowed-domains config: INFERRED; spill-file: deferred),
    docs/self-hosted-security.md (web egress originates in the executor, not the gate;
-   the "still deferred" line goes), CLAUDE.md's `.env` sentence, README status,
-   CHANGELOG. STATE.md flips this plan `in-progress` in slice 1's PR.
+   the "still deferred" line goes), README status, CHANGELOG. STATE.md flips this plan
+   `in-progress` in slice 1's PR; slice 1 already updated CLAUDE.md's `.env` sentence
+   and docs/ARCHITECTURE.md's package reference with the seam.
 
 ## Acceptance (from #47)
 
