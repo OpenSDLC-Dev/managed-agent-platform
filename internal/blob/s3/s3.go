@@ -69,6 +69,12 @@ func alreadyOwned(err error) bool {
 	return code == "BucketAlreadyOwnedByYou" || code == "BucketAlreadyExists"
 }
 
+// noSuchKey reports the endpoint saying the object is not there — absence, not
+// a failure, for both readers and deleters.
+func noSuchKey(err error) bool {
+	return minio.ToErrorResponse(err).Code == "NoSuchKey"
+}
+
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
 	_, err := s.client.PutObject(ctx, s.bucket, key, r, size,
 		minio.PutObjectOptions{ContentType: contentType})
@@ -88,7 +94,7 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, int64, erro
 	info, err := obj.Stat()
 	if err != nil {
 		_ = obj.Close()
-		if minio.ToErrorResponse(err).Code == "NoSuchKey" {
+		if noSuchKey(err) {
 			return nil, 0, fmt.Errorf("s3: get %s: %w", key, blob.ErrNotFound)
 		}
 		return nil, 0, fmt.Errorf("s3: stat %s: %w", key, err)
@@ -97,9 +103,12 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, int64, erro
 }
 
 func (s *Store) Delete(ctx context.Context, key string) error {
-	// S3 DeleteObject is idempotent — a missing key succeeds — which is
-	// exactly the contract's convergence requirement.
-	if err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil {
+	// AWS S3 and MinIO make DeleteObject idempotent themselves — a missing key
+	// answers 204 — but GCS's XML API answers 404 NoSuchKey, so the same
+	// absence has to be mapped here for the contract's crashed-and-retried
+	// delete to converge on every S3-compatible endpoint rather than flap.
+	err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
+	if err != nil && !noSuchKey(err) {
 		return fmt.Errorf("s3: delete %s: %w", key, err)
 	}
 	return nil

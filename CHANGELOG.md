@@ -153,6 +153,22 @@ copy of an entry here.
 
 ### Fixed
 
+- **Deleting an already-deleted object converges on Google Cloud Storage**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 1).
+  `blob.Store` requires a delete to converge rather than flap — "a crashed-and-retried
+  delete must converge" — and the S3 backend got that for free from AWS S3 and MinIO,
+  which answer a DELETE of a missing object with `204`. GCS's XML API answers
+  `404 NoSuchKey` instead (measured against real GCS on 2026-08-01, the one contract row
+  of eight that failed there), so every retried delete after a crash returned an error
+  and the caller's cleanup never reached a settled state. `Delete` now treats that code
+  as the absence it describes, which is the check `Get` has always made to map a missing
+  object onto `blob.ErrNotFound`; both now go through one `noSuchKey` helper. The mapping
+  is deliberately narrow — a denied or otherwise failed delete is still an error, and a
+  vanished *bucket* stays an error on every backend. Nothing changes on S3 or MinIO,
+  which never produce the code, which is also why the MinIO-backed contract suite cannot
+  reach this path: the regression test drives a stub S3 endpoint whose DELETE answers
+  `404 NoSuchKey`, and was confirmed failing against the pre-fix code.
+
 - **A NUL in the model's own output no longer wedges the turn**
   ([#228](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/228)). The model was the
   third NUL producer, and the last unguarded one: tool output is stripped since #223 and
