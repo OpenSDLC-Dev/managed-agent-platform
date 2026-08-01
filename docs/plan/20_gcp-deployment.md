@@ -649,11 +649,16 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
     executor startup** rather than silently reverting to the default; the empty value
     applies nothing.
 
-  Chart surface for all three. Two of them — the storage limit and the placement knobs —
-  default to today's behaviour exactly. **`seccompProfile` deliberately does not**: it
-  is applied unconditionally, so pods that ran unconfined now run under `RuntimeDefault`,
-  and that behaviour change is the entire point of shipping it rather than a knob nobody
-  turns on. Saying so matters beyond tidiness — it is what lets the
+  Chart surface for the two that have one — the storage limit and the placement knobs —
+  both defaulting to today's behaviour exactly. **`seccompProfile` has none, and
+  deliberately does not**: it is applied unconditionally, so pods that ran unconfined now
+  run under `RuntimeDefault`, and that behaviour change is the entire point of shipping it
+  rather than a knob nobody turns on. (Drafted as "chart surface for all three". The chart
+  *could* carry one — it already configures runtime-created sandbox pods indirectly, piping
+  `executor.netSetupImage` and `sandboxRuntimeClass.name` through the executor's
+  environment — so the reason there is no seccomp knob is that the design deliberately has
+  none, not that the chart could not express it. Its operator-facing surface is
+  documentation.) Saying so matters beyond tidiness — it is what lets the
   shared-responsibility row move onto the platform, which an opt-in default could not
   justify. Unit-test at the podSpec level, and run the shared contract suite on kind
   **including a gated session**: a seccomp filter that interfered with the gate's
@@ -671,10 +676,16 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   no `runAsNonRoot: true`, no `seccompProfile`, and a `capabilities.drop` that does not
   contain `ALL`. This slice removes the second; `SANDBOX_CAP_DROP=ALL` already removes
   the third, leaving `runAsNonRoot` as the one blocker no configuration reaches. So
-  slice 2 is a step toward `restricted` compliance, not the arrival — and for a **gated**
-  pod it is not even that, since the gate sidecar adds `NET_ADMIN`, which `restricted`
-  forbids outright. Nothing in this plan should be read as making sandbox namespaces
-  `restricted`-ready.
+  slice 2 is a step toward `restricted` compliance, not the arrival.
+
+  And that accounting holds only for a pod with no init container. `restricted` evaluates
+  *every* container in the pod, init containers included, and every pod carrying one fails
+  outright: the gate sidecar, or `netsetup`. Both add `NET_ADMIN`, neither drops `ALL`,
+  neither sets `allowPrivilegeEscalation: false`. The set is wider than the networking
+  type suggests — the gate rides `limited` networking **or any attached vault**, so a
+  vault-attached *unrestricted* session gets the sidecar too, and the only init-free shape
+  is unrestricted **and** vault-less, which `runAsNonRoot` still rejects. Nothing in this
+  plan should be read as making sandbox namespaces `restricted`-ready.
 
   Deliberately not in this slice, because no code can carry it: the **per-pod process
   limit**. `Hardening.PidsLimit` is Docker-only and the Pod API has no equivalent, so on

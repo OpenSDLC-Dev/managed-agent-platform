@@ -355,6 +355,7 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 			RestartPolicy:                corev1.RestartPolicyNever,
 			AutomountServiceAccountToken: &noAutomount,
 			RuntimeClassName:             runtimeClassName(p.runtimeClass),
+			SecurityContext:              podSecurityContext(),
 			Containers: []corev1.Container{{
 				Name:            containerName,
 				Image:           spec.Image,
@@ -456,6 +457,36 @@ func runtimeClassName(name string) *string {
 		return nil
 	}
 	return &name
+}
+
+// podSecurityContext is what the whole pod gets whatever the session asked
+// for. Without it a sandbox runs under the runtime's *unconfined* default with
+// every syscall the kernel offers, while the Docker backend's containers get
+// the runtime's curated filter for free — so this brings the two backends to
+// the same posture. RuntimeDefault is the container runtime's own profile, not
+// one the platform authors.
+//
+// It does open a compatibility question rather than avoiding one, and the
+// platform answers it the same way for everybody: the profile varies by
+// runtime and runtime version, so a sandbox image or tool that needs a syscall
+// its node's profile blocks now fails, and there is no in-platform exception
+// to grant it. That is the cost accepted for the guarantee.
+//
+// Deliberately unconditional, and deliberately pod-level. Unconditional
+// because a knob nobody turns on cannot carry a responsibility the platform is
+// claiming; pod-level because it then covers the gate sidecar and the netsetup
+// init container without either growing a securityContext of its own, and
+// leaves the container-level helper below returning nil for an unhardened pod
+// exactly as it always has.
+//
+// Two consequences worth naming rather than discovering. A cluster whose
+// kubelet already runs with --seccomp-default was applying this profile
+// anyway, so there this is a no-op; and an operator can no longer choose
+// Unconfined for a sandbox, which is a capability removed, not just added.
+func podSecurityContext() *corev1.PodSecurityContext {
+	return &corev1.PodSecurityContext{
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
 }
 
 // securityContext is the sandbox container's hardening: the configured

@@ -6,13 +6,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 **[docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) (in-progress)** — the
 Google Cloud production-deployment plan, authored and approved 2026-08-01 from GCP probes
-run the same day. Slice 1 lands with this PR; next is slice 2.
+run the same day. Slice 2 is split into three sub-PRs, one per deliverable.
 
 ## Tasks
 
 - [x] Plan 20 authored and approved — evidence in its Ground truth section
-- [x] Slice 1 — GCS delete convergence (`internal/blob/s3`) — this PR
-- [ ] Slice 2 — sandbox pod placement and bounds (seccomp, ephemeral-storage, node sel.)
+- [x] Slice 1 — GCS delete convergence (`internal/blob/s3`)
+- [ ] Slice 2 — sandbox pod placement and bounds:
+  - [x] 2a — `seccompProfile: RuntimeDefault`, pod-level and unconditional (this PR)
+  - [ ] 2b — `EphemeralStorageBytes` + `SANDBOX_EPHEMERAL_STORAGE_BYTES` + chart knob
+  - [ ] 2c — node selection and tolerations (`SANDBOX_K8S_NODE_SELECTOR`/`_TOLERATIONS`)
 - [ ] Slice 3 — `internal/secrets/gcpkms` cipher + size guard + chart knob + `cmd/` wiring
 - [ ] Slice 4 — staging environment (`deploy/gcp/`) + mode-1 acceptance on GKE
 - [ ] Slice 5 — mode-2 acceptance + `docs/deploy-gcp.md`
