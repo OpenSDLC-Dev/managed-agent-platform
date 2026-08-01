@@ -467,8 +467,9 @@ resources deleted and the sweep verified empty afterwards.
    create** on `environment/`, with `foundation/` untouched, proving the three things a
    rebuild can actually fail at: the second `apply` succeeds with no KMS name collision;
    the bootstrap script **reconciles the live system against the surviving secrets** —
-   reapplying the database password to the brand-new Cloud SQL instance and the GCS HMAC
-   key against the surviving service account; and a fresh
+   reapplying the database password to the brand-new Cloud SQL instance, and checking the
+   stored GCS HMAC pair still resolves to a live key on the surviving service account; and
+   a fresh
    vault credential round-trips on the rebuilt stack. An operator who needs the data to
    survive needs a Cloud SQL export/restore step, which this plan does not build and the
    deploy guide says so.
