@@ -181,11 +181,11 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 		budget := toolset.MaxOutputBytes
 		blocks := make([]domain.SearchResultBlock, 0, len(hits))
 		for _, h := range hits {
-			source := sanitizeWebString(h.URL)
+			source := toolset.SanitizeText(h.URL)
 			if source == "" {
 				continue
 			}
-			title := sanitizeWebString(h.Title)
+			title := toolset.SanitizeText(h.Title)
 			if title == "" {
 				title = source
 			}
@@ -194,7 +194,7 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 			}
 			budget -= len(title) + len(source)
 			content := []domain.ContentBlock{}
-			if snippet := toolset.CapOutput(sanitizeWebString(h.Content)); snippet != "" && len(snippet) <= budget {
+			if snippet := toolset.CapOutput(toolset.SanitizeText(h.Content)); snippet != "" && len(snippet) <= budget {
 				content = append(content, domain.ContentBlock{Type: "text", Text: snippet})
 				budget -= len(snippet)
 			}
@@ -239,18 +239,9 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 		// so a transport-truncated page is always also log-capped here and the
 		// model sees the truncation notice either way. Sanitized for the same
 		// jsonb reason as the search strings above.
-		return toolset.Result{Content: toolset.CapOutput(sanitizeWebString(page.Content))}
+		return toolset.Result{Content: toolset.CapOutput(toolset.SanitizeText(page.Content))}
 	}
 	// Unreachable while IsWebTool and this switch agree; the check is what
 	// keeps them agreeing.
 	return fail(fmt.Sprintf("unknown web tool %q", u.name))
-}
-
-// sanitizeWebString strips NUL bytes from backend-supplied text. Postgres's
-// jsonb cannot store a NUL inside a string value, so one anywhere in a
-// fetched page or a search hit would fault the result append - and a
-// faulted item reclaim-loops, re-fetching forever. Everything else rides
-// verbatim.
-func sanitizeWebString(s string) string {
-	return strings.ReplaceAll(s, "\x00", "")
 }

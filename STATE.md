@@ -4,8 +4,11 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** Plan 15 (web tools, #47) archived 2026-08-01 — delivery record in [docs/HISTORY.md](./docs/HISTORY.md) § "Web tools plan (15)"; the backlog is the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
+**Web-tools follow-up hardening** — the four issues split out of plan 15 (#47), worked in order: [#223](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/223) → [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225) → [#222](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/222) (plan) → [#226](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/226) (plan). Triage: #223/#225 single-PR direct; #222 and #226 need docs/plan/ files first (#222: repair-strategy decision, race reachable only on self_hosted `web_exec`; #226: wire shape unrecorded + no-sandbox web tools).
 
 ## Tasks
 
-*(none — populated when the next plan or issue starts)*
+- [x] #223 — NUL-strip tool output at the toolset boundary (three-layer tests) + the executor result-event backstop for web error text
+- [ ] #225 — operator-side `WEBTOOL_ALLOWED_DOMAINS` allowlist in the executor web driver (HostSet semantics)
+- [ ] #222 — plan, then fix the self_hosted web_exec double-answer race
+- [ ] #226 — plan the spill-to-file design (blocked on wire recording / sandbox-provisioning decision)

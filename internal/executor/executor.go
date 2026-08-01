@@ -494,12 +494,16 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 // an empty text block, and that request is what the brain replays every
 // resume, wedging the session.
 func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, error) {
+	// SanitizeText again at this boundary: the web driver's error text embeds
+	// a backend's err.Error() (which can quote a server-controlled body) and
+	// never passes Runner.dispatch, so this is the last stop before jsonb.
 	var content any = []map[string]any{}
+	text := toolset.SanitizeText(res.Content)
 	switch {
 	case res.SearchResults != nil:
 		content = res.SearchResults
-	case res.Content != "":
-		content = []map[string]any{{"type": "text", "text": res.Content}}
+	case text != "":
+		content = []map[string]any{{"type": "text", "text": text}}
 	}
 	payload, err := json.Marshal(map[string]any{
 		"tool_use_id": useID.String(),
