@@ -340,10 +340,20 @@ resources deleted and the sweep verified empty afterwards.
      the script sets the password through the **Cloud SQL Admin API `users.update`**
      with its JSON body streamed on stdin, which keeps the value out of `argv`
      entirely, and writes the same bytes to Secret Manager with `--data-file=-`.
-     Generate it ASCII-safe so the identical bytes survive JSON encoding, the DSN, and
-     the Kubernetes Secret without re-quoting. The acceptance step for this is not "the
-     command exited zero" but **a connection actually made with the stored password**,
-     plus a check that neither shell history nor a process listing contains it. The
+
+     Generate it as **hex** (`openssl rand -hex 32`), not raw bytes and not plain
+     base64. The password is embedded verbatim in the `database-url` the platform
+     consumes, and the chart already encodes that constraint — `templates/secret.yaml`
+     fails the render when `postgresql.password` matches `[@:/?#% ]`, saying "it is
+     embedded in DATABASE_URL". That guard sits inside the `{{- if not
+     .Values.existingSecret -}}` block, so **mode-2 bypasses it entirely**: in the
+     configuration this plan actually ships, the bootstrap script is the only thing
+     standing between a random password and a DSN that parses into something else.
+     Base64 would not do — it emits `/` and `+`. Hex survives JSON, the DSN, and the
+     Kubernetes Secret with no re-quoting anywhere. The acceptance step for this is not
+     "the command exited zero" but **a connection actually made with the stored
+     password**, plus a check that neither shell history nor a process listing contains
+     it. The
      model key is pasted from its own provider. Terraform never sees any of these; it
      holds names, IAM bindings, and preconditions only.
 
