@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -205,5 +206,22 @@ func TestProvisionRefusesTheGatesUIDWhenGated(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "gate") {
 		t.Fatalf("Provision = %v, want a refusal naming the gate", err)
+	}
+}
+
+// The gate's uid is stated by the provider, not left to the gate image's own
+// default. Hardening.Validate refuses a sandbox running as gaterun.DefaultGateUID
+// because the gate's owner-match rule ACCEPTs it; a custom gate image baking a
+// different GATE_UID would otherwise move the firewall's accepted identity out
+// from under that check with nothing to notice. Container env beats image env,
+// so setting it here is what makes the constant true.
+func TestGateContainerIsGivenThePlatformsGateUID(t *testing.T) {
+	cfg := gateConfig(sandbox.Spec{
+		SessionID: domain.NewID("sesn"),
+		Gate:      &sandbox.GateSpec{Image: "gate:1", ControlplaneURL: "http://cp", TokenMinter: &fakeMinter{}},
+	}, "tok", "bridge")
+	want := "GATE_UID=" + strconv.Itoa(gaterun.DefaultGateUID)
+	if !slices.Contains(cfg.Env, want) {
+		t.Errorf("gate env = %v, want it to carry %s", cfg.Env, want)
 	}
 }

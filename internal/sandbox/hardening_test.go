@@ -2,6 +2,7 @@ package sandbox_test
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -143,12 +144,21 @@ func TestHardeningFromEnvRejectsMalformedValues(t *testing.T) {
 		{"SANDBOX_CAP_DROP", "_"},
 		{"SANDBOX_CAP_DROP", "123"},
 		{"SANDBOX_CAP_DROP", "CAP_CAP_NET_RAW"},
+		// Shaped exactly like a capability name, so only the kernel's own set
+		// can catch it here rather than at every container create.
+		{"SANDBOX_CAP_DROP", "NET_RAWW"},
+		{"SANDBOX_CAP_DROP", "NET_RAW,SYS_ADMINN"},
 		// Large enough to wrap the millicores-to-nanoCPUs multiplication a
 		// backend does, which lands on zero and reads as "no limit".
 		{"SANDBOX_CPU_MILLIS", "9223372036854775"},
 		{"SANDBOX_READONLY_ROOTFS", "yes"},
 		{"SANDBOX_RUN_AS_USER", "nobody"},
 		{"SANDBOX_RUN_AS_USER", "-1"},
+		// uid_t is 32-bit: a larger value truncates in the runtime's setuid and
+		// can land on 0, handing a root sandbox to an operator who asked for an
+		// unprivileged one. 2^32 is that exact case.
+		{"SANDBOX_RUN_AS_USER", "4294967296"},
+		{"SANDBOX_RUN_AS_USER", "2147483648"},
 	} {
 		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
 			setHardeningEnv(t, map[string]string{tc.name: tc.value})
@@ -254,5 +264,52 @@ func TestValidateRefusesTheGatesOwnUID(t *testing.T) {
 				t.Errorf("error %q does not say why the uid is refused", err)
 			}
 		})
+	}
+}
+
+// Every capability the platform drops by default, and the wildcard, must
+// survive the name check — a set that rejected its own defaults would fail
+// every startup rather than only the typos it exists to catch.
+func TestCapDropAcceptsTheDefaultsAndTheWildcard(t *testing.T) {
+	for _, v := range append(append([]string{}, sandbox.DefaultCapDrop...), "ALL", "SYS_ADMIN", "CHOWN", "BPF", "CHECKPOINT_RESTORE") {
+		setHardeningEnv(t, map[string]string{"SANDBOX_CAP_DROP": v})
+		h, err := sandbox.HardeningFromEnv()
+		if err != nil {
+			t.Errorf("SANDBOX_CAP_DROP=%q: %v", v, err)
+			continue
+		}
+		if len(h.CapDrop) != 1 || h.CapDrop[0] != v {
+			t.Errorf("SANDBOX_CAP_DROP=%q parsed to %v", v, h.CapDrop)
+		}
+	}
+}
+
+// A workdir the operator wrote with a trailing slash is the same mount target
+// as one without, and mounting both fails the create on either backend. Exact
+// string dedupe cannot see that; cleaning the path first can.
+func TestWritablePathsNormalizesBeforeDeduplicating(t *testing.T) {
+	for _, workdir := range []string{"/tmp/", "/tmp", "//tmp", "/tmp/."} {
+		got := sandbox.WritablePaths(workdir)
+		if len(got) != 3 {
+			t.Errorf("WritablePaths(%q) = %v, want the workdir folded into the fixed paths", workdir, got)
+		}
+		if !slices.Contains(got, "/tmp") {
+			t.Errorf("WritablePaths(%q) = %v, want it to contain /tmp", workdir, got)
+		}
+	}
+	if got := sandbox.WritablePaths("/srv/work/"); !slices.Contains(got, "/srv/work") {
+		t.Errorf("WritablePaths(%q) = %v, want the cleaned workdir", "/srv/work/", got)
+	}
+}
+
+// The largest uid that survives a 32-bit uid_t is still accepted: the bound
+// exists to catch truncation, not to narrow what a deployment may choose.
+func TestRunAsUserAcceptsTheLargestSafeUID(t *testing.T) {
+	for _, v := range []string{"0", "1", "65534", "2147483647"} {
+		setHardeningEnv(t, map[string]string{"SANDBOX_RUN_AS_USER": v})
+		h, err := sandbox.HardeningFromEnv()
+		if err != nil || h.RunAsUser == nil || strconv.FormatInt(*h.RunAsUser, 10) != v {
+			t.Errorf("SANDBOX_RUN_AS_USER=%q parsed to %v, %v", v, h.RunAsUser, err)
+		}
 	}
 }

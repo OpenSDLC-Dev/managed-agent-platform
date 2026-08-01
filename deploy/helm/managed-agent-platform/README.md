@@ -219,6 +219,8 @@ See [`values.yaml`](./values.yaml) for the full set.
 > already run the handler — and, being Helm-managed, `helm uninstall` takes it away again,
 > which breaks anything else pointing at it).
 
+<!-- Two separate notes: a bare blank line between blockquotes renders as one. -->
+
 > **Process limits:** `executor.sandboxHardening` has no pids knob because Kubernetes has no
 > per-pod one — it is the kubelet's `podPidsLimit` node setting, which you configure on the
 > nodes, not in this chart. The Docker backend does cap it per container

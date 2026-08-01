@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -163,11 +164,35 @@ func TestProvisionRefusesTheGatesUIDWhenGated(t *testing.T) {
 // DNS-1123 legal whatever the configured workdir looks like — the API server
 // rejects the whole pod otherwise.
 func TestVolumeNameIsLegalAndUnique(t *testing.T) {
+	assertLegalAndUnique(t, "/srv/Agent_Work/1")
+}
+
+// The workdir is an operator's string, so the two things a readable stem cannot
+// promise are exactly what a pod is rejected for: a name past the 63-character
+// label limit, and two paths folding onto one name ("/w_1" and "/w-1" differ
+// only in a character this normalization erases). Both are per-deployment
+// failures that would strand every session, not one.
+func TestVolumeNameSurvivesAHostileWorkdir(t *testing.T) {
+	for _, workdir := range []string{
+		"/srv/" + strings.Repeat("deep/", 24) + "work",
+		"/w_1",
+		"/w-1",
+		"/VAR/LIB/MAP_SHELL",
+	} {
+		t.Run(workdir, func(t *testing.T) { assertLegalAndUnique(t, workdir) })
+	}
+	if a, b := volumeName("/w_1"), volumeName("/w-1"); a == b {
+		t.Errorf("volumeName folded two distinct paths onto %q", a)
+	}
+}
+
+func assertLegalAndUnique(t *testing.T, workdir string) {
+	t.Helper()
 	seen := map[string]bool{}
-	for _, path := range sandbox.WritablePaths("/srv/Agent_Work/1") {
+	for _, path := range sandbox.WritablePaths(workdir) {
 		name := volumeName(path)
 		if seen[name] {
-			t.Errorf("volume name %q is not unique across %v", name, sandbox.WritablePaths("/srv/Agent_Work/1"))
+			t.Errorf("volume name %q is not unique across %v", name, sandbox.WritablePaths(workdir))
 		}
 		seen[name] = true
 		if name == "" || len(name) > 63 {
@@ -179,4 +204,21 @@ func TestVolumeNameIsLegalAndUnique(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The Kubernetes gate sidecar states the same uid the Docker gate does, and for
+// the same reason: Hardening.Validate refuses a sandbox running as it, so the
+// platform must be the one deciding it rather than the gate image.
+func TestGateSidecarIsGivenThePlatformsGateUID(t *testing.T) {
+	c := gateSidecar(&sandbox.GateSpec{Image: "gate:1", ControlplaneURL: "http://cp"}, "tok")
+	want := strconv.Itoa(gaterun.DefaultGateUID)
+	for _, e := range c.Env {
+		if e.Name == "GATE_UID" {
+			if e.Value != want {
+				t.Errorf("GATE_UID = %q, want %q", e.Value, want)
+			}
+			return
+		}
+	}
+	t.Errorf("gate sidecar env = %v, want a GATE_UID entry", c.Env)
 }

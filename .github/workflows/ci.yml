@@ -79,7 +79,7 @@ jobs:
       - name: sandbox hardening and RuntimeClass are off by default and complete when set
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -qE 'SANDBOX_CPU_MILLIS|SANDBOX_CAP_DROP|SANDBOX_K8S_RUNTIME_CLASS' \
+          echo "$out" | grep -qE 'SANDBOX_PIDS_LIMIT|SANDBOX_CPU_MILLIS|SANDBOX_MEMORY_BYTES|SANDBOX_CAP_DROP|SANDBOX_READONLY_ROOTFS|SANDBOX_RUN_AS_USER|SANDBOX_K8S_RUNTIME_CLASS' \
             && { echo "default values must leave the executor's own hardening defaults alone" >&2; exit 1; }
           out="$(helm template t "$CHART" -f "$VALUES" \
             --set sandboxRuntimeClass.name=gvisor \

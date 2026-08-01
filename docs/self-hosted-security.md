@@ -22,7 +22,7 @@ deliberate divergences from the reference are in
 | Concern | Platform enforces (in code) | You (the operator) own |
 |---|---|---|
 | **Sandbox image** | Requires `/bin/bash` + a POSIX userland, and wants a `stat` accepting `-c`; pulls the image you name | Building and pinning a hardened, minimal image; keeping it patched |
-| **Resource limits** | **By default** caps every sandbox at 512 processes and 2 CPUs (`SANDBOX_PIDS_LIMIT` / `SANDBOX_CPU_MILLIS`); an optional memory cap. Kubernetes has no per-pod process limit to set | Tuning the caps; on Kubernetes, the kubelet's `podPidsLimit` |
+| **Resource limits** | **By default** caps every sandbox at 2 CPUs (`SANDBOX_CPU_MILLIS`) and every **Docker** sandbox at 512 processes (`SANDBOX_PIDS_LIMIT`); an optional memory cap. Kubernetes has no per-pod process limit to set, so `SANDBOX_PIDS_LIMIT` does nothing there | Tuning the caps; on Kubernetes, the kubelet's `podPidsLimit` |
 | **Non-root execution** | Runs the image's default user, or the uid `SANDBOX_RUN_AS_USER` names | Shipping an image whose default user is unprivileged, and whose workdir that user can reach |
 | **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; seccomp and AppArmor/SELinux profiles |
 | **Read-only root filesystem** | Set on request (`SANDBOX_READONLY_ROOTFS`), with writable mounts arranged over every path the platform itself writes (workdir, `/tmp`, the shell state root, the file-resource mount root) | Deciding to turn it on, and shipping an image that tolerates one |
@@ -236,7 +236,10 @@ alongside them (Docker `no-new-privileges`, Kubernetes
 `allowPrivilegeEscalation: false`) so a setuid binary cannot hand a dropped
 capability straight back. `SANDBOX_CAP_DROP` changes the set: a comma-separated
 list of bare capability names, `ALL` to drop everything, `none` to drop nothing
-and run with the runtime's default set.
+and run with the runtime's default set. A name that is not a Linux capability
+fails the executor's (or worker's) startup rather than every container create, so
+a typo is a process that will not start, not a deployment that starts and cannot
+provision a session.
 
 What the default costs, so it is not a surprise: a tool that changes uid loses
 the ability. `apt-get` is the one worth knowing — it warns that it cannot drop
@@ -335,6 +338,20 @@ same way: a session file resource given an **explicit `mount_path`** outside tha
 set cannot be materialized under a read-only root (it is logged, and the session
 continues without the file), so leave `mount_path` unset or put it under the
 workdir.
+
+### Rolling out a change to any of this
+
+Containment is bound when a sandbox is **created**, exactly as `Env` and the
+networking mode are. `Provision` is idempotent: it adopts a session's existing
+container or pod rather than replacing it, so a session that was already running
+when you rolled the executor keeps the containment it was created with until its
+sandbox is destroyed. New sessions get the new settings immediately. This is
+deliberate — replacing a live session's sandbox to apply a setting would discard
+the workdir, its uploaded file resources and the persistent shell's state
+mid-task, which is a worse outcome than an already-running session finishing
+under the containment it started with. If you need a configuration change to
+reach every session at once, drain the running ones (stop them, or let them
+finish) before or after the roll.
 
 ### 5. Egress restriction
 

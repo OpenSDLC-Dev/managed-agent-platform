@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	gopath "path"
 	"slices"
 	"strconv"
 	"strings"
@@ -84,6 +85,17 @@ type Hardening struct {
 // the netfilter OUTPUT hook.
 var mandatoryGateCapDrop = []string{"NET_RAW", "SETUID", "SETGID"}
 
+// maxUID is the largest uid a sandbox may be given. uid_t is 32-bit and a
+// value that does not fit truncates in the runtime's setuid — 2^32 becomes 0,
+// which is root — so the cap sits inside a positive int32, matching
+// gaterun's maxGateID. No real deployment needs an id above it.
+const maxUID = 1<<31 - 1
+
+// capDropAll is the runtime's wildcard, not a capability: both backends take it
+// in a drop list to mean every capability, and it is the one entry the
+// capability-name check has to let past.
+const capDropAll = "ALL"
+
 // EffectiveCapDrop is the capability set a backend actually applies: the
 // configured drops, plus the gate's mandatory three when the sandbox is half of
 // a gate pair. It is one function so the two backends cannot drift on which
@@ -99,8 +111,8 @@ func (h Hardening) EffectiveCapDrop(gated bool) []string {
 	out := make([]string, 0, len(want))
 	seen := map[string]bool{}
 	for _, c := range want {
-		if c == "ALL" {
-			return []string{"ALL"}
+		if c == capDropAll {
+			return []string{capDropAll}
 		}
 		if !seen[c] {
 			seen[c] = true
@@ -133,13 +145,16 @@ const sessionResourceRoot = "/mnt"
 // write, in the order a backend should mount them. Both backends take the list
 // from here so they cannot drift on it, and it is deduplicated: a deployment
 // whose workdir is one of the fixed paths must not produce two mounts on the
-// same target, which both runtimes reject.
+// same target, which both runtimes reject. The workdir is cleaned first, so a
+// trailing slash or a doubled separator is the same target here as it is to the
+// kernel — otherwise `/tmp/` would slip past the dedupe and produce exactly the
+// duplicate this exists to prevent.
 func WritablePaths(workdir string) []string {
 	if workdir == "" {
 		workdir = DefaultWorkdir
 	}
 	out := make([]string, 0, 4)
-	for _, p := range []string{workdir, "/tmp", ShellStateRoot, sessionResourceRoot} {
+	for _, p := range []string{gopath.Clean(workdir), "/tmp", ShellStateRoot, sessionResourceRoot} {
 		if !slices.Contains(out, p) {
 			out = append(out, p)
 		}
@@ -228,8 +243,12 @@ func HardeningFromEnv() (Hardening, error) {
 	}
 	if v := os.Getenv(envRunAsUser); v != "" {
 		uid, perr := strconv.ParseInt(v, 10, 64)
-		if perr != nil || uid < 0 {
-			return Hardening{}, fmt.Errorf("%s=%q is not a uid", envRunAsUser, v)
+		// Bounded, not merely non-negative: uid_t is 32-bit, so a larger value
+		// truncates in the runtime's setuid and can land on 0 — an operator who
+		// asked for an unprivileged sandbox would get a root one. The gate
+		// refuses its own uid on the same grounds (gaterun.CheckGateID).
+		if perr != nil || uid < 0 || uid > maxUID {
+			return Hardening{}, fmt.Errorf("%s=%q is not a uid (0..%d)", envRunAsUser, v, maxUID)
 		}
 		h.RunAsUser = &uid
 	}
@@ -268,7 +287,7 @@ func parseCapDrop(v string) ([]string, error) {
 	var out []string
 	for _, part := range strings.Split(v, ",") {
 		c := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(part)), "CAP_")
-		if !isCapabilityName(c) {
+		if c != capDropAll && !isCapabilityName(c) {
 			return nil, fmt.Errorf("%s=%q: %q is not a capability name", envCapDrop, v, part)
 		}
 		out = append(out, c)
@@ -276,17 +295,33 @@ func parseCapDrop(v string) ([]string, error) {
 	return out, nil
 }
 
-// isCapabilityName reports whether c is shaped like a bare Linux capability
-// name. A character-class check alone is not enough: it admits "0", "_" and
-// "123", which reach the runtime as capability names and fail every container
-// create instead of failing this deployment's startup. A residual CAP_ prefix
-// (from "CAP_CAP_NET_RAW") is refused for the same reason — no real capability
-// carries one once stripped, and Kubernetes rejects the spelling outright.
-func isCapabilityName(c string) bool {
-	if c == "" || c[0] < 'A' || c[0] > 'Z' || strings.HasPrefix(c, "CAP_") {
-		return false
-	}
-	return !strings.ContainsFunc(c, func(r rune) bool {
-		return !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_'
-	})
+// linuxCapabilities is every capability the kernel defines, bare (the CAP_
+// prefix stripped), through CAP_CHECKPOINT_RESTORE — the last one added, in
+// Linux 5.9. It is the set both runtimes accept, and the only way a typo can be
+// caught where this configuration is read: "NET_RAWW" is shaped exactly like a
+// capability name, so a character-class check passes it to the runtime, which
+// rejects every container create instead of this deployment's startup. A kernel
+// that grows a new capability needs a line here; refusing a name we cannot send
+// is the safe direction, and the alternative is a deployment that starts
+// cleanly and then cannot provision a single session.
+var linuxCapabilities = map[string]bool{
+	"AUDIT_CONTROL": true, "AUDIT_READ": true, "AUDIT_WRITE": true,
+	"BLOCK_SUSPEND": true, "BPF": true, "CHECKPOINT_RESTORE": true,
+	"CHOWN": true, "DAC_OVERRIDE": true, "DAC_READ_SEARCH": true,
+	"FOWNER": true, "FSETID": true, "IPC_LOCK": true, "IPC_OWNER": true,
+	"KILL": true, "LEASE": true, "LINUX_IMMUTABLE": true,
+	"MAC_ADMIN": true, "MAC_OVERRIDE": true, "MKNOD": true,
+	"NET_ADMIN": true, "NET_BIND_SERVICE": true, "NET_BROADCAST": true,
+	"NET_RAW": true, "PERFMON": true, "SETFCAP": true, "SETGID": true,
+	"SETPCAP": true, "SETUID": true, "SYSLOG": true, "SYS_ADMIN": true,
+	"SYS_BOOT": true, "SYS_CHROOT": true, "SYS_MODULE": true,
+	"SYS_NICE": true, "SYS_PACCT": true, "SYS_PTRACE": true,
+	"SYS_RAWIO": true, "SYS_RESOURCE": true, "SYS_TIME": true,
+	"SYS_TTY_CONFIG": true, "WAKE_ALARM": true,
 }
+
+// isCapabilityName reports whether c is a Linux capability this platform can
+// send to a runtime. c arrives upper-cased with any CAP_ prefix stripped, so a
+// residual prefix ("CAP_CAP_NET_RAW") fails the lookup along with "0", "_" and
+// every misspelling.
+func isCapabilityName(c string) bool { return linuxCapabilities[c] }

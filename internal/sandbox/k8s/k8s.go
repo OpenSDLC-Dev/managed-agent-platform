@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -403,11 +404,17 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 }
 
 // volumeName derives a pod-unique, DNS-1123 volume name from a writable mount
-// path ("/var/lib/map-shell" → "map-w-var-lib-map-shell"). The paths are the
-// platform's own (sandbox.WritablePaths) plus the configured workdir, all
-// absolute and lowercase in practice; anything else a path could carry is
-// folded to '-' so the pod is never rejected for a name this function chose.
+// path ("/var/lib/map-shell" → "map-w-var-lib-map-shell-<hash>"). Three of the
+// paths are the platform's own (sandbox.WritablePaths); the fourth is the
+// configured workdir, which is an operator's string and so cannot be assumed
+// short, lowercase, or free of the characters folded to '-' here. The readable
+// stem alone would therefore not do: it can exceed the 63-character label limit,
+// and two distinct paths can fold onto it ("/w_1" and "/w-1"). The suffix is
+// taken from the exact path, so the name is unique whenever the path is and the
+// pod is never rejected for a name this function chose.
 func volumeName(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	suffix := "-" + hex.EncodeToString(sum[:4])
 	var b strings.Builder
 	b.WriteString("map-w")
 	for _, r := range strings.ToLower(path) {
@@ -417,8 +424,15 @@ func volumeName(path string) string {
 		}
 		b.WriteByte('-')
 	}
-	return strings.TrimRight(b.String(), "-")
+	stem := b.String()
+	if max := dns1123MaxLen - len(suffix); len(stem) > max {
+		stem = stem[:max]
+	}
+	return strings.TrimRight(stem, "-") + suffix
 }
+
+// dns1123MaxLen is the label length Kubernetes enforces on a volume name.
+const dns1123MaxLen = 63
 
 // warnUnenforceablePidsLimit says once, per provider, that a configured pids
 // limit does nothing here. The Pod API carries no per-pod process limit (it is
@@ -527,6 +541,10 @@ func gateSidecar(g *sandbox.GateSpec, token string) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "CONTROLPLANE_URL", Value: g.ControlplaneURL},
 		{Name: "GATE_TOKEN", Value: token},
+		// Stated for the same reason the Docker gate states it: the platform
+		// depends on knowing the uid the gate's owner-match rule ACCEPTs, since
+		// Hardening.Validate refuses a sandbox running as it.
+		{Name: "GATE_UID", Value: strconv.Itoa(gaterun.DefaultGateUID)},
 	}
 	// Only when a collector is configured; an empty endpoint runs the gate
 	// without an exporter, matching the Docker wiring and telemetry.Run.
