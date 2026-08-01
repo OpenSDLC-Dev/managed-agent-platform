@@ -15,6 +15,25 @@ copy of an entry here.
 
 ### Added
 
+- **The web-tools plan and its backend seam** ([docs/plan/15_web-tools.md](./docs/plan/15_web-tools.md),
+  in-progress, [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)). `web_fetch`
+  and `web_search` — the last two `agent_toolset_20260401` tools, so far a registered deferral that
+  resolves an enabled tool to nothing — get their design and its first slice. The design: executed
+  in the **executor process on both deployment modes** (the official `ant` worker implements only
+  the six sandbox tools, so self_hosted web calls must never reach it; the environment's networking
+  policy explicitly does not govern the web tools, so they bypass the session gate), returning the
+  wire's `search_result`/`text` blocks (`betasessionevent.go`'s closed four-variant result union) —
+  ground truth resolved against the public managed-agents docs and the pinned SDK, with the
+  behaviors only a real `ant` recording can settle carried as INFERRED. The slice:
+  `internal/webtool` — `Searcher`/`Fetcher` interfaces with `tavily/` (POST /search, fixed
+  `max_results`) and `jina/` (Jina Reader, target URL as the request path) adapters, response reads
+  capped at 4 MiB (fetch truncates and says so; search refuses), backend-failure errors carrying a
+  credential-redacted excerpt, and the `webtooltest` shared contract suite plus the
+  `RUN_LIVE_WEB_TESTS=1` live tier reading `TAVILY_API_KEY`/`JINA_API_KEY` from the environment or
+  the repo-root `.env` under modeltest's consent rules (opted in but unconfigured fails, never
+  skips). Nothing consumes the seam yet — the definitions, routing, and executor driver are
+  slices 2–3.
+
 - **`user.interrupt` now ends the turn it names — the escape hatch for a session nothing will
   finish** ([#68](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/68)). The event was
   accepted, validated and appended, and then nothing acted on it, so a session suspended on a tool
