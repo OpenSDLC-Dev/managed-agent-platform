@@ -297,8 +297,10 @@ What is still yours at the runtime layer:
   `--security-opt seccomp=unconfined`. **Seccomp is no longer in this list on
   Kubernetes** — see the *Syscall filtering* row in the shared-responsibility
   table above.
-- **Pod Security Admission.** A strict `restricted` namespace label still
-  rejects the sandbox pod, in every configuration. Two of the three reasons it
+- **Pod Security Admission.** A namespace **enforcing** `restricted`
+  (`pod-security.kubernetes.io/enforce=restricted`) still rejects the sandbox
+  pod, in every configuration; the `audit` and `warn` modes admit it and record
+  or surface the violation instead. Two of the three reasons it
   used to reject an *unrestricted* pod are now closed — `SANDBOX_CAP_DROP=ALL`
   makes `capabilities.drop` contain `ALL`, and the pod carries a
   `seccompProfile` of the shape `restricted` accepts — leaving one:
