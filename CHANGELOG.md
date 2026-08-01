@@ -15,6 +15,28 @@ copy of an entry here.
 
 ### Added
 
+- **The Google Cloud production-deployment plan**
+  ([docs/plan/19_gcp-deployment.md](./docs/plan/19_gcp-deployment.md), approved). A
+  probe-backed path to run the platform on GKE with Google-managed backing services:
+  every decision rests on measurements taken against real GCP on 2026-08-01 — the
+  repo's own contract suites ported verbatim proved GCS interop (one real defect:
+  DELETE of a missing object answers `404 NoSuchKey`, breaking `blob.Store`'s delete
+  convergence — slice 1 mirrors `Get`'s existing `NoSuchKey` check in `Delete`), Cloud
+  KMS as a `secrets.Cipher` (6/6, with a measured 65536-byte plaintext ceiling sitting
+  exactly on the contract's largest case — accepted as a documented backend limit, with
+  envelope encryption recorded as the escape hatch if anything ever approaches it),
+  Cloud SQL's LISTEN/NOTIFY commit semantics, the gate's
+  full enforcement on the default runtime, and the impossibility of in-pod iptables
+  under gVisor (fail-closed, with the standalone-gate topology probe-proven as the
+  follow-on's design evidence). Three code deliverables (the GCS fix, an
+  `internal/secrets/gcpkms` cipher, and sandbox-pod resource bounds plus the two free
+  hardening options from Google's reference spec — an ephemeral-storage *limit* is
+  deliberately excluded, since mid-session eviction is a worse failure than the node
+  pressure it would avert); the rest is images,
+  a scripted persistent staging environment (`deploy/gcp/` Terraform behind Make targets
+  — GCP developer tooling only, never a platform dependency), a deploy guide, and two
+  recorded acceptance runs shaped by the chart's render-time secret-mode exclusivity.
+
 - **Oversized sandbox-tool output spills to a file instead of losing its tail**
   ([#226](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/226),
   [docs/plan/18_spill-oversized-output.md](./docs/plan/18_spill-oversized-output.md)). The
