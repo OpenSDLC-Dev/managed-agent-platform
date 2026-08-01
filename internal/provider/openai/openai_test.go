@@ -3,10 +3,12 @@ package openai_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/openai"
@@ -456,5 +458,140 @@ func TestTruncatedStreamFails(t *testing.T) {
 	}
 	if stream.Err() == nil {
 		t.Error("a stream ending before finish_reason must surface an error")
+	}
+}
+
+// A completed turn drains its tail on Close so the connection can be pooled —
+// but an endpoint that keeps writing past its own [DONE] would hold that drain
+// forever, and the stall guard cannot end it, because the drain's own reads are
+// what feed the guard. The bound has to be the byte limit, and Close must return
+// (#121).
+func TestCloseDoesNotDrainForeverPastDone(t *testing.T) {
+	// Closed before the server is, so a regression fails this test in ten
+	// seconds instead of hanging the whole binary: httptest.Server.Close waits
+	// for a handler that would otherwise keep writing to a blocked drain.
+	stop := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("ResponseWriter is not a Flusher")
+			return
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "data: "+`{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}`+"\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+		// Past the terminator, forever — until the client hangs up.
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-stop:
+				return
+			default:
+			}
+			if _, err := fmt.Fprint(w, ": "+strings.Repeat("k", 512)+"\n\n"); err != nil {
+				return
+			}
+			fl.Flush()
+		}
+	}))
+	t.Cleanup(func() { close(stop); srv.Close() })
+	p, err := openai.New(provider.Config{
+		Protocol: "openai", Model: "m", BaseURL: srv.URL, APIKey: testAPIKey,
+		// Long on purpose: the drain must be bounded by its own limit, not by a
+		// guard that this very drain keeps re-arming.
+		StallTimeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for stream.Next() { // reaches [DONE] and completes
+	}
+	if stream.Err() != nil {
+		t.Fatalf("stream error: %v", stream.Err())
+	}
+	done := make(chan error, 1)
+	go func() { done <- stream.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Close = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close never returned — the tail drain is unbounded, and it holds the brain's turn (#121)")
+	}
+}
+
+// An error body that stops mid-credential must not be quoted. Redaction matches
+// whole secrets, so half an echoed key survives it — and this package's own
+// truncation test defines any prefix longer than three characters as a leak. The
+// stall guard is what makes this reachable: a read that used to hang now returns
+// what it had (#121).
+func TestUpstreamErrorBodyCutMidCredentialIsNotQuoted(t *testing.T) {
+	// Everything but the last two characters: long enough that a surviving
+	// prefix is unambiguously a leak, short enough that redaction cannot match.
+	partial := testAPIKey[:len(testAPIKey)-2]
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("ResponseWriter is not a Flusher")
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"rejected credential `+partial)
+		fl.Flush()
+		select { // never finishes the body
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	t.Cleanup(srv.Close)
+	const budget = 300 * time.Millisecond
+	p, err := openai.New(provider.Config{
+		Protocol: "openai", Model: "m", BaseURL: srv.URL, APIKey: testAPIKey, StallTimeout: budget,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	type result struct{ err error }
+	res := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		_, err := p.Generate(context.Background(), provider.Request{
+			Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		})
+		res <- result{err}
+	}()
+	var genErr error
+	select {
+	case r := <-res:
+		genErr = r.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("Generate never returned — a stalled error body is unbounded (#121)")
+	}
+	if genErr == nil {
+		t.Fatal("Generate against a 401 should return an error")
+	}
+	if elapsed := time.Since(start); elapsed < budget {
+		t.Errorf("Generate failed in %s, inside its own %s budget — something other than the stall bound ended it", elapsed, budget)
+	}
+	for n := len(partial); n > 3; n-- {
+		if strings.Contains(genErr.Error(), partial[:n]) {
+			t.Fatalf("error quotes a %d-character prefix of the credential: %q", n, genErr)
+		}
+	}
+	// The status still reaches the operator — dropping the body must not drop
+	// the diagnostic that explains a gateway misconfiguration.
+	if !strings.Contains(genErr.Error(), "401") {
+		t.Errorf("error = %q, want it to still report the status", genErr)
 	}
 }

@@ -9,7 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -45,25 +47,46 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		// each instance its own connection pool — re-read the Registry
 		// doc before doing so.
 		//
-		// The same skip costs us the SDK's ResponseHeaderTimeout, and
-		// nothing else bounds a turn: an endpoint that accepts the
-		// connection and never sends headers hangs it. Pre-existing and
-		// orthogonal to the caching question — tracked in #121, whose fix
-		// must not reintroduce a per-instance pool.
+		// The same skip costs us the SDK's ResponseHeaderTimeout, so the turn
+		// is bounded by a provider.StallGuard instead — which the skip is not
+		// the only reason for: the SDK retries a transport error, so a header
+		// timeout registered on its client would buy a wedged endpoint three
+		// budgets rather than one, and it would still not cover a stream that
+		// dies mid-SSE (#121).
 		option.WithoutEnvironmentDefaults(),
 		option.WithBaseURL(cfg.BaseURL),
 		option.WithAPIKey(cfg.APIKey),
+		// Every byte the endpoint sends is a sign of life for that guard. The
+		// SDK owns the response body, and a middleware is the only place an
+		// adapter can reach it; the guard rides the request context because
+		// this client is built once and serves whatever turns follow.
+		option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+			resp, err := next(req)
+			if err != nil || resp == nil {
+				return resp, err
+			}
+			resp.Body = provider.ProgressBody(req.Context(), resp.Body)
+			return resp, nil
+		}),
 	}
 	for k, v := range cfg.Headers {
 		opts = append(opts, option.WithHeader(k, v))
 	}
 	client := sdk.NewClient(opts...)
-	return &anthropicProvider{client: client, model: cfg.Model, redact: provider.NewRedactor(cfg)}, nil
+	return &anthropicProvider{
+		client: client,
+		model:  cfg.Model,
+		stall:  cfg.StallTimeout,
+		redact: provider.NewRedactor(cfg),
+	}, nil
 }
 
 type anthropicProvider struct {
 	client sdk.Client
 	model  string
+	// stall is how long this endpoint may say nothing before the turn is
+	// abandoned; zero takes provider.DefaultStallTimeout.
+	stall time.Duration
 	// The SDK's API error quotes the whole response body and the request URL,
 	// so both an echoed credential and one carried in base_url reach its text.
 	redact provider.Redactor
@@ -113,14 +136,20 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 		params.Tools = append(params.Tools, tp)
 	}
 
-	events := p.client.Messages.NewStreaming(ctx, params)
+	// The guard bounds the whole call, the wait for response headers included:
+	// cancelling the context the SDK was handed also stops it retrying, which a
+	// timeout inside its HTTP client would not.
+	gctx, guard := provider.NewStallGuard(ctx, p.stall)
+	events := p.client.Messages.NewStreaming(gctx, params)
 	if err := events.Err(); err != nil {
-		return nil, p.redact.Error(err)
+		err = guard.Cause(p.redact.Error(err))
+		guard.Stop()
+		return nil, err
 	}
 	// The stream carries the redactor too: an endpoint can report a failure
 	// mid-stream under HTTP 200, and that error surfaces from Err() after
 	// Next(), never from here.
-	return &stream{events: events, redact: p.redact}, nil
+	return &stream{events: events, redact: p.redact, guard: guard}, nil
 }
 
 // stream translates the Messages API event stream into provider chunks:
@@ -130,6 +159,7 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 type stream struct {
 	events *ssestream.Stream[sdk.MessageStreamEventUnion]
 	redact provider.Redactor
+	guard  *provider.StallGuard
 	cur    provider.Chunk
 	err    error
 
@@ -165,7 +195,14 @@ func reportedUsage(f respjson.Field) bool {
 
 func (s *stream) Chunk() provider.Chunk { return s.cur }
 func (s *stream) Err() error            { return s.err }
-func (s *stream) Close() error          { return s.events.Close() }
+
+func (s *stream) Close() error {
+	err := s.events.Close()
+	// After the body, so a close that still reads is not aborted by the very
+	// cancellation that releases the guard.
+	s.guard.Stop()
+	return err
+}
 
 func (s *stream) Next() bool {
 	if s.err != nil || s.done {
@@ -296,12 +333,15 @@ func (s *stream) Next() bool {
 			return true
 		}
 	}
-	s.err = s.redact.Error(s.events.Err())
+	err := s.redact.Error(s.events.Err())
 	// A drained stream without message_stop is a truncated turn, not a
 	// success: callers must never mistake it for a turn that merely
 	// produced no done chunk.
-	if s.err == nil {
-		s.err = fmt.Errorf("model stream ended before message_stop")
+	if err == nil {
+		err = fmt.Errorf("model stream ended before message_stop")
 	}
+	// Last, so an endpoint that went silent is named as one: what the aborted
+	// read reports is a bare cancellation either way.
+	s.err = s.guard.Cause(err)
 	return false
 }

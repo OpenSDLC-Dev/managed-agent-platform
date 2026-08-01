@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +19,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/anthropic"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/jackc/pgx/v5"
@@ -1514,6 +1519,122 @@ func TestProviderErrorFailsTurnVisibly(t *testing.T) {
 		`SELECT count(*) FROM work_items WHERE session_id=$1 AND state != 'stopped'`, h.sessionID.String()).Scan(&live)
 	if live != 0 {
 		t.Errorf("%d work items live after failed turn", live)
+	}
+}
+
+// An endpoint that went silent (#121) is a model-side failure like any other:
+// the adapter's stall guard ends the turn, and the brain settles it on the log
+// as a session.error naming the stall. Classifying it as an infra fault instead
+// would abandon the item to lease expiry, and the brain that reclaimed it would
+// wait out the same wedged endpoint again, forever.
+func TestStalledEndpointFailsTurnVisibly(t *testing.T) {
+	// Shaped exactly as an adapter returns it — streamTurn adds the "model
+	// stream:" prefix itself. What this pins is the brain's half: that the
+	// sentinel is not mistaken for an infra fault, and that the adapter's own
+	// wording survives onto the log instead of being replaced by a generic one.
+	// That a real stall produces this error at all is TestWedgedEndpointEnds…'s
+	// job, with no injection anywhere.
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "partial")}},
+		[]error{fmt.Errorf("%w: no data for 10m0s", provider.ErrStalled)})
+	h.wake(t, "hi")
+	h.runOnce(t)
+
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"session.error"}})
+	if len(evs) != 1 {
+		t.Fatalf("session.error events = %d, want 1 — a stall must reach the log", len(evs))
+	}
+	var errPayload struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(evs[0].Body, &errPayload); err != nil {
+		t.Fatal(err)
+	}
+	if errPayload.Error.Type != "model_request_failed_error" {
+		t.Errorf("error type = %q, want model_request_failed_error", errPayload.Error.Type)
+	}
+	// The message is what an operator reads to tell a wedged endpoint from any
+	// other failed turn — including the budget that ran out.
+	if !strings.Contains(errPayload.Error.Message, provider.ErrStalled.Error()) {
+		t.Errorf("session.error message = %q, want it to name the stall", errPayload.Error.Message)
+	}
+	if n := h.liveWork(t); n != 0 {
+		t.Errorf("%d work items live after a stalled turn, want 0: it must not be left to reclaim", n)
+	}
+}
+
+// #121's acceptance, end to end with nothing faked in the model path: a real
+// Anthropic-protocol adapter pointed at an endpoint that accepts the connection
+// and then answers nothing at all must end the turn inside its stall budget and
+// leave the failure on the event log — not hold the replica until someone
+// restarts it.
+func TestWedgedEndpointEndsTheTurnOnTheLog(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// Drained so the server notices the client hanging up; then nothing —
+		// no status line, no headers, no body.
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(30 * time.Second):
+		}
+	}))
+	defer srv.Close()
+
+	pool := pgtest.NewPool(t)
+	sid, envID := pgtest.NewSession(t, pool, "cloud")
+	reg, err := provider.NewRegistry(
+		[]provider.Route{{Model: "*", Config: provider.Config{
+			Protocol: "anthropic", Model: "m", BaseURL: srv.URL, APIKey: "k",
+			StallTimeout: 300 * time.Millisecond,
+		}}},
+		map[string]provider.Factory{"anthropic": anthropic.New})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
+		brain: brain.New(pool, reg, brain.Config{}), sessionID: sid, envID: envID}
+	h.wake(t, "hi")
+
+	// Run the turn off the test goroutine so an unbounded wait fails the test
+	// rather than hanging it — the defect itself.
+	type outcome struct {
+		found bool
+		err   error
+	}
+	res := make(chan outcome, 1)
+	go func() {
+		found, err := h.brain.RunOnce(context.Background())
+		res <- outcome{found, err}
+	}()
+	select {
+	case got := <-res:
+		if !got.found {
+			t.Fatal("RunOnce found no work")
+		}
+		if got.err != nil {
+			t.Fatalf("RunOnce: %v", got.err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the turn had not ended after 20s — the wedged endpoint still holds the brain (#121)")
+	}
+
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+	evs, _ := h.log.List(context.Background(), sid, events.ListQuery{Types: []string{"session.error"}})
+	if len(evs) != 1 {
+		t.Fatalf("session.error events = %d, want 1", len(evs))
+	}
+	if !strings.Contains(string(evs[0].Body), provider.ErrStalled.Error()) {
+		t.Errorf("session.error body = %s, want it to name the stall", evs[0].Body)
+	}
+	if n := h.liveWork(t); n != 0 {
+		t.Errorf("%d work items live after the wedged turn, want 0", n)
 	}
 }
 

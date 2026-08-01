@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 // routeFile is one entry of the model_providers config file (CLAUDE.md
@@ -12,7 +13,9 @@ import (
 // agent-facing model string ("*" = default route); `upstream_model` is what
 // the endpoint receives (empty = pass the agent's string through). Exactly
 // one of `api_key` / `api_key_env` supplies the credential — the env
-// indirection keeps secrets out of config files.
+// indirection keeps secrets out of config files. `stall_timeout` is a Go
+// duration ("90s", "2m") bounding how long this endpoint may say nothing at
+// all before its turn is abandoned; absent takes DefaultStallTimeout.
 type routeFile struct {
 	Model         string            `json:"model"`
 	Protocol      string            `json:"protocol"`
@@ -21,6 +24,7 @@ type routeFile struct {
 	APIKey        string            `json:"api_key"`
 	APIKeyEnv     string            `json:"api_key_env"`
 	Headers       map[string]string `json:"headers"`
+	StallTimeout  string            `json:"stall_timeout"`
 }
 
 // LoadRoutes reads a model_providers JSON file into registry routes.
@@ -64,14 +68,29 @@ func LoadRoutes(path string) ([]Route, error) {
 				return nil, fmt.Errorf("model providers config %s, entry %d: environment variable %s is not set", path, i, rf.APIKeyEnv)
 			}
 		}
+		var stall time.Duration
+		if rf.StallTimeout != "" {
+			// Parsed here rather than left to the adapter: a typo must fail the
+			// process at startup, not silently take the default on the turn that
+			// needed the bound.
+			parsed, err := time.ParseDuration(rf.StallTimeout)
+			if err != nil {
+				return nil, fmt.Errorf("model providers config %s, entry %d: stall_timeout: %w", path, i, err)
+			}
+			if parsed <= 0 {
+				return nil, fmt.Errorf("model providers config %s, entry %d: stall_timeout must be positive (omit it for the default)", path, i)
+			}
+			stall = parsed
+		}
 		routes = append(routes, Route{
 			Model: rf.Model,
 			Config: Config{
-				Protocol: rf.Protocol,
-				Model:    rf.UpstreamModel,
-				BaseURL:  rf.BaseURL,
-				APIKey:   key,
-				Headers:  rf.Headers,
+				Protocol:     rf.Protocol,
+				Model:        rf.UpstreamModel,
+				BaseURL:      rf.BaseURL,
+				APIKey:       key,
+				Headers:      rf.Headers,
+				StallTimeout: stall,
 			},
 		})
 	}

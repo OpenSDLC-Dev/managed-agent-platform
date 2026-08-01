@@ -3,6 +3,7 @@ package openai_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -22,7 +23,9 @@ func TestSharedContract(t *testing.T) {
 		Turn: func(t *testing.T, s providertest.Script) provider.Provider {
 			return start(t, &fakeServer{sse: renderOpenAITurn(s)})
 		},
-		Hang: startHangingOpenAI,
+		Hang:      startHangingOpenAI,
+		Wedge:     startWedgedOpenAI,
+		Keepalive: startKeepaliveOpenAI,
 	})
 }
 
@@ -63,8 +66,56 @@ func renderOpenAITurn(s providertest.Script) []string {
 }
 
 // startHangingOpenAI stands up an upstream that streams one content delta and
-// then blocks, so the shared suite can cancel the request context mid-stream.
-func startHangingOpenAI(t *testing.T) provider.Provider {
+// then blocks, so the shared suite can cancel the request context mid-stream —
+// or leave it to the adapter's own stall budget.
+func startHangingOpenAI(t *testing.T, stall time.Duration) provider.Provider {
+	t.Helper()
+	return startOpenAIStream(t, stall, func(w http.ResponseWriter, r *http.Request, fl http.Flusher) {
+		_, _ = fmt.Fprint(w, "data: "+`{"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+		fl.Flush()
+		blockUntilDone(r)
+	})
+}
+
+// startWedgedOpenAI stands up an upstream that accepts the connection and then
+// answers nothing at all — no status line, no headers, no body.
+func startWedgedOpenAI(t *testing.T, stall time.Duration) provider.Provider {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		blockUntilDone(r)
+	}))
+	t.Cleanup(srv.Close)
+	return newOpenAIProvider(t, srv, stall)
+}
+
+// startKeepaliveOpenAI stands up an upstream that sends nothing but SSE
+// comments for three stall budgets before answering — the shape of a model that
+// is thinking. A comment is not an event, so nothing above the socket sees it;
+// only the bytes on the wire prove this endpoint is alive.
+func startKeepaliveOpenAI(t *testing.T, stall time.Duration) provider.Provider {
+	t.Helper()
+	return startOpenAIStream(t, stall, func(w http.ResponseWriter, r *http.Request, fl http.Flusher) {
+		fl.Flush() // headers first, so the wait that follows is a mid-stream one
+		for deadline := time.Now().Add(3 * stall); time.Now().Before(deadline); {
+			_, _ = fmt.Fprint(w, ": keepalive\n\n")
+			fl.Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(stall / 8):
+			}
+		}
+		for _, data := range renderOpenAITurn(providertest.Script{Text: "ok"}) {
+			_, _ = fmt.Fprint(w, "data: "+data+"\n\n")
+		}
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+	})
+}
+
+// startOpenAIStream stands up an event-stream upstream driven by write, and
+// returns an adapter wired to it with stall as its stall budget.
+func startOpenAIStream(t *testing.T, stall time.Duration, write func(w http.ResponseWriter, r *http.Request, fl http.Flusher)) provider.Provider {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fl, ok := w.(http.Flusher)
@@ -74,21 +125,36 @@ func startHangingOpenAI(t *testing.T) provider.Provider {
 		}
 		w.Header().Set("content-type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, "data: "+`{"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
-		fl.Flush()
-		// Block until the client disconnects (its context cancel) or a safety
-		// timeout, so the turn never completes on its own.
-		select {
-		case <-r.Context().Done():
-		case <-time.After(10 * time.Second):
-		}
+		write(w, r, fl)
 	}))
 	t.Cleanup(srv.Close)
-	p, err := openai.New(provider.Config{Protocol: "openai", Model: "m", BaseURL: srv.URL, APIKey: testAPIKey})
+	return newOpenAIProvider(t, srv, stall)
+}
+
+func newOpenAIProvider(t *testing.T, srv *httptest.Server, stall time.Duration) provider.Provider {
+	t.Helper()
+	p, err := openai.New(provider.Config{
+		Protocol: "openai", Model: "m", BaseURL: srv.URL, APIKey: testAPIKey, StallTimeout: stall,
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return p
+}
+
+// blockUntilDone holds a handler open until the client disconnects or a safety
+// timeout expires, so a turn never completes on its own — and httptest.Server's
+// Close, which waits for outstanding requests, always returns.
+func blockUntilDone(r *http.Request) {
+	// Draining the request first is what lets the server notice the hang-up:
+	// net/http starts the background read that detects a disconnect only once
+	// the body is consumed, so an undrained handler sits out the whole safety
+	// timeout after the client is long gone.
+	_, _ = io.Copy(io.Discard, r.Body)
+	select {
+	case <-r.Context().Done():
+	case <-time.After(10 * time.Second):
+	}
 }
 
 // jsonString renders v as a JSON string literal, escaping as needed.

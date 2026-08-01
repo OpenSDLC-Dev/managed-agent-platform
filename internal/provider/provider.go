@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
@@ -22,6 +23,13 @@ type Config struct {
 	BaseURL  string            // endpoint base URL; required (no implicit default host)
 	APIKey   string            // credential for the endpoint
 	Headers  map[string]string // optional extra headers (gateway routing etc.)
+	// StallTimeout is how long this endpoint may send nothing at all before its
+	// turn is abandoned (#121); zero takes DefaultStallTimeout. It is per route
+	// because the worst legitimate silence is a property of the endpoint — a
+	// hosted gateway answers in seconds, a queued self-hosted model may take
+	// minutes to send its first byte. See StallGuard for what it bounds and why
+	// it is not an HTTP client timeout.
+	StallTimeout time.Duration
 }
 
 // Request is one model turn in Anthropic Messages semantics. Content and
@@ -110,6 +118,10 @@ type Provider interface {
 // credential, headers. NOT by the whole Config: under a pass-through route
 // Config.Model is the agent's model string, so a Config-keyed cache would be
 // keyed by client input and would rebuild issue #88 inside the adapter.
+//
+// None of this forbids a *turn* from acquiring something: Generate starts the
+// StallGuard's watcher goroutine, which the stream releases on Close. What the
+// factory must not acquire is anything that outlives the instance it builds.
 type Factory func(Config) (Provider, error)
 
 // Route binds an agent-facing model string to a provider config. Model "*"
