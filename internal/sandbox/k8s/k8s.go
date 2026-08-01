@@ -529,10 +529,11 @@ func securityContext(h sandbox.Hardening, gated bool) *corev1.SecurityContext {
 // containment; the request stays out of the scheduler's way.
 const cpuRequestFloorMillis = 100
 
-// resourceRequirements turns the hardening's CPU and memory caps into the
-// sandbox container's resources. Memory keeps request = limit, which is the
-// right posture for a resource that cannot be throttled — and it is opt-in, so
-// the reservation is one an operator asked for. sandbox.Hardening.PidsLimit has
+// resourceRequirements turns the hardening's CPU, memory and ephemeral-storage
+// caps into the sandbox container's resources. Memory and ephemeral storage keep
+// request = limit, which is the right posture for resources that cannot be
+// throttled — and both are opt-in, so the reservation is one an operator asked
+// for. sandbox.Hardening.PidsLimit has
 // no counterpart here: the Pod API carries no per-pod pids limit (it is the
 // kubelet's `podPidsLimit`), a divergence recorded in docs/DIVERGENCES.md.
 func resourceRequirements(h sandbox.Hardening) corev1.ResourceRequirements {

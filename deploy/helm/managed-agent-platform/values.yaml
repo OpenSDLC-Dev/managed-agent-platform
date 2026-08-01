@@ -95,7 +95,8 @@ executor:
   # for lowering a cap or turning one off (`0`, or `none` for capDrop), not for
   # switching containment on. A malformed value fails executor startup.
   #
-  # The `memoryBytes`, `readOnlyRootfs` and `runAsUser` half is opt-in because
+  # The `memoryBytes`, `ephemeralStorageBytes`, `readOnlyRootfs` and `runAsUser`
+  # half is opt-in because
   # each needs an image that tolerates it: an OOM kill lands mid-task, and a uid
   # the image did not choose must still be able to reach the workdir (a
   # read-only root supplies a world-writable emptyDir over it). Kubernetes has
@@ -106,8 +107,10 @@ executor:
     memoryBytes: ""
     # -- Node-local disk cap for a sandbox, in BYTES — not a Kubernetes quantity
     # string, so `21474836480`, never `20Gi` (a quantity fails executor startup).
-    # Kubernetes-only, the mirror of the absent pids knob: the Docker backend
-    # cannot express it and logs that it ignored it. Exceeding it gets the pod
+    # Kubernetes-only, the mirror of the absent pids knob — though for a
+    # different reason: the Docker backend can express a writable-layer quota,
+    # it just cannot vouch for one (storage-driver dependent), so it logs that
+    # it ignored this instead. Exceeding it gets the pod
     # EVICTED by the kubelet rather than failing the write, and the request is
     # set equal to the limit, so a generous cap is a real per-pod reservation the
     # node pool has to be sized for. And it binds only where the kubelet can
