@@ -2,6 +2,7 @@ package s3_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -117,20 +118,54 @@ func TestDeleteRejectsNoSuchKeyOutsideANotFound(t *testing.T) {
 	}
 }
 
-// TestDeleteConvergesOnABodylessNotFound records what the mapping cannot tell
-// apart, rather than leaving it silent. minio-go synthesizes NoSuchKey from
-// the status alone whenever the body is not an S3 error document, so a bare
-// 404 — a misrouting proxy, an endpoint concealing a denial — is indis-
-// tinguishable from GCS's genuine answer and converges too. It is not
-// separable through minio-go's API (its own tests assert the synthesis, and
-// the fields that differ point the wrong way: GCS's real document carries no
-// <Key>, the synthesized one does), and Get has always read absence the same
-// way. Tracked in #244; this test fails loudly if that ever becomes decidable.
-func TestDeleteConvergesOnABodylessNotFound(t *testing.T) {
-	s, _ := stubStore(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+// TestDeleteSurfacesA404WithoutAnErrorDocument is what keeps the convergence
+// from becoming "any 404 means gone". minio-go synthesizes NoSuchKey from the
+// status alone whenever the body does not decode as an S3 error document, so
+// without demanding that document a misrouting proxy or a denial concealed as
+// a bare 404 would be reported as a successful delete — the caller told its
+// data is gone while it is still there. Neither of these bodies is the
+// endpoint's own word, so neither converges.
+func TestDeleteSurfacesA404WithoutAnErrorDocument(t *testing.T) {
+	for name, body := range map[string]string{
+		"Bodyless":  "",
+		"ProxyPage": "<html><head><title>404 Not Found</title></head></html>",
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, _ := stubStore(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, body)
+			})
+			if err := s.Delete(context.Background(), "k"); err == nil {
+				t.Fatal("a 404 carrying no S3 error document reported success")
+			}
+		})
+	}
+}
+
+// TestGetReadsAbsenceWithoutAnErrorDocument pins the asymmetry as deliberate,
+// since the obvious tidy-up — one shared check for both — would break every
+// backend. Get learns of absence from a HEAD, and a HEAD response carries no
+// body by definition, so its 404 is always the synthesized kind. Measured
+// against real GCS: DELETE of a missing object answers with a parsed <Error>
+// document, HEAD of the same object answers 404 with nothing in it.
+func TestGetReadsAbsenceWithoutAnErrorDocument(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stub-bucket/" { // the bucket check in s3.New
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound) // a HEAD 404 has no body to carry
+	}))
+	t.Cleanup(srv.Close)
+	s, err := s3.New(context.Background(), s3.Config{
+		Endpoint:  strings.TrimPrefix(srv.URL, "http://"),
+		AccessKey: "stub", SecretKey: "stubsecret",
+		Bucket: "stub-bucket", Region: "us-east-1",
 	})
-	if err := s.Delete(context.Background(), "k"); err != nil {
-		t.Fatalf("delete against a bodyless 404 = %v, want nil (see #244)", err)
+	if err != nil {
+		t.Fatalf("s3.New against the stub: %v", err)
+	}
+	if _, _, err := s.Get(context.Background(), "gone"); !errors.Is(err, blob.ErrNotFound) {
+		t.Fatalf("get of a missing key = %v, want blob.ErrNotFound", err)
 	}
 }
