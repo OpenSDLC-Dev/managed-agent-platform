@@ -337,15 +337,30 @@ resources deleted and the sweep verified empty afterwards.
      that lands in history. The model key is pasted from its own provider. Terraform
      never sees any of these; it holds names, IAM bindings, and preconditions only.
 
-     One value cannot follow that shape, and the script has to say so: the **GCS HMAC
-     secret is readable exactly once**, at `gcloud storage hmac create`. If creation
-     succeeds and the Secret Manager write then fails, the secret is gone and rerunning
-     cannot recover it — the failure is not convergent by default. So the HMAC step is
-     ordered create → store → verify, and on a failed store it **deletes the orphaned
-     key** before exiting non-zero, leaving the next run a clean slate. Everything else
-     is a no-op on already-populated secrets; the acceptance criterion is
-     reproduce-from-clean, not reproduce-by-overwrite, and a half-finished bootstrap has
-     to leave the project in a state the next run can finish from.
+     **The script has two jobs, and only the first is idempotent-by-skipping.** Job one:
+     ensure Secret Manager holds a value — a no-op when the secret already has a
+     version, because the acceptance criterion is reproduce-from-clean, not
+     reproduce-by-overwrite. Job two: ensure the *live system* uses that value —
+     and this one must **run every time, reconciling rather than skipping**, because
+     `environment/` is rebuildable while `foundation/` is not. After a destroy and
+     recreate, Secret Manager still holds the database password but the Cloud SQL
+     instance is brand new and knows nothing about it; a script that treated the
+     populated secret as "done" would leave a rebuilt deployment unable to authenticate.
+     So the reconcile step reads each secret's current version and reapplies it to
+     whatever now needs it — `gcloud sql users set-password` for the database user, and
+     the same for the GCS HMAC key described next. Conflating "the secret exists" with
+     "the system is using it" is the failure mode this split exists to prevent.
+
+     One value cannot follow the generate-once shape at all, and the script has to say
+     so: the **GCS HMAC secret is readable exactly once**, at
+     `gcloud storage hmac create`. If creation succeeds and the Secret Manager write
+     then fails, the secret is gone and rerunning cannot recover it — not convergent by
+     default. So the HMAC step is ordered create → store → verify, and on a failed store
+     it **deletes the orphaned key** before exiting non-zero, leaving the next run a
+     clean slate. Its reconcile case is the mirror image: if the stored access ID no
+     longer resolves to a live key on the surviving service account, the stored pair is
+     dead and the step regenerates and overwrites rather than skipping. A half-finished
+     bootstrap must always leave the project in a state the next run can finish from.
    - **External Secrets Operator, for teams and multiple clusters.** Its marginal buy
      over the baseline is continuous drift correction, multi-cluster fan-out, and
      deployers not needing Secret Manager read access — real at that scale, close to
@@ -427,6 +442,16 @@ resources deleted and the sweep verified empty afterwards.
      foundation's identities to them. It reads the foundation's key, secret and account
      names through `data` sources, never owning them.
 
+     "Freely" is not the provider's default, and the three settings that make it true
+     belong in the plan rather than in a debugging session: the Google provider refuses
+     to destroy a **GKE cluster** or a **Cloud SQL instance** while
+     `deletion_protection` is on, and it refuses to destroy a **non-empty bucket**
+     without `force_destroy`. The acceptance battery leaves objects in that bucket by
+     construction, so all three are set to the destructive value here, deliberately and
+     visibly. They are correct for a staging environment and wrong for anything holding
+     data someone would miss — which is exactly why the deploy guide states them as a
+     staging choice rather than shipping them as a default an operator inherits.
+
    That also answers the clean-project case a `data` source alone cannot: the first
    `apply` of `foundation/` creates the ring and key; every later environment rebuild
    adopts them. A project that already has a ring documents a one-time
@@ -441,8 +466,9 @@ resources deleted and the sweep verified empty afterwards.
    after" — that credential is gone by design. Acceptance is **create → destroy →
    create** on `environment/`, with `foundation/` untouched, proving the three things a
    rebuild can actually fail at: the second `apply` succeeds with no KMS name collision;
-   the bootstrap script converges on the already-populated secrets, **including
-   reconciling the GCS HMAC key** against the surviving service account; and a fresh
+   the bootstrap script **reconciles the live system against the surviving secrets** —
+   reapplying the database password to the brand-new Cloud SQL instance and the GCS HMAC
+   key against the surviving service account; and a fresh
    vault credential round-trips on the rebuilt stack. An operator who needs the data to
    survive needs a Cloud SQL export/restore step, which this plan does not build and the
    deploy guide says so.
@@ -477,6 +503,21 @@ resources deleted and the sweep verified empty afterwards.
     `ephemeral-storage` limit as `Hardening` configuration with an empty default —
     today's behaviour stays the default, and the GCP deploy guide sets a real value; the
     per-volume bound is left out of this plan rather than described as available.
+
+    One implementation detail is a decision, not a detail, because the existing code
+    already made the opposite call for a different resource: Kubernetes copies a limit
+    into the request when no request is given, so a generous cap silently becomes a
+    generous *reservation*. `cpuRequestFloorMillis` exists precisely to stop that for
+    CPU — "the limit is the containment; the request stays out of the scheduler's way".
+    Ephemeral storage takes the **other** branch, the one memory already takes:
+    **request equals limit**. Disk, like memory, is not compressible, and Decision 10's
+    whole argument is that arbitrary node-pressure eviction is worse than a targeted
+    one — which means the scheduler must not be allowed to oversubscribe a node's disk
+    in the first place. The cost is that a generous limit demands a node pool sized for
+    it (slice 5's guidance) and that, while
+    [#64](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/64) leaves pods
+    unreaped, every leaked pod holds its reservation. That is an argument for closing
+    #64, which slice 4 already measures — not for pretending the disk is free.
 
     **Node isolation is the second half, and it needs code.** The sandbox pod spec
     carries no `nodeSelector`, affinity, or tolerations, and the Kubernetes provider's
@@ -548,7 +589,9 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   - **An `ephemeral-storage` limit**, as a `Hardening` field
     (`EphemeralStorageBytes`, env `SANDBOX_EPHEMERAL_STORAGE_BYTES`, matching
     `MemoryBytes`/`SANDBOX_MEMORY_BYTES` in name, units and zero-means-unbounded
-    semantics) — Decision 10. Kubernetes-only, the mirror image of `PidsLimit` being
+    semantics — and matching it in `resourceRequirements` too, **request equal to
+    limit**, for the reason Decision 10 gives) — Decision 10.
+    Kubernetes-only, the mirror image of `PidsLimit` being
     Docker-only: Docker's writable-layer quota needs a specific storage driver, so the
     asymmetry is registered in docs/DIVERGENCES.md the way #65 registered its own rather
     than faked.
@@ -628,8 +671,9 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   into, so the scripts are exercised rather than merely written. Teardown is proven as
   **create → destroy → create** on `environment/`, against the three things a rebuild
   can actually fail at (Decision 9): the second `apply` succeeds with no KMS name
-  collision; the bootstrap script converges on already-populated secrets, including
-  reconciling the GCS HMAC key against the surviving service account; and a **fresh**
+  collision; the bootstrap script reconciles the live system against the surviving
+  secrets — the database password reapplied to the new Cloud SQL instance, the GCS HMAC
+  key checked against the surviving service account; and a **fresh**
   vault credential round-trips on the rebuilt stack. Explicitly *not* an old credential
   surviving — `environment/` owns Cloud SQL, so the destroy takes the ciphertext with it
   by design.
@@ -667,10 +711,14 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   DDL with no role or database creation. That is not what Cloud SQL *grants* — a
   built-in PostgreSQL user is created with `cloudsqlsuperuser`, which carries `CREATEDB`
   and `CREATEROLE`, so accepting "it only needs schema DDL" as "it only has schema DDL"
-  would repeat Decision 11's mistake one layer down. This slice specifies the
-  custom-role or explicit-revocation sequence that narrows it, and asserts the result
-  rather than assuming it: `rolcreatedb = false`, `rolcreaterole = false`, and ownership
-  of the platform database and nothing else. Write the deploy guide: the Gateway +
+  would repeat Decision 11's mistake one layer down. This slice specifies the sequence
+  that narrows it — **assigning custom database roles at user creation**, which avoids
+  the `cloudsqlsuperuser` membership entirely rather than granting and then revoking
+  it — and asserts the result rather than assuming it. Three assertions, because the
+  first two alone would not settle it: `rolcreatedb = false` and `rolcreaterole = false`
+  are *role attributes* and say nothing about membership, so the acceptance also checks
+  **`pg_has_role(<user>, 'cloudsqlsuperuser', 'member')` is false**, plus ownership of
+  the platform database and nothing else. Write the deploy guide: the Gateway +
   managed-certificate example and
   Decision 8's do-not-expose-without-it statement, the collector config, the
   node-local-dns DNS-carve-out note, the sandbox node-pool sizing guidance from slice
@@ -698,9 +746,10 @@ unscoped**, and the guide says which rather than letting "scoped and rotatable" 
 the set. Scoped, each asserted rather than assumed: the GCS HMAC pair (single bucket;
 its removal is the GCS-native-backend follow-on), the model key (the provider's own),
 and the **Cloud SQL user, narrowed to ownership of the platform's own database** —
-DDL-capable there because `store.Open` migrates the database its DSN names, and
-narrowed *away* from the `cloudsqlsuperuser` a built-in user is created with, with
-`rolcreatedb`/`rolcreaterole` checked false in the acceptance run (slice 5). Unscoped:
+DDL-capable there because `store.Open` migrates the database its DSN names, and kept
+clear of the `cloudsqlsuperuser` a built-in user is created with, checked in the
+acceptance run by `rolcreatedb`, `rolcreaterole` **and** `pg_has_role(…,
+'cloudsqlsuperuser', 'member')` all being false (slice 5). Unscoped:
 the **management API key, which authorizes every management `/v1` route with no role or
 resource model** (`requireAPIKey`). That one is unscoped by design, and narrowing it is
 a platform change rather than a deployment one.
