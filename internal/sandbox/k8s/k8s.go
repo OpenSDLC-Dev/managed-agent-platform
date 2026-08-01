@@ -462,9 +462,15 @@ func runtimeClassName(name string) *string {
 // podSecurityContext is what the whole pod gets whatever the session asked
 // for. Without it a sandbox runs under the runtime's *unconfined* default with
 // every syscall the kernel offers, while the Docker backend's containers get
-// the runtime's curated filter for free — so this closes a gap between the two
-// backends rather than opening a compatibility question. RuntimeDefault is the
-// container runtime's own profile, not one the platform authors.
+// the runtime's curated filter for free — so this brings the two backends to
+// the same posture. RuntimeDefault is the container runtime's own profile, not
+// one the platform authors.
+//
+// It does open a compatibility question rather than avoiding one, and the
+// platform answers it the same way for everybody: the profile varies by
+// runtime and runtime version, so a sandbox image or tool that needs a syscall
+// its node's profile blocks now fails, and there is no in-platform exception
+// to grant it. That is the cost accepted for the guarantee.
 //
 // Deliberately unconditional, and deliberately pod-level. Unconditional
 // because a knob nobody turns on cannot carry a responsibility the platform is

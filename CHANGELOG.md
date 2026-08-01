@@ -21,9 +21,15 @@ copy of an entry here.
   the kernel offers**: no `seccompProfile` appeared anywhere in the Go code or the chart,
   so the pod took the runtime's *unconfined* default. The same command in the Docker
   backend was already filtered, because an ordinary container gets its runtime's curated
-  profile for free — so this closes a gap between the two backends rather than opening a
-  compatibility question. `RuntimeDefault` is the container runtime's own profile; the
-  platform still authors none, and AppArmor/SELinux remain the operator's.
+  profile for free — so this brings the two backends to the same posture.
+  `RuntimeDefault` is the container runtime's own profile; the platform still authors
+  none, and AppArmor/SELinux remain the operator's.
+
+  It **does** open a compatibility question rather than avoiding one, and the answer is
+  the same for everybody: the profile's contents vary by runtime and runtime version, so
+  a sandbox image or tool needing a syscall its node's profile blocks now fails, with no
+  in-platform exception to grant it. Operators running custom sandbox images should
+  exercise them against their node runtime before upgrading.
 
   Applied **unconditionally** — there is no knob, and that is the point: a control nobody
   turns on could not carry the shared-responsibility row this moves off the operator and

@@ -297,13 +297,20 @@ What is still yours at the runtime layer:
   `--security-opt seccomp=unconfined`. **Seccomp is no longer in this list on
   Kubernetes** — see the platform row below.
 - **Pod Security Admission.** A strict `restricted` namespace label still
-  rejects the sandbox pod, and `SANDBOX_RUN_AS_USER` does not change that: the
-  profile wants `runAsNonRoot: true`, a *different* field the provider does not
-  set. The other two reasons are closed — `SANDBOX_CAP_DROP=ALL` makes
-  `capabilities.drop` contain `ALL`, and the pod now carries a `seccompProfile`
-  of the shape `restricted` accepts. That is two of three, not readiness: a
-  *gated* pod is rejected regardless, since the gate sidecar *adds*
-  `NET_ADMIN`, which `restricted` forbids.
+  rejects the sandbox pod, in every configuration. Two of the three reasons it
+  used to reject an *unrestricted* pod are now closed — `SANDBOX_CAP_DROP=ALL`
+  makes `capabilities.drop` contain `ALL`, and the pod carries a
+  `seccompProfile` of the shape `restricted` accepts — leaving one:
+  `runAsNonRoot: true`, a *different* field from `SANDBOX_RUN_AS_USER`, which
+  the provider does not set.
+  <br>That accounting covers the sandbox container alone. **`restricted`
+  evaluates every container in the pod, init containers included**, and any
+  `limited` session carries one that fails it outright: the gate sidecar when
+  gated, the `netsetup` init container when not. Both *add* `NET_ADMIN` (which
+  `restricted` permits only for `NET_BIND_SERVICE`), neither drops `ALL`, and
+  neither sets `allowPrivilegeEscalation: false`. So a `limited` pod is
+  rejected whatever the configuration, gated or not — and no amount of
+  `SANDBOX_*` tuning changes it.
 
 ### 4. Read-only root filesystem
 

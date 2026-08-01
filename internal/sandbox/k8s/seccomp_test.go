@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -25,10 +26,11 @@ func seccompPod(t *testing.T, net domain.NetworkingType, gate *sandbox.GateSpec)
 // TestPodSpecAlwaysSetsSeccompRuntimeDefault: without this the sandbox runs
 // under the runtime's *unconfined* default with every syscall the kernel
 // offers, while an ordinary Docker container gets the runtime's curated filter
-// — so setting it on Kubernetes closes a gap between the two backends rather
-// than opening a compatibility question. Deliberately not configurable: a knob
-// nobody turns on could not carry the shared-responsibility row this moves onto
-// the platform.
+// — so setting it on Kubernetes brings the two backends to the same posture.
+// Deliberately not configurable: a knob nobody turns on could not carry the
+// shared-responsibility row this moves onto the platform, and the cost of that
+// choice is that an image needing a blocked syscall has no exception to ask
+// for.
 func TestPodSpecAlwaysSetsSeccompRuntimeDefault(t *testing.T) {
 	for name, tc := range map[string]struct {
 		net  domain.NetworkingType
@@ -58,21 +60,38 @@ func TestPodSpecAlwaysSetsSeccompRuntimeDefault(t *testing.T) {
 	}
 }
 
-// TestSeccompStaysOffTheContainerSecurityContext pins the placement, not just
+// TestSeccompStaysOffEveryContainerSecurityContext pins the placement, not just
 // the value. Container-level would break two tests that assert an unhardened
 // pod's container securityContext is exactly nil — assertions that exist so a
 // knob nobody set cannot quietly grow one — and the tempting fix would be to
 // weaken them. Pod-level leaves them true, and is the only placement that
 // reaches the gate sidecar and the netsetup init container without editing
 // either.
-func TestSeccompStaysOffTheContainerSecurityContext(t *testing.T) {
-	pod := seccompPod(t, domain.NetUnrestricted, nil)
-	if got := pod.Spec.Containers[0].SecurityContext; got != nil {
-		t.Errorf("the sandbox container grew a securityContext: %+v", got)
-	}
-	for _, c := range pod.Spec.Containers {
-		if c.SecurityContext != nil && c.SecurityContext.SeccompProfile != nil {
-			t.Errorf("container %q carries its own seccompProfile; it belongs on the pod", c.Name)
-		}
+//
+// Init containers are the point of the sweep: a per-container profile added to
+// the gate sidecar or to netsetup would override the pod's for the one
+// container whose syscalls this most needs to reach, and checking only
+// Spec.Containers would never see it.
+func TestSeccompStaysOffEveryContainerSecurityContext(t *testing.T) {
+	for name, tc := range map[string]struct {
+		net  domain.NetworkingType
+		gate *sandbox.GateSpec
+	}{
+		"Unrestricted":  {domain.NetUnrestricted, nil},
+		"Gated":         {domain.NetLimited, gateSpecFixture(&mintRecorder{})},
+		"LimitedNoGate": {domain.NetLimited, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := seccompPod(t, tc.net, tc.gate)
+			for _, c := range slices.Concat(pod.Spec.InitContainers, pod.Spec.Containers) {
+				if c.SecurityContext != nil && c.SecurityContext.SeccompProfile != nil {
+					t.Errorf("container %q carries its own seccompProfile (%+v); it belongs on the pod",
+						c.Name, c.SecurityContext.SeccompProfile)
+				}
+			}
+			if got := pod.Spec.Containers[0].SecurityContext; tc.gate == nil && got != nil {
+				t.Errorf("the sandbox container of an unhardened pod grew a securityContext: %+v", got)
+			}
+		})
 	}
 }
