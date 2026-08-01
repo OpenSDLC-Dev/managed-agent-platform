@@ -596,12 +596,20 @@ resources deleted and the sweep verified empty afterwards.
 Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
 
 - **Slice 1 — GCS delete convergence (`internal/blob/s3`).** `Delete` treats
-  `NoSuchKey` from `RemoveObject` as success (the same error-code check `Get` already
-  uses), restoring the contract's convergence on GCS while changing nothing on
-  S3/MinIO (which never produce it). Test: a stub S3 endpoint whose DELETE answers
-  `404 NoSuchKey` — asserted failing against the pre-fix code first (the
-  fixture-must-force-the-transformation lesson); the MinIO-backed contract suite stays
-  as-is and keeps passing.
+  `NoSuchKey` from `RemoveObject` as success, restoring the contract's convergence on
+  GCS while changing nothing on S3/MinIO (which never produce it). Test: a stub S3
+  endpoint whose DELETE answers `404 NoSuchKey` — asserted failing against the pre-fix
+  code first (the fixture-must-force-the-transformation lesson); the MinIO-backed
+  contract suite stays as-is and keeps passing.
+
+  Drafted as "the same error-code check `Get` already uses"; **review rejected that
+  unification**, and the landed design asks the two paths for different proof. A DELETE
+  answer can carry the endpoint's own error document and a HEAD answer cannot, so
+  `Delete` demands the document (minio-go synthesizes `NoSuchKey` from any unparseable
+  404, which would let a misrouting proxy's bare 404 read as "already gone") while `Get`
+  can only require the code and a 404 status. Measured against real GCS while landing
+  the slice, not assumed. CHANGELOG.md carries the reasoning; #244 tracks the residue on
+  `Get`.
 - **Slice 2 — sandbox pod placement and bounds (`internal/sandbox` +
   `internal/sandbox/k8s` + chart).** Plan 19/#65 delivered most of what this slice was
   originally scoped to add — CPU limit, capability drops, no-privilege-escalation,

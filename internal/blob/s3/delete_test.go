@@ -129,6 +129,11 @@ func TestDeleteSurfacesA404WithoutAnErrorDocument(t *testing.T) {
 	for name, body := range map[string]string{
 		"Bodyless":  "",
 		"ProxyPage": "<html><head><title>404 Not Found</title></head></html>",
+		// A document that starts <Error> and then breaks. encoding/xml has
+		// already assigned XMLName by then, so this is the shape that would
+		// slip through if minio-go did not replace the whole struct when the
+		// decode fails — the reason the marker can be trusted at all.
+		"TruncatedDocument": "<Error><Code>NoSuchKey</Code>",
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, _ := stubStore(t, func(w http.ResponseWriter, _ *http.Request) {

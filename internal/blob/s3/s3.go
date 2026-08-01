@@ -88,8 +88,13 @@ func noSuchKey(err error) bool {
 // and must: minio-go synthesizes NoSuchKey from any 404 it fails to parse, so
 // without it a misrouting proxy or an authorization layer concealing a denial
 // would be read as "already gone" and the caller told its data was deleted.
-// encoding/xml fills XMLName only on a successful decode, and every branch
-// minio-go synthesizes leaves it zero.
+// XMLName is the marker: minio-go keeps the decoded struct only when the body
+// parsed, and replaces it wholesale in every decode-failure branch, so a
+// synthesized error always carries a zero XMLName. (encoding/xml alone would
+// not be enough — it validates the root element and assigns XMLName before
+// decoding any children, so a document that starts <Error> and then breaks
+// leaves XMLName set. minio-go discarding that struct is what makes the
+// marker trustworthy.)
 //
 // Measured against real GCS with this minio-go release: its DELETE of a
 // missing object answers 404 with a parsed <Error> document (XMLName "Error",
@@ -131,7 +136,11 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	// AWS S3 and MinIO make DeleteObject idempotent themselves — a missing key
 	// answers 204 — but GCS's XML API answers 404 NoSuchKey, so the same
 	// absence has to be mapped here for the contract's crashed-and-retried
-	// delete to converge on every S3-compatible endpoint rather than flap.
+	// delete to converge rather than flap. It converges on an endpoint that
+	// answers 204 or says NoSuchKey in its own error document; one that answers
+	// a bare 404 instead fails closed and never converges, which is the
+	// deliberate trade — a delete that keeps erroring is an operator's problem,
+	// a delete that reports success on a misrouted request is a lost object.
 	err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
 	if err != nil && !absentOnDelete(err) {
 		return fmt.Errorf("s3: delete %s: %w", key, err)
