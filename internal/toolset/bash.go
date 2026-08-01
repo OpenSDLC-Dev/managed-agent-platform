@@ -56,6 +56,10 @@ func (r Runner) bash(ctx context.Context, id domain.ID, raw json.RawMessage) (Re
 	out := SanitizeText(combine(sandbox.ExecResult{
 		Stdout: res.Stdout, Stderr: res.Stderr, Truncated: res.Truncated,
 	}))
+	// The failure arms below spill for the same reason: they cap before
+	// dispatch, so by the time dispatch's own spill hook runs the tail is
+	// already gone. The success arm falls through to dispatch uncapped and
+	// spills there — never here, or the same call would write its file twice.
 	// The status trailer is capped WITH the output rather than after it, so a
 	// command whose output overruns MaxOutputBytes does not lose the one line
 	// that says whether it failed.
@@ -67,9 +71,9 @@ func (r Runner) bash(ctx context.Context, id domain.ID, raw json.RawMessage) (Re
 		// call resumes from the last completed one, not from this command's
 		// mutations.
 		trailer := fmt.Sprintf("\ncommand timed out after %s; this call's shell state changes were dropped", timeout)
-		return Result{Content: capWithTrailer(out, trailer), IsError: true}, nil
+		return Result{Content: capWithTrailer(out, trailer, r.spill(ctx, id, out)), IsError: true}, nil
 	case res.ExitCode != 0:
-		return Result{Content: capWithTrailer(out, fmt.Sprintf("\nexit code: %d", res.ExitCode)), IsError: true}, nil
+		return Result{Content: capWithTrailer(out, fmt.Sprintf("\nexit code: %d", res.ExitCode), r.spill(ctx, id, out)), IsError: true}, nil
 	}
 	return succeed(out)
 }

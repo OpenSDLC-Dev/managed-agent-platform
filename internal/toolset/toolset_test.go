@@ -2,8 +2,11 @@ package toolset_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -127,6 +130,34 @@ func TestBash(t *testing.T) {
 		got := fails(t, r, "bash", `{"command":"echo partial; exit 3"}`, "exit code: 3")
 		if !strings.Contains(got, "partial") {
 			t.Fatalf("content = %q, want the output the command did produce", got)
+		}
+	})
+
+	t.Run("an oversized failure output spills whole to a sandbox file", func(t *testing.T) {
+		// The failure arms cap before dispatch, so the spill must hook ahead
+		// of capWithTrailer — the exit-code trailer and the spill notice both
+		// survive, and the whole payload is byte-exact in the file. The
+		// payload is deterministic so the file can be checked by size and
+		// digest, not just its tail: the expected bytes are stdout, a joining
+		// newline, and stderr's marker — exactly what combine assembles.
+		unit := "0123456789abcdef\n"
+		payload := strings.Repeat(unit, 180000/len(unit)+1)[:180000]
+		want := payload + "\n" + "marker\n"
+		got := fails(t, r, "bash", `{"command":"yes 0123456789abcdef | head -c 180000; echo marker >&2; exit 3"}`, "exit code: 3")
+		i := strings.Index(got, "/tmp/tool_outputs/")
+		if i < 0 {
+			t.Fatalf("content = %q..., want the spill path named", got[:80])
+		}
+		j := strings.Index(got[i:], ".txt")
+		path := got[i : i+j+4]
+		count, err := strconv.Atoi(strings.TrimSpace(ok(t, r, "bash", fmt.Sprintf(`{"command":"wc -c < %s"}`, path))))
+		if err != nil || count != len(want) {
+			t.Fatalf("spill file holds %d bytes (%v), want exactly %d", count, err, len(want))
+		}
+		sum := sha256.Sum256([]byte(want))
+		digest := ok(t, r, "bash", fmt.Sprintf(`{"command":"sha256sum %s"}`, path))
+		if !strings.HasPrefix(digest, hex.EncodeToString(sum[:])) {
+			t.Errorf("spill digest = %q, want %s — the file is not byte-identical to the output", digest, hex.EncodeToString(sum[:]))
 		}
 	})
 
@@ -424,13 +455,36 @@ func TestGrep(t *testing.T) {
 	})
 
 	t.Run("output is capped", func(t *testing.T) {
-		ok(t, r, "bash", fmt.Sprintf(`{"command":"mkdir -p big && for i in $(seq 1 %d); do echo needle-line-with-some-padding-$i; done > big/f.txt"}`, 20000))
+		ok(t, r, "bash", fmt.Sprintf(`{"command":"mkdir -p big && for i in $(seq 1 %d); do echo needle-line-with-some-padding-$i; done > big/f.txt"}`, 14000))
 		got := ok(t, r, "grep", `{"pattern":"needle","path":"big"}`)
-		if len(got) > toolset.MaxOutputBytes+len("\n[output truncated]") {
-			t.Fatalf("content is %d bytes, want it capped at %d", len(got), toolset.MaxOutputBytes)
+		cut := strings.LastIndex(got, "\n[output truncated; full output written to /tmp/tool_outputs/")
+		if cut < 0 {
+			t.Fatalf("content does not report the truncation and the spill file: %q", got[max(0, len(got)-80):])
 		}
-		if !strings.HasSuffix(got, "[output truncated]") {
-			t.Fatalf("content does not report the truncation: %q", got[max(0, len(got)-80):])
+		if cut > toolset.MaxOutputBytes {
+			t.Fatalf("preview body is %d bytes, want it capped at %d", cut, toolset.MaxOutputBytes)
+		}
+		// The fixture sits under the sandbox's 1 MiB Exec retention (~870 KB
+		// with the absolute-path prefixes) so the spill must hold the WHOLE
+		// result: no upstream marker, a head byte-identical to the preview the
+		// model saw (digest-compared in the sandbox), every match record
+		// present, and the tail the preview lost intact.
+		if strings.HasPrefix(got, "[output truncated]\n") {
+			t.Fatalf("the fixture crossed the Exec retention — shrink it, or completeness below asserts nothing")
+		}
+		i := strings.Index(got, "/tmp/tool_outputs/")
+		path := got[i : i+strings.Index(got[i:], ".txt")+4]
+		preview := got[:cut]
+		sum := sha256.Sum256([]byte(preview))
+		digest := ok(t, r, "bash", fmt.Sprintf(`{"command":"head -c %d %s | sha256sum"}`, len(preview), path))
+		if !strings.HasPrefix(digest, hex.EncodeToString(sum[:])) {
+			t.Errorf("spill head digest = %q, want the preview's own %s", digest, hex.EncodeToString(sum[:]))
+		}
+		if n := strings.TrimSpace(ok(t, r, "bash", fmt.Sprintf(`{"command":"grep -c needle-line %s"}`, path))); n != "14000" {
+			t.Errorf("spill file holds %s match records, want all 14000", n)
+		}
+		if tl := ok(t, r, "bash", fmt.Sprintf(`{"command":"tail -c 80 %s"}`, path)); !strings.Contains(tl, "needle-line-with-some-padding-14000") {
+			t.Errorf("spill tail = %q, want the last match intact", tl)
 		}
 	})
 }
