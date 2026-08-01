@@ -61,7 +61,18 @@ spec:
                    executor's default instead. */}}
             {{- if not (or (kindIs "invalid" $value) (eq (toString $value) "")) }}
             - name: {{ $env }}
-              value: {{ $value | quote }}
+              {{- /* A values FILE parses an unquoted number as float64, and
+                     rendering a large one goes to scientific notation:
+                     `memoryBytes: 21474836480` became "2.147483648e+10", which
+                     the executor rejects as malformed and refuses to start on.
+                     `--set` parses to int64 and was never affected, which is
+                     exactly why a --set-only CI render did not catch it. Every
+                     numeric knob here is integral — millicores, bytes, a uid —
+                     so format it as one. Above 2^53 the float64 decode has
+                     already lost precision before the template sees it; that is
+                     Helm's YAML parse, not something quoting can undo, and it
+                     is 9 PB of sandbox disk away from any real deployment. */}}
+              value: {{ if kindIs "float64" $value }}{{ printf "%.0f" $value | quote }}{{ else }}{{ $value | quote }}{{ end }}
             {{- end }}
             {{- end }}
             {{- with .Values.executor.leaseTTL }}

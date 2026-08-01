@@ -23,9 +23,11 @@ copy of an entry here.
   now a model-directed `dd` or a runaway build could fill a node's disk and take every other
   pod on it down with the sandbox; CPU, memory and processes were bounded, disk was not.
 
-  **Off by default, unlike every other cap here**, because its enforcement is unlike every
-  other cap here: exceeding a CPU or memory bound throttles or kills the process, while
-  exceeding this gets the whole **pod evicted** by the kubelet. There is no `ENOSPC` for the
+  **Off by default** — as the memory cap already is, and for a sharper version of the same
+  reason. Memory is opt-in because an OOM kill mid-task is worse than the throttling a CPU
+  quota causes; this is opt-in because its enforcement is harsher still. Exceeding a CPU or
+  memory bound throttles or kills the process; exceeding this gets the whole **pod evicted**
+  by the kubelet. There is no `ENOSPC` for the
   tool to handle — the session's sandbox disappears mid-call. A platform-chosen default would
   turn a disk-hungry-but-honest tool call into a lost sandbox, so the operator picks the
   number or gets nothing. The request is set equal to the limit for the reason memory already
@@ -226,6 +228,22 @@ copy of an entry here.
   not a wire change.
 
 ### Fixed
+
+- **A sandbox resource limit written in a Helm values file no longer reaches the executor
+  in scientific notation.** `executor.sandboxHardening.memoryBytes: 21474836480` in a values
+  file rendered as `value: "2.147483648e+10"`, which the executor rejects as a malformed
+  hardening value and refuses to start on — so the deployment that carefully capped its
+  sandboxes got an executor that would not run at all. Helm parses an unquoted number from
+  `--set` into an `int64` but one from a values **file** into a `float64`, and rendering a
+  large `float64` goes exponential; every numeric knob in that block is integral
+  (millicores, bytes, a uid), so the template now formats it as one. Quoting the value in
+  the values file was always a workaround and still is; it should not have been necessary.
+
+  The bug was invisible to CI because the chart job only ever rendered these knobs through
+  `--set`, the one path that was never affected. It now renders them through a values file
+  too and asserts the plain-integer form — a guard proven to fail against the unfixed
+  template. Found while adding `ephemeralStorageBytes`, which is a bytes knob and would have
+  shipped broken for essentially every realistic value (1 GiB renders as `1.073741824e+09`).
 
 - **Deleting an already-deleted object converges on Google Cloud Storage**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 1).

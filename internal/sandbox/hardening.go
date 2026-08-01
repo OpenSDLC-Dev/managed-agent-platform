@@ -59,7 +59,8 @@ type Hardening struct {
 	// daemon has, so that backend ignores this and says so once. The asymmetry
 	// is recorded in docs/DIVERGENCES.md rather than faked.
 	//
-	// Its enforcement is unlike every other cap here, which is why it is opt-in:
+	// Its enforcement is unlike every other cap here, which is why it is opt-in
+	// as MemoryBytes above is — a sharper version of that field's reason:
 	// exceeding a memory limit kills the offending container, exceeding a CPU
 	// limit throttles it, but exceeding this gets the whole pod **evicted** by
 	// the kubelet. On this provider that surfaces mid-tool-call as a sandbox
