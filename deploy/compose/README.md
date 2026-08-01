@@ -89,6 +89,20 @@ exactly this deployment — but if any of those paths is exposed to untrusted
 callers, set `upstream_model`, or replace the `"*"` route with per-model routes
 ([#88](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/88)).
 
+A route may also set `stall_timeout`, a Go duration (`"90s"`, `"2m"`) bounding how
+long that endpoint may send **nothing at all** before the turn is abandoned with a
+`session.error`. Every byte the endpoint sends — a keepalive included — buys the
+budget back, so it never ends a healthy turn however long the model streams; what
+it ends is a wedged proxy that accepts the connection and then goes silent, which
+would otherwise hold a brain replica forever
+([#121](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/121)).
+Omitted, it is 10 minutes — sized for an endpoint that queues a request before it
+sends its first byte. Tighten it per route if you know yours answers faster; it
+must be positive, and a zero or negative value is rejected at startup rather than
+read as "no bound". Tighten it a long way and the budget starts to cover the
+brain's own work between chunks, so a stalled database can end a turn as if the
+model had gone quiet.
+
 ## The sandbox and the Docker socket
 
 The executor runs each session's tools in a per-session sandbox container. Under

@@ -40,6 +40,39 @@ copy of an entry here.
 
 ### Fixed
 
+- **A wedged model endpoint no longer hangs a brain replica forever**
+  ([#121](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/121)). Nothing bounded a
+  turn's wait on the model: the Anthropic adapter's `option.WithoutEnvironmentDefaults()` — there to
+  stop the SDK leaking ambient credentials to a third-party `base_url` — also skips the SDK's
+  `DefaultClientOptions`, and with them the only `ResponseHeaderTimeout` it installs; the OpenAI
+  adapter used bare `http.DefaultClient`; and no caller supplied a deadline. Since the brain runs one
+  turn at a time and its lease keeper renews the work item for as long as the stream is open, an
+  endpoint that accepted the connection and then went silent took a whole replica out of service, for
+  every tenant, with no error, no metric and no log — and no other replica could reclaim the item.
+  A turn is now bounded by the endpoint's **silence** rather than by its duration
+  (`provider.StallGuard`): the request context is cancelled once nothing has arrived for the route's
+  `stall_timeout` (new, optional, a Go duration; default 10 minutes, the anthropic SDK's own judgment
+  for the same hazard), and every byte the endpoint sends buys another budget. The bound is on the
+  request context, not on an HTTP client — a client timeout would surface as a transport error the
+  SDK retries, three budgets instead of one, and a per-route client would give every per-turn
+  provider instance its own connection pool, which `provider.Registry` cannot afford (#88). Progress
+  is measured in bytes, because the frames that prove a quiet endpoint is alive never reach an
+  adapter: the SDK's stream decoder swallows `ping` events and an SSE comment is not an event, so a
+  guard fed by content chunks would kill a model that is still thinking. A stall surfaces as
+  `provider.ErrStalled`, a model-side failure like any other, so it settles on the log as a
+  `session.error` and the turn ends the way any failed model request does — idling with
+  `retries_exhausted`, or chaining a fresh turn when input arrived mid-turn — instead of being
+  abandoned to a lease expiry that would hand the same wedged endpoint to the next replica. One
+  case is knowingly mislabelled: the SDK sleeps out an upstream `Retry-After` under the same
+  context, so a backoff longer than the budget is cut short (itself a good bound — that header is
+  uncapped) but reported as a stall. Pinned by three new subtests in the shared provider contract suite — a wedged
+  upstream and a mid-stream silence each end the turn inside the budget, a keepalive-only upstream is
+  left to think — which both adapters pass, plus guard and body-wrapper unit tests, and two
+  brain-level tests: that a stall settles onto the log, and the issue's acceptance end to end with
+  nothing faked in the model path (the real Anthropic adapter against a wedged `httptest` endpoint,
+  turn over and `session.error` written inside the budget). Plan:
+  [docs/plan/17_model-endpoint-stall-bound.md](./docs/plan/17_model-endpoint-stall-bound.md).
+
 - **A client `user.tool_result` can no longer double-answer a web call**
   ([#222](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/222),
   [docs/plan/16_one-answer-per-tool-call.md](./docs/plan/16_one-answer-per-tool-call.md)). The

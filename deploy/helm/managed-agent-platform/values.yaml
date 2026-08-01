@@ -47,7 +47,10 @@ brain:
   # -- Model routes, written verbatim as a JSON array to the file the brain reads
   # (MODEL_PROVIDERS_PATH). The loader (internal/provider — LoadRoutes) requires a JSON
   # ARRAY: each entry is model (route key, "*" = default), protocol, base_url, and
-  # api_key, plus optional upstream_model / headers. (The loader also accepts api_key_env,
+  # api_key, plus optional upstream_model / headers / stall_timeout — a Go duration
+  # bounding how long that endpoint may send nothing at all before the turn is abandoned
+  # (default 10m; every byte received buys the budget back, so it never ends a healthy
+  # turn, only a wedged one — #121). (The loader also accepts api_key_env,
   # but this chart injects no extra env into the brain, so supply api_key here instead.)
   # No other keys — the loader rejects unknown fields. Contains api_key, so it is stored
   # in a Secret. REQUIRED (at least one route). base_url is the API ROOT — the adapter

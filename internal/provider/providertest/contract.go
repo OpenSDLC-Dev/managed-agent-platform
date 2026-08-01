@@ -13,8 +13,11 @@
 // rather than its label (#181); a tool call's input accumulates and defaults to {} when empty; a usage
 // reading is nil only when the endpoint reported none (not when it reported
 // zeroes, #90); a cancelled context surfaces as a stream error rather than a
-// silent completion; and Close releases the stream both after a completed turn
-// and before draining one.
+// silent completion; an endpoint that goes silent — before its response headers
+// or in the middle of its stream — ends the turn within the configured stall
+// budget, while one that sends nothing but keepalives is left to think (#121);
+// and Close releases the stream both after a completed turn and before draining
+// one.
 //
 // Protocol-specific behavior stays in each adapter's own package: the wire
 // request shape, credential redaction, the OpenAI lossy conversions, and the
@@ -30,6 +33,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -68,8 +72,25 @@ type Backend struct {
 
 	// Hang stages an upstream that streams exactly enough to yield one text
 	// chunk and then blocks without completing the turn, so the suite can
-	// cancel the request context mid-stream. It returns a provider wired to it.
-	Hang func(t *testing.T) provider.Provider
+	// cancel the request context mid-stream — or let the provider's own stall
+	// budget end it. It returns a provider wired to it, configured with stall as
+	// its Config.StallTimeout (zero for the default).
+	Hang func(t *testing.T, stall time.Duration) provider.Provider
+
+	// Wedge stages an upstream that accepts the connection and then answers
+	// nothing at all — no response headers, ever — the wedged proxy of #121. It
+	// returns a provider wired to it with stall as its Config.StallTimeout.
+	Wedge func(t *testing.T, stall time.Duration) provider.Provider
+
+	// Keepalive stages an upstream that sends nothing but this protocol's
+	// content-free liveness frames (an Anthropic ping, an SSE comment) every
+	// stall/8 for 3*stall, and only then completes a one-word turn. It returns a
+	// provider wired to it with stall as its Config.StallTimeout, so the suite
+	// can hold an adapter to the other half of the stall contract: a quiet but
+	// living endpoint must not be killed. The frames are eight to a budget so
+	// that a loaded machine has to lose seven in a row before this reads as a
+	// stall — the margin is the difference between a contract test and a flake.
+	Keepalive func(t *testing.T, stall time.Duration) provider.Provider
 }
 
 // Run exercises the provider.Provider contract against one backend.
@@ -97,6 +118,9 @@ func Run(t *testing.T, b Backend) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
+		// Closed like a real caller closes it: the brain always does, and a
+		// stream left open holds its stall guard's watcher until the budget.
+		defer stream.Close()
 		chunks, err := drain(stream)
 		if err != nil {
 			t.Fatalf("stream error: %v", err)
@@ -141,6 +165,9 @@ func Run(t *testing.T, b Backend) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
+		// Closed like a real caller closes it: the brain always does, and a
+		// stream left open holds its stall guard's watcher until the budget.
+		defer stream.Close()
 		chunks, err := drain(stream)
 		if err != nil {
 			t.Fatalf("stream error: %v", err)
@@ -182,6 +209,9 @@ func Run(t *testing.T, b Backend) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
+		// Closed like a real caller closes it: the brain always does, and a
+		// stream left open holds its stall guard's watcher until the budget.
+		defer stream.Close()
 		chunks, err := drain(stream)
 		if err != nil {
 			t.Fatalf("stream error: %v", err)
@@ -207,6 +237,9 @@ func Run(t *testing.T, b Backend) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
+		// Closed like a real caller closes it: the brain always does, and a
+		// stream left open holds its stall guard's watcher until the budget.
+		defer stream.Close()
 		chunks, err := drain(stream)
 		if err != nil {
 			t.Fatalf("stream error: %v", err)
@@ -228,6 +261,9 @@ func Run(t *testing.T, b Backend) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
+		// Closed like a real caller closes it: the brain always does, and a
+		// stream left open holds its stall guard's watcher until the budget.
+		defer stream.Close()
 		chunks, err := drain(stream)
 		if err != nil {
 			t.Fatalf("stream error: %v", err)
@@ -247,7 +283,7 @@ func Run(t *testing.T, b Backend) {
 	t.Run("ContextCancellationSurfacesAsError", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		p := b.Hang(t)
+		p := b.Hang(t, 0)
 		stream, err := p.Generate(ctx, req())
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
@@ -283,6 +319,95 @@ func Run(t *testing.T, b Backend) {
 		}
 	})
 
+	// #121: an endpoint that accepts the connection and then answers nothing must
+	// end the turn on its own. Nothing else will: the brain runs one turn at a
+	// time and its lease keeper renews the work item for as long as the stream is
+	// open, so an unbounded wait takes a replica out of service for every tenant,
+	// with no error, no metric and no log.
+	t.Run("WedgedEndpointFailsWithinTheStallBudget", func(t *testing.T) {
+		const budget = 250 * time.Millisecond
+		p := b.Wedge(t, budget)
+		start := time.Now()
+		err := failWithin(t, 5*time.Second, func() error {
+			stream, err := p.Generate(context.Background(), req())
+			if err != nil {
+				return err
+			}
+			defer stream.Close()
+			_, err = drain(stream)
+			return err
+		})
+		if !errors.Is(err, provider.ErrStalled) {
+			t.Errorf("error = %v, want one matching provider.ErrStalled", err)
+		}
+		// The lower bound is what makes this a statement about the configured
+		// budget rather than about finiteness: a turn that failed instantly
+		// failed for some other reason — a refused connection, a bad URL — and
+		// would satisfy the ceiling alone while proving nothing.
+		if elapsed := time.Since(start); elapsed < budget {
+			t.Errorf("the turn failed in %s, inside its own %s budget — something other than the stall bound ended it", elapsed, budget)
+		}
+	})
+
+	// The other half of the same hang: response headers arrive, content starts,
+	// and the endpoint then dies mid-stream. A header timeout would not catch
+	// this one — the bound has to be the silence, wherever in the turn it falls.
+	t.Run("MidStreamSilenceFailsWithinTheStallBudget", func(t *testing.T) {
+		const budget = 250 * time.Millisecond
+		p := b.Hang(t, budget)
+		var chunks []provider.Chunk
+		start := time.Now()
+		err := failWithin(t, 5*time.Second, func() error {
+			stream, err := p.Generate(context.Background(), req())
+			if err != nil {
+				return err
+			}
+			defer stream.Close()
+			chunks, err = drain(stream)
+			return err
+		})
+		if !errors.Is(err, provider.ErrStalled) {
+			t.Errorf("error = %v, want one matching provider.ErrStalled", err)
+		}
+		if len(chunks) == 0 {
+			t.Error("the stall discarded the chunk the upstream did send before going quiet")
+		}
+		if elapsed := time.Since(start); elapsed < budget {
+			t.Errorf("the turn failed in %s, inside its own %s budget — something other than the stall bound ended it", elapsed, budget)
+		}
+	})
+
+	// A quiet endpoint is not a dead one. Keepalives buy the budget back, so a
+	// model that thinks for longer than one budget before its first token still
+	// gets to answer — the failure mode a bound this fix must not introduce.
+	t.Run("KeepalivesHoldTheStallBudgetOpen", func(t *testing.T) {
+		const budget = 400 * time.Millisecond
+		p := b.Keepalive(t, budget)
+		start := time.Now()
+		var chunks []provider.Chunk
+		err := failWithin(t, 10*time.Second, func() error {
+			stream, err := p.Generate(context.Background(), req())
+			if err != nil {
+				return err
+			}
+			defer stream.Close()
+			chunks, err = drain(stream)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("a keepalive-only upstream failed the turn: %v", err)
+		}
+		if lastChunk(t, chunks).Kind != provider.KindDone {
+			t.Error("the keepalive turn did not terminate with a done chunk")
+		}
+		// Without the reset, the turn would have died at one budget. Two is the
+		// margin that keeps this a statement about resets rather than about how
+		// promptly a loaded CI machine schedules a timer.
+		if elapsed := time.Since(start); elapsed < 2*budget {
+			t.Errorf("the turn completed in %s, inside two %s budgets — the upstream never went quiet long enough to test anything", elapsed, budget)
+		}
+	})
+
 	t.Run("CloseAfterCompletionReturnsNil", func(t *testing.T) {
 		p := b.Turn(t, Script{Text: "done"})
 		stream, err := p.Generate(context.Background(), req())
@@ -305,7 +430,7 @@ func Run(t *testing.T, b Backend) {
 	t.Run("CloseDoesNotBlockOnAHungUpstream", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		p := b.Hang(t)
+		p := b.Hang(t, 0)
 		stream, err := p.Generate(ctx, req())
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
@@ -320,6 +445,23 @@ func Run(t *testing.T, b Backend) {
 			t.Errorf("Close blocked %s on a hung upstream — it must not drain a stream that never completed", elapsed)
 		}
 	})
+}
+
+// failWithin runs op in the background and returns its error, failing the test
+// if op has not returned by limit. A bound that does not bind would otherwise
+// hang this suite for the whole test timeout instead of failing it, which is
+// the exact shape of the defect under test.
+func failWithin(t *testing.T, limit time.Duration, op func() error) error {
+	t.Helper()
+	res := make(chan error, 1)
+	go func() { res <- op() }()
+	select {
+	case err := <-res:
+		return err
+	case <-time.After(limit):
+		t.Fatalf("the turn had not ended after %s — nothing bounds the wait on the endpoint (#121)", limit)
+		return nil
+	}
 }
 
 // lastChunk returns the final chunk of a drained turn. A turn that produced no

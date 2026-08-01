@@ -29,6 +29,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -36,6 +37,12 @@ import (
 
 // quotedBodyLimit bounds how much of a failing response body an error quotes.
 const quotedBodyLimit = 4096
+
+// drainTailLimit bounds the read-to-EOF a completed stream does on Close so the
+// connection can be pooled. A conforming endpoint sends a newline or two after
+// `data: [DONE]`; this leaves room for a stray keepalive and stops well short of
+// a body that never ends.
+const drainTailLimit = 4096
 
 // New constructs the adapter from configuration alone.
 func New(cfg provider.Config) (provider.Provider, error) {
@@ -51,6 +58,7 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		model:    cfg.Model,
 		headers:  cfg.Headers,
 		client:   http.DefaultClient,
+		stall:    cfg.StallTimeout,
 		redact:   provider.NewRedactor(cfg),
 	}, nil
 }
@@ -61,7 +69,12 @@ type openaiProvider struct {
 	model    string
 	headers  map[string]string
 	client   *http.Client
-	redact   provider.Redactor
+	// stall is how long this endpoint may say nothing before the turn is
+	// abandoned; zero takes provider.DefaultStallTimeout. It bounds the request
+	// rather than the client because http.DefaultClient is shared with every
+	// other provider instance — see provider.StallGuard and Registry.
+	stall  time.Duration
+	redact provider.Redactor
 }
 
 func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (provider.Stream, error) {
@@ -85,8 +98,13 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(raw))
+	// The guard bounds the whole call: the wait for response headers, which
+	// nothing else covers, and the body reads below, which no header timeout
+	// would reach.
+	gctx, guard := provider.NewStallGuard(ctx, p.stall)
+	httpReq, err := http.NewRequestWithContext(gctx, http.MethodPost, p.endpoint, bytes.NewReader(raw))
 	if err != nil {
+		guard.Stop()
 		// A URL parse failure quotes the endpoint back verbatim, and base_url
 		// may carry a credential; net/http strips one only from an error it
 		// builds itself. The redactor finds an unparsable base_url's password
@@ -104,10 +122,22 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, p.redact.Error(err)
+		err = guard.Cause(p.redact.Error(err))
+		guard.Stop()
+		return nil, err
 	}
+	// Every byte the endpoint delivers, keepalive comments included, is a sign
+	// of life for the guard — the liveness a frame-level signal would miss,
+	// since a comment is not an event. Wrapped before the status is examined so
+	// an error body gets the same budget a stream body does: the response's own
+	// arrival counts as progress, and each byte read buys another budget. The
+	// anthropic adapter's middleware wraps every response the same way; only
+	// this hand-rolled path could tell a 200 from a 500 and treat them
+	// differently.
+	respBody := provider.ProgressBody(gctx, resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		defer guard.Stop()
+		defer respBody.Close()
 		// The body is quoted because the status alone rarely explains a gateway
 		// misconfiguration — but an endpoint that echoes the request's
 		// Authorization header into it must not get the credential into an
@@ -117,16 +147,34 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 		// credential straddling it is still matched whole; the redacted text is
 		// then cut back. Reading exactly the budget would leave the head of a
 		// key in the message, matching nothing.
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, quotedBodyLimit+int64(p.redact.Longest())))
+		msg, readErr := io.ReadAll(io.LimitReader(respBody, quotedBodyLimit+int64(p.redact.Longest())))
+		// A body that simply exceeds the budget is not an error — LimitReader
+		// ends it with EOF, and the overshoot above is what keeps a straddling
+		// credential matchable. A real read failure is different: the bytes stop
+		// wherever the failure fell, which may be the middle of an echoed
+		// credential, and redaction matches whole secrets only — so a key cut in
+		// half survives it, which this package's own tests define as a leak. An
+		// endpoint that stalls mid-error-body reaches here now that the guard
+		// cancels the read instead of letting it hang, so the truncated text is
+		// dropped rather than quoted.
+		if readErr != nil {
+			return nil, fmt.Errorf("openai endpoint returned %s, and its error body could not be read: %w",
+				p.redact.String(resp.Status), p.redact.Error(readErr))
+		}
 		quoted := p.redact.String(strings.TrimSpace(string(msg)))
 		if len(quoted) > quotedBodyLimit {
 			quoted = quoted[:quotedBodyLimit]
 		}
 		// The status line is endpoint-controlled too: HTTP/1 lets a server put
 		// any text after the code.
+		//
+		// Not passed through guard.Cause, deliberately: an endpoint that answers
+		// a status and then stalls is still bounded — the guard's cancellation is
+		// what ends the read above — but what it said is the better diagnostic,
+		// and naming the stall instead would throw it away.
 		return nil, fmt.Errorf("openai endpoint returned %s: %s", p.redact.String(resp.Status), quoted)
 	}
-	return &stream{body: resp.Body, r: bufio.NewReader(resp.Body), redact: p.redact}, nil
+	return &stream{body: respBody, r: bufio.NewReader(respBody), redact: p.redact, guard: guard}, nil
 }
 
 // --- outgoing request shapes (Anthropic-native -> OpenAI Chat Completions) ---
@@ -403,6 +451,7 @@ type stream struct {
 	body   io.ReadCloser
 	r      *bufio.Reader
 	redact provider.Redactor
+	guard  *provider.StallGuard
 
 	pending []provider.Chunk
 	cur     provider.Chunk
@@ -430,17 +479,29 @@ func (s *stream) Chunk() provider.Chunk { return s.cur }
 func (s *stream) Err() error            { return s.err }
 
 func (s *stream) Close() error {
-	// Only when the turn completed normally is there a bounded tail to drain
-	// (the few bytes after `data: [DONE]`) — draining it lets net/http pool the
+	// Only when the turn completed normally is there a tail to drain (the few
+	// bytes after `data: [DONE]`) — draining it lets net/http pool the
 	// keep-alive connection across a session's many turns. On an early or
 	// errored close the body may still be open, and an unbounded drain would
 	// block until the upstream EOFs; since the brain closes the stream in a
 	// defer before releasing the turn's lease, that would wedge the session on a
 	// hung endpoint. So skip the drain and close immediately in that case.
+	//
+	// The drain is bounded even so. "The few bytes after [DONE]" is the
+	// endpoint's good behavior, not a guarantee: one that keeps writing
+	// keepalives past its own terminator would hold this Copy forever, and the
+	// stall guard cannot end it — the drain's own reads are what feed the guard
+	// (#121). A limit is the bound that does not depend on the reader being
+	// idle. Overrunning it costs one pooled connection, which is what an
+	// endpoint behaving this way deserves.
 	if s.completed {
-		_, _ = io.Copy(io.Discard, s.r)
+		_, _ = io.Copy(io.Discard, io.LimitReader(s.r, drainTailLimit))
 	}
-	return s.body.Close()
+	err := s.body.Close()
+	// After the body, so a drain that still reads is not aborted by the very
+	// cancellation that releases the guard.
+	s.guard.Stop()
+	return err
 }
 
 func (s *stream) Next() bool {
@@ -459,8 +520,9 @@ func (s *stream) Next() bool {
 		data, status, err := s.readData()
 		if err != nil {
 			// Endpoint-controlled: an HTTP/2 GOAWAY carries server debug data
-			// into the body-read error.
-			s.err = s.redact.Error(err)
+			// into the body-read error. An endpoint that simply stopped talking
+			// is named as that instead — the read reports a bare cancellation.
+			s.err = s.guard.Cause(s.redact.Error(err))
 			return false
 		}
 		switch status {
@@ -478,7 +540,7 @@ func (s *stream) Next() bool {
 			// turn is complete and the missing terminator is benign; otherwise
 			// the stream was cut off mid-turn — a truncated turn, not a success.
 			if !s.sawFinish {
-				s.err = fmt.Errorf("openai stream ended before completion (no finish_reason or [DONE])")
+				s.err = s.guard.Cause(fmt.Errorf("openai stream ended before completion (no finish_reason or [DONE])"))
 				return false
 			}
 			s.complete()
