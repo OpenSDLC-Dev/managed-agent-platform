@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -35,6 +37,49 @@ func TestSandboxConfigIgnoresEphemeralStorage(t *testing.T) {
 	}
 	if !bytes.Equal(want, got) {
 		t.Errorf("a disk cap changed the create payload:\n want %s\n  got %s", want, got)
+	}
+}
+
+// The two rows above exercise sandboxConfig and the warning helper directly,
+// which between them leave the one line that matters in production untested:
+// Provision's call into the warning. This drives the real Provision against a
+// scripted daemon and asserts both halves of the backend's answer to a disk
+// cap — the create payload the daemon actually received carries nothing about
+// storage, and the operator is told once. Delete the call in Provision and this
+// row goes red; the two above stay green.
+func TestProvisionIgnoresTheDiskCapAndSaysSoOnce(t *testing.T) {
+	logged := captureWarnings(t)
+
+	s := spec()
+	s.Hardening = sandbox.Hardening{EphemeralStorageBytes: 2 << 30}
+	var created []byte
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/containers/create":
+			created, _ = io.ReadAll(r.Body)
+			io.WriteString(w, `{"Id":"abc"}`)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	if _, err := p.Provision(context.Background(), s); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	// Not a named field: the failure guarded against is the cap reaching the
+	// daemon under *some* option, and naming one in advance would be guessing
+	// which. StorageOpt is the option Docker would take it under.
+	for _, banned := range []string{"StorageOpt", "2147483648"} {
+		if bytes.Contains(created, []byte(banned)) {
+			t.Errorf("the create payload carries %q: %s", banned, created)
+		}
+	}
+	if n := strings.Count(logged(), "ephemeral storage"); n != 1 {
+		t.Errorf("Provision warned %d times about the ignored disk cap, want exactly 1:\n%s", n, logged())
 	}
 }
 

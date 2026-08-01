@@ -243,6 +243,14 @@ copy of an entry here.
 
 ### Fixed
 
+- **The chart no longer documents a path that runs sandboxes as root.** The
+  `executor.sandboxHardening.*` row said "`0` / `none` to turn one off" for the whole group.
+  That is right for the numeric caps and for `capDrop`, and wrong for the two that are not
+  numbers: `readOnlyRootfs` takes `false` (a `0` fails executor startup), and `runAsUser` is
+  disabled only by an **empty** value — `0` is a perfectly valid uid meaning **root**, so an
+  operator following the documented way to "turn it off" would have got the opposite of
+  containment. Now stated per field.
+
 - **A sandbox resource limit written in a Helm values file no longer reaches the executor
   in scientific notation.** `executor.sandboxHardening.memoryBytes: 21474836480` in a values
   file rendered as `value: "2.147483648e+10"`, which the executor rejects as a malformed
