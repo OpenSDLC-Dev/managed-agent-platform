@@ -649,11 +649,14 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
     executor startup** rather than silently reverting to the default; the empty value
     applies nothing.
 
-  Chart surface for all three. Two of them — the storage limit and the placement knobs —
-  default to today's behaviour exactly. **`seccompProfile` deliberately does not**: it
-  is applied unconditionally, so pods that ran unconfined now run under `RuntimeDefault`,
-  and that behaviour change is the entire point of shipping it rather than a knob nobody
-  turns on. Saying so matters beyond tidiness — it is what lets the
+  Chart surface for the two that have one — the storage limit and the placement knobs —
+  both defaulting to today's behaviour exactly. **`seccompProfile` has none, and
+  deliberately does not**: it is applied unconditionally, so pods that ran unconfined now
+  run under `RuntimeDefault`, and that behaviour change is the entire point of shipping it
+  rather than a knob nobody turns on. (Drafted as "chart surface for all three", which was
+  not implementable: sandbox pods are created by the executor at runtime and the chart
+  ships no template describing one, so an unconditional pod-spec field has nowhere in
+  `values.yaml` to live. Its operator-facing surface is documentation.) Saying so matters beyond tidiness — it is what lets the
   shared-responsibility row move onto the platform, which an opt-in default could not
   justify. Unit-test at the podSpec level, and run the shared contract suite on kind
   **including a gated session**: a seccomp filter that interfered with the gate's

@@ -15,6 +15,38 @@ copy of an entry here.
 
 ### Added
 
+- **Sandbox pods on Kubernetes run under the runtime's seccomp filter**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2). A sandbox
+  runs untrusted, model-directed commands, and on Kubernetes it ran with **every syscall
+  the kernel offers**: no `seccompProfile` appeared anywhere in the Go code or the chart,
+  so the pod took the runtime's *unconfined* default. The same command in the Docker
+  backend was already filtered, because an ordinary container gets its runtime's curated
+  profile for free — so this closes a gap between the two backends rather than opening a
+  compatibility question. `RuntimeDefault` is the container runtime's own profile; the
+  platform still authors none, and AppArmor/SELinux remain the operator's.
+
+  Applied **unconditionally** — there is no knob, and that is the point: a control nobody
+  turns on could not carry the shared-responsibility row this moves off the operator and
+  onto the platform. Applied at the **pod** level rather than the container level, which
+  is what lets one field cover the sandbox container, the gate sidecar and the netsetup
+  init container at once, and what leaves the per-container hardening helper still
+  returning nil for a pod that asked for nothing — an invariant two existing tests assert
+  exactly, and which a container-level profile would have forced open.
+
+  The risk worth proving was the gate: it applies its egress firewall with
+  `iptables-restore` under `CAP_NET_ADMIN`, and a filter that interfered would surface as
+  a sandbox that never starts, since the gate's startup probe is what admits it. Measured
+  on a real cluster rather than argued — a gated session provisioned on kind carried
+  `seccompProfile: RuntimeDefault` on the live pod object and the gated-egress contract
+  row passed against it.
+
+  Two consequences stated rather than left to be discovered. A cluster whose kubelet
+  already runs with `--seccomp-default` was applying this profile anyway, so there this
+  changes nothing; and an operator can no longer choose `Unconfined` for a sandbox, which
+  is a capability removed alongside the one added. Pod specs are immutable and adoption
+  matches on the session label, so after an executor upgrade an already-running sandbox
+  keeps its old spec until the session ends.
+
 - **The Google Cloud production-deployment plan**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), approved). A
   probe-backed path to run the platform on GKE with Google-managed backing services:

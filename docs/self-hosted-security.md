@@ -24,7 +24,8 @@ deliberate divergences from the reference are in
 | **Sandbox image** | Requires `/bin/bash` + a POSIX userland, and wants a `stat` accepting `-c`; pulls the image you name | Building and pinning a hardened, minimal image; keeping it patched |
 | **Resource limits** | **By default** caps every sandbox at 2 CPUs (`SANDBOX_CPU_MILLIS`) and every **Docker** sandbox at 512 processes (`SANDBOX_PIDS_LIMIT`); an optional memory cap. Kubernetes has no per-pod process limit to set, so `SANDBOX_PIDS_LIMIT` does nothing there | Tuning the caps; on Kubernetes, the kubelet's `podPidsLimit` |
 | **Non-root execution** | Runs the image's default user, or the uid `SANDBOX_RUN_AS_USER` names | Shipping an image whose default user is unprivileged, and whose workdir that user can reach |
-| **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; seccomp and AppArmor/SELinux profiles |
+| **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; AppArmor/SELinux profiles |
+| **Syscall filtering** | On **Kubernetes**, sets `seccompProfile: RuntimeDefault` on every sandbox pod, always — covering the sandbox container, the gate sidecar and the netsetup init container. Not configurable, and it is the runtime's own curated filter, not one the platform authors. Docker containers already receive their runtime's default | Not disabling it out of band (a node whose runtime has no default profile refuses the pod); AppArmor/SELinux, which are still yours |
 | **Read-only root filesystem** | Set on request (`SANDBOX_READONLY_ROOTFS`), with writable mounts arranged over every path the platform itself writes (workdir, `/tmp`, the shell state root, the file-resource mount root) | Deciding to turn it on, and shipping an image that tolerates one |
 | **Sandbox egress** | `limited` = only `allowed_hosts`, through the per-session egress gate (both backends, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
 | **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
@@ -291,17 +292,18 @@ What is still yours at the runtime layer:
   the kubelet's `podPidsLimit` node setting, so it is node configuration, not
   chart or platform configuration
   ([docs/DIVERGENCES.md](./DIVERGENCES.md)).
-- **Seccomp and AppArmor/SELinux.** The platform authors no profile; keep the
+- **AppArmor/SELinux.** The platform authors no profile for either; keep the
   runtime's defaults enabled, and never run sandboxes `--privileged` or with
-  `--security-opt seccomp=unconfined`.
-- **Pod Security Admission.** A strict `restricted` namespace label rejects the
-  sandbox pod, and `SANDBOX_RUN_AS_USER` does not change that: the profile wants
-  `runAsNonRoot: true` (a *different* field, which the provider does not set), a
-  `seccompProfile` (which it never sets — the platform authors no profile), and
-  `capabilities.drop` containing `ALL`, where the default drops three names.
-  `SANDBOX_CAP_DROP=ALL` closes the last of those three; the other two are not
-  configurable today. A *gated* pod is rejected regardless, since the gate
-  sidecar *adds* `NET_ADMIN`, which `restricted` forbids.
+  `--security-opt seccomp=unconfined`. **Seccomp is no longer in this list on
+  Kubernetes** — see the platform row below.
+- **Pod Security Admission.** A strict `restricted` namespace label still
+  rejects the sandbox pod, and `SANDBOX_RUN_AS_USER` does not change that: the
+  profile wants `runAsNonRoot: true`, a *different* field the provider does not
+  set. The other two reasons are closed — `SANDBOX_CAP_DROP=ALL` makes
+  `capabilities.drop` contain `ALL`, and the pod now carries a `seccompProfile`
+  of the shape `restricted` accepts. That is two of three, not readiness: a
+  *gated* pod is rejected regardless, since the gate sidecar *adds*
+  `NET_ADMIN`, which `restricted` forbids.
 
 ### 4. Read-only root filesystem
 
@@ -503,10 +505,12 @@ with tracking issues, not silent omissions:
 - **Sandbox `securityContext` / `runtimeClassName`** — **closed (#65).** The
   platform now sets cgroup limits and capability drops on every sandbox by
   default, and non-root, a read-only root filesystem and a hardened
-  `runtimeClassName` on request (§2–4 above). Two limits remain, stated rather
-  than papered over: Kubernetes has no per-pod process limit to set (the
-  kubelet's `podPidsLimit`), and seccomp/AppArmor/SELinux profiles are still the
-  runtime's defaults — the platform authors none.
+  `runtimeClassName` on request (§2–4 above), and on Kubernetes a
+  `seccompProfile` of `RuntimeDefault` on every sandbox pod (plan 20 slice 2 —
+  the runtime's own filter, selected by the platform; it still authors none).
+  Two limits remain, stated rather than papered over: Kubernetes has no per-pod
+  process limit to set (the kubelet's `podPidsLimit`), and AppArmor/SELinux
+  profiles are still the runtime's defaults.
 - **Tool-time credential injection (vaults)** — delivered on both gate-wired
   backends: the sandbox sees only opaque placeholders, substituted at the gate
   on admitted plain-HTTP egress (in-sandbox HTTPS keeps its placeholders until
