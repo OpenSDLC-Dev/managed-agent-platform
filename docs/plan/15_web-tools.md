@@ -120,7 +120,7 @@ passes the same suite). Config is env-driven and never hard-codes an endpoint
 | Env | Meaning | Default |
 |---|---|---|
 | `TAVILY_API_KEY` | Tavily key for `web_search` | — (unset ⇒ backend unconfigured) |
-| `JINA_API_KEY` | Jina Reader key for `web_fetch` | — (unset ⇒ backend unconfigured) |
+| `JINA_API_KEY` | Jina Reader key for `web_fetch` | — (the Reader protocol works keyless, so the slice-1 adapter sends `Authorization` only when a key is set; slice 3 requires **either** this key **or** an explicit `WEBFETCH_BASE_URL` before constructing the fetcher — a bare install must not silently egress model-chosen URLs to the public reader) |
 | `WEBSEARCH_BASE_URL` | Tavily-protocol endpoint | `https://api.tavily.com` |
 | `WEBFETCH_BASE_URL` | Jina-Reader-protocol endpoint | `https://r.jina.ai` |
 

@@ -433,6 +433,37 @@ func TestAlreadyAnsweredIsNoOp(t *testing.T) {
 	}
 }
 
+// TestWebToolUseIsNeverAnsweredByTheWorker: a web call (web_fetch/web_search)
+// is the platform executor's, whatever environment the session runs in — this
+// worker implements the six sandbox tools, like the official client toolset.
+// The enqueue hold-back means a polled item should never coexist with an
+// unanswered web call; if a stray log shape ever presents one anyway, the scan
+// must skip it rather than feed it to the Runner's unknown-tool arm and post a
+// wrong-shaped answer to a call that is not this worker's to answer.
+func TestWebToolUseIsNeverAnsweredByTheWorker(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	webUse, _ := json.Marshal(map[string]any{
+		"name": "web_search", "input": map[string]string{"query": "golang"},
+	})
+	uses := h.suspend(t, string(webUse), writeUse("out.txt", "hello"))
+
+	if err := h.run(); err != nil {
+		t.Fatalf("RunSessionTools: %v", err)
+	}
+
+	results := h.results(t)
+	if len(results) != 1 {
+		t.Fatalf("user.tool_result = %d, want 1 (the sandbox tool only)", len(results))
+	}
+	if got := results[0].ToolUseID; got != uses[1].ID.String() {
+		t.Errorf("result references %q, want the write use %q — never the web call", got, uses[1].ID)
+	}
+	if sb.files["/workspace/out.txt"] != "hello" {
+		t.Errorf("the sandbox tool did not run: %v", sb.files)
+	}
+}
+
 // countEventReads returns a counter of the scan's wire cost and the handler
 // wrapper that feeds it: one tick per GET of the session events list, which is
 // the only request the diff makes. Both bound tests share it so they cannot

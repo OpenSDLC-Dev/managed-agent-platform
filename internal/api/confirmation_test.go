@@ -92,6 +92,36 @@ func TestConfirmationAllowResumesWithToolExec(t *testing.T) {
 	}
 }
 
+// A confirmed web tool resumes with web_exec — and a mixed confirmed set
+// (web + sandbox) resumes with web_exec ONLY, the same web-first choice the
+// brain's settlement makes: a tool_exec is visible to a BYOC worker, whose
+// official toolset implements only the six sandbox tools, so it must not
+// exist while a web call is unanswered. The executor's web driver answers
+// the web calls and chains the tool_exec itself.
+func TestConfirmationAllowWebToolResumesWithWebExec(t *testing.T) {
+	s := newTestServer(t)
+	sessionID := eventsFixture(t, s)
+	webAsk := appendAskToolUse(t, s, sessionID, "web_search")
+	bashAsk := appendAskToolUse(t, s, sessionID, "bash")
+
+	sendEvents(t, s, sessionID,
+		confirm(webAsk, "allow", nil),
+		confirm(bashAsk, "allow", nil))
+
+	if got := s.sessionStatus(sessionID); got != "running" {
+		t.Errorf("status after allow = %q, want running", got)
+	}
+	if n := s.liveWork(sessionID, queue.WebExec); n != 1 {
+		t.Errorf("live web_exec = %d, want 1", n)
+	}
+	if n := s.liveWork(sessionID, queue.ToolExec); n != 0 {
+		t.Errorf("live tool_exec = %d, want 0 — the web driver chains it", n)
+	}
+	if n := s.liveWork(sessionID, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn = %d, want 0", n)
+	}
+}
+
 func TestConfirmationDenyAnswersWithErrorAndResumesBrain(t *testing.T) {
 	s := newTestServer(t)
 	sessionID := eventsFixture(t, s)

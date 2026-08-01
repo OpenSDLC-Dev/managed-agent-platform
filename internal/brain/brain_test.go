@@ -479,9 +479,9 @@ func TestBuiltinToolUseEnqueuesToolExec(t *testing.T) {
 		t.Errorf("status while awaiting tool = %q, want running", got)
 	}
 
-	// The model was offered the six built-in tools, no custom.
-	if got := len(h.provider.calls[0].Tools); got != 6 {
-		t.Errorf("model saw %d tools, want 6 built-in", got)
+	// The model was offered the eight built-in tools, no custom.
+	if got := len(h.provider.calls[0].Tools); got != 8 {
+		t.Errorf("model saw %d tools, want 8 built-in", got)
 	}
 
 	// A tool_exec item is queued for an executor; the model_turn item is done.
@@ -504,6 +504,46 @@ func TestBuiltinToolUseEnqueuesToolExec(t *testing.T) {
 	_ = json.Unmarshal(evs[0].Body, &body)
 	if body.Name != "bash" || body.Input["command"] != "ls" {
 		t.Errorf("intent body = %+v", body)
+	}
+}
+
+// A turn with a web tool enqueues web_exec INSTEAD of tool_exec — even when a
+// sandbox tool rides the same turn. A tool_exec is visible to a BYOC worker,
+// whose official toolset implements only the six sandbox tools and answers
+// the whole unanswered set, so it must not see the log while a web call is
+// outstanding; the executor's web driver answers the web calls and chains the
+// tool_exec itself (docs/plan/15_web-tools.md).
+func TestWebToolUseEnqueuesWebExecOnly(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_web", Name: "web_search", Input: json.RawMessage(`{"query":"weather in taipei"}`)}},
+			provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+				ID: "toolu_sand", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)}},
+			done("tool_use", 3),
+		},
+	}, nil)
+
+	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
+		"model":{"id":"fixture-model"},"system":"do the task","description":"",
+		"tools":[{"type":"agent_toolset_20260401"}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wake(t, "look up the weather and list the files")
+	h.runOnce(t)
+
+	if got := h.liveOf(t, queue.WebExec); got != 1 {
+		t.Errorf("web_exec items = %d, want 1", got)
+	}
+	if got := h.liveOf(t, queue.ToolExec); got != 0 {
+		t.Errorf("tool_exec items = %d, want 0 — the web driver chains it", got)
+	}
+	if got := h.status(t); got != "running" {
+		t.Errorf("status while awaiting tools = %q, want running", got)
 	}
 }
 

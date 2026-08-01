@@ -15,6 +15,41 @@ copy of an entry here.
 
 ### Added
 
+- **`web_fetch` and `web_search` execute** — plan 15's slices 2+3
+  ([docs/plan/15_web-tools.md](./docs/plan/15_web-tools.md),
+  [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)). The last two
+  `agent_toolset_20260401` tools go from registered deferral to working: the toolset now offers all
+  eight definitions (the six sandbox schemas stay the SDK's field for field; the two web input
+  schemas — `web_search {query}`, `web_fetch {url}` — are this platform's own, INFERRED), and a new
+  internal work kind, `web_exec` (migration 0015), routes the calls to the **platform executor's web
+  driver** for cloud and self_hosted sessions alike — no sandbox is provisioned, the session gate is
+  bypassed by design (the reference documents that networking does not govern these tools), and
+  `Poll` never serves the kind, so a BYOC worker cannot receive one. A mixed turn (web + sandbox
+  tools) serializes **web-first**: the brain's settlement — and the confirmation resume, now picking
+  its kind from `events.UnansweredPlatformToolNames` — enqueues only the `web_exec` item, and the
+  web driver chains the `tool_exec` once every web call is answered, because a polling real `ant`
+  worker answers the whole unanswered set and implements only the six sandbox tools (ordering
+  INFERRED; both scan paths also filter `toolset.IsWebTool` as a stray-shape guard, and the
+  executor's sandbox pass heals a stray unanswered web call by chaining a `web_exec` instead of
+  resuming past it). Results are the wire's blocks: `web_search` → one `search_result` block per hit
+  (`domain.SearchResultBlock`, round-trip-tested against the SDK's
+  `BetaManagedAgentsSearchResultBlock`; hits normalized, with titles, source URLs, and snippets all
+  charged against one shared `toolset.MaxOutputBytes` budget; no hits → a single "No results
+  found." text block, the documented shape) carried on the new `toolset.Result.SearchResults`
+  field; `web_fetch` → a text block capped at the same `toolset.CapOutput` log budget every sandbox
+  tool honors (block choice INFERRED), the model-chosen URL restricted to http/https at the
+  executor seam — defense in depth ahead of the adapter's identical check, on a path the
+  per-session gate never sees; backend strings NUL-stripped so a hostile page cannot fault the `jsonb` append. Every
+  web failure — bad input, unreachable page, backend HTTP error, or an unconfigured backend (the
+  `is_error` names what is missing: `TAVILY_API_KEY` for search, `JINA_API_KEY` or
+  `WEBFETCH_BASE_URL` for fetch — with neither set, fetch stays unconfigured rather than silently
+  egressing model-chosen URLs to the public reader) — answers the model as an `is_error` result
+  rather than faulting the item into a reclaim loop. The executor reads
+  `TAVILY_API_KEY`/`JINA_API_KEY`/`WEBSEARCH_BASE_URL`/`WEBFETCH_BASE_URL` (compose passes them
+  through; the chart gains a generic `executor.extraEnv` seam for secret-ref entries), web runs
+  record through the shared `toolset.RecordRun` instrument, and the openai provider flattens
+  `search_result` blocks to text (a new documented lossy conversion) instead of erroring the turn.
+
 - **The web-tools plan and its backend seam** ([docs/plan/15_web-tools.md](./docs/plan/15_web-tools.md),
   in-progress, [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)). `web_fetch`
   and `web_search` — the last two `agent_toolset_20260401` tools, so far a registered deferral that

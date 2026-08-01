@@ -20,12 +20,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Kind discriminates the two work streams.
+// Kind discriminates the work streams.
 type Kind string
 
 const (
 	ModelTurn Kind = "model_turn"
 	ToolExec  Kind = "tool_exec"
+	// WebExec is the web_fetch/web_search work (docs/plan/15_web-tools.md):
+	// run by the platform executor's web driver in its own process — no
+	// sandbox — for cloud AND self_hosted sessions alike. Poll never serves
+	// it; the official worker implements only the six sandbox tools.
+	WebExec Kind = "web_exec"
 )
 
 // ErrLeaseLost reports that the item is no longer this claimant's: its lease
@@ -121,13 +126,14 @@ func New(pool *pgxpool.Pool) *Queue { return &Queue{pool: pool} }
 // for the same session and kind exists. It reports whether a new item was
 // created; false means an existing live item already covers the work.
 func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, kind Kind) (bool, error) {
-	// Only tool_exec work is ever run as a tool execution, so only it carries a
-	// trace context — consumed by the cloud executor's Claim and the BYOC
-	// worker's poll. A model_turn drives the brain, which opens its own
-	// model_request span per turn and never reads this back, so capturing it
-	// there would only persist an unread payload; leave it NULL.
+	// Only tool executions carry a trace context — tool_exec (consumed by the
+	// cloud executor's Claim and the BYOC worker's poll) and web_exec (the
+	// executor's web driver), so their consumer spans parent on the enqueuing
+	// turn. A model_turn drives the brain, which opens its own model_request
+	// span per turn and never reads this back, so capturing it there would
+	// only persist an unread payload; leave it NULL.
 	var traceCtx any
-	if kind == ToolExec {
+	if kind == ToolExec || kind == WebExec {
 		traceCtx = traceContextArg(ctx)
 	}
 	tag, err := db.Exec(ctx,
@@ -168,9 +174,10 @@ func traceContextArg(ctx context.Context) any {
 // tool_exec claims are scoped to cloud environments — the platform-managed
 // executor is the cloud hands. A self_hosted environment's tool_exec work is
 // served only by Poll (a BYOC worker), never Claim, so an item a worker has
-// polled can never also be run by the executor. model_turn work is claimed for
-// every environment: the brain (model calls) runs on the platform regardless of
-// where a session's sandbox lives.
+// polled can never also be run by the executor. Every other kind is claimed
+// for every environment: the brain (model calls) and the executor's web
+// driver (web_fetch/web_search) run on the platform regardless of where a
+// session's sandbox lives.
 func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item, error) {
 	var it Item
 	var prevState string
@@ -179,7 +186,7 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 		    SELECT w.id, w.state FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id
 		    WHERE w.kind = $1
-		      AND (w.kind = 'model_turn' OR e.kind = 'cloud')
+		      AND (w.kind <> 'tool_exec' OR e.kind = 'cloud')
 		      AND (w.state = 'queued' OR (w.state = 'active' AND w.lease_expires_at < now()))
 		    ORDER BY w.created_at
 		    FOR UPDATE OF w SKIP LOCKED

@@ -96,6 +96,16 @@ func run(ctx context.Context) error {
 		// each session's gate container so its egress spans reach the collector too.
 		OTelEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		OTelInsecure: os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
+		// The web tools' backends (docs/plan/15_web-tools.md): no TAVILY_API_KEY
+		// leaves web_search unconfigured, and neither JINA_API_KEY nor
+		// WEBFETCH_BASE_URL leaves web_fetch unconfigured (each answers
+		// is_error naming what is missing — never a silent default egress);
+		// empty base URLs resolve to the public endpoints once a tool is
+		// configured.
+		TavilyAPIKey:     os.Getenv("TAVILY_API_KEY"),
+		JinaAPIKey:       os.Getenv("JINA_API_KEY"),
+		WebSearchBaseURL: os.Getenv("WEBSEARCH_BASE_URL"),
+		WebFetchBaseURL:  os.Getenv("WEBFETCH_BASE_URL"),
 	}
 	for env, dst := range map[string]*time.Duration{
 		"EXECUTOR_LEASE_TTL": &cfg.LeaseTTL, "EXECUTOR_POLL_INTERVAL": &cfg.PollInterval,

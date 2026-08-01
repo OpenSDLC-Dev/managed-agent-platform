@@ -119,6 +119,23 @@ type ContentBlock struct {
 	Text string `json:"text,omitempty"`
 }
 
+// SearchResultBlock is one web_search hit as an agent.tool_result carries it —
+// the SDK's BetaManagedAgentsSearchResultBlock, field for field: the citation
+// settings, the hit's text content, the source URL, the page title, and type
+// "search_result". Every field is required on the wire, so none is omitempty.
+type SearchResultBlock struct {
+	Type      string                `json:"type"` // always "search_result"
+	Citations SearchResultCitations `json:"citations"`
+	Content   []ContentBlock        `json:"content"`
+	Source    string                `json:"source"`
+	Title     string                `json:"title"`
+}
+
+// SearchResultCitations mirrors BetaManagedAgentsSearchResultCitations.
+type SearchResultCitations struct {
+	Enabled bool `json:"enabled"`
+}
+
 // ModelUsage is the token accounting attached to a span.model_request_end
 // event (wire field model_usage). All counters are always present on the
 // wire; speed is nullable ("standard" | "fast").

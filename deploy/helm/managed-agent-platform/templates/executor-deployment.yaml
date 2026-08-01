@@ -62,6 +62,9 @@ spec:
             {{- include "map.commonEnv" . | nindent 12 }}
             {{- include "map.blobEnv" . | nindent 12 }}
             {{- include "map.secretsEnv" . | nindent 12 }}
+            {{- with .Values.executor.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- with .Values.executor.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

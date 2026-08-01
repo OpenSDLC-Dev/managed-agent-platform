@@ -182,6 +182,16 @@ scan:
 		switch domain.EventType(ev.Type) {
 		case domain.EventAgentToolUse:
 			sawUse = true
+			// A web call (web_fetch/web_search) is never this worker's: it runs
+			// in the platform executor's web driver for every environment kind,
+			// and the enqueue hold-back keeps a polled item from coexisting with
+			// an unanswered one. The filter guards the stray case, so the
+			// six-tool Runner is never fed a name it must answer unknown-tool.
+			// It still marks sawUse — the call belongs to the trailing turn's
+			// run, and the boundary is about turns, not this worker's share.
+			if toolset.IsWebTool(ev.Name) {
+				continue
+			}
 			// Not "stop at the first answered use": a turn's tools can be
 			// answered out of order — a denial's result lands at once while an
 			// allowed sibling is still outstanding — so the whole run is read.

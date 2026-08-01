@@ -15,12 +15,14 @@ import (
 // one constant once a real managed-agents endpoint can be recorded.
 const DefaultAgentToolsetPolicy = domain.PolicyAlwaysAllow
 
-// definitions are the six built-in tools in the order the reference lists them,
-// each already in the Messages-API tool shape the provider request carries
-// (name / description / input_schema). The schemas are the wire's, field for
-// field — anthropic-sdk-go's BetaManagedAgentsAgentToolset20260401*Input types
-// are what the model's tool calls are validated against on the other side, so a
-// property this platform invents is a property no reference client would send.
+// definitions are the eight built-in tools in the order the reference lists
+// them, each already in the Messages-API tool shape the provider request
+// carries (name / description / input_schema). The six sandbox tools' schemas
+// are the wire's, field for field — anthropic-sdk-go's
+// BetaManagedAgentsAgentToolset20260401*Input types are what the model's tool
+// calls are validated against on the other side, so a property this platform
+// invents is a property no reference client would send. The two web tools have
+// no such Input types (see their own comment below).
 var definitions = []toolDef{
 	{
 		name:        "bash",
@@ -82,6 +84,43 @@ var definitions = []toolDef{
 		},
 		required: []string{"pattern"},
 	},
+	// The two web tools execute in the executor's own process, not the sandbox
+	// (docs/plan/15_web-tools.md) — web:true is what routes their work to the
+	// web_exec item and keeps their names out of every sandbox-tool scan.
+	// Unlike the six above, the wire carries no Input type for them (the
+	// official client toolset implements only the six), so these schemas are
+	// this platform's minimal reading, recorded INFERRED in docs/DIVERGENCES.md.
+	{
+		name:        "web_fetch",
+		description: "Fetch a web page by absolute http(s) URL, returning its content as markdown text.",
+		props: map[string]any{
+			"url": prop("string", "Absolute http(s) URL of the page to fetch."),
+		},
+		required: []string{"url"},
+		web:      true,
+	},
+	{
+		name:        "web_search",
+		description: "Search the web, returning the top results — title, source URL, and a content snippet for each.",
+		props: map[string]any{
+			"query": prop("string", "The search query."),
+		},
+		required: []string{"query"},
+		web:      true,
+	},
+}
+
+// IsWebTool reports whether name is a built-in tool that executes in the
+// executor's process rather than the sandbox. The executor's sandbox scan, the
+// BYOC worker's, and the queue-kind decisions all consult this one predicate,
+// so the split cannot drift between them.
+func IsWebTool(name string) bool {
+	for _, d := range definitions {
+		if d.name == name {
+			return d.web
+		}
+	}
+	return false
 }
 
 type toolDef struct {
@@ -89,6 +128,9 @@ type toolDef struct {
 	description string
 	props       map[string]any
 	required    []string
+	// web marks a tool that executes in the executor's process (web_exec
+	// work), never in the sandbox.
+	web bool
 }
 
 func prop(typ, description string) map[string]any {
@@ -141,11 +183,6 @@ type resolved struct {
 // the wire's order with each tool's resolved enable state dropped and its policy
 // kept. Enable and policy resolve independently: a per-tool config overrides
 // default_config, which overrides the toolset default (on / DefaultAgentToolsetPolicy).
-//
-// web_fetch and web_search are in the wire's tool-config enum but carry no input
-// schema there and run executor-side against an egress policy this platform has
-// not built; they are absent from definitions, so enabling one resolves to
-// nothing and a config that only names one contributes no tool.
 func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 	var e entry
 	if err := json.Unmarshal(raw, &e); err != nil {

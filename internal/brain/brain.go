@@ -20,6 +20,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -402,15 +403,17 @@ func pendingInput(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64
 // Each platform tool_use is stamped with its evaluated_permission (the resolved
 // policy: allow for always_allow, ask for always_ask); custom tools are
 // client-executed and carry none. It reports whether any intent is a
-// platform-executed tool (platform) and the pre-minted ids of the tool_use
-// events whose policy is always_ask (askIDs) — the events a requires_action
-// suspension blocks on. An ask intent's id is minted here rather than left to
-// the store so the same id can name it in the status_idle stop_reason.
-func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType) (batch []events.NewEvent, platform bool, askIDs []domain.ID, err error) {
+// platform-executed tool (platform), whether any of those is a web tool (web —
+// which picks the work kind the settlement enqueues) and the pre-minted ids of
+// the tool_use events whose policy is always_ask (askIDs) — the events a
+// requires_action suspension blocks on. An ask intent's id is minted here
+// rather than left to the store so the same id can name it in the status_idle
+// stop_reason.
+func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType) (batch []events.NewEvent, platform, web bool, askIDs []domain.ID, err error) {
 	if len(turn.text) > 0 {
 		content, err := json.Marshal(map[string]any{"content": turn.text})
 		if err != nil {
-			return nil, false, nil, err
+			return nil, false, false, nil, err
 		}
 		batch = append(batch, events.NewEvent{
 			ID: turn.messageEventID, Type: domain.EventAgentMessage, Payload: content,
@@ -429,6 +432,9 @@ func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy m
 		var id domain.ID
 		if typ == domain.EventAgentToolUse {
 			platform = true
+			if toolset.IsWebTool(tu.Name) {
+				web = true
+			}
 			perm := domain.EvalPermAllow
 			if policy[tu.Name] == domain.PolicyAlwaysAsk {
 				perm = domain.EvalPermAsk
@@ -439,11 +445,11 @@ func turnEvents(turn *turnResult, toolKind map[string]domain.EventType, policy m
 		}
 		payload, err := json.Marshal(fields)
 		if err != nil {
-			return nil, false, nil, err
+			return nil, false, false, nil, err
 		}
 		batch = append(batch, events.NewEvent{ID: id, Type: typ, Payload: payload})
 	}
-	return batch, platform, askIDs, nil
+	return batch, platform, web, askIDs, nil
 }
 
 // settleTurn commits the turn: the emitted events (message, tool intents),
@@ -466,7 +472,7 @@ func (b *Brain) settleTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 }
 
 func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, turn *turnResult, toolKind map[string]domain.EventType, policy map[string]domain.PermissionPolicyType, watermark int64) error {
-	head, platform, askIDs, err := turnEvents(turn, toolKind, policy)
+	head, platform, web, askIDs, err := turnEvents(turn, toolKind, policy)
 	if err != nil {
 		return err
 	}
@@ -546,17 +552,27 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 		// for an earlier intent that landed mid-turn is not lost either —
 		// it stays unprocessed and the resuming turn replays it.
 		//
-		// If any intent is a platform-executed built-in tool, enqueue the
-		// tool_exec item in the same commit so an executor picks it up. A
-		// turn of only client-executed custom tools enqueues nothing — the
-		// client posts user.custom_tool_result and the control plane's
-		// trigger schedules the resume.
+		// If any intent is a platform-executed built-in tool, enqueue its
+		// work item in the same commit so an executor picks it up. A turn
+		// with any web tool enqueues web_exec INSTEAD of tool_exec, even
+		// when sandbox tools ride the same turn: a tool_exec is visible to a
+		// BYOC worker, whose official toolset implements only the six
+		// sandbox tools and answers the whole unanswered set — it would fail
+		// the web calls as unknown tools. The web driver answers the web
+		// calls first and chains the tool_exec itself (webwork.go). A turn
+		// of only client-executed custom tools enqueues nothing — the client
+		// posts user.custom_tool_result and the control plane's trigger
+		// schedules the resume.
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			if err := b.queue.Complete(ctx, tx, item); err != nil {
 				return err
 			}
 			if platform {
-				if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, queue.ToolExec); err != nil {
+				kind := queue.ToolExec
+				if web {
+					kind = queue.WebExec
+				}
+				if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, kind); err != nil {
 					return err
 				}
 			}

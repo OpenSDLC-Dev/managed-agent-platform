@@ -185,7 +185,13 @@ type contentBlock struct {
 	Name      string          `json:"name"`        // tool_use
 	Input     json.RawMessage `json:"input"`       // tool_use
 	ToolUseID string          `json:"tool_use_id"` // tool_result
-	Content   json.RawMessage `json:"content"`     // tool_result: string or block array
+	Content   json.RawMessage `json:"content"`     // tool_result: string or block array; search_result: text blocks
+	Title     string          `json:"title"`       // search_result
+	// Source is raw, not string: search_result carries a URL string here, but
+	// image/document blocks carry an OBJECT under the same key — typing it
+	// string would fail their decode before the unsupported-block guards can
+	// name them.
+	Source json.RawMessage `json:"source"`
 }
 
 func strp(s string) *string { return &s }
@@ -279,9 +285,11 @@ func decodeContent(raw json.RawMessage) (string, bool, error) {
 
 // toolResultText flattens an Anthropic tool_result content (a string, or an
 // array of blocks) into the plain text OpenAI's tool message carries. A
-// non-text block (e.g. an image) has no representation in an OpenAI tool
-// message, so it fails loudly rather than silently vanishing — matching how an
-// unsupported top-level content block is handled.
+// search_result block (a web_search answer) flattens to text via
+// searchResultText; any other non-text block (e.g. an image) has no
+// representation in an OpenAI tool message, so it fails loudly rather than
+// silently vanishing — matching how an unsupported top-level content block is
+// handled.
 func toolResultText(raw json.RawMessage) (string, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return "", nil
@@ -297,12 +305,57 @@ func toolResultText(raw json.RawMessage) (string, error) {
 	}
 	var parts []string
 	for _, b := range blocks {
-		if b.Type != "text" {
+		switch b.Type {
+		case "text":
+			parts = append(parts, b.Text)
+		case "search_result":
+			flat, err := searchResultText(b)
+			if err != nil {
+				return "", err
+			}
+			// The flat form is line-shaped; joined bare onto a preceding text
+			// block it would glue onto that block's last line.
+			if n := len(parts); n > 0 && !strings.HasSuffix(parts[n-1], "\n") {
+				parts = append(parts, "\n")
+			}
+			parts = append(parts, flat)
+		default:
 			return "", fmt.Errorf("unsupported tool_result content block %q (OpenAI tool messages are text-only)", b.Type)
 		}
-		parts = append(parts, b.Text)
 	}
 	return strings.Join(parts, ""), nil
+}
+
+// searchResultText renders one search_result block as plain text: the title
+// and source URL on a header line, then each of the block's text blocks on its
+// own newline-terminated line, so consecutive results stay separated after the
+// caller's plain join. The structure (citations config, block boundaries) is
+// dropped — a documented lossy conversion, confined to this package. The wire
+// union says the inner content is text blocks only, so anything else is an
+// upstream bug and fails loudly.
+func searchResultText(b contentBlock) (string, error) {
+	var source string
+	if len(bytes.TrimSpace(b.Source)) > 0 {
+		if err := json.Unmarshal(b.Source, &source); err != nil {
+			return "", fmt.Errorf("search_result source must be a URL string: %w", err)
+		}
+	}
+	var inner []contentBlock
+	if len(bytes.TrimSpace(b.Content)) > 0 {
+		if err := json.Unmarshal(b.Content, &inner); err != nil {
+			return "", err
+		}
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s (%s)\n", b.Title, source)
+	for _, c := range inner {
+		if c.Type != "text" {
+			return "", fmt.Errorf("unsupported block %q inside search_result content (text only)", c.Type)
+		}
+		sb.WriteString(c.Text)
+		sb.WriteString("\n")
+	}
+	return sb.String(), nil
 }
 
 func compactJSON(raw json.RawMessage) (string, error) {

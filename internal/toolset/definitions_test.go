@@ -41,7 +41,7 @@ func equal(a, b []string) bool {
 }
 
 func TestTools(t *testing.T) {
-	all := []string{"bash", "read", "write", "edit", "glob", "grep"}
+	all := []string{"bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"}
 
 	cases := []struct {
 		name  string
@@ -76,15 +76,14 @@ func TestTools(t *testing.T) {
 			name: "a config overrides the default on",
 			entry: `{"type":"agent_toolset_20260401","default_config":{"enabled":true},
 			         "configs":[{"name":"bash","enabled":false}]}`,
-			want: []string{"read", "write", "edit", "glob", "grep"},
+			want: []string{"read", "write", "edit", "glob", "grep", "web_fetch", "web_search"},
 		},
 		{
-			// web_fetch/web_search are named in the wire's tool-config enum but
-			// carry no input schema there and execute executor-side; they are
-			// deferred, so enabling one offers the model nothing.
-			name:  "web tools are not offered",
+			// web_fetch/web_search execute executor-side (plan 15), and since
+			// slice 2 they resolve like any other built-in.
+			name:  "a web tool is offered when enabled",
 			entry: `{"type":"agent_toolset_20260401","default_config":{"enabled":false},"configs":[{"name":"web_search","enabled":true}]}`,
-			want:  nil,
+			want:  []string{"web_search"},
 		},
 		{
 			// permission_policy is slice 7's; it must not change what is offered.
@@ -135,6 +134,10 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 			required: []string{"file_path", "new_string", "old_string"}},
 		"glob": {props: []string{"path", "pattern"}, required: []string{"pattern"}},
 		"grep": {props: []string{"path", "pattern"}, required: []string{"pattern"}},
+		// The web tools' schemas are this platform's minimal reading — the wire
+		// carries no Input types for them (docs/DIVERGENCES.md, INFERRED).
+		"web_fetch":  {props: []string{"url"}, required: []string{"url"}},
+		"web_search": {props: []string{"query"}, required: []string{"query"}},
 	}
 
 	defs, err := toolset.Tools(json.RawMessage(`{"type":"agent_toolset_20260401"}`))
@@ -173,6 +176,18 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 		if !equal(req, w.required) {
 			t.Errorf("%s: required = %v, want %v", d.Name, req, w.required)
 		}
+		// The web schemas are ours (INFERRED), so their property types are a
+		// contract this test owns, not one mirrored from the SDK.
+		if d.Name == "web_fetch" || d.Name == "web_search" {
+			for p, raw := range d.InputSchema.Properties {
+				var ps struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal(raw, &ps); err != nil || ps.Type != "string" {
+					t.Errorf("%s.%s: type = %q, want string", d.Name, p, ps.Type)
+				}
+			}
+		}
 	}
 }
 
@@ -180,6 +195,17 @@ func sortStrings(s []string) {
 	for i := 1; i < len(s); i++ {
 		for j := i; j > 0 && s[j] < s[j-1]; j-- {
 			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
+func TestIsWebTool(t *testing.T) {
+	for name, want := range map[string]bool{
+		"web_fetch": true, "web_search": true,
+		"bash": false, "grep": false, "no_such_tool": false,
+	} {
+		if got := toolset.IsWebTool(name); got != want {
+			t.Errorf("IsWebTool(%q) = %v, want %v", name, got, want)
 		}
 	}
 }

@@ -539,6 +539,58 @@ func TestClaimAndPollAreExclusiveByEnvironmentKind(t *testing.T) {
 	}
 }
 
+// TestWebExecIsClaimedForEveryEnvironmentAndNeverPolled pins web_exec's
+// routing (docs/plan/15_web-tools.md): web_fetch/web_search run in the
+// platform executor's own process for cloud AND self_hosted sessions alike,
+// so Claim(web_exec) serves both environment kinds — and Poll never serves
+// it, because the official worker toolset implements only the six sandbox
+// tools and would fail an unknown tool. Like tool_exec, it carries the
+// enqueuing turn's trace context for the web driver's span to parent on.
+func TestWebExecIsClaimedForEveryEnvironmentAndNeverPolled(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	cloudSess, cloudEnv := pgtest.NewSession(t, pool, "cloud")
+	selfSess, selfEnv := pgtest.NewSession(t, pool, "self_hosted")
+	q := queue.New(pool)
+
+	// A self_hosted web_exec item: Poll must never hand it to a BYOC worker;
+	// the platform executor claims it despite the environment kind.
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f},
+		SpanID:     trace.SpanID{0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38},
+		TraceFlags: trace.FlagsSampled,
+	})
+	if _, err := q.Enqueue(trace.ContextWithSpanContext(ctx, sc), pool, selfEnv, selfSess, queue.WebExec); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := q.Poll(ctx, selfEnv, time.Minute); err != nil || w != nil {
+		t.Fatalf("poll served a web_exec item to a worker: %+v %v", w, err)
+	}
+	it, err := q.Claim(ctx, queue.WebExec, time.Minute)
+	if err != nil || it == nil {
+		t.Fatalf("executor did not claim the self_hosted web_exec item: %+v %v", it, err)
+	}
+	if it.EnvironmentID != selfEnv || it.Kind != queue.WebExec {
+		t.Errorf("claimed item = %+v, want the self_hosted web_exec item", it)
+	}
+	want := fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID())
+	if got := it.TraceContext["traceparent"]; got != want {
+		t.Errorf("claimed trace_context[traceparent] = %q, want %q", got, want)
+	}
+
+	// A cloud web_exec item claims the same way.
+	if _, err := q.Enqueue(ctx, pool, cloudEnv, cloudSess, queue.WebExec); err != nil {
+		t.Fatal(err)
+	}
+	ci, err := q.Claim(ctx, queue.WebExec, time.Minute)
+	if err != nil || ci == nil {
+		t.Fatalf("executor did not claim the cloud web_exec item: %+v %v", ci, err)
+	}
+	if ci.EnvironmentID != cloudEnv {
+		t.Errorf("claimed item environment = %s, want the cloud env %s", ci.EnvironmentID, cloudEnv)
+	}
+}
+
 func TestCancelSessionTakesEveryLiveItem(t *testing.T) {
 	// What a user.interrupt does to the turn it ends: every item the session
 	// still has in flight is stopped, whoever holds it. A claimant's lease proof

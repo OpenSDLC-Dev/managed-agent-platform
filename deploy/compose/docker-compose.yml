@@ -195,6 +195,15 @@ services:
       CONTROLPLANE_URL: http://controlplane:8080
       EXECUTOR_GATE_IMAGE: managed-agent-platform-gate:local
       SANDBOX_DOCKER_GATE_NETWORK: managed-agent-platform_default
+      # Web tool backends (docs/plan/15_web-tools.md). Empty TAVILY_API_KEY
+      # leaves web_search unconfigured; empty JINA_API_KEY with no
+      # WEBFETCH_BASE_URL leaves web_fetch unconfigured (each answers is_error
+      # naming what is missing). Filled from the host env or a compose-side
+      # .env — never committed.
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      JINA_API_KEY: ${JINA_API_KEY:-}
+      WEBSEARCH_BASE_URL: ${WEBSEARCH_BASE_URL:-}
+      WEBFETCH_BASE_URL: ${WEBFETCH_BASE_URL:-}
     # An explicit depends_on replaces the anchor's, so postgres is restated.
     depends_on:
       postgres:
