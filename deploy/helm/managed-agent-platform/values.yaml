@@ -110,7 +110,10 @@ executor:
     # cannot express it and logs that it ignored it. Exceeding it gets the pod
     # EVICTED by the kubelet rather than failing the write, and the request is
     # set equal to the limit, so a generous cap is a real per-pod reservation the
-    # node pool has to be sized for.
+    # node pool has to be sized for. And it binds only where the kubelet can
+    # measure local ephemeral storage — a single filesystem, a separate runtime
+    # filesystem, or a split image filesystem; on any other node layout the pod
+    # takes the fields and is never evicted for exceeding them.
     ephemeralStorageBytes: ""
     capDrop: ""
     readOnlyRootfs: ""

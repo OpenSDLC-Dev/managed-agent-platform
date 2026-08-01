@@ -22,7 +22,7 @@ deliberate divergences from the reference are in
 | Concern | Platform enforces (in code) | You (the operator) own |
 |---|---|---|
 | **Sandbox image** | Requires `/bin/bash` + a POSIX userland, and wants a `stat` accepting `-c`; pulls the image you name | Building and pinning a hardened, minimal image; keeping it patched |
-| **Resource limits** | **By default** caps every sandbox at 2 CPUs (`SANDBOX_CPU_MILLIS`) and every **Docker** sandbox at 512 processes (`SANDBOX_PIDS_LIMIT`); an optional memory cap, plus an optional **Kubernetes-only** disk cap (`SANDBOX_EPHEMERAL_STORAGE_BYTES`, enforced by evicting the pod). The gap runs both ways: Kubernetes has no per-pod process limit to set, so `SANDBOX_PIDS_LIMIT` does nothing there, and a Docker daemon cannot be trusted to enforce a disk quota, so the disk cap does nothing there | Tuning the caps; on Kubernetes, the kubelet's `podPidsLimit`; on Docker, bounding the disk at the host |
+| **Resource limits** | **By default** caps every sandbox at 2 CPUs (`SANDBOX_CPU_MILLIS`) and every **Docker** sandbox at 512 processes (`SANDBOX_PIDS_LIMIT`); an optional memory cap, plus an optional **Kubernetes-only** disk cap (`SANDBOX_EPHEMERAL_STORAGE_BYTES`, enforced by evicting the pod). The gap runs both ways: Kubernetes has no per-pod process limit to set, so `SANDBOX_PIDS_LIMIT` does nothing there, and whether a Docker daemon enforces a disk quota depends on its storage driver, so the disk cap does nothing there rather than sometimes-nothing | Tuning the caps; on Kubernetes, the kubelet's `podPidsLimit`; on Docker, bounding the disk at the host |
 | **Non-root execution** | Runs the image's default user, or the uid `SANDBOX_RUN_AS_USER` names | Shipping an image whose default user is unprivileged, and whose workdir that user can reach |
 | **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; AppArmor/SELinux profiles |
 | **Syscall filtering** | On **Kubernetes**, sets `seccompProfile: RuntimeDefault` on every sandbox pod, always — covering the sandbox container, the gate sidecar and the netsetup init container. Not configurable, and it is the runtime's own curated filter, not one the platform authors. Docker containers already receive their runtime's default | Not disabling it out of band (a node whose runtime has no default profile refuses the pod); AppArmor/SELinux, which are still yours |
@@ -281,7 +281,17 @@ rest. `SANDBOX_EPHEMERAL_STORAGE_BYTES` caps the node-local disk a sandbox may
 consume — its writable layer and every `emptyDir` mounted over it — and
 Kubernetes enforces it by **eviction**, not by refusing the write: a tool that
 fills the disk does not get `ENOSPC`, the kubelet notices the pod is over its
-allowance and kills the whole pod, ending the session's sandbox mid-call. That
+allowance and kills the whole pod, ending the session's sandbox mid-call.
+
+It enforces it only where it can measure it, which is a property of your nodes
+rather than of this setting. The kubelet measures local ephemeral storage on the
+three node layouts it supports — a single filesystem, a separate runtime
+filesystem, or a split image filesystem — and on any other layout it *"does not
+apply resource limits for ephemeral local storage"*: the pod accepts the fields
+and can exceed them without ever being evicted. Check your nodes' layout before
+treating this as a bound. What still fires there is the node-level signal — a
+node short on local storage taints itself and evicts pods that do not tolerate
+the taint — which is the arbitrary-victim outcome this cap exists to replace. That
 is why this cap is off by default where the CPU cap is not, and why the request
 is set equal to the limit — the kubelet ranks eviction candidates by usage
 against the *request*, so a limit the scheduler never reserved would push the
@@ -307,14 +317,18 @@ What is still yours at the runtime layer:
   chart or platform configuration
   ([docs/DIVERGENCES.md](./DIVERGENCES.md)).
 - **A disk cap on Docker.** The Engine API takes a writable-layer quota, but
-  enforcing one needs a storage driver with quota support, which not every
-  daemon has — and a daemon without one accepts the option and silently does
-  nothing (measured: the container's rootfs still reports the whole host
-  filesystem). The platform will not ship a cap it cannot trust, so the Docker
-  backend ignores `SANDBOX_EPHEMERAL_STORAGE_BYTES` and warns once in the
-  executor's log instead of reporting a limit that is not there
+  whether it means anything depends on the daemon's storage driver, and the
+  daemons disagree: btrfs, zfs and overlay2 over XFS with `pquota` can enforce
+  it, classic overlay2 without `pquota` refuses the option outright, and Docker
+  Desktop's `overlayfs` driver accepts it and enforces nothing (measured — the
+  container's rootfs still reports the whole host filesystem). Passing it
+  through blindly would therefore break provisioning on one daemon and report a
+  cap that does not exist on another, so the Docker backend ignores
+  `SANDBOX_EPHEMERAL_STORAGE_BYTES` and warns once in the executor's log
   ([docs/DIVERGENCES.md](./DIVERGENCES.md)). Bound the disk at the host — a
-  dedicated filesystem or volume behind the daemon's data root.
+  dedicated filesystem or volume behind the daemon's data root — or, if your
+  daemon is one of the drivers that can enforce a quota, at the daemon's own
+  default (`dockerd --storage-opt`).
 - **AppArmor/SELinux.** The platform authors no profile for either; keep the
   runtime's defaults enabled, and never run sandboxes `--privileged` or with
   `--security-opt seccomp=unconfined`. **Seccomp is no longer in this list on
@@ -549,7 +563,7 @@ with tracking issues, not silent omissions:
   the runtime's own filter, selected by the platform; it still authors none).
   Three limits remain, stated rather than papered over: Kubernetes has no
   per-pod process limit to set (the kubelet's `podPidsLimit`), Docker has no
-  disk quota the platform can trust (so the opt-in
+  disk quota the platform can rely on across storage drivers (so the opt-in
   `SANDBOX_EPHEMERAL_STORAGE_BYTES` is Kubernetes-only), and AppArmor/SELinux
   profiles are still the runtime's defaults.
 - **Tool-time credential injection (vaults)** — delivered on both gate-wired

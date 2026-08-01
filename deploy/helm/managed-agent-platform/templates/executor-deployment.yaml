@@ -71,8 +71,17 @@ spec:
                      so format it as one. Above 2^53 the float64 decode has
                      already lost precision before the template sees it; that is
                      Helm's YAML parse, not something quoting can undo, and it
-                     is 9 PB of sandbox disk away from any real deployment. */}}
-              value: {{ if kindIs "float64" $value }}{{ printf "%.0f" $value | quote }}{{ else }}{{ $value | quote }}{{ end }}
+                     is 9 PB of sandbox disk away from any real deployment.
+
+                     Only an INTEGRAL float is reformatted, and the floor test
+                     is load-bearing rather than defensive: formatting every
+                     float would round a malformed one into a valid one, and
+                     `runAsUser: -0.4` would reach the executor as "-0" — which
+                     parses as uid 0, silently running every sandbox as root
+                     where the value was meant to fail startup. A fractional
+                     value is passed through as written so the executor still
+                     refuses it. */}}
+              value: {{ if and (kindIs "float64" $value) (eq $value (floor $value)) }}{{ printf "%.0f" $value | quote }}{{ else }}{{ $value | quote }}{{ end }}
             {{- end }}
             {{- end }}
             {{- with .Values.executor.leaseTTL }}

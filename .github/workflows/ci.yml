@@ -126,6 +126,25 @@ jobs:
               || { echo "$1 from a values file did not render as a plain integer (scientific notation?)" >&2
                    echo "$fileOut" | grep -A1 "name: $1" >&2; exit 1; }
           done
+          # ...and the other half of that fix: a FRACTIONAL value must NOT be
+          # normalised. Rounding one turns malformed input into valid input —
+          # `runAsUser: -0.4` would reach the executor as "-0", which parses as
+          # uid 0 and runs every sandbox as root, where the value was supposed to
+          # fail startup. It has to arrive as written so the executor refuses it.
+          cat > /tmp/hardening-fractional.yaml <<'YAML'
+          executor:
+            sandboxHardening:
+              cpuMillis: 2.5
+              runAsUser: -0.4
+          YAML
+          fracOut="$(helm template t "$CHART" -f "$VALUES" -f /tmp/hardening-fractional.yaml \
+            --show-only templates/executor-deployment.yaml)"
+          for pair in 'SANDBOX_CPU_MILLIS 2.5' 'SANDBOX_RUN_AS_USER -0.4'; do
+            set -- $pair
+            echo "$fracOut" | grep -A1 "name: $1" | grep -q "value: \"$2\"" \
+              || { echo "$1 was rounded instead of reaching the executor as written" >&2
+                   echo "$fracOut" | grep -A1 "name: $1" >&2; exit 1; }
+          done
           # An explicit numeric/boolean zero means "turn this cap off" and must
           # reach the executor: Helm's `empty` is true of 0 and false, so the
           # obvious emptiness test would silently substitute the default.

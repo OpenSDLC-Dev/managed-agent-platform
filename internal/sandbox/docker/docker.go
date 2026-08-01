@@ -141,14 +141,17 @@ type Provider struct {
 }
 
 // warnUnenforceableEphemeralStorage says once that a configured disk cap is
-// being ignored. Docker's writable-layer quota needs a storage driver with
-// quota support, and a daemon without one does not refuse the option — it
-// accepts it and enforces nothing (measured on 29.6.2/overlayfs: the container
-// still sees the whole host filesystem). Honouring EphemeralStorageBytes here
-// would therefore mean reporting a cap that may not exist, so this backend
-// ignores it — the mirror of Kubernetes ignoring PidsLimit, and warned about
-// for the same reason: an operator who capped a sandbox and silently got
-// nothing believes it is capped.
+// being ignored. Docker's writable-layer quota is only as good as the daemon's
+// storage driver, and the daemons disagree: some enforce it, classic overlay2
+// without XFS pquota refuses the option outright, and Docker Desktop's
+// overlayfs accepts it and enforces nothing (measured on 29.6.2 — the container
+// still sees the whole host filesystem). Passing it through blindly would
+// therefore fail provisioning on one daemon and report a cap that does not
+// exist on another; honouring it properly means reading the daemon's storage
+// driver and branching on it, which this cap's plan scopes to Kubernetes. So
+// this backend ignores it — the mirror of Kubernetes ignoring PidsLimit, and
+// warned about for the same reason: an operator who capped a sandbox and
+// silently got nothing believes it is capped.
 func (p *Provider) warnUnenforceableEphemeralStorage(ctx context.Context, h sandbox.Hardening) {
 	if h.EphemeralStorageBytes <= 0 {
 		return

@@ -235,5 +235,7 @@ See [`values.yaml`](./values.yaml) for the full set.
 > `21474836480`, not `20Gi`; a Kubernetes quantity string fails executor startup. Off by
 > default, and worth understanding before turning on: Kubernetes enforces this one by
 > **evicting the pod**, not by failing the write, so a cap set too low ends sessions
-> mid-call rather than making a tool call fail
+> mid-call rather than making a tool call fail — and it enforces it only on the node
+> layouts whose local ephemeral storage the kubelet can measure, so check yours before
+> treating the number as a bound
 > ([docs/self-hosted-security.md](../../../docs/self-hosted-security.md) §3).
