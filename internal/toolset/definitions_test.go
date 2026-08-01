@@ -176,6 +176,18 @@ func TestToolSchemasMatchTheWire(t *testing.T) {
 		if !equal(req, w.required) {
 			t.Errorf("%s: required = %v, want %v", d.Name, req, w.required)
 		}
+		// The web schemas are ours (INFERRED), so their property types are a
+		// contract this test owns, not one mirrored from the SDK.
+		if d.Name == "web_fetch" || d.Name == "web_search" {
+			for p, raw := range d.InputSchema.Properties {
+				var ps struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal(raw, &ps); err != nil || ps.Type != "string" {
+					t.Errorf("%s.%s: type = %q, want string", d.Name, p, ps.Type)
+				}
+			}
+		}
 	}
 }
 

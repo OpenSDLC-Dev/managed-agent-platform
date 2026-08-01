@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -164,9 +165,12 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 			return toolset.Result{Content: "No results found."}
 		}
 		// The whole answer honors the same event-log budget every sandbox tool
-		// does (toolset.MaxOutputBytes is per tool CALL, not per block): each
-		// hit's snippet is included only while it fits the remaining budget
-		// whole; a hit past the budget keeps its title and URL — enough for
+		// does (toolset.MaxOutputBytes is per tool CALL, not per block): a
+		// hit's title and source charge the budget first — they are
+		// backend-controlled too, and five oversized titles would bust the
+		// cap as surely as one oversized snippet — then its snippet is
+		// included only while it fits the remaining budget whole; a hit whose
+		// snippet is past the budget keeps its title and URL — enough for
 		// the model to web_fetch it — with an empty content array. Backend
 		// strings are sanitized (a jsonb column cannot store a NUL byte, and a
 		// faulted append would reclaim-loop the item forever re-fetching), a
@@ -185,6 +189,10 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 			if title == "" {
 				title = source
 			}
+			if len(title)+len(source) > budget {
+				continue
+			}
+			budget -= len(title) + len(source)
 			content := []domain.ContentBlock{}
 			if snippet := toolset.CapOutput(sanitizeWebString(h.Content)); snippet != "" && len(snippet) <= budget {
 				content = append(content, domain.ContentBlock{Type: "text", Text: snippet})
@@ -211,6 +219,13 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 		}
 		if err := json.Unmarshal(u.input, &in); err != nil || strings.TrimSpace(in.URL) == "" {
 			return fail(`web_fetch: input requires a non-empty "url" string`)
+		}
+		// The web tools egress from this process, outside the per-session
+		// gate, so this scheme check is all that stands between a
+		// model-chosen URL (file://, gopher://, ...) and the reader backend's
+		// own network position.
+		if parsed, perr := url.Parse(strings.TrimSpace(in.URL)); perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return fail(`web_fetch: "url" must be an http or https URL`)
 		}
 		page, err := e.fetcher.Fetch(ctx, in.URL)
 		if err != nil {

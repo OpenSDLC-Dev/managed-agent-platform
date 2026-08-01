@@ -188,6 +188,7 @@ func TestWebSearchBoundsAndNormalizesTheAnswer(t *testing.T) {
 		{"title": "third\x00third", "url": "https://c.example/\x00", "content": "sni\x00ppet"},
 		{"title": "", "url": "https://d.example/", "content": "snippet"},
 		{"title": "no-url", "url": "", "content": "dropped"},
+		{"title": strings.Repeat("t", toolset.MaxOutputBytes), "url": "https://e.example/", "content": "x"},
 	}})
 	h := webHarness(t, string(hits), "")
 	h.suspendWeb(t, searchUse("q"))
@@ -200,7 +201,7 @@ func TestWebSearchBoundsAndNormalizesTheAnswer(t *testing.T) {
 	}
 	blocks := results[0].Content
 	if len(blocks) != 4 {
-		t.Fatalf("blocks = %d, want 4 (the URL-less hit dropped)", len(blocks))
+		t.Fatalf("blocks = %d, want 4 (the URL-less hit and the budget-busting title both dropped)", len(blocks))
 	}
 	var total int
 	for _, b := range blocks {
@@ -214,8 +215,8 @@ func TestWebSearchBoundsAndNormalizesTheAnswer(t *testing.T) {
 	if total > toolset.MaxOutputBytes {
 		t.Errorf("total snippet bytes = %d, want <= the %d log budget", total, toolset.MaxOutputBytes)
 	}
-	// Both 60KiB snippets fit (120KiB > budget, so only the first does);
-	// the second hit keeps its title and URL with no content.
+	// Only the first 60KiB snippet fits — two of them exceed the 100KiB
+	// budget — so the second hit keeps its title and URL with no content.
 	if len(blocks[0].Content) != 1 || len(blocks[1].Content) != 0 {
 		t.Errorf("budget split = %d/%d content blocks, want 1/0", len(blocks[0].Content), len(blocks[1].Content))
 	}
@@ -324,18 +325,24 @@ func TestWebSearchUnconfiguredAnswersIsError(t *testing.T) {
 
 func TestWebToolBadInputAnswersIsError(t *testing.T) {
 	h := webHarness(t, `{"results":[]}`, "page")
-	h.suspendWeb(t, `{"name":"web_fetch","input":{}}`, `{"name":"web_search","input":{"query":"   "}}`)
+	h.suspendWeb(t, `{"name":"web_fetch","input":{}}`, `{"name":"web_search","input":{"query":"   "}}`,
+		`{"name":"web_fetch","input":{"url":"file:///etc/passwd"}}`)
 
 	h.stepOnce(t)
 
 	results := h.toolResults(t)
-	if len(results) != 2 {
-		t.Fatalf("results = %d, want 2", len(results))
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
 	}
 	for i, r := range results {
 		if !r.IsError {
-			t.Errorf("result %d = %+v, want is_error for the missing argument", i, r)
+			t.Errorf("result %d = %+v, want is_error for the bad argument", i, r)
 		}
+	}
+	// The scheme check is the only guard between a model-chosen URL and the
+	// reader backend's network position (no gate on this path).
+	if text := results[2].Content[0].Text; !strings.Contains(text, "http") {
+		t.Errorf("file:// answer = %q, want it to name the http/https requirement", text)
 	}
 }
 

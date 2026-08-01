@@ -33,11 +33,12 @@ copy of an entry here.
   executor's sandbox pass heals a stray unanswered web call by chaining a `web_exec` instead of
   resuming past it). Results are the wire's blocks: `web_search` → one `search_result` block per hit
   (`domain.SearchResultBlock`, round-trip-tested against the SDK's
-  `BetaManagedAgentsSearchResultBlock`; hits normalized and their snippets admitted against one
-  shared `toolset.MaxOutputBytes` budget; no hits → a single "No results found." text block, the
-  documented shape) carried on the new `toolset.Result.SearchResults` field; `web_fetch` → a text
-  block capped at the same `toolset.CapOutput` log budget every sandbox tool honors (block choice
-  INFERRED); backend strings NUL-stripped so a hostile page cannot fault the `jsonb` append. Every
+  `BetaManagedAgentsSearchResultBlock`; hits normalized, with titles, source URLs, and snippets all
+  charged against one shared `toolset.MaxOutputBytes` budget; no hits → a single "No results
+  found." text block, the documented shape) carried on the new `toolset.Result.SearchResults`
+  field; `web_fetch` → a text block capped at the same `toolset.CapOutput` log budget every sandbox
+  tool honors (block choice INFERRED), the model-chosen URL restricted to http/https before it
+  reaches the reader — nothing else guards this gate-bypassing path; backend strings NUL-stripped so a hostile page cannot fault the `jsonb` append. Every
   web failure — bad input, unreachable page, backend HTTP error, or an unconfigured backend (the
   `is_error` names what is missing: `TAVILY_API_KEY` for search, `JINA_API_KEY` or
   `WEBFETCH_BASE_URL` for fetch — with neither set, fetch stays unconfigured rather than silently

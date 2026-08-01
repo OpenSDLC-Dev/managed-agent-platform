@@ -1,4 +1,4 @@
-package domain_test
+package toolset_test
 
 import (
 	"encoding/json"
@@ -9,8 +9,9 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
-// The search_result block the executor's web driver emits must be, field for
-// field, what the SDK's typed schema decodes — the round-trip discipline every
+// The search_result block the executor's web driver emits (carried on
+// Result.SearchResults) must be, field for field, what the SDK's typed schema
+// decodes — the round-trip discipline every
 // wire shape gets. Presence is asserted through respjson, not just decoded
 // values: a dropped required field would decode to the same zero value.
 func TestSearchResultBlockRoundTripsThroughSDK(t *testing.T) {

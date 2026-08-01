@@ -44,7 +44,7 @@ const errorTypeTool = "tool_error"
 func RecordRun(ctx context.Context, name string, d time.Duration, res Result, err error) {
 	hist, herr := otel.GetMeterProvider().Meter(meterName).Float64Histogram(
 		MetricToolDuration,
-		metric.WithDescription("Duration of one built-in tool call, measured in the sandbox."),
+		metric.WithDescription("Duration of one built-in tool call, wherever it executes."),
 		metric.WithUnit("s"),
 	)
 	if herr != nil {
