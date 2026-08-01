@@ -1,14 +1,17 @@
 package brain
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 )
 
 // turnResult is one model response translated into event material.
@@ -76,8 +79,9 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 		case provider.KindThinkingDelta:
 			// Thinking is the first content a reasoning model streams, so it is
 			// the first token whenever it comes before any text. Guarded on content
-			// like the text path below: a content-free thinking delta is not a token.
-			if turn.firstTokenAt.IsZero() && c.Text != "" {
+			// like the text path below: a content-free thinking delta — empty or
+			// all NULs, the text lane's own rule — is not a token.
+			if turn.firstTokenAt.IsZero() && toolset.SanitizeText(c.Text) != "" {
 				turn.firstTokenAt = time.Now()
 			}
 			// The preview is start-only (agent.thinking carries no content);
@@ -100,6 +104,12 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 			if err := closeThinking(); err != nil {
 				return nil, err
 			}
+			// The model is a NUL producer like any other (#228): Postgres
+			// jsonb cannot store `\u0000`, so one NUL in a delta would fault
+			// the buffered agent.message append and reclaim-loop the turn.
+			// Stripped at arrival — ahead of the empty guard, so a delta of
+			// nothing but NULs is an empty delta.
+			c.Text = toolset.SanitizeText(c.Text)
 			// An empty delta adds no text. Skipping it before anything is
 			// allocated keeps the content array dense: a block that never
 			// produces text gets no entry, so the preview's delta indices
@@ -142,6 +152,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 			// settlement (a silent reclaim loop) or make the model reject
 			// every future replay of this session.
 			tu := *c.ToolUse
+			tu.Name = toolset.SanitizeText(tu.Name)
 			input, err := normalizeToolInput(tu.Input)
 			if err != nil {
 				return nil, fmt.Errorf("tool %q: %w", tu.Name, err)
@@ -171,21 +182,73 @@ func (b *Brain) streamTurn(ctx context.Context, sid domain.ID, p provider.Provid
 	return turn, nil
 }
 
-// normalizeToolInput accepts an absent or null input as the empty object and
-// rejects anything that is not a JSON object. The null case is decided by the
-// decode, not by comparing bytes: unmarshalling any JSON null — padded with
-// whitespace or not — into a map leaves it nil and reports no error, so a
-// byte comparison would wave ` null ` through as a valid object.
+func stripValue(v any) (any, error) {
+	switch x := v.(type) {
+	case string:
+		return toolset.SanitizeText(x), nil
+	case map[string]any:
+		m := make(map[string]any, len(x))
+		for k, e := range x {
+			k = toolset.SanitizeText(k)
+			// Two different keys that collide once stripped would leave Go
+			// map iteration to pick which value survives — a write targeting
+			// either of two files on a coin flip. Fail the turn visibly.
+			if _, dup := m[k]; dup {
+				return nil, fmt.Errorf("input keys collide at %q after NUL strip", k)
+			}
+			var err error
+			if m[k], err = stripValue(e); err != nil {
+				return nil, err
+			}
+		}
+		return m, nil
+	case []any:
+		for i, e := range x {
+			var err error
+			if x[i], err = stripValue(e); err != nil {
+				return nil, err
+			}
+		}
+		return x, nil
+	}
+	return v, nil
+}
+
+// normalizeToolInput accepts an absent or null input as the empty object,
+// rejects anything that is not a JSON object, and re-encodes what it accepts
+// through Go rather than passing the model's bytes along. The rewrite is what
+// makes the payload storable: the input is the one model-produced value that
+// reaches jsonb as raw bytes — every Go-string lane is coerced to valid UTF-8
+// at marshal time, this one is not — so a NUL escape, a lone surrogate escape
+// (well-formed JSON to Go, SQLSTATE 22P02 to Postgres), or raw invalid UTF-8
+// (22021) would each fault the append and reclaim-loop the item (#228).
+// Decoding launders the last two to U+FFFD, stripValue removes the NULs, and
+// UseNumber carries every numeric lexeme through untouched. The null case is
+// decided by the decode, not by comparing bytes: decoding any JSON null —
+// padded with whitespace or not — into a map leaves it nil and reports no
+// error, so a byte comparison would wave ` null ` through as a valid object.
 func normalizeToolInput(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return json.RawMessage("{}"), nil
 	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil {
 		return nil, fmt.Errorf("input must be a JSON object: %w", err)
+	}
+	// Probing with Token, not More: More treats a trailing ] or } as the end
+	// of a collection and reports nothing left, which would silently discard
+	// the malformed suffix and execute the valid prefix of corrupted output.
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("input must be a single JSON object")
 	}
 	if obj == nil {
 		return json.RawMessage("{}"), nil
 	}
-	return raw, nil
+	v, err := stripValue(obj)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(v)
 }

@@ -684,7 +684,10 @@ func (b *Brain) commitUnderLock(ctx context.Context, sid domain.ID, batch []even
 // end, error, status, and item fate commit atomically under the session
 // lock, with the lease proof, exactly like a successful settle.
 func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg string) error {
-	err := b.commitFailure(ctx, sid, item, span, watermark, msg)
+	// The message may quote endpoint bytes (an error body, a stream error),
+	// and a NUL there would fault the session.error append — the failure
+	// path failing, the same wedge one level up (#228).
+	err := b.commitFailure(ctx, sid, item, span, watermark, toolset.SanitizeText(msg))
 	if span != nil {
 		span.Finish(ctx, true, err)
 	}
