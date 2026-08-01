@@ -165,6 +165,31 @@ func TestClampCPUAsksTheDaemonOnce(t *testing.T) {
 	}
 }
 
+// A daemon that would not answer is asked again. Caching the failure instead
+// would let one transient error pin a host smaller than the cap into a rejected
+// create per session until the executor restarts — which is the failure clampCPU
+// exists to prevent, reintroduced by the cache in front of it.
+func TestClampCPURetriesAFailedProbe(t *testing.T) {
+	calls := 0
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		io.WriteString(w, `{"NCPU":1}`)
+	})
+	if got := p.clampCPU(context.Background(), 2000); got != 2000 {
+		t.Fatalf("first clampCPU = %d, want the configured 2000 left alone", got)
+	}
+	if got := p.clampCPU(context.Background(), 2000); got != 1000 {
+		t.Errorf("clampCPU after the daemon recovered = %d, want it clamped to 1000", got)
+	}
+	if calls != 2 {
+		t.Errorf("daemon /info calls = %d, want 2", calls)
+	}
+}
+
 // A gated sandbox running as the gate's own uid would match the gate's
 // owner-match ACCEPT rule and leave the namespace unfiltered. Provision refuses
 // before it touches the daemon — a fail-closed check, not a warning.

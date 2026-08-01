@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -131,10 +132,9 @@ type Config struct {
 type Provider struct {
 	api         *apiClient
 	gateNetwork string
-	// cpus caches the daemon's CPU count, read once on the first provision that
-	// needs it (New deliberately contacts no daemon). See clampCPU.
-	cpus     int
-	cpusOnce sync.Once
+	// cpus caches the daemon's CPU count, read on the first provision that needs
+	// it (New deliberately contacts no daemon) and 0 until then. See daemonCPUs.
+	cpus atomic.Int64
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -309,20 +309,33 @@ func (p *Provider) clampCPU(ctx context.Context, millis int64) int64 {
 	if millis <= 0 {
 		return millis
 	}
-	p.cpusOnce.Do(func() {
-		n, err := p.api.hostCPUs(ctx)
-		if err != nil {
-			slog.WarnContext(ctx, "docker: could not read the daemon's CPU count; leaving the sandbox CPU cap unclamped", "err", err)
-			return
-		}
-		p.cpus = n
-	})
-	if p.cpus <= 0 || millis <= int64(p.cpus)*1000 {
+	cpus := p.daemonCPUs(ctx)
+	if cpus <= 0 || millis <= cpus*1000 {
 		return millis
 	}
 	slog.WarnContext(ctx, "docker: sandbox CPU cap exceeds the host's CPUs; clamping",
-		"configured_millis", millis, "host_cpus", p.cpus)
-	return int64(p.cpus) * 1000
+		"configured_millis", millis, "host_cpus", cpus)
+	return cpus * 1000
+}
+
+// daemonCPUs asks the daemon for its CPU count once and caches the answer, or
+// returns 0 for a daemon that would not answer. Only a *success* is cached: a
+// failed probe is retried on the next provision, since caching it would let one
+// transient error pin a host smaller than the cap into a rejected create per
+// session until the executor restarts — the very failure clampCPU exists to
+// prevent. Racing provisions may each probe once before the first answer lands,
+// which costs a redundant /info and nothing else.
+func (p *Provider) daemonCPUs(ctx context.Context) int64 {
+	if n := p.cpus.Load(); n > 0 {
+		return n
+	}
+	n, err := p.api.hostCPUs(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "docker: could not read the daemon's CPU count; leaving the sandbox CPU cap unclamped", "err", err)
+		return 0
+	}
+	p.cpus.Store(int64(n))
+	return int64(n)
 }
 
 func sandboxConfig(spec sandbox.Spec, workdir, gateID string, cpuMillis int64) containerConfig {
