@@ -266,10 +266,17 @@ network-layer controls remain the mechanism. The built-in `web_fetch` /
 **executor process**, not the sandbox, and deliberately not through the gate —
 the reference documents that the environment's networking policy does not
 govern these tools — so firewalling the sandbox network never constrains them;
-bound them at the executor's own network, or by the backend endpoints you
-configure (`WEBSEARCH_BASE_URL`/`WEBFETCH_BASE_URL` — point them at a proxy you
-control) ([#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
-[docs/plan/15_web-tools.md](./plan/15_web-tools.md)).
+bound them with `WEBTOOL_ALLOWED_DOMAINS` on the executor (a comma-separated
+allowlist in the wire's allowed_hosts grammar, entries validated at startup; a
+bare entry admits only the apex and `*.example.com` only subdomains — list
+both to get both —
+`web_fetch` refuses hosts outside it and search hits from outside it are
+dropped; note it judges the URL the model *names*, not where the reader
+backend's server-side fetch or an allowed host's redirect ultimately lands),
+at the executor's own network, or by the backend endpoints you configure
+(`WEBSEARCH_BASE_URL`/`WEBFETCH_BASE_URL` — point them at a proxy you control)
+([#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
+[#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)).
 
 ### 6. Environment-key rotation
 
@@ -356,11 +363,16 @@ This model is honest about what is not yet enforced. These are reserved seams
 with tracking issues, not silent omissions:
 
 - **`web_fetch` / `web_search` egress** — implemented (executor-process
-  execution, deliberately outside the session gate — see §5 above); what
-  remains open is operator-side bounding only: the tools' egress follows the
-  executor's network and the configured backend endpoints, and no in-platform
-  allowlist applies to it (matching the reference's documented behavior).
-  [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)
+  execution, deliberately outside the session gate — see §5 above), and
+  in-platform bounding now exists: `WEBTOOL_ALLOWED_DOMAINS` (#225) fences the
+  URL the model *names*, with entries validated at startup. What it cannot
+  judge is where the reader backend's own fetch lands — a remote reader
+  resolves the target and any redirects server-side (our adapters refuse to
+  follow 3xx themselves), so an open redirect on an allowed host can still
+  return a fenced-off domain's content. Network-layer controls at the executor
+  remain the hard boundary.
+  [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
+  [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)
 - **Environment-key issuance UX** — no operator wire endpoint yet; keys are seeded
   directly.
   [#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)

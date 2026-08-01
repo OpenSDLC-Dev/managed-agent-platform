@@ -6,7 +6,11 @@
 // resolution supplies it credentials read from the store.
 package egress
 
-import "strings"
+import (
+	"fmt"
+	"net"
+	"strings"
+)
 
 // HostSet matches a request host against an allowed_hosts list in the grammar
 // the vault API validates (internal/api/vaultcredauth.go): a bare hostname, an
@@ -118,4 +122,57 @@ func hasEmptyLabel(host string) bool {
 		}
 	}
 	return false
+}
+
+// ValidateHostEntry checks one allowed-hosts entry against the grammar this
+// package matches: a bare hostname, an IPv4 literal, or a "*."-prefixed
+// wildcard on a hostname. It is the single source for the grammar — the vault
+// API's allowed_hosts validation wraps it, and the executor's
+// WEBTOOL_ALLOWED_DOMAINS fails startup on the first bad entry, because an
+// out-of-grammar entry silently matches nothing (a typo would read as the
+// operator's fence when it is really a hole in it, or a deny-all).
+func ValidateHostEntry(h string) error {
+	badf := func() error {
+		return fmt.Errorf("allowed_hosts entry %q is not a hostname, IPv4 address, or *.-wildcard", h)
+	}
+	wildcard := strings.HasPrefix(h, "*.")
+	host := strings.TrimPrefix(h, "*.")
+	if host == "" || strings.Contains(host, "*") {
+		return fmt.Errorf("allowed_hosts entry %q: a wildcard must be a \"*.\" prefix on a hostname", h)
+	}
+	// A ":" is never part of the grammar — it is a port or an IPv6 literal,
+	// including IPv4-mapped forms like "::ffff:10.0.0.1" that net.ParseIP
+	// would otherwise accept as IPv4.
+	if strings.Contains(host, ":") {
+		return badf()
+	}
+	// A dotted-numeric entry must be a valid IPv4 literal (so 999.999.999.999
+	// is rejected), and a wildcard applies to hostnames only — never an IP.
+	if ip := net.ParseIP(host); ip != nil {
+		if wildcard {
+			return fmt.Errorf("allowed_hosts entry %q: a \"*.\" wildcard applies to hostnames, not IP addresses", h)
+		}
+		return nil
+	}
+	allNumeric := true
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return badf()
+		}
+		for _, r := range label {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '-':
+				allNumeric = false
+			case r >= '0' && r <= '9':
+			default:
+				return badf()
+			}
+		}
+	}
+	// An all-numeric dotted string that net.ParseIP rejected is a malformed IP
+	// (e.g. 999.999.999.999), not a hostname.
+	if allNumeric {
+		return badf()
+	}
+	return nil
 }

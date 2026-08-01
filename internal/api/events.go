@@ -79,8 +79,10 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// append-only: accepting a result with a wrong, unknown, or duplicate
 	// reference would poison every future replay with a request the model
 	// protocol rejects, permanently wedging the session — so bad references
-	// are the client's 400, not the session's funeral.
-	if err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents); err != nil {
+	// are the client's 400, not the session's funeral. IsWebTool marks the
+	// calls only the platform's web driver answers, which closes the
+	// scan-to-commit double-answer window on self_hosted (#222).
+	if err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents, toolset.IsWebTool); err != nil {
 		return nil, errInvalid("%s", err)
 	}
 	// A confirmation must name a tool use still awaiting one; like a tool

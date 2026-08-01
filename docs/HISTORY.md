@@ -33,9 +33,9 @@ recorded nowhere else.
 
 ---
 
-## Model endpoint stall bound (plan 16) — archived 2026-08-01, delivered in one PR (#121)
+## Model endpoint stall bound (plan 17) — archived 2026-08-01, delivered in one PR (#121)
 
-docs/plan/16_model-endpoint-stall-bound.md is archived complete: a model turn is now bounded by the endpoint's silence (`provider.StallGuard`), enforced on the request context and fed by byte-level progress, with a per-route `stall_timeout` defaulting to 10 minutes. The narrative is in CHANGELOG.md; what follows is only the designs that were evaluated and rejected, since the issue proposed two of them and named a third as wrong.
+docs/plan/17_model-endpoint-stall-bound.md is archived complete: a model turn is now bounded by the endpoint's silence (`provider.StallGuard`), enforced on the request context and fed by byte-level progress, with a per-route `stall_timeout` defaulting to 10 minutes. The narrative is in CHANGELOG.md; what follows is only the designs that were evaluated and rejected, since the issue proposed two of them and named a third as wrong.
 
 - **A shared, package-level `http.Client` with a `ResponseHeaderTimeout`** — the issue's first suggestion, and the shape that most directly restores what `option.WithoutEnvironmentDefaults()` costs. Rejected on two counts, both verified in the pinned SDK's source. `requestconfig.shouldRetry` returns true whenever `res == nil`, so a transport-level timeout is a *retryable* error: a wedged endpoint would buy `MaxRetries+1` budgets (three, by default) rather than one, and the wait an operator configured would not be the wait they got. And a header timeout bounds only the wait for headers — the issue says so itself — leaving a gateway that sends headers and then dies mid-SSE exactly as unbounded as before. Cancelling the context the SDK was handed avoids both: `ExecuteNewRequest` checks `ctx.Err()` immediately after the handler, ahead of the retry decision, and the same cancellation aborts a body read at any point in the stream.
 - **A per-turn deadline at the brain's call site** — the issue's second suggestion. Rejected because a deadline bounds *duration*, and duration is not the defect: a model streaming a 64k-token answer legitimately holds one request open for tens of minutes, so any deadline safe for that turn is far too loose to be a bound on a wedged endpoint. It would also apply the same number to every route, and to the brain's own database writes inside `streamTurn`, where a fired deadline would be misclassified as an `infraError` and abandon the turn to lease expiry instead of reporting it.
@@ -52,6 +52,24 @@ docs/plan/16_model-endpoint-stall-bound.md is archived complete: a model turn is
 - **Documentation overclaimed the settlement.** Four places said a stall completes the work item with `retries_exhausted`; a stall with pending mid-turn input chains a fresh turn with `retrying` and requeues, like any other failed model request. Corrected in CHANGELOG, DIVERGENCES, ARCHITECTURE and the plan.
 - **Two comments asserted things that were not true** — that a brain blocked on the database for a budget has necessarily lost its lease (`queue.KeepLease` cancels only on a *failed* renewal), and, by omission, that the guard bounds a peer that dribbles one byte per budget (it cannot, by construction). Both replaced by what is actually true, including the one case the guard knowingly mislabels: the SDK sleeps out an uncapped upstream `Retry-After` under the same context, so a long backoff is cut short and reported as a stall.
 - **Refuted, with evidence:** that sampling `time.Since(start)` before `last.Load()` is a defect. Descheduled between the two, the guard trips *late* by that interval; the opposite order would trip *early* on progress that had just arrived. Late is the safe direction — the ordering is deliberate and now says so.
+
+## One answer per tool call (plan 16) — archived 2026-08-01, delivered in one PR (#222)
+
+A single-PR plan: the same PR landed the file (archived at birth) and the fix. The triage-opened
+repair fork — a commit-time answered-set re-diff in the executor's web settlement vs. an API-layer
+rejection scoped to web tool names — resolved to the **API-layer rejection**, one new arm in the
+already-existing `ValidateToolResults` (a platform-ownership predicate the API fills with
+`toolset.IsWebTool`). The re-diff was rejected for two reasons recorded in the plan: with the arm
+in place it guards an unreachable state (clients rejected at the door; interrupts and rival
+executors already fail the settlement's `queue.Complete` lease proof; `tool_exec` is cloud-claimed
+only; the permission gate never overlaps a live run), and its semantics are wrong for a
+platform-owned call — it silently drops one answer instead of 400-ing the poster, letting a
+client-fabricated result stand for a call the platform was asked to run. Also evaluated and
+rejected: importing `toolset` into `internal/events` for the name check (drags the sandbox
+dependency into the log package — the predicate is injected instead). Reachability analysis that
+narrowed the issue's "both paths affected equally" to self_hosted `web_exec` only is recorded on
+the issue and in the plan. Public docs (self-hosted-sandboxes / tools / events-and-streaming,
+2026-08-01) were checked for reference behavior before recording the rejection as INFERRED.
 
 ## Web tools plan (15) — archived 2026-08-01, all four slices delivered (#47)
 

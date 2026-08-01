@@ -7,7 +7,7 @@ issue: "#121"
 
 > Archived 2026-08-01: completed, delivered in one PR. The narrative is in CHANGELOG.md and the
 > designs evaluated and rejected are in [docs/HISTORY.md](../HISTORY.md) § "Model endpoint stall
-> bound (plan 16)". **Everything below describes the state of the repository *before* that PR** —
+> bound (plan 17)". **Everything below describes the state of the repository *before* that PR** —
 > read it as the argument for the change, not a description of the result.
 
 The plan for [#121](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/121).

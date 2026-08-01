@@ -123,3 +123,19 @@ func TestSearchRejectsUnusableBaseURL(t *testing.T) {
 		t.Fatal("an unusable base URL did not surface as an error")
 	}
 }
+
+func TestSearchDoesNotFollowRedirects(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := tavily.New(srv.URL, "k").Search(context.Background(), "q"); err == nil {
+		t.Fatal("Search followed a redirect to success, want an HTTP error")
+	}
+	if hits != 1 {
+		t.Errorf("backend requests = %d, want 1 (the redirect not followed)", hits)
+	}
+}

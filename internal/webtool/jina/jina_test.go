@@ -94,3 +94,23 @@ func TestFetchRejectsUnusableBaseURL(t *testing.T) {
 		t.Fatal("an unusable base URL did not surface as an error")
 	}
 }
+
+// A redirecting backend is an error, never followed: the executor's allowlist
+// judged the URL it was asked to fetch, and silently following a 3xx would
+// move the request somewhere it never judged.
+func TestFetchDoesNotFollowRedirects(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := jina.New(srv.URL, "").Fetch(context.Background(), "https://example.com/page")
+	if err == nil {
+		t.Fatal("Fetch followed a redirect to success, want an HTTP error")
+	}
+	if hits != 1 {
+		t.Errorf("backend requests = %d, want 1 (the redirect not followed)", hits)
+	}
+}

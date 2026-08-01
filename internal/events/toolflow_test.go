@@ -432,7 +432,7 @@ func TestValidateToolResults(t *testing.T) {
 	// Validation is sequential and complete per event: for an error to surface
 	// at index n, events 0..n-1 must be entirely valid.
 	validate := func(sid domain.ID, evs ...events.NewEvent) error {
-		return events.ValidateToolResults(ctx, pool, sid, evs)
+		return events.ValidateToolResults(ctx, pool, sid, evs, nil)
 	}
 
 	t.Run("unknown reference", func(t *testing.T) {
@@ -474,6 +474,48 @@ func TestValidateToolResults(t *testing.T) {
 		// that message reading as the more natural fit.
 		err := validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", msg.String()))
 		wantErrIs(t, err, fmt.Sprintf(`events[0]: tool_use_id %q references a agent.message event, not agent.tool_use`, msg))
+	})
+
+	t.Run("platform-owned call", func(t *testing.T) {
+		sid := newSession(t, pool)
+		web := appendEvent(t, log, sid, "", domain.EventAgentToolUse, `{"name":"web_fetch"}`)
+		sandbox := appendEvent(t, log, sid, "", domain.EventAgentToolUse, `{"name":"bash"}`)
+		owned := func(name string) bool { return name == "web_fetch" }
+
+		wantErrIs(t, events.ValidateToolResults(ctx, pool, sid,
+			[]events.NewEvent{inResult(domain.EventUserToolResult, "tool_use_id", web.String())}, owned),
+			fmt.Sprintf(`events[0]: tool use %q (web_fetch) is platform-executed and cannot be answered by a client result`, web))
+		// The arm gates by name, not family: the sandbox call stays
+		// client-answerable — that is the BYOC pull protocol (#222).
+		if err := events.ValidateToolResults(ctx, pool, sid,
+			[]events.NewEvent{inResult(domain.EventUserToolResult, "tool_use_id", sandbox.String())}, owned); err != nil {
+			t.Errorf("sandbox call with predicate: %v", err)
+		}
+		// A nil predicate keeps the web call answerable: the events package
+		// has no tool knowledge of its own; the caller injects the split.
+		if err := events.ValidateToolResults(ctx, pool, sid,
+			[]events.NewEvent{inResult(domain.EventUserToolResult, "tool_use_id", web.String())}, nil); err != nil {
+			t.Errorf("web call with nil predicate: %v", err)
+		}
+		// The wantUse gate: a custom tool deliberately named web_fetch is the
+		// client's to run, and its result rides the custom family untouched.
+		customWeb := appendEvent(t, log, sid, "", domain.EventAgentCustomToolUse, `{"name":"web_fetch"}`)
+		if err := events.ValidateToolResults(ctx, pool, sid,
+			[]events.NewEvent{inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", customWeb.String())}, owned); err != nil {
+			t.Errorf("custom tool named web_fetch: %v", err)
+		}
+		// Ownership precedes the confirmation arm: an unconfirmed ask-gated
+		// web call reads platform-executed, not awaiting-confirmation.
+		askedWeb := appendEvent(t, log, sid, "", domain.EventAgentToolUse, `{"name":"web_fetch","evaluated_permission":"ask"}`)
+		wantErrIs(t, events.ValidateToolResults(ctx, pool, sid,
+			[]events.NewEvent{inResult(domain.EventUserToolResult, "tool_use_id", askedWeb.String())}, owned),
+			fmt.Sprintf(`events[0]: tool use %q (web_fetch) is platform-executed and cannot be answered by a client result`, askedWeb))
+		// Once the platform's own answer lands, a retry is diagnosed as
+		// already answered — the answered arm runs first.
+		answerWith(t, log, sid, domain.EventAgentToolResult, "tool_use_id", web)
+		wantErrIs(t, events.ValidateToolResults(ctx, pool, sid,
+			[]events.NewEvent{inResult(domain.EventUserToolResult, "tool_use_id", web.String())}, owned),
+			fmt.Sprintf(`events[0]: tool use %q already has a result`, web))
 	})
 
 	t.Run("already answered", func(t *testing.T) {
@@ -1045,7 +1087,7 @@ func TestToolflowQueryErrorsAreWrapped(t *testing.T) {
 	}
 	err := events.ValidateToolResults(ctx, pool, sid, []events.NewEvent{
 		inResult(domain.EventUserToolResult, "tool_use_id", id.String()),
-	})
+	}, nil)
 	wantErrHas(t, err, "validate tool result:")
 	if err != nil && (strings.Contains(err.Error(), "references a") || strings.Contains(err.Error(), "does not name")) {
 		t.Errorf("a driver failure was reported as a client error: %v", err)

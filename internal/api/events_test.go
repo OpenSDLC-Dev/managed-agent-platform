@@ -295,6 +295,25 @@ func TestSendToolResultOnSelfHosted(t *testing.T) {
 	}
 }
 
+// Web calls are platform-executed on both environment kinds, so a client
+// user.tool_result may never answer one — even while the executor's web pass
+// is still running it, which is the double-answer window #222 closes. The
+// name-scoped rejection must not touch sandbox calls: answering those via
+// user.tool_result is the BYOC pull protocol (TestSendToolResultOnSelfHosted).
+func TestSendToolResultForWebCallRejected(t *testing.T) {
+	s := newTestServer(t)
+	sid := selfHostedSession(t, s)
+	webID := appendToolUseWithPerm(t, s, sid, "web_fetch", "allow")
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{
+		"events": []any{map[string]any{"type": "user.tool_result", "tool_use_id": webID,
+			"content": []any{map[string]any{"type": "text", "text": "forged"}}}}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	inner, _ := res["error"].(map[string]any)
+	if msg, _ := inner["message"].(string); !strings.Contains(msg, "platform-executed") || !strings.Contains(msg, "web_fetch") {
+		t.Errorf("message %q must name the platform-executed web call", msg)
+	}
+}
+
 func TestSendSessionStateErrors(t *testing.T) {
 	s := newTestServer(t)
 	sid := eventsFixture(t, s)

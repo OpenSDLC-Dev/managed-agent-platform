@@ -13,6 +13,31 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Added
+
+- **An operator-side allowed-domains allowlist for the web tools**
+  ([#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)). The reference has
+  per-tool "allowed domains" for `web_fetch`/`web_search`, configured by no wire field — so ours is
+  equally operator-side: `WEBTOOL_ALLOWED_DOMAINS` on the executor, comma-separated entries in the
+  wire's allowed_hosts grammar (bare host, IPv4, `*.`-wildcard that never matches the apex), matched
+  by the same `egress.HostSet` that decides vault and networking allow-lists. A `web_fetch` of a
+  host outside the list answers as a tool error before any fetch; a search hit whose source is
+  outside it is dropped like the other hit normalizations (every hit filtered → the zero-hit "No
+  results found." answer). Empty keeps today's unrestricted behavior; a malformed entry **fails
+  startup** (`egress.ValidateHostEntry`, now the grammar's single source — the vault API's
+  validator wraps it) rather than silently matching nothing. Extracting the grammar surfaced a
+  latent acceptance the vault path had shipped with: an IPv4-mapped IPv6 literal
+  (`::ffff:10.0.0.1`) slipped through the IPv4 check, so any entry containing `:` is now
+  rejected on both the wire 400 path and at startup. The Tavily/Jina adapters no longer follow
+  redirects: they talk only to the operator-configured backend endpoints, so a 3xx means stale
+  configuration (repoint the base URL at the post-redirect address) and chasing it would resend
+  model-controlled data to an unvetted host — while what a *remote* reader's server-side fetch
+  does past the allowlist stays the operator's network boundary, said plainly in
+  docs/self-hosted-security.md. Wired through
+  compose (passthrough) and the chart's existing `executor.extraEnv`; the DIVERGENCES entry
+  narrows to the reference-side residue (its list contents, configuration surface, and
+  blocked-domain answer stay unobserved).
+
 ### Fixed
 
 - **A wedged model endpoint no longer hangs a brain replica forever**
@@ -46,7 +71,24 @@ copy of an entry here.
   brain-level tests: that a stall settles onto the log, and the issue's acceptance end to end with
   nothing faked in the model path (the real Anthropic adapter against a wedged `httptest` endpoint,
   turn over and `session.error` written inside the budget). Plan:
-  [docs/plan/16_model-endpoint-stall-bound.md](./docs/plan/16_model-endpoint-stall-bound.md).
+  [docs/plan/17_model-endpoint-stall-bound.md](./docs/plan/17_model-endpoint-stall-bound.md).
+
+- **A client `user.tool_result` can no longer double-answer a web call**
+  ([#222](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/222),
+  [docs/plan/16_one-answer-per-tool-call.md](./docs/plan/16_one-answer-per-tool-call.md)). The
+  executor's web pass scans the unanswered set, runs the tools, and commits the results in a later
+  transaction; on a self_hosted session a client `user.tool_result` for the same call posted in
+  that window referenced a still-unanswered call, passed validation, and the executor's settlement
+  then appended the second answer — two results for one `tool_use_id` on an append-only log, a
+  request the Messages protocol rejects on every later replay. `events.ValidateToolResults` now
+  takes a platform-ownership predicate (the API injects `toolset.IsWebTool`): a client result for
+  a web call is a wire 400 whether or not the call is answered yet, closing the window's only
+  remaining writer — interrupts and rival executors already fail the settlement's lease proof,
+  `tool_exec` is cloud-claimed only, and the permission gate never overlaps a live run. Scoped to
+  web names alone: a self_hosted worker answering the sandbox six via `user.tool_result` is the
+  BYOC pull protocol and stays untouched (regression-pinned). Mutation-checked at both the
+  validation and the API surface; the rejection is an INFERRED divergence (reference behavior
+  unobserved — docs/DIVERGENCES.md).
 
 - **A NUL byte in tool output no longer wedges the session**
   ([#223](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/223)). Postgres's `jsonb`
