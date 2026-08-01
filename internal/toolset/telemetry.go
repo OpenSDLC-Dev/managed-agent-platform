@@ -31,13 +31,17 @@ const MetricToolDuration = "tool.execution.duration"
 // agent things, while a backend fault is the platform breaking.
 const errorTypeTool = "tool_error"
 
-// recordToolRun records one tool call's duration. It resolves the meter per
+// RecordRun records one tool call's duration. It resolves the meter per
 // call rather than caching an instrument at package scope: a tool call costs a
 // sandbox round trip, which dwarfs this, and a cached instrument would pin
 // whichever MeterProvider happened to be installed first — leaving the metric
 // silently wired to a dead provider in any process that configures telemetry
 // after the first call, and untestable besides.
-func recordToolRun(ctx context.Context, name string, d time.Duration, res Result, err error) {
+//
+// Exported because the executor's web driver runs the web tools outside this
+// package's Runner and must record through the SAME instrument — one metric
+// name, one meaning, whatever process ran the tool.
+func RecordRun(ctx context.Context, name string, d time.Duration, res Result, err error) {
 	hist, herr := otel.GetMeterProvider().Meter(meterName).Float64Histogram(
 		MetricToolDuration,
 		metric.WithDescription("Duration of one built-in tool call, measured in the sandbox."),

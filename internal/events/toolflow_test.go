@@ -385,6 +385,45 @@ func TestHasUnansweredPlatformToolUse(t *testing.T) {
 	}
 }
 
+func TestUnansweredPlatformToolNames(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	ctx := context.Background()
+	sid := newSession(t, pool)
+
+	names := func(t *testing.T, extra []string) []string {
+		t.Helper()
+		got, err := events.UnansweredPlatformToolNames(ctx, pool, sid, extra)
+		if err != nil {
+			t.Fatalf("UnansweredPlatformToolNames: %v", err)
+		}
+		return got
+	}
+
+	if got := names(t, nil); len(got) != 0 {
+		t.Errorf("empty session listed %v", got)
+	}
+
+	// Only agent.tool_use rows are listed: an MCP or custom call outstanding at
+	// the same time is other machinery's problem, whatever its name says.
+	appendEvent(t, log, sid, "", domain.EventAgentMCPToolUse, `{"name":"web_search"}`)
+	appendEvent(t, log, sid, "", domain.EventAgentCustomToolUse, `{"name":"web_fetch"}`)
+	bash := appendEvent(t, log, sid, "", domain.EventAgentToolUse, `{"name":"bash"}`)
+	search := appendEvent(t, log, sid, "", domain.EventAgentToolUse, `{"name":"web_search"}`)
+	if got := names(t, nil); !slices.Equal(got, []string{"bash", "web_search"}) {
+		t.Errorf("names = %v, want [bash web_search] in log order", got)
+	}
+
+	// An answered call drops out; extraRefs pre-answers exactly like a result.
+	answerWith(t, log, sid, domain.EventAgentToolResult, "tool_use_id", bash)
+	if got := names(t, nil); !slices.Equal(got, []string{"web_search"}) {
+		t.Errorf("names after result = %v, want [web_search]", got)
+	}
+	if got := names(t, []string{search.String()}); len(got) != 0 {
+		t.Errorf("extraRefs did not clear the call: %v", got)
+	}
+}
+
 func TestValidateToolResults(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)

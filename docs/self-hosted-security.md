@@ -262,8 +262,14 @@ On gate-wired deployments (either backend), `allowed_hosts` per-host
 allowlisting for `limited` environments is enforced in-platform (above).
 Everywhere else — un-opted-in deployments and every non-`limited` environment —
 network-layer controls remain the mechanism. The built-in `web_fetch` /
-`web_search` tools are still deferred (not yet wired through the gate) and
-return an error if enabled ([#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)).
+`web_search` tools are the deliberate exception: their egress originates in the
+**executor process**, not the sandbox, and deliberately not through the gate —
+the reference documents that the environment's networking policy does not
+govern these tools — so firewalling the sandbox network never constrains them;
+bound them at the executor's own network, or by the backend endpoints you
+configure (`WEBSEARCH_BASE_URL`/`WEBFETCH_BASE_URL` — point them at a proxy you
+control) ([#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
+[docs/plan/15_web-tools.md](./plan/15_web-tools.md)).
 
 ### 6. Environment-key rotation
 
@@ -349,8 +355,11 @@ daemon and every container on it as one trust domain.
 This model is honest about what is not yet enforced. These are reserved seams
 with tracking issues, not silent omissions:
 
-- **`web_fetch` / `web_search`** — deferred pending their wiring through the
-  egress gate; return an error if enabled.
+- **`web_fetch` / `web_search` egress** — implemented (executor-process
+  execution, deliberately outside the session gate — see §5 above); what
+  remains open is operator-side bounding only: the tools' egress follows the
+  executor's network and the configured backend endpoints, and no in-platform
+  allowlist applies to it (matching the reference's documented behavior).
   [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)
 - **Environment-key issuance UX** — no operator wire endpoint yet; keys are seeded
   directly.

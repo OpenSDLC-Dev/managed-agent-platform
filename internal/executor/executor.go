@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
@@ -40,6 +41,9 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/webtool"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/webtool/jina"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/webtool/tavily"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -80,6 +84,19 @@ type Config struct {
 	// no collector; the gate runs without an exporter.
 	OTelEndpoint string
 	OTelInsecure bool
+	// The web tools' backends (docs/plan/15_web-tools.md). An unconfigured
+	// tool answers with an is_error result naming what is missing, so the
+	// misconfiguration surfaces to an operator instead of masking the tool.
+	// web_search needs TavilyAPIKey; web_fetch needs JinaAPIKey OR an explicit
+	// WebFetchBaseURL (the Reader protocol works keyless — a keyless proxy, or
+	// the public free tier named deliberately — but with neither set, a bare
+	// install must not silently egress model-chosen URLs to a public third
+	// party). The base URLs point at Tavily-protocol / Jina-Reader-protocol
+	// endpoints; empty resolves to the adapters' public defaults.
+	TavilyAPIKey     string
+	JinaAPIKey       string
+	WebSearchBaseURL string
+	WebFetchBaseURL  string
 }
 
 func (c Config) withDefaults() Config {
@@ -106,13 +123,31 @@ type Executor struct {
 	// deploy) skips materialization with a log line, never a fault.
 	blobs blob.Store
 	cfg   Config
+	// searcher and fetcher are the web tools' backends (webwork.go). Nil means
+	// unconfigured — the tool answers with an is_error naming what is missing.
+	// The fetcher needs either a key or an explicit base URL: the Jina Reader
+	// protocol works keyless, but constructing it with neither would have an
+	// entirely unconfigured self-hosted install silently egress model-chosen
+	// URLs to the public r.jina.ai — the wrong default for an on-prem product.
+	searcher webtool.Searcher
+	fetcher  webtool.Fetcher
 	// onFault, when set, receives every per-item fault. Left nil in production
 	// (the queue's reclaim is the recovery); tests set it to observe faults.
 	onFault func(*queue.Item, error)
+	// webFirst alternates step's claim order between the two kinds — see step.
+	// Touched only by Run's single goroutine.
+	webFirst bool
 }
 
 func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.Provider, blobs blob.Store, cfg Config) *Executor {
-	return &Executor{pool: pool, log: log, queue: q, provider: provider, blobs: blobs, cfg: cfg.withDefaults()}
+	e := &Executor{pool: pool, log: log, queue: q, provider: provider, blobs: blobs, cfg: cfg.withDefaults()}
+	if cfg.TavilyAPIKey != "" {
+		e.searcher = tavily.New(cfg.WebSearchBaseURL, cfg.TavilyAPIKey)
+	}
+	if cfg.JinaAPIKey != "" || cfg.WebFetchBaseURL != "" {
+		e.fetcher = jina.New(cfg.WebFetchBaseURL, cfg.JinaAPIKey)
+	}
+	return e
 }
 
 // Run polls until the context is cancelled. It claims one tool_exec item at a
@@ -141,29 +176,42 @@ func (e *Executor) Run(ctx context.Context) error {
 }
 
 // step claims and processes at most one item, reporting whether it found work.
-// A per-item fault (sandbox gone, database hiccup, lost lease) is not fatal to
-// the loop: the item keeps its lease until it lapses, then another claim
-// reclaims and retries it. Only a claim failure is returned up.
+// The two kinds are tried in alternating order across steps: a fixed
+// web-always-first order would be strict cross-session priority — under
+// sustained web load, one session's queued sandbox work could wait behind
+// every other session's later web calls indefinitely — while alternation
+// bounds the wait at one item of the other kind. Within a kind the queue is
+// FIFO by age. A per-item fault (sandbox gone, database hiccup, lost lease)
+// is not fatal to the loop: the item keeps its lease until it lapses, then
+// another claim reclaims and retries it. Only a claim failure is returned up.
 func (e *Executor) step(ctx context.Context) (bool, error) {
-	item, err := e.queue.Claim(ctx, queue.ToolExec, e.cfg.LeaseTTL)
-	if err != nil {
-		return false, err
+	// Faults are reported by process/processWeb themselves, from inside their
+	// spans — see report. webFirst is loop-local state: Run is one goroutine.
+	kinds := [2]queue.Kind{queue.WebExec, queue.ToolExec}
+	if !e.webFirst {
+		kinds[0], kinds[1] = kinds[1], kinds[0]
 	}
-	if item == nil {
-		return false, nil
+	e.webFirst = !e.webFirst
+	for _, kind := range kinds {
+		item, err := e.queue.Claim(ctx, kind, e.cfg.LeaseTTL)
+		if err != nil {
+			return false, err
+		}
+		if item == nil {
+			continue
+		}
+		if kind == queue.WebExec {
+			_ = e.processWeb(ctx, item)
+		} else {
+			_ = e.process(ctx, item)
+		}
+		return true, nil
 	}
-	// A fault is reported by process itself, from inside its span — see report.
-	_ = e.process(ctx, item)
-	return true, nil
+	return false, nil
 }
 
 // process runs one tool_exec item to completion.
 func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
-	// Parent the work on the turn that enqueued it, whose trace context the
-	// queue captured onto the item — so a session's model turns and the tools
-	// they trigger are one trace, the same guarantee the BYOC worker already
-	// gets from the poll response.
-	//
 	// The span opens on a claimed item and closes when the item is done with,
 	// which is what a consumer span stands for: the handling of one message,
 	// end to end. Both edges matter. Everything below can fail — the session
@@ -172,13 +220,7 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 	// would omit exactly the recurring faults an operator opens the trace to
 	// find. The tools' own timing is toolset's duration metric, not this span's
 	// business.
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(
-		telemetry.Extract(ctx, item.TraceContext), "tool_exec",
-		trace.WithSpanKind(trace.SpanKindConsumer),
-		trace.WithAttributes(
-			attribute.String("session.id", item.SessionID.String()),
-			attribute.String("work.id", item.ID.String()),
-		))
+	ctx, span := consumerSpan(ctx, item, "tool_exec")
 	// Every failure this function reports is the platform's own — a tool the
 	// model can read and recover from (a missing file, a nonzero exit) never
 	// reaches here: it rides the log verbatim and the toolset metric's
@@ -241,6 +283,25 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 					return err
 				}
 			}
+			// A web call this sandbox pass filtered out and left unanswered is
+			// healed with a chained web_exec rather than abandoned: every
+			// enqueue site excludes the shape (the web-first hold-back), so a
+			// tool_exec coexisting with an unanswered web call is a log no
+			// current code produces — but completing the item over one would
+			// strand the session permanently, and the heal is the same chain
+			// the web driver runs in the other direction.
+			if complete {
+				names, err := events.UnansweredPlatformToolNames(ctx, tx, item.SessionID, nil)
+				if err != nil {
+					return err
+				}
+				if slices.ContainsFunc(names, toolset.IsWebTool) {
+					if _, err := e.queue.Enqueue(ctx, tx, item.EnvironmentID, item.SessionID, queue.WebExec); err != nil {
+						return err
+					}
+					return e.queue.Complete(ctx, tx, item)
+				}
+			}
 			unanswered, err := events.HasUnansweredToolUse(ctx, tx, item.SessionID, nil)
 			if err != nil {
 				return err
@@ -260,6 +321,21 @@ func (e *Executor) process(ctx context.Context, item *queue.Item) (err error) {
 		return fmt.Errorf("append tool results: %w", err)
 	}
 	return faultErr
+}
+
+// consumerSpan opens the consumer span for one claimed item — name is the work
+// kind — parented on the enqueuing turn's captured trace context, so a
+// session's model turns and the tools they trigger are one trace, the same
+// guarantee the BYOC worker gets from the poll response. See process for why
+// both edges of the item's handling live inside the span.
+func consumerSpan(ctx context.Context, item *queue.Item, name string) (context.Context, trace.Span) {
+	return otel.GetTracerProvider().Tracer(tracerName).Start(
+		telemetry.Extract(ctx, item.TraceContext), name,
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("session.id", item.SessionID.String()),
+			attribute.String("work.id", item.ID.String()),
+		))
 }
 
 // provisionAndRun provisions the session's sandbox and runs its unanswered
@@ -290,6 +366,11 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	if err != nil {
 		return nil, nil, err
 	}
+	// The web tools are the web driver's (webwork.go), never this sandbox
+	// pass's — and normally never even seen here: a tool_exec is enqueued only
+	// after every web call is answered (the web-first hold-back). The filter
+	// keeps a stray one from reaching the Runner's unknown-tool arm.
+	uses = slices.DeleteFunc(uses, func(u toolUse) bool { return toolset.IsWebTool(u.name) })
 	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses)
 	return results, faultErr, nil
 }
@@ -405,14 +486,20 @@ func (e *Executor) runTools(ctx context.Context, sb sandbox.Sandbox, sid domain.
 
 // toolResultEvent renders a Result as an agent.tool_result event body:
 // tool_use_id + content blocks + is_error, matching the wire's
-// BetaManagedAgentsAgentToolResultEvent and what replay reads back. Empty
-// output (a read of an empty file) becomes an empty content array, never a text
-// block with an empty string — a Messages endpoint rejects an empty text block,
-// and that request is what the brain replays every resume, wedging the session.
+// BetaManagedAgentsAgentToolResultEvent and what replay reads back. A
+// SearchResults set (a web_search answer) IS the content — search_result
+// blocks, an empty slice landing as an empty array for a search with no hits.
+// Otherwise empty output (a read of an empty file) becomes an empty content
+// array, never a text block with an empty string — a Messages endpoint rejects
+// an empty text block, and that request is what the brain replays every
+// resume, wedging the session.
 func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, error) {
-	content := []map[string]any{}
-	if res.Content != "" {
-		content = append(content, map[string]any{"type": "text", "text": res.Content})
+	var content any = []map[string]any{}
+	switch {
+	case res.SearchResults != nil:
+		content = res.SearchResults
+	case res.Content != "":
+		content = []map[string]any{{"type": "text", "text": res.Content}}
 	}
 	payload, err := json.Marshal(map[string]any{
 		"tool_use_id": useID.String(),
@@ -512,8 +599,8 @@ func (e *Executor) report(ctx context.Context, item *queue.Item, err error) {
 	// how the run failed: a backend fault leaves the lease to expire and be
 	// reclaimed, while a lost lease means the item is already another executor's
 	// or was cancelled outright by a user.interrupt.
-	slog.ErrorContext(ctx, "executor: tool_exec item faulted, its results were not committed",
-		"item", item.ID, "session", item.SessionID, "error", err)
+	slog.ErrorContext(ctx, "executor: work item faulted, its results were not committed",
+		"kind", item.Kind, "item", item.ID, "session", item.SessionID, "error", err)
 	if e.onFault != nil {
 		e.onFault(item, err)
 	}

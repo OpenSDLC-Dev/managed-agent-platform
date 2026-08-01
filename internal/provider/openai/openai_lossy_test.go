@@ -52,6 +52,66 @@ func TestToolResultBlockArray(t *testing.T) {
 	}
 }
 
+// A tool_result carrying search_result blocks (a web_search answer) flattens
+// to text: title and source URL on a header line, then the result's own text
+// content, newline-terminated so consecutive results stay separated. OpenAI's
+// tool message is a string, so the structure is lossy by design — confined
+// here and pinned, like every other lossy conversion in this package.
+func TestToolResultSearchResultFlattens(t *testing.T) {
+	body := requestFor(t, provider.Request{
+		Messages: []provider.Message{
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_s","content":[` +
+				`{"type":"search_result","title":"Go docs","source":"https://go.dev/doc/","content":[{"type":"text","text":"How to write Go."}],"citations":{"enabled":false}},` +
+				`{"type":"text","text":"tail"}]}]`)},
+		},
+	})
+	m := messagesOf(t, body)[0]
+	want := "Go docs (https://go.dev/doc/)\nHow to write Go.\ntail"
+	if m["role"] != "tool" || m["tool_call_id"] != "call_s" || m["content"] != want {
+		t.Errorf("search_result tool_result = %v, want content %q", m, want)
+	}
+}
+
+// A text block BEFORE a search_result gains a separating newline, so the
+// header line cannot glue onto the text's last line (the reverse order is
+// covered above, where the search block's own trailing newline separates).
+func TestToolResultTextThenSearchResultSeparated(t *testing.T) {
+	body := requestFor(t, provider.Request{
+		Messages: []provider.Message{
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_s","content":[` +
+				`{"type":"text","text":"preface"},` +
+				`{"type":"search_result","title":"Go docs","source":"https://go.dev/doc/","content":[],"citations":{"enabled":false}}]}]`)},
+		},
+	})
+	m := messagesOf(t, body)[0]
+	want := "preface\nGo docs (https://go.dev/doc/)\n"
+	if m["content"] != want {
+		t.Errorf("content = %q, want %q", m["content"], want)
+	}
+}
+
+// A search_result whose inner content holds a non-text block still fails
+// loudly: the wire union says its content is text blocks only, so anything
+// else is an upstream bug, not something to silently drop. The inner block is
+// chosen to DECODE cleanly (a bare unknown type), so the failure proves the
+// type guard fired, not a JSON error upstream of it.
+func TestToolResultSearchResultRejectsNonTextInner(t *testing.T) {
+	f := &fakeServer{}
+	p := start(t, f)
+	_, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_s","content":[` +
+				`{"type":"search_result","title":"t","source":"https://a.example/","content":[{"type":"image","source":{}}]}]}]`)},
+		},
+	})
+	if err == nil {
+		t.Fatal("a non-text block inside search_result content should fail loudly")
+	}
+	if !strings.Contains(err.Error(), `unsupported block "image" inside search_result`) {
+		t.Errorf("error = %v, want the inner type guard's message, not a decode error", err)
+	}
+}
+
 // An empty tool_result content is valid and maps to an empty tool message.
 func TestToolResultEmptyContent(t *testing.T) {
 	body := requestFor(t, provider.Request{

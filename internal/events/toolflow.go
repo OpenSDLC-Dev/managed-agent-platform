@@ -133,6 +133,34 @@ func HasUnansweredPlatformToolUse(ctx context.Context, q Querier, sessionID doma
 	return hasUnansweredToolUse(ctx, q, sessionID, []string{string(domain.EventAgentToolUse)}, extraRefs)
 }
 
+// UnansweredPlatformToolNames lists, in log order, the tool names of the
+// platform built-in calls HasUnansweredPlatformToolUse counts. The name is
+// what routes the work: web_fetch/web_search run in the executor's own
+// process as web_exec while the other built-ins ride tool_exec to a sandbox
+// (docs/plan/15_web-tools.md), so a resume trigger picks its work kind from
+// this list. extraRefs are treated as answered, exactly as above.
+func UnansweredPlatformToolNames(ctx context.Context, q Querier, sessionID domain.ID, extraRefs []string) ([]string, error) {
+	if extraRefs == nil {
+		extraRefs = []string{}
+	}
+	rows, err := q.Query(ctx,
+		`SELECT COALESCE(tu.payload->>'name', '') FROM events tu WHERE`+unansweredToolUse+` ORDER BY tu.seq`,
+		sessionID.String(), []string{string(domain.EventAgentToolUse)}, toolResultTypes, extraRefs)
+	if err != nil {
+		return nil, fmt.Errorf("unanswered platform tool names: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
 func hasUnansweredToolUse(ctx context.Context, q Querier, sessionID domain.ID, useTypes, extraRefs []string) (bool, error) {
 	if extraRefs == nil {
 		extraRefs = []string{}

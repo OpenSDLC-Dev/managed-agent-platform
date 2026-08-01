@@ -27,16 +27,16 @@ func TestPolicies(t *testing.T) {
 			name:  "bare entry defaults every tool to always_allow",
 			entry: `{"type":"agent_toolset_20260401"}`,
 			want: map[string]domain.PermissionPolicyType{
-				"bash": allow, "read": allow, "write": allow,
-				"edit": allow, "glob": allow, "grep": allow,
+				"bash": allow, "read": allow, "write": allow, "edit": allow,
+				"glob": allow, "grep": allow, "web_fetch": allow, "web_search": allow,
 			},
 		},
 		{
 			name:  "default_config policy applies to every enabled tool",
 			entry: `{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"always_ask"}}}`,
 			want: map[string]domain.PermissionPolicyType{
-				"bash": ask, "read": ask, "write": ask,
-				"edit": ask, "glob": ask, "grep": ask,
+				"bash": ask, "read": ask, "write": ask, "edit": ask,
+				"glob": ask, "grep": ask, "web_fetch": ask, "web_search": ask,
 			},
 		},
 		{
@@ -45,8 +45,8 @@ func TestPolicies(t *testing.T) {
 			         "default_config":{"permission_policy":{"type":"always_ask"}},
 			         "configs":[{"name":"read","permission_policy":{"type":"always_allow"}}]}`,
 			want: map[string]domain.PermissionPolicyType{
-				"bash": ask, "read": allow, "write": ask,
-				"edit": ask, "glob": ask, "grep": ask,
+				"bash": ask, "read": allow, "write": ask, "edit": ask,
+				"glob": ask, "grep": ask, "web_fetch": ask, "web_search": ask,
 			},
 		},
 		{

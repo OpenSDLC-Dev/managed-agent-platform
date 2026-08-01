@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -276,20 +277,32 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		if err == nil {
 			approvalWaitSeconds = &secs
 		}
-		// Resume the right work. The executor runs only platform built-ins, so a
-		// tool_exec is enqueued only when an allowed one is still unanswered
-		// (denials are already answered). If the only remaining unanswered tools
-		// are client-executed custom tools, enqueue nothing — the client's
-		// user.custom_tool_result resumes the turn (mirroring the non-ask suspend,
-		// which never runs an executor for a custom-only turn). If every tool is
-		// answered (all gated tools denied), resume the brain directly.
-		platformPending, err := events.HasUnansweredPlatformToolUse(ctx, tx, domain.ID(id), deniedIDs)
+		// Resume the right work. The executor runs only platform built-ins, so
+		// their work item is enqueued only when an allowed one is still
+		// unanswered (denials are already answered) — as web_exec when any of
+		// them is a web tool, else tool_exec, the same web-first choice the
+		// brain's settlement makes and for the same reason: a tool_exec is
+		// visible to a BYOC worker, which implements only the six sandbox tools
+		// and must not see the log while a web call is outstanding. If the only
+		// remaining unanswered tools are client-executed custom tools, enqueue
+		// nothing — the client's user.custom_tool_result resumes the turn
+		// (mirroring the non-ask suspend, which never runs an executor for a
+		// custom-only turn). If every tool is answered (all gated tools
+		// denied), resume the brain directly.
+		platformPending, err := events.UnansweredPlatformToolNames(ctx, tx, domain.ID(id), deniedIDs)
 		if err != nil {
 			return nil, err
 		}
-		if platformPending {
+		if len(platformPending) > 0 {
+			kind := queue.ToolExec
+			for _, name := range platformPending {
+				if toolset.IsWebTool(name) {
+					kind = queue.WebExec
+					break
+				}
+			}
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
-				_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), queue.ToolExec)
+				_, err := s.queue.Enqueue(ctx, tx, envID, domain.ID(id), kind)
 				return err
 			}
 			break

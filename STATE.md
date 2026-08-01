@@ -9,6 +9,6 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Tasks
 
 - [x] Slice 1 — `internal/webtool` seam: Searcher/Fetcher, tavily/jina adapters, contract suite, consent-gated live tier (PR #221; live tier green against real Tavily/Jina 2026-07-31; the production env wiring is slice 3's)
-- [ ] Slice 2 — wire surface: domain `SearchResultBlock`, `Result` blocks field, definitions, brain offering
-- [ ] Slice 3 — routing + execution: `web_exec` queue kind, trigger hold-back, executor driver
-- [ ] Slice 4 — docs: DIVERGENCES entries, self-hosted-security.md, README
+- [x] Slice 2 — wire surface: domain `SearchResultBlock` (SDK round-trip), `Result.SearchResults`, eight-tool definitions + `IsWebTool`, brain offering, openai search_result flattening (with slice 3, one PR)
+- [x] Slice 3 — routing + execution: `web_exec` kind (migration 0015), web-first hold-back (brain settlement + confirmation resume), executor web driver (no sandbox, both env kinds), worker/sandbox-pass filters, env wiring (with slice 2, one PR)
+- [ ] Slice 4 — docs: remaining DIVERGENCES entries (allowed-domains, spill-file), README status, plan archive + HISTORY summary (self-hosted-security.md landed with slices 2+3)

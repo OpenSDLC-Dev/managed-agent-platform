@@ -73,7 +73,13 @@ const (
 // happens to the tool call then is the executor's decision, not the model's.
 type Result struct {
 	Content string
-	IsError bool
+	// SearchResults, when non-nil, is the structured content of a web_search
+	// answer: the tool_result carries these search_result blocks instead of a
+	// text block (an empty non-nil slice is an empty content array — a search
+	// with no hits). Only the executor's web driver sets it; nil keeps today's
+	// text shape byte-identical.
+	SearchResults []domain.SearchResultBlock
+	IsError       bool
 }
 
 // Runner executes built-in tool calls inside one session's sandbox.
@@ -94,7 +100,7 @@ type Runner struct {
 // be recorded once and mean the same thing at both deployment points.
 func (r Runner) Run(ctx context.Context, id domain.ID, name string, input json.RawMessage) (res Result, err error) {
 	start := time.Now()
-	defer func() { recordToolRun(ctx, name, time.Since(start), res, err) }()
+	defer func() { RecordRun(ctx, name, time.Since(start), res, err) }()
 	return r.dispatch(ctx, id, name, input)
 }
 
@@ -117,15 +123,17 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	case "grep":
 		res, err = r.grep(ctx, input)
 	default:
-		// Not a backend fault: the model asked for something this platform does
-		// not run (web_fetch and web_search are named in the wire's tool-config
-		// enum and are deferred). Telling it so lets it try something else.
+		// Not a backend fault: the model asked for something this Runner does
+		// not run. The web tools never arrive here — the executor routes them
+		// to its own web driver and every sandbox-tool scan filters them out
+		// (IsWebTool) — so a name landing on this arm is one the platform does
+		// not recognise at all. Telling the model so lets it try something else.
 		return failf("unknown tool %q", name)
 	}
 	if err != nil {
 		return Result{}, err
 	}
-	res.Content = capOutput(res.Content)
+	res.Content = CapOutput(res.Content)
 	return res, nil
 }
 
@@ -186,8 +194,11 @@ func truncateRunes(s string, n int) string {
 	return cut
 }
 
-// capOutput trims content to MaxOutputBytes, marking the truncation.
-func capOutput(s string) string {
+// CapOutput trims content to MaxOutputBytes, marking the truncation. Exported
+// for the same reason RecordRun is: the executor's web driver produces tool
+// results outside this Runner and must honor the SAME log budget — one cap,
+// one meaning, whatever process ran the tool.
+func CapOutput(s string) string {
 	if len(s) <= MaxOutputBytes {
 		return s
 	}
@@ -199,7 +210,7 @@ func capOutput(s string) string {
 // signal — whether the command failed — and must survive truncation of a huge
 // output, which they would not if the trailer were appended and the join then
 // capped from the end. The result is already within the cap, so Run's own
-// capOutput leaves it untouched.
+// CapOutput leaves it untouched.
 func capWithTrailer(body, trailer string) string {
 	if len(body)+len(trailer) <= MaxOutputBytes {
 		return body + trailer
