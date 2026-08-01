@@ -40,6 +40,23 @@ copy of an entry here.
 
 ### Fixed
 
+- **A client `user.tool_result` can no longer double-answer a web call**
+  ([#222](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/222),
+  [docs/plan/16_one-answer-per-tool-call.md](./docs/plan/16_one-answer-per-tool-call.md)). The
+  executor's web pass scans the unanswered set, runs the tools, and commits the results in a later
+  transaction; on a self_hosted session a client `user.tool_result` for the same call posted in
+  that window referenced a still-unanswered call, passed validation, and the executor's settlement
+  then appended the second answer — two results for one `tool_use_id` on an append-only log, a
+  request the Messages protocol rejects on every later replay. `events.ValidateToolResults` now
+  takes a platform-ownership predicate (the API injects `toolset.IsWebTool`): a client result for
+  a web call is a wire 400 whether or not the call is answered yet, closing the window's only
+  remaining writer — interrupts and rival executors already fail the settlement's lease proof,
+  `tool_exec` is cloud-claimed only, and the permission gate never overlaps a live run. Scoped to
+  web names alone: a self_hosted worker answering the sandbox six via `user.tool_result` is the
+  BYOC pull protocol and stays untouched (regression-pinned). Mutation-checked at both the
+  validation and the API surface; the rejection is an INFERRED divergence (reference behavior
+  unobserved — docs/DIVERGENCES.md).
+
 - **A NUL byte in tool output no longer wedges the session**
   ([#223](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/223)). Postgres's `jsonb`
   cannot store `\u0000`, so a tool whose output carried a raw NUL — one byte of `/dev/zero` on

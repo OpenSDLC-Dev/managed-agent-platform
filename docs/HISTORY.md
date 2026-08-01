@@ -33,6 +33,24 @@ recorded nowhere else.
 
 ---
 
+## One answer per tool call (plan 16) — archived 2026-08-01, delivered in one PR (#222)
+
+A single-PR plan: the same PR landed the file (archived at birth) and the fix. The triage-opened
+repair fork — a commit-time answered-set re-diff in the executor's web settlement vs. an API-layer
+rejection scoped to web tool names — resolved to the **API-layer rejection**, one new arm in the
+already-existing `ValidateToolResults` (a platform-ownership predicate the API fills with
+`toolset.IsWebTool`). The re-diff was rejected for two reasons recorded in the plan: with the arm
+in place it guards an unreachable state (clients rejected at the door; interrupts and rival
+executors already fail the settlement's `queue.Complete` lease proof; `tool_exec` is cloud-claimed
+only; the permission gate never overlaps a live run), and its semantics are wrong for a
+platform-owned call — it silently drops one answer instead of 400-ing the poster, letting a
+client-fabricated result stand for a call the platform was asked to run. Also evaluated and
+rejected: importing `toolset` into `internal/events` for the name check (drags the sandbox
+dependency into the log package — the predicate is injected instead). Reachability analysis that
+narrowed the issue's "both paths affected equally" to self_hosted `web_exec` only is recorded on
+the issue and in the plan. Public docs (self-hosted-sandboxes / tools / events-and-streaming,
+2026-08-01) were checked for reference behavior before recording the rejection as INFERRED.
+
 ## Web tools plan (15) — archived 2026-08-01, all four slices delivered (#47)
 
 docs/plan/15_web-tools.md is archived complete: the last two `agent_toolset_20260401` tools execute in the platform executor's process on both deployment modes, behind config-driven Tavily/Jina backends. Slice 1: the `internal/webtool` seam — Searcher/Fetcher interfaces, tavily/jina adapters, shared contract suite, `RUN_LIVE_WEB_TESTS` live tier (PR #221). Slices 2+3, one PR (#224): domain `SearchResultBlock` + `Result.SearchResults` + eight-tool definitions + openai `search_result` flattening; the `web_exec` work kind (migration 0015), the web-first hold-back (brain settlement + confirmation resume), the executor web driver (no sandbox, both env kinds), worker/sandbox-pass filters, env wiring (compose passthrough + helm `executor.extraEnv`), and the acceptance run below. Review hardening landed in-PR: fail-closed fetch construction, the metadata-charged output budget, NUL sanitization, the http/https scheme check at the executor seam, the stray-web-call heal, claim-order alternation. Follow-ups split out rather than absorbed: #222 (double-answer race, pre-existing), #223 (sandbox NUL output, pre-existing), #225 (allowed-domains allowlist), #226 (spill-to-file). Slice 4: the remaining DIVERGENCES registrations (#225/#226), the README status line, the plan archive. Deliberate divergences and inferences are in docs/DIVERGENCES.md; the as-built system in docs/ARCHITECTURE.md.

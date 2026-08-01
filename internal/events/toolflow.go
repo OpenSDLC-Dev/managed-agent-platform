@@ -195,7 +195,15 @@ func ToolResultRefs(evs []NewEvent) []string {
 // batch. The log is append-only — one accepted bad reference would poison
 // every future replay with a request the model protocol rejects, wedging the
 // session permanently.
-func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent) error {
+//
+// platformOwned, when non-nil, names the built-in tools only the platform may
+// answer (the API injects toolset.IsWebTool): a client result for such a call
+// is rejected even while it is still unanswered, closing the double-answer
+// window between the executor's web scan and its commit (#222,
+// docs/plan/16_one-answer-per-tool-call.md). It must never cover the sandbox
+// six — a self_hosted worker answering those via user.tool_result is the
+// BYOC pull protocol.
+func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent, platformOwned func(name string) bool) error {
 	seen := map[string]bool{}
 	for i, ev := range evs {
 		refKey := resultRefKey(ev.Type)
@@ -215,10 +223,11 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		}
 		seen[ref] = true
 
-		var useType, perm string
+		var useType, name, perm string
 		var answered, confirmed bool
 		err = q.QueryRow(ctx,
 			`SELECT tu.type,
+			        COALESCE(tu.payload->>'name', ''),
 			        COALESCE(tu.payload->>'evaluated_permission', ''),
 			        `+answeredBy(3)+`,
 			        EXISTS (
@@ -227,7 +236,7 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 			            AND c.payload->>'tool_use_id' = tu.id
 			        )
 			 FROM events tu WHERE tu.session_id = $1 AND tu.id = $2`,
-			sessionID.String(), ref, toolResultTypes, string(domain.EventUserToolConfirm)).Scan(&useType, &perm, &answered, &confirmed)
+			sessionID.String(), ref, toolResultTypes, string(domain.EventUserToolConfirm)).Scan(&useType, &name, &perm, &answered, &confirmed)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
 		}
@@ -239,6 +248,14 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		}
 		if answered {
 			return fmt.Errorf("events[%d]: tool use %q already has a result", i, ref)
+		}
+		// A platform-owned call is never the client's to answer, answered or
+		// not: while the executor's web pass runs between its scan and its
+		// commit, the call is still unanswered and every other arm here would
+		// wave the client's result through — the second answer then commits
+		// with the executor's settlement (#222).
+		if platformOwned != nil && wantUse == domain.EventAgentToolUse && platformOwned(name) {
+			return fmt.Errorf("events[%d]: tool use %q (%s) is platform-executed and cannot be answered by a client result", i, ref, name)
 		}
 		// An ask-gated tool must be confirmed before any result answers it: a
 		// premature result would bypass the human approval and, on a later
