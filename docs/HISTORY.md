@@ -33,6 +33,34 @@ recorded nowhere else.
 
 ---
 
+## Spill oversized tool output (plan 18) — archived 2026-08-01, delivered in one PR (#226)
+
+A single-PR plan, the plan-16 precedent. The issue's open design fork — the web tools run in the
+executor with no sandbox provisioned, so where does a web answer spill? — resolved to **web
+answers do not spill**: provisioning a sandbox solely to store a spilled answer would couple the
+web pass back into sandbox lifecycle (plan 15's "no sandbox and no gate" was deliberate), and web
+content, unlike a command's output, is re-fetchable — the model can fetch again, narrower. The
+five eligible sandbox tools spill via the `Runner`'s own sandbox handle. Also evaluated and rejected: spilling
+raw (pre-sanitize) bytes — the file holds the NUL-stripped text the trailer describes; spilling
+in bash's success arm as well as its failure arms — the success arm reaches dispatch uncapped
+and spilling twice would write the same file twice per call. The issue's other unknown — the
+reference's preview shape and path convention — stayed unobservable (no recording capability
+against the real backend); both landed as ours, INFERRED, in the rewritten DIVERGENCES entry.
+One honest bound recorded there: "whole" is everything `Sandbox.Exec` retained and returned to
+the toolset, bounded by its pre-existing 1 MiB per-stream memory guard. The review round then
+forced one behavior change and killed one wrong claim, both reviewers converging on each: the
+first cut spilled `read` output too, and because every spill file exceeds the cap by
+construction, reading one back minted another full copy under a fresh id — a chain with no fixed
+point, measured at five distinct 106 KB copies in five follow-the-notice reads — so `read` is now
+exempt (decision 8; its full content already sits at the path the model named); and the original
+rune-boundary fixture (2-byte runes against an even cap) could never split a rune, so both
+preview paths are now pinned with 3-byte fixtures the cap genuinely cuts mid-rune, plus the
+timeout arm's spill and the write-attempt-on-failure, all mutation-checked. The PR round added
+one more: a successful grep that hit the sandbox's own 1 MiB Exec retention arrived with
+`Truncated` set but dropped the flag, so a spill of it claimed "full output" for a result the
+sandbox had already cut — grep's success arm now carries the upstream `[output truncated]`
+marker at its head, mutation-checked (the test observed red against the unfixed arm).
+
 ## Model endpoint stall bound (plan 17) — archived 2026-08-01, delivered in one PR (#121)
 
 docs/plan/17_model-endpoint-stall-bound.md is archived complete: a model turn is now bounded by the endpoint's silence (`provider.StallGuard`), enforced on the request context and fed by byte-level progress, with a per-route `stall_timeout` defaulting to 10 minutes. The narrative is in CHANGELOG.md; what follows is only the designs that were evaluated and rejected, since the issue proposed two of them and named a third as wrong.
