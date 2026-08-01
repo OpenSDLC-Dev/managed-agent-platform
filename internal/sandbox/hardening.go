@@ -55,9 +55,10 @@ type Hardening struct {
 	// unbounded, the platform default.
 	//
 	// Kubernetes-only, the mirror image of PidsLimit: Docker's writable-layer
-	// quota needs a specific storage driver rather than being a property every
-	// daemon has, so that backend ignores this and says so once. The asymmetry
-	// is recorded in docs/DIVERGENCES.md rather than faked.
+	// quota is only as good as the daemon's storage driver — some enforce it,
+	// some refuse the option, and at least one accepts it and enforces nothing —
+	// so that backend ignores this and says so once. The asymmetry is recorded
+	// in docs/DIVERGENCES.md rather than faked.
 	//
 	// Its enforcement is unlike every other cap here, which is why it is opt-in
 	// as MemoryBytes above is — a sharper version of that field's reason:
@@ -67,6 +68,11 @@ type Hardening struct {
 	// that no longer exists. The limit makes the victim of node disk pressure
 	// targeted and attributable instead of arbitrary; it does not make eviction
 	// gentle.
+	//
+	// And it binds only where the kubelet can measure local ephemeral storage —
+	// the node layouts Kubernetes supports for it. On any other layout the pod
+	// takes the field and is never evicted for exceeding it, so this is a cap
+	// whose effect is a property of the cluster's nodes as much as of the value.
 	EphemeralStorageBytes int64
 	// CapDrop names the Linux capabilities to drop, without the CAP_ prefix
 	// ("NET_RAW"), or the single entry "ALL". Empty drops none. A gated
