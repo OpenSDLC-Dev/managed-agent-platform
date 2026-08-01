@@ -89,8 +89,9 @@ executor:
   # -- Extra literal env entries for the executor container, rendered verbatim.
   # The seam for deployment-shaped configuration the chart has no dedicated knob
   # for — e.g. the web tools' backends (TAVILY_API_KEY, JINA_API_KEY,
-  # WEBSEARCH_BASE_URL, WEBFETCH_BASE_URL; docs/plan/15_web-tools.md): put the
-  # keys behind `valueFrom.secretKeyRef` entries here rather than inline values.
+  # WEBSEARCH_BASE_URL, WEBFETCH_BASE_URL) and their operator allowlist
+  # (WEBTOOL_ALLOWED_DOMAINS; docs/plan/15_web-tools.md, #225): put the keys
+  # behind `valueFrom.secretKeyRef` entries here rather than inline values.
   extraEnv: []
   resources: {}
   nodeSelector: {}

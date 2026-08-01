@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
@@ -509,5 +510,63 @@ func TestWebFetchUnconfiguredAnswersIsError(t *testing.T) {
 	}
 	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
 		t.Errorf("live model_turn = %d, want 1", n)
+	}
+}
+
+func TestWebFetchOutsideAllowedDomainsAnswersIsError(t *testing.T) {
+	f := &recordingFetcher{}
+	e := &Executor{fetcher: f, webAllowed: egress.NewHostSet([]string{"example.com", "*.example.com"})}
+
+	denied := e.runWebTool(context.Background(), toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"https://evil.test/x"}`)})
+	if !denied.IsError || !strings.Contains(denied.Content, "allowed domains") {
+		t.Fatalf("denied result = %+v, want is_error naming the allowlist", denied)
+	}
+	if f.calls != 0 {
+		t.Errorf("fetcher calls = %d, want 0 — a denied host must never be fetched", f.calls)
+	}
+
+	allowed := e.runWebTool(context.Background(), toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"https://docs.example.com/page"}`)})
+	if allowed.IsError || f.calls != 1 {
+		t.Errorf("allowed result = %+v (fetcher calls %d), want a fetch of the in-list host", allowed, f.calls)
+	}
+}
+
+func TestWebSearchFiltersHitsOutsideAllowedDomains(t *testing.T) {
+	e := &Executor{
+		searcher: stubSearcher{hits: []webtool.SearchResult{
+			{Title: "in", URL: "https://docs.example.com/a", Content: "kept"},
+			{Title: "out", URL: "https://evil.test/b", Content: "dropped"},
+		}},
+		webAllowed: egress.NewHostSet([]string{"*.example.com"}),
+	}
+
+	res := e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"q"}`)})
+
+	if res.IsError {
+		t.Fatalf("result = %+v, want a non-error answer", res)
+	}
+	if len(res.SearchResults) != 1 || res.SearchResults[0].Source != "https://docs.example.com/a" {
+		t.Errorf("blocks = %+v, want only the in-list hit", res.SearchResults)
+	}
+
+	// Every hit outside the list answers as the documented zero-hit shape, so
+	// the model reads an outcome, not an error.
+	e.searcher = stubSearcher{hits: []webtool.SearchResult{{Title: "out", URL: "https://evil.test/b", Content: "x"}}}
+	res = e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"q"}`)})
+	if res.IsError || res.Content != "No results found." {
+		t.Errorf("all-filtered result = %+v, want the zero-hit text answer", res)
+	}
+}
+
+// New builds the allowlist only from a non-empty config: an unset
+// WEBTOOL_ALLOWED_DOMAINS must stay a nil set (unrestricted), never invert
+// into HostSet's own nil-set deny-all semantics.
+func TestNewBuildsTheAllowlistOnlyWhenConfigured(t *testing.T) {
+	if e := New(nil, nil, nil, nil, nil, Config{}); e.webAllowed != nil {
+		t.Error("empty config built an allowlist — unset must mean unrestricted")
+	}
+	e := New(nil, nil, nil, nil, nil, Config{WebAllowedDomains: []string{"example.com"}})
+	if e.webAllowed == nil || !e.webAllowed.Match("example.com") || e.webAllowed.Match("evil.test") {
+		t.Errorf("configured allowlist = %+v, want example.com admitted and evil.test refused", e.webAllowed)
 	}
 }

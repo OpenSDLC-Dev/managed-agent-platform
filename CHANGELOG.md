@@ -13,6 +13,31 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Added
+
+- **An operator-side allowed-domains allowlist for the web tools**
+  ([#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)). The reference has
+  per-tool "allowed domains" for `web_fetch`/`web_search`, configured by no wire field — so ours is
+  equally operator-side: `WEBTOOL_ALLOWED_DOMAINS` on the executor, comma-separated entries in the
+  wire's allowed_hosts grammar (bare host, IPv4, `*.`-wildcard that never matches the apex), matched
+  by the same `egress.HostSet` that decides vault and networking allow-lists. A `web_fetch` of a
+  host outside the list answers as a tool error before any fetch; a search hit whose source is
+  outside it is dropped like the other hit normalizations (every hit filtered → the zero-hit "No
+  results found." answer). Empty keeps today's unrestricted behavior; a malformed entry **fails
+  startup** (`egress.ValidateHostEntry`, now the grammar's single source — the vault API's
+  validator wraps it) rather than silently matching nothing. Extracting the grammar surfaced a
+  latent acceptance the vault path had shipped with: an IPv4-mapped IPv6 literal
+  (`::ffff:10.0.0.1`) slipped through the IPv4 check, so any entry containing `:` is now
+  rejected on both the wire 400 path and at startup. The Tavily/Jina adapters no longer follow
+  redirects: they talk only to the operator-configured backend endpoints, so a 3xx means stale
+  configuration (repoint the base URL at the post-redirect address) and chasing it would resend
+  model-controlled data to an unvetted host — while what a *remote* reader's server-side fetch
+  does past the allowlist stays the operator's network boundary, said plainly in
+  docs/self-hosted-security.md. Wired through
+  compose (passthrough) and the chart's existing `executor.extraEnv`; the DIVERGENCES entry
+  narrows to the reference-side residue (its list contents, configuration surface, and
+  blocked-domain answer stay unobserved).
+
 ### Fixed
 
 - **A NUL byte in tool output no longer wedges the session**

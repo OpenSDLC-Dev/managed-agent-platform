@@ -34,6 +34,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gatetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -97,6 +98,15 @@ type Config struct {
 	JinaAPIKey       string
 	WebSearchBaseURL string
 	WebFetchBaseURL  string
+	// WebAllowedDomains, when non-empty, is the operator-side allowlist for
+	// the web tools (#225): web_fetch may reach only these hosts, and a
+	// search hit whose source is outside them is dropped. Entries use the
+	// same grammar as the wire's allowed_hosts (a bare hostname, an IPv4
+	// literal, or a "*."-prefixed wildcard that never matches the apex —
+	// egress.HostSet, the one matcher). Empty means unrestricted: the
+	// reference has per-tool allowed domains, but no wire field carries
+	// them, so this knob is platform-native (docs/DIVERGENCES.md).
+	WebAllowedDomains []string
 }
 
 func (c Config) withDefaults() Config {
@@ -131,6 +141,9 @@ type Executor struct {
 	// URLs to the public r.jina.ai — the wrong default for an on-prem product.
 	searcher webtool.Searcher
 	fetcher  webtool.Fetcher
+	// webAllowed, when non-nil, restricts the web tools' hosts (webwork.go).
+	// Nil means no allowlist is configured — unrestricted, today's default.
+	webAllowed *egress.HostSet
 	// onFault, when set, receives every per-item fault. Left nil in production
 	// (the queue's reclaim is the recovery); tests set it to observe faults.
 	onFault func(*queue.Item, error)
@@ -146,6 +159,9 @@ func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.P
 	}
 	if cfg.JinaAPIKey != "" || cfg.WebFetchBaseURL != "" {
 		e.fetcher = jina.New(cfg.WebFetchBaseURL, cfg.JinaAPIKey)
+	}
+	if len(cfg.WebAllowedDomains) > 0 {
+		e.webAllowed = egress.NewHostSet(cfg.WebAllowedDomains)
 	}
 	return e
 }
