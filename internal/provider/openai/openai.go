@@ -126,9 +126,18 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 		guard.Stop()
 		return nil, err
 	}
+	// Every byte the endpoint delivers, keepalive comments included, is a sign
+	// of life for the guard — the liveness a frame-level signal would miss,
+	// since a comment is not an event. Wrapped before the status is examined so
+	// an error body gets the same budget a stream body does: the response's own
+	// arrival counts as progress, and each byte read buys another budget. The
+	// anthropic adapter's middleware wraps every response the same way; only
+	// this hand-rolled path could tell a 200 from a 500 and treat them
+	// differently.
+	respBody := provider.ProgressBody(gctx, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		defer guard.Stop()
-		defer resp.Body.Close()
+		defer respBody.Close()
 		// The body is quoted because the status alone rarely explains a gateway
 		// misconfiguration — but an endpoint that echoes the request's
 		// Authorization header into it must not get the credential into an
@@ -138,7 +147,7 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 		// credential straddling it is still matched whole; the redacted text is
 		// then cut back. Reading exactly the budget would leave the head of a
 		// key in the message, matching nothing.
-		msg, readErr := io.ReadAll(io.LimitReader(resp.Body, quotedBodyLimit+int64(p.redact.Longest())))
+		msg, readErr := io.ReadAll(io.LimitReader(respBody, quotedBodyLimit+int64(p.redact.Longest())))
 		// A body that simply exceeds the budget is not an error — LimitReader
 		// ends it with EOF, and the overshoot above is what keeps a straddling
 		// credential matchable. A real read failure is different: the bytes stop
@@ -165,10 +174,6 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 		// and naming the stall instead would throw it away.
 		return nil, fmt.Errorf("openai endpoint returned %s: %s", p.redact.String(resp.Status), quoted)
 	}
-	// Every byte the endpoint delivers, keepalive comments included, is a sign
-	// of life for the guard — the liveness a frame-level signal would miss,
-	// since a comment is not an event.
-	respBody := provider.ProgressBody(gctx, resp.Body)
 	return &stream{body: respBody, r: bufio.NewReader(respBody), redact: p.redact, guard: guard}, nil
 }
 

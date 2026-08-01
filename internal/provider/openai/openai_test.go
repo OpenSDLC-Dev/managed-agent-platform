@@ -595,3 +595,61 @@ func TestUpstreamErrorBodyCutMidCredentialIsNotQuoted(t *testing.T) {
 		t.Errorf("error = %q, want it to still report the status", genErr)
 	}
 }
+
+// A responsive endpoint's error body must survive the stall bound. The guard is
+// on silence, not duration, so an upstream that streams a long diagnostic in
+// chunks — each one inside the budget, the whole longer than it — is not stalled
+// and its explanation is the most useful thing the operator gets. The wrap that
+// makes body bytes progress therefore has to happen before the status is
+// examined, the way the anthropic adapter's middleware wraps every response
+// (#121).
+func TestSlowButResponsiveErrorBodyIsStillQuoted(t *testing.T) {
+	const budget = 300 * time.Millisecond
+	chunks := []string{`{"error":{"message":"upstream `, `is misconfigured, `, `not silent"}}`}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("ResponseWriter is not a Flusher")
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		for _, c := range chunks {
+			_, _ = fmt.Fprint(w, c)
+			fl.Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(budget * 6 / 10): // inside the budget, never a stall
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	p, err := openai.New(provider.Config{
+		Protocol: "openai", Model: "m", BaseURL: srv.URL, APIKey: testAPIKey, StallTimeout: budget,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	type result struct{ err error }
+	res := make(chan result, 1)
+	go func() {
+		_, err := p.Generate(context.Background(), provider.Request{
+			Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+		})
+		res <- result{err}
+	}()
+	var genErr error
+	select {
+	case r := <-res:
+		genErr = r.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("Generate never returned")
+	}
+	if genErr == nil {
+		t.Fatal("Generate against a 502 should return an error")
+	}
+	if want := strings.Join(chunks, ""); !strings.Contains(genErr.Error(), want) {
+		t.Errorf("error = %q, want it to quote the whole body %q — the endpoint was slow, not silent", genErr, want)
+	}
+}
