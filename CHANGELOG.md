@@ -66,6 +66,34 @@ copy of an entry here.
 
 ### Fixed
 
+- **A NUL in the model's own output no longer wedges the turn**
+  ([#228](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/228)). The model was the
+  third NUL producer, and the last unguarded one: tool output is stripped since #223 and
+  API-inbound events are rejected with a 400, but the brain built `agent.message` and
+  `agent.tool_use` payloads from model output with no check — and a `\u0000` escape is well-formed
+  JSON any model (or misbehaving OpenAI-compatible endpoint) can emit. One such escape faulted the
+  turn's append (Postgres `jsonb` cannot store it, `SQLSTATE 22P05`) and the work item
+  reclaim-looped, re-running the same turn forever — the #223 wedge on the brain's lane. Model
+  output is now sanitized at the brain's event-construction boundary, matching the strip-not-reject
+  choice recorded in docs/DIVERGENCES.md's U+0000 entry: text deltas at arrival (ahead of the empty
+  guard, so an all-NUL delta is an empty delta and lands nothing), the tool_use name, and the
+  tool_use input — the one model-produced value that reaches jsonb as raw bytes, where a NUL is
+  the six-byte `\u0000` escape a byte-level strip cannot see. The input normalize now decodes and
+  re-encodes unconditionally: the NULs are stripped from strings and keys alike, and the two
+  sibling byte classes only this lane can smuggle — a lone surrogate escape (well-formed JSON to
+  Go, `SQLSTATE 22P02` to Postgres) and raw invalid UTF-8 (`22021`), both reproduced wedging the
+  turn — are laundered to U+FFFD by the decode, with `UseNumber` carrying numeric lexemes through
+  byte-exact and literal backslash-u text (`\\u0000`) untouched. The failure lane is guarded too: `failTurn`'s message can
+  quote endpoint bytes, and a NUL there faulted the `session.error` append — the failure path
+  failing, the same wedge one level up. Two keys that collide once
+  stripped (`file_path` and a NUL-bearing spelling of it) fail the turn visibly instead of letting
+  Go map iteration pick which value survives, a NUL-only thinking delta is no more a first token
+  than an empty one, and the strip sits ahead of the preview broadcast, so a live SSE subscriber
+  and the stored event read the same text. Every lane is pinned by a test over the real store that
+  reproduced the 22P05 wedge before the fix: text, all-NUL delta, tool input values/keys (with the
+  literal-text and big-integer control fixtures), the key collision, the thinking TTFT guard, the
+  broadcast frames (drained off a live broker subscription), and the error message.
+
 - **A wedged model endpoint no longer hangs a brain replica forever**
   ([#121](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/121)). Nothing bounded a
   turn's wait on the model: the Anthropic adapter's `option.WithoutEnvironmentDefaults()` — there to
