@@ -15,6 +15,43 @@ copy of an entry here.
 
 ### Added
 
+- **The Google Cloud production-deployment plan**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), approved). A
+  probe-backed path to run the platform on GKE with Google-managed backing services:
+  every decision rests on measurements taken against real GCP on 2026-08-01 — the
+  repo's own contract suites ported verbatim proved GCS interop (one real defect:
+  DELETE of a missing object answers `404 NoSuchKey`, breaking `blob.Store`'s delete
+  convergence — slice 1 mirrors `Get`'s existing `NoSuchKey` check in `Delete`), Cloud
+  KMS as a `secrets.Cipher` (6/6, with a measured 65536-byte plaintext ceiling),
+  Cloud SQL's LISTEN/NOTIFY commit semantics, the gate's
+  full enforcement on the default runtime, and the impossibility of in-pod iptables
+  under gVisor (fail-closed, with the standalone-gate topology probe-proven as the
+  follow-on's design evidence). Three code deliverables — the GCS fix, an
+  `internal/secrets/gcpkms` cipher, and sandbox pod placement and bounds
+  (`seccompProfile: RuntimeDefault`, an `ephemeral-storage` limit, and node
+  selection/tolerations), which are the containment gaps the sandbox-hardening work
+  below does not close; the
+  rest is images, a scripted persistent staging environment (`deploy/gcp/` Terraform
+  behind Make targets — GCP developer tooling only, never a platform dependency), a
+  deploy guide, and two recorded acceptance runs shaped by the chart's render-time
+  secret-mode exclusivity.
+
+  Three limits the plan carries explicitly rather than discovering later. The KMS
+  ceiling is a **backend-visible behavioural limit**, not a theoretical one: the API
+  bounds a body at 4 MiB and puts no length bound on credential fields, so an input it
+  accepts today under OpenBao transit can be refused under direct KMS — handled with a
+  guard, a DIVERGENCES entry, an API-level boundary test, and a ciphertext format marker
+  so envelope encryption stays retrofittable. The **deployment identity needs
+  `storage.buckets.get`** on top of object-admin, because `s3.New` HEADs the bucket at
+  startup — a requirement this plan's own probe masked by running as project-wide
+  storage admin. And the acceptance is scoped **staging-grade**, naming what it does not
+  establish: sustained operation (pods accumulate while
+  [#64](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/64) has no
+  production caller of `Sandbox.Destroy`), transport security (nothing terminates TLS,
+  so nothing is exposed), and host-level isolation of untrusted code (gVisor and today's
+  in-pod gate are mutually exclusive, so the interim boundary is a dedicated tainted
+  sandbox node pool).
+
 - **Sandbox containers are hardened when they are created**
   ([#65](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/65),
   [docs/plan/19_sandbox-hardening.md](./docs/plan/19_sandbox-hardening.md)). A session's sandbox
