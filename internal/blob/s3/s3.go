@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -69,6 +70,41 @@ func alreadyOwned(err error) bool {
 	return code == "BucketAlreadyOwnedByYou" || code == "BucketAlreadyExists"
 }
 
+// noSuchKey reports the endpoint saying the object is not there. The status is
+// required alongside the code because minio-go lets an x-minio-error-code
+// response header overwrite the parsed code whatever the response was, and
+// absence answers 404 and nothing else.
+//
+// This is as far as a reader can get: Get learns of absence from a HEAD, whose
+// 404 carries no body by definition, so minio-go always synthesizes the code
+// from the status there and no stronger proof exists to ask for (#244).
+func noSuchKey(err error) bool {
+	res := minio.ToErrorResponse(err)
+	return res.Code == "NoSuchKey" && res.StatusCode == http.StatusNotFound
+}
+
+// absentOnDelete reports a DELETE answered with the endpoint's own NoSuchKey
+// error document. A deleter can demand that document where a reader cannot,
+// and must: minio-go synthesizes NoSuchKey from any 404 it fails to parse, so
+// without it a misrouting proxy or an authorization layer concealing a denial
+// would be read as "already gone" and the caller told its data was deleted.
+// XMLName is the marker: minio-go keeps the decoded struct only when the body
+// parsed, and replaces it wholesale in every decode-failure branch, so a
+// synthesized error always carries a zero XMLName. (encoding/xml alone would
+// not be enough — it validates the root element and assigns XMLName before
+// decoding any children, so a document that starts <Error> and then breaks
+// leaves XMLName set. minio-go discarding that struct is what makes the
+// marker trustworthy.)
+//
+// Measured against real GCS with this minio-go release: its DELETE of a
+// missing object answers 404 with a parsed <Error> document (XMLName "Error",
+// no Key), while the same object's HEAD answers 404 with no body at all
+// (XMLName empty, Key filled) — which is why the two paths ask for different
+// proof rather than sharing one check.
+func absentOnDelete(err error) bool {
+	return noSuchKey(err) && minio.ToErrorResponse(err).XMLName.Local == "Error"
+}
+
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
 	_, err := s.client.PutObject(ctx, s.bucket, key, r, size,
 		minio.PutObjectOptions{ContentType: contentType})
@@ -88,7 +124,7 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, int64, erro
 	info, err := obj.Stat()
 	if err != nil {
 		_ = obj.Close()
-		if minio.ToErrorResponse(err).Code == "NoSuchKey" {
+		if noSuchKey(err) {
 			return nil, 0, fmt.Errorf("s3: get %s: %w", key, blob.ErrNotFound)
 		}
 		return nil, 0, fmt.Errorf("s3: stat %s: %w", key, err)
@@ -97,9 +133,16 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, int64, erro
 }
 
 func (s *Store) Delete(ctx context.Context, key string) error {
-	// S3 DeleteObject is idempotent — a missing key succeeds — which is
-	// exactly the contract's convergence requirement.
-	if err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil {
+	// AWS S3 and MinIO make DeleteObject idempotent themselves — a missing key
+	// answers 204 — but GCS's XML API answers 404 NoSuchKey, so the same
+	// absence has to be mapped here for the contract's crashed-and-retried
+	// delete to converge rather than flap. It converges on an endpoint that
+	// answers 204 or says NoSuchKey in its own error document; one that answers
+	// a bare 404 instead fails closed and never converges, which is the
+	// deliberate trade — a delete that keeps erroring is an operator's problem,
+	// a delete that reports success on a misrouted request is a lost object.
+	err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
+	if err != nil && !absentOnDelete(err) {
 		return fmt.Errorf("s3: delete %s: %w", key, err)
 	}
 	return nil

@@ -153,6 +153,45 @@ copy of an entry here.
 
 ### Fixed
 
+- **Deleting an already-deleted object converges on Google Cloud Storage**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 1).
+  `blob.Store` requires a delete to converge rather than flap — "a crashed-and-retried
+  delete must converge" — and the S3 backend got that for free from AWS S3 and MinIO,
+  which answer a DELETE of a missing object with `204`. GCS's XML API answers
+  `404 NoSuchKey` instead (measured against real GCS on 2026-08-01, the one contract row
+  of eight that failed there), so every retried delete after a crash returned an error
+  and the caller's cleanup never reached a settled state. `Delete` now treats that code
+  as the absence it describes, which is the check `Get` has always made to map a missing
+  object onto `blob.ErrNotFound`; both now go through one `noSuchKey` helper. Nothing
+  changes on S3 or MinIO, whose DELETE answers 204 and never carries the code.
+
+  The code alone is not proof of absence, and the review that landed this established
+  exactly how much more to demand. **`NoSuchKey` is not always the endpoint's own word**:
+  minio-go synthesizes it from the status whenever a 404's body does not decode as an S3
+  error document, and separately lets an `x-minio-error-code` response header overwrite
+  the parsed code on any response at all. Left as just a code check, a misrouting proxy's
+  bare 404 or a denial concealed behind one would have been reported as a successful
+  delete — the caller told its data is gone while it is still there. So `Delete` requires
+  three things: the code, a 404 status, and the endpoint's own error document. Alongside
+  them, a denied delete and a vanished *bucket* (404 too, under its own `NoSuchBucket`
+  code) stay errors.
+
+  `Get` deliberately asks for less, and the difference is measured rather than assumed. It
+  learns of absence from a HEAD, and a HEAD response carries no body by definition, so its
+  404 is always the synthesized kind — a probe against real GCS with this minio-go release
+  recorded a DELETE of a missing object answering with a parsed `<Error>` document and a
+  HEAD of the same object answering 404 with nothing in it. Unifying the two checks would
+  therefore break `ErrNotFound` on every backend, which is why a test now pins the
+  asymmetry as intentional. `Get` does adopt the 404-status requirement, which its own
+  documented intent ("only object absence maps there") already implied.
+  [#244](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/244) tracks what
+  remains: a reader cannot demand what a HEAD cannot send.
+
+  The MinIO-backed contract suite cannot reach any of this, so the regression tests drive
+  a stub S3 endpoint — the convergence case confirmed failing against the pre-fix code and
+  asserting the DELETE was really issued, plus a case per way the code can arrive detached
+  from real absence.
+
 - **A NUL in the model's own output no longer wedges the turn**
   ([#228](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/228)). The model was the
   third NUL producer, and the last unguarded one: tool output is stripped since #223 and

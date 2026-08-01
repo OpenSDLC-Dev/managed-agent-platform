@@ -4,14 +4,14 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**[docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) (approved)** — the
+**[docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) (in-progress)** — the
 Google Cloud production-deployment plan, authored and approved 2026-08-01 from GCP probes
-run the same day. Development starts at slice 1.
+run the same day. Slice 1 lands with this PR; next is slice 2.
 
 ## Tasks
 
-- [x] Plan 20 authored and approved (this PR) — evidence in its Ground truth section
-- [ ] Slice 1 — GCS delete convergence (`internal/blob/s3`)
+- [x] Plan 20 authored and approved — evidence in its Ground truth section
+- [x] Slice 1 — GCS delete convergence (`internal/blob/s3`) — this PR
 - [ ] Slice 2 — sandbox pod placement and bounds (seccomp, ephemeral-storage, node sel.)
 - [ ] Slice 3 — `internal/secrets/gcpkms` cipher + size guard + chart knob + `cmd/` wiring
 - [ ] Slice 4 — staging environment (`deploy/gcp/`) + mode-1 acceptance on GKE
