@@ -16,6 +16,7 @@ import (
 var hardeningEnv = []string{
 	"SANDBOX_PIDS_LIMIT", "SANDBOX_CPU_MILLIS", "SANDBOX_MEMORY_BYTES",
 	"SANDBOX_CAP_DROP", "SANDBOX_READONLY_ROOTFS", "SANDBOX_RUN_AS_USER",
+	"SANDBOX_EPHEMERAL_STORAGE_BYTES",
 }
 
 func setHardeningEnv(t *testing.T, kv map[string]string) {
@@ -53,6 +54,12 @@ func TestHardeningFromEnvDefaults(t *testing.T) {
 	if h.MemoryBytes != 0 || h.ReadOnlyRootfs || h.RunAsUser != nil {
 		t.Errorf("opt-in knobs = %d/%v/%v, want off", h.MemoryBytes, h.ReadOnlyRootfs, h.RunAsUser)
 	}
+	// The disk cap is opt-in for a sharper reason than the others: exceeding it
+	// gets the pod evicted, not the write refused, so a default nobody chose
+	// would destroy sandboxes mid-task.
+	if h.EphemeralStorageBytes != 0 {
+		t.Errorf("EphemeralStorageBytes = %d, want 0", h.EphemeralStorageBytes)
+	}
 }
 
 func TestHardeningFromEnvOverrides(t *testing.T) {
@@ -63,6 +70,8 @@ func TestHardeningFromEnvOverrides(t *testing.T) {
 		"SANDBOX_CAP_DROP":        "ALL",
 		"SANDBOX_READONLY_ROOTFS": "true",
 		"SANDBOX_RUN_AS_USER":     "65534",
+
+		"SANDBOX_EPHEMERAL_STORAGE_BYTES": "2147483648",
 	})
 	h, err := sandbox.HardeningFromEnv()
 	if err != nil {
@@ -79,6 +88,9 @@ func TestHardeningFromEnvOverrides(t *testing.T) {
 	}
 	if h.RunAsUser == nil || *h.RunAsUser != 65534 {
 		t.Errorf("RunAsUser = %v, want 65534", h.RunAsUser)
+	}
+	if h.EphemeralStorageBytes != 2<<30 {
+		t.Errorf("EphemeralStorageBytes = %d, want %d", h.EphemeralStorageBytes, 2<<30)
 	}
 }
 
@@ -135,6 +147,11 @@ func TestHardeningFromEnvRejectsMalformedValues(t *testing.T) {
 		{"SANDBOX_PIDS_LIMIT", "-1"},
 		{"SANDBOX_CPU_MILLIS", "2.5"},
 		{"SANDBOX_MEMORY_BYTES", "1GiB"},
+		// Bytes, like every other count here — not a Kubernetes quantity. An
+		// operator who writes the limit the way the Pod API spells it gets a
+		// startup failure naming the variable, not a cap they did not ask for.
+		{"SANDBOX_EPHEMERAL_STORAGE_BYTES", "20Gi"},
+		{"SANDBOX_EPHEMERAL_STORAGE_BYTES", "-1"},
 		{"SANDBOX_CAP_DROP", "NET_RAW,"},
 		{"SANDBOX_CAP_DROP", "NET RAW"},
 		// A character-class check alone admits these, and they reach the runtime

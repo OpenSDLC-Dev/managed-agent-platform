@@ -29,10 +29,14 @@ import (
 // without re-applying a changed Hardening, so a caller that re-provisions a
 // session must keep it stable.
 //
-// Backends apply what their runtime can express, and only that: PidsLimit is
-// Docker-only, because the Kubernetes Pod API carries no per-pod pids limit
-// (it is the kubelet's `podPidsLimit` node setting). The asymmetry is recorded
-// in docs/DIVERGENCES.md rather than faked here.
+// Backends apply what their runtime can express, and only that, and the gap
+// runs both ways: PidsLimit is Docker-only, because the Kubernetes Pod API
+// carries no per-pod pids limit (it is the kubelet's `podPidsLimit` node
+// setting), while EphemeralStorageBytes is Kubernetes-only, because Docker's
+// writable-layer quota is only as good as the daemon's storage driver. Each
+// asymmetry is recorded in docs/DIVERGENCES.md rather than faked here, and the
+// backend that cannot honour a configured value says so once rather than
+// silently.
 type Hardening struct {
 	// PidsLimit caps the processes the sandbox may have alive at once. It is
 	// the containment for a fork bomb and for the process pressure that would
@@ -47,6 +51,30 @@ type Hardening struct {
 	// platform default, because an OOM kill in the middle of a task is a worse
 	// failure than the throttling a CPU quota causes.
 	MemoryBytes int64
+	// EphemeralStorageBytes caps the sandbox's node-local disk — the container's
+	// writable layer and every emptyDir the platform mounts over it. 0 leaves it
+	// unbounded, the platform default.
+	//
+	// Kubernetes-only, the mirror image of PidsLimit: Docker's writable-layer
+	// quota is only as good as the daemon's storage driver — some enforce it,
+	// some refuse the option, and at least one accepts it and enforces nothing —
+	// so that backend ignores this and says so once. The asymmetry is recorded
+	// in docs/DIVERGENCES.md rather than faked.
+	//
+	// Its enforcement is unlike every other cap here, which is why it is opt-in
+	// as MemoryBytes above is — a sharper version of that field's reason:
+	// exceeding a memory limit kills the offending container, exceeding a CPU
+	// limit throttles it, but exceeding this gets the whole pod **evicted** by
+	// the kubelet. On this provider that surfaces mid-tool-call as a sandbox
+	// that no longer exists. The limit makes the victim of node disk pressure
+	// targeted and attributable instead of arbitrary; it does not make eviction
+	// gentle.
+	//
+	// And it binds only where the kubelet can measure local ephemeral storage —
+	// the node layouts Kubernetes supports for it. On any other layout the pod
+	// takes the field and is never evicted for exceeding it, so this is a cap
+	// whose effect is a property of the cluster's nodes as much as of the value.
+	EphemeralStorageBytes int64
 	// CapDrop names the Linux capabilities to drop, without the CAP_ prefix
 	// ("NET_RAW"), or the single entry "ALL". Empty drops none. A gated
 	// sandbox always drops NET_RAW/SETUID/SETGID on top of whatever this says:
@@ -187,6 +215,7 @@ const (
 	envPidsLimit      = "SANDBOX_PIDS_LIMIT"
 	envCPUMillis      = "SANDBOX_CPU_MILLIS"
 	envMemoryBytes    = "SANDBOX_MEMORY_BYTES"
+	envEphemeralBytes = "SANDBOX_EPHEMERAL_STORAGE_BYTES"
 	envCapDrop        = "SANDBOX_CAP_DROP"
 	envReadOnlyRootfs = "SANDBOX_READONLY_ROOTFS"
 	envRunAsUser      = "SANDBOX_RUN_AS_USER"
@@ -229,6 +258,9 @@ func HardeningFromEnv() (Hardening, error) {
 		return Hardening{}, fmt.Errorf("%s=%d is too large to express as a CPU limit", envCPUMillis, h.CPUMillis)
 	}
 	if h.MemoryBytes, err = envCount(envMemoryBytes, 0); err != nil {
+		return Hardening{}, err
+	}
+	if h.EphemeralStorageBytes, err = envCount(envEphemeralBytes, 0); err != nil {
 		return Hardening{}, err
 	}
 	if h.CapDrop, err = parseCapDrop(os.Getenv(envCapDrop)); err != nil {

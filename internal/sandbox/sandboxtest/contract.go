@@ -36,10 +36,17 @@ import (
 // EnforcesPidsLimit declares that the backend's runtime can cap a single
 // sandbox's process count (sandbox.Hardening.PidsLimit). Docker can; the
 // Kubernetes Pod API cannot express a per-pod pids limit at all, so that
-// backend leaves it false and the row is not registered — the one hardening
-// dimension the two backends genuinely cannot share, recorded in
-// docs/DIVERGENCES.md. Everything else in Hardening is asserted for every
-// backend.
+// backend leaves it false and the row is not registered — one of the two
+// hardening dimensions the backends genuinely cannot share, both recorded in
+// docs/DIVERGENCES.md.
+//
+// The other one, EphemeralStorageBytes, is Kubernetes-only and gets no flag
+// here, because no flag would gate anything: every row in this suite asserts
+// what a tool *inside* the sandbox can observe, and a disk cap is enforced by
+// the kubelet evicting the pod rather than by any cgroup file the sandbox could
+// read. It is asserted at the provider level on both backends instead — the pod
+// spec carries it, the Docker create payload provably does not — the way the
+// memory cap is, since observing that one means being OOM-killed.
 type Harness struct {
 	Provider          sandbox.Provider
 	Image             string

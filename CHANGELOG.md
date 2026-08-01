@@ -15,6 +15,58 @@ copy of an entry here.
 
 ### Added
 
+- **An opt-in disk cap for sandbox pods on Kubernetes**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2).
+  `SANDBOX_EPHEMERAL_STORAGE_BYTES` (chart: `executor.sandboxHardening.ephemeralStorageBytes`)
+  bounds the node-local disk a sandbox may consume — its writable layer and every
+  `emptyDir` the platform mounts over it — as an `ephemeral-storage` limit on the pod. Until
+  now a model-directed `dd` or a runaway build could fill a node's disk and take every other
+  pod on it down with the sandbox; CPU, memory and processes were bounded, disk was not.
+
+  **Off by default** — as the memory cap already is, and for a sharper version of the same
+  reason. Memory is opt-in because an OOM kill mid-task is worse than the throttling a CPU
+  quota causes; this is opt-in because its enforcement is harsher still. Exceeding a CPU or
+  memory bound throttles or kills the process; exceeding this gets the whole **pod evicted**
+  by the kubelet. There is no `ENOSPC` for the
+  tool to handle — the session's sandbox disappears mid-call. A platform-chosen default would
+  turn a disk-hungry-but-honest tool call into a lost sandbox, so the operator picks the
+  number or gets nothing. The request is set equal to the limit for the reason memory already
+  is: the kubelet ranks eviction candidates by usage against the *request*, so a limit the
+  scheduler never reserved would leave the enforcement landing on whichever pod happens to be
+  over its own request — the arbitrary victim this cap exists to make targeted.
+
+  Give it **bytes** — `21474836480`, never `20Gi`. The parser takes a plain integer and a
+  Kubernetes quantity string fails executor/worker startup, as any malformed hardening value
+  does. The chart never rewrites a value into a quantity; the one thing it does normalise is
+  the integer *spelling* a values file forces on it (see the Fixed entry below), and it
+  deliberately stops short of normalising a fractional value, so a malformed one still
+  reaches the executor and still fails startup. CI asserts both halves.
+
+  Its enforcement has one precondition worth checking before relying on it: the kubelet
+  applies an ephemeral-storage limit only on the node layouts whose local storage it can
+  measure — a single filesystem, a separate runtime filesystem, or a split image filesystem.
+  On any other layout it *"does not apply resource limits for ephemeral local storage"*, the
+  pod accepts the fields, and nothing evicts it for exceeding them. Documented in
+  [docs/self-hosted-security.md](./docs/self-hosted-security.md) §3 rather than left for an
+  operator to discover from an unenforced cap.
+
+  **Kubernetes-only, and the Docker backend says so out loud.** This is the mirror of the
+  existing pids asymmetry but it does not have the same cause, which is why the Docker side
+  warns instead of silently ignoring: the Engine API *does* define a writable-layer quota, so
+  unlike a pids resource on a pod the field is not missing — but it is only as good as the
+  daemon's storage driver, and the daemons disagree. Some enforce it (btrfs, zfs, overlay2
+  over XFS with `pquota`); classic overlay2 without `pquota` refuses the option outright; and
+  Docker Desktop's `overlayfs` accepts it and enforces nothing at all — measured on 29.6.2,
+  where `--storage-opt size=1G` exits 0 and the container's root filesystem still reports the
+  full host disk, identical to the same run without it. Passing it through blindly would
+  therefore break provisioning on one daemon and report a cap that does not exist on another,
+  and honouring it properly means reading the daemon's storage driver and branching on it. So
+  the backend logs once per provider and leaves the create payload
+  byte-for-byte what it would have been — which is what a test asserts, rather than naming
+  the fields it must not have touched. Recorded in
+  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md); operator-facing framing in
+  [docs/self-hosted-security.md](./docs/self-hosted-security.md) §3.
+
 - **Sandbox pods on Kubernetes run under the runtime's seccomp filter**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2). A sandbox
   runs untrusted, model-directed commands, and on Kubernetes it ran with **every syscall
@@ -190,6 +242,38 @@ copy of an entry here.
   not a wire change.
 
 ### Fixed
+
+- **The chart no longer documents a path that runs sandboxes as root.** The
+  `executor.sandboxHardening.*` row said "`0` / `none` to turn one off" for the whole group.
+  That is right for the numeric caps and for `capDrop`, and wrong for the two that are not
+  numbers: `readOnlyRootfs` takes `false` (a `0` fails executor startup), and `runAsUser` is
+  disabled only by an **empty** value — `0` is a perfectly valid uid meaning **root**, so an
+  operator following the documented way to "turn it off" would have got the opposite of
+  containment. Now stated per field.
+
+- **A sandbox resource limit written in a Helm values file no longer reaches the executor
+  in scientific notation.** `executor.sandboxHardening.memoryBytes: 21474836480` in a values
+  file rendered as `value: "2.147483648e+10"`, which the executor rejects as a malformed
+  hardening value and refuses to start on — so the deployment that carefully capped its
+  sandboxes got an executor that would not run at all. Helm parses an unquoted number from
+  `--set` into an `int64` but one from a values **file** into a `float64`, and rendering a
+  large `float64` goes exponential; every numeric knob in that block is integral
+  (millicores, bytes, a uid), so the template now formats an **integral** float as one.
+  Quoting the value in the values file was always a workaround and still is; it should not
+  have been necessary.
+
+  Only an integral one, and that restraint is the interesting half. Normalising every float
+  would round malformed input into valid input: `runAsUser: -0.4` would reach the executor
+  as `-0`, which parses as uid 0 and runs every sandbox as **root**, where the whole point of
+  the value was to fail startup. A fractional value is therefore passed through as written
+  and the executor still refuses it.
+
+  The bug was invisible to CI because the chart job only ever rendered these knobs through
+  `--set`, the one path that was never affected. It now renders them through a values file
+  too and asserts both halves — the plain-integer form for integral values, and the
+  unrounded form for fractional ones. Each guard was proven to fail against the template
+  state it guards against. Found while adding `ephemeralStorageBytes`, which is a bytes knob and would have
+  shipped broken for essentially every realistic value (1 GiB renders as `1.073741824e+09`).
 
 - **Deleting an already-deleted object converges on Google Cloud Storage**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 1).

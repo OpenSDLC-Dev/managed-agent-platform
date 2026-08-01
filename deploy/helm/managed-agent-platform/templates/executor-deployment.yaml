@@ -50,6 +50,7 @@ spec:
             {{- range $env, $value := dict
                   "SANDBOX_CPU_MILLIS" .Values.executor.sandboxHardening.cpuMillis
                   "SANDBOX_MEMORY_BYTES" .Values.executor.sandboxHardening.memoryBytes
+                  "SANDBOX_EPHEMERAL_STORAGE_BYTES" .Values.executor.sandboxHardening.ephemeralStorageBytes
                   "SANDBOX_CAP_DROP" .Values.executor.sandboxHardening.capDrop
                   "SANDBOX_READONLY_ROOTFS" .Values.executor.sandboxHardening.readOnlyRootfs
                   "SANDBOX_RUN_AS_USER" .Values.executor.sandboxHardening.runAsUser }}
@@ -60,7 +61,32 @@ spec:
                    executor's default instead. */}}
             {{- if not (or (kindIs "invalid" $value) (eq (toString $value) "")) }}
             - name: {{ $env }}
-              value: {{ $value | quote }}
+              {{- /* A values FILE parses an unquoted number as float64, and
+                     rendering a large one goes to scientific notation:
+                     `memoryBytes: 21474836480` became "2.147483648e+10", which
+                     the executor rejects as malformed and refuses to start on.
+                     `--set` parses to int64 and was never affected, which is
+                     exactly why a --set-only CI render did not catch it. Every
+                     numeric knob here is integral — millicores, bytes, a uid —
+                     so format it as one. Above 2^53 the float64 decode has
+                     already lost precision before the template sees it — that
+                     is Helm's YAML decode, and nothing here can repair it.
+                     Quoting the number in the values file does avoid it, by
+                     never producing a float64 at all, and is the remedy if a
+                     deployment ever needs one. The template does not refuse
+                     such a value: reaching the range costs 9 PB of sandbox disk
+                     (`runAsUser` is bounded far below it by the executor), and
+                     the error there is one byte in nine quadrillion.
+
+                     Only an INTEGRAL float is reformatted, and the floor test
+                     is load-bearing rather than defensive: formatting every
+                     float would round a malformed one into a valid one, and
+                     `runAsUser: -0.4` would reach the executor as "-0" — which
+                     parses as uid 0, silently running every sandbox as root
+                     where the value was meant to fail startup. A fractional
+                     value is passed through as written so the executor still
+                     refuses it. */}}
+              value: {{ if and (kindIs "float64" $value) (eq $value (floor $value)) }}{{ printf "%.0f" $value | quote }}{{ else }}{{ $value | quote }}{{ end }}
             {{- end }}
             {{- end }}
             {{- with .Values.executor.leaseTTL }}
