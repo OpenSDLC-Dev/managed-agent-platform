@@ -390,7 +390,9 @@ resources deleted and the sweep verified empty afterwards.
    did not exercise.
 9. **A persistent staging environment with one-command create and destroy.** The cluster
    and its backing services stay up between slices rather than being rebuilt per run,
-   but teardown must be one command so an idle week costs nothing. Provisioning is
+   but teardown must be one command, so that an idle week costs the cents the
+   never-destroyed `foundation/` below is worth rather than a running GKE cluster and
+   Cloud SQL instance. Provisioning is
    **Terraform** under `deploy/gcp/`, wrapped by Make targets — the same shape Google's
    managed-agents sandbox reference uses. Terraform rather than shell because destroy is
    the operation that must not miss anything: state-tracked teardown is what prevents
@@ -616,17 +618,21 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   defect.
 - **Slice 4 — staging environment + mode-1 acceptance on GKE.** `deploy/gcp/` Terraform
   and its Make targets (Decision 9), in the two configurations that decision requires:
-  **`foundation/`** — the KMS key ring and crypto key and the Secret Manager secrets,
-  applied once and never destroyed — and **`environment/`** — cluster, Artifact
-  Registry, service accounts and Workload Identity bindings, Cloud SQL, the GCS bucket,
+  **`foundation/`** — the KMS key ring and crypto key, the Secret Manager secrets, and
+  the service accounts, applied once and never destroyed — and **`environment/`** —
+  cluster, Artifact Registry, Cloud SQL, the GCS bucket, the Workload Identity and IAM
+  bindings that attach the foundation's identities to them,
   and the **dedicated tainted sandbox node pool** of Decision 10, whose node system
   config also sets the kubelet's `podPidsLimit` (the per-pod process containment the Pod
   API cannot express). They are used to create the environment this slice then deploys
-  into, so the scripts are exercised rather than merely written. Teardown is proven the
-  only way it can be: **create → destroy → create** on `environment/`, and the proof
-  that the KMS split works is a vault credential written before the destroy and read
-  back after the rebuild — a name collision would fail the second apply, but silent key
-  loss would only ever show up as a failed decrypt.
+  into, so the scripts are exercised rather than merely written. Teardown is proven as
+  **create → destroy → create** on `environment/`, against the three things a rebuild
+  can actually fail at (Decision 9): the second `apply` succeeds with no KMS name
+  collision; the bootstrap script converges on already-populated secrets, including
+  reconciling the GCS HMAC key against the surviving service account; and a **fresh**
+  vault credential round-trips on the rebuilt stack. Explicitly *not* an old credential
+  surviving — `environment/` owns Cloud SQL, so the destroy takes the ciphertext with it
+  by design.
   Then: Cloud Build images; `helm install` with bundled services; the real `ant` CLI
   end-to-end over `kubectl port-forward` (Decision 8 — nothing public): sessions, bash
   and file tools, HITL, the `skill-answer` and `file-answer` evals, a vault-attached
