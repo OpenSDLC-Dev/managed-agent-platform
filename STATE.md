@@ -6,7 +6,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 **[docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) (in-progress)** — the
 Google Cloud production-deployment plan, authored and approved 2026-08-01 from GCP probes
-run the same day. Slice 1 landed; next is slice 2.
+run the same day. Slice 1 lands with this PR; next is slice 2.
 
 ## Tasks
 

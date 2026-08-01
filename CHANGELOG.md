@@ -162,12 +162,26 @@ copy of an entry here.
   of eight that failed there), so every retried delete after a crash returned an error
   and the caller's cleanup never reached a settled state. `Delete` now treats that code
   as the absence it describes, which is the check `Get` has always made to map a missing
-  object onto `blob.ErrNotFound`; both now go through one `noSuchKey` helper. The mapping
-  is deliberately narrow — a denied or otherwise failed delete is still an error, and a
-  vanished *bucket* stays an error on every backend. Nothing changes on S3 or MinIO,
-  which never produce the code, which is also why the MinIO-backed contract suite cannot
-  reach this path: the regression test drives a stub S3 endpoint whose DELETE answers
-  `404 NoSuchKey`, and was confirmed failing against the pre-fix code.
+  object onto `blob.ErrNotFound`; both now go through one `noSuchKey` helper. Nothing
+  changes on S3 or MinIO, whose DELETE answers 204 and never carries the code.
+
+  The mapping is as narrow as the client library allows, and the review that landed it
+  established where that limit is. A denied delete, and a vanished *bucket* — which
+  answers 404 too, under its own `NoSuchBucket` code — both stay errors. The helper now
+  also requires the status to be 404, because minio-go lets an `x-minio-error-code`
+  response header overwrite the parsed code on any response, and absence answers 404 and
+  nothing else; that narrowing applies to `Get`'s `ErrNotFound` mapping as well, which
+  documented the same intent and now enforces it. What no check can separate is a 404
+  whose body is not an S3 error document at all: minio-go synthesizes `NoSuchKey` from
+  the status alone there, so a bare 404 from a misrouting proxy reads as absence — a
+  pre-existing property of `Get`, now shared by `Delete`, recorded as
+  [#244](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/244) and pinned by
+  a test rather than left silent.
+
+  The MinIO-backed contract suite cannot reach any of this, so the regression tests drive
+  a stub S3 endpoint: the convergence case was confirmed failing against the pre-fix code
+  and asserts the DELETE was really issued, and the status-narrowing case was confirmed
+  failing before that narrowing landed.
 
 - **A NUL in the model's own output no longer wedges the turn**
   ([#228](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/228)). The model was the

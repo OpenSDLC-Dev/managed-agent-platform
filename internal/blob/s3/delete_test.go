@@ -6,28 +6,32 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
 )
 
-// stubStore builds a Store against a stub endpoint that answers the bucket
-// check s3.New makes and gives every DELETE the supplied status and S3 error
-// code. It exists because the MinIO-backed contract suite cannot produce the
-// condition these tests are about: MinIO and AWS S3 answer a DELETE of a
-// missing object with 204, so only a stub can say otherwise.
-func stubStore(t *testing.T, deleteStatus int, deleteCode string) blob.Store {
+// stubStore builds a Store against a stub S3 endpoint that answers the bucket
+// check s3.New makes and hands every DELETE to answer, and reports the object
+// paths the endpoint was asked to delete. It exists because the MinIO-backed
+// contract suite cannot produce the conditions this file is about: MinIO and
+// AWS S3 answer a DELETE of a missing object with 204, so only a stub can say
+// anything else.
+func stubStore(t *testing.T, answer http.HandlerFunc) (blob.Store, func() []string) {
 	t.Helper()
+	var mu sync.Mutex
+	var deleted []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodHead: // the bucket check in s3.New
 			w.WriteHeader(http.StatusOK)
 		case http.MethodDelete:
-			w.Header().Set("Content-Type", "application/xml")
-			w.WriteHeader(deleteStatus)
-			_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>`+
-				deleteCode+`</Code><Message>stub</Message></Error>`)
+			mu.Lock()
+			deleted = append(deleted, r.URL.Path)
+			mu.Unlock()
+			answer(w, r)
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -43,7 +47,22 @@ func stubStore(t *testing.T, deleteStatus int, deleteCode string) blob.Store {
 	if err != nil {
 		t.Fatalf("s3.New against the stub: %v", err)
 	}
-	return s
+	return s, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), deleted...)
+	}
+}
+
+// s3Error answers with a well-formed S3 error document, the shape a real
+// endpoint sends and the only one whose code is the server's own word.
+func s3Error(status int, code string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>`+
+			code+`</Code><Message>stub</Message></Error>`)
+	}
 }
 
 // TestDeleteConvergesWhenTheEndpointReportsNoSuchKey pins blob.Store's
@@ -52,15 +71,66 @@ func stubStore(t *testing.T, deleteStatus int, deleteCode string) blob.Store {
 // with 404 NoSuchKey where S3 and MinIO answer 204. Measured against real GCS;
 // see docs/plan/20_gcp-deployment.md, "Ground truth".
 func TestDeleteConvergesWhenTheEndpointReportsNoSuchKey(t *testing.T) {
-	if err := stubStore(t, http.StatusNotFound, "NoSuchKey").Delete(context.Background(), "gone"); err != nil {
+	s, deletes := stubStore(t, s3Error(http.StatusNotFound, "NoSuchKey"))
+	if err := s.Delete(context.Background(), "gone"); err != nil {
 		t.Fatalf("delete of a missing key = %v, want nil", err)
+	}
+	// Converging is only convergence if the object was actually asked for: a
+	// Delete that stopped issuing the request would satisfy the line above.
+	if got := deletes(); len(got) != 1 || got[0] != "/stub-bucket/gone" {
+		t.Errorf("endpoint saw deletes %v, want exactly [/stub-bucket/gone]", got)
 	}
 }
 
 // TestDeleteSurfacesOtherEndpointErrors keeps that mapping narrow: only the
 // object's absence is success. A denied delete is still a failure.
 func TestDeleteSurfacesOtherEndpointErrors(t *testing.T) {
-	if err := stubStore(t, http.StatusForbidden, "AccessDenied").Delete(context.Background(), "k"); err == nil {
+	s, _ := stubStore(t, s3Error(http.StatusForbidden, "AccessDenied"))
+	if err := s.Delete(context.Background(), "k"); err == nil {
 		t.Fatal("a denied delete reported success")
+	}
+}
+
+// TestDeleteSurfacesAMissingBucket is the same narrowness at the status the
+// mapping does accept: a vanished bucket also answers 404, and its own code is
+// what keeps it an error. TestOpsAgainstRemovedBucketAreErrorsNotAbsence
+// proves this against a real MinIO; this pins it where the answer is dictated.
+func TestDeleteSurfacesAMissingBucket(t *testing.T) {
+	s, _ := stubStore(t, s3Error(http.StatusNotFound, "NoSuchBucket"))
+	if err := s.Delete(context.Background(), "k"); err == nil {
+		t.Fatal("a delete into a missing bucket reported success")
+	}
+}
+
+// TestDeleteRejectsNoSuchKeyOutsideANotFound covers the one path by which the
+// code can arrive detached from the status: minio-go lets an
+// x-minio-error-code header overwrite the parsed code whatever the response
+// was, so a server in that dialect could label an arbitrary failure NoSuchKey.
+// Absence answers 404 and nothing else, so the mapping requires both.
+func TestDeleteRejectsNoSuchKeyOutsideANotFound(t *testing.T) {
+	s, _ := stubStore(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("x-minio-error-code", "NoSuchKey")
+		w.WriteHeader(http.StatusForbidden)
+	})
+	if err := s.Delete(context.Background(), "k"); err == nil {
+		t.Fatal("a NoSuchKey code on a 403 reported success")
+	}
+}
+
+// TestDeleteConvergesOnABodylessNotFound records what the mapping cannot tell
+// apart, rather than leaving it silent. minio-go synthesizes NoSuchKey from
+// the status alone whenever the body is not an S3 error document, so a bare
+// 404 — a misrouting proxy, an endpoint concealing a denial — is indis-
+// tinguishable from GCS's genuine answer and converges too. It is not
+// separable through minio-go's API (its own tests assert the synthesis, and
+// the fields that differ point the wrong way: GCS's real document carries no
+// <Key>, the synthesized one does), and Get has always read absence the same
+// way. Tracked in #244; this test fails loudly if that ever becomes decidable.
+func TestDeleteConvergesOnABodylessNotFound(t *testing.T) {
+	s, _ := stubStore(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	if err := s.Delete(context.Background(), "k"); err != nil {
+		t.Fatalf("delete against a bodyless 404 = %v, want nil (see #244)", err)
 	}
 }

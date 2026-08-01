@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -70,9 +71,15 @@ func alreadyOwned(err error) bool {
 }
 
 // noSuchKey reports the endpoint saying the object is not there — absence, not
-// a failure, for both readers and deleters.
+// a failure, for both readers and deleters. The status is required alongside
+// the code because minio-go lets an x-minio-error-code header overwrite the
+// parsed code on any response; absence answers 404 and nothing else. What the
+// check still cannot see is a 404 whose body is not an S3 error document at
+// all: minio-go synthesizes NoSuchKey from the status alone there, so a bare
+// 404 from a misrouting proxy reads as absence (#244).
 func noSuchKey(err error) bool {
-	return minio.ToErrorResponse(err).Code == "NoSuchKey"
+	res := minio.ToErrorResponse(err)
+	return res.Code == "NoSuchKey" && res.StatusCode == http.StatusNotFound
 }
 
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
