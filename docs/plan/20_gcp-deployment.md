@@ -330,12 +330,22 @@ resources deleted and the sweep verified empty afterwards.
      makes it work is **generate once, deliver twice**: the script generates a value with
      `openssl rand`, writes it to Secret Manager with
      `gcloud secrets versions add --data-file=-`, and separately installs it wherever it
-     has to be live. The database password is the case that makes this explicit —
-     `gcloud sql users set-password` **does not generate** one, it takes the value it is
-     given, so the script must produce the bytes and hand the *same* bytes to Cloud SQL
-     and to Secret Manager, both via `--data-file`/stdin rather than a shell variable
-     that lands in history. The model key is pasted from its own provider. Terraform
-     never sees any of these; it holds names, IAM bindings, and preconditions only.
+     has to be live.
+
+     The database password is where that gets specific, because the obvious command
+     cannot do it. `gcloud sql users set-password` **neither generates a password nor
+     reads one from stdin or a file** — its only inputs are `--password=VALUE` and
+     `--prompt-for-password` (verified against the installed CLI), and the first puts
+     the secret in the process argument list where `ps` and shell history can see it. So
+     the script sets the password through the **Cloud SQL Admin API `users.update`**
+     with its JSON body streamed on stdin, which keeps the value out of `argv`
+     entirely, and writes the same bytes to Secret Manager with `--data-file=-`.
+     Generate it ASCII-safe so the identical bytes survive JSON encoding, the DSN, and
+     the Kubernetes Secret without re-quoting. The acceptance step for this is not "the
+     command exited zero" but **a connection actually made with the stored password**,
+     plus a check that neither shell history nor a process listing contains it. The
+     model key is pasted from its own provider. Terraform never sees any of these; it
+     holds names, IAM bindings, and preconditions only.
 
      **The script has two jobs, and only the first is idempotent-by-skipping.** Job one:
      ensure Secret Manager holds a value — a no-op when the secret already has a
@@ -347,8 +357,9 @@ resources deleted and the sweep verified empty afterwards.
      instance is brand new and knows nothing about it; a script that treated the
      populated secret as "done" would leave a rebuilt deployment unable to authenticate.
      So the reconcile step reads each secret's current version and makes the live system
-     match it — `gcloud sql users set-password` for the database user. The GCS HMAC key
-     cannot be reapplied that way and takes a different reconcile path, described next.
+     match it — the Cloud SQL Admin API `users.update` call described below, for the
+     database user. The GCS HMAC key cannot be reapplied that way at all and takes a
+     different reconcile path, described next.
      Conflating "the secret exists" with "the system is using it" is the failure mode
      this split exists to prevent.
 
@@ -358,10 +369,16 @@ resources deleted and the sweep verified empty afterwards.
      then fails, the secret is gone and rerunning cannot recover it — not convergent by
      default. So the HMAC step is ordered create → store → verify, and on a failed store
      it **deletes the orphaned key** before exiting non-zero, leaving the next run a
-     clean slate. Its reconcile case is the mirror image: if the stored access ID no
-     longer resolves to a live key on the surviving service account, the stored pair is
-     dead and the step regenerates and overwrites rather than skipping. A half-finished
-     bootstrap must always leave the project in a state the next run can finish from.
+     clean slate. Its reconcile case is the mirror image, and it has to test the **pair**
+     rather than the identifier: a stored access ID can still resolve to a live key while
+     the secret half beside it is stale or was rotated out of band, and checking only
+     that the key exists would preserve a credential that authenticates nothing. So the
+     reconcile step performs an **authenticated GCS call using both stored values**, and
+     regenerates and overwrites only when that call fails to authenticate. Verifying the
+     ID alone would move the failure from the bootstrap, where it is one clear error, to
+     `internal/blob/s3`'s first request, where it is a deployment that came up and then
+     could not read its own bucket. A half-finished bootstrap must always leave the
+     project in a state the next run can finish from.
    - **External Secrets Operator, for teams and multiple clusters.** Its marginal buy
      over the baseline is continuous drift correction, multi-cluster fan-out, and
      deployers not needing Secret Manager read access — real at that scale, close to
@@ -468,9 +485,9 @@ resources deleted and the sweep verified empty afterwards.
    create** on `environment/`, with `foundation/` untouched, proving the three things a
    rebuild can actually fail at: the second `apply` succeeds with no KMS name collision;
    the bootstrap script **reconciles the live system against the surviving secrets** —
-   reapplying the database password to the brand-new Cloud SQL instance, and checking
-   the stored GCS HMAC pair still resolves to a live key on the surviving service
-   account; and a fresh
+   reapplying the database password to the brand-new Cloud SQL instance, and proving the
+   stored GCS HMAC **pair** still authenticates against the surviving service account
+   rather than merely that its access ID resolves; and a fresh
    vault credential round-trips on the rebuilt stack. An operator who needs the data to
    survive needs a Cloud SQL export/restore step, which this plan does not build and the
    deploy guide says so.
@@ -649,11 +666,19 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   cipher of Decision 3: the ciphertext format marker, the 65536-byte plaintext guard
   behind a **`secrets` sentinel error** that the vault-credential handler classifies
   into the `errInvalid` family — without that classification the refusal is a generic
-  500 and the limit reaches nobody but the log — and the `secrets-backend=gcpkms` env
-  plumbing
-  (key resource name; ADC for auth) through the chart's Secret keys and
-  `map.secretsEnv`; docs for the Workload Identity binding. Hermetic contract + live
-  tier as above. Two things land in this same PR rather than being batched later,
+  500 and the limit reaches nobody but the log — and the env plumbing.
+
+  That plumbing is a naming contract, so it is settled here rather than at
+  implementation time, following the shape `internal/secrets/env.go` and
+  `map.secretsEnv` already establish (backend selector, then backend-prefixed keys, as
+  `openbao` does with `BAO_*`): **`SECRETS_BACKEND=gcpkms`** keeps its existing
+  `secrets-backend` Secret key, and the CryptoKey resource name arrives as
+  **`GCPKMS_KEY_NAME`** from a new **`gcpkms-key-name`** Secret key, threaded through
+  `map.secretsEnv` with the same `optional: true` as its siblings. It rides the Secret
+  for uniformity, not for confidentiality — a key resource name is not secret, and
+  Decision 3 says so; splitting it into a plain value would buy nothing and give the
+  backend two configuration paths. Authentication is ADC, so no credential accompanies
+  it. Docs for the Workload Identity binding. Hermetic contract + live tier as above. Two things land in this same PR rather than being batched later,
   because they are what makes the accepted limit honest: the **docs/DIVERGENCES.md
   entry** recording that this backend cannot serve every input the API accepts, and the
   **API-level boundary test** — a vault-credential create that succeeds under the local
@@ -674,8 +699,9 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   **create → destroy → create** on `environment/`, against the three things a rebuild
   can actually fail at (Decision 9): the second `apply` succeeds with no KMS name
   collision; the bootstrap script reconciles the live system against the surviving
-  secrets — the database password reapplied to the new Cloud SQL instance, the GCS HMAC
-  key checked against the surviving service account; and a **fresh**
+  secrets — the database password reapplied to the new Cloud SQL instance, the stored
+  GCS HMAC pair proven by an authenticated call rather than by resolving its access ID;
+  and a **fresh**
   vault credential round-trips on the rebuilt stack. Explicitly *not* an old credential
   surviving — `environment/` owns Cloud SQL, so the destroy takes the ciphertext with it
   by design.
