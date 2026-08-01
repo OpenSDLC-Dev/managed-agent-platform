@@ -2,10 +2,10 @@ package api
 
 import (
 	"encoding/json"
-	"net"
 	"net/url"
-	"strings"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 )
 
 // The credential auth union (plan 12 slice 2). The stored auth document is
@@ -392,44 +392,10 @@ func validateEndpointURL(raw, field string) error {
 // an IPv4 address, or a "*."-prefixed wildcard — no URLs, ports, paths, or
 // IPv6. (IPv4 is hostname-shaped, so one label check covers both.)
 func validateAllowedHost(h string) error {
-	badf := func() error {
-		return errInvalid("allowed_hosts entry %q is not a hostname, IPv4 address, or *.-wildcard", h)
-	}
-	wildcard := strings.HasPrefix(h, "*.")
-	host := strings.TrimPrefix(h, "*.")
-	if host == "" || strings.Contains(host, "*") {
-		return errInvalid("allowed_hosts entry %q: a wildcard must be a \"*.\" prefix on a hostname", h)
-	}
-	// A dotted-numeric entry must be a valid IPv4 literal (so 999.999.999.999
-	// is rejected), and a wildcard applies to hostnames only — never an IP.
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.To4() == nil {
-			return errInvalid("allowed_hosts entry %q: IPv6 is not supported", h)
-		}
-		if wildcard {
-			return errInvalid("allowed_hosts entry %q: a \"*.\" wildcard applies to hostnames, not IP addresses", h)
-		}
-		return nil
-	}
-	allNumeric := true
-	for _, label := range strings.Split(host, ".") {
-		if label == "" || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
-			return badf()
-		}
-		for _, r := range label {
-			switch {
-			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '-':
-				allNumeric = false
-			case r >= '0' && r <= '9':
-			default:
-				return badf()
-			}
-		}
-	}
-	// An all-numeric dotted string that net.ParseIP rejected is a malformed IP
-	// (e.g. 999.999.999.999), not a hostname.
-	if allNumeric {
-		return badf()
+	// The grammar lives with its matcher (internal/egress, the shared
+	// HostSet); this wrapper only recasts the failure as a wire 400.
+	if err := egress.ValidateHostEntry(h); err != nil {
+		return errInvalid("%s", err)
 	}
 	return nil
 }

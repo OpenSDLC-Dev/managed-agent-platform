@@ -39,7 +39,17 @@ func New(baseURL, key string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		key:     key,
-		hc:      &http.Client{Timeout: requestTimeout},
+		hc: &http.Client{Timeout: requestTimeout,
+			// Never follow a redirect: this client talks only to the
+			// operator-configured backend endpoint, so a 3xx means that
+			// configuration is stale (point the base URL at the
+			// post-redirect address). Chasing it would resend a request
+			// carrying model-controlled data to a host nobody vetted;
+			// refusing surfaces it as an HTTPError naming the drift.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 

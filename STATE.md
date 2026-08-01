@@ -9,6 +9,6 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Tasks
 
 - [x] #223 — NUL-strip tool output at the toolset boundary (three-layer tests) + the executor result-event backstop for web error text
-- [ ] #225 — operator-side `WEBTOOL_ALLOWED_DOMAINS` allowlist in the executor web driver (HostSet semantics)
+- [x] #225 — operator-side `WEBTOOL_ALLOWED_DOMAINS` allowlist in the executor web driver (HostSet semantics; both enforcement points mutation-checked)
 - [ ] #222 — plan, then fix the self_hosted web_exec double-answer race
 - [ ] #226 — plan the spill-to-file design (blocked on wire recording / sandbox-provisioning decision)

@@ -45,6 +45,15 @@
 //	                         controlplane-side, for the per-session gate
 //	BAO_ADDR / BAO_TOKEN / BAO_TRANSIT_KEY / SECRETS_MASTER_KEY / SECRETS_KEY_ID
 //	                         the rest of the cipher config (as controlplane)
+//	TAVILY_API_KEY           web_search backend key; unset leaves the tool
+//	                         unconfigured (it answers is_error naming it)
+//	JINA_API_KEY             web_fetch backend key; web_fetch needs this OR
+//	                         WEBFETCH_BASE_URL, else it answers is_error
+//	WEBSEARCH_BASE_URL / WEBFETCH_BASE_URL   Tavily-protocol / Jina-Reader-
+//	                         protocol endpoints (default: the public ones)
+//	WEBTOOL_ALLOWED_DOMAINS  comma-separated operator allowlist for both web
+//	                         tools (bare host, IPv4, or *.wildcard); empty =
+//	                         unrestricted
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
 //	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
 package main
@@ -52,13 +61,16 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/executor"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -67,6 +79,25 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
+
+// splitDomains parses the comma-separated WEBTOOL_ALLOWED_DOMAINS value. Empty
+// segments are dropped so a trailing comma cannot smuggle a match-nothing
+// entry, and every entry must pass the allowed-hosts grammar: an out-of-grammar
+// entry silently matches nothing (a typo would read as the operator's fence
+// when it is really a hole in it, or a deny-all), so it fails startup instead.
+func splitDomains(s string) ([]string, error) {
+	var out []string
+	for _, d := range strings.Split(s, ",") {
+		if d = strings.TrimSpace(d); d == "" {
+			continue
+		}
+		if err := egress.ValidateHostEntry(d); err != nil {
+			return nil, fmt.Errorf("WEBTOOL_ALLOWED_DOMAINS: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -101,11 +132,16 @@ func run(ctx context.Context) error {
 		// WEBFETCH_BASE_URL leaves web_fetch unconfigured (each answers
 		// is_error naming what is missing — never a silent default egress);
 		// empty base URLs resolve to the public endpoints once a tool is
-		// configured.
+		// configured. WEBTOOL_ALLOWED_DOMAINS (comma-separated; bare host,
+		// IPv4, or *.wildcard) bounds both tools' hosts; empty = unrestricted.
 		TavilyAPIKey:     os.Getenv("TAVILY_API_KEY"),
 		JinaAPIKey:       os.Getenv("JINA_API_KEY"),
 		WebSearchBaseURL: os.Getenv("WEBSEARCH_BASE_URL"),
 		WebFetchBaseURL:  os.Getenv("WEBFETCH_BASE_URL"),
+	}
+	var err error
+	if cfg.WebAllowedDomains, err = splitDomains(os.Getenv("WEBTOOL_ALLOWED_DOMAINS")); err != nil {
+		return err
 	}
 	for env, dst := range map[string]*time.Duration{
 		"EXECUTOR_LEASE_TTL": &cfg.LeaseTTL, "EXECUTOR_POLL_INTERVAL": &cfg.PollInterval,

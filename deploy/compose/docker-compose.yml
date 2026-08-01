@@ -198,12 +198,14 @@ services:
       # Web tool backends (docs/plan/15_web-tools.md). Empty TAVILY_API_KEY
       # leaves web_search unconfigured; empty JINA_API_KEY with no
       # WEBFETCH_BASE_URL leaves web_fetch unconfigured (each answers is_error
-      # naming what is missing). Filled from the host env or a compose-side
-      # .env — never committed.
+      # naming what is missing). WEBTOOL_ALLOWED_DOMAINS (comma-separated)
+      # bounds both tools' hosts; empty = unrestricted. Filled from the host
+      # env or a compose-side .env — never committed.
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       JINA_API_KEY: ${JINA_API_KEY:-}
       WEBSEARCH_BASE_URL: ${WEBSEARCH_BASE_URL:-}
       WEBFETCH_BASE_URL: ${WEBFETCH_BASE_URL:-}
+      WEBTOOL_ALLOWED_DOMAINS: ${WEBTOOL_ALLOWED_DOMAINS:-}
     # An explicit depends_on replaces the anchor's, so postgres is restated.
     depends_on:
       postgres:

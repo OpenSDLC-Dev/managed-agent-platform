@@ -185,6 +185,16 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 			if source == "" {
 				continue
 			}
+			// The operator's allowlist (#225) prunes hits like the other
+			// normalizations do: a source outside it is dropped rather than
+			// flagged, so the model never sees — and so never tries to fetch —
+			// a domain the operator has fenced off.
+			if e.webAllowed != nil {
+				su, serr := url.Parse(source)
+				if serr != nil || !e.webAllowed.Match(su.Hostname()) {
+					continue
+				}
+			}
 			title := toolset.SanitizeText(h.Title)
 			if title == "" {
 				title = source
@@ -226,8 +236,12 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 		// model-chosen URL (file://, gopher://, ...) reaches the reader
 		// backend's network position.
 		target := strings.TrimSpace(in.URL)
-		if parsed, perr := url.Parse(target); perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		parsed, perr := url.Parse(target)
+		if perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return fail(`web_fetch: "url" must be an http or https URL`)
+		}
+		if e.webAllowed != nil && !e.webAllowed.Match(parsed.Hostname()) {
+			return fail(fmt.Sprintf("web_fetch: host %q is outside the operator's allowed domains (WEBTOOL_ALLOWED_DOMAINS)", parsed.Hostname()))
 		}
 		page, err := e.fetcher.Fetch(ctx, target)
 		if err != nil {

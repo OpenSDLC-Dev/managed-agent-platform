@@ -100,3 +100,23 @@ func TestHostSetEmpty(t *testing.T) {
 		t.Error("nil host set must match nothing")
 	}
 }
+
+// ValidateHostEntry is the grammar's single source: the vault API wraps it and
+// the executor's WEBTOOL_ALLOWED_DOMAINS fails startup on it, because an
+// out-of-grammar entry stored in a HostSet silently matches nothing.
+func TestValidateHostEntry(t *testing.T) {
+	for _, ok := range []string{"example.com", "sub.example.com", "*.example.com", "10.0.0.1", "localhost"} {
+		if err := egress.ValidateHostEntry(ok); err != nil {
+			t.Errorf("ValidateHostEntry(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"https://example.com", "example.com:443", "example.com/docs",
+		"*example.com", ".example.com", "*.", "*", "999.999.999.999",
+		"::1", "::ffff:10.0.0.1", "*.10.0.0.1", "*.1", "ex ample.com",
+	} {
+		if err := egress.ValidateHostEntry(bad); err == nil {
+			t.Errorf("ValidateHostEntry(%q) = nil, want an error", bad)
+		}
+	}
+}
