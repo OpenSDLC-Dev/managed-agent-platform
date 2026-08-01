@@ -32,15 +32,18 @@ server unchanged. An agent is three independently-swappable pieces:
                                                │  resource CRUD + optimistic versions      │
                                                │  session state machine (idle/running/…)   │
                                                └──┬───────────────┬────────────────┬───────┘
-                                 model_turn work  │               │ append-only    │ tool_exec work
+                                 model_turn work  │               │ append-only    │ tool_exec + web_exec
                                                   ▼               ▼ event log      ▼  (work queue)
                                           ┌──────────────┐  ┌──────────┐   ┌──────────────────────────┐
                                           │ brain pool   │  │ Postgres │   │ executor                 │
                                           │ (stateless:  │◀▶│ events   │◀─▶│  Docker / K8s sandbox    │
                                           │ replay log,  │  │ sessions │   │  providers; runs the     │
                                           │ call model,  │  │ agents…  │   │  built-in toolset in a   │
-                                          │ emit events) │  └──────────┘   │  per-session container   │
-                                          └──────────────┘                 └──────────────────────────┘
+                                          │ emit events) │  └──────────┘   │  per-session container;  │
+                                          └──────────────┘                 │  web_fetch/web_search    │
+                                                                           │  in-process (web_exec,   │
+                                                                           │  both env kinds)         │
+                                                                           └──────────────────────────┘
                                                                                ▲ same pull protocol
                                                                                │
                                                             customer BYOC worker (ant beta:worker

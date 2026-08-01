@@ -343,8 +343,8 @@ func TestWebToolBadInputAnswersIsError(t *testing.T) {
 	// the adapters by TestWebFetchRejectsNonHTTPSchemesBeforeTheFetch (the
 	// jina adapter rejects the same schemes, so this answer alone cannot
 	// tell the two guards apart).
-	if text := results[2].Content[0].Text; !strings.Contains(text, "http") {
-		t.Errorf("file:// answer = %q, want it to name the http/https requirement", text)
+	if text := results[2].Content[0].Text; !strings.Contains(text, "http or https") {
+		t.Errorf("file:// answer = %q, want it to name the http-or-https requirement", text)
 	}
 }
 
@@ -358,10 +358,14 @@ func (s stubSearcher) Search(context.Context, string) ([]webtool.SearchResult, e
 	return s.hits, nil
 }
 
-type recordingFetcher struct{ calls int }
+type recordingFetcher struct {
+	calls   int
+	lastURL string
+}
 
-func (f *recordingFetcher) Fetch(context.Context, string) (webtool.FetchResult, error) {
+func (f *recordingFetcher) Fetch(_ context.Context, url string) (webtool.FetchResult, error) {
 	f.calls++
+	f.lastURL = url
 	return webtool.FetchResult{Content: "page"}, nil
 }
 
@@ -387,11 +391,25 @@ func TestWebFetchRejectsNonHTTPSchemesBeforeTheFetch(t *testing.T) {
 
 	res := e.runWebTool(context.Background(), toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"file:///etc/passwd"}`)})
 
-	if !res.IsError || !strings.Contains(res.Content, "http") {
-		t.Fatalf("result = %+v, want is_error naming the http/https requirement", res)
+	if !res.IsError || !strings.Contains(res.Content, "http or https") {
+		t.Fatalf("result = %+v, want is_error naming the http-or-https requirement", res)
 	}
 	if f.calls != 0 {
 		t.Errorf("fetcher calls = %d, want 0 — the executor seam rejects the scheme before the fetch", f.calls)
+	}
+}
+
+func TestWebFetchHandsTheAdapterTheTrimmedURL(t *testing.T) {
+	f := &recordingFetcher{}
+	e := &Executor{fetcher: f}
+
+	res := e.runWebTool(context.Background(), toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"  https://example.com/page  "}`)})
+
+	if res.IsError {
+		t.Fatalf("result = %+v, want a non-error answer", res)
+	}
+	if f.lastURL != "https://example.com/page" {
+		t.Errorf("fetched URL = %q, want the trimmed input", f.lastURL)
 	}
 }
 
