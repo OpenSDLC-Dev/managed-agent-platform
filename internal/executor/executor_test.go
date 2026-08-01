@@ -731,3 +731,32 @@ func TestEmptyToolResultOmitsEmptyTextBlock(t *testing.T) {
 		t.Errorf("content = %v, want an empty array (no empty text block)", body.Content)
 	}
 }
+
+// A tool result carrying a NUL byte must still answer and resume the turn:
+// Postgres's jsonb cannot store \u0000, so before the toolset boundary
+// sanitized it, the append faulted and the item reclaim-looped forever,
+// re-running the same command into the same failure (#223).
+func TestNULToolOutputStillAnswersAndResumes(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{"/workspace/nul.dat": "a\x00b"}}
+	h := newHarness(t, sb)
+	uses := h.suspend(t, readUse("nul.dat"))
+
+	worked, err := h.exec.step(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("step = %v, %v", worked, err)
+	}
+
+	results := h.toolResults(t)
+	if len(results) != 1 || results[0].IsError || results[0].ToolUseID != uses[0].ID.String() {
+		t.Fatalf("results = %+v, want one non-error answer to the read", results)
+	}
+	if len(results[0].Content) != 1 || results[0].Content[0].Text != "ab" {
+		t.Errorf("content = %+v, want one text block %q", results[0].Content, "ab")
+	}
+	if n := h.liveOf(t, queue.ToolExec); n != 0 {
+		t.Errorf("live tool_exec = %d, want 0 - a NUL result must not reclaim-loop", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn = %d, want 1", n)
+	}
+}

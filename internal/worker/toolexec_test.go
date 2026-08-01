@@ -667,3 +667,24 @@ func TestInvalidEnvironmentKeyRejected(t *testing.T) {
 		t.Errorf("provisions = %d, want 0 (rejected before provisioning)", h.prov.provisions)
 	}
 }
+
+// The BYOC worker shares the toolset boundary, so a NUL-emitting tool answers
+// on this path too - sanitized once in the shared dispatch, not at a second
+// worker-side site (#223).
+func TestNULToolOutputIsSanitizedByTheWorker(t *testing.T) {
+	sb := &fakeSandbox{files: map[string]string{"/workspace/nul.dat": "a\x00b"}}
+	h := newHarness(t, sb)
+	uses := h.suspend(t, readUse("nul.dat"))
+
+	if err := h.run(); err != nil {
+		t.Fatalf("RunSessionTools: %v", err)
+	}
+
+	results := h.results(t)
+	if len(results) != 1 || results[0].IsError || results[0].ToolUseID != uses[0].ID.String() {
+		t.Fatalf("results = %+v, want one non-error answer to the read", results)
+	}
+	if len(results[0].Content) != 1 || results[0].Content[0]["text"] != "ab" {
+		t.Errorf("content = %+v, want one text block %q", results[0].Content, "ab")
+	}
+}

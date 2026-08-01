@@ -133,8 +133,22 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	if err != nil {
 		return Result{}, err
 	}
-	res.Content = CapOutput(res.Content)
+	res.Content = CapOutput(SanitizeText(res.Content))
 	return res, nil
+}
+
+// SanitizeText strips NUL bytes from tool output. Postgres's jsonb cannot
+// store \u0000 inside a string value, so a NUL anywhere in a result — one
+// byte of /dev/zero on stdout is enough — would fault the event append, and a
+// faulted work item reclaim-loops, re-running the same command into the same
+// failure. Sanitized before CapOutput so the log budget is spent on bytes
+// that survive. Exported for the executor's web driver, which produces
+// results outside this Runner (the same reason CapOutput is exported).
+func SanitizeText(s string) string {
+	if strings.IndexByte(s, 0) < 0 {
+		return s
+	}
+	return strings.ReplaceAll(s, "\x00", "")
 }
 
 // workdir is the root relative tool paths resolve against.

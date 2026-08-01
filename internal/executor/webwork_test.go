@@ -414,8 +414,11 @@ func TestWebFetchHandsTheAdapterTheTrimmedURL(t *testing.T) {
 }
 
 func TestWebBackendErrorAnswersIsError(t *testing.T) {
+	// The body carries a NUL: it lands in the backend error's excerpt, which
+	// rides fail()'s error text — a path that never passes Runner.dispatch, so
+	// only the executor's result-event boundary stands between it and jsonb.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "secret-internal-detail", http.StatusBadGateway)
+		http.Error(w, "secret-internal\x00detail", http.StatusBadGateway)
 	}))
 	t.Cleanup(srv.Close)
 	prov := &fakeProvider{sb: &fakeSandbox{}}
@@ -428,6 +431,9 @@ func TestWebBackendErrorAnswersIsError(t *testing.T) {
 	results := h.toolResults(t)
 	if len(results) != 1 || !results[0].IsError {
 		t.Fatalf("results = %+v, want one is_error result", results)
+	}
+	if text := results[0].Content[0].Text; strings.IndexByte(text, 0) >= 0 {
+		t.Errorf("error text carries a NUL byte: %q", text)
 	}
 	if n := h.liveOf(t, queue.WebExec); n != 0 {
 		t.Errorf("live web_exec = %d, want 0 — a backend error is the model's, not a reclaim loop", n)

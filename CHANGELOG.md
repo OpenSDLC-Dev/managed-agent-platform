@@ -13,6 +13,24 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A NUL byte in tool output no longer wedges the session**
+  ([#223](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/223)). Postgres's `jsonb`
+  cannot store `\u0000`, so a tool whose output carried a raw NUL — one byte of `/dev/zero` on
+  stdout was enough — faulted the `agent.tool_result` append, and the faulted work item
+  reclaim-looped, re-running the same command into the same failure forever. Tool output is now
+  NUL-stripped at the shared toolset boundary (`toolset.SanitizeText`, applied in the dispatch
+  every `Runner` result passes through before `CapOutput`), which covers the cloud executor and
+  the BYOC worker in one place; bash additionally sanitizes before its failure arms cap through
+  `capWithTrailer`, so NUL bytes cannot spend the budget a failing command's stderr needs; and
+  the executor's result-event boundary strips once more — the web driver's error text embeds a
+  backend's `err.Error()` (which can quote a server-controlled body) and never passes dispatch.
+  The web driver drops its private copy of the same helper. Pinned by mutation-checked tests at
+  every layer: a real-sandbox contract test (NUL through bash, and a NUL-flooded failure keeping
+  its stderr), an executor-path regression (a NUL result answers and resumes instead of
+  reclaim-looping), a worker-path regression, and a NUL-bearing backend error on the web path.
+
 ### Added
 
 - **Web-tools plan archived** — plan 15 ([docs/plan/15_web-tools.md](./docs/plan/15_web-tools.md),

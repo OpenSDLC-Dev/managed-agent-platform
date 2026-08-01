@@ -50,9 +50,12 @@ func (r Runner) bash(ctx context.Context, id domain.ID, raw json.RawMessage) (Re
 		return succeed("bash session restarted")
 	}
 
-	out := combine(sandbox.ExecResult{
+	// Sanitized here, not just in dispatch: the failure arms below cap through
+	// capWithTrailer first, and NUL bytes must not spend the budget that a
+	// command's real output (its stderr above all) needs to survive.
+	out := SanitizeText(combine(sandbox.ExecResult{
 		Stdout: res.Stdout, Stderr: res.Stderr, Truncated: res.Truncated,
-	})
+	}))
 	// The status trailer is capped WITH the output rather than after it, so a
 	// command whose output overruns MaxOutputBytes does not lose the one line
 	// that says whether it failed.

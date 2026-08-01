@@ -439,3 +439,31 @@ func TestUnknownTool(t *testing.T) {
 	r := runner(t)
 	fails(t, r, "web_search", `{"query":"x"}`, "unknown tool")
 }
+
+// A NUL byte in tool output must never reach the Result: Postgres's jsonb
+// cannot store \u0000, so one unsanitized byte - a single byte of /dev/zero
+// on stdout is enough - would fault the tool-result append, and a faulted
+// work item reclaim-loops re-running the same command forever (#223).
+func TestOutputNULBytesAreStripped(t *testing.T) {
+	r := runner(t)
+	got := ok(t, r, "bash", `{"command":"printf 'a\\0b'"}`)
+	if strings.IndexByte(got, 0) >= 0 {
+		t.Fatalf("bash output carries a NUL byte: %q", got)
+	}
+	if strings.TrimSpace(got) != "ab" {
+		t.Errorf("content = %q, want ab (the NUL stripped, its neighbors kept)", got)
+	}
+
+	// A failing command flooded with NUL must keep its stderr: bash sanitizes
+	// before capWithTrailer, so NUL bytes cannot spend the budget the real
+	// output needs (the failure arms cap before dispatch's own sanitize runs).
+	t.Run("a NUL-flooded failure keeps its stderr", func(t *testing.T) {
+		got := fails(t, r, "bash", `{"command":"head -c 200000 /dev/zero; echo marker >&2; exit 3"}`, "exit code: 3")
+		if strings.IndexByte(got, 0) >= 0 {
+			t.Errorf("content carries a NUL byte")
+		}
+		if !strings.Contains(got, "marker") {
+			t.Errorf("stderr marker lost — NUL bytes spent the output budget")
+		}
+	})
+}
