@@ -678,13 +678,14 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   the third, leaving `runAsNonRoot` as the one blocker no configuration reaches. So
   slice 2 is a step toward `restricted` compliance, not the arrival.
 
-  And that accounting holds for the sandbox container of an **unrestricted** pod only.
-  Review of the landed slice corrected it: `restricted` evaluates *every* container in
-  the pod, init containers included, and any `limited` session carries one that fails it
-  outright — the gate sidecar when gated, `netsetup` when not. Both add `NET_ADMIN`,
-  neither drops `ALL`, neither sets `allowPrivilegeEscalation: false`. So a `limited`
-  pod is rejected whatever the configuration, gated or not. Nothing in this plan should
-  be read as making sandbox namespaces `restricted`-ready.
+  And that accounting holds only for a pod with no init container. `restricted` evaluates
+  *every* container in the pod, init containers included, and every pod carrying one fails
+  outright: the gate sidecar, or `netsetup`. Both add `NET_ADMIN`, neither drops `ALL`,
+  neither sets `allowPrivilegeEscalation: false`. The set is wider than the networking
+  type suggests — the gate rides `limited` networking **or any attached vault**, so a
+  vault-attached *unrestricted* session gets the sidecar too, and the only init-free shape
+  is unrestricted **and** vault-less, which `runAsNonRoot` still rejects. Nothing in this
+  plan should be read as making sandbox namespaces `restricted`-ready.
 
   Deliberately not in this slice, because no code can carry it: the **per-pod process
   limit**. `Hardening.PidsLimit` is Docker-only and the Pod API has no equivalent, so on

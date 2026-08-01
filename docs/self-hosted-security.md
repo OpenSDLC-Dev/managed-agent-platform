@@ -295,7 +295,8 @@ What is still yours at the runtime layer:
 - **AppArmor/SELinux.** The platform authors no profile for either; keep the
   runtime's defaults enabled, and never run sandboxes `--privileged` or with
   `--security-opt seccomp=unconfined`. **Seccomp is no longer in this list on
-  Kubernetes** — see the platform row below.
+  Kubernetes** — see the *Syscall filtering* row in the shared-responsibility
+  table above.
 - **Pod Security Admission.** A strict `restricted` namespace label still
   rejects the sandbox pod, in every configuration. Two of the three reasons it
   used to reject an *unrestricted* pod are now closed — `SANDBOX_CAP_DROP=ALL`
@@ -303,14 +304,20 @@ What is still yours at the runtime layer:
   `seccompProfile` of the shape `restricted` accepts — leaving one:
   `runAsNonRoot: true`, a *different* field from `SANDBOX_RUN_AS_USER`, which
   the provider does not set.
-  <br>That accounting covers the sandbox container alone. **`restricted`
-  evaluates every container in the pod, init containers included**, and any
-  `limited` session carries one that fails it outright: the gate sidecar when
-  gated, the `netsetup` init container when not. Both *add* `NET_ADMIN` (which
-  `restricted` permits only for `NET_BIND_SERVICE`), neither drops `ALL`, and
-  neither sets `allowPrivilegeEscalation: false`. So a `limited` pod is
-  rejected whatever the configuration, gated or not — and no amount of
-  `SANDBOX_*` tuning changes it.
+  <br>That accounting covers the sandbox container of a pod that has no init
+  container at all. **`restricted` evaluates every container in the pod, init
+  containers included**, and every pod that carries one fails outright on it:
+  the gate sidecar, or the `netsetup` init container. Both *add* `NET_ADMIN`
+  (which `restricted` permits only for `NET_BIND_SERVICE`), neither drops
+  `ALL`, and neither sets `allowPrivilegeEscalation: false`.
+  <br>Which pods those are is wider than the networking type suggests, and is
+  the boundary to get right: the gate rides **`limited` networking *or* any
+  attached vault**, so a vault-attached *unrestricted* session gets the sidecar
+  too. A `limited` session without a gate configured gets `netsetup` instead.
+  The only shape left with no init container is unrestricted **and**
+  vault-less — and that one is still rejected for `runAsNonRoot`. So no
+  configuration produces a `restricted`-acceptable sandbox pod, and no amount
+  of `SANDBOX_*` tuning changes it.
 
 ### 4. Read-only root filesystem
 
