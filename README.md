@@ -39,7 +39,7 @@ Two security invariants, adopted from the reference design:
 1. **Credentials never reach the sandbox.** Repos are cloned with a token the sandbox never sees; tool credentials are injected at egress.
 2. **A session is not a context window.** The harness may replay, slice, or rewind the event log before feeding the model, so context strategy is never baked into an irreversible compaction.
 
-Self-hosting means you own the infrastructure these run on. The **[self-hosted shared-responsibility model](./docs/self-hosted-security.md)** draws the line: what the platform enforces in code (credential isolation, scoped auth, fail-closed egress) versus what you configure (sandbox image hardening, capability drops, egress policy, environment-key rotation).
+Self-hosting means you own the infrastructure these run on. The **[self-hosted shared-responsibility model](./docs/self-hosted-security.md)** draws the line: what the platform enforces in code (credential isolation, scoped auth, fail-closed egress, and the sandbox's own cgroup limits and capability drops — on by default) versus what you configure (the sandbox image, egress policy for non-`limited` environments, a hardened container runtime, environment-key rotation).
 
 ## Roadmap
 

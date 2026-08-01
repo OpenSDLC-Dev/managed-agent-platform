@@ -66,6 +66,12 @@ type Config struct {
 	Workdir      string
 	LeaseTTL     time.Duration
 	PollInterval time.Duration
+	// Hardening is the containment every session's sandbox is created with —
+	// cgroup limits, capability drops, optionally a uid and a read-only root
+	// (#65). The zero value hardens nothing, which is what a test that builds a
+	// Config by hand wants; cmd/executor resolves the platform's defaults from
+	// the environment (sandbox.HardeningFromEnv), so every deployment gets them.
+	Hardening sandbox.Hardening
 	// ControlplaneURL and GateImage opt the deployment into the per-session egress
 	// gate. A session wants a gate when its networking is `limited` or it has
 	// vaults attached; its gate container (GateImage) fetches that session's egress
@@ -371,6 +377,7 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 		Workdir:    e.cfg.Workdir,
 		Networking: sess.networking,
 		Env:        env,
+		Hardening:  e.cfg.Hardening,
 		Gate:       gate,
 	})
 	if err != nil {

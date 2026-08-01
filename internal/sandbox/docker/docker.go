@@ -273,16 +273,21 @@ func pairedWithGate(info containerInfo, gateID string) bool {
 	return gateID == "" || info.HostConfig.NetworkMode == "container:"+gateID
 }
 
-// sandboxConfig is the session container's create config. When gateID is set the
-// sandbox joins the gate's network namespace (container:<gateID>) and is hardened
-// so it cannot forge the gate's egress identity: it drops NET_RAW (no raw or
-// AF_PACKET socket that would bypass the OUTPUT hook) and SETUID/SETGID (so even
-// a root process cannot setuid to the gate's uid and match the owner-ACCEPT rule)
-// and runs no-new-privileges (no setuid-binary escalation back to those caps).
-// Its HTTP(S)_PROXY is pointed at the gate's loopback proxy — the gate is where
-// egress is filtered and vault credentials are substituted. With no gate it
-// networks directly per its Networking (unrestricted, or none — fail-closed —
-// for limited).
+// sandboxConfig is the session container's create config. It applies
+// spec.Hardening — cgroup limits, capability drops, a uid, a read-only root with
+// writable volumes over the paths the sandbox writes — and, when gateID is set, joins the
+// gate's network namespace (container:<gateID>) and points HTTP(S)_PROXY at the
+// gate's loopback proxy, where egress is filtered and vault credentials are
+// substituted. With no gate it networks directly per its Networking
+// (unrestricted, or none — fail-closed — for limited).
+//
+// A gated sandbox always drops NET_RAW (no raw or AF_PACKET socket that would
+// bypass the OUTPUT hook) and SETUID/SETGID (so even a root process cannot
+// setuid to the gate's uid and match the owner-ACCEPT rule) whatever the
+// Hardening says — sandbox.Hardening.EffectiveCapDrop owns that union, so the
+// two backends cannot drift on it. no-new-privileges travels with any drop set:
+// dropping a capability while leaving setuid-binary escalation available would
+// hand it straight back.
 func sandboxConfig(spec sandbox.Spec, workdir, gateID string) containerConfig {
 	// Tools background processes and orphan them; an init process reaps them
 	// instead of letting them pile up as zombies for the session's whole life.
@@ -290,13 +295,30 @@ func sandboxConfig(spec sandbox.Spec, workdir, gateID string) containerConfig {
 	env := spec.Env
 	if gateID != "" {
 		host.NetworkMode = "container:" + gateID
-		host.CapDrop = []string{"NET_RAW", "SETUID", "SETGID"}
-		host.SecurityOpt = []string{"no-new-privileges"}
 		env = withProxyEnv(env)
 	} else {
 		host.NetworkMode = networkMode(spec.Networking)
 	}
-	return containerConfig{
+	h := spec.Hardening
+	if host.CapDrop = h.EffectiveCapDrop(gateID != ""); len(host.CapDrop) > 0 {
+		host.SecurityOpt = []string{"no-new-privileges"}
+	}
+	host.PidsLimit = h.PidsLimit
+	// The daemon takes CPU as nanoCPUs (its `--cpus`) and turns it into the
+	// cgroup's cpu.max quota; a millicore is a million of them.
+	host.NanoCpus = h.CPUMillis * 1_000_000
+	host.Memory = h.MemoryBytes
+	if h.ReadOnlyRootfs {
+		// The two paths the sandbox writes: the session workdir, and /tmp, which
+		// the image ships 1777 and a fresh anonymous volume inherits. See the
+		// `mount` type for why these are volumes and not tmpfs.
+		host.ReadonlyRootfs = true
+		host.Mounts = []mount{
+			{Type: "volume", Target: workdir},
+			{Type: "volume", Target: "/tmp"},
+		}
+	}
+	cfg := containerConfig{
 		Image: spec.Image,
 		Env:   envSlice(env),
 		// Hold the container open and guarantee the workdir exists. Nothing
@@ -308,6 +330,10 @@ func sandboxConfig(spec sandbox.Spec, workdir, gateID string) containerConfig {
 		Labels:     map[string]string{sessionLabel: string(spec.SessionID)},
 		HostConfig: host,
 	}
+	if h.RunAsUser != nil {
+		cfg.User = strconv.FormatInt(*h.RunAsUser, 10)
+	}
+	return cfg
 }
 
 // withProxyEnv returns a copy of env with the sandbox's egress-proxy variables

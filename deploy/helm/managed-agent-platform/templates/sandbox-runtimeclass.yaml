@@ -1,0 +1,19 @@
+{{- /*
+The hardened runtime for sandbox pods. RuntimeClass is cluster-scoped, so
+creating it is opt-in: it outlives the release, collides with another release
+creating the same name, and needs the nodes to already run the handler (gVisor's
+runsc, Kata's kata). Setting sandboxRuntimeClass.name alone — the usual case —
+just points the executor at a RuntimeClass the cluster already has.
+*/ -}}
+{{- if .Values.sandboxRuntimeClass.create }}
+{{- if not .Values.sandboxRuntimeClass.name }}
+{{- fail "sandboxRuntimeClass.create needs sandboxRuntimeClass.name: the object the chart would create is also the name the executor puts on sandbox pods" }}
+{{- end }}
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: {{ .Values.sandboxRuntimeClass.name | quote }}
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+handler: {{ .Values.sandboxRuntimeClass.handler | quote }}
+{{- end }}

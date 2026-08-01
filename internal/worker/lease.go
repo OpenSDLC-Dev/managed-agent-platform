@@ -59,6 +59,11 @@ type Config struct {
 	Image      string
 	Workdir    string
 	Networking domain.Networking
+	// Hardening caps every sandbox this worker provisions (#65) — the BYOC twin
+	// of the platform executor's. cmd/worker reads the same SANDBOX_* variables
+	// the executor does; the zero value hardens nothing, so a test builds a
+	// Config without acquiring a limit it did not ask for.
+	Hardening sandbox.Hardening
 	// EmptyPollSleep is the wait between empty polls (default 1s). Our poll is
 	// non-blocking, so this — not block_ms — spaces reconnections.
 	EmptyPollSleep time.Duration
@@ -348,6 +353,7 @@ func (w *Worker) runItem(ctx context.Context, work *sdk.BetaSelfHostedWork) (ite
 		Image:      w.cfg.Image,
 		Workdir:    w.cfg.Workdir,
 		Networking: w.cfg.Networking,
+		Hardening:  w.cfg.Hardening,
 	}); err != nil {
 		// A tool backend-faulted (or the heartbeat cancelled the run): some tools
 		// may be unanswered. Leave the item live for reclaim, matching the

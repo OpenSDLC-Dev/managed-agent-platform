@@ -25,8 +25,15 @@ const DefaultAgentToolsetPolicy = domain.PolicyAlwaysAllow
 // no such Input types (see their own comment below).
 var definitions = []toolDef{
 	{
-		name:        "bash",
-		description: "Run a bash command in a persistent shell. State (cwd, env vars) persists across calls.",
+		name: "bash",
+		// The redirection sentence is ours, and it is behavioural rather than
+		// cosmetic: a backgrounded process inherits the call's output stream and
+		// holds it open after the command itself has exited, so an unredirected
+		// straggler costs about two seconds per call while the daemon force-closes
+		// it. Telling the model up front is cheaper than paying it every call.
+		description: "Run a bash command in a persistent shell. State (cwd, env vars) persists across calls. " +
+			"Redirect the output of any process you background (`cmd > /tmp/out 2>&1 &`): a straggler still " +
+			"holding this call's output stream open delays the result.",
 		props: map[string]any{
 			"command":    prop("string", "The command to run."),
 			"restart":    prop("boolean", "Restart the persistent shell before running."),

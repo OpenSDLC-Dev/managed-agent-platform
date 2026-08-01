@@ -23,7 +23,11 @@ func TestDockerProviderContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("contract tests require Docker: %v", err)
 		}
-		return sandboxtest.Harness{Provider: provider, Image: testImage, Gate: gateFixture}
+		return sandboxtest.Harness{
+			Provider: provider, Image: testImage, Gate: gateFixture,
+			// The daemon caps a single container's process count (HostConfig.PidsLimit).
+			EnforcesPidsLimit: true,
+		}
 	})
 }
 

@@ -32,6 +32,10 @@ type Config struct {
 	K8sContext       string
 	K8sNamespace     string
 	K8sNetSetupImage string
+	// k8s: the RuntimeClass sandbox pods run under (a hardened runtime such as
+	// gVisor's runsc). Empty uses the cluster default. Docker has no analogue —
+	// a runtime there is a daemon-level choice, not a per-container one.
+	K8sRuntimeClass string
 }
 
 // New builds the named sandbox provider, or an error naming the accepted set.
@@ -45,6 +49,7 @@ func New(cfg Config) (sandbox.Provider, error) {
 			Context:       cfg.K8sContext,
 			Namespace:     cfg.K8sNamespace,
 			NetSetupImage: cfg.K8sNetSetupImage,
+			RuntimeClass:  cfg.K8sRuntimeClass,
 		})
 	default:
 		return nil, fmt.Errorf("sandbox backend %q is not one of docker, k8s", cfg.Backend)

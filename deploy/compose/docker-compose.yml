@@ -173,6 +173,19 @@ services:
       DOCKER_HOST: unix:///var/run/docker.sock
       # Base image for the per-session sandbox containers the executor launches.
       EXECUTOR_IMAGE: ${EXECUTOR_IMAGE:-debian:stable-slim}
+      # Sandbox containment (#65). The executor applies its own defaults when
+      # these are unset — 512 processes, 2 CPUs, and the NET_RAW/SETUID/SETGID
+      # drops — so they are here to be *lowered* or turned off (0, or `none` for
+      # the capabilities), not to switch containment on. The two that are off by
+      # default are opt-in because they need an image that tolerates them:
+      # SANDBOX_MEMORY_BYTES (an OOM kill mid-task) and SANDBOX_READONLY_ROOTFS /
+      # SANDBOX_RUN_AS_USER (a uid that can reach the workdir).
+      SANDBOX_PIDS_LIMIT: ${SANDBOX_PIDS_LIMIT:-}
+      SANDBOX_CPU_MILLIS: ${SANDBOX_CPU_MILLIS:-}
+      SANDBOX_MEMORY_BYTES: ${SANDBOX_MEMORY_BYTES:-}
+      SANDBOX_CAP_DROP: ${SANDBOX_CAP_DROP:-}
+      SANDBOX_READONLY_ROOTFS: ${SANDBOX_READONLY_ROOTFS:-}
+      SANDBOX_RUN_AS_USER: ${SANDBOX_RUN_AS_USER:-}
       # Skill archives come from the same bundled MinIO the controlplane
       # writes; unset BLOB_ENDPOINT and the executor skips materialization.
       BLOB_ENDPOINT: minio:9000
