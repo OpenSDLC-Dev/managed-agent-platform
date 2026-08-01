@@ -4,8 +4,15 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** The web-tools follow-up hardening batch (#223 → #225 → #222 → #226, split out of plan 15/#47) and the model-lane NUL guard it surfaced (#228) completed 2026-08-01 — delivery narratives in CHANGELOG.md, plans 16 and 18 archived with summaries in docs/HISTORY.md. The backlog is GitHub issues.
+**[docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) (approved)** — the
+Google Cloud production-deployment plan, authored and approved 2026-08-01 from GCP probes
+run the same day. Development starts at slice 1.
 
 ## Tasks
 
-**None.**
+- [x] Plan 20 authored and approved (this PR) — evidence in its Ground truth section
+- [ ] Slice 1 — GCS delete convergence (`internal/blob/s3`)
+- [ ] Slice 2 — sandbox pod placement and bounds (seccomp, ephemeral-storage, node sel.)
+- [ ] Slice 3 — `internal/secrets/gcpkms` cipher + size guard + chart knob + `cmd/` wiring
+- [ ] Slice 4 — staging environment (`deploy/gcp/`) + mode-1 acceptance on GKE
+- [ ] Slice 5 — mode-2 acceptance + `docs/deploy-gcp.md`
