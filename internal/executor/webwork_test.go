@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/webtool"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -188,7 +189,6 @@ func TestWebSearchBoundsAndNormalizesTheAnswer(t *testing.T) {
 		{"title": "third\x00third", "url": "https://c.example/\x00", "content": "sni\x00ppet"},
 		{"title": "", "url": "https://d.example/", "content": "snippet"},
 		{"title": "no-url", "url": "", "content": "dropped"},
-		{"title": strings.Repeat("t", toolset.MaxOutputBytes), "url": "https://e.example/", "content": "x"},
 	}})
 	h := webHarness(t, string(hits), "")
 	h.suspendWeb(t, searchUse("q"))
@@ -201,7 +201,7 @@ func TestWebSearchBoundsAndNormalizesTheAnswer(t *testing.T) {
 	}
 	blocks := results[0].Content
 	if len(blocks) != 4 {
-		t.Fatalf("blocks = %d, want 4 (the URL-less hit and the budget-busting title both dropped)", len(blocks))
+		t.Fatalf("blocks = %d, want 4 (the URL-less hit dropped)", len(blocks))
 	}
 	var total int
 	for _, b := range blocks {
@@ -339,10 +339,59 @@ func TestWebToolBadInputAnswersIsError(t *testing.T) {
 			t.Errorf("result %d = %+v, want is_error for the bad argument", i, r)
 		}
 	}
-	// The scheme check is the only guard between a model-chosen URL and the
-	// reader backend's network position (no gate on this path).
+	// End-to-end shape only; the executor-seam check itself is pinned below
+	// the adapters by TestWebFetchRejectsNonHTTPSchemesBeforeTheFetch (the
+	// jina adapter rejects the same schemes, so this answer alone cannot
+	// tell the two guards apart).
 	if text := results[2].Content[0].Text; !strings.Contains(text, "http") {
 		t.Errorf("file:// answer = %q, want it to name the http/https requirement", text)
+	}
+}
+
+// stubSearcher and recordingFetcher drive runWebTool directly — below the
+// adapters — so behavior the adapters would mask stays pinned: the Tavily hit
+// cap truncates a long result list before the executor ever sees it, and the
+// jina adapter re-validates URL schemes.
+type stubSearcher struct{ hits []webtool.SearchResult }
+
+func (s stubSearcher) Search(context.Context, string) ([]webtool.SearchResult, error) {
+	return s.hits, nil
+}
+
+type recordingFetcher struct{ calls int }
+
+func (f *recordingFetcher) Fetch(context.Context, string) (webtool.FetchResult, error) {
+	f.calls++
+	return webtool.FetchResult{Content: "page"}, nil
+}
+
+func TestWebSearchDropsAHitWhoseMetadataBustsTheBudget(t *testing.T) {
+	e := &Executor{searcher: stubSearcher{hits: []webtool.SearchResult{
+		{Title: strings.Repeat("t", toolset.MaxOutputBytes), URL: "https://big.example/", Content: "x"},
+		{Title: "small", URL: "https://small.example/", Content: "snippet"},
+	}}}
+
+	res := e.runWebTool(context.Background(), toolUse{name: "web_search", input: json.RawMessage(`{"query":"q"}`)})
+
+	if res.IsError {
+		t.Fatalf("result = %+v, want a non-error answer", res)
+	}
+	if len(res.SearchResults) != 1 || res.SearchResults[0].Source != "https://small.example/" {
+		t.Errorf("blocks = %+v, want only the small hit — title and source charge the budget too", res.SearchResults)
+	}
+}
+
+func TestWebFetchRejectsNonHTTPSchemesBeforeTheFetch(t *testing.T) {
+	f := &recordingFetcher{}
+	e := &Executor{fetcher: f}
+
+	res := e.runWebTool(context.Background(), toolUse{name: "web_fetch", input: json.RawMessage(`{"url":"file:///etc/passwd"}`)})
+
+	if !res.IsError || !strings.Contains(res.Content, "http") {
+		t.Fatalf("result = %+v, want is_error naming the http/https requirement", res)
+	}
+	if f.calls != 0 {
+		t.Errorf("fetcher calls = %d, want 0 — the executor seam rejects the scheme before the fetch", f.calls)
 	}
 }
 

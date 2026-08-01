@@ -37,8 +37,9 @@ copy of an entry here.
   charged against one shared `toolset.MaxOutputBytes` budget; no hits → a single "No results
   found." text block, the documented shape) carried on the new `toolset.Result.SearchResults`
   field; `web_fetch` → a text block capped at the same `toolset.CapOutput` log budget every sandbox
-  tool honors (block choice INFERRED), the model-chosen URL restricted to http/https before it
-  reaches the reader — nothing else guards this gate-bypassing path; backend strings NUL-stripped so a hostile page cannot fault the `jsonb` append. Every
+  tool honors (block choice INFERRED), the model-chosen URL restricted to http/https at the
+  executor seam — defense in depth ahead of the adapter's identical check, on a path the
+  per-session gate never sees; backend strings NUL-stripped so a hostile page cannot fault the `jsonb` append. Every
   web failure — bad input, unreachable page, backend HTTP error, or an unconfigured backend (the
   `is_error` names what is missing: `TAVILY_API_KEY` for search, `JINA_API_KEY` or
   `WEBFETCH_BASE_URL` for fetch — with neither set, fetch stays unconfigured rather than silently

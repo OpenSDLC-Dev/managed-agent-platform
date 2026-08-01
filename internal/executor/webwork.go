@@ -221,13 +221,15 @@ func (e *Executor) runWebTool(ctx context.Context, u toolUse) toolset.Result {
 			return fail(`web_fetch: input requires a non-empty "url" string`)
 		}
 		// The web tools egress from this process, outside the per-session
-		// gate, so this scheme check is all that stands between a
-		// model-chosen URL (file://, gopher://, ...) and the reader backend's
-		// own network position.
-		if parsed, perr := url.Parse(strings.TrimSpace(in.URL)); perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		// gate, so the executor rejects non-http(s) schemes at its own seam —
+		// defense in depth ahead of the adapter's identical check — before a
+		// model-chosen URL (file://, gopher://, ...) reaches the reader
+		// backend's network position.
+		target := strings.TrimSpace(in.URL)
+		if parsed, perr := url.Parse(target); perr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return fail(`web_fetch: "url" must be an http or https URL`)
 		}
-		page, err := e.fetcher.Fetch(ctx, in.URL)
+		page, err := e.fetcher.Fetch(ctx, target)
 		if err != nil {
 			return fail("web_fetch: " + err.Error())
 		}
