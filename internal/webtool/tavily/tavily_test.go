@@ -116,9 +116,6 @@ func TestDefaultBaseURL(t *testing.T) {
 	if tavily.DefaultBaseURL != "https://api.tavily.com" {
 		t.Errorf("DefaultBaseURL = %q", tavily.DefaultBaseURL)
 	}
-	// Covers New's default-wiring branch; the resolved URL is unobservable
-	// without a network call, and the constant's value is pinned above.
-	_ = tavily.New("", "k")
 }
 
 func TestSearchRejectsUnusableBaseURL(t *testing.T) {

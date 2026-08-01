@@ -87,9 +87,6 @@ func TestDefaultBaseURL(t *testing.T) {
 	if jina.DefaultBaseURL != "https://r.jina.ai" {
 		t.Errorf("DefaultBaseURL = %q", jina.DefaultBaseURL)
 	}
-	// Covers New's default-wiring branch; the resolved URL is unobservable
-	// without a network call, and the constant's value is pinned above.
-	_ = jina.New("", "k")
 }
 
 func TestFetchRejectsUnusableBaseURL(t *testing.T) {
