@@ -15,6 +15,15 @@ copy of an entry here.
 
 ### Added
 
+- **Web-tools plan archived** — plan 15 ([docs/plan/15_web-tools.md](./docs/plan/15_web-tools.md),
+  [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)) completes with its docs
+  slice: the two remaining DIVERGENCES registrations — oversized tool output is truncated, never
+  spilled to a sandbox file (deliberate, [#226](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/226))
+  and the reference's wire-invisible per-tool allowed domains recorded as INFERRED
+  ([#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)) — the README status
+  line (the `agent_toolset_20260401` toolset is complete), and the plan's archive; the delivery
+  record is [docs/HISTORY.md](./docs/HISTORY.md) § "Web tools plan (15)".
+
 - **`web_fetch` and `web_search` execute** — plan 15's slices 2+3
   ([docs/plan/15_web-tools.md](./docs/plan/15_web-tools.md),
   [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47)). The last two

@@ -1,9 +1,12 @@
 ---
-status: in-progress
+status: archived
 issue: "#47"
 ---
 
 # web_fetch + web_search built-in tools (plan 15)
+
+> **Archived 2026-08-01 — completed.** All four slices delivered (PRs #221, #224, and the
+> slice-4 docs PR); the progress summary is docs/HISTORY.md § "Web tools plan (15)".
 
 This plan lifts **#47** out of its deferral: the last two `agent_toolset_20260401` tools,
 executed **in the executor process on both deployment modes** (cloud *and* self_hosted),
