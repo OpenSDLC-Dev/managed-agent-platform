@@ -133,8 +133,45 @@ func (r Runner) dispatch(ctx context.Context, id domain.ID, name string, input j
 	if err != nil {
 		return Result{}, err
 	}
-	res.Content = CapOutput(SanitizeText(res.Content))
+	res.Content = SanitizeText(res.Content)
+	// read never spills: its full content already sits in the sandbox at the
+	// very path the model just named, so a spill would only copy a file to a
+	// second file — and reading a spill file back would then mint another
+	// copy under a fresh id on every attempt, a chain with no fixed point.
+	// An oversized read truncates plainly; view_range and bash slicing reach
+	// the rest. Every other tool's output is ephemeral — the one place the
+	// spill earns its keep.
+	if name != "read" {
+		if notice := r.spill(ctx, id, res.Content); notice != "" {
+			res.Content = truncateRunes(res.Content, MaxOutputBytes) + "\n" + notice
+			return res, nil
+		}
+	}
+	res.Content = CapOutput(res.Content)
 	return res, nil
+}
+
+// spillDir is where an oversized output's full bytes land in the sandbox —
+// outside the workdir, so a project-relative glob or grep never matches a
+// spill file. The convention is ours: the reference documents the spill but
+// neither its path nor its preview shape (docs/DIVERGENCES.md, #226).
+const spillDir = "/tmp/tool_outputs"
+
+// spill writes an output past MaxOutputBytes to the sandbox whole and returns
+// the truncation notice naming the file — or "" when the output fits, or when
+// the write fails: the caller then truncates exactly as before, so the spill
+// is an enhancement, never a new failure mode for the call. The web tools
+// never reach it — their driver runs with no sandbox at all, a deliberate
+// divergence (web content is re-fetchable; a command's output is not).
+func (r Runner) spill(ctx context.Context, id domain.ID, full string) string {
+	if len(full) <= MaxOutputBytes {
+		return ""
+	}
+	path := spillDir + "/" + id.String() + ".txt"
+	if err := r.Sandbox.WriteFile(ctx, path, []byte(full)); err != nil {
+		return ""
+	}
+	return "[output truncated; full output written to " + path + "]"
 }
 
 // SanitizeText strips NUL bytes from tool output. Postgres's jsonb cannot
@@ -224,12 +261,16 @@ func CapOutput(s string) string {
 // signal — whether the command failed — and must survive truncation of a huge
 // output, which they would not if the trailer were appended and the join then
 // capped from the end. The result is already within the cap, so Run's own
-// CapOutput leaves it untouched.
-func capWithTrailer(body, trailer string) string {
+// CapOutput leaves it untouched. spillNotice, when non-empty, replaces the
+// plain truncation marker — a spilled body's preview names its file.
+func capWithTrailer(body, trailer, spillNotice string) string {
 	if len(body)+len(trailer) <= MaxOutputBytes {
 		return body + trailer
 	}
 	notice := "\n" + truncationNotice
+	if spillNotice != "" {
+		notice = "\n" + spillNotice
+	}
 	budget := MaxOutputBytes - len(trailer) - len(notice)
 	if budget < 0 {
 		budget = 0

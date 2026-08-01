@@ -174,6 +174,11 @@ func (r Runner) grep(ctx context.Context, raw json.RawMessage) (Result, error) {
 	if out == "" {
 		return succeed("no matches")
 	}
+	// The sandbox's own per-stream cap may already have cut this stream; the
+	// marker must ride along, or a spill of it would read as the full result.
+	if res.Truncated {
+		out = truncationNotice + "\n" + out
+	}
 	return succeed(out)
 }
 

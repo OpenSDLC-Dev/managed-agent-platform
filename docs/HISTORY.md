@@ -33,9 +33,9 @@ recorded nowhere else.
 
 ---
 
-## Sandbox hardening (plan 18) — archived 2026-08-01, delivered in one PR (#65)
+## Sandbox hardening (plan 19) — archived 2026-08-01, delivered in one PR (#65)
 
-docs/plan/18_sandbox-hardening.md is archived complete: every sandbox is now created with cgroup limits and capability drops by default, with a memory cap, a read-only root filesystem, a non-root uid and a Kubernetes `runtimeClassName` available on request. The narrative is in CHANGELOG.md; what follows is only what a changelog cannot hold — the alternatives that were evaluated and rejected, and the measurements that decided them.
+docs/plan/19_sandbox-hardening.md is archived complete: every sandbox is now created with cgroup limits and capability drops by default, with a memory cap, a read-only root filesystem, a non-root uid and a Kubernetes `runtimeClassName` available on request. The narrative is in CHANGELOG.md; what follows is only what a changelog cannot hold — the alternatives that were evaluated and rejected, and the measurements that decided them.
 
 - **Failing `Provision` on Kubernetes when a pids limit is configured** — the fail-closed shape this codebase normally prefers, and the honest one: a security control the backend cannot enforce would never be silently ignored. Rejected because the platform default is *on* (512), so it would have broken every Kubernetes deployment out of the box for a control the cluster expresses elsewhere entirely — the kubelet's `podPidsLimit`. What landed instead makes the asymmetry structural rather than hidden: the shared contract's pids row is registered only for a backend declaring `Harness.EnforcesPidsLimit`, `TestPodSpecIgnoresPidsLimit` pins the Kubernetes side as deliberate, and docs/DIVERGENCES.md carries the entry. Measured while deciding: a pod under a 500m CPU limit on kind reads `/sys/fs/cgroup/pids.max` as the node default (9517), and `k8s.io/api` v0.36.2 `core/v1` defines no pids `ResourceName` at all.
 - **Putting the hardening on the provider config rather than on `sandbox.Spec`** — less code, and arguably the more honest home for what is deployment configuration. Rejected because the acceptance asks the *shared contract suite* to cover the controls, and a per-`Spec` knob lets one row provision a differently hardened sandbox from the same provider; a provider-config knob would have needed a second harness hook per dimension.
@@ -94,6 +94,34 @@ pinned by a mutation-checked test (the fix reverted, the test observed to fail).
 - **The `bash` description was the one sandbox-tool string that still matched the SDK's verbatim**, and now deliberately does not (verifier, recorded for completeness). Registered in docs/DIVERGENCES.md rather than left as an unregistered mismatch, since a divergence outside the registry is a finding.
 - **Documentation claims that were not true**, each corrected: `RunAsUser`'s own doc comment and the contract row's said a read-only root's writable mount makes the workdir writable by a non-root uid, which holds only on Kubernetes (the plan and the security doc already said so — the code contradicted them); the divergence registry claimed a shared *memory* contract row that does not exist; the security doc claimed a strict Pod Security `restricted` namespace would accept the pod once `SANDBOX_RUN_AS_USER` was set, when `restricted` wants `runAsNonRoot`, a `seccompProfile` and `drop: [ALL]`, none of which that knob supplies; and the chart's RuntimeClass comment claimed the created object outlives the release, when Helm removes it on uninstall (Codex) — left Helm-managed deliberately, since a chart that strands cluster-scoped objects is the worse failure.
 - **Refuted, with evidence:** that `EffectiveCapDrop` could be made to drop the gate's three by configuration. Every route was checked — `"ALL"` (which absorbs them), duplicates, ordering, and an empty configured set — and the union is applied after the configured value in one function both backends call. Both reviewers audited it independently and neither found a path; the remaining hazard is the *uid*, not the capability set, which is the finding above.
+
+## Spill oversized tool output (plan 18) — archived 2026-08-01, delivered in one PR (#226)
+
+A single-PR plan, the plan-16 precedent. The issue's open design fork — the web tools run in the
+executor with no sandbox provisioned, so where does a web answer spill? — resolved to **web
+answers do not spill**: provisioning a sandbox solely to store a spilled answer would couple the
+web pass back into sandbox lifecycle (plan 15's "no sandbox and no gate" was deliberate), and web
+content, unlike a command's output, is re-fetchable — the model can fetch again, narrower. The
+five eligible sandbox tools spill via the `Runner`'s own sandbox handle. Also evaluated and rejected: spilling
+raw (pre-sanitize) bytes — the file holds the NUL-stripped text the trailer describes; spilling
+in bash's success arm as well as its failure arms — the success arm reaches dispatch uncapped
+and spilling twice would write the same file twice per call. The issue's other unknown — the
+reference's preview shape and path convention — stayed unobservable (no recording capability
+against the real backend); both landed as ours, INFERRED, in the rewritten DIVERGENCES entry.
+One honest bound recorded there: "whole" is everything `Sandbox.Exec` retained and returned to
+the toolset, bounded by its pre-existing 1 MiB per-stream memory guard. The review round then
+forced one behavior change and killed one wrong claim, both reviewers converging on each: the
+first cut spilled `read` output too, and because every spill file exceeds the cap by
+construction, reading one back minted another full copy under a fresh id — a chain with no fixed
+point, measured at five distinct 106 KB copies in five follow-the-notice reads — so `read` is now
+exempt (decision 8; its full content already sits at the path the model named); and the original
+rune-boundary fixture (2-byte runes against an even cap) could never split a rune, so both
+preview paths are now pinned with 3-byte fixtures the cap genuinely cuts mid-rune, plus the
+timeout arm's spill and the write-attempt-on-failure, all mutation-checked. The PR round added
+one more: a successful grep that hit the sandbox's own 1 MiB Exec retention arrived with
+`Truncated` set but dropped the flag, so a spill of it claimed "full output" for a result the
+sandbox had already cut — grep's success arm now carries the upstream `[output truncated]`
+marker at its head, mutation-checked (the test observed red against the unfixed arm).
 
 ## Model endpoint stall bound (plan 17) — archived 2026-08-01, delivered in one PR (#121)
 

@@ -392,8 +392,13 @@ func TestAbsoluteGlobPattern(t *testing.T) {
 // The tool result is what goes on the event log forever, so it is capped — and
 // the cut backs off to a rune boundary rather than splitting a character.
 func TestOutputIsCapped(t *testing.T) {
-	long := strings.Repeat("é", toolset.MaxOutputBytes) // 2 bytes each
-	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: long, ExitCode: 0}}
+	// 3-byte runes: the cap is not a multiple of 3, so a raw byte slice
+	// would split a rune — a 2-byte fixture against the even cap never
+	// could, and proved nothing. writeErr keeps this fixture on the
+	// plain-truncation path; the spill preview's own cut is pinned by
+	// TestOversizedOutputSpillsToTheSandbox with the same rune width.
+	long := strings.Repeat("€", toolset.MaxOutputBytes/2)
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: long, ExitCode: 0}, writeErr: errors.New("no spill")}
 	res, err := run(t, sb, "grep", `{"pattern":"x"}`)
 	if err != nil {
 		t.Fatalf("grep: %v", err)
@@ -415,34 +420,52 @@ func TestOutputIsCapped(t *testing.T) {
 func TestBashStatusTrailerSurvivesTruncation(t *testing.T) {
 	huge := strings.Repeat("x", toolset.MaxOutputBytes+50_000)
 
-	t.Run("exit code", func(t *testing.T) {
-		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: huge, ExitCode: 7}}
-		res, err := run(t, sb, "bash", `{"command":"big; exit 7"}`)
+	// Both failure arms spill before capping — the spill file must hold the
+	// WHOLE output, not the capped preview, and the notice rides between the
+	// truncated body and the status trailer. Explicit ids so the file's
+	// content can be asserted, not just its existence.
+	bash := func(t *testing.T, sb *fakeSandbox, input string) (toolset.Result, string) {
+		t.Helper()
+		r := toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
+		id := domain.NewID("sevt")
+		res, err := r.Run(context.Background(), id, "bash", json.RawMessage(input))
 		if err != nil {
 			t.Fatalf("bash: %v", err)
 		}
+		return res, "/tmp/tool_outputs/" + id.String() + ".txt"
+	}
+
+	t.Run("exit code", func(t *testing.T) {
+		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: huge, ExitCode: 7}}
+		res, spillPath := bash(t, sb, `{"command":"big; exit 7"}`)
 		if !res.IsError || !strings.HasSuffix(res.Content, "\nexit code: 7") {
 			t.Fatalf("content tail = %q, want the exit code to survive", tail(res.Content))
 		}
 		if len(res.Content) > toolset.MaxOutputBytes {
 			t.Fatalf("content is %d bytes, want it within the cap", len(res.Content))
 		}
-		if !strings.Contains(res.Content, "[output truncated]") {
-			t.Fatal("content does not report the truncation")
+		if !strings.Contains(res.Content, "[output truncated; full output written to "+spillPath+"]") {
+			t.Fatal("content does not report the truncation and the spill file")
+		}
+		if sb.files[spillPath] != huge {
+			t.Fatalf("spill file holds %d bytes, want the full %d", len(sb.files[spillPath]), len(huge))
 		}
 	})
 
 	t.Run("timeout", func(t *testing.T) {
 		sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: huge, TimedOut: true}}
-		res, err := run(t, sb, "bash", `{"command":"big","timeout_ms":500}`)
-		if err != nil {
-			t.Fatalf("bash: %v", err)
-		}
+		res, spillPath := bash(t, sb, `{"command":"big","timeout_ms":500}`)
 		if !res.IsError || !strings.HasSuffix(res.Content, "state changes were dropped") {
 			t.Fatalf("content tail = %q, want the timeout notice to survive", tail(res.Content))
 		}
 		if len(res.Content) > toolset.MaxOutputBytes {
 			t.Fatalf("content is %d bytes, want it within the cap", len(res.Content))
+		}
+		if !strings.Contains(res.Content, "[output truncated; full output written to "+spillPath+"]") {
+			t.Fatal("content does not report the truncation and the spill file")
+		}
+		if sb.files[spillPath] != huge {
+			t.Fatalf("spill file holds %d bytes, want the full %d", len(sb.files[spillPath]), len(huge))
 		}
 	})
 }
@@ -507,5 +530,113 @@ func TestSearchPatternsAreQuoted(t *testing.T) {
 		if strings.Contains(script, "; touch /pwned; ") && !strings.Contains(script, `'\''`) {
 			t.Fatalf("%s: the pattern reached the script unquoted:\n%s", tc.tool, script)
 		}
+	}
+}
+
+// The spill (#226, docs/plan/18_spill-oversized-output.md): an output past
+// MaxOutputBytes lands whole in a sandbox file and the preview names it. The
+// fixture is 3-byte runes so the cap falls mid-rune — the preview's own cut
+// must back off to a boundary, a property the fallback path pins separately.
+func TestOversizedOutputSpillsToTheSandbox(t *testing.T) {
+	full := strings.Repeat("€", 40_000) // 120000 bytes; 102400 % 3 != 0
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: full}}
+	r := toolset.Runner{Sandbox: sb, Session: domain.NewID("sesn")}
+	id := domain.NewID("sevt")
+	res, err := r.Run(context.Background(), id, "grep", json.RawMessage(`{"pattern":"x"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("grep: err=%v content=%s", err, tail(res.Content))
+	}
+	spillPath := "/tmp/tool_outputs/" + id.String() + ".txt"
+	if sb.files[spillPath] != full {
+		t.Errorf("spill file holds %d bytes, want the full %d", len(sb.files[spillPath]), len(full))
+	}
+	wantSuffix := "\n[output truncated; full output written to " + spillPath + "]"
+	if !strings.HasSuffix(res.Content, wantSuffix) {
+		t.Fatalf("content tail = %q, want it to end with %q", tail(res.Content), wantSuffix)
+	}
+	body := strings.TrimSuffix(res.Content, wantSuffix)
+	if len(body) > toolset.MaxOutputBytes || !strings.HasPrefix(full, body) {
+		t.Errorf("preview body is %d bytes, want the output's own head within the cap", len(body))
+	}
+	if !utf8.ValidString(body) {
+		t.Error("the spill preview's cut split a rune")
+	}
+}
+
+func TestOutputWithinTheCapDoesNotSpill(t *testing.T) {
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: "hello\n"}}
+	res, err := run(t, sb, "grep", `{"pattern":"h"}`)
+	if err != nil || res.Content != "hello" {
+		t.Fatalf("grep: err=%v content=%q", err, res.Content)
+	}
+	for _, w := range sb.writes {
+		if strings.HasPrefix(w, "/tmp/tool_outputs/") {
+			t.Errorf("an under-cap output wrote a spill file: %s", w)
+		}
+	}
+}
+
+// A successful grep whose output hit the sandbox's own per-stream Exec cap
+// arrives with ExecResult.Truncated set, and the marker must survive into the
+// content — or the spill notice's "full output" would vouch for a result the
+// sandbox itself already cut.
+func TestExecTruncatedGrepCarriesTheUpstreamMarker(t *testing.T) {
+	full := strings.Repeat("z", toolset.MaxOutputBytes+64)
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: full, Truncated: true}}
+	res, err := run(t, sb, "grep", `{"pattern":"z"}`)
+	if err != nil || res.IsError {
+		t.Fatalf("grep: err=%v", err)
+	}
+	if !strings.HasPrefix(res.Content, "[output truncated]\n") {
+		t.Errorf("content head = %.40q, want the upstream truncation marker first", res.Content)
+	}
+}
+
+// read is exempt: its full content already sits in the sandbox at the very
+// path the model just named, and a spilled copy would chain — every read of
+// a spill file would mint another under a fresh id, with no fixed point. An
+// oversized read truncates plainly; view_range and bash slicing reach the
+// rest.
+func TestReadNeverSpills(t *testing.T) {
+	full := strings.Repeat("x", toolset.MaxOutputBytes+64)
+	sb := &fakeSandbox{files: map[string]string{"/big.txt": full}}
+	res, err := run(t, sb, "read", `{"file_path":"/big.txt"}`)
+	if err != nil || res.IsError {
+		t.Fatalf("read: err=%v", err)
+	}
+	if !strings.HasSuffix(res.Content, "\n[output truncated]") || strings.Contains(res.Content, "/tmp/tool_outputs/") {
+		t.Errorf("content tail = %q, want plain truncation naming no spill file", tail(res.Content))
+	}
+	for _, w := range sb.writes {
+		if strings.HasPrefix(w, "/tmp/tool_outputs/") {
+			t.Errorf("read spilled a copy: %s", w)
+		}
+	}
+}
+
+// A failed spill write must cost the call nothing: the result caps exactly as
+// it did before the spill existed — and the attempt must really have been
+// made, or this fixture would also pass with the hook deleted.
+func TestSpillWriteFailureFallsBackToPlainTruncation(t *testing.T) {
+	full := strings.Repeat("y", toolset.MaxOutputBytes+64)
+	sb := &fakeSandbox{exec: sandbox.ExecResult{Stdout: full}, writeErr: errors.New("disk full")}
+	res, err := run(t, sb, "grep", `{"pattern":"y"}`)
+	if err != nil || res.IsError {
+		t.Fatalf("grep: err=%v content=%s", err, tail(res.Content))
+	}
+	attempted := false
+	for _, w := range sb.writes {
+		if strings.HasPrefix(w, "/tmp/tool_outputs/") {
+			attempted = true
+		}
+	}
+	if !attempted {
+		t.Error("no spill write was attempted")
+	}
+	if !strings.HasSuffix(res.Content, "\n[output truncated]") {
+		t.Errorf("content tail = %q, want the plain truncation trailer", tail(res.Content))
+	}
+	if strings.Contains(res.Content, "/tmp/tool_outputs/") {
+		t.Errorf("a failed spill still named a file: %s", tail(res.Content))
 	}
 }

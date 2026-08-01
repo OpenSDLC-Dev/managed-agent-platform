@@ -16,7 +16,8 @@ copy of an entry here.
 ### Added
 
 - **Sandbox containers are hardened when they are created**
-  ([#65](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/65)). A session's sandbox
+  ([#65](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/65),
+  [docs/plan/19_sandbox-hardening.md](./docs/plan/19_sandbox-hardening.md)). A session's sandbox
   runs untrusted, model-directed commands and until now the platform created it with almost no
   containment: on Docker only `HostConfig.Init`, on Kubernetes a `securityContext` that existed
   only for a gated session, no resource limits on either, and no `runtimeClassName` — which is why
@@ -53,6 +54,32 @@ copy of an entry here.
   declaring `EnforcesPidsLimit`, and the gap is recorded rather than faked. `docs/self-hosted-security.md`
   moves the corresponding rows of the shared-responsibility table onto the platform and closes its
   `securityContext`/`runtimeClassName` reserved seam.
+
+- **Oversized sandbox-tool output spills to a file instead of losing its tail**
+  ([#226](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/226),
+  [docs/plan/18_spill-oversized-output.md](./docs/plan/18_spill-oversized-output.md)). The
+  reference writes tool output past ~100k characters to a sandbox file and hands the model a
+  preview plus the path; we truncated at `toolset.MaxOutputBytes` and the tail was gone — for a
+  command that ran once, irrecoverably. Now output past the cap lands at
+  `/tmp/tool_outputs/<tool_use_id>.txt` via one `Sandbox.WriteFile` — NUL-sanitized and complete
+  as the toolset received it (for exec-driven tools, what `Sandbox.Exec` retained under its
+  pre-existing 1MiB per-stream memory guard) — and the preview's marker names the file
+  (`[output truncated; full output written to …]`); bash's failure arms spill before the
+  exit-code/timeout trailer caps the body, its success arm spills in dispatch, and a failed spill
+  write falls back to plain truncation — an enhancement, never a new failure mode. Two tools are
+  deliberately exempt: **`read` never spills** (its full content already sits at the path the
+  model named, and a spilled copy would chain — every read of a spill file would mint another
+  under a fresh id; an oversized read truncates plainly, its tail reachable via `view_range` or
+  bash slicing), and the web tools keep truncation/pruning (their driver runs with no sandbox by
+  design, and web content is re-fetchable) — both recorded in the rewritten docs/DIVERGENCES.md
+  entry, the INFERRED path/preview shapes cross-linked from its INFERRED section (#78). The BYOC
+  worker inherits it all for free (the spill lives in the shared `toolset.Runner`). Every guard
+  is mutation-checked — the dispatch and bash hooks, the timeout arm's spill, the read exemption,
+  and rune-boundary cuts on both preview paths (3-byte fixtures the cap splits mid-rune) — with
+  an end-to-end pin: a real-sandbox bash failure spills, and the file's tail (the stderr marker
+  past the cap) reads back from the sandbox. A successful grep that hit that 1MiB Exec guard now
+  carries the upstream `[output truncated]` marker at its head (it used to drop the flag), so a
+  spill of it can never read as the full result.
 
 - **An operator-side allowed-domains allowlist for the web tools**
   ([#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)). The reference has
