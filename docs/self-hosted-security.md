@@ -289,9 +289,11 @@ three node layouts it supports — a single filesystem, a separate runtime
 filesystem, or a split image filesystem — and on any other layout it *"does not
 apply resource limits for ephemeral local storage"*: the pod accepts the fields
 and can exceed them without ever being evicted. Check your nodes' layout before
-treating this as a bound. What still fires there is the node-level signal — a
-node short on local storage taints itself and evicts pods that do not tolerate
-the taint — which is the arbitrary-victim outcome this cap exists to replace. That
+treating this as a bound. What still fires there is node-pressure eviction — a node short
+on local storage stops accepting new pods and the kubelet starts terminating
+running ones to reclaim space, chosen by usage against their requests and by
+priority, never by which pod filled the disk — which is the arbitrary-victim
+outcome this cap exists to replace. That
 is why this cap is off by default where the CPU cap is not, and why the request
 is set equal to the limit — the kubelet ranks eviction candidates by usage
 against the *request*, so a limit the scheduler never reserved would push the

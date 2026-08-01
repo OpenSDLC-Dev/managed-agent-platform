@@ -33,9 +33,10 @@ import (
 // runs both ways: PidsLimit is Docker-only, because the Kubernetes Pod API
 // carries no per-pod pids limit (it is the kubelet's `podPidsLimit` node
 // setting), while EphemeralStorageBytes is Kubernetes-only, because Docker's
-// writable-layer quota needs a specific storage driver. Each asymmetry is
-// recorded in docs/DIVERGENCES.md rather than faked here, and the backend that
-// cannot honour a configured value says so once rather than silently.
+// writable-layer quota is only as good as the daemon's storage driver. Each
+// asymmetry is recorded in docs/DIVERGENCES.md rather than faked here, and the
+// backend that cannot honour a configured value says so once rather than
+// silently.
 type Hardening struct {
 	// PidsLimit caps the processes the sandbox may have alive at once. It is
 	// the containment for a fork bomb and for the process pressure that would

@@ -230,8 +230,9 @@ See [`values.yaml`](./values.yaml) for the full set.
 
 > **Disk limits:** `ephemeralStorageBytes` is the asymmetry pointing the other way — a
 > Kubernetes-only cap on the node-local disk a sandbox may consume (its writable layer and
-> every `emptyDir` under it), with no Docker counterpart, because a daemon whose storage
-> driver has no quota support accepts the option and enforces nothing. Give it **bytes** —
+> every `emptyDir` under it), with no Docker counterpart, because whether a Docker daemon
+> enforces a writable-layer quota depends on its storage driver — some do, some refuse the
+> option outright, and some accept it and enforce nothing. Give it **bytes** —
 > `21474836480`, not `20Gi`; a Kubernetes quantity string fails executor startup. Off by
 > default, and worth understanding before turning on: Kubernetes enforces this one by
 > **evicting the pod**, not by failing the write, so a cap set too low ends sessions
