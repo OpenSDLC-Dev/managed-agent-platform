@@ -205,6 +205,7 @@ processes; `otlp.insecure=true` to export without TLS.
 | `executor.sandboxImage` | `debian:stable-slim` | base image for sandbox Pods |
 | `executor.gateImage` | `""` (gate off) | per-session egress-gate sidecar image (`--target gate` build); setting it opts `limited` / vault-attached sessions into the gate — allowed_hosts enforcement plus vault-credential substitution at egress. The sidecar needs `CAP_NET_ADMIN` (no `restricted` Pod Security on the namespace) and, as a native sidecar, Kubernetes >= 1.29 (the render fails on older clusters); unset keeps the fail-closed route-flush |
 | `executor.sandboxHardening.*` | `""` (executor defaults) | containment applied to every sandbox Pod (#65): `cpuMillis`, `memoryBytes`, `ephemeralStorageBytes`, `capDrop`, `readOnlyRootfs`, `runAsUser`. Empty keeps the executor's own defaults — 2 CPUs and the `NET_RAW,SETUID,SETGID` drops. Turning one **off** is per field, not one rule: `0` for a numeric cap, `none` for `capDrop`, `false` for `readOnlyRootfs` — and for `runAsUser` only an **empty** value, because `0` is a valid uid meaning **root** and `none` fails executor startup |
+| `sandboxPlacement.nodeSelector` / `.tolerations` | `{}` / `[]` | where sandbox Pods may run: node labels they require, and taints they tolerate. Written as ordinary Kubernetes shapes (a map and a list of Toleration objects); the chart encodes them for the executor. **Not** `executor.nodeSelector`/`executor.tolerations`, which place the executor's own Deployment |
 | `sandboxRuntimeClass.name` | `""` (cluster default) | `runtimeClassName` set on every sandbox Pod — a hardened runtime such as gVisor |
 | `sandboxRuntimeClass.create` / `.handler` | `false` / `runsc` | also create the cluster-scoped `RuntimeClass` object named above |
 
@@ -240,3 +241,15 @@ See [`values.yaml`](./values.yaml) for the full set.
 > layouts whose local ephemeral storage the kubelet can measure, so check yours before
 > treating the number as a bound
 > ([docs/self-hosted-security.md](../../../docs/self-hosted-security.md) §3).
+
+<!-- Two separate notes: a bare blank line between blockquotes renders as one. -->
+
+> **Sandbox placement:** `sandboxPlacement` is a different pod from
+> `executor.nodeSelector`/`executor.tolerations`, and the distinction is the reason it is
+> top-level rather than nested under `executor`. The `executor.*` pair places the executor
+> **Deployment**; `sandboxPlacement` places the per-session **sandbox Pods** the executor
+> creates. A dedicated, tainted sandbox node pool needs the pair together — the selector
+> reaches the pool, the tolerations get admitted onto its taint — and needs the executor
+> itself to stay somewhere else. Both are validated at executor startup: a selector that
+> could match no node, or a toleration the API server would reject, stops the process
+> instead of producing Pods that sit `Pending` for the life of every session.

@@ -46,12 +46,21 @@ import (
 // cluster, not of a session. Empty uses the cluster's default runtime; a name
 // no RuntimeClass object defines makes the kubelet refuse the pod, which is the
 // fail-closed direction.
+//
+// NodeSelector and Tolerations are where a sandbox pod may run, and are here for
+// the same reason RuntimeClass is: which nodes a cluster has is a property of
+// the cluster. They are carried as the raw strings the deployment configured, so
+// the one place that knows their encoding is the one place that parses them
+// (placement.go) — New rejects a malformed value rather than letting it become a
+// pod that never schedules.
 type Config struct {
 	Kubeconfig    string
 	Context       string
 	Namespace     string
 	NetSetupImage string
 	RuntimeClass  string
+	NodeSelector  string
+	Tolerations   string
 }
 
 // restConfig resolves the cluster connection: in-cluster when running as a pod

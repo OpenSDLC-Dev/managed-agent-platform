@@ -29,6 +29,7 @@ deliberate divergences from the reference are in
 | **Read-only root filesystem** | Set on request (`SANDBOX_READONLY_ROOTFS`), with writable mounts arranged over every path the platform itself writes (workdir, `/tmp`, the shell state root, the file-resource mount root) | Deciding to turn it on, and shipping an image that tolerates one |
 | **Sandbox egress** | `limited` = only `allowed_hosts`, through the per-session egress gate (both backends, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
 | **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
+| **Sandbox placement** | On **Kubernetes**, puts your `nodeSelector` and `tolerations` on every sandbox pod (`SANDBOX_K8S_NODE_SELECTOR` / `SANDBOX_K8S_TOLERATIONS`; the chart's `sandboxPlacement`), and refuses a malformed one at startup | Building the node pool, labelling and tainting it, and keeping the platform's own workloads off it |
 | **Environment-key lifecycle** | Hash-only storage, one live key per environment, revoke-on-re-mint, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
 | **Model / tool credentials** | Never enter the sandbox; redacted from error events | Securing the brain's provider config and any egress-time secrets |
 | **Auth transport** | Hashes `x-api-key` and environment keys at rest; scopes each | Terminating TLS; keeping keys off logs and out of images |
@@ -525,6 +526,34 @@ whole sandbox pod, **including a gated session's gate sidecar**, which holds
 support is partial, so a gate under `runsc` is not something this platform has
 verified — run a `limited` session end to end on your own cluster before
 combining the two.
+
+### Sandbox node placement (Kubernetes)
+
+A hardened runtime bounds what a sandbox can do on its node. Which node it lands
+on is a separate question, and on a shared cluster it is the one that decides
+what a container escape reaches: a sandbox scheduled beside the control plane, a
+database, or a CI runner is a sandbox one bug away from them.
+
+The platform puts your placement on every sandbox pod —
+`SANDBOX_K8S_NODE_SELECTOR` (comma-separated `key=value`) and
+`SANDBOX_K8S_TOLERATIONS` (a JSON array of Kubernetes `Toleration` objects), the
+chart's `sandboxPlacement.nodeSelector` / `.tolerations`, which take ordinary
+Kubernetes shapes and encode them for you. Empty applies nothing, which is the
+default and today's behaviour.
+
+Building the pool is yours, and the isolating configuration is the **pair**: a
+node pool labelled so the selector finds it, **and** tainted so nothing else
+lands there. A label alone keeps sandboxes on the pool but does not keep anything
+else off it; a taint alone keeps others off but leaves sandboxes unable to
+schedule. Keep the platform's own Deployments elsewhere — the chart's
+`executor.nodeSelector`/`executor.tolerations` place the executor, and are
+deliberately a different setting from `sandboxPlacement`.
+
+Both values are parsed when the executor (or BYOC worker) starts, and a malformed
+one **fails that startup**. That is the deliberate direction: a selector that
+could match no node, or a toleration the API server would reject, otherwise
+becomes a pod that sits `Pending` for the life of every session, with nothing in
+the log to say why.
 
 ### Single-tenant daemon trust (Docker backend)
 

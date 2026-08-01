@@ -44,6 +44,23 @@ spec:
             - name: SANDBOX_K8S_RUNTIME_CLASS
               value: {{ . | quote }}
             {{- end }}
+            {{- /* Where sandbox pods may run. The operator writes Kubernetes
+                   shapes — a map and a list — and the chart encodes them the way
+                   the executor parses them, rather than making anyone hand-write
+                   an env-var dialect. `range` over a map is sorted by key, so a
+                   given values file always renders the same string. */}}
+            {{- with .Values.sandboxPlacement.nodeSelector }}
+            {{- $pairs := list }}
+            {{- range $k, $v := . }}{{ $pairs = append $pairs (printf "%s=%s" $k $v) }}{{ end }}
+            - name: SANDBOX_K8S_NODE_SELECTOR
+              value: {{ join "," $pairs | quote }}
+            {{- end }}
+            {{- /* toJson, not toString: `range`+toString mangles a list of maps,
+                   and tolerationSeconds must survive as a number. */}}
+            {{- with .Values.sandboxPlacement.tolerations }}
+            - name: SANDBOX_K8S_TOLERATIONS
+              value: {{ toJson . | quote }}
+            {{- end }}
             {{- /* Sandbox containment (#65). Each is omitted when empty so the
                    executor's own default holds; an explicit value — including
                    "0" or "none" — is passed through verbatim. */}}

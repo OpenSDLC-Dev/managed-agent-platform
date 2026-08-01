@@ -15,6 +15,40 @@ copy of an entry here.
 
 ### Added
 
+- **Sandbox pods can be pinned to a node pool of their own**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2).
+  `SANDBOX_K8S_NODE_SELECTOR` and `SANDBOX_K8S_TOLERATIONS` (chart:
+  `sandboxPlacement.nodeSelector` / `.tolerations`) put a `nodeSelector` and `tolerations`
+  on every sandbox pod. Until now the platform said where a sandbox may *run* only in terms
+  of its runtime; on a shared cluster the more consequential question is which machine it
+  lands on, because a sandbox running untrusted, model-directed commands beside a database
+  or a CI runner is one container escape away from them.
+
+  The isolating configuration is the **pair**, and the docs say so rather than leaving it to
+  be discovered: a pool labelled so the selector finds it *and* tainted so nothing else lands
+  there. A label alone keeps sandboxes on the pool without keeping anything else off it; a
+  taint alone keeps others off but leaves every sandbox `Pending`. This is also why the chart
+  keys are top-level: `executor.nodeSelector`/`executor.tolerations` already exist and place
+  the executor's own Deployment — a different pod, and usually deliberately a different pool.
+
+  **A malformed value fails executor (and worker) startup**, before the provider reaches for
+  a cluster. That direction is the point of parsing these in-process at all: the failure it
+  replaces is silent and close to undebuggable — a selector matching no node, or a toleration
+  the API server would reject, produces sandboxes that sit `Pending` for the life of every
+  session with nothing in the log to say why. So the parsers apply the API server's own rules
+  rather than a looser subset: label key and value validity, and for tolerations a **strict**
+  JSON decode (a permissive one drops a misspelled `"efect"` and silently leaves a toleration
+  that tolerates nothing) plus the operator and effect enums and the two documented pairings
+  (an empty key needs `Exists`; `Exists` takes no value).
+
+  The encodings are the plan's, and are what a chart can produce from Kubernetes-shaped YAML:
+  comma-separated `key=value` for the selector — the form `kubectl` already uses — and a JSON
+  array for tolerations, because `tolerationSeconds` is a *pointer* and any flat dialect that
+  kept "absent" distinct from "0" would be a worse JSON. Operators write a map and a list in
+  values.yaml; the chart encodes. The two sides are pinned against drift from both ends: CI
+  asserts the exact rendered strings, and a Go test feeds those same literals to the real
+  parsers.
+
 - **An opt-in disk cap for sandbox pods on Kubernetes**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2).
   `SANDBOX_EPHEMERAL_STORAGE_BYTES` (chart: `executor.sandboxHardening.ephemeralStorageBytes`)

@@ -81,6 +81,8 @@ func run(ctx context.Context) error {
 		K8sNamespace:     os.Getenv("SANDBOX_K8S_NAMESPACE"),
 		K8sNetSetupImage: os.Getenv("SANDBOX_K8S_NETSETUP_IMAGE"),
 		K8sRuntimeClass:  os.Getenv("SANDBOX_K8S_RUNTIME_CLASS"),
+		K8sNodeSelector:  os.Getenv("SANDBOX_K8S_NODE_SELECTOR"),
+		K8sTolerations:   os.Getenv("SANDBOX_K8S_TOLERATIONS"),
 	})
 	if err != nil {
 		return err
