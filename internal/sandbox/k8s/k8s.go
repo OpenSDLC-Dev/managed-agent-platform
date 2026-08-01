@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	gopath "path"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -65,6 +67,9 @@ type Provider struct {
 	client        *client
 	netSetupImage string
 	runtimeClass  string
+	// pidsWarnOnce keeps warnUnenforceablePidsLimit to one line per provider
+	// rather than one per provisioned pod.
+	pidsWarnOnce sync.Once
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -100,6 +105,10 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	if err := sandbox.ValidateEnv(spec.Env); err != nil {
 		return nil, err
 	}
+	if err := spec.Hardening.Validate(spec.Gate != nil); err != nil {
+		return nil, err
+	}
+	p.warnUnenforceablePidsLimit(ctx, spec.Hardening)
 	workdir := spec.Workdir
 	if workdir == "" {
 		workdir = sandbox.DefaultWorkdir
@@ -366,17 +375,19 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 		},
 	}
 	if spec.Hardening.ReadOnlyRootfs {
-		// A read-only root still has to leave the sandbox somewhere to write:
-		// the session workdir, and /tmp, where this backend keeps each exec's
-		// state file. The kubelet creates an emptyDir world-writable, so the
-		// mounts work whatever uid the container runs as.
-		pod.Spec.Volumes = []corev1.Volume{
-			{Name: workdirVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-			{Name: tmpVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-		}
-		pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
-			{Name: workdirVolume, MountPath: workdir},
-			{Name: tmpVolume, MountPath: "/tmp"},
+		// A read-only root still has to leave the sandbox somewhere to write.
+		// The set is sandbox.WritablePaths, shared with the Docker backend so
+		// neither can forget one — the persistent shell's state root especially,
+		// without which the first bash call faults instead of answering. The
+		// kubelet creates an emptyDir world-writable, so the mounts work whatever
+		// uid the container runs as.
+		for _, path := range sandbox.WritablePaths(workdir) {
+			name := volumeName(path)
+			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+				Name: name, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			})
+			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts,
+				corev1.VolumeMount{Name: name, MountPath: path})
 		}
 	}
 	switch {
@@ -391,11 +402,38 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 	return pod
 }
 
-// The emptyDir volumes a read-only-rootfs sandbox writes through.
-const (
-	workdirVolume = "workdir"
-	tmpVolume     = "tmp"
-)
+// volumeName derives a pod-unique, DNS-1123 volume name from a writable mount
+// path ("/var/lib/map-shell" → "map-w-var-lib-map-shell"). The paths are the
+// platform's own (sandbox.WritablePaths) plus the configured workdir, all
+// absolute and lowercase in practice; anything else a path could carry is
+// folded to '-' so the pod is never rejected for a name this function chose.
+func volumeName(path string) string {
+	var b strings.Builder
+	b.WriteString("map-w")
+	for _, r := range strings.ToLower(path) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('-')
+	}
+	return strings.TrimRight(b.String(), "-")
+}
+
+// warnUnenforceablePidsLimit says once, per provider, that a configured pids
+// limit does nothing here. The Pod API carries no per-pod process limit (it is
+// the kubelet's `podPidsLimit`), and an operator who set SANDBOX_PIDS_LIMIT
+// otherwise gets silence — documented in docs/DIVERGENCES.md, but a log line is
+// what reaches them at the moment it matters.
+func (p *Provider) warnUnenforceablePidsLimit(ctx context.Context, h sandbox.Hardening) {
+	if h.PidsLimit <= 0 {
+		return
+	}
+	p.pidsWarnOnce.Do(func() {
+		slog.WarnContext(ctx, "k8s: sandbox pids limit is not expressible on Kubernetes and is ignored; "+
+			"set the kubelet's podPidsLimit on the nodes instead", "configured", h.PidsLimit)
+	})
+}
 
 // runtimeClassName is the pod's RuntimeClass, or nil for the cluster default —
 // the field is a *string, and an empty one is not the same as unset.

@@ -1,9 +1,12 @@
 {{- /*
 The hardened runtime for sandbox pods. RuntimeClass is cluster-scoped, so
-creating it is opt-in: it outlives the release, collides with another release
-creating the same name, and needs the nodes to already run the handler (gVisor's
-runsc, Kata's kata). Setting sandboxRuntimeClass.name alone — the usual case —
-just points the executor at a RuntimeClass the cluster already has.
+creating it is opt-in: it collides with another release creating the same name,
+needs cluster-scope RBAC to install, and needs the nodes to already run the
+handler (gVisor's runsc, Kata's kata). It is Helm-managed like every other object
+here, so `helm uninstall` removes it — deliberately not annotated
+`helm.sh/resource-policy: keep`, since a chart that leaves cluster-scoped objects
+behind is the worse failure. Setting sandboxRuntimeClass.name alone — the usual
+case — just points the executor at a RuntimeClass the cluster already owns.
 */ -}}
 {{- if .Values.sandboxRuntimeClass.create }}
 {{- if not .Values.sandboxRuntimeClass.name }}

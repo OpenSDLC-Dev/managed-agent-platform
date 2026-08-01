@@ -34,11 +34,18 @@ copy of an entry here.
   drops stay non-negotiable: `EffectiveCapDrop` unions them in for a gated sandbox whatever the
   configuration says, in one place both backends call, so the invariant that keeps a tool from
   becoming the gate's uid cannot drift. Read-only rootfs arranges the writable space it needs
-  itself — the workdir and `/tmp` — which is what made it a runtime-level change before: an
-  `emptyDir` on Kubernetes, and on Docker an **anonymous volume**, because the daemon refuses an
-  archive PUT into a *tmpfs* on a read-only-rootfs container (measured), and every file that
-  backend writes goes through that endpoint, so a tmpfs workdir would have given a sandbox that
-  runs commands but can never receive a file. The Kubernetes provider now sets `runtimeClassName`
+  itself — the workdir, `/tmp`, the persistent shell's state root, and the file-resource mount
+  root, one list both backends share so neither can forget one — which is what made it a
+  runtime-level change before: an `emptyDir` on Kubernetes, and on Docker an **anonymous
+  volume**, because the daemon refuses an archive PUT into a *tmpfs* on a read-only-rootfs
+  container (measured), and every file that backend writes goes through that endpoint, so a
+  tmpfs workdir would have given a sandbox that runs commands but can never receive a file.
+  Two edges the defaults survive rather than assume away: a gated session refuses
+  `SANDBOX_RUN_AS_USER` set to the gate's own uid — it would match the gate's owner-match ACCEPT
+  rule and void `allowed_hosts` with nothing logged, the platform-side half of #196 — and the
+  Docker backend clamps the CPU cap to the host's CPU count, since the daemon rejects a container
+  asking for more than the machine has and the two-CPU default would otherwise fail every
+  provision on a one-CPU host. The Kubernetes provider now sets `runtimeClassName`
   from `SANDBOX_K8S_RUNTIME_CLASS`, so the chart ships `sandboxRuntimeClass` — the name for every
   sandbox pod, plus an opt-in `create` for the cluster-scoped object — closing the deferral. One
   dimension the backends genuinely cannot share: Kubernetes has no per-pod process limit (it is the

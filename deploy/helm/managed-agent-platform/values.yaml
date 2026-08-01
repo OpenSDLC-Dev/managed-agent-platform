@@ -132,8 +132,11 @@ sandboxRuntimeClass:
   # pod — the fail-closed direction.
   name: ""
   # -- Also create the cluster-scoped RuntimeClass named above. Off by default:
-  # the object outlives the release and collides between releases, the install
-  # needs cluster-scope RBAC, and the nodes must already run the handler.
+  # it collides with another release creating the same name, the install needs
+  # cluster-scope RBAC, and the nodes must already run the handler. It is
+  # Helm-managed, so `helm uninstall` removes it again — which breaks any other
+  # workload pointing at it. Leave this false and point `name` at a RuntimeClass
+  # the cluster already owns unless this release is the one that owns it.
   create: false
   # -- CRI handler the created RuntimeClass points at; gVisor's is `runsc`.
   handler: runsc

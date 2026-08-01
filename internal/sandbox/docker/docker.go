@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	gopath "path"
 	"sort"
@@ -130,6 +131,10 @@ type Config struct {
 type Provider struct {
 	api         *apiClient
 	gateNetwork string
+	// cpus caches the daemon's CPU count, read once on the first provision that
+	// needs it (New deliberately contacts no daemon). See clampCPU.
+	cpus     int
+	cpusOnce sync.Once
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -163,6 +168,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		return nil, errors.New("docker: provision needs an image")
 	}
 	if err := sandbox.ValidateEnv(spec.Env); err != nil {
+		return nil, err
+	}
+	if err := spec.Hardening.Validate(spec.Gate != nil); err != nil {
 		return nil, err
 	}
 	workdir := spec.Workdir
@@ -223,7 +231,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		return nil, ierr
 	}
 
-	cfg := sandboxConfig(spec, workdir, gateID)
+	cfg := sandboxConfig(spec, workdir, gateID, p.clampCPU(ctx, spec.Hardening.CPUMillis))
 	id, cerr := p.api.createContainer(ctx, name, cfg)
 	if statusIs(cerr, 404) { // the image is not on this host yet
 		if perr := p.api.pullImage(ctx, spec.Image); perr != nil {
@@ -288,7 +296,36 @@ func pairedWithGate(info containerInfo, gateID string) bool {
 // two backends cannot drift on it. no-new-privileges travels with any drop set:
 // dropping a capability while leaving setuid-binary escalation available would
 // hand it straight back.
-func sandboxConfig(spec sandbox.Spec, workdir, gateID string) containerConfig {
+// clampCPU bounds a CPU cap by the daemon's own CPU count. The daemon rejects a
+// create whose NanoCpus exceeds the host's CPUs outright, so the platform's
+// default of two would fail every provision on a one-CPU host — a per-session
+// 400 rather than a startup error, and on a backend whose whole point is being
+// easy to run locally. Clamping *down* to the only value the host can express is
+// not a silent policy change: the operator asked for at least this much
+// containment and gets the most the machine allows. A daemon that will not
+// answer leaves the configured value alone, so a probe failure can never widen
+// the cap.
+func (p *Provider) clampCPU(ctx context.Context, millis int64) int64 {
+	if millis <= 0 {
+		return millis
+	}
+	p.cpusOnce.Do(func() {
+		n, err := p.api.hostCPUs(ctx)
+		if err != nil {
+			slog.WarnContext(ctx, "docker: could not read the daemon's CPU count; leaving the sandbox CPU cap unclamped", "err", err)
+			return
+		}
+		p.cpus = n
+	})
+	if p.cpus <= 0 || millis <= int64(p.cpus)*1000 {
+		return millis
+	}
+	slog.WarnContext(ctx, "docker: sandbox CPU cap exceeds the host's CPUs; clamping",
+		"configured_millis", millis, "host_cpus", p.cpus)
+	return int64(p.cpus) * 1000
+}
+
+func sandboxConfig(spec sandbox.Spec, workdir, gateID string, cpuMillis int64) containerConfig {
 	// Tools background processes and orphan them; an init process reaps them
 	// instead of letting them pile up as zombies for the session's whole life.
 	host := hostConfig{Init: true}
@@ -305,17 +342,18 @@ func sandboxConfig(spec sandbox.Spec, workdir, gateID string) containerConfig {
 	}
 	host.PidsLimit = h.PidsLimit
 	// The daemon takes CPU as nanoCPUs (its `--cpus`) and turns it into the
-	// cgroup's cpu.max quota; a millicore is a million of them.
-	host.NanoCpus = h.CPUMillis * 1_000_000
+	// cgroup's cpu.max quota; a millicore is a million of them. cpuMillis is the
+	// host-clamped value, and HardeningFromEnv has already refused one large
+	// enough to wrap this multiplication.
+	host.NanoCpus = cpuMillis * 1_000_000
 	host.Memory = h.MemoryBytes
 	if h.ReadOnlyRootfs {
-		// The two paths the sandbox writes: the session workdir, and /tmp, which
-		// the image ships 1777 and a fresh anonymous volume inherits. See the
-		// `mount` type for why these are volumes and not tmpfs.
+		// Everything the platform itself writes inside the sandbox — see
+		// sandbox.WritablePaths, which both backends share so neither can forget
+		// one. The `mount` type says why these are volumes and not tmpfs.
 		host.ReadonlyRootfs = true
-		host.Mounts = []mount{
-			{Type: "volume", Target: workdir},
-			{Type: "volume", Target: "/tmp"},
+		for _, path := range sandbox.WritablePaths(workdir) {
+			host.Mounts = append(host.Mounts, mount{Type: "volume", Target: path})
 		}
 	}
 	cfg := containerConfig{

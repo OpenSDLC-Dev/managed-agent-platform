@@ -204,7 +204,6 @@ processes; `otlp.insecure=true` to export without TLS.
 | `existingSecret` | `""` | reference a pre-created Secret instead of inlining |
 | `executor.sandboxImage` | `debian:stable-slim` | base image for sandbox Pods |
 | `executor.gateImage` | `""` (gate off) | per-session egress-gate sidecar image (`--target gate` build); setting it opts `limited` / vault-attached sessions into the gate — allowed_hosts enforcement plus vault-credential substitution at egress. The sidecar needs `CAP_NET_ADMIN` (no `restricted` Pod Security on the namespace) and, as a native sidecar, Kubernetes >= 1.29 (the render fails on older clusters); unset keeps the fail-closed route-flush |
-
 | `executor.sandboxHardening.*` | `""` (executor defaults) | containment applied to every sandbox Pod (#65): `cpuMillis`, `memoryBytes`, `capDrop`, `readOnlyRootfs`, `runAsUser`. Empty keeps the executor's own defaults — 2 CPUs and the `NET_RAW,SETUID,SETGID` drops; set a value to lower a cap, `0` / `none` to turn one off |
 | `sandboxRuntimeClass.name` | `""` (cluster default) | `runtimeClassName` set on every sandbox Pod — a hardened runtime such as gVisor |
 | `sandboxRuntimeClass.create` / `.handler` | `false` / `runsc` | also create the cluster-scoped `RuntimeClass` object named above |
@@ -215,8 +214,10 @@ See [`values.yaml`](./values.yaml) for the full set.
 > a cluster whose nodes run gVisor can isolate the sandbox with it — the strongest lever an
 > operator has over a container that runs untrusted, model-directed commands. Point it at a
 > `RuntimeClass` the cluster already has, or set `sandboxRuntimeClass.create=true` to have the
-> chart create one (off by default: the object is cluster-scoped, so it outlives the release
-> and collides between releases, and the nodes must already run the handler).
+> chart create one (off by default: the object is cluster-scoped, so it collides with another
+> release creating the same name, the install needs cluster-scope RBAC, and the nodes must
+> already run the handler — and, being Helm-managed, `helm uninstall` takes it away again,
+> which breaks anything else pointing at it).
 
 > **Process limits:** `executor.sandboxHardening` has no pids knob because Kubernetes has no
 > per-pod one — it is the kubelet's `podPidsLimit` node setting, which you configure on the

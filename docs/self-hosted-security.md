@@ -25,7 +25,7 @@ deliberate divergences from the reference are in
 | **Resource limits** | **By default** caps every sandbox at 512 processes and 2 CPUs (`SANDBOX_PIDS_LIMIT` / `SANDBOX_CPU_MILLIS`); an optional memory cap. Kubernetes has no per-pod process limit to set | Tuning the caps; on Kubernetes, the kubelet's `podPidsLimit` |
 | **Non-root execution** | Runs the image's default user, or the uid `SANDBOX_RUN_AS_USER` names | Shipping an image whose default user is unprivileged, and whose workdir that user can reach |
 | **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; seccomp and AppArmor/SELinux profiles |
-| **Read-only root filesystem** | Set on request (`SANDBOX_READONLY_ROOTFS`), with writable mounts arranged over the workdir and `/tmp` | Deciding to turn it on, and shipping an image that tolerates one |
+| **Read-only root filesystem** | Set on request (`SANDBOX_READONLY_ROOTFS`), with writable mounts arranged over every path the platform itself writes (workdir, `/tmp`, the shell state root, the file-resource mount root) | Deciding to turn it on, and shipping an image that tolerates one |
 | **Sandbox egress** | `limited` = only `allowed_hosts`, through the per-session egress gate (both backends, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
 | **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
 | **Environment-key lifecycle** | Hash-only storage, one live key per environment, revoke-on-re-mint, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
@@ -250,7 +250,10 @@ configurable away. One caveat the drops cannot cover: a sandbox **image** whose
 — notably distroless's `nonroot` user) starts every tool process as the UID the
 owner-match firewall permits, silently bypassing `allowed_hosts` on both
 backends. Do not use sandbox images that run as the configured gate UID;
-enforcement is tracked in #196. The `NET_ADMIN` holders are the gate
+enforcement for the *image* is tracked in #196. The half the platform itself
+opens is closed: `SANDBOX_RUN_AS_USER` set to the gate's uid on a gated session
+**fails the provision** on both backends, rather than starting a sandbox whose
+egress policy is silently void. The `NET_ADMIN` holders are the gate
 container/sidecar itself (it installs the firewall, then drops privileges) and,
 on Kubernetes, the short-lived `netsetup` init container that enforces gate-less
 `limited` networking — never the sandbox container.
@@ -268,6 +271,17 @@ the exec deadline's process-group kill:
 falling back to the default — a deployment that meant to cap a sandbox must not
 run believing it had.
 
+Two runtime-shaped edges are worth knowing before you tune these, both Docker's:
+
+- The daemon refuses a container whose CPU cap exceeds the host's CPU count, so
+  the provider **clamps** the cap to what the daemon reports, and logs when it
+  does. Without that the two-CPU default would fail every provision on a
+  one-CPU host — per session, not at startup. Kubernetes has no such ceiling: a
+  limit above the node's capacity simply never throttles.
+- The daemon's minimum memory limit is 6 MB, so a smaller `SANDBOX_MEMORY_BYTES`
+  is refused at provision. The knob is off by default, so only setting it
+  reaches this.
+
 What is still yours at the runtime layer:
 
 - **A process cap on Kubernetes.** The Pod API has no per-pod pids limit; it is
@@ -277,19 +291,33 @@ What is still yours at the runtime layer:
 - **Seccomp and AppArmor/SELinux.** The platform authors no profile; keep the
   runtime's defaults enabled, and never run sandboxes `--privileged` or with
   `--security-opt seccomp=unconfined`.
-- **Pod Security Admission.** A strict `restricted` namespace label still
-  rejects the sandbox pod unless you set `SANDBOX_RUN_AS_USER` (it requires
-  `runAsNonRoot`) — and rejects a *gated* pod either way, since the gate sidecar
-  *adds* `NET_ADMIN`, which `restricted` forbids.
+- **Pod Security Admission.** A strict `restricted` namespace label rejects the
+  sandbox pod, and `SANDBOX_RUN_AS_USER` does not change that: the profile wants
+  `runAsNonRoot: true` (a *different* field, which the provider does not set), a
+  `seccompProfile` (which it never sets — the platform authors no profile), and
+  `capabilities.drop` containing `ALL`, where the default drops three names.
+  `SANDBOX_CAP_DROP=ALL` closes the last of those three; the other two are not
+  configurable today. A *gated* pod is rejected regardless, since the gate
+  sidecar *adds* `NET_ADMIN`, which `restricted` forbids.
 
 ### 4. Read-only root filesystem
 
 `SANDBOX_READONLY_ROOTFS=true` mounts the sandbox's root filesystem read-only on
 both backends and — the part that used to make this a runtime-level change
-rather than a flag — arranges the writable space the sandbox still needs itself:
-the session workdir, and `/tmp`, where the Kubernetes backend keeps each exec's
-state file. Kubernetes mounts an `emptyDir` over each; Docker an anonymous
-volume, which its existing container removal takes away with the container.
+rather than a flag — arranges the writable space the sandbox still needs itself.
+That set is every path the platform writes inside a sandbox, and it is one list
+in the code (`sandbox.WritablePaths`) precisely so neither backend can forget one:
+
+- the **session workdir**;
+- **`/tmp`**, where the Kubernetes backend keeps each exec's state file;
+- **`/var/lib/map-shell`**, where the persistent shell keeps each session's cwd
+  and environment — without it the *first* `bash` call of every session fails,
+  and fails as a backend fault rather than an answer the model can see;
+- **`/mnt`**, the parent of the default mount point for a session's file
+  resources (`/mnt/session/uploads/<file_id>`).
+
+Kubernetes mounts an `emptyDir` over each; Docker an anonymous volume, which its
+existing container removal takes away with the container.
 
 Docker uses a volume rather than a `tmpfs` deliberately, and the reason is
 measured rather than stylistic: the daemon refuses `PUT
@@ -300,9 +328,13 @@ that endpoint, so a tmpfs workdir would give you a sandbox that runs commands bu
 can never receive a file — no skills, no files, no `write` tool.
 
 What is still yours: an **image that tolerates a read-only root elsewhere**. A
-tool that writes outside the workdir and `/tmp` — a package manager, a language
-runtime with a cache under `$HOME` — fails. That is the "where the image allows"
-half of this dimension, and only you can judge it.
+tool that writes outside the set above — a package manager, a language runtime
+with a cache under `$HOME` — fails. That is the "where the image allows" half of
+this dimension, and only you can judge it. One platform-shaped case falls the
+same way: a session file resource given an **explicit `mount_path`** outside that
+set cannot be materialized under a read-only root (it is logged, and the session
+continues without the file), so leave `mount_path` unset or put it under the
+workdir.
 
 ### 5. Egress restriction
 

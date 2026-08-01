@@ -1,10 +1,15 @@
 package docker
 
 import (
+	"context"
+	"io"
+	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -22,7 +27,7 @@ func hardenedSpec(h sandbox.Hardening) sandbox.Spec {
 // guard that an unconfigured deployment's containers are unchanged — the
 // contract rows can only see a hardened sandbox.
 func TestSandboxConfigUnhardenedIsUnchanged(t *testing.T) {
-	cfg := sandboxConfig(hardenedSpec(sandbox.Hardening{}), "/workspace", "")
+	cfg := sandboxConfig(hardenedSpec(sandbox.Hardening{}), "/workspace", "", 0)
 	if cfg.User != "" {
 		t.Errorf("User = %q, want the image's own", cfg.User)
 	}
@@ -46,7 +51,7 @@ func TestSandboxConfigAppliesHardening(t *testing.T) {
 	cfg := sandboxConfig(hardenedSpec(sandbox.Hardening{
 		PidsLimit: 512, CPUMillis: 2000, MemoryBytes: 1 << 30,
 		CapDrop: []string{"CHOWN"}, ReadOnlyRootfs: true, RunAsUser: &uid,
-	}), "/workspace", "")
+	}), "/workspace", "", 2000)
 
 	h := cfg.HostConfig
 	if h.PidsLimit != 512 {
@@ -73,7 +78,13 @@ func TestSandboxConfigAppliesHardening(t *testing.T) {
 	if !h.ReadonlyRootfs {
 		t.Error("ReadonlyRootfs = false")
 	}
-	want := []mount{{Type: "volume", Target: "/workspace"}, {Type: "volume", Target: "/tmp"}}
+	// Every path the platform itself writes, not just the workdir: the shell's
+	// state root is what a bash call needs, and a session file resource lands
+	// under the resource mount root.
+	var want []mount
+	for _, path := range sandbox.WritablePaths("/workspace") {
+		want = append(want, mount{Type: "volume", Target: path})
+	}
 	if !slices.Equal(h.Mounts, want) {
 		t.Errorf("Mounts = %+v, want %+v — anonymous volumes, since the daemon "+
 			"refuses an archive PUT into a tmpfs on a read-only-rootfs container", h.Mounts, want)
@@ -93,7 +104,7 @@ func TestSandboxConfigGatedKeepsItsMandatoryDrops(t *testing.T) {
 			[]string{"CHOWN", "NET_RAW", "SETUID", "SETGID"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := sandboxConfig(hardenedSpec(sandbox.Hardening{CapDrop: tc.configured}), "/workspace", "gate1")
+			cfg := sandboxConfig(hardenedSpec(sandbox.Hardening{CapDrop: tc.configured}), "/workspace", "gate1", 0)
 			if !slices.Equal(cfg.HostConfig.CapDrop, tc.want) {
 				t.Errorf("CapDrop = %v, want %v", cfg.HostConfig.CapDrop, tc.want)
 			}
@@ -101,5 +112,73 @@ func TestSandboxConfigGatedKeepsItsMandatoryDrops(t *testing.T) {
 				t.Errorf("SecurityOpt = %v, want [no-new-privileges]", cfg.HostConfig.SecurityOpt)
 			}
 		})
+	}
+}
+
+// The daemon refuses a create whose NanoCpus exceeds the host's CPUs outright,
+// so the platform's on-by-default two-CPU cap would fail *every* provision on a
+// smaller host — a per-session 400, not a startup error. clampCPU bounds the cap
+// by what the daemon says it has; a daemon that will not answer leaves the
+// configured value alone, so a failed probe can never widen a cap.
+func TestClampCPUToTheHostsCPUs(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		hostCPUs   string
+		configured int64
+		want       int64
+	}{
+		{"a cap the host can express is untouched", `{"NCPU":8}`, 2000, 2000},
+		{"a cap above the host is clamped to it", `{"NCPU":1}`, 2000, 1000},
+		{"no cap configured stays no cap", `{"NCPU":1}`, 0, 0},
+		{"an unreadable daemon leaves the cap alone", "", 2000, 2000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/info" {
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+				if tc.hostCPUs == "" {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				io.WriteString(w, tc.hostCPUs)
+			})
+			if got := p.clampCPU(context.Background(), tc.configured); got != tc.want {
+				t.Errorf("clampCPU(%d) = %d, want %d", tc.configured, got, tc.want)
+			}
+		})
+	}
+}
+
+// The daemon is asked once, not once per session: every tool call re-provisions.
+func TestClampCPUAsksTheDaemonOnce(t *testing.T) {
+	calls := 0
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		io.WriteString(w, `{"NCPU":4}`)
+	})
+	for range 3 {
+		p.clampCPU(context.Background(), 2000)
+	}
+	if calls != 1 {
+		t.Errorf("daemon /info calls = %d, want 1", calls)
+	}
+}
+
+// A gated sandbox running as the gate's own uid would match the gate's
+// owner-match ACCEPT rule and leave the namespace unfiltered. Provision refuses
+// before it touches the daemon — a fail-closed check, not a warning.
+func TestProvisionRefusesTheGatesUIDWhenGated(t *testing.T) {
+	uid := int64(gaterun.DefaultGateUID)
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("the daemon was contacted at all: %s %s", r.Method, r.URL.Path)
+	})
+	_, err := p.Provision(context.Background(), sandbox.Spec{
+		SessionID: domain.NewID("sesn"), Image: "img",
+		Hardening: sandbox.Hardening{RunAsUser: &uid},
+		Gate:      &sandbox.GateSpec{Image: "gate:1", ControlplaneURL: "http://cp"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "gate") {
+		t.Fatalf("Provision = %v, want a refusal naming the gate", err)
 	}
 }

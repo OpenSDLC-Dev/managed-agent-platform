@@ -100,9 +100,18 @@ Two invariants are **not** configurable away:
 
 `docs/self-hosted-security.md` records why a read-only root is not a free
 toggle: the sandbox writes the session workdir, and on Kubernetes per-exec state
-under `/tmp` (`internal/sandbox/k8s/k8s.go`, `/tmp/.map-exec-<nonce>`). When
-`ReadOnlyRootfs` is set, the provider therefore mounts writable space over both
-paths itself — Kubernetes an `emptyDir` (the kubelet creates it world-writable,
+under `/tmp` (`internal/sandbox/k8s/k8s.go`, `/tmp/.map-exec-<nonce>`). Review
+found two more, and both were load-bearing: the persistent shell keeps every
+session's cwd and environment under `/var/lib/map-shell`
+(`internal/sandbox/shell`), so a read-only root without it fails the **first**
+bash call of every session — as a *backend fault*, which leaves the tool
+unanswered and the work item reclaiming rather than answering the model; and a
+session's file resources land under `/mnt/session/uploads/<file_id>`
+(`internal/api`), so materialization silently skips them. The set therefore lives
+in one function, `sandbox.WritablePaths`, which both backends consume and which
+deduplicates — a deployment whose workdir *is* one of the fixed paths must not
+produce two mounts on one target, which both runtimes reject. When
+`ReadOnlyRootfs` is set, the provider mounts writable space over every path in it — Kubernetes an `emptyDir` (the kubelet creates it world-writable,
 verified against a real cluster: `drwxrwxrwx`, and a `runAsUser: 65534`
 container writes it), Docker an **anonymous volume**.
 
@@ -162,6 +171,30 @@ the fork failures a burst of background processes reports. Memory is covered at
 the provider level only — asserting an OOM kill is a heavy, timing-shaped test
 for a knob that is off by default.
 
+### 7. Two edges the defaults must survive, not assume away
+
+Both found by review, both measured, both defaults rather than exotic
+configuration:
+
+- **A gated sandbox may not run as the gate's uid.** The gate's owner-match
+  firewall ACCEPTs exactly `gaterun.DefaultGateUID` (65532), so a
+  `SANDBOX_RUN_AS_USER` set to it would let every tool process leave the
+  namespace unfiltered — `allowed_hosts` void, vault substitution bypassed, and
+  nothing logged. It is the same hazard as #196 (a sandbox *image* whose USER is
+  that uid) reached through a knob the platform itself now offers, so the
+  platform closes its own half: `Hardening.Validate` refuses it and both
+  providers call it before they touch a daemon or an API server. 65532 moves to
+  `gaterun.DefaultGateUID` so cmd/gate and the providers cannot disagree about
+  which uid that is.
+- **A CPU cap above the host's CPU count is refused by the Docker daemon**
+  ("range of CPUs is from 0.01 to N"), so the on-by-default two-CPU cap would
+  fail *every* provision on a one-CPU host — per session, as a daemon 400, not
+  at startup. The provider clamps the cap to what `/info` reports (read once,
+  logged when it clamps); a daemon that will not answer leaves the configured
+  value alone, so a failed probe can never widen a cap. Kubernetes has no such
+  ceiling. Also measured and documented rather than validated: the daemon's
+  6 MB minimum memory limit.
+
 ## What lands
 
 1. `internal/sandbox`: the `Hardening` type, its validation, and
@@ -183,8 +216,11 @@ for a knob that is off by default.
    optional gVisor `RuntimeClass`.
 8. Docs: `docs/self-hosted-security.md` (the shared-responsibility line moves),
    `docs/DIVERGENCES.md` (the Helm entry's gVisor deferral is resolved; the
-   Kubernetes pids gap is recorded), `docs/ARCHITECTURE.md`, `CHANGELOG.md`,
-   `STATE.md`.
+   Kubernetes pids gap and the `bash` description are recorded),
+   `docs/ARCHITECTURE.md`, `README.md`, `CHANGELOG.md`, and this plan's archive
+   summary in `docs/HISTORY.md`. **Not** `STATE.md`: this plan is archived in the
+   same PR that lands it, so at merge nothing here is in flight and STATE.md's
+   incumbent active work stays the tracked item.
 
 ## Non-goals
 

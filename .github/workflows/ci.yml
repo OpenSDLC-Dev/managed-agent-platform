@@ -91,6 +91,17 @@ jobs:
           for v in SANDBOX_K8S_RUNTIME_CLASS SANDBOX_CPU_MILLIS SANDBOX_CAP_DROP SANDBOX_READONLY_ROOTFS SANDBOX_RUN_AS_USER; do
             echo "$out" | grep -q "name: $v" || { echo "$v was not rendered" >&2; exit 1; }
           done
+          # An explicit numeric/boolean zero means "turn this cap off" and must
+          # reach the executor: Helm's `empty` is true of 0 and false, so the
+          # obvious emptiness test would silently substitute the default.
+          out="$(helm template t "$CHART" -f "$VALUES" \
+            --set executor.sandboxHardening.cpuMillis=0 \
+            --set executor.sandboxHardening.readOnlyRootfs=false \
+            --show-only templates/executor-deployment.yaml)"
+          echo "$out" | grep -A1 'name: SANDBOX_CPU_MILLIS' | grep -q 'value: "0"' \
+            || { echo "an explicit cpuMillis=0 was dropped instead of turning the cap off" >&2; exit 1; }
+          echo "$out" | grep -A1 'name: SANDBOX_READONLY_ROOTFS' | grep -q 'value: "false"' \
+            || { echo "an explicit readOnlyRootfs=false was dropped" >&2; exit 1; }
           # The RuntimeClass object is opt-in on top of the name, and creating it
           # without one would leave the executor pointing at nothing.
           helm template t "$CHART" -f "$VALUES" | grep -q '^kind: RuntimeClass' \

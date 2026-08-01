@@ -1259,11 +1259,13 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
-	// A read-only root is not a bare flag: the sandbox writes the workdir, and
-	// on one backend per-exec state under /tmp, so the provider has to supply
-	// writable space over both. All three halves are asserted together — a
-	// read-only root that broke the workdir would be a sandbox that cannot run
-	// a tool.
+	// A read-only root is not a bare flag: the platform itself writes several
+	// paths inside the sandbox — the workdir, /tmp, the persistent shell's state
+	// root, the session-resource mount root — and a read-only root that reached
+	// any of them would be a sandbox whose very first bash call faults instead
+	// of answering. Every path sandbox.WritablePaths names is asserted, so a
+	// future writer that forgets to add its path here fails the row rather than
+	// the deployment.
 	t.Run("HardeningReadOnlyRootFilesystem", func(t *testing.T) {
 		sb := provisionHardened(t, sandbox.Hardening{ReadOnlyRootfs: true})
 		ctx := context.Background()
@@ -1274,10 +1276,12 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if res.ExitCode == 0 {
 			t.Error("a write to /etc succeeded on a read-only root filesystem")
 		}
-		for _, dir := range []string{workdir, "/tmp"} {
-			res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "touch " + dir + "/map-probe"})
+		for _, dir := range sandbox.WritablePaths(workdir) {
+			res, err := sb.Exec(ctx, sandbox.ExecRequest{
+				Command: "mkdir -p " + dir + "/probe.d && touch " + dir + "/probe.d/map-probe",
+			})
 			if err != nil || res.ExitCode != 0 {
-				t.Errorf("write to %s = %+v, %v; a read-only root must still leave it writable", dir, res, err)
+				t.Errorf("write under %s = %+v, %v; a read-only root must still leave it writable", dir, res, err)
 			}
 		}
 		// And the file primitives, not just exec: the workdir is what the write
@@ -1288,10 +1292,12 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 	})
 
 	// A uid the image did not choose. It travels with ReadOnlyRootfs because the
-	// container's entrypoint creates the workdir: on an image whose root
-	// filesystem the uid cannot write, the world-writable mount a read-only root
-	// brings is what makes the workdir reachable at all — the pairing the
-	// Hardening.RunAsUser doc names, exercised rather than asserted in prose.
+	// container's entrypoint runs `mkdir -p <workdir>` as that uid: the writable
+	// mount a read-only root brings is what makes the workdir *exist* where the
+	// uid could not have created it. Whether the uid can also *write* it is the
+	// image's business on Docker (a fresh anonymous volume is root-owned) and the
+	// kubelet's on Kubernetes (an emptyDir is world-writable), so this row
+	// asserts only what holds on both — see Hardening.RunAsUser.
 	t.Run("HardeningRunsAsTheConfiguredUser", func(t *testing.T) {
 		uid := int64(65534)
 		sb := provisionHardened(t, sandbox.Hardening{RunAsUser: &uid, ReadOnlyRootfs: true})

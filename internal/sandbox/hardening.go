@@ -2,9 +2,13 @@ package sandbox
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
 )
 
 // Hardening is the containment a provider applies to a session's sandbox when
@@ -49,16 +53,28 @@ type Hardening struct {
 	// they are not configurable away.
 	CapDrop []string
 	// ReadOnlyRootfs mounts the container's root filesystem read-only. The
-	// provider mounts writable space over the workdir and /tmp when it is set
-	// — the sandbox writes both — so this is a provision-time choice rather
-	// than a runtime-layer one, but it still needs an image that tolerates a
-	// read-only root elsewhere.
+	// provider mounts writable space over every path the platform itself writes
+	// (WritablePaths) when it is set, so this is a provision-time choice rather
+	// than a runtime-layer one — but it still needs an image that tolerates a
+	// read-only root everywhere else, and a session file resource given an
+	// explicit mount_path outside that set cannot be materialized.
 	ReadOnlyRootfs bool
 	// RunAsUser overrides the image's default user with a numeric uid; nil
 	// keeps the image's own USER. Numeric because that is what both backends
-	// can express (a Kubernetes securityContext takes no user name). An image
-	// whose workdir the uid cannot write needs ReadOnlyRootfs too, whose
-	// writable mount is world-writable.
+	// can express (a Kubernetes securityContext takes no user name).
+	//
+	// It does not make an image non-root-ready. ReadOnlyRootfs alongside it
+	// makes the writable paths *exist* under a uid that could not create them
+	// — which is what keeps the container's `mkdir -p <workdir>` entrypoint
+	// alive — but only Kubernetes makes them *writable* by that uid (the
+	// kubelet creates an emptyDir world-writable). On Docker a fresh anonymous
+	// volume is root-owned 0755 unless the image ships the directory, so there
+	// the image still decides. Shipping an image whose own USER is the uid
+	// remains the reliable route; see docs/self-hosted-security.md §2.
+	//
+	// The one value both backends refuse is gaterun.DefaultGateUID for a gated
+	// sandbox: a tool running as the gate's uid matches its owner-ACCEPT rule
+	// and leaves the namespace unfiltered. Validate enforces it.
 	RunAsUser *int64
 }
 
@@ -72,14 +88,17 @@ var mandatoryGateCapDrop = []string{"NET_RAW", "SETUID", "SETGID"}
 // configured drops, plus the gate's mandatory three when the sandbox is half of
 // a gate pair. It is one function so the two backends cannot drift on which
 // drops are negotiable. The result is deduplicated and ordered so a create
-// payload is stable; "ALL" absorbs everything.
+// payload is stable, "ALL" absorbs everything, and it is always a fresh slice —
+// a backend must never be handed the caller's (or this package's default)
+// backing array to store in a create payload.
 func (h Hardening) EffectiveCapDrop(gated bool) []string {
-	if !gated {
-		return h.CapDrop
+	want := h.CapDrop
+	if gated {
+		want = append(append([]string{}, h.CapDrop...), mandatoryGateCapDrop...)
 	}
-	out := make([]string, 0, len(h.CapDrop)+len(mandatoryGateCapDrop))
+	out := make([]string, 0, len(want))
 	seen := map[string]bool{}
-	for _, c := range append(append([]string{}, h.CapDrop...), mandatoryGateCapDrop...) {
+	for _, c := range want {
 		if c == "ALL" {
 			return []string{"ALL"}
 		}
@@ -88,7 +107,61 @@ func (h Hardening) EffectiveCapDrop(gated bool) []string {
 			out = append(out, c)
 		}
 	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
+}
+
+// ShellStateRoot is where the persistent shell keeps every session's cwd/env
+// state inside the sandbox (internal/sandbox/shell). It is named here because a
+// read-only-rootfs sandbox has to mount writable space over it: without that,
+// the first bash call fails to write its state and the tool faults rather than
+// answering. It lives in this package rather than in shell because shell
+// imports this one.
+const ShellStateRoot = "/var/lib/map-shell"
+
+// sessionResourceRoot is the mount point a session's file resources land under.
+// The exact default path (`/mnt/session/uploads/<file_id>`) is resolved in
+// internal/api, which this package must not import; the parent is what has to be
+// writable, and mounting it covers any default-placed resource. A caller-supplied
+// mount_path outside the writable set still fails under a read-only root — stated
+// in docs/self-hosted-security.md §4 rather than guessed at here.
+const sessionResourceRoot = "/mnt"
+
+// WritablePaths are the mount points a read-only-rootfs sandbox still needs to
+// write, in the order a backend should mount them. Both backends take the list
+// from here so they cannot drift on it, and it is deduplicated: a deployment
+// whose workdir is one of the fixed paths must not produce two mounts on the
+// same target, which both runtimes reject.
+func WritablePaths(workdir string) []string {
+	if workdir == "" {
+		workdir = DefaultWorkdir
+	}
+	out := make([]string, 0, 4)
+	for _, p := range []string{workdir, "/tmp", ShellStateRoot, sessionResourceRoot} {
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// Validate rejects a Hardening that would quietly defeat something else the
+// platform guarantees. Today that is one combination, and it fails closed at
+// provision rather than at the first surprising egress: a **gated** sandbox may
+// not run as the gate's own uid, because the gate's owner-match firewall ACCEPTs
+// exactly that uid — every tool process would leave the namespace unfiltered,
+// with allowed_hosts and vault substitution bypassed and nothing logged. The
+// same hazard reached through the sandbox *image* is #196; this closes the half
+// the platform itself now opens.
+func (h Hardening) Validate(gated bool) error {
+	if gated && h.RunAsUser != nil && *h.RunAsUser == gaterun.DefaultGateUID {
+		return fmt.Errorf("sandbox: RunAsUser %d is the egress gate's own uid: "+
+			"a sandbox running as it matches the gate's owner-match ACCEPT rule and would "+
+			"bypass allowed_hosts entirely", *h.RunAsUser)
+	}
+	return nil
 }
 
 // The environment variables HardeningFromEnv reads. They are shared by the two
@@ -134,6 +207,12 @@ func HardeningFromEnv() (Hardening, error) {
 	if h.CPUMillis, err = envCount(envCPUMillis, DefaultCPUMillis); err != nil {
 		return Hardening{}, err
 	}
+	// A backend turns millicores into nanoCPUs by multiplying by a million, and
+	// an int64 that wraps there lands on zero — which reads as "no limit", the
+	// one answer a configured cap must never produce.
+	if h.CPUMillis > math.MaxInt64/1_000_000 {
+		return Hardening{}, fmt.Errorf("%s=%d is too large to express as a CPU limit", envCPUMillis, h.CPUMillis)
+	}
 	if h.MemoryBytes, err = envCount(envMemoryBytes, 0); err != nil {
 		return Hardening{}, err
 	}
@@ -178,22 +257,36 @@ func envCount(name string, def int64) (int64, error) {
 // about it: Docker accepts either spelling, a Kubernetes securityContext only
 // the bare name.
 func parseCapDrop(v string) ([]string, error) {
-	switch strings.TrimSpace(v) {
+	switch strings.ToUpper(strings.TrimSpace(v)) {
 	case "":
-		return DefaultCapDrop, nil
-	case "none":
+		// A fresh slice: the default is exported, and handing its backing array
+		// to a create payload would let one deployment's mutation reach another.
+		return slices.Clone(DefaultCapDrop), nil
+	case "NONE":
 		return nil, nil
 	}
 	var out []string
 	for _, part := range strings.Split(v, ",") {
-		c := strings.ToUpper(strings.TrimSpace(part))
-		c = strings.TrimPrefix(c, "CAP_")
-		if c == "" || strings.ContainsFunc(c, func(r rune) bool {
-			return !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_'
-		}) {
+		c := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(part)), "CAP_")
+		if !isCapabilityName(c) {
 			return nil, fmt.Errorf("%s=%q: %q is not a capability name", envCapDrop, v, part)
 		}
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// isCapabilityName reports whether c is shaped like a bare Linux capability
+// name. A character-class check alone is not enough: it admits "0", "_" and
+// "123", which reach the runtime as capability names and fail every container
+// create instead of failing this deployment's startup. A residual CAP_ prefix
+// (from "CAP_CAP_NET_RAW") is refused for the same reason — no real capability
+// carries one once stripped, and Kubernetes rejects the spelling outright.
+func isCapabilityName(c string) bool {
+	if c == "" || c[0] < 'A' || c[0] > 'Z' || strings.HasPrefix(c, "CAP_") {
+		return false
+	}
+	return !strings.ContainsFunc(c, func(r rune) bool {
+		return !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_'
+	})
 }

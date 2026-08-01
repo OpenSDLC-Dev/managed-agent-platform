@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -35,8 +36,16 @@ func TestHardeningFromEnvDefaults(t *testing.T) {
 		t.Errorf("pids/cpu = %d/%d, want %d/%d",
 			h.PidsLimit, h.CPUMillis, sandbox.DefaultPidsLimit, sandbox.DefaultCPUMillis)
 	}
-	if !slices.Equal(h.CapDrop, sandbox.DefaultCapDrop) {
-		t.Errorf("CapDrop = %v, want %v", h.CapDrop, sandbox.DefaultCapDrop)
+	// A literal, not sandbox.DefaultCapDrop: comparing the result to the very
+	// slice it was built from is an assertion that cannot fail.
+	if want := []string{"NET_RAW", "SETUID", "SETGID"}; !slices.Equal(h.CapDrop, want) {
+		t.Errorf("CapDrop = %v, want %v", h.CapDrop, want)
+	}
+	// And it must be a copy: DefaultCapDrop is exported, so handing its backing
+	// array out would let one deployment's mutation reach every later one.
+	h.CapDrop[0] = "MUTATED"
+	if sandbox.DefaultCapDrop[0] != "NET_RAW" {
+		t.Errorf("mutating the parsed set changed DefaultCapDrop to %v", sandbox.DefaultCapDrop)
 	}
 	// Memory, read-only rootfs and the uid are opt-in: defaulting them on would
 	// OOM-kill or break a task on the platform's own default image.
@@ -102,6 +111,21 @@ func TestHardeningFromEnvNormalisesCapabilityNames(t *testing.T) {
 	}
 }
 
+// "none" turns the drops off, in whatever case the operator wrote it — upper-cased
+// it would otherwise become a capability literally named NONE and fail every
+// container create instead of doing what it says.
+func TestHardeningFromEnvNoneIsCaseInsensitive(t *testing.T) {
+	for _, spelling := range []string{"none", "NONE", "None"} {
+		t.Run(spelling, func(t *testing.T) {
+			setHardeningEnv(t, map[string]string{"SANDBOX_CAP_DROP": spelling})
+			h, err := sandbox.HardeningFromEnv()
+			if err != nil || h.CapDrop != nil {
+				t.Errorf("HardeningFromEnv() = %v, %v; want no drops", h.CapDrop, err)
+			}
+		})
+	}
+}
+
 // A malformed value fails startup. Falling back to the default would leave a
 // deployment believing it had capped a sandbox it had not.
 func TestHardeningFromEnvRejectsMalformedValues(t *testing.T) {
@@ -112,6 +136,16 @@ func TestHardeningFromEnvRejectsMalformedValues(t *testing.T) {
 		{"SANDBOX_MEMORY_BYTES", "1GiB"},
 		{"SANDBOX_CAP_DROP", "NET_RAW,"},
 		{"SANDBOX_CAP_DROP", "NET RAW"},
+		// A character-class check alone admits these, and they reach the runtime
+		// as capability names — failing every container create instead of this
+		// deployment's startup.
+		{"SANDBOX_CAP_DROP", "0"},
+		{"SANDBOX_CAP_DROP", "_"},
+		{"SANDBOX_CAP_DROP", "123"},
+		{"SANDBOX_CAP_DROP", "CAP_CAP_NET_RAW"},
+		// Large enough to wrap the millicores-to-nanoCPUs multiplication a
+		// backend does, which lands on zero and reads as "no limit".
+		{"SANDBOX_CPU_MILLIS", "9223372036854775"},
 		{"SANDBOX_READONLY_ROOTFS", "yes"},
 		{"SANDBOX_RUN_AS_USER", "nobody"},
 		{"SANDBOX_RUN_AS_USER", "-1"},
@@ -138,6 +172,7 @@ func TestEffectiveCapDrop(t *testing.T) {
 	}{
 		{"ungated passes the configured set through", []string{"CHOWN"}, false, []string{"CHOWN"}},
 		{"ungated drops nothing when nothing is configured", nil, false, nil},
+		{"ungated normalises too", []string{"CHOWN", "CHOWN", "ALL"}, false, []string{"ALL"}},
 		// The gate's three are what make its owner-match firewall hold, so they
 		// are added even to a sandbox configured to drop nothing at all.
 		{"gated adds the mandatory three", nil, true, []string{"NET_RAW", "SETUID", "SETGID"}},
@@ -149,6 +184,74 @@ func TestEffectiveCapDrop(t *testing.T) {
 			got := sandbox.Hardening{CapDrop: tc.configured}.EffectiveCapDrop(tc.gated)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("EffectiveCapDrop(%v) = %v, want %v", tc.gated, got, tc.want)
+			}
+		})
+	}
+}
+
+// The ungated result must not alias the caller's slice either: a backend stores
+// it in a create payload, and a caller that reused its own Hardening would then
+// be editing a pending request.
+func TestEffectiveCapDropDoesNotAliasTheCaller(t *testing.T) {
+	configured := []string{"CHOWN"}
+	got := sandbox.Hardening{CapDrop: configured}.EffectiveCapDrop(false)
+	got[0] = "MUTATED"
+	if configured[0] != "CHOWN" {
+		t.Errorf("the caller's CapDrop became %v", configured)
+	}
+}
+
+// Every path the platform writes inside a sandbox has to be in one list, or a
+// read-only-rootfs deployment breaks somewhere nobody tested — the persistent
+// shell's state root is the one that cost a review round.
+func TestWritablePaths(t *testing.T) {
+	paths := sandbox.WritablePaths("/workspace")
+	for _, want := range []string{"/workspace", "/tmp", sandbox.ShellStateRoot, "/mnt"} {
+		if !slices.Contains(paths, want) {
+			t.Errorf("WritablePaths = %v, missing %s", paths, want)
+		}
+	}
+	// A workdir that collides with a fixed path must not be mounted twice: both
+	// runtimes reject duplicate mount targets, so the sandbox would not start.
+	for _, workdir := range []string{"/tmp", sandbox.ShellStateRoot, "/mnt"} {
+		got := sandbox.WritablePaths(workdir)
+		seen := map[string]bool{}
+		for _, p := range got {
+			if seen[p] {
+				t.Errorf("WritablePaths(%q) = %v, contains %s twice", workdir, got, p)
+			}
+			seen[p] = true
+		}
+	}
+	// An empty workdir is the same default the providers resolve.
+	if got := sandbox.WritablePaths(""); !slices.Contains(got, sandbox.DefaultWorkdir) {
+		t.Errorf("WritablePaths(\"\") = %v, want the default workdir", got)
+	}
+}
+
+// A gated sandbox running as the gate's own uid matches the owner-match ACCEPT
+// rule, so every tool process leaves the namespace unfiltered with allowed_hosts
+// bypassed and nothing logged. Provision must refuse rather than start it.
+func TestValidateRefusesTheGatesOwnUID(t *testing.T) {
+	gateUID, other := int64(gaterun.DefaultGateUID), int64(65534)
+	for _, tc := range []struct {
+		name    string
+		uid     *int64
+		gated   bool
+		wantErr bool
+	}{
+		{"the gate's uid on a gated sandbox", &gateUID, true, true},
+		{"the gate's uid without a gate is only a uid", &gateUID, false, false},
+		{"another uid on a gated sandbox", &other, true, false},
+		{"no uid at all", nil, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := sandbox.Hardening{RunAsUser: tc.uid}.Validate(tc.gated)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate(%v) = %v, wantErr %v", tc.gated, err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), "gate") {
+				t.Errorf("error %q does not say why the uid is refused", err)
 			}
 		})
 	}

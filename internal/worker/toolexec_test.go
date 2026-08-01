@@ -119,10 +119,12 @@ type fakeProvider struct {
 	sb           *fakeSandbox
 	provisionErr error
 	provisions   int
+	lastSpec     sandbox.Spec // captured for the hardening-wiring assertion
 }
 
-func (p *fakeProvider) Provision(_ context.Context, _ sandbox.Spec) (sandbox.Sandbox, error) {
+func (p *fakeProvider) Provision(_ context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
 	p.provisions++
+	p.lastSpec = spec
 	if p.provisionErr != nil {
 		return nil, p.provisionErr
 	}

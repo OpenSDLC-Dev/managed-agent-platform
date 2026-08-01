@@ -165,6 +165,19 @@ type containerInfo struct {
 	} `json:"HostConfig"`
 }
 
+// hostCPUs is the daemon's CPU count. The daemon refuses a create whose
+// NanoCpus exceeds it ("range of CPUs is from 0.01 to N"), so the platform's
+// default CPU cap has to be clamped to it — otherwise a host with fewer CPUs
+// than the default would fail *every* provision with a 400, per session, rather
+// than at startup.
+func (c *apiClient) hostCPUs(ctx context.Context) (int, error) {
+	var info struct {
+		NCPU int `json:"NCPU"`
+	}
+	err := c.getJSON(ctx, "/info", &info)
+	return info.NCPU, err
+}
+
 func (c *apiClient) inspectContainer(ctx context.Context, ref string) (containerInfo, error) {
 	var info containerInfo
 	err := c.getJSON(ctx, "/containers/"+ref+"/json", &info)

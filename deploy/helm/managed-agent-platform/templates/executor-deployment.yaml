@@ -53,7 +53,12 @@ spec:
                   "SANDBOX_CAP_DROP" .Values.executor.sandboxHardening.capDrop
                   "SANDBOX_READONLY_ROOTFS" .Values.executor.sandboxHardening.readOnlyRootfs
                   "SANDBOX_RUN_AS_USER" .Values.executor.sandboxHardening.runAsUser }}
-            {{- if not (empty $value) }}
+            {{- /* Only an unset value is skipped. `empty` would be the obvious
+                   test and is the wrong one: it is true of the int 0 and of
+                   false, so an operator writing an unquoted `cpuMillis: 0` to
+                   turn a cap OFF would have that silently ignored and get the
+                   executor's default instead. */}}
+            {{- if not (or (kindIs "invalid" $value) (eq (toString $value) "")) }}
             - name: {{ $env }}
               value: {{ $value | quote }}
             {{- end }}

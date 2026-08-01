@@ -1,12 +1,15 @@
 package k8s
 
 import (
+	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -63,20 +66,22 @@ func TestPodSpecAppliesHardening(t *testing.T) {
 
 	// A read-only root still has to leave the workdir and /tmp writable — /tmp
 	// is where this backend keeps each exec's state file.
-	mounts := map[string]string{}
+	mounted := map[string]bool{}
 	for _, m := range c.VolumeMounts {
-		mounts[m.MountPath] = m.Name
+		mounted[m.MountPath] = true
 	}
-	if mounts["/workspace"] != workdirVolume || mounts["/tmp"] != tmpVolume {
-		t.Errorf("volume mounts = %+v, want the workdir and /tmp", c.VolumeMounts)
+	for _, path := range sandbox.WritablePaths("/workspace") {
+		if !mounted[path] {
+			t.Errorf("%s is not mounted writable: %+v", path, c.VolumeMounts)
+		}
 	}
 	for _, v := range pod.Spec.Volumes {
 		if v.EmptyDir == nil {
 			t.Errorf("volume %s is not an emptyDir: %+v", v.Name, v.VolumeSource)
 		}
 	}
-	if len(pod.Spec.Volumes) != 2 {
-		t.Errorf("volumes = %+v, want exactly the two writable mounts", pod.Spec.Volumes)
+	if len(pod.Spec.Volumes) != len(sandbox.WritablePaths("/workspace")) {
+		t.Errorf("volumes = %+v, want exactly the writable mounts", pod.Spec.Volumes)
 	}
 }
 
@@ -135,5 +140,43 @@ func TestPodSpecRuntimeClass(t *testing.T) {
 	rc := hardenedPod(t, p, sandbox.Hardening{}).Spec.RuntimeClassName
 	if rc == nil || *rc != "gvisor" {
 		t.Errorf("RuntimeClassName = %v, want gvisor", rc)
+	}
+}
+
+// The same fail-closed refusal the Docker backend makes: a gated sandbox may not
+// run as the gate's own uid, or the gate's owner-match ACCEPT rule admits every
+// tool process and allowed_hosts is void.
+func TestProvisionRefusesTheGatesUIDWhenGated(t *testing.T) {
+	uid := int64(gaterun.DefaultGateUID)
+	p := fakeProvider()
+	_, err := p.Provision(context.Background(), sandbox.Spec{
+		SessionID: domain.NewID("sesn"), Image: "img",
+		Hardening: sandbox.Hardening{RunAsUser: &uid},
+		Gate:      gateSpecFixture(&mintRecorder{}),
+	})
+	if err == nil || !strings.Contains(err.Error(), "gate") {
+		t.Fatalf("Provision = %v, want a refusal naming the gate", err)
+	}
+}
+
+// A volume name is derived from the mount path, so it must be pod-unique and
+// DNS-1123 legal whatever the configured workdir looks like — the API server
+// rejects the whole pod otherwise.
+func TestVolumeNameIsLegalAndUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for _, path := range sandbox.WritablePaths("/srv/Agent_Work/1") {
+		name := volumeName(path)
+		if seen[name] {
+			t.Errorf("volume name %q is not unique across %v", name, sandbox.WritablePaths("/srv/Agent_Work/1"))
+		}
+		seen[name] = true
+		if name == "" || len(name) > 63 {
+			t.Errorf("volume name %q for %s is not a legal length", name, path)
+		}
+		for _, r := range name {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+				t.Errorf("volume name %q for %s carries %q, which DNS-1123 forbids", name, path, r)
+			}
+		}
 	}
 }
