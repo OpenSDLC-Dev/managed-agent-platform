@@ -15,6 +15,42 @@ copy of an entry here.
 
 ### Added
 
+- **An opt-in disk cap for sandbox pods on Kubernetes**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2).
+  `SANDBOX_EPHEMERAL_STORAGE_BYTES` (chart: `executor.sandboxHardening.ephemeralStorageBytes`)
+  bounds the node-local disk a sandbox may consume — its writable layer and every
+  `emptyDir` the platform mounts over it — as an `ephemeral-storage` limit on the pod. Until
+  now a model-directed `dd` or a runaway build could fill a node's disk and take every other
+  pod on it down with the sandbox; CPU, memory and processes were bounded, disk was not.
+
+  **Off by default, unlike every other cap here**, because its enforcement is unlike every
+  other cap here: exceeding a CPU or memory bound throttles or kills the process, while
+  exceeding this gets the whole **pod evicted** by the kubelet. There is no `ENOSPC` for the
+  tool to handle — the session's sandbox disappears mid-call. A platform-chosen default would
+  turn a disk-hungry-but-honest tool call into a lost sandbox, so the operator picks the
+  number or gets nothing. The request is set equal to the limit for the reason memory already
+  is: the kubelet ranks eviction candidates by usage against the *request*, so a limit the
+  scheduler never reserved would land the enforcement on some other pod.
+
+  Give it **bytes** — `21474836480`, never `20Gi`. The parser takes a plain integer and a
+  Kubernetes quantity string fails executor/worker startup, as any malformed hardening value
+  does; the chart passes the value through untouched rather than helpfully rendering a
+  quantity, and CI asserts exactly that.
+
+  **Kubernetes-only, and the Docker backend says so out loud.** This is the mirror of the
+  existing pids asymmetry but it does not have the same cause, which is why the Docker side
+  warns instead of silently ignoring: the Engine API *does* define a writable-layer quota, so
+  unlike a pids resource on a pod the field is not missing — enforcing it needs a storage
+  driver with quota support, and a daemon without one accepts the option and enforces
+  nothing. Measured on Docker 29.6.2 with the `overlayfs` driver: `--storage-opt size=1G`
+  exits 0 and the container's root filesystem still reports the full host disk, identical to
+  the same run without it. Shipping a cap that reports success and enforces nothing is worse
+  than shipping none, so the backend logs once per provider and leaves the create payload
+  byte-for-byte what it would have been — which is what a test asserts, rather than naming
+  the fields it must not have touched. Recorded in
+  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md); operator-facing framing in
+  [docs/self-hosted-security.md](./docs/self-hosted-security.md) §3.
+
 - **Sandbox pods on Kubernetes run under the runtime's seccomp filter**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2). A sandbox
   runs untrusted, model-directed commands, and on Kubernetes it ran with **every syscall

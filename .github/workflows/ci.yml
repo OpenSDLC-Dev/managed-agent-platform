@@ -79,23 +79,29 @@ jobs:
       - name: sandbox hardening and RuntimeClass are off by default and complete when set
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -qE 'SANDBOX_PIDS_LIMIT|SANDBOX_CPU_MILLIS|SANDBOX_MEMORY_BYTES|SANDBOX_CAP_DROP|SANDBOX_READONLY_ROOTFS|SANDBOX_RUN_AS_USER|SANDBOX_K8S_RUNTIME_CLASS' \
+          echo "$out" | grep -qE 'SANDBOX_PIDS_LIMIT|SANDBOX_CPU_MILLIS|SANDBOX_MEMORY_BYTES|SANDBOX_EPHEMERAL_STORAGE_BYTES|SANDBOX_CAP_DROP|SANDBOX_READONLY_ROOTFS|SANDBOX_RUN_AS_USER|SANDBOX_K8S_RUNTIME_CLASS' \
             && { echo "default values must leave the executor's own hardening defaults alone" >&2; exit 1; }
           out="$(helm template t "$CHART" -f "$VALUES" \
             --set sandboxRuntimeClass.name=gvisor \
             --set executor.sandboxHardening.cpuMillis=1000 \
             --set executor.sandboxHardening.memoryBytes=1073741824 \
+            --set executor.sandboxHardening.ephemeralStorageBytes=21474836480 \
             --set executor.sandboxHardening.capDrop=ALL \
             --set executor.sandboxHardening.readOnlyRootfs=true \
             --set executor.sandboxHardening.runAsUser=10001 \
             --show-only templates/executor-deployment.yaml)"
-          for v in SANDBOX_K8S_RUNTIME_CLASS SANDBOX_CPU_MILLIS SANDBOX_MEMORY_BYTES SANDBOX_CAP_DROP SANDBOX_READONLY_ROOTFS SANDBOX_RUN_AS_USER; do
+          for v in SANDBOX_K8S_RUNTIME_CLASS SANDBOX_CPU_MILLIS SANDBOX_MEMORY_BYTES SANDBOX_EPHEMERAL_STORAGE_BYTES SANDBOX_CAP_DROP SANDBOX_READONLY_ROOTFS SANDBOX_RUN_AS_USER; do
             echo "$out" | grep -q "name: $v" || { echo "$v was not rendered" >&2; exit 1; }
           done
           # The value, not only the name: a knob rendered with the wrong value is
           # a cap the operator did not ask for.
           echo "$out" | grep -A1 'name: SANDBOX_MEMORY_BYTES' | grep -q 'value: "1073741824"' \
             || { echo "memoryBytes did not reach the executor as configured" >&2; exit 1; }
+          # Bytes, never a Kubernetes quantity string: the executor parses a
+          # plain integer and fails startup on "20Gi", so a chart that helpfully
+          # rendered a quantity would break every deployment that set the knob.
+          echo "$out" | grep -A1 'name: SANDBOX_EPHEMERAL_STORAGE_BYTES' | grep -q 'value: "21474836480"' \
+            || { echo "ephemeralStorageBytes did not reach the executor as raw bytes" >&2; exit 1; }
           # An explicit numeric/boolean zero means "turn this cap off" and must
           # reach the executor: Helm's `empty` is true of 0 and false, so the
           # obvious emptiness test would silently substitute the default.

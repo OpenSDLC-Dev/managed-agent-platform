@@ -104,6 +104,14 @@ executor:
   sandboxHardening:
     cpuMillis: ""
     memoryBytes: ""
+    # -- Node-local disk cap for a sandbox, in BYTES — not a Kubernetes quantity
+    # string, so `21474836480`, never `20Gi` (a quantity fails executor startup).
+    # Kubernetes-only, the mirror of the absent pids knob: the Docker backend
+    # cannot express it and logs that it ignored it. Exceeding it gets the pod
+    # EVICTED by the kubelet rather than failing the write, and the request is
+    # set equal to the limit, so a generous cap is a real per-pod reservation the
+    # node pool has to be sized for.
+    ephemeralStorageBytes: ""
     capDrop: ""
     readOnlyRootfs: ""
     runAsUser: ""

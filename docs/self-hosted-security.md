@@ -22,7 +22,7 @@ deliberate divergences from the reference are in
 | Concern | Platform enforces (in code) | You (the operator) own |
 |---|---|---|
 | **Sandbox image** | Requires `/bin/bash` + a POSIX userland, and wants a `stat` accepting `-c`; pulls the image you name | Building and pinning a hardened, minimal image; keeping it patched |
-| **Resource limits** | **By default** caps every sandbox at 2 CPUs (`SANDBOX_CPU_MILLIS`) and every **Docker** sandbox at 512 processes (`SANDBOX_PIDS_LIMIT`); an optional memory cap. Kubernetes has no per-pod process limit to set, so `SANDBOX_PIDS_LIMIT` does nothing there | Tuning the caps; on Kubernetes, the kubelet's `podPidsLimit` |
+| **Resource limits** | **By default** caps every sandbox at 2 CPUs (`SANDBOX_CPU_MILLIS`) and every **Docker** sandbox at 512 processes (`SANDBOX_PIDS_LIMIT`); an optional memory cap, plus an optional **Kubernetes-only** disk cap (`SANDBOX_EPHEMERAL_STORAGE_BYTES`, enforced by evicting the pod). The gap runs both ways: Kubernetes has no per-pod process limit to set, so `SANDBOX_PIDS_LIMIT` does nothing there, and a Docker daemon cannot be trusted to enforce a disk quota, so the disk cap does nothing there | Tuning the caps; on Kubernetes, the kubelet's `podPidsLimit`; on Docker, bounding the disk at the host |
 | **Non-root execution** | Runs the image's default user, or the uid `SANDBOX_RUN_AS_USER` names | Shipping an image whose default user is unprivileged, and whose workdir that user can reach |
 | **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; AppArmor/SELinux profiles |
 | **Syscall filtering** | On **Kubernetes**, sets `seccompProfile: RuntimeDefault` on every sandbox pod, always — covering the sandbox container, the gate sidecar and the netsetup init container. Not configurable, and it is the runtime's own curated filter, not one the platform authors. Docker containers already receive their runtime's default | Not disabling it out of band (a node whose runtime has no default profile refuses the pod); AppArmor/SELinux, which are still yours |
@@ -270,10 +270,24 @@ the exec deadline's process-group kill:
 | `SANDBOX_PIDS_LIMIT` | `512` | `HostConfig.PidsLimit` | **not expressible** — see below |
 | `SANDBOX_CPU_MILLIS` | `2000` (2 CPUs) | `HostConfig.NanoCpus` | `resources.limits.cpu`, with a 100m request so a limit does not become a per-pod reservation |
 | `SANDBOX_MEMORY_BYTES` | off | `HostConfig.Memory` | `resources.limits.memory` (request = limit) |
+| `SANDBOX_EPHEMERAL_STORAGE_BYTES` | off | **not enforceable** — see below | `resources.limits.ephemeral-storage` (request = limit) |
 
 `0` turns one off. A malformed value fails executor/worker startup rather than
 falling back to the default — a deployment that meant to cap a sandbox must not
 run believing it had.
+
+One row there is not a cgroup limit despite the heading, and behaves unlike the
+rest. `SANDBOX_EPHEMERAL_STORAGE_BYTES` caps the node-local disk a sandbox may
+consume — its writable layer and every `emptyDir` mounted over it — and
+Kubernetes enforces it by **eviction**, not by refusing the write: a tool that
+fills the disk does not get `ENOSPC`, the kubelet notices the pod is over its
+allowance and kills the whole pod, ending the session's sandbox mid-call. That
+is why this cap is off by default where the CPU cap is not, and why the request
+is set equal to the limit — the kubelet ranks eviction candidates by usage
+against the *request*, so a limit the scheduler never reserved would push the
+enforcement onto whichever pod is over its own. Set it in **bytes**:
+`21474836480`, never `20Gi` — a Kubernetes quantity string is a malformed value
+like any other and fails startup.
 
 Two runtime-shaped edges are worth knowing before you tune these, both Docker's:
 
@@ -292,6 +306,15 @@ What is still yours at the runtime layer:
   the kubelet's `podPidsLimit` node setting, so it is node configuration, not
   chart or platform configuration
   ([docs/DIVERGENCES.md](./DIVERGENCES.md)).
+- **A disk cap on Docker.** The Engine API takes a writable-layer quota, but
+  enforcing one needs a storage driver with quota support, which not every
+  daemon has — and a daemon without one accepts the option and silently does
+  nothing (measured: the container's rootfs still reports the whole host
+  filesystem). The platform will not ship a cap it cannot trust, so the Docker
+  backend ignores `SANDBOX_EPHEMERAL_STORAGE_BYTES` and warns once in the
+  executor's log instead of reporting a limit that is not there
+  ([docs/DIVERGENCES.md](./DIVERGENCES.md)). Bound the disk at the host — a
+  dedicated filesystem or volume behind the daemon's data root.
 - **AppArmor/SELinux.** The platform authors no profile for either; keep the
   runtime's defaults enabled, and never run sandboxes `--privileged` or with
   `--security-opt seccomp=unconfined`. **Seccomp is no longer in this list on
@@ -524,8 +547,10 @@ with tracking issues, not silent omissions:
   `runtimeClassName` on request (§2–4 above), and on Kubernetes a
   `seccompProfile` of `RuntimeDefault` on every sandbox pod (plan 20 slice 2 —
   the runtime's own filter, selected by the platform; it still authors none).
-  Two limits remain, stated rather than papered over: Kubernetes has no per-pod
-  process limit to set (the kubelet's `podPidsLimit`), and AppArmor/SELinux
+  Three limits remain, stated rather than papered over: Kubernetes has no
+  per-pod process limit to set (the kubelet's `podPidsLimit`), Docker has no
+  disk quota the platform can trust (so the opt-in
+  `SANDBOX_EPHEMERAL_STORAGE_BYTES` is Kubernetes-only), and AppArmor/SELinux
   profiles are still the runtime's defaults.
 - **Tool-time credential injection (vaults)** — delivered on both gate-wired
   backends: the sandbox sees only opaque placeholders, substituted at the gate

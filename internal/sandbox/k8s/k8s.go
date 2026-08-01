@@ -553,6 +553,25 @@ func resourceRequirements(h sandbox.Hardening) corev1.ResourceRequirements {
 		r.Limits[corev1.ResourceMemory] = mem
 		r.Requests[corev1.ResourceMemory] = mem
 	}
+	if h.EphemeralStorageBytes > 0 {
+		// The same nil guard, and not a formality: with the CPU cap turned off
+		// (SANDBOX_CPU_MILLIS=0, documented as how to do that) and no memory
+		// cap, neither list above exists and assigning into one would panic
+		// every provision.
+		if r.Limits == nil {
+			r.Limits, r.Requests = corev1.ResourceList{}, corev1.ResourceList{}
+		}
+		// Request equals limit, the shape memory already takes and the opposite
+		// of CPU's small request. The kubelet decides evictions by comparing a
+		// pod's usage against its *request*, so a limit the scheduler never
+		// reserved would leave enforcement landing on whichever pod happened to
+		// exceed its own request — the arbitrary victim this cap exists to make
+		// targeted. It also means a generous cap is a real reservation, so the
+		// node pool has to be sized for it.
+		disk := *resource.NewQuantity(h.EphemeralStorageBytes, resource.BinarySI)
+		r.Limits[corev1.ResourceEphemeralStorage] = disk
+		r.Requests[corev1.ResourceEphemeralStorage] = disk
+	}
 	return r
 }
 

@@ -50,6 +50,7 @@ spec:
             {{- range $env, $value := dict
                   "SANDBOX_CPU_MILLIS" .Values.executor.sandboxHardening.cpuMillis
                   "SANDBOX_MEMORY_BYTES" .Values.executor.sandboxHardening.memoryBytes
+                  "SANDBOX_EPHEMERAL_STORAGE_BYTES" .Values.executor.sandboxHardening.ephemeralStorageBytes
                   "SANDBOX_CAP_DROP" .Values.executor.sandboxHardening.capDrop
                   "SANDBOX_READONLY_ROOTFS" .Values.executor.sandboxHardening.readOnlyRootfs
                   "SANDBOX_RUN_AS_USER" .Values.executor.sandboxHardening.runAsUser }}

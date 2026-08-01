@@ -135,6 +135,29 @@ type Provider struct {
 	// cpus caches the daemon's CPU count, read on the first provision that needs
 	// it (New deliberately contacts no daemon) and 0 until then. See daemonCPUs.
 	cpus atomic.Int64
+	// diskWarnOnce keeps warnUnenforceableEphemeralStorage to one line per
+	// provider rather than one per provisioned sandbox.
+	diskWarnOnce sync.Once
+}
+
+// warnUnenforceableEphemeralStorage says once that a configured disk cap is
+// being ignored. Docker's writable-layer quota needs a storage driver with
+// quota support, and a daemon without one does not refuse the option — it
+// accepts it and enforces nothing (measured on 29.6.2/overlayfs: the container
+// still sees the whole host filesystem). Honouring EphemeralStorageBytes here
+// would therefore mean reporting a cap that may not exist, so this backend
+// ignores it — the mirror of Kubernetes ignoring PidsLimit, and warned about
+// for the same reason: an operator who capped a sandbox and silently got
+// nothing believes it is capped.
+func (p *Provider) warnUnenforceableEphemeralStorage(ctx context.Context, h sandbox.Hardening) {
+	if h.EphemeralStorageBytes <= 0 {
+		return
+	}
+	p.diskWarnOnce.Do(func() {
+		slog.WarnContext(ctx, "docker: sandbox ephemeral storage limit is not expressible on this "+
+			"backend and is ignored; it needs a storage driver with quota support",
+			"configured", h.EphemeralStorageBytes)
+	})
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -173,6 +196,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 	if err := spec.Hardening.Validate(spec.Gate != nil); err != nil {
 		return nil, err
 	}
+	p.warnUnenforceableEphemeralStorage(ctx, spec.Hardening)
 	workdir := spec.Workdir
 	if workdir == "" {
 		workdir = sandbox.DefaultWorkdir
