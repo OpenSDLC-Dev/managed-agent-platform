@@ -157,8 +157,9 @@ func (p *Provider) warnUnenforceableEphemeralStorage(ctx context.Context, h sand
 		return
 	}
 	p.diskWarnOnce.Do(func() {
-		slog.WarnContext(ctx, "docker: sandbox ephemeral storage limit is not expressible on this "+
-			"backend and is ignored; it needs a storage driver with quota support",
+		slog.WarnContext(ctx, "docker: sandbox ephemeral storage limit is ignored on this backend; "+
+			"whether a writable-layer quota is enforced depends on the daemon's storage driver, "+
+			"so the platform does not report a cap it cannot vouch for — bound the disk at the host",
 			"configured", h.EphemeralStorageBytes)
 	})
 }

@@ -270,7 +270,7 @@ the exec deadline's process-group kill:
 | `SANDBOX_PIDS_LIMIT` | `512` | `HostConfig.PidsLimit` | **not expressible** — see below |
 | `SANDBOX_CPU_MILLIS` | `2000` (2 CPUs) | `HostConfig.NanoCpus` | `resources.limits.cpu`, with a 100m request so a limit does not become a per-pod reservation |
 | `SANDBOX_MEMORY_BYTES` | off | `HostConfig.Memory` | `resources.limits.memory` (request = limit) |
-| `SANDBOX_EPHEMERAL_STORAGE_BYTES` | off | **not enforceable** — see below | `resources.limits.ephemeral-storage` (request = limit) |
+| `SANDBOX_EPHEMERAL_STORAGE_BYTES` | off | **ignored** — storage-driver dependent, see below | `resources.limits.ephemeral-storage` (request = limit) |
 
 `0` turns one off. A malformed value fails executor/worker startup rather than
 falling back to the default — a deployment that meant to cap a sandbox must not

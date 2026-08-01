@@ -32,7 +32,8 @@ copy of an entry here.
   turn a disk-hungry-but-honest tool call into a lost sandbox, so the operator picks the
   number or gets nothing. The request is set equal to the limit for the reason memory already
   is: the kubelet ranks eviction candidates by usage against the *request*, so a limit the
-  scheduler never reserved would land the enforcement on some other pod.
+  scheduler never reserved would leave the enforcement landing on whichever pod happens to be
+  over its own request — the arbitrary victim this cap exists to make targeted.
 
   Give it **bytes** — `21474836480`, never `20Gi`. The parser takes a plain integer and a
   Kubernetes quantity string fails executor/worker startup, as any malformed hardening value
