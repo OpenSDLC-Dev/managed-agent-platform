@@ -678,7 +678,9 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   for uniformity, not for confidentiality — a key resource name is not secret, and
   Decision 3 says so; splitting it into a plain value would buy nothing and give the
   backend two configuration paths. Authentication is ADC, so no credential accompanies
-  it. Docs for the Workload Identity binding. Hermetic contract + live tier as above. Two things land in this same PR rather than being batched later,
+  it. Docs for the Workload Identity binding. Hermetic contract + live tier as above.
+
+  Two things land in this same PR rather than being batched later,
   because they are what makes the accepted limit honest: the **docs/DIVERGENCES.md
   entry** recording that this backend cannot serve every input the API accepts, and the
   **API-level boundary test** — a vault-credential create that succeeds under the local
