@@ -76,6 +76,47 @@ jobs:
           echo "$err" | grep -q 'executor.gateImage needs Kubernetes >= 1.29' \
             || { echo "the 1.26 render failed for the wrong reason: $err" >&2; exit 1; }
           echo "ok: gate opt-in paths"
+      - name: sandbox hardening and RuntimeClass are off by default and complete when set
+        run: |
+          out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
+          echo "$out" | grep -qE 'SANDBOX_PIDS_LIMIT|SANDBOX_CPU_MILLIS|SANDBOX_MEMORY_BYTES|SANDBOX_CAP_DROP|SANDBOX_READONLY_ROOTFS|SANDBOX_RUN_AS_USER|SANDBOX_K8S_RUNTIME_CLASS' \
+            && { echo "default values must leave the executor's own hardening defaults alone" >&2; exit 1; }
+          out="$(helm template t "$CHART" -f "$VALUES" \
+            --set sandboxRuntimeClass.name=gvisor \
+            --set executor.sandboxHardening.cpuMillis=1000 \
+            --set executor.sandboxHardening.memoryBytes=1073741824 \
+            --set executor.sandboxHardening.capDrop=ALL \
+            --set executor.sandboxHardening.readOnlyRootfs=true \
+            --set executor.sandboxHardening.runAsUser=10001 \
+            --show-only templates/executor-deployment.yaml)"
+          for v in SANDBOX_K8S_RUNTIME_CLASS SANDBOX_CPU_MILLIS SANDBOX_MEMORY_BYTES SANDBOX_CAP_DROP SANDBOX_READONLY_ROOTFS SANDBOX_RUN_AS_USER; do
+            echo "$out" | grep -q "name: $v" || { echo "$v was not rendered" >&2; exit 1; }
+          done
+          # The value, not only the name: a knob rendered with the wrong value is
+          # a cap the operator did not ask for.
+          echo "$out" | grep -A1 'name: SANDBOX_MEMORY_BYTES' | grep -q 'value: "1073741824"' \
+            || { echo "memoryBytes did not reach the executor as configured" >&2; exit 1; }
+          # An explicit numeric/boolean zero means "turn this cap off" and must
+          # reach the executor: Helm's `empty` is true of 0 and false, so the
+          # obvious emptiness test would silently substitute the default.
+          out="$(helm template t "$CHART" -f "$VALUES" \
+            --set executor.sandboxHardening.cpuMillis=0 \
+            --set executor.sandboxHardening.readOnlyRootfs=false \
+            --show-only templates/executor-deployment.yaml)"
+          echo "$out" | grep -A1 'name: SANDBOX_CPU_MILLIS' | grep -q 'value: "0"' \
+            || { echo "an explicit cpuMillis=0 was dropped instead of turning the cap off" >&2; exit 1; }
+          echo "$out" | grep -A1 'name: SANDBOX_READONLY_ROOTFS' | grep -q 'value: "false"' \
+            || { echo "an explicit readOnlyRootfs=false was dropped" >&2; exit 1; }
+          # The RuntimeClass object is opt-in on top of the name, and creating it
+          # without one would leave the executor pointing at nothing.
+          helm template t "$CHART" -f "$VALUES" | grep -q '^kind: RuntimeClass' \
+            && { echo "the chart must not create a cluster-scoped RuntimeClass by default" >&2; exit 1; }
+          helm template t "$CHART" -f "$VALUES" --set sandboxRuntimeClass.create=true \
+            --set sandboxRuntimeClass.name=gvisor --show-only templates/sandbox-runtimeclass.yaml \
+            | grep -q 'handler: "runsc"' || { echo "create=true did not render the RuntimeClass" >&2; exit 1; }
+          helm template t "$CHART" -f "$VALUES" --set sandboxRuntimeClass.create=true >/dev/null 2>&1 \
+            && { echo "create=true without a name must fail the render" >&2; exit 1; }
+          echo "ok: sandbox hardening + RuntimeClass paths"
       - name: existingSecret path renders (chart creates no Secret)
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" \

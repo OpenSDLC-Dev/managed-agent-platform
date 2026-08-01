@@ -89,6 +89,24 @@ executor:
   # a native sidecar, so the cluster must be Kubernetes >= 1.29 (the template
   # fails the render on older clusters).
   gateImage: ""
+  # -- Containment applied to every sandbox pod at provision time (#65). The
+  # executor's own defaults hold where a value is empty — 2000 millicores (2
+  # CPUs) and the `NET_RAW,SETUID,SETGID` capability drops — so these knobs are
+  # for lowering a cap or turning one off (`0`, or `none` for capDrop), not for
+  # switching containment on. A malformed value fails executor startup.
+  #
+  # The `memoryBytes`, `readOnlyRootfs` and `runAsUser` half is opt-in because
+  # each needs an image that tolerates it: an OOM kill lands mid-task, and a uid
+  # the image did not choose must still be able to reach the workdir (a
+  # read-only root supplies a world-writable emptyDir over it). Kubernetes has
+  # no per-pod process limit to expose here — that is the kubelet's
+  # `podPidsLimit` node setting (docs/DIVERGENCES.md).
+  sandboxHardening:
+    cpuMillis: ""
+    memoryBytes: ""
+    capDrop: ""
+    readOnlyRootfs: ""
+    runAsUser: ""
   # -- Extra literal env entries for the executor container, rendered verbatim.
   # The seam for deployment-shaped configuration the chart has no dedicated knob
   # for — e.g. the web tools' backends (TAVILY_API_KEY, JINA_API_KEY,
@@ -102,6 +120,26 @@ executor:
   affinity: {}
   # The executor runs sandbox pods in the release namespace via in-cluster config;
   # the chart grants it the pods / pods/exec RBAC it needs there.
+
+# -- Hardened container runtime for sandbox pods. The sandbox runs untrusted,
+# model-directed commands, so the strength of the container boundary is the
+# strength of your isolation: a sandboxing runtime (gVisor, Kata) is the
+# strongest lever an operator has. This block both names the RuntimeClass the
+# executor puts on sandbox pods and, optionally, creates the object.
+sandboxRuntimeClass:
+  # -- RuntimeClass name set on every sandbox pod. Empty uses the cluster's
+  # default runtime. A name no RuntimeClass defines makes the kubelet refuse the
+  # pod — the fail-closed direction.
+  name: ""
+  # -- Also create the cluster-scoped RuntimeClass named above. Off by default:
+  # it collides with another release creating the same name, the install needs
+  # cluster-scope RBAC, and the nodes must already run the handler. It is
+  # Helm-managed, so `helm uninstall` removes it again — which breaks any other
+  # workload pointing at it. Leave this false and point `name` at a RuntimeClass
+  # the cluster already owns unless this release is the one that owns it.
+  create: false
+  # -- CRI handler the created RuntimeClass points at; gVisor's is `runsc`.
+  handler: runsc
 
 # -- In-cluster Postgres. For production, disable this and point externalDatabase
 # at your own managed Postgres. This is a deliberate divergence from a Postgres

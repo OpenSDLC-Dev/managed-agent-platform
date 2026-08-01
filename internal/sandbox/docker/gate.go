@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -162,6 +164,13 @@ func gateConfig(spec sandbox.Spec, token, network string) containerConfig {
 	env := map[string]string{
 		"CONTROLPLANE_URL": spec.Gate.ControlplaneURL,
 		"GATE_TOKEN":       token,
+		// Stated rather than left to the image's own default, because the
+		// platform now depends on knowing it: Hardening.Validate refuses a
+		// sandbox running as this uid, since the gate's owner-match rule ACCEPTs
+		// it. A custom gate image baking a different GATE_UID would otherwise
+		// move the firewall's accepted identity out from under that check
+		// silently. Container env beats image env, so this is the value.
+		"GATE_UID": strconv.Itoa(gaterun.DefaultGateUID),
 	}
 	// Only when a collector is configured; an empty endpoint runs the gate without
 	// an exporter, matching the executor's own telemetry.Run behavior.

@@ -13,6 +13,14 @@ import (
 // listener and the client from drifting apart.
 const DefaultProxyAddr = "127.0.0.1:15080"
 
+// DefaultGateUID is the uid the gate drops to and the owner-match firewall
+// ACCEPTs (cmd/gate's GATE_UID default). It lives here rather than in cmd/gate
+// because the sandbox providers need it too: a sandbox running as this uid
+// matches the ACCEPT rule and leaves the namespace unfiltered, so they refuse
+// that combination rather than start a sandbox whose egress policy is silently
+// void (#65, #196).
+const DefaultGateUID = 65532
+
 // CheckLoopbackListenAddr rejects a proxy listen address whose host is not
 // loopback. The gate's forward proxy is unauthenticated — its only protection is
 // that only the co-resident sandbox, sharing its network namespace, can reach it

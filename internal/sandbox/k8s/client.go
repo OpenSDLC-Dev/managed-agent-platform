@@ -39,11 +39,19 @@ import (
 // NetSetupImage is the tiny utility image whose init container flushes a limited
 // sandbox's routing table (it needs an `ip` command, which the sandbox image is
 // not required to carry); empty defaults to busybox.
+//
+// RuntimeClass names the RuntimeClass sandbox pods run under — a hardened
+// runtime such as gVisor's `runsc` or Kata. It lives here rather than on
+// sandbox.Spec because which runtimes a cluster has is a property of the
+// cluster, not of a session. Empty uses the cluster's default runtime; a name
+// no RuntimeClass object defines makes the kubelet refuse the pod, which is the
+// fail-closed direction.
 type Config struct {
 	Kubeconfig    string
 	Context       string
 	Namespace     string
 	NetSetupImage string
+	RuntimeClass  string
 }
 
 // restConfig resolves the cluster connection: in-cluster when running as a pod

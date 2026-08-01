@@ -88,6 +88,14 @@ type Spec struct {
 	// egress gate relies on this by minting stable per-session placeholders and
 	// resolving their live values at egress rather than re-injecting them.
 	Env map[string]string
+	// Hardening is the containment the provider applies when it creates the
+	// sandbox — cgroup limits, capability drops, a non-root uid, a read-only
+	// root filesystem. The zero value applies none of it, which is what a
+	// provider did before the field existed; the platform's own defaults are
+	// resolved by HardeningFromEnv in the binaries that provision sandboxes.
+	// Like Env it is bound at create and not re-applied to an adopted sandbox.
+	// See Hardening for what each backend can express.
+	Hardening Hardening
 	// Gate, when non-nil, tells the provider to run a per-session egress gate
 	// sidecar: a gate container (Gate.Image, on the deploy network, holding
 	// CAP_NET_ADMIN) that owns the network namespace and installs owner-match

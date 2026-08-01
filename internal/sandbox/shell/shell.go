@@ -88,8 +88,11 @@ var templateScript string
 
 // stateRoot holds every session's shell state. It must live on the container's
 // writable layer (not a tmpfs) so cwd/env survive a container restart; Destroy
-// removes it with the container.
-const stateRoot = "/var/lib/map-shell"
+// removes it with the container. It is sandbox.ShellStateRoot rather than a
+// literal because a read-only-rootfs sandbox has to mount writable space over
+// exactly this path, and a second copy of it would be a silent way for the
+// shell to stop working.
+const stateRoot = sandbox.ShellStateRoot
 
 // snapPrefix names a snapshot directory. It is deliberately not one of domain's
 // Prefix* constants: those mirror Anthropic's wire-facing resource ids, and this

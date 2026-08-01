@@ -165,6 +165,19 @@ type containerInfo struct {
 	} `json:"HostConfig"`
 }
 
+// hostCPUs is the daemon's CPU count. The daemon refuses a create whose
+// NanoCpus exceeds it ("range of CPUs is from 0.01 to N"), so the platform's
+// default CPU cap has to be clamped to it — otherwise a host with fewer CPUs
+// than the default would fail *every* provision with a 400, per session, rather
+// than at startup.
+func (c *apiClient) hostCPUs(ctx context.Context) (int, error) {
+	var info struct {
+		NCPU int `json:"NCPU"`
+	}
+	err := c.getJSON(ctx, "/info", &info)
+	return info.NCPU, err
+}
+
 func (c *apiClient) inspectContainer(ctx context.Context, ref string) (containerInfo, error) {
 	var info containerInfo
 	err := c.getJSON(ctx, "/containers/"+ref+"/json", &info)
@@ -182,6 +195,35 @@ type hostConfig struct {
 	CapAdd      []string `json:"CapAdd,omitempty"`
 	CapDrop     []string `json:"CapDrop,omitempty"`
 	SecurityOpt []string `json:"SecurityOpt,omitempty"`
+	// The sandbox's cgroup limits (sandbox.Hardening). PidsLimit is the
+	// containment for a process that escaped the exec deadline's process-group
+	// kill; NanoCpus is the daemon's `--cpus` (it lands as the cgroup's
+	// cpu.max quota); Memory is bytes. Each is omitted when 0 so an
+	// unconfigured deployment's create payload is byte-for-byte what it was.
+	PidsLimit int64 `json:"PidsLimit,omitempty"`
+	NanoCpus  int64 `json:"NanoCpus,omitempty"`
+	Memory    int64 `json:"Memory,omitempty"`
+	// ReadonlyRootfs makes / read-only; Mounts then supplies the writable space
+	// the sandbox still needs.
+	ReadonlyRootfs bool    `json:"ReadonlyRootfs,omitempty"`
+	Mounts         []mount `json:"Mounts,omitempty"`
+}
+
+// mount is one writable path in a read-only-rootfs sandbox. Only anonymous
+// volumes are used — Type "volume" with no Source — so the daemon creates them
+// with the container and removeContainer's `v=1` takes them away with it, and
+// nothing has to be named, tracked or reaped.
+//
+// A volume rather than a tmpfs, which would otherwise be the obvious choice:
+// the daemon refuses PUT /containers/{id}/archive on a read-only-rootfs
+// container ("container rootfs is marked read-only") when the destination is a
+// tmpfs, and allows it when the destination resolves into a volume. Every file
+// this backend writes goes through that endpoint, so a tmpfs workdir would give
+// a sandbox that runs commands but can never receive a file — no skills, no
+// files, no write tool. Measured against the daemon, not inferred.
+type mount struct {
+	Type   string `json:"Type"`
+	Target string `json:"Target"`
 }
 
 type containerConfig struct {
@@ -191,11 +233,14 @@ type containerConfig struct {
 	// the daemon distinctly: the gate leaves all three unset (JSON null → inherit
 	// the image's /gate entrypoint, "" → image default), while the sandbox sets
 	// Entrypoint and an explicit empty Cmd ([] → clear the image CMD, not inherit
-	// it). Both containers run as root — the sandbox safely so, since it drops
-	// SETUID/SETGID and gains no-new-privileges (see sandboxConfig) — so there is
-	// no User field.
-	Entrypoint []string          `json:"Entrypoint"`
-	Cmd        []string          `json:"Cmd"`
+	// it).
+	Entrypoint []string `json:"Entrypoint"`
+	Cmd        []string `json:"Cmd"`
+	// User overrides the image's own USER with sandbox.Hardening's uid. Empty —
+	// the default, and always the gate's — keeps the image's user, which for the
+	// platform's default image is root; a root sandbox is safe to the extent
+	// that its capability drops and no-new-privileges make it so.
+	User       string            `json:"User,omitempty"`
 	WorkingDir string            `json:"WorkingDir"`
 	Labels     map[string]string `json:"Labels"`
 	HostConfig hostConfig        `json:"HostConfig"`

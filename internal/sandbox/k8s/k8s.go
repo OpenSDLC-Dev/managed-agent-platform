@@ -4,19 +4,23 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	gopath "path"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -63,6 +67,10 @@ const defaultNetSetupImage = "busybox"
 type Provider struct {
 	client        *client
 	netSetupImage string
+	runtimeClass  string
+	// pidsWarnOnce keeps warnUnenforceablePidsLimit to one line per provider
+	// rather than one per provisioned pod.
+	pidsWarnOnce sync.Once
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -74,7 +82,7 @@ func New(cfg Config) (*Provider, error) {
 	if img == "" {
 		img = defaultNetSetupImage
 	}
-	return &Provider{client: cl, netSetupImage: img}, nil
+	return &Provider{client: cl, netSetupImage: img, runtimeClass: cfg.RuntimeClass}, nil
 }
 
 // podName derives a DNS-1123 pod name from the session id. Session ids carry one
@@ -98,6 +106,10 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	if err := sandbox.ValidateEnv(spec.Env); err != nil {
 		return nil, err
 	}
+	if err := spec.Hardening.Validate(spec.Gate != nil); err != nil {
+		return nil, err
+	}
+	p.warnUnenforceablePidsLimit(ctx, spec.Hardening)
 	workdir := spec.Workdir
 	if workdir == "" {
 		workdir = sandbox.DefaultWorkdir
@@ -324,22 +336,15 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 	// The provider drives the cluster with its own credentials, not the pod's.
 	noAutomount := false
 	env := spec.Env
-	var sandboxSecurity *corev1.SecurityContext
 	if spec.Gate != nil {
 		// The sandbox reaches the network only through the gate: the proxy env
 		// steers well-behaved clients to the sidecar's loopback proxy, and the
-		// hardening is what makes the gate's owner-match firewall hold — without
-		// CAP_SETUID/SETGID (and no privilege escalation) a tool cannot become
-		// the gate's UID, and without CAP_NET_RAW it cannot AF_PACKET past the
-		// netfilter OUTPUT hook. Mirrors the Docker provider's gated hardening.
+		// capability drops securityContext adds for a gated pod are what make
+		// the gate's owner-match firewall hold — without CAP_SETUID/SETGID (and
+		// no privilege escalation) a tool cannot become the gate's UID, and
+		// without CAP_NET_RAW it cannot AF_PACKET past the netfilter OUTPUT
+		// hook. Mirrors the Docker provider's gated hardening.
 		env = withProxyEnv(env)
-		noEscalation := false
-		sandboxSecurity = &corev1.SecurityContext{
-			AllowPrivilegeEscalation: &noEscalation,
-			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"NET_RAW", "SETUID", "SETGID"},
-			},
-		}
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -349,6 +354,7 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 		Spec: corev1.PodSpec{
 			RestartPolicy:                corev1.RestartPolicyNever,
 			AutomountServiceAccountToken: &noAutomount,
+			RuntimeClassName:             runtimeClassName(p.runtimeClass),
 			Containers: []corev1.Container{{
 				Name:            containerName,
 				Image:           spec.Image,
@@ -364,9 +370,26 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 					"mkdir -p " + shellQuote(workdir) + " && while :; do sleep 3600; done"},
 				WorkingDir:      workdir,
 				Env:             envVars(env),
-				SecurityContext: sandboxSecurity,
+				SecurityContext: securityContext(spec.Hardening, spec.Gate != nil),
+				Resources:       resourceRequirements(spec.Hardening),
 			}},
 		},
+	}
+	if spec.Hardening.ReadOnlyRootfs {
+		// A read-only root still has to leave the sandbox somewhere to write.
+		// The set is sandbox.WritablePaths, shared with the Docker backend so
+		// neither can forget one — the persistent shell's state root especially,
+		// without which the first bash call faults instead of answering. The
+		// kubelet creates an emptyDir world-writable, so the mounts work whatever
+		// uid the container runs as.
+		for _, path := range sandbox.WritablePaths(workdir) {
+			name := volumeName(path)
+			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+				Name: name, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			})
+			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts,
+				corev1.VolumeMount{Name: name, MountPath: path})
+		}
 	}
 	switch {
 	case spec.Gate != nil:
@@ -378,6 +401,128 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 		pod.Spec.InitContainers = []corev1.Container{p.netSetup()}
 	}
 	return pod
+}
+
+// volumeName derives a pod-unique, DNS-1123 volume name from a writable mount
+// path ("/var/lib/map-shell" → "map-w-var-lib-map-shell-<hash>"). Three of the
+// paths are the platform's own (sandbox.WritablePaths); the fourth is the
+// configured workdir, which is an operator's string and so cannot be assumed
+// short, lowercase, or free of the characters folded to '-' here. The readable
+// stem alone would therefore not do: it can exceed the 63-character label limit,
+// and two distinct paths can fold onto it ("/w_1" and "/w-1"). The suffix is
+// taken from the exact path, so the name is unique whenever the path is and the
+// pod is never rejected for a name this function chose.
+func volumeName(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	suffix := "-" + hex.EncodeToString(sum[:4])
+	var b strings.Builder
+	b.WriteString("map-w")
+	for _, r := range strings.ToLower(path) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('-')
+	}
+	stem := b.String()
+	if max := dns1123MaxLen - len(suffix); len(stem) > max {
+		stem = stem[:max]
+	}
+	return strings.TrimRight(stem, "-") + suffix
+}
+
+// dns1123MaxLen is the label length Kubernetes enforces on a volume name.
+const dns1123MaxLen = 63
+
+// warnUnenforceablePidsLimit says once, per provider, that a configured pids
+// limit does nothing here. The Pod API carries no per-pod process limit (it is
+// the kubelet's `podPidsLimit`), and an operator who set SANDBOX_PIDS_LIMIT
+// otherwise gets silence — documented in docs/DIVERGENCES.md, but a log line is
+// what reaches them at the moment it matters.
+func (p *Provider) warnUnenforceablePidsLimit(ctx context.Context, h sandbox.Hardening) {
+	if h.PidsLimit <= 0 {
+		return
+	}
+	p.pidsWarnOnce.Do(func() {
+		slog.WarnContext(ctx, "k8s: sandbox pids limit is not expressible on Kubernetes and is ignored; "+
+			"set the kubelet's podPidsLimit on the nodes instead", "configured", h.PidsLimit)
+	})
+}
+
+// runtimeClassName is the pod's RuntimeClass, or nil for the cluster default —
+// the field is a *string, and an empty one is not the same as unset.
+func runtimeClassName(name string) *string {
+	if name == "" {
+		return nil
+	}
+	return &name
+}
+
+// securityContext is the sandbox container's hardening: the configured
+// capability drops (unioned with the gate's mandatory three when the pod is
+// gated — sandbox.Hardening.EffectiveCapDrop owns that union so the two backends
+// cannot drift), a read-only root, and a uid. allowPrivilegeEscalation travels
+// with any drop set, since dropping a capability while leaving setuid-binary
+// escalation available would hand it back. It returns nil when nothing is asked
+// for, so an unhardened pod spec is what it always was.
+func securityContext(h sandbox.Hardening, gated bool) *corev1.SecurityContext {
+	drop := h.EffectiveCapDrop(gated)
+	if len(drop) == 0 && !h.ReadOnlyRootfs && h.RunAsUser == nil {
+		return nil
+	}
+	sc := &corev1.SecurityContext{}
+	if len(drop) > 0 {
+		caps := make([]corev1.Capability, len(drop))
+		for i, c := range drop {
+			caps[i] = corev1.Capability(c)
+		}
+		noEscalation := false
+		sc.Capabilities = &corev1.Capabilities{Drop: caps}
+		sc.AllowPrivilegeEscalation = &noEscalation
+	}
+	if h.ReadOnlyRootfs {
+		readOnly := true
+		sc.ReadOnlyRootFilesystem = &readOnly
+	}
+	if h.RunAsUser != nil {
+		uid := *h.RunAsUser
+		sc.RunAsUser = &uid
+	}
+	return sc
+}
+
+// cpuRequestFloorMillis bounds the CPU a sandbox pod *reserves*. Kubernetes
+// copies a limit into the request when none is given, so a two-CPU sandbox would
+// reserve two CPUs and could be unschedulable on a small node — turning
+// containment into a capacity decision nobody made. The limit is the
+// containment; the request stays out of the scheduler's way.
+const cpuRequestFloorMillis = 100
+
+// resourceRequirements turns the hardening's CPU and memory caps into the
+// sandbox container's resources. Memory keeps request = limit, which is the
+// right posture for a resource that cannot be throttled — and it is opt-in, so
+// the reservation is one an operator asked for. sandbox.Hardening.PidsLimit has
+// no counterpart here: the Pod API carries no per-pod pids limit (it is the
+// kubelet's `podPidsLimit`), a divergence recorded in docs/DIVERGENCES.md.
+func resourceRequirements(h sandbox.Hardening) corev1.ResourceRequirements {
+	var r corev1.ResourceRequirements
+	if h.CPUMillis > 0 {
+		r.Limits = corev1.ResourceList{
+			corev1.ResourceCPU: *resource.NewMilliQuantity(h.CPUMillis, resource.DecimalSI),
+		}
+		r.Requests = corev1.ResourceList{
+			corev1.ResourceCPU: *resource.NewMilliQuantity(min(h.CPUMillis, cpuRequestFloorMillis), resource.DecimalSI),
+		}
+	}
+	if h.MemoryBytes > 0 {
+		if r.Limits == nil {
+			r.Limits, r.Requests = corev1.ResourceList{}, corev1.ResourceList{}
+		}
+		mem := *resource.NewQuantity(h.MemoryBytes, resource.BinarySI)
+		r.Limits[corev1.ResourceMemory] = mem
+		r.Requests[corev1.ResourceMemory] = mem
+	}
+	return r
 }
 
 // gateSidecar is the egress-gate native sidecar (an init container with
@@ -396,6 +541,10 @@ func gateSidecar(g *sandbox.GateSpec, token string) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "CONTROLPLANE_URL", Value: g.ControlplaneURL},
 		{Name: "GATE_TOKEN", Value: token},
+		// Stated for the same reason the Docker gate states it: the platform
+		// depends on knowing the uid the gate's owner-match rule ACCEPTs, since
+		// Hardening.Validate refuses a sandbox running as it.
+		{Name: "GATE_UID", Value: strconv.Itoa(gaterun.DefaultGateUID)},
 	}
 	// Only when a collector is configured; an empty endpoint runs the gate
 	// without an exporter, matching the Docker wiring and telemetry.Run.

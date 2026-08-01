@@ -41,6 +41,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worker"
@@ -79,6 +80,7 @@ func run(ctx context.Context) error {
 		K8sContext:       os.Getenv("SANDBOX_K8S_CONTEXT"),
 		K8sNamespace:     os.Getenv("SANDBOX_K8S_NAMESPACE"),
 		K8sNetSetupImage: os.Getenv("SANDBOX_K8S_NETSETUP_IMAGE"),
+		K8sRuntimeClass:  os.Getenv("SANDBOX_K8S_RUNTIME_CLASS"),
 	})
 	if err != nil {
 		return err
@@ -89,6 +91,11 @@ func run(ctx context.Context) error {
 		WorkerID:      os.Getenv("ANTHROPIC_WORKER_ID"),
 		Image:         os.Getenv("WORKER_IMAGE"),
 		Workdir:       os.Getenv("WORKER_WORKDIR"),
+	}
+	// The same SANDBOX_* containment the platform executor applies, so a
+	// customer-hosted sandbox is capped the way a platform-managed one is.
+	if cfg.Hardening, err = sandbox.HardeningFromEnv(); err != nil {
+		return err
 	}
 	client := worker.NewClient(baseURL, envKey)
 

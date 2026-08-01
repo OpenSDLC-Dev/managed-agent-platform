@@ -22,11 +22,12 @@ deliberate divergences from the reference are in
 | Concern | Platform enforces (in code) | You (the operator) own |
 |---|---|---|
 | **Sandbox image** | Requires `/bin/bash` + a POSIX userland, and wants a `stat` accepting `-c`; pulls the image you name | Building and pinning a hardened, minimal image; keeping it patched |
-| **Non-root execution** | Sets no user — the container runs as your image's default user | Shipping an image whose default user is unprivileged |
-| **Linux capabilities** | Adds none to the sandbox; a **gated** sandbox additionally drops `NET_RAW`/`SETUID`/`SETGID` (Docker also sets `no-new-privileges`; K8s sets `allowPrivilegeEscalation: false`) — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Dropping the remaining capabilities at the runtime / orchestrator layer |
-| **Read-only root filesystem** | Not set | Enforcing it at the runtime layer, with writable mounts for the workdir |
+| **Resource limits** | **By default** caps every sandbox at 2 CPUs (`SANDBOX_CPU_MILLIS`) and every **Docker** sandbox at 512 processes (`SANDBOX_PIDS_LIMIT`); an optional memory cap. Kubernetes has no per-pod process limit to set, so `SANDBOX_PIDS_LIMIT` does nothing there | Tuning the caps; on Kubernetes, the kubelet's `podPidsLimit` |
+| **Non-root execution** | Runs the image's default user, or the uid `SANDBOX_RUN_AS_USER` names | Shipping an image whose default user is unprivileged, and whose workdir that user can reach |
+| **Linux capabilities** | **By default** drops `NET_RAW`/`SETUID`/`SETGID` from every sandbox and forbids privilege escalation (`SANDBOX_CAP_DROP`, `ALL` accepted); a **gated** sandbox drops those three whatever the config says — the `NET_ADMIN` holders are the gate container/sidecar and the K8s netsetup init container, below | Widening or narrowing the drop set; seccomp and AppArmor/SELinux profiles |
+| **Read-only root filesystem** | Set on request (`SANDBOX_READONLY_ROOTFS`), with writable mounts arranged over every path the platform itself writes (workdir, `/tmp`, the shell state root, the file-resource mount root) | Deciding to turn it on, and shipping an image that tolerates one |
 | **Sandbox egress** | `limited` = only `allowed_hosts`, through the per-session egress gate (both backends, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
-| **Runtime isolation** | Runs tools in a per-session container; no gVisor/Kata wired yet | Choosing a hardened container runtime (gVisor, Kata, userns-remap) |
+| **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
 | **Environment-key lifecycle** | Hash-only storage, one live key per environment, revoke-on-re-mint, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
 | **Model / tool credentials** | Never enter the sandbox; redacted from error events | Securing the brain's provider config and any egress-time secrets |
 | **Auth transport** | Hashes `x-api-key` and environment keys at rest; scopes each | Terminating TLS; keeping keys off logs and out of images |
@@ -112,12 +113,26 @@ tests and the reference design commits to.
   isolated; hardening that isolation (below) is therefore load-bearing, not
   optional polish.
 
+- **A sandbox is capped when it is created.** Every sandbox gets cgroup limits
+  and capability drops at provision time, with no operator action:
+  512 processes, 2 CPUs, and `NET_RAW`/`SETUID`/`SETGID` dropped with privilege
+  escalation forbidden. This is not tidiness — the exec deadline kills a
+  timed-out command by SIGKILLing its process *group*, so a child that calls
+  `setsid` escapes the kill and outlives the deadline, and abandoning the exec's
+  stream is not a kill primitive. The cgroup limits are the containment for
+  exactly that process, and the cap on the process pressure a command would need
+  to stall the daemon probe the deadline labels an overrun with. Every value is
+  configurable (`SANDBOX_*`, §2–4 below), including off, and a malformed one
+  fails startup rather than silently reverting to the default. One asymmetry:
+  the process cap is Docker-only, because Kubernetes has no per-pod process
+  limit ([docs/DIVERGENCES.md](./DIVERGENCES.md)).
+
 ## What you own
 
 Self-hosting means you supply the sandbox image, run the container runtime, and
-place the deployment on your network. The controls below live at those layers,
-not in the platform's request path — the platform reserves the seams but does not
-set them for you today.
+place the deployment on your network. The platform sets what it can at provision
+time (§2–4 are configuration, not seams); what remains below lives at those
+layers, where only you can decide it.
 
 ### 1. Sandbox image hardening
 
@@ -190,58 +205,153 @@ responsibility.
 
 ### 2. Non-root execution
 
-The platform sets no user on the sandbox container, so it **runs as your image's
-default user**. `debian:stable-slim` defaults to root; a hardened image does not
-have to.
+The sandbox runs as **your image's default user** unless you name a uid:
+`SANDBOX_RUN_AS_USER=10001` sets it on both backends (Docker's container `User`,
+Kubernetes' `securityContext.runAsUser`). It is numeric because that is all both
+backends can express — a Kubernetes securityContext takes no user name.
+`debian:stable-slim` defaults to root; a hardened image does not have to.
 
-To run tools unprivileged, ship an image with an unprivileged default user (e.g.
-a `USER 10001` layer) and make sure that user can create and write the session
-workdir (the container's entrypoint does `mkdir -p <workdir>`). This is the one
-hardening dimension you can fully own through the image alone, with no platform
-change — so do it.
+The catch is the **workdir**. The container's entrypoint runs `mkdir -p
+<workdir>` as whatever user the container runs as, and a uid the image did not
+plan for usually cannot create a directory at the root of the filesystem — so the
+sandbox dies at startup. Two ways out, and the first is still the better one:
 
-### 3. Dropping Linux capabilities
+- **Ship the workdir in the image**, owned by an unprivileged default user (a
+  `USER 10001` layer plus a `chown`ed `/workspace`). This is the one hardening
+  dimension you can fully own through the image alone, with no platform
+  configuration at all — so do it.
+- **Turn on the read-only root filesystem** (§4) alongside the uid. It mounts
+  writable space over the workdir, so the directory exists whatever the uid.
+  On Kubernetes the kubelet creates that `emptyDir` world-writable, so the uid
+  can write it too; on Docker the mount is an anonymous volume, which inherits
+  the image directory's ownership when the image ships one and is otherwise
+  root-owned — so on **Docker the image still decides** whether a non-root uid
+  can write the workdir.
 
-The platform does not drop capabilities from an ungated sandbox, so it runs
-with the container runtime's **default capability set**. A **gated** Docker
-sandbox (plan 12) is the exception: the provider drops `NET_RAW`, `SETUID` and
-`SETGID` and sets `no-new-privileges` (the gated Kubernetes sandbox drops the
-same three and sets `allowPrivilegeEscalation: false`), so the sandbox can
-neither craft raw packets past the gate's owner-match firewall nor become the
-gate's UID *at runtime*. One caveat the drops cannot cover: a sandbox **image**
-whose `USER` directive is already the gate's dropped-to UID (`GATE_UID`,
-default 65532 — notably distroless's `nonroot` user) starts every tool
-process as the UID the owner-match firewall permits, silently bypassing
-`allowed_hosts` on both backends. Do not use sandbox images that run as the
-configured gate UID; enforcement is tracked in #196. The `NET_ADMIN` holders are the gate container/sidecar itself (it
-installs the firewall, then drops privileges) and, on Kubernetes, the
-short-lived `netsetup` init container that enforces gate-less `limited`
-networking — never the sandbox container.
+### 3. Capability drops and cgroup limits
 
-Dropping capabilities is not a per-container toggle the platform exposes yet, so
-enforce it at the layer you control:
+The platform drops capabilities from **every** sandbox, not only a gated one:
+`NET_RAW`, `SETUID` and `SETGID` by default, with privilege escalation forbidden
+alongside them (Docker `no-new-privileges`, Kubernetes
+`allowPrivilegeEscalation: false`) so a setuid binary cannot hand a dropped
+capability straight back. `SANDBOX_CAP_DROP` changes the set: a comma-separated
+list of bare capability names, `ALL` to drop everything, `none` to drop nothing
+and run with the runtime's default set. A name that is not a Linux capability
+fails the executor's (or worker's) startup rather than every container create, so
+a typo is a process that will not start, not a deployment that starts and cannot
+provision a session.
 
-- **Docker:** set a restrictive daemon default (`--cap-drop`), and keep the
-  default seccomp and AppArmor/SELinux profiles enabled (do not run sandboxes
-  `--privileged` or with `--security-opt seccomp=unconfined`).
-- **Kubernetes:** a *gated* sandbox container ships the drops above, but an
-  ungated pod carries no `securityContext` of its own, so dropping further
-  capabilities means a mutating admission webhook that injects one, or a
-  locked-down node/runtime — Pod Security Admission can *reject* a
-  non-conforming pod but cannot add a `securityContext` for you. Be aware that
-  a strict Pod Security `restricted` label rejects the sandbox pod either way
-  (no `runAsNonRoot`; and the gate sidecar *adds* `NET_ADMIN`, which
-  `restricted` forbids) — the reserved seam tracked below.
+What the default costs, so it is not a surprise: a tool that changes uid loses
+the ability. `apt-get` is the one worth knowing — it warns that it cannot drop
+privileges for downloading and continues as root; `su` and `sudo` fail outright.
+
+A **gated** sandbox (plan 12) drops those same three whatever `SANDBOX_CAP_DROP`
+says — they are what keeps a tool from crafting raw packets past the gate's
+owner-match firewall or becoming the gate's UID *at runtime*, so they are not
+configurable away. One caveat the drops cannot cover: a sandbox **image** whose
+`USER` directive is already the gate's dropped-to UID (`GATE_UID`, default 65532
+— notably distroless's `nonroot` user) starts every tool process as the UID the
+owner-match firewall permits, silently bypassing `allowed_hosts` on both
+backends. Do not use sandbox images that run as the configured gate UID;
+enforcement for the *image* is tracked in #196. The half the platform itself
+opens is closed: `SANDBOX_RUN_AS_USER` set to the gate's uid on a gated session
+**fails the provision** on both backends, rather than starting a sandbox whose
+egress policy is silently void. The `NET_ADMIN` holders are the gate
+container/sidecar itself (it installs the firewall, then drops privileges) and,
+on Kubernetes, the short-lived `netsetup` init container that enforces gate-less
+`limited` networking — never the sandbox container.
+
+Alongside the drops, cgroup limits — the containment for a process that escaped
+the exec deadline's process-group kill:
+
+| Variable | Default | Docker | Kubernetes |
+|---|---|---|---|
+| `SANDBOX_PIDS_LIMIT` | `512` | `HostConfig.PidsLimit` | **not expressible** — see below |
+| `SANDBOX_CPU_MILLIS` | `2000` (2 CPUs) | `HostConfig.NanoCpus` | `resources.limits.cpu`, with a 100m request so a limit does not become a per-pod reservation |
+| `SANDBOX_MEMORY_BYTES` | off | `HostConfig.Memory` | `resources.limits.memory` (request = limit) |
+
+`0` turns one off. A malformed value fails executor/worker startup rather than
+falling back to the default — a deployment that meant to cap a sandbox must not
+run believing it had.
+
+Two runtime-shaped edges are worth knowing before you tune these, both Docker's:
+
+- The daemon refuses a container whose CPU cap exceeds the host's CPU count, so
+  the provider **clamps** the cap to what the daemon reports, and logs when it
+  does. Without that the two-CPU default would fail every provision on a
+  one-CPU host — per session, not at startup. Kubernetes has no such ceiling: a
+  limit above the node's capacity simply never throttles.
+- The daemon's minimum memory limit is 6 MB, so a smaller `SANDBOX_MEMORY_BYTES`
+  is refused at provision. The knob is off by default, so only setting it
+  reaches this.
+
+What is still yours at the runtime layer:
+
+- **A process cap on Kubernetes.** The Pod API has no per-pod pids limit; it is
+  the kubelet's `podPidsLimit` node setting, so it is node configuration, not
+  chart or platform configuration
+  ([docs/DIVERGENCES.md](./DIVERGENCES.md)).
+- **Seccomp and AppArmor/SELinux.** The platform authors no profile; keep the
+  runtime's defaults enabled, and never run sandboxes `--privileged` or with
+  `--security-opt seccomp=unconfined`.
+- **Pod Security Admission.** A strict `restricted` namespace label rejects the
+  sandbox pod, and `SANDBOX_RUN_AS_USER` does not change that: the profile wants
+  `runAsNonRoot: true` (a *different* field, which the provider does not set), a
+  `seccompProfile` (which it never sets — the platform authors no profile), and
+  `capabilities.drop` containing `ALL`, where the default drops three names.
+  `SANDBOX_CAP_DROP=ALL` closes the last of those three; the other two are not
+  configurable today. A *gated* pod is rejected regardless, since the gate
+  sidecar *adds* `NET_ADMIN`, which `restricted` forbids.
 
 ### 4. Read-only root filesystem
 
-The platform sets neither `ReadonlyRootfs` (Docker) nor `readOnlyRootFilesystem`
-(Kubernetes). Enable it at the runtime layer if your threat model calls for it —
-but note it is not a free toggle here: the sandbox writes the session workdir
-(and, on Kubernetes, per-exec state under `/tmp`), so a read-only root needs
-writable `tmpfs`/`emptyDir` mounts over those paths, which the platform's
-provider does not currently arrange. Treat it as a deliberate runtime-level
-change, not a flag.
+`SANDBOX_READONLY_ROOTFS=true` mounts the sandbox's root filesystem read-only on
+both backends and — the part that used to make this a runtime-level change
+rather than a flag — arranges the writable space the sandbox still needs itself.
+That set is every path the platform writes inside a sandbox, and it is one list
+in the code (`sandbox.WritablePaths`) precisely so neither backend can forget one:
+
+- the **session workdir**;
+- **`/tmp`**, where the Kubernetes backend keeps each exec's state file;
+- **`/var/lib/map-shell`**, where the persistent shell keeps each session's cwd
+  and environment — without it the *first* `bash` call of every session fails,
+  and fails as a backend fault rather than an answer the model can see;
+- **`/mnt`**, the parent of the default mount point for a session's file
+  resources (`/mnt/session/uploads/<file_id>`).
+
+Kubernetes mounts an `emptyDir` over each; Docker an anonymous volume, which its
+existing container removal takes away with the container.
+
+Docker uses a volume rather than a `tmpfs` deliberately, and the reason is
+measured rather than stylistic: the daemon refuses `PUT
+/containers/{id}/archive` on a read-only-rootfs container when the destination is
+a tmpfs (`container rootfs is marked read-only`) and allows it when the
+destination resolves into a volume. Every file that backend writes goes through
+that endpoint, so a tmpfs workdir would give you a sandbox that runs commands but
+can never receive a file — no skills, no files, no `write` tool.
+
+What is still yours: an **image that tolerates a read-only root elsewhere**. A
+tool that writes outside the set above — a package manager, a language runtime
+with a cache under `$HOME` — fails. That is the "where the image allows" half of
+this dimension, and only you can judge it. One platform-shaped case falls the
+same way: a session file resource given an **explicit `mount_path`** outside that
+set cannot be materialized under a read-only root (it is logged, and the session
+continues without the file), so leave `mount_path` unset or put it under the
+workdir.
+
+### Rolling out a change to any of this
+
+Containment is bound when a sandbox is **created**, exactly as `Env` and the
+networking mode are. `Provision` is idempotent: it adopts a session's existing
+container or pod rather than replacing it, so a session that was already running
+when you rolled the executor keeps the containment it was created with until its
+sandbox is destroyed. New sessions get the new settings immediately. This is
+deliberate — replacing a live session's sandbox to apply a setting would discard
+the workdir, its uploaded file resources and the persistent shell's state
+mid-task, which is a worse outcome than an already-running session finishing
+under the containment it started with. If you need a configuration change to
+reach every session at once, drain the running ones (stop them, or let them
+finish) before or after the roll.
 
 ### 5. Egress restriction
 
@@ -339,11 +449,25 @@ restore-ordering constraint you own:
 The sandbox runs untrusted, model-directed commands, so the strength of the
 container boundary is the strength of your isolation. The platform does not pin a
 hardened runtime, so choose one: a sandboxing runtime such as **gVisor** or
-**Kata Containers**, or at minimum user-namespace remapping and the runtime
-hardening from sections 3–4. On Kubernetes this is a `RuntimeClass` decision; the
-Helm chart intentionally does not ship a gVisor `RuntimeClass` yet, because the
-sandbox provider does not set `runtimeClassName` (documented in
-[docs/DIVERGENCES.md](./DIVERGENCES.md)).
+**Kata Containers**, or at minimum user-namespace remapping alongside the
+hardening in §2–4.
+
+On **Kubernetes** this is a `RuntimeClass` decision, and the platform wires it:
+`SANDBOX_K8S_RUNTIME_CLASS` puts a `runtimeClassName` on every sandbox pod, and
+the Helm chart exposes it as `sandboxRuntimeClass.name` — with an opt-in
+`sandboxRuntimeClass.create` that also creates the cluster-scoped `RuntimeClass`
+object. Naming a RuntimeClass the cluster does not define makes the kubelet
+refuse the pod, which is the fail-closed direction. What remains yours is running
+the handler on the nodes (gVisor's `runsc`, Kata's) — nothing the chart can do
+for you. On **Docker** there is no per-container equivalent: the runtime is a
+daemon-level choice (`--default-runtime`, or userns-remap).
+
+One combination to test before you rely on it: the RuntimeClass applies to the
+whole sandbox pod, **including a gated session's gate sidecar**, which holds
+`CAP_NET_ADMIN` and installs an iptables owner-match ruleset. gVisor's netfilter
+support is partial, so a gate under `runsc` is not something this platform has
+verified — run a `limited` session end to end on your own cluster before
+combining the two.
 
 ### Single-tenant daemon trust (Docker backend)
 
@@ -376,11 +500,13 @@ with tracking issues, not silent omissions:
 - **Environment-key issuance UX** — no operator wire endpoint yet; keys are seeded
   directly.
   [#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)
-- **Sandbox `securityContext` / `runtimeClassName`** — beyond the gated
-  sandbox's drops on both backends (above), the platform does not yet set
-  capability drops, non-root, read-only rootfs, or a hardened RuntimeClass on
-  the sandbox; these are operator-configured at the runtime layer today, as
-  above.
+- **Sandbox `securityContext` / `runtimeClassName`** — **closed (#65).** The
+  platform now sets cgroup limits and capability drops on every sandbox by
+  default, and non-root, a read-only root filesystem and a hardened
+  `runtimeClassName` on request (§2–4 above). Two limits remain, stated rather
+  than papered over: Kubernetes has no per-pod process limit to set (the
+  kubelet's `podPidsLimit`), and seccomp/AppArmor/SELinux profiles are still the
+  runtime's defaults — the platform authors none.
 - **Tool-time credential injection (vaults)** — delivered on both gate-wired
   backends: the sandbox sees only opaque placeholders, substituted at the gate
   on admitted plain-HTTP egress (in-sandbox HTTPS keeps its placeholders until

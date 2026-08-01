@@ -74,6 +74,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/executor"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
@@ -143,6 +144,12 @@ func run(ctx context.Context) error {
 	if cfg.WebAllowedDomains, err = splitDomains(os.Getenv("WEBTOOL_ALLOWED_DOMAINS")); err != nil {
 		return err
 	}
+	// The sandbox's containment (#65). Malformed configuration fails startup
+	// rather than falling back to the defaults: an operator who meant to cap a
+	// sandbox must not run believing they had.
+	if cfg.Hardening, err = sandbox.HardeningFromEnv(); err != nil {
+		return err
+	}
 	for env, dst := range map[string]*time.Duration{
 		"EXECUTOR_LEASE_TTL": &cfg.LeaseTTL, "EXECUTOR_POLL_INTERVAL": &cfg.PollInterval,
 	} {
@@ -163,6 +170,7 @@ func run(ctx context.Context) error {
 		K8sContext:        os.Getenv("SANDBOX_K8S_CONTEXT"),
 		K8sNamespace:      os.Getenv("SANDBOX_K8S_NAMESPACE"),
 		K8sNetSetupImage:  os.Getenv("SANDBOX_K8S_NETSETUP_IMAGE"),
+		K8sRuntimeClass:   os.Getenv("SANDBOX_K8S_RUNTIME_CLASS"),
 	})
 	if err != nil {
 		return err

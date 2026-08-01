@@ -32,10 +32,19 @@ import (
 // backend that does not yet run a gate leaves it nil — the gated rows are not
 // registered, and the ungated limited-networking row keeps the fail-closed
 // no-route expectation for every backend.
+//
+// EnforcesPidsLimit declares that the backend's runtime can cap a single
+// sandbox's process count (sandbox.Hardening.PidsLimit). Docker can; the
+// Kubernetes Pod API cannot express a per-pod pids limit at all, so that
+// backend leaves it false and the row is not registered — the one hardening
+// dimension the two backends genuinely cannot share, recorded in
+// docs/DIVERGENCES.md. Everything else in Hardening is asserted for every
+// backend.
 type Harness struct {
-	Provider sandbox.Provider
-	Image    string
-	Gate     func(t *testing.T) GateFixture
+	Provider          sandbox.Provider
+	Image             string
+	Gate              func(t *testing.T) GateFixture
+	EnforcesPidsLimit bool
 }
 
 const workdir = "/workspace"
@@ -69,6 +78,27 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		return sb, h, sid
 	}
 	unrestricted := domain.Networking{Type: domain.NetUnrestricted}
+
+	// provisionHardened gives a subtest a sandbox created with the containment it
+	// asks for. Hardening is bound at create, exactly as Env and Networking are,
+	// so a row that wants a different one needs its own sandbox.
+	provisionHardened := func(t *testing.T, hardening sandbox.Hardening) sandbox.Sandbox {
+		t.Helper()
+		h := newHarness(t)
+		sb, err := h.Provider.Provision(context.Background(), sandbox.Spec{
+			SessionID: domain.NewID("sesn"), Image: h.Image, Workdir: workdir,
+			Networking: unrestricted, Hardening: hardening,
+		})
+		if err != nil {
+			t.Fatalf("provision (hardening %+v): %v", hardening, err)
+		}
+		t.Cleanup(func() {
+			if err := sb.Destroy(context.Background()); err != nil {
+				t.Errorf("destroy: %v", err)
+			}
+		})
+		return sb
+	}
 
 	t.Run("ExecCapturesBothStreams", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
@@ -1176,11 +1206,126 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// --- Spec.Hardening (#65) ---------------------------------------------
+	//
+	// Hardening is bound when the sandbox is created, so every row here
+	// provisions its own. Each asserts what a tool inside the sandbox can see:
+	// the kernel's own report of the applied cgroup limit, an operation the
+	// dropped capability gates, a write outside the writable mounts, `id -u`.
+
+	// A CPU quota is the containment for a process that escaped the deadline's
+	// process-group kill — a `setsid` child outlives the kill and would
+	// otherwise pin a core until the sandbox is destroyed. cpu.max is the
+	// kernel's answer in "<quota> <period>" microseconds, so 500 millicores is
+	// half of the 100ms period.
+	t.Run("HardeningCapsCPU", func(t *testing.T) {
+		sb := provisionHardened(t, sandbox.Hardening{CPUMillis: 500})
+		if got := catInSandbox(t, sb, "/sys/fs/cgroup/cpu.max"); got != "50000 100000" {
+			t.Errorf("cpu.max = %q, want %q for a 500-millicore limit", got, "50000 100000")
+		}
+	})
+
+	// The pids limit is the other half of that containment, and the cap on the
+	// process pressure a command needs to stall the daemon probe the deadline
+	// labels an overrun with. Only a backend whose runtime can express a
+	// per-sandbox limit registers the row: the Kubernetes Pod API carries no
+	// per-pod pids limit (it is the kubelet's `podPidsLimit`), a divergence
+	// recorded in docs/DIVERGENCES.md rather than faked with a passing row.
+	if newHarness(t).EnforcesPidsLimit {
+		t.Run("HardeningCapsProcesses", func(t *testing.T) {
+			sb := provisionHardened(t, sandbox.Hardening{PidsLimit: 64})
+			if got := catInSandbox(t, sb, "/sys/fs/cgroup/pids.max"); got != "64" {
+				t.Errorf("pids.max = %q, want 64", got)
+			}
+		})
+	}
+
+	// A differential, because a one-sided assertion would pass for the wrong
+	// reason — `chown` also fails for an image running as a user who does not
+	// own the file, and would then "prove" a drop that never happened.
+	t.Run("HardeningDropsCapabilities", func(t *testing.T) {
+		probe := "touch " + workdir + "/owned && chown 1 " + workdir + "/owned"
+		plain, _, _ := provision(t, unrestricted)
+		if res, err := plain.Exec(context.Background(), sandbox.ExecRequest{Command: probe}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("chown without a drop = %+v, %v; the row cannot tell a drop from an unrelated failure", res, err)
+		}
+		dropped := provisionHardened(t, sandbox.Hardening{CapDrop: []string{"CHOWN"}})
+		res, err := dropped.Exec(context.Background(), sandbox.ExecRequest{Command: probe})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if res.ExitCode == 0 {
+			t.Error("chown succeeded with CAP_CHOWN dropped")
+		}
+	})
+
+	// A read-only root is not a bare flag: the platform itself writes several
+	// paths inside the sandbox — the workdir, /tmp, the persistent shell's state
+	// root, the session-resource mount root — and a read-only root that reached
+	// any of them would be a sandbox whose very first bash call faults instead
+	// of answering. Every path sandbox.WritablePaths names is asserted, so a
+	// future writer that forgets to add its path here fails the row rather than
+	// the deployment.
+	t.Run("HardeningReadOnlyRootFilesystem", func(t *testing.T) {
+		sb := provisionHardened(t, sandbox.Hardening{ReadOnlyRootfs: true})
+		ctx := context.Background()
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "touch /etc/map-probe"})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if res.ExitCode == 0 {
+			t.Error("a write to /etc succeeded on a read-only root filesystem")
+		}
+		for _, dir := range sandbox.WritablePaths(workdir) {
+			res, err := sb.Exec(ctx, sandbox.ExecRequest{
+				Command: "mkdir -p " + dir + "/probe.d && touch " + dir + "/probe.d/map-probe",
+			})
+			if err != nil || res.ExitCode != 0 {
+				t.Errorf("write under %s = %+v, %v; a read-only root must still leave it writable", dir, res, err)
+			}
+		}
+		// And the file primitives, not just exec: the workdir is what the write
+		// tool lands bytes in.
+		if err := sb.WriteFile(ctx, workdir+"/probe.txt", []byte("hi")); err != nil {
+			t.Errorf("WriteFile on a read-only-rootfs sandbox: %v", err)
+		}
+	})
+
+	// A uid the image did not choose. It travels with ReadOnlyRootfs because the
+	// container's entrypoint runs `mkdir -p <workdir>` as that uid: the writable
+	// mount a read-only root brings is what makes the workdir *exist* where the
+	// uid could not have created it. Whether the uid can also *write* it is the
+	// image's business on Docker (a fresh anonymous volume is root-owned) and the
+	// kubelet's on Kubernetes (an emptyDir is world-writable), so this row
+	// asserts only what holds on both — see Hardening.RunAsUser.
+	t.Run("HardeningRunsAsTheConfiguredUser", func(t *testing.T) {
+		uid := int64(65534)
+		sb := provisionHardened(t, sandbox.Hardening{RunAsUser: &uid, ReadOnlyRootfs: true})
+		res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "id -u"})
+		if err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if got := strings.TrimSpace(res.Stdout); got != "65534" {
+			t.Errorf("id -u = %q, want 65534 (the image's own user is root)", got)
+		}
+	})
+
 	// The gated rows run only for a backend that declares gate support; the
 	// suite never fabricates a GateSpec of its own.
 	if newHarness(t).Gate != nil {
 		gateRows(t, newHarness)
 	}
+}
+
+// catInSandbox reads a small file through Exec and trims it. The hardening rows
+// use it for the kernel's own cgroup reports, which is what a tool would see.
+func catInSandbox(t *testing.T, sb sandbox.Sandbox, path string) string {
+	t.Helper()
+	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "cat " + path})
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("cat %s = %+v, %v", path, res, err)
+	}
+	return strings.TrimSpace(res.Stdout)
 }
 
 // firstDiff returns the index of the first byte where a and b differ, or the

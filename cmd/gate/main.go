@@ -36,7 +36,7 @@ import (
 
 const (
 	defaultAddr          = gaterun.DefaultProxyAddr
-	defaultGateUID       = 65532
+	defaultGateUID       = gaterun.DefaultGateUID
 	defaultFetchInterval = 30 * time.Second
 	// fetchTimeout bounds one config fetch. Without it a control plane that
 	// accepts the connection but never responds would wedge the fetch loop

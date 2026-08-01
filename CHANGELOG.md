@@ -15,6 +15,46 @@ copy of an entry here.
 
 ### Added
 
+- **Sandbox containers are hardened when they are created**
+  ([#65](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/65),
+  [docs/plan/19_sandbox-hardening.md](./docs/plan/19_sandbox-hardening.md)). A session's sandbox
+  runs untrusted, model-directed commands and until now the platform created it with almost no
+  containment: on Docker only `HostConfig.Init`, on Kubernetes a `securityContext` that existed
+  only for a gated session, no resource limits on either, and no `runtimeClassName` — which is why
+  the chart's optional gVisor `RuntimeClass` had stayed deferred as unwired. `sandbox.Spec` now
+  carries a `Hardening`, applied by both backends at create: a **pids limit (512) and a CPU limit
+  (2 CPUs) are on by default**, as are the `NET_RAW`/`SETUID`/`SETGID` drops that until now only a
+  gated sandbox got, with privilege escalation forbidden alongside them. This is containment the
+  exec deadline cannot provide for itself — its kill is a process-*group* kill, so a child that
+  calls `setsid` outlives the deadline and can pin a core until the sandbox is destroyed, and
+  enough escaped processes stall the daemon probe that labels an overrun. A memory cap, a read-only
+  root filesystem and a non-root uid are opt-in, because each needs an image that tolerates it.
+  Every knob is a `SANDBOX_*` variable read by the executor and the BYOC worker alike; the zero
+  value applies nothing, so a programmatic caller and the existing tests are unchanged, and a
+  malformed value **fails startup** rather than silently reverting to the default. The gate's three
+  drops stay non-negotiable: `EffectiveCapDrop` unions them in for a gated sandbox whatever the
+  configuration says, in one place both backends call, so the invariant that keeps a tool from
+  becoming the gate's uid cannot drift. Read-only rootfs arranges the writable space it needs
+  itself — the workdir, `/tmp`, the persistent shell's state root, and the file-resource mount
+  root, one list both backends share so neither can forget one — which is what made it a
+  runtime-level change before: an `emptyDir` on Kubernetes, and on Docker an **anonymous
+  volume**, because the daemon refuses an archive PUT into a *tmpfs* on a read-only-rootfs
+  container (measured), and every file that backend writes goes through that endpoint, so a
+  tmpfs workdir would have given a sandbox that runs commands but can never receive a file.
+  Two edges the defaults survive rather than assume away: a gated session refuses
+  `SANDBOX_RUN_AS_USER` set to the gate's own uid — it would match the gate's owner-match ACCEPT
+  rule and void `allowed_hosts` with nothing logged, the platform-side half of #196 — and the
+  Docker backend clamps the CPU cap to the host's CPU count, since the daemon rejects a container
+  asking for more than the machine has and the two-CPU default would otherwise fail every
+  provision on a one-CPU host. The Kubernetes provider now sets `runtimeClassName`
+  from `SANDBOX_K8S_RUNTIME_CLASS`, so the chart ships `sandboxRuntimeClass` — the name for every
+  sandbox pod, plus an opt-in `create` for the cluster-scoped object — closing the deferral. One
+  dimension the backends genuinely cannot share: Kubernetes has no per-pod process limit (it is the
+  kubelet's `podPidsLimit`), so the shared contract suite registers its pids row only for a backend
+  declaring `EnforcesPidsLimit`, and the gap is recorded rather than faked. `docs/self-hosted-security.md`
+  moves the corresponding rows of the shared-responsibility table onto the platform and closes its
+  `securityContext`/`runtimeClassName` reserved seam.
+
 - **Oversized sandbox-tool output spills to a file instead of losing its tail**
   ([#226](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/226),
   [docs/plan/18_spill-oversized-output.md](./docs/plan/18_spill-oversized-output.md)). The
@@ -63,6 +103,16 @@ copy of an entry here.
   compose (passthrough) and the chart's existing `executor.extraEnv`; the DIVERGENCES entry
   narrows to the reference-side residue (its list contents, configuration surface, and
   blocked-domain answer stay unobserved).
+
+### Changed
+
+- **The `bash` tool tells the model to redirect a backgrounded process's output**
+  ([#65](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/65)). A process the model
+  backgrounds inherits the call's output stream and holds it open after the command itself has
+  exited, costing about two seconds per call while the daemon force-closes it. The tool description
+  now says so up front. Descriptions are ours rather than the wire's — only the six sandbox tools'
+  *schemas* are matched field for field against the SDK's typed `Input` types — so this is prose,
+  not a wire change.
 
 ### Fixed
 

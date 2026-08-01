@@ -14,12 +14,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	gopath "path"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -130,6 +132,9 @@ type Config struct {
 type Provider struct {
 	api         *apiClient
 	gateNetwork string
+	// cpus caches the daemon's CPU count, read on the first provision that needs
+	// it (New deliberately contacts no daemon) and 0 until then. See daemonCPUs.
+	cpus atomic.Int64
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -163,6 +168,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		return nil, errors.New("docker: provision needs an image")
 	}
 	if err := sandbox.ValidateEnv(spec.Env); err != nil {
+		return nil, err
+	}
+	if err := spec.Hardening.Validate(spec.Gate != nil); err != nil {
 		return nil, err
 	}
 	workdir := spec.Workdir
@@ -223,7 +231,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		return nil, ierr
 	}
 
-	cfg := sandboxConfig(spec, workdir, gateID)
+	cfg := sandboxConfig(spec, workdir, gateID, p.clampCPU(ctx, spec.Hardening.CPUMillis))
 	id, cerr := p.api.createContainer(ctx, name, cfg)
 	if statusIs(cerr, 404) { // the image is not on this host yet
 		if perr := p.api.pullImage(ctx, spec.Image); perr != nil {
@@ -273,30 +281,95 @@ func pairedWithGate(info containerInfo, gateID string) bool {
 	return gateID == "" || info.HostConfig.NetworkMode == "container:"+gateID
 }
 
-// sandboxConfig is the session container's create config. When gateID is set the
-// sandbox joins the gate's network namespace (container:<gateID>) and is hardened
-// so it cannot forge the gate's egress identity: it drops NET_RAW (no raw or
-// AF_PACKET socket that would bypass the OUTPUT hook) and SETUID/SETGID (so even
-// a root process cannot setuid to the gate's uid and match the owner-ACCEPT rule)
-// and runs no-new-privileges (no setuid-binary escalation back to those caps).
-// Its HTTP(S)_PROXY is pointed at the gate's loopback proxy — the gate is where
-// egress is filtered and vault credentials are substituted. With no gate it
-// networks directly per its Networking (unrestricted, or none — fail-closed —
-// for limited).
-func sandboxConfig(spec sandbox.Spec, workdir, gateID string) containerConfig {
+// sandboxConfig is the session container's create config. It applies
+// spec.Hardening — cgroup limits, capability drops, a uid, a read-only root with
+// writable volumes over the paths the sandbox writes — and, when gateID is set, joins the
+// gate's network namespace (container:<gateID>) and points HTTP(S)_PROXY at the
+// gate's loopback proxy, where egress is filtered and vault credentials are
+// substituted. With no gate it networks directly per its Networking
+// (unrestricted, or none — fail-closed — for limited).
+//
+// A gated sandbox always drops NET_RAW (no raw or AF_PACKET socket that would
+// bypass the OUTPUT hook) and SETUID/SETGID (so even a root process cannot
+// setuid to the gate's uid and match the owner-ACCEPT rule) whatever the
+// Hardening says — sandbox.Hardening.EffectiveCapDrop owns that union, so the
+// two backends cannot drift on it. no-new-privileges travels with any drop set:
+// dropping a capability while leaving setuid-binary escalation available would
+// hand it straight back.
+// clampCPU bounds a CPU cap by the daemon's own CPU count. The daemon rejects a
+// create whose NanoCpus exceeds the host's CPUs outright, so the platform's
+// default of two would fail every provision on a one-CPU host — a per-session
+// 400 rather than a startup error, and on a backend whose whole point is being
+// easy to run locally. Clamping *down* to the only value the host can express is
+// not a silent policy change: the operator asked for at least this much
+// containment and gets the most the machine allows. A daemon that will not
+// answer leaves the configured value alone, so a probe failure can never widen
+// the cap.
+func (p *Provider) clampCPU(ctx context.Context, millis int64) int64 {
+	if millis <= 0 {
+		return millis
+	}
+	cpus := p.daemonCPUs(ctx)
+	if cpus <= 0 || millis <= cpus*1000 {
+		return millis
+	}
+	slog.WarnContext(ctx, "docker: sandbox CPU cap exceeds the host's CPUs; clamping",
+		"configured_millis", millis, "host_cpus", cpus)
+	return cpus * 1000
+}
+
+// daemonCPUs asks the daemon for its CPU count once and caches the answer, or
+// returns 0 for a daemon that would not answer. Only a *success* is cached: a
+// failed probe is retried on the next provision, since caching it would let one
+// transient error pin a host smaller than the cap into a rejected create per
+// session until the executor restarts — the very failure clampCPU exists to
+// prevent. Racing provisions may each probe once before the first answer lands,
+// which costs a redundant /info and nothing else.
+func (p *Provider) daemonCPUs(ctx context.Context) int64 {
+	if n := p.cpus.Load(); n > 0 {
+		return n
+	}
+	n, err := p.api.hostCPUs(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "docker: could not read the daemon's CPU count; leaving the sandbox CPU cap unclamped", "err", err)
+		return 0
+	}
+	p.cpus.Store(int64(n))
+	return int64(n)
+}
+
+func sandboxConfig(spec sandbox.Spec, workdir, gateID string, cpuMillis int64) containerConfig {
 	// Tools background processes and orphan them; an init process reaps them
 	// instead of letting them pile up as zombies for the session's whole life.
 	host := hostConfig{Init: true}
 	env := spec.Env
 	if gateID != "" {
 		host.NetworkMode = "container:" + gateID
-		host.CapDrop = []string{"NET_RAW", "SETUID", "SETGID"}
-		host.SecurityOpt = []string{"no-new-privileges"}
 		env = withProxyEnv(env)
 	} else {
 		host.NetworkMode = networkMode(spec.Networking)
 	}
-	return containerConfig{
+	h := spec.Hardening
+	if host.CapDrop = h.EffectiveCapDrop(gateID != ""); len(host.CapDrop) > 0 {
+		host.SecurityOpt = []string{"no-new-privileges"}
+	}
+	host.PidsLimit = h.PidsLimit
+	// The daemon takes CPU as nanoCPUs (its `--cpus`) and turns it into the
+	// cgroup's cpu.max quota; a millicore is a million of them. cpuMillis is the
+	// host-clamped value, and HardeningFromEnv has already refused one large
+	// enough to wrap this multiplication.
+	host.NanoCpus = cpuMillis * 1_000_000
+	host.Memory = h.MemoryBytes
+	if h.ReadOnlyRootfs {
+		// Everything the platform itself writes inside the sandbox — see
+		// sandbox.WritablePaths, which both backends share so neither can forget
+		// one. The `mount` type says why these are volumes and not tmpfs.
+		host.ReadonlyRootfs = true
+		for _, path := range sandbox.WritablePaths(workdir) {
+			host.Mounts = append(host.Mounts, mount{Type: "volume", Target: path})
+		}
+	}
+	cfg := containerConfig{
 		Image: spec.Image,
 		Env:   envSlice(env),
 		// Hold the container open and guarantee the workdir exists. Nothing
@@ -308,6 +381,10 @@ func sandboxConfig(spec sandbox.Spec, workdir, gateID string) containerConfig {
 		Labels:     map[string]string{sessionLabel: string(spec.SessionID)},
 		HostConfig: host,
 	}
+	if h.RunAsUser != nil {
+		cfg.User = strconv.FormatInt(*h.RunAsUser, 10)
+	}
+	return cfg
 }
 
 // withProxyEnv returns a copy of env with the sandbox's egress-proxy variables

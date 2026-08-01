@@ -22,6 +22,11 @@ type ToolExecConfig struct {
 	Image      string
 	Workdir    string
 	Networking domain.Networking
+	// Hardening is the containment the worker's sandboxes are created with, the
+	// BYOC twin of the platform executor's (#65). cmd/worker resolves it from
+	// the same environment variables the executor reads, so a customer-hosted
+	// sandbox is capped the same way a platform-managed one is.
+	Hardening sandbox.Hardening
 }
 
 // toolUse is one unanswered agent.tool_use the worker must run: the tool-use
@@ -77,6 +82,7 @@ func RunSessionTools(ctx context.Context, client sdk.Client, provider sandbox.Pr
 		Image:      cfg.Image,
 		Workdir:    cfg.Workdir,
 		Networking: cfg.Networking,
+		Hardening:  cfg.Hardening,
 	})
 	if err != nil {
 		return fmt.Errorf("provision sandbox: %w", err)

@@ -33,6 +33,72 @@ recorded nowhere else.
 
 ---
 
+## Sandbox hardening (plan 19) — archived 2026-08-01, delivered in one PR (#65)
+
+docs/plan/19_sandbox-hardening.md is archived complete: every sandbox is now created with cgroup limits and capability drops by default, with a memory cap, a read-only root filesystem, a non-root uid and a Kubernetes `runtimeClassName` available on request. The narrative is in CHANGELOG.md; what follows is only what a changelog cannot hold — the alternatives that were evaluated and rejected, and the measurements that decided them.
+
+- **Failing `Provision` on Kubernetes when a pids limit is configured** — the fail-closed shape this codebase normally prefers, and the honest one: a security control the backend cannot enforce would never be silently ignored. Rejected because the platform default is *on* (512), so it would have broken every Kubernetes deployment out of the box for a control the cluster expresses elsewhere entirely — the kubelet's `podPidsLimit`. What landed instead makes the asymmetry structural rather than hidden: the shared contract's pids row is registered only for a backend declaring `Harness.EnforcesPidsLimit`, `TestPodSpecIgnoresPidsLimit` pins the Kubernetes side as deliberate, and docs/DIVERGENCES.md carries the entry. Measured while deciding: a pod under a 500m CPU limit on kind reads `/sys/fs/cgroup/pids.max` as the node default (9517), and `k8s.io/api` v0.36.2 `core/v1` defines no pids `ResourceName` at all.
+- **Putting the hardening on the provider config rather than on `sandbox.Spec`** — less code, and arguably the more honest home for what is deployment configuration. Rejected because the acceptance asks the *shared contract suite* to cover the controls, and a per-`Spec` knob lets one row provision a differently hardened sandbox from the same provider; a provider-config knob would have needed a second harness hook per dimension.
+- **A tmpfs for the read-only-rootfs writable mounts on Docker** — the obvious choice, and wrong. The contract row caught it before review did: the daemon refuses `PUT /containers/{id}/archive` on a read-only-rootfs container with `http 400: container rootfs is marked read-only` when the destination is a **tmpfs**, and allows the same PUT when the destination resolves into a **volume** (both measured directly against the daemon, with `docker cp` into a container carrying one of each). Every file that backend writes goes through that endpoint, so a tmpfs workdir would have shipped a sandbox that runs commands but can never receive a file — no skill materialization, no file materialization, no `write` tool. Anonymous volumes need no lifecycle of their own: `removeContainer` already deletes with `v=1`, verified to take them away with the container (28 → 30 → 28 volumes across a create/delete cycle). The residue is recorded rather than papered over — a fresh anonymous volume takes its ownership from the image's directory when the image ships one and is otherwise root-owned `0755`, so on Docker a read-only root makes the workdir *exist* for a non-root uid but does not make it *writable*; on Kubernetes the kubelet's world-writable `emptyDir` does both (`drwxrwxrwx`, verified with `runAsUser: 65534`).
+- **Letting a CPU limit become the Kubernetes request** — the default when no request is given, and it would have turned containment into a capacity decision nobody made: a 2-CPU limit reserves 2 CPUs per sandbox pod and can make it unschedulable on a small node, a CI kind cluster especially. The provider pins the request to `min(limit, 100m)` instead. Memory keeps request = limit, which is correct for a resource that cannot be throttled, and is opt-in anyway.
+- **Defaulting the memory cap on** — rejected: an OOM kill lands in the middle of a task, which is a worse failure than the throttling a CPU quota causes, and the issue's acceptance names pids and CPU only. The knob exists and is off.
+
+**Review hardening, landed in the same PR.** The first cut had three defects that
+would have shipped a hardening flag nobody could safely turn on; each is now
+pinned by a mutation-checked test (the fix reverted, the test observed to fail).
+
+- **A read-only root filesystem broke the `bash` tool outright** (Claude review,
+  measured against the daemon). The persistent shell keeps every session's cwd
+  and environment under `/var/lib/map-shell`, which is on the container's root —
+  so the *first* bash call of every session hit `EROFS`, and hit it as a
+  **backend fault**: the tool was left unanswered and the work item reclaimed,
+  rather than the model seeing an error. The sandbox contract row could not see
+  it (it exercises `Exec` and `WriteFile`, never `shell.Run`) and the shell
+  suite provisioned unhardened sandboxes. The same class hid a second path:
+  session file resources land under `/mnt/session/uploads/<file_id>` (Codex),
+  where materialization would have logged a failure and continued without the
+  file. Both paths are now in one shared list, `sandbox.WritablePaths`, asserted
+  by the contract row and by a new shell row that provisions a read-only-rootfs
+  sandbox; reverted, it reproduces `mkdir: cannot create directory
+  '/var/lib/map-shell': Read-only file system` exactly.
+- **`SANDBOX_RUN_AS_USER` could silently disable the egress gate** (Claude
+  review). The gate's owner-match firewall ACCEPTs uid 65532, so setting the
+  sandbox to run as it — distroless's `nonroot`, the most copy-pasted non-root
+  uid, and the one the security doc already flagged as dangerous for an *image*
+  — would have let every tool process leave the namespace unfiltered with
+  `allowed_hosts` void and nothing logged. #196 reached through a knob this
+  change itself introduced. `Hardening.Validate` now refuses it on a gated
+  session and both providers call it before contacting anything; 65532 moved to
+  `gaterun.DefaultGateUID` so cmd/gate and the providers cannot disagree.
+- **The on-by-default CPU cap would have failed every provision on a small
+  host** (Claude review, measured). The Docker daemon rejects a container asking
+  for more CPUs than the machine has, so two CPUs on a one-vCPU host meant a 400
+  per session rather than an error at startup. The provider now clamps to the
+  daemon's own count, read once and logged when it clamps; a daemon that will
+  not answer leaves the value alone, so a failed probe can never widen a cap.
+- **A large `SANDBOX_CPU_MILLIS` wrapped to "no limit"** (Codex): millicores ×
+  10⁶ overflows int64 above ~9.2×10¹² and lands on exactly zero, which
+  `omitempty` then drops. Refused at parse time instead. Capability parsing was
+  laxer than it claimed for the same reason — `0`, `_`, `123` and
+  `CAP_CAP_NET_RAW` all passed a character-class check and would have failed
+  every container create instead of this deployment's startup — and `none` was
+  matched case-sensitively while every other value is upper-cased, so `NONE`
+  became a capability literally named NONE.
+- **The wiring nobody tested.** `Hardening: cfg.Hardening` in the executor and
+  the worker is the one line that makes "on by default" true for every real
+  deployment, and deleting either left the whole suite green (Claude review):
+  the contract rows pass a Hardening straight to `Provision` and never travel
+  through those packages. Both now have a row.
+- **The Helm template silently dropped an explicit zero** (verifier). `{{- if not (empty $value) }}` is true of Helm's int `0` and of `false`, so an operator writing an unquoted `cpuMillis: 0` to turn a cap **off** had that ignored and got the executor's 2000-millicore default — the exact "silently changed configuration" failure the rest of the change refuses. Measured both ways (`--set cpuMillis=0` rendered nothing; `--set-string cpuMillis=0` rendered `value: "0"`). The test is now `not (or (kindIs "invalid" $value) (eq (toString $value) ""))`, and CI asserts the `0`/`false` passthrough.
+- **The plan promised a `STATE.md` update the PR deliberately does not make** (verifier). The non-update is correct — this plan is archived in the same PR, so at merge nothing here is in flight and STATE.md's incumbent active work stays the tracked item — but the plan's "What lands" list said otherwise. Corrected there, with the reason.
+- **The `bash` description was the one sandbox-tool string that still matched the SDK's verbatim**, and now deliberately does not (verifier, recorded for completeness). Registered in docs/DIVERGENCES.md rather than left as an unregistered mismatch, since a divergence outside the registry is a finding.
+- **Documentation claims that were not true**, each corrected: `RunAsUser`'s own doc comment and the contract row's said a read-only root's writable mount makes the workdir writable by a non-root uid, which holds only on Kubernetes (the plan and the security doc already said so — the code contradicted them); the divergence registry claimed a shared *memory* contract row that does not exist; the security doc claimed a strict Pod Security `restricted` namespace would accept the pod once `SANDBOX_RUN_AS_USER` was set, when `restricted` wants `runAsNonRoot`, a `seccompProfile` and `drop: [ALL]`, none of which that knob supplies; and the chart's RuntimeClass comment claimed the created object outlives the release, when Helm removes it on uninstall (Codex) — left Helm-managed deliberately, since a chart that strands cluster-scoped objects is the worse failure.
+- **The clamp's own cache could reintroduce what the clamp prevents** (verifier, second pass). `clampCPU` read the daemon's CPU count under a `sync.Once`, which cached a *failed* probe as readily as a successful one: one transient `/info` error on a host smaller than the cap left every later provision unclamped and taking the daemon's rejection per session until the executor restarted. Only a success is cached now — a failed probe is retried on the next provision, at the cost of a redundant `/info` when racing provisions both miss. Mutation-checked: restoring the cached failure turns `TestClampCPURetriesAFailedProbe` red at one `/info` call instead of two.
+- **Three defects the bot reviewers found on the PR**, all in the configuration surface rather than the containment itself, each mutation-checked. `SANDBOX_CAP_DROP` validated the *shape* of a capability name, so `NET_RAWW` started cleanly and then failed every container create — the opposite of the fail-fast contract the rest of the knobs keep; it is checked against the kernel's own capability set now, with `ALL` still the wildcard. `WritablePaths` deduplicated exact strings, so a workdir written `/tmp/` slipped past and produced the duplicate mount target both runtimes reject; the workdir is cleaned first. And `volumeName` folded a path into a readable stem with nothing bounding it: a workdir over ~57 characters exceeded the DNS-1123 label limit, and two paths differing only in a character it erases collided — `/VAR/LIB/MAP_SHELL` against the platform's own `/var/lib/map-shell`, found by the test rather than by inspection. A hash of the exact path is appended and the stem truncated to fit.
+- **Two more from the PR round, both in the same configuration surface.** `SANDBOX_RUN_AS_USER` was bounded only below, so a uid past 32 bits truncated in the runtime's setuid and could land on 0 — an operator asking for an unprivileged sandbox getting a root one, the hazard `gaterun.CheckGateID` already guards for the gate's own uid; it is bounded by a positive int32 now. And `Hardening.Validate` compared `RunAsUser` against `gaterun.DefaultGateUID` while the gate container's uid was whatever its image's `GATE_UID` said, so a custom gate image could move the firewall's accepted identity out from under the check. Rather than plumb a configurable uid through `Validate`, both providers now *state* `GATE_UID` in the gate container's environment, where it beats the image's — the constant is true by construction.
+- **Refuted, with evidence:** that an adopted sandbox should be replaced when the configured containment changes. The observation is correct — `Provision` adopts a session's existing container or pod, so a session already running when the executor rolls keeps the containment it was created with — but the remedy costs more than the gap: replacing a live sandbox discards the workdir, the session's materialized file resources and the persistent shell's state mid-task, to harden a session that is already running and already bounded by its own end. Containment binds at create exactly as `Env` and the networking mode do, which `sandbox.Spec` documents; the rollout consequence is now stated for operators in docs/self-hosted-security.md rather than left to be discovered.
+- **Refuted, with evidence:** that `EffectiveCapDrop` could be made to drop the gate's three by configuration. Every route was checked — `"ALL"` (which absorbs them), duplicates, ordering, and an empty configured set — and the union is applied after the configured value in one function both backends call. Both reviewers audited it independently and neither found a path; the remaining hazard is the *uid*, not the capability set, which is the finding above.
+
 ## Spill oversized tool output (plan 18) — archived 2026-08-01, delivered in one PR (#226)
 
 A single-PR plan, the plan-16 precedent. The issue's open design fork — the web tools run in the

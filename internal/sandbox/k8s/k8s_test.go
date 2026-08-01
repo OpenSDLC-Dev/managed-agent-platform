@@ -36,6 +36,10 @@ func TestK8sProviderContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("contract tests require a Kubernetes cluster: %v", err)
 		}
+		// EnforcesPidsLimit stays false: the Pod API carries no per-pod pids
+		// limit (it is the kubelet's `podPidsLimit` node setting), so the
+		// suite's pids row is not registered here. docs/DIVERGENCES.md records
+		// it; TestPodSpecIgnoresPidsLimit keeps it deliberate.
 		return sandboxtest.Harness{Provider: provider, Image: testImage, Gate: k8sGateFixture}
 	})
 }
