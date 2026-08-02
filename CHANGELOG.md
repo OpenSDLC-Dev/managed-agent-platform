@@ -33,8 +33,9 @@ copy of an entry here.
 
 ### Added
 
-- **`deploy/gcp/cloudbuild.yaml` — the two-stage image build.** One Dockerfile produces
-  both images the deployment needs, and the chart composes an image reference as
+- **`deploy/gcp/cloudbuild.yaml` — the image build.** One Dockerfile, whose three stages
+  (`build`, `gate`, `server`) yield the two images the deployment needs, and the chart
+  composes an image reference as
   `registry/repository/COMPONENT:tag`, so the server stage is published under three
   per-component names (`controlplane`, `brain`, `executor`) as three tags on a single
   build — one digest behind all three, so they cannot drift — while `--target gate` builds

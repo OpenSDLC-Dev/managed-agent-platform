@@ -1567,13 +1567,14 @@ built from the read-only checkout, and the teardown proven by destroy → apply.
 narrows [#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75) — images
 published and a real `helm install` accepted end to end, on GCP rather than generically.
 
-**What was created.** `foundation/` applied 13 resources (three service accounts, the KMS
-key ring and crypto key, three empty Secret Manager secrets). `bootstrap.sh` filled them
+**What was created.** `foundation/` applied 13 resources — three service accounts, the KMS
+key ring and crypto key, three empty Secret Manager secrets, and five API enablements. `bootstrap.sh` filled them
 and created the GCS HMAC key; run a second time it skipped every one, leaving exactly one
 version per secret and exactly one HMAC key — the idempotency its unit suite simulates,
-here against the live API. `environment/` applied 24 resources (zonal GKE cluster, the
-platform and tainted sandbox node pools, Cloud SQL, Artifact Registry, the GCS bucket, and
-the IAM and Workload Identity bindings).
+here against the live API. `environment/` applied 24 resources: a zonal GKE cluster, the
+platform and tainted sandbox node pools, Cloud SQL with its database and user, Artifact
+Registry, the GCS bucket, ten IAM and Workload Identity bindings, and six more API
+enablements.
 
 **Three configuration defects, all found by running it.**
 
@@ -1592,7 +1593,8 @@ the IAM and Workload Identity bindings).
    `edition = "ENTERPRISE"` settles it; the `connection_pool_config` block is accepted
    alongside it, which is the combination the instance was created with.
 
-**The image build.** One Dockerfile, two stages, four published images. The chart composes
+**The image build.** One Dockerfile whose three stages (`build`, `gate`, `server`)
+produce four published images from two of them. The chart composes
 `registry/repository/COMPONENT:tag`, so the server stage is pushed under three
 per-component names — `controlplane`, `brain`, `executor` — as three tags on one build, and
 all three resolved to the same digest (`sha256:39c0cad9…`), so nothing can drift between
@@ -1678,5 +1680,19 @@ The zip upload form carries the paths inside the archive and works, which is how
 `skill-answer` skill was uploaded. Whether the reference API accepts bare basenames was not
 established here.
 
-**Cleanup.** `environment/` was destroyed after the run; `foundation/` is retained by
-design (Decision 9) and its KMS key ring can never be deleted in GCP.
+**A credential exposure this run caused, and closed.** The first `.gcloudignore` written
+for the build did not carry `#!include:.gitignore`. A custom `.gcloudignore` *replaces*
+gcloud's default behaviour rather than extending it, so every gitignored-because-secret
+file in the checkout entered the uploaded source archive — `.env` (three live API keys) and
+both `terraform.tfvars` among them — on all three builds submitted before the fix.
+`.dockerignore` does not help: it filters what reaches the build, after the upload. Measured
+both ways with `gcloud meta list-files-for-upload`: without the include those files upload,
+with it they do not, and the build context still carries the Dockerfile, `go.mod`, `go.sum`
+and 318 `internal/` files. The archives were deleted, the bucket's seven-day soft-delete
+retention cleared (three recoverable copies purged, verified zero remaining), and the
+Cloud Build bucket removed. Rotating the exposed keys is the operator's call.
+
+**Cleanup.** `environment/` was destroyed after the run and the IAM added by hand for the
+OTel collector removed; `foundation/` is retained by design (Decision 9) and its KMS key
+ring can never be deleted in GCP. Nothing billable remains: no cluster, no Cloud SQL
+instance, no Artifact Registry repository, no buckets.

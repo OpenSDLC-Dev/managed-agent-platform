@@ -45,8 +45,9 @@ Three things make the split necessary rather than tidy:
   agreement with them: the database password is reapplied to the new Cloud SQL instance,
   and the HMAC pair is carried forward untouched. (Decision 6 also wants that pair *proven*
   against the new bucket by an authenticated call rather than assumed valid from the presence of
-  a secret version. `bootstrap.sh` does not do that yet — slice 4b's acceptance battery is where
-  it belongs, because it needs a live bucket to authenticate against.)
+  a secret version. `bootstrap.sh` does not do that; slice 4b's acceptance battery did,
+  because it needs a live bucket to authenticate against — PUT, GET and DELETE in the
+  rebuilt bucket with the surviving pair, recorded in docs/HISTORY.md.)
 
 **No secret value is in either configuration.** Terraform holds names, IAM bindings and
 preconditions; `bootstrap.sh` owns value creation, and `environment/` reads the database
@@ -106,16 +107,23 @@ PROJECT=your-project make gcp-bootstrap  # fills them, creates the GCS HMAC key
 #
 # Written by replacing rather than appending: Terraform rejects a tfvars file that
 # assigns the same variable twice, so a plain `>>` breaks the second time you run it.
-sa="$(gcloud builds get-default-service-account --project your-project)"
-tfvars=deploy/gcp/environment/terraform.tfvars
-touch "$tfvars"
-{ grep -v '^cloud_build_service_account' "$tfvars" || true
-  # ${sa##*/} keeps only the EMAIL. Which form comes back is not fixed — gcloud
-  # 578.0.0 printed a bare email here, and the documented shape is
-  # projects/…/serviceAccounts/EMAIL — and this strips a prefix if present and
-  # leaves a bare email alone, so it does not matter which you get.
-  echo "cloud_build_service_account = \"${sa##*/}\""
-} > "$tfvars.new" && mv "$tfvars.new" "$tfvars"
+# The `if` is load-bearing: a bare `sa=$(...)` does NOT stop an interactive
+# shell when the lookup fails, so the block below would go on to delete a good
+# assignment and write an empty one — turning the retryable SERVICE_DISABLED
+# above into a corrupted tfvars file.
+if ! sa="$(gcloud builds get-default-service-account --project your-project)" || [ -z "$sa" ]; then
+  echo "lookup failed — tfvars left untouched; retry the command above" >&2
+else
+  tfvars=deploy/gcp/environment/terraform.tfvars
+  touch "$tfvars"
+  { grep -vE '^[[:space:]]*cloud_build_service_account' "$tfvars" || true
+    # ${sa##*/} keeps only the EMAIL. Which form comes back is not fixed —
+    # gcloud 578.0.0 printed a bare email here, and the documented shape is
+    # projects/…/serviceAccounts/EMAIL — and this strips a prefix if present
+    # and leaves a bare email alone, so it does not matter which you get.
+    echo "cloud_build_service_account = \"${sa##*/}\""
+  } > "$tfvars.new" && mv "$tfvars.new" "$tfvars"
+fi
 
 make gcp-env-apply
 ```
@@ -223,6 +231,24 @@ supply alongside it, and the render fails naming each one you miss:
 | `postgresql.password` | bundled Postgres; must be URL-safe — it is embedded in `DATABASE_URL` |
 | `minio.rootUser` / `minio.rootPassword` | bundled object storage |
 | `openbao.staticSealKey` / `openbao.platformToken` | bundled OpenBao; the seal key is base64 of exactly 32 bytes |
+
+Two more come from the **build** rather than from Terraform, and the render does *not* fail
+without them — which is why they are called out here rather than left to be discovered:
+
+| Value | Why |
+| --- | --- |
+| `image.tag` | the tag `cloudbuild.yaml` pushed. Empty falls back to the chart's `appVersion` (`0.1.0`), which nothing publishes, so all three platform pods sit in `ImagePullBackOff` |
+| `executor.gateImage` | the full `…/gate:TAG` reference. Empty is *valid* and means no gate: `limited` and vault-attached sessions fall back to the backend's own fail-closed networking, and credential substitution does not happen |
+
+```sh
+tag="$(git rev-parse --short HEAD)"   # whatever _TAG the build used
+cat >> ~/map-values-gcp.yaml <<EOF
+image:
+  tag: "$tag"
+executor:
+  gateImage: "$(terraform output -raw artifact_registry)/gate:$tag"
+EOF
+```
 
 The sandbox-placement values in that fragment are a **pair, and neither half works alone**.
 Without the tolerations every sandbox pod stays `Pending` forever — the pool's taint has no
