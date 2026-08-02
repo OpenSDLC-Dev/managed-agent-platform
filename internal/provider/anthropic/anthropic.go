@@ -74,10 +74,11 @@ func New(cfg provider.Config) (provider.Provider, error) {
 	}
 	client := sdk.NewClient(opts...)
 	return &anthropicProvider{
-		client: client,
-		model:  cfg.Model,
-		stall:  cfg.StallTimeout,
-		redact: provider.NewRedactor(cfg),
+		client:    client,
+		model:     cfg.Model,
+		stall:     cfg.StallTimeout,
+		maxTokens: cfg.MaxTokens,
+		redact:    provider.NewRedactor(cfg),
 	}, nil
 }
 
@@ -87,19 +88,25 @@ type anthropicProvider struct {
 	// stall is how long this endpoint may say nothing before the turn is
 	// abandoned; zero takes provider.DefaultStallTimeout.
 	stall time.Duration
+	// maxTokens is the route's default output cap for turns that set none;
+	// zero takes defaultMaxTokens.
+	maxTokens int64
 	// The SDK's API error quotes the whole response body and the request URL,
 	// so both an echoed credential and one carried in base_url reach its text.
 	redact provider.Redactor
 }
 
-// defaultMaxTokens applies when the request doesn't set one; the wire field
-// is required.
+// defaultMaxTokens applies when neither the request nor the route config sets
+// one; the wire field is required.
 const defaultMaxTokens = 8192
 
 func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) (provider.Stream, error) {
 	params := sdk.MessageNewParams{
 		Model:     sdk.Model(p.model),
 		MaxTokens: req.MaxTokens,
+	}
+	if params.MaxTokens == 0 {
+		params.MaxTokens = p.maxTokens
 	}
 	if params.MaxTokens == 0 {
 		params.MaxTokens = defaultMaxTokens
