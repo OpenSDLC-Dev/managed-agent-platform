@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -294,3 +297,112 @@ func TestOutcomeGraderError(t *testing.T) {
 type contextualError string
 
 func (e contextualError) Error() string { return string(e) }
+
+func TestOutcomeInterruptDuringGrading(t *testing.T) {
+	// An interrupt lands while the grader call is in flight: the API path
+	// flips the entry terminal in its own transaction. The verdict
+	// settlement re-reads the entry under the lock and, finding it no longer
+	// evaluating, discards the verdict — the interrupt's end event is the
+	// only one on the log.
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("looks fine", "satisfied"),
+	}, nil)
+	h.wakeOutcome(t, "Build it", 3)
+
+	h.provider.onGenerate = func(call int) {
+		if call != 1 {
+			return
+		}
+		// Mimic the API interrupt's flip (its cancel is what usually kills
+		// this item's lease; racing past it exercises the settlement's own
+		// stale check).
+		_, err := h.log.AppendWith(context.Background(), h.sessionID, nil, events.AppendOptions{
+			MutateOutcomes: events.FlipNonTerminalOutcomes(time.Now().UTC()),
+		})
+		if err != nil {
+			t.Errorf("mid-grade flip: %v", err)
+		}
+	}
+	h.drain(t)
+
+	evals := h.outcomes(t)
+	if evals[0].Result != domain.OutcomeResultInterrupted {
+		t.Fatalf("entry = %+v, want interrupted (the API's flip wins)", evals[0])
+	}
+	// The discarded verdict rendered no end event of its own.
+	if ends := h.eventsOfType(t, domain.EventSpanOutcomeEvalEnd); len(ends) != 0 {
+		t.Fatalf("end events = %d, want 0 (the flip here bypassed the API's own end append)", len(ends))
+	}
+}
+
+// blobHarness is the harness plus the in-memory object store its brain reads.
+type blobHarness struct {
+	*harness
+	blobs *blobtest.MemStore
+}
+
+func newHarnessWithBlobs(t *testing.T, scripts [][]provider.Chunk, errs []error) *blobHarness {
+	t.Helper()
+	h := newHarness(t, scripts, errs)
+	blobs := blobtest.Mem()
+	// Rebuild the brain with the store; the registry inside the harness brain
+	// is not reachable, so mirror newHarness's registry wiring.
+	reg, err := provider.NewRegistry(
+		[]provider.Route{{Model: "*", Config: provider.Config{Protocol: "fake", BaseURL: "http://fake"}}},
+		map[string]provider.Factory{"fake": func(cfg provider.Config) (provider.Provider, error) {
+			return h.provider, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.brain = brain.New(h.pool, reg, blobs, brain.Config{})
+	return &blobHarness{harness: h, blobs: blobs}
+}
+
+func TestOutcomeFileRubricSnapshot(t *testing.T) {
+	// A file rubric grades from its acceptance snapshot in the blob store.
+	h := newHarnessWithBlobs(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("meets the filed rubric", "satisfied"),
+	}, nil)
+	outcomeID := domain.NewID(domain.PrefixOutcome)
+	if err := h.blobs.Put(context.Background(), events.RubricSnapshotKey(outcomeID),
+		strings.NewReader("# Snapshotted rubric\n- from the file"), int64(len("# Snapshotted rubric\n- from the file")), "text/markdown"); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"description":    "Build it",
+		"rubric":         map[string]any{"type": "file", "file_id": "file_0123456789abcdefghjkmnpq"},
+		"max_iterations": int64(3),
+		"outcome_id":     outcomeID,
+	})
+	running := domain.SessionRunning
+	if _, err := h.log.AppendWith(context.Background(), h.sessionID, []events.NewEvent{
+		{Type: domain.EventUserDefineOutcome, Payload: payload},
+		{Type: domain.EventSessionStatusRunning},
+	}, events.AppendOptions{
+		SetStatus: &running,
+		MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+			return append(evals, domain.OutcomeEvaluation{
+				Type: "outcome_evaluation", OutcomeID: outcomeID,
+				Description: "Build it", Result: domain.OutcomeResultPending,
+			}), nil
+		},
+		Then: func(ctx context.Context, tx pgx.Tx) error {
+			_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
+			return err
+		},
+	}); err != nil {
+		t.Fatalf("wake: %v", err)
+	}
+	h.drain(t)
+
+	if evals := h.outcomes(t); evals[0].Result != domain.OutcomeResultSatisfied {
+		t.Fatalf("entry = %+v, want satisfied", evals[0])
+	}
+	g := h.provider.calls[1]
+	if !strings.Contains(g.System, "Snapshotted rubric") {
+		t.Errorf("grader system missing the snapshot bytes: %q", g.System)
+	}
+}

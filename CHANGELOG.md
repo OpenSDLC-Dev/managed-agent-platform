@@ -15,6 +15,31 @@ copy of an entry here.
 
 ### Added
 
+- **The outcome grader: evaluation cycles run, verdicts settle, revisions loop**
+  ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 3). The loop the docs
+  describe is now real: after a tool-less agent turn settles with an active outcome, the
+  platform provisions a grader — one model call in a separate context (grader charge +
+  rubric + role-labeled transcript; a file rubric reads its acceptance snapshot through
+  the brain's new read-only `blob.Store`, wired in `cmd/brain`; no tools, no previews —
+  "you see that it's working, not what it's thinking") — and the cycle's
+  `span.outcome_evaluation_start`/`_ongoing`/`_end` ride the log with the OTel span from
+  one instrumentation point. Grading is **two-phase through the work queue** so no model
+  call ever runs under a session lock: the settlement commits the start and the entry's
+  flip to `evaluating`, requeues its own item, and the next claim grades; a brain dying
+  mid-grade re-grades on reclaim under the same start. Verdicts: satisfied/failed idle
+  with the ordinary `end_turn` (mid-outcome messages chain first);
+  needs_revision returns the entry to `running` with `iteration+1` and the revision turn
+  replays the grader's findings as deterministic log-derived feedback (no extra persisted
+  event); a final-cycle needs_revision is reported `max_iterations_reached` and the one
+  documented acknowledgment turn follows before idle. A grader failure renders no end
+  event — the entry reverts to `running` and the session settles like a failed model
+  turn, resuming the outcome on its next wake; an interrupt landing mid-grade wins over
+  the in-flight verdict (the settlement re-checks the entry under the lock). Seven
+  scripted state-machine tests drive every path against real Postgres. Everything the
+  reference keeps opaque — the grader's prompt, inputs, verdict protocol, cadence,
+  scheduling, failure posture — is registered as one consolidated INFERRED divergence in
+  the same PR.
+
 - **`user.define_outcome` is accepted; `outcome_evaluations` is real, stored state;
   session create takes `initial_events`**
   ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 2, closing the #77
