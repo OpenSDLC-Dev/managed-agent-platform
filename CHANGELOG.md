@@ -27,8 +27,10 @@ copy of an entry here.
   sandbox (bash listing, NUL-separated; forged paths from the agent-writable sandbox are
   excluded, and each path segment is held to the upload endpoint's own filename rule —
   valid UTF-8 included, so a stray byte can never fault the publish at the text-column
-  bind and wedge the reclaim, the #135 class), and publishes a **per-path snapshot**
-  into the files registry — 
+  bind and wedge the reclaim, the #135 class; a listing past the exec output cap
+  degrades to its complete-entry sorted prefix rather than faulting — the tree is
+  static during grading, so the fault would repeat on every reclaim), and publishes a
+  **per-path snapshot** into the files registry — 
   `filename` = relative path under a new `(scope_id, filename)` unique index,
   `scope_type:"session"`, `downloadable:true`, mime by extension — with caps of
   50 MiB/file and 200 files / 500 MiB per session, applied greedily in lexicographic

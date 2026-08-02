@@ -139,12 +139,19 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess se
 	if res.ExitCode != 0 {
 		return nil, fmt.Errorf("list outputs: exit %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
+	listing := res.Stdout
 	if res.Truncated {
-		// A partial listing would silently drop deliverables from the
-		// snapshot; fault instead, and the reclaim retries.
-		return nil, errors.New("list outputs: listing exceeded the exec output cap")
+		// The exec cap cut the listing. The glob emits paths sorted, so its
+		// complete entries are the tree's lexicographic prefix — what greedy
+		// admission takes first anyway. Keep them and drop the trailing
+		// mid-path fragment: the tree is static during grading, so a fault
+		// here would repeat identically on every reclaim and wedge the
+		// session, where a partial snapshot (logged) still grades.
+		listing = listing[:strings.LastIndexByte(listing, 0)+1]
+		slog.WarnContext(ctx, "executor: outputs listing exceeded the exec output cap; snapshot degrades to its sorted prefix",
+			"session", item.SessionID)
 	}
-	paths, rejected := parseListing(res.Stdout)
+	paths, rejected := parseListing(listing)
 	for _, p := range rejected {
 		slog.WarnContext(ctx, "executor: outputs listing produced an invalid path; excluded",
 			"session", item.SessionID, "path", p)

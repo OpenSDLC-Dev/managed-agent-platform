@@ -371,24 +371,35 @@ func TestHarvestStaleSessionDrains(t *testing.T) {
 	}
 }
 
-func TestHarvestTruncatedListingFaults(t *testing.T) {
-	sb := &fakeSandbox{files: map[string]string{outputsDir + "/report.json": "v1"}}
+func TestHarvestTruncatedListingDegradesToSortedPrefix(t *testing.T) {
+	// A tree big enough to overflow the exec output cap would fault every
+	// reclaim identically — the tree is static during grading — wedging the
+	// session. A truncated listing instead publishes its complete entries (the
+	// glob's sorted prefix) and drops the trailing mid-path fragment, even
+	// when that fragment happens to name a file that exists ("repo" here is a
+	// real file but arrived as a cut of "report.json").
+	sb := &fakeSandbox{files: map[string]string{
+		outputsDir + "/a.txt":       "alpha",
+		outputsDir + "/b.txt":       "beta",
+		outputsDir + "/repo":        "a real file the fragment must not publish",
+		outputsDir + "/report.json": "cut off by the cap",
+	}}
+	sb.execStdout = "a.txt\x00b.txt\x00repo"
 	sb.execTruncated = true
 	h := newHarness(t, sb)
 	h.seedOutcome(t, domain.OutcomeResultEvaluating)
-	var faulted error
-	h.exec.onFault = func(_ *queue.Item, err error) { faulted = err }
 	h.enqueueHarvest(t)
 	h.stepOnce(t)
 
-	if faulted == nil || !strings.Contains(faulted.Error(), "listing") {
-		t.Fatalf("fault = %v, want a truncated-listing fault", faulted)
+	rows := h.fileRows(t)
+	if len(rows) != 2 || rows[0].filename != "a.txt" || rows[1].filename != "b.txt" {
+		t.Fatalf("rows = %+v, want exactly a.txt and b.txt (fragment dropped)", rows)
 	}
-	if rows := h.fileRows(t); len(rows) != 0 {
-		t.Errorf("files rows = %d, want 0 (a partial listing must not publish)", len(rows))
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn live = %d, want 1 (grading chained)", got)
 	}
-	if got := h.liveOf(t, queue.OutputsHarvest); got != 1 {
-		t.Errorf("outputs_harvest live = %d, want 1 (left for reclaim)", got)
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
 	}
 }
 
