@@ -335,9 +335,7 @@ eval belongs to the `evals/` suite later, under `RUN_EVALS` — tracked by an is
 ## Slices (each lands as its own PR, TDD-first, `make verify` green)
 
 Lifecycle per CLAUDE.md: slice 1's PR — the first that starts development — flips this
-plan to `in-progress` and takes over STATE.md's Active work/Tasks. (The plan as first
-landed said slice 2; corrected when the user started development at slice 1, since
-CLAUDE.md ties the flip to the PR that starts the work.) **Every slice lands
+plan to `in-progress` and takes over STATE.md's Active work/Tasks. **Every slice lands
 its docs/DIVERGENCES.md entries in the same PR that introduces the behavior** (the
 registry's same-PR rule; plan 15 states it verbatim as a warning against batching) —
 slice 5 adds no registry entries of its own.
