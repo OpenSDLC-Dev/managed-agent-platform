@@ -1,0 +1,330 @@
+---
+status: draft
+issue: "#77"
+---
+
+# Session outcomes: `user.define_outcome`, the grader loop, and `outcome_evaluations` (plan 21)
+
+The outcomes surface is the reference's "give the agent a goal and a rubric, and the
+platform grades the work" loop: a client sends one `user.define_outcome` event, the agent
+starts working immediately, and after each work cycle a platform-provisioned **grader**
+(a separate model context) scores the deliverables against the rubric — feeding failures
+back to the agent for revision up to `max_iterations` times — while the session resource
+mirrors the state in `outcome_evaluations[]` and the log carries a
+`span.outcome_evaluation_start/_ongoing/_end` trio per cycle. This plan implements that
+surface end-to-end, closes the three v1 placeholders that reserved its seams
+(the `user.define_outcome` rejection in `internal/events/inbound.go`, the hard-coded
+`outcome_evaluations: []` in `internal/api/sessions.go`, the missing `outc_` prefix in
+`internal/domain/id.go`), absorbs #161 (`initial_events` on session create — half its
+union *is* `user.define_outcome`), and opens plan 08's reserved session-outputs seam so
+the reference doc example's final step (retrieve deliverables by `scope_id`) works.
+
+Tracking issue: [#77](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/77).
+Absorbed: [#161](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/161).
+Acceptance replays the reference's own example —
+<https://platform.claude.com/docs/en/managed-agents/define-outcomes> — against this
+platform with the **latest** Anthropic SDK (see Acceptance; versions re-checked on
+execution day).
+
+## Ground truth (pinned 2026-08-02)
+
+### Wire surface — anthropic-sdk-go v1.61.0 (latest release, 2026-07-24)
+
+The outcome surface landed in SDK v1.41.0 (2026-05-06, "add support for Managed Agents
+multiagents and outcomes, webhooks, vault validation") and **no changelog entry since
+touches it** — it is byte-identical between the current v1.59.0 pin and v1.61.0. Slice 1
+still bumps to v1.61.0 so acceptance runs on the latest release (the user-facing goal),
+with the two in-between releases' non-outcome surface swept and recorded.
+
+- **Inbound params** (`betasessionevent.go:6406-6416`,
+  `BetaManagedAgentsUserDefineOutcomeEventParams`): `type: "user.define_outcome"`,
+  `description` (required — "What the agent should produce. This is the task
+  specification."), `rubric` (required union), `max_iterations` (optional int —
+  "Eval→revision cycles before giving up. Default 3, max 20.").
+- **Rubric union** — `{type: "text", content}` (`betasessionevent.go:5649-5669`;
+  "Plain text or markdown — the grader treats it as freeform text. Maximum 262144
+  characters.") or `{type: "file", file_id}` (`betasessionevent.go:1995-2015`).
+- **Server echo** (`betasessionevent.go:6292-6320`,
+  `BetaManagedAgentsUserDefineOutcomeEvent`, all fields required): `id`, `description`
+  ("Copied from the input event"), `max_iterations`, `outcome_id` ("Server-generated
+  `outc_` ID … Referenced by `span.outcome_evaluation_*` events and the session's
+  `outcome_evaluations` list"), `processed_at`, `rubric`, `type`.
+- **Span trio** (all required fields):
+  - `span.outcome_evaluation_start` (`betasessionevent.go:4875-4910`): `id`, `iteration`
+    ("0-indexed revision cycle. 0 is the first evaluation; 1 is the re-evaluation after
+    the first revision"), `outcome_id`, `processed_at`, `type`.
+  - `span.outcome_evaluation_ongoing` (`betasessionevent.go:4839-4873`): same fields;
+    "Periodic heartbeat … Distinguishes 'evaluation is actively running' from
+    'evaluation is stuck'".
+  - `span.outcome_evaluation_end` (`betasessionevent.go:4776-4833`): adds `explanation`,
+    `outcome_evaluation_start_id`, `result`, `usage` (`BetaManagedAgentsSpanModelUsage`
+    — "Token usage for a **single model request**", with nullable `speed`). Result
+    semantics, verbatim from the type: "'satisfied': criteria met, session goes idle.
+    'needs_revision': criteria not met, another revision cycle follows.
+    'max_iterations_reached': evaluation budget exhausted with criteria still unmet —
+    one final acknowledgment turn follows before the session goes idle, but no further
+    evaluation runs. 'failed': grader determined the rubric does not apply to the
+    deliverables. 'interrupted': user sent an interrupt while evaluation was in
+    progress."
+- **Session resource** (`betasession.go:977-1021` + `1035-1037`):
+  `outcome_evaluations` is a required array, "One entry per define_outcome event sent to
+  the session", each entry `{type: "outcome_evaluation", outcome_id, description,
+  explanation, iteration, result, completed_at}` with `result` — "`pending` before the
+  agent begins work; `running` while producing or revising; `evaluating` while the
+  grader scores; `satisfied`/`max_iterations_reached`/`failed`/`interrupted` are
+  terminal" — and `explanation` "Grader's verdict text from the **most recent**
+  evaluation" (one entry mutated in place per cycle, not one entry per cycle).
+- **Session create** (`betasession.go:2083`): `initial_events` — "processed in order.
+  Supports `user.message` and `user.define_outcome` events. Maximum 50 events."
+- **No new endpoints, no new stop_reason.** The surface rides the existing session +
+  events endpoints (api.md; sessions → response types lists
+  `BetaManagedAgentsOutcomeEvaluationResource`). The `session.status_idle` stop_reason
+  union stays `end_turn | requires_action | retries_exhausted`
+  (`betasessionevent.go:4218-4221`) — outcome terminality lives in the evaluation's
+  `result`, and a satisfied/failed/exhausted session idles with plain `end_turn`.
+- **Adjacent surface deliberately out of scope here**: the
+  `session.outcome_evaluation_ended` webhook event (`betawebhook.go:1105-1120` — this
+  platform has no webhook delivery at all), deployments' own `initial_events`
+  define_outcome variant (`betadeployment.go:830-849` — deployments are #51), and
+  session threads' echo of the event (threads are #53).
+
+### Reference behavior — public docs (fetched 2026-08-02)
+
+From <https://platform.claude.com/docs/en/managed-agents/define-outcomes> unless noted:
+
+1. "The agent begins work immediately. No additional user message event is required."
+2. The event "is processed on receipt and echoed back with `processed_at` already
+   populated" — one of exactly three such exceptions, alongside
+   `user.custom_tool_result` / `user.tool_result` (events-and-streaming page; this
+   platform already records a deliberate divergence for the other two —
+   docs/DIVERGENCES.md "processed_at on inbound tool results").
+3. "Only one outcome is supported at a time, but you may chain outcomes in sequence. To
+   do this, send a new `user.define_outcome` event after the terminal
+   `span.outcome_evaluation_end` event of the previous outcome."
+4. "The harness automatically provisions a *grader* to evaluate the artifact against a
+   rubric. The grader uses a **separate context window** to avoid being influenced by
+   the main agent's implementation choices." The grader "returns an explanation
+   summarizing which criteria passed or failed … That feedback is handed back to the
+   agent for the next iteration." Heartbeats: "The grader's internal reasoning is
+   opaque: you see that it's working, not what it's thinking."
+5. Status reads two ways: "listen on the event stream for
+   `span.outcome_evaluation_end`, or poll `GET /v1/sessions/{session_id}` and read
+   `outcome_evaluations[].result`."
+6. `interrupted` is "emitted when the session is interrupted while an outcome is active,
+   **even if evaluation hadn't started yet**. If no `outcome_evaluation_start` fired
+   before the interrupt, `outcome_evaluation_start_id` is an empty string." An interrupt
+   "pauses work on the current outcome and marks the end result `interrupted`, allowing
+   you to kick off a new outcome."
+7. `initial_events` (sessions page): a non-empty list "starts the agent loop in the same
+   call: the session is created directly in the `running` status"; 400 on "More than one
+   `user.define_outcome` event", "A `user.define_outcome` event without a `rubric`",
+   "More than 100 file-sourced `document` content blocks across the whole list"; 413 on
+   a body over 32 MB.
+8. Deliverables: "The agent writes output files to `/mnt/session/outputs/` inside the
+   sandbox. Once the session is idle, fetch them through the Files API scoped to the
+   session" (`GET /v1/files?scope_id={session_id}`, then
+   `GET /v1/files/{file_id}/content`). Plan 08 built the registry and the `scope`/
+   `downloadable` columns as an explicit seam: "session-generated outputs are future
+   work; the column and `scope` fields are the seam they'll land in."
+9. Mid-outcome `user.message` is allowed "to direct the agent's work as it progresses,
+   but it isn't required"; after a terminal evaluation "the session can be continued as
+   a conversational session, or a new outcome can be started."
+10. The `ant` CLI is pure pass-through (no outcome subcommand, no typed construction, no
+    outcome rendering; `--initial-event` and `--event` carry arbitrary YAML/JSON), and
+    its delta whitelist stays `agent.message`/`agent.thinking` — outcome span events are
+    never preview-streamed, only delivered as committed frames.
+
+### What no source pins (each becomes an INFERRED divergence entry, recording tracked by #78)
+
+The grader's model, prompt, and inputs; the exact evaluation trigger; the revision
+feedback's injection shape; heartbeat cadence; event ordering among the echo,
+`session.status_running`, and the first `span.outcome_evaluation_start`;
+`outcome_evaluations[].completed_at`'s value before a terminal result; the error shape
+for a second `user.define_outcome` while one is active; out-of-range `max_iterations`
+handling; the `iteration` value on an `interrupted` end event that had no start; whether
+`usage.speed` rides the wire as `null`; `max_iterations` boundary semantics (see
+Decision 6).
+
+## Design decisions
+
+1. **Storage: an `outcome_evaluations` jsonb column on the sessions row**, exactly the
+   `resources`/`usage` verbatim-jsonb precedent — one migration
+   (`ALTER TABLE sessions ADD COLUMN outcome_evaluations jsonb NOT NULL DEFAULT '[]'`),
+   stored in the wire shape, mutated **only inside the same append transaction as the
+   event that changes it**, under the session row lock (the `AddUsage` read-modify-write
+   in `internal/events/log.go` is the template — a new `AppendOptions` member). The
+   event log stays the source of truth; the column is a projection that can never drift
+   from it because they commit together. Rendering is then plan 08's `resourcesJSON`
+   pattern: extend `sessionColumns`/`sessionRow`/`scanSession`, replace the hard-coded
+   `[]` in `renderSession`, and every session-returning endpoint (get/list/create/
+   update/archive) picks it up at once. No grading work-queue kind: evaluation runs
+   inside the brain's existing turn settlement (Decision 5), so `work_items.kind` is
+   untouched.
+2. **One active outcome, enforced at send.** A `user.define_outcome` while another
+   outcome is non-terminal → 400 `invalid_request_error` (message ours; exact reference
+   shape unrecorded → INFERRED). Enforced in the send transaction alongside
+   `ValidateToolResults` (it needs the DB, so it lives in the API transaction, not in
+   `NormalizeInbound`). The same transaction validates a `file` rubric's `file_id`
+   against the files registry. Field validation in `normalizeDefineOutcome`
+   (`internal/events/inbound.go`): strict `allowKeys(type, description, rubric,
+   max_iterations)`; `description` required non-empty; rubric union exact (`text`
+   content ≤ 262144 chars, `file` requires `file_id`); `max_iterations` integer 1–20,
+   default 3 (out-of-range → 400, our choice, INFERRED). The normalizer mints
+   `outcome_id: domain.NewID(domain.PrefixOutcome)` into the payload so the echo is the
+   usual payload+envelope merge.
+3. **`processed_at`: extend the existing recorded divergence, not the docs' words.**
+   The docs put `user.define_outcome` in the processed-on-receipt trio; this platform
+   already deliberately echoes the other two members with `processed_at: null` and
+   stamps at turn settlement, because receipt-stamping would break `pendingInput`
+   chaining (docs/DIVERGENCES.md, the "processed_at on inbound tool results" entry, and
+   `user.define_outcome` must join `pendingInputTypes` for exactly the same reason — a
+   define_outcome landing mid-turn must chain the next turn, not idle past it). The
+   existing entry is rewritten to name all three.
+4. **Trigger and replay.** In `sendSessionEvents`' state-machine switch, a
+   `user.define_outcome` on an idle session behaves like `user.message`: flip
+   `status_running` + enqueue a turn ("begins work immediately"). In replay
+   (`internal/brain/replay.go`), the event renders as a user-role message built
+   deterministically from its payload — the outcome description plus the rubric text
+   (a file rubric's content resolved from the blob store at build time) — so any fresh
+   brain reconstructs the same conversation; grader feedback for revision cycles is
+   likewise injected at replay time as a user-role message derived from each
+   `needs_revision` `span.outcome_evaluation_end` on the log (deterministic ⇒ no extra
+   persisted event, crash-safe by construction). Both renderings are ours → INFERRED.
+5. **The grader is one model call at turn settlement, in a separate context.** Hook
+   point: the brain's `settle` path — the one place a finished turn decides between
+   chaining and idling (`internal/brain/brain.go`). When a turn would settle idle with
+   `end_turn` and the session has a non-terminal outcome, the brain instead: emits
+   `span.outcome_evaluation_start` (flipping the stored entry to `evaluating`), runs
+   **one** provider request (the SDK's `usage` doc — "a single model request" —
+   corroborates single-call grading) with a fresh context: grader instructions (ours),
+   the rubric content, the outcome description, a read-only rendering of the session
+   transcript, and a recursive listing of `/mnt/session/outputs/` plus small text file
+   contents under a fixed byte budget (the grader must see deliverables to judge them;
+   exact inputs INFERRED); emits heartbeat `span.outcome_evaluation_ongoing` every 30s
+   (cadence ours, INFERRED) while the call runs; then emits
+   `span.outcome_evaluation_end` with the verdict, explanation, and the call's usage.
+   Span events and the OTel span come from one instrumentation point — clone the
+   `events.StartModelRequest` same-source pattern in `internal/events/span.go` (design
+   principle 3). The grader rides the session's own resolved model config (model choice
+   INFERRED — the reference names no grader model).
+6. **Verdict handling.** `satisfied`/`failed` → entry terminal (+`completed_at`), session
+   idles `end_turn`. `needs_revision` → entry back to `running`, `iteration+1`, and the
+   brain chains a revision turn (the `chained` mechanics `settle` already has) whose
+   prompt carries the grader's explanation (Decision 4). Budget: up to `max_iterations`
+   evaluation cycles total (iterations `0 … max_iterations-1`); a would-be
+   `needs_revision` on the final cycle is reported as `max_iterations_reached`
+   (boundary reading INFERRED), after which **one final acknowledgment turn** runs — an
+   agent turn told the budget is exhausted (prompt ours, INFERRED) — and the session
+   idles with no further evaluation. `user.interrupt` with an active outcome emits an
+   `end` event with `result: "interrupted"` (in the interrupt's own append transaction;
+   `outcome_evaluation_start_id: ""` when no start fired, `iteration` = the entry's
+   current value) and the entry goes terminal — extending the existing interrupt path in
+   `internal/api/events.go`. `completed_at` is `null` until terminal (INFERRED).
+7. **`initial_events` lands whole (#161).** `createSession` accepts the key: an ordered
+   list of `user.message` / `user.define_outcome`, max 50, reusing `NormalizeInbound`
+   plus the create-specific 400s (more than one define_outcome; define_outcome without
+   rubric — which strict rubric validation already yields; more than 100 file-sourced
+   document blocks across the list) and the 32 MB / 413 body bound; a non-empty list
+   creates the session directly in `running` with a turn enqueued, events appended in
+   order in the create transaction. The #161 divergence entry retires.
+8. **Deliverables harvest opens plan 08's seam, cloud-only.** On a session's
+   running→idle transition, the executor's side of the platform harvests regular files
+   under `/mnt/session/outputs/` in the session sandbox into the files registry:
+   content to the blob store, rows with `scope_type: "session"`, `scope_id`, and
+   `downloadable: true` — making `GET /v1/files?scope_id={session_id}` and content
+   download work exactly as the doc example's step 4 expects. Idempotent per path
+   (re-harvest after a later turn upserts by `(session, path)`; semantics ours,
+   INFERRED), size-capped per file and per session (bounds ours). `self_hosted`
+   environments get no harvest — the platform cannot reach a BYOC sandbox, and the
+   reference worker has no file lane at all (plan 08's finding) — recorded as a
+   deliberate divergence.
+9. **Not conversation-gated.** Outcomes work on both environment kinds and coexist with
+   mid-outcome `user.message` traffic (it chains into the current work cycle; the grader
+   still runs at settlement). After a terminal outcome the session is an ordinary
+   conversational session again, and a new `user.define_outcome` is accepted.
+
+## Out of scope
+
+The `session.outcome_evaluation_ended` webhook (no webhook infrastructure exists —
+recorded as a divergence, not built), deployments and their `initial_events` (#51),
+session threads (#53), the session `stats` fields (the shared "stats /
+outcome_evaluations / deployment_id" divergence entry splits; stats stays deferred), any
+grader-quality evals beyond the acceptance run (a rubric-grading eval belongs to the
+`evals/` suite later, under `RUN_EVALS`).
+
+## Slices (each lands as its own PR, TDD-first, `make verify` green)
+
+1. **SDK bump v1.59.0 → v1.61.0** (plan 05/11 ritual): bump, full `git diff` sweep of
+   the two releases with a verification record in docs/HISTORY.md; the new
+   `model_context_window_exceeded` stop reason and `tool_change` stream/content variants
+   handled or recorded (they postdate the platform's mirrored surface → DIVERGENCES +
+   issue refs, #160 pattern); goal — acceptance runs on the latest SDK release.
+   → verify: `make verify`; record complete.
+2. **Domain + acceptance + storage + rendering** (closes the #77 placeholders and #161):
+   `PrefixOutcome` in `internal/domain/id.go` (+`knownPrefixes`); domain outcome types
+   (`internal/domain/outcome.go`, stdlib-only); span event constants in
+   `internal/domain/event.go`; `normalizeDefineOutcome` replacing the inbound.go
+   rejection (Decision 2's validation); the send-transaction single-active check and
+   file-rubric existence check; the `0016` migration + `AppendOptions` outcome mutation
+   + `sessionColumns`/`renderSession` wiring (entry born `pending` at receipt); the
+   idle-session wake trigger + `pendingInputTypes` membership; `initial_events` on
+   create (Decision 7). Flip the pinned rejection tests into acceptance/echo-shape
+   tests; wire tests diff every rendered shape field-by-field against SDK v1.61.0.
+   → verify: `make verify`; `user.define_outcome` send → echo carries `outc_` id;
+   session GET shows a `pending` entry; initial_events session is born `running`.
+3. **Brain grader loop**: replay rendering + revision-feedback injection (Decision 4);
+   the settle-site evaluation (Decision 5) with the span trio's same-source
+   instrumentation and heartbeats; verdict handling, iteration budget, acknowledgment
+   turn, interrupt → `interrupted` (Decision 6); stored-entry state flips
+   (`pending→running→evaluating→…`) riding the existing append transactions.
+   Deterministic tests script the provider (`internal/modeltest` fake) through
+   satisfied / needs_revision→satisfied / max_iterations / failed / interrupted paths
+   and assert the full event sequences and projection states.
+   → verify: `make verify`; scripted end-to-end state machines green.
+4. **Deliverables harvest** (Decision 8): idle-transition harvest into the files
+   registry with session scope + `downloadable: true`; `scope_id` listing now matches;
+   caps + idempotency tests against the sandbox contract suites.
+   → verify: `make verify`; a file written to `/mnt/session/outputs/` in a docker
+   sandbox appears in `GET /v1/files?scope_id=…` and downloads byte-identically.
+5. **Full-chain acceptance** (below) + docs settlement: DIVERGENCES rewrites (retire the
+   rejection entry; split the stats entry; retire #161's; add every INFERRED entry from
+   Ground truth), CHANGELOG narrative, HISTORY acceptance record, README status line,
+   plan archived, #77 and #161 closed.
+   → verify: verifier PASS including its wire-compat and docs-consistency rungs.
+
+## Acceptance — the doc example, end to end, on the latest SDK
+
+Replay <https://platform.claude.com/docs/en/managed-agents/define-outcomes> — the DCF
+Model Rubric example — against the local compose stack
+(controlplane+brain+executor+Postgres+MinIO), with the `.env` model endpoint, under the
+live-tier consent contract (`RUN_LIVE_MODEL_TESTS=1`; never in `make test`'s default
+path). **SDK versions are re-checked on execution day** — as of 2026-08-02 the latest
+releases are Go v1.61.0 (2026-07-24), Python 0.120.2 (2026-07-28), TypeScript 0.115.0
+(2026-07-24); outcome wire types are identical across them (all landed 2026-05-06).
+
+Three clients, in order of authority:
+
+1. **Go SDK at the bumped latest pin (v1.61.0)** — a live integration test replaying the
+   example's Go tab step-for-step: upload `rubric.md` via `client.Beta.Files.Upload` →
+   create the session ("Financial analysis on Costco") → send `user.define_outcome`
+   (both rubric variants exercised: `file` referencing the upload, and `text` with the
+   rubric inline; `max_iterations: 5`) → watch the stream for the
+   `span.outcome_evaluation_start/_ongoing/_end` trio → poll
+   `client.Beta.Sessions.Get` reading `outcome_evaluations[].result` through
+   `pending/running/evaluating` to a terminal value → list deliverables
+   `client.Beta.Files.List(scope_id)` and download. Every response decodes through the
+   SDK's typed structs with zero `ExtraFields` surprises and all `api:"required"`
+   fields present.
+2. **The real `ant` CLI** (built from the read-only checkout; it embeds SDK v1.61.0) —
+   the example's CLI tab: `ant beta:sessions create --initial-event` (the
+   define_outcome-in-initial_events variant the page's Note describes),
+   `beta:sessions:events send`, `beta:sessions retrieve --transform
+   'outcome_evaluations'`, `beta:files list --scope-id`, `beta:files download`.
+3. **curl** — the raw-wire tab, captured as the acceptance record's transcript
+   (docs/HISTORY.md), giving the byte-level evidence the typed clients abstract away.
+
+The recorded run (transcripts, event orderings, session projections) lands in
+docs/HISTORY.md as this plan's acceptance record — and doubles as the platform-side
+baseline for the #78 reference-recording comparison when a real managed-agents endpoint
+is available. A scripted-model rehearsal of the same harness (deterministic, no live
+key) guards the mechanics in CI so the live run is the only paid step.
