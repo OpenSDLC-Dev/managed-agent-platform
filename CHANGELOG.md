@@ -56,6 +56,29 @@ copy of an entry here.
   statement, after every assertion had passed — and a `\getenv` that turned a missing
   password into a syntax error instead of the complaint written for that case.
 
+- **[docs/deploy-gcp.md](./docs/deploy-gcp.md) — the GCP deployment guide.** What the
+  Terraform builds and what it deliberately does not, the two modes, and the settings that
+  are **required** rather than recommended: `podPidsLimit` as node configuration (the Pod
+  API carries no per-pod process limit, so `Hardening.PidsLimit` is Docker-only and a fork
+  bomb in a GKE sandbox is otherwise bounded by nothing), and TLS in front of a control
+  plane that serves plain HTTP — with a Gateway + managed-certificate example and the
+  statement that exposing it without one is not an optional hardening step.
+
+  It carries the measured numbers rather than guidance: **68 sandbox pods** on two
+  `e2-standard-4` nodes before `Insufficient cpu`, CPU-bound rather than pod-cap-bound,
+  which with #64 means the pool degrades at ~68 *sessions* rather than 68 concurrent ones;
+  0.43 MiB of workspace for a session that wrote and tested a small project. It also
+  states the gVisor boundary precisely — gated sessions on gVisor are **unusable, not
+  unprotected**, because the gate fails closed and its healthcheck never passes — the
+  node-local-dns trap that makes a kube-dns `podSelector` carve-out silently not match, the
+  Workload Identity rule that node service-account roles do not reach pods, and Cloud
+  Trace's sharded first page.
+
+  And the teardown step `terraform destroy` does not do: GKE's PersistentVolumes for
+  StatefulSet PVCs are Compute Engine disks outside Terraform's state, six of which were
+  left billing after the first real teardown — half of them carrying no `goog-k8s-*` labels
+  at all, so a label-filtered sweep removes three of six and reports success.
+
 - **`user.define_outcome` is accepted; `outcome_evaluations` is real, stored state;
   session create takes `initial_events`**
   ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 2, closing the #77

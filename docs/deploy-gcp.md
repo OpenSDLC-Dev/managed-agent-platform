@@ -1,0 +1,352 @@
+# Deploying on Google Cloud
+
+How to run this platform on GKE with Cloud SQL, Cloud Storage and Cloud KMS — what the
+Terraform in [`deploy/gcp/`](../deploy/gcp/) builds, what it deliberately does not, and the
+settings that are **required** rather than recommended.
+
+Two documents sit next to this one and are not repeated here.
+[`deploy/gcp/README.md`](../deploy/gcp/README.md) is the operating manual for the Terraform
+itself — the foundation/environment split, the exact run order, state recovery, and the
+credential-free checks. [`docs/plan/20_gcp-deployment.md`](./plan/20_gcp-deployment.md) is
+the design record and carries the reasoning behind every decision referenced below.
+
+## What this is, and what it is not
+
+The configuration in `deploy/gcp/` builds a **staging-grade** deployment. "Production
+shape" throughout this guide means the shape of the topology — private nodes, a private
+database, a non-superuser database role — never a readiness verdict.
+
+Three prerequisites stand between this and a production deployment, and none of them is in
+the Terraform:
+
+1. **Transport security.** `controlplane` serves plain HTTP and terminates no TLS of its
+   own. Nothing here exposes it publicly, and you must not either until you have read
+   "Exposing the control plane" below.
+2. **Host-level isolation of untrusted code.** Sandboxes run on GKE Standard's default
+   runtime. gVisor and the current in-pod egress gate are mutually exclusive — see "gVisor"
+   below for the exact boundary.
+3. **A backup and restore procedure you have rehearsed.** See "Backups, and two lifecycles
+   that lose data".
+
+## The two modes
+
+**Mode 1** runs the chart's bundled Postgres, MinIO and OpenBao as StatefulSets in the
+cluster. It is the fastest way to see the platform work and is what
+`terraform output -raw helm_values_mode1` produces. It is not what to run in production, and
+its PersistentVolumes are the thing the teardown section warns about.
+
+**Mode 2** points the platform at Cloud SQL, Cloud Storage and Cloud KMS. Everything below
+assumes mode 2 unless it says otherwise. The switch is `existingSecret`: set it and the
+chart creates no Secret of its own and reads every credential from the one you pre-created,
+which must carry `controlplane-api-key`, `model-providers.json`, `database-url`, the
+`blob-*` keys, and `secrets-backend` plus `gcpkms-key-name`. `existingSecret` is
+incompatible with `postgresql.enabled`, `minio.enabled` and `openbao.enabled` — the chart
+fails the render rather than deploying two of anything.
+
+## Building it
+
+The run order is in [`deploy/gcp/README.md`](../deploy/gcp/README.md#running-it) and is
+load-bearing; this is only the shape of it:
+
+```
+make gcp-foundation-apply    # once, ever — durable identities, KMS, empty secrets
+make gcp-bootstrap           # fills the secrets, creates the GCS HMAC key
+make gcp-env-apply           # network, cluster, Cloud SQL, bucket, registry
+make gcp-db-init             # the platform's database role — see below
+gcloud builds submit ...     # the component images
+helm install ...             # the platform
+```
+
+`foundation/` is applied once and never destroyed; `environment/` is created and destroyed
+freely. That split is what makes a rebuild safe, and the reason is not tidiness: a KMS key
+ring cannot be deleted in GCP at all, and destroying the key schedules every version for
+destruction while the name stays taken — so a configuration that owned it could not be
+re-applied, and the vault ciphertext encrypted under it would be gone.
+
+## The database role is not a Cloud SQL superuser
+
+Cloud SQL grants `cloudsqlsuperuser` — which carries `CREATEDB` and `CREATEROLE` — to every
+built-in user created through its Admin API. That is the path `gcloud sql users create` and
+Terraform's `google_sql_user` both take, so the obvious way to create the platform's
+credential hands it those privileges. What the platform actually needs is narrower:
+`store.Open` migrates only the database its DSN names, and all migrations are ordinary
+schema DDL that creates no role and no database.
+
+Google documents one escape: name one or more **custom database roles** at creation
+(`--database-roles` / `databaseRoles` / `database_roles`) and the `cloudsqlsuperuser` grant
+is suppressed. The catch is that a custom role is an ordinary PostgreSQL role that must
+already exist, and creating one takes a SQL session against an instance that does not exist
+until Terraform has run — a circle that cannot be closed inside one apply.
+
+So `deploy/gcp/` splits by owner. Terraform creates exactly one built-in user, the
+administrator `postgres`, whose password lives in the `<prefix>-db-admin-password` secret
+and which the platform never reads. `make gcp-db-init` then runs
+[`deploy/gcp/dbinit.sql`](../deploy/gcp/dbinit.sql), which creates the custom role and the
+platform's own role under it with plain `CREATE ROLE` — a path that never goes through the
+Admin API's user creation, so there is no grant to suppress.
+
+It runs as a **Kubernetes Job**, not as a local `psql`, because the instance has no public
+address: it is reachable from inside the VPC and from nowhere else, including not from the
+machine running Terraform.
+
+The file **asserts** the result rather than the reasoning, and a failed assertion fails the
+step:
+
+| Asserted | Why this one |
+| --- | --- |
+| not `SUPERUSER` | the floor |
+| no `CREATEDB`, no `CREATEROLE`, no `BYPASSRLS` | role attributes |
+| `pg_has_role(user, 'cloudsqlsuperuser', 'member')` is false | **the one that settles it** — the attributes above are attributes and say nothing about membership, so a role with every flag false is still a superuser in effect if it is a member of one |
+| owns the platform database | the migrations need it |
+| owns no other database | scope |
+| `pg_stat_ssl` reports the session encrypted | the property, not the request — `sslmode` states what the client asked for |
+
+Re-run `make gcp-db-init` after every `environment/` rebuild. It is also the whole password
+rotation procedure: rotate the secret, re-run, and the unconditional `ALTER ROLE` pushes the
+new value.
+
+### Connecting to a private-IP instance
+
+The instance has `ipv4_enabled = false`. Google's documented path from GKE is the **Cloud
+SQL Auth Proxy with `--private-ip`**, which terminates the encrypted leg itself and offers
+the application a plain loopback socket — so an application behind the proxy uses
+`sslmode=disable` in its DSN while the connection the server sees is TLS. That is not a
+downgrade, and `ssl_mode = ENCRYPTED_ONLY` on the instance is what makes it checkable: the
+server rejects an unencrypted connection whatever the client asked for.
+
+The chart templates no sidecar, so the proxy is not a Helm value today. Run it as its own
+Deployment and Service in the namespace and point `database-url` at that Service, or add a
+sidecar to the deployments yourself. This is a chart gap, not a platform limitation — the
+same gap that leaves `brain` without a ServiceAccount to annotate.
+
+## Exposing the control plane
+
+**Do not put the control-plane Service behind a public load balancer without terminating
+TLS in front of it.** `controlplane` is an `http.Server` with no TLS configuration. An
+external load balancer that terminates nothing carries the global `x-api-key`, every
+session's prompts and outputs, and the entire SSE event stream in cleartext across whatever
+network the balancer sits on. This is a prerequisite for any exposed deployment, not an
+optional hardening step.
+
+The acceptance runs behind this guide used `kubectl port-forward` and exposed nothing.
+
+When you do expose it, a GKE Gateway with a Google-managed certificate is the least
+surprising way:
+
+```yaml
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: map
+spec:
+  domains:
+    - map.example.com
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: map
+  annotations:
+    networking.gke.io/certmap: ""            # or reference the ManagedCertificate
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: map-tls                     # a Secret, or a Certificate Manager map
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: map
+spec:
+  parentRefs:
+    - name: map
+  hostnames:
+    - map.example.com
+  rules:
+    - backendRefs:
+        - name: map-managed-agent-platform-controlplane
+          port: 8080
+```
+
+Terminating TLS at the Gateway leaves the hop from the Gateway to the pod in cleartext
+inside the VPC. If that is not acceptable, the alternatives are Identity-Aware Proxy in
+front of the Gateway, or not exposing the service at all and reaching it over a VPN or
+`kubectl port-forward`. Authentication is still the platform's own `x-api-key` in every
+case — the Gateway does not add any.
+
+## Observability
+
+The chart has an `otlp.endpoint` and nothing to point it at; it ships no collector. Deploy
+an OpenTelemetry Collector with the `googlecloud` exporter and set `otlp.endpoint` to it.
+
+Two things about this cost real time to discover, and both are properties of GKE rather
+than of the platform:
+
+- **On a Workload Identity cluster, the node service account's project roles do not reach
+  pods.** GKE stops serving the node identity through the metadata server, so the collector
+  needs its own Kubernetes ServiceAccount, annotated with
+  `iam.gke.io/gcp-service-account`, bound to a Google service account that holds
+  `roles/cloudtrace.agent`. Granting the node account `roles/editor` changes nothing. This
+  applies to anything you add to the cluster, not only the collector.
+- **Cloud Trace's v1 `traces.list` shards its results.** The first page can come back empty
+  with a `nextPageToken`; following it produced 22 traces on a run that had just been told
+  it had none. An empty first page is not an empty result — follow the token before
+  concluding that tracing is broken.
+
+## Networking
+
+### NetworkPolicy and node-local DNS
+
+If you write a NetworkPolicy for sandbox pods, the usual "allow egress to the kube-dns
+pods" carve-out — a `podSelector` matching kube-dns in `kube-system` — **does not match** on
+GKE. GKE enables node-local DNS alongside FQDN network policy, and the node intercepts the
+kube-dns VIP, so the traffic never reaches a pod the selector could match. Write DNS
+carve-outs in the port-53 / `ipBlock` form instead.
+
+### The sandbox needs no external DNS
+
+Where the egress gate is in use, the sandbox resolves nothing: an HTTPS `CONNECT` tunnel
+hands the hostname to the gate, and the gate resolves it. That is a property of the
+topology and worth knowing before adding DNS rules the sandbox does not need.
+
+## Sizing the sandbox node pool
+
+Measured on two `e2-standard-4` nodes with the shipped defaults:
+
+- **68 sandbox pods** were scheduled before the pool returned `Unschedulable — Insufficient
+  cpu`. The binding constraint is **CPU requests, not the 110-pod-per-node cap**.
+- A session that wrote a small Python project and ran its tests used **0.43 MiB** of
+  ephemeral storage; trivial sessions used 0.04–0.09 MiB. At those rates the 100 GiB boot
+  disk is dominated by the image, not by workspaces.
+
+The number that matters is 68, and it matters more than it looks because
+[#64](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/64) means nothing in
+production calls `Sandbox.Destroy`: every session keeps its pod, and its 100m CPU request,
+indefinitely. So the pool degrades at roughly 68 **sessions**, not 68 concurrent ones. Size
+for the number of sessions you expect between cluster rebuilds, not the number you expect
+at once, until #64 lands.
+
+## Required node settings
+
+**`podPidsLimit` is required, not optional.** `Hardening.PidsLimit` is Docker-only: the Pod
+API carries no per-pod process limit, so the Kubernetes sandbox provider ignores a
+configured value and logs that it did (recorded in
+[docs/DIVERGENCES.md](./DIVERGENCES.md)). On GKE the equivalent control is the kubelet's
+`podPidsLimit`, which is **node configuration** — so it belongs to the node pool. Without
+it, a fork bomb in a sandbox is bounded by nothing the platform sets.
+
+`deploy/gcp/environment/` sets it on the sandbox pool through
+`var.sandbox_pod_pids_limit` (default 4096; GKE accepts 1024–4194304). If you build node
+pools by hand, set it yourself.
+
+What the sandbox provider *does* apply by default: a CPU limit, and the
+`NET_RAW`/`SETUID`/`SETGID` capability drops with privilege escalation forbidden alongside
+them. Note that the escalation guard rides on the drop set — `SANDBOX_CAP_DROP=none`
+removes it too. A memory cap, a read-only rootfs and a non-root uid are opt-in. No seccomp
+profile is set by any code or template in this repo, so sandbox pods run under the
+runtime's unconfined default.
+
+## gVisor
+
+The chart can place sandbox pods on a hardened runtime: `sandboxRuntimeClass.name` sets
+`runtimeClassName` on every sandbox pod. Before you set it, know the boundary.
+
+**gVisor and the in-pod egress gate are mutually exclusive.** Under GKE Sandbox the gate
+cannot program iptables at all — the nft backend fails with `Protocol not supported` and
+the legacy backend with `can't initialize iptables table 'filter'`. The gate **fails
+closed**: `gaterun.Setup` errors and the process exits before anything listens, so the
+HEALTHCHECK that admits the sandbox never passes.
+
+The consequence, stated precisely because the imprecise version is alarming and wrong:
+**gated sessions on gVisor are unusable, not unprotected.** A session with a `limited`
+network policy or an attached vault will not start. Sessions that are not gated run on
+gVisor normally. So `sandboxRuntimeClass.name: gvisor` is safe to set if you do not use
+gated sessions, and breaks them if you do.
+
+NetworkPolicy *does* bind on gVisor pods — raw-IP egress times out at the TCP layer, so
+that enforcement is non-cooperative — and an HTTPS `CONNECT` tunnel from inside gVisor to a
+proxy pod on the default runtime works. That combination is the shape a future standalone
+gate would take; it is not what ships today.
+
+## Backups, and two lifecycles that lose data
+
+Back up **Cloud SQL**. It holds the event log, which is the single source of truth for
+every session, and it holds vault credential ciphertext. `environment/` sets no automated
+backup configuration — that is a staging choice, and it is wrong for anything you would
+miss.
+
+Two credential lifecycles are not covered by a database backup, and they fail differently:
+
+- **The GCS HMAC key.** Its secret is returned by GCS exactly once, at creation, and lives
+  afterwards only in Secret Manager. Deleting the storage service account deletes its HMAC
+  keys and strands that secret — valid-looking and dead. Rotation means creating a new key,
+  writing both halves, and only then deleting the old one. `bootstrap.sh` does the create
+  half and refuses to proceed when exactly one of the pair is present, because half a pair
+  looks like a working credential.
+- **The Cloud KMS key. This one is a data-loss hazard, not a rotation chore.** Vault
+  credential ciphertext in Postgres is decryptable by that key version and by nothing else.
+  A key ring and a key can never be deleted in GCP, but a key *version* can be destroyed —
+  and destroying the version that encrypted live ciphertext makes it permanently
+  unreadable. A database backup does not help, because the backup contains the same
+  ciphertext. Treat the key version as part of the backup set, and do not destroy one to
+  save the ~$0.06/month an enabled version costs.
+
+## Tearing it down
+
+```
+make gcp-env-destroy
+```
+
+destroys the cluster, Cloud SQL, the bucket and the registry, and leaves `foundation/`
+alone. Three settings make that possible and are deliberately non-default: the cluster's
+`deletion_protection`, Cloud SQL's two separate deletion-protection flags, and the bucket's
+`force_destroy`. All three are correct for staging and wrong for anything holding data
+someone would miss.
+
+**Then check for orphaned disks. `terraform destroy` does not reclaim them.**
+
+If you ran mode 1, the chart's bundled Postgres, MinIO and OpenBao each have a
+PersistentVolumeClaim, and the GKE PD CSI driver creates a Compute Engine disk for each.
+Those disks are not in Terraform's state, so the destroy takes the cluster and leaves them
+behind, billing at the full provisioned rate with nothing able to re-attach them. After the
+first real teardown of this configuration, **six** were left: 34 GiB, about $3.40/month,
+one set per build-up.
+
+```sh
+gcloud compute disks list --project YOUR_PROJECT \
+  --format='table(name,zone.basename(),sizeGb,status,users.list(),description)'
+```
+
+**Do not filter by label.** Only some of them carry `goog-k8s-cluster-name`; disks from a
+later cluster generation had no labels at all, so a label-filtered sweep deletes half the
+leak and reports success. The reliable handle is the PVC name in the disk's `description`.
+An unattached disk shows an empty `users` column.
+
+The OpenBao volume holds the vault's own state, so this is a data-remanence question as
+well as a cost one.
+
+Also worth checking, because none of it is in Terraform's state either: an active GCS HMAC
+key that outlived its bucket (`gcloud storage hmac list`), soft-deleted buckets still
+inside their retention window (they bill until they hard-delete, and they self-clear), and
+Secret Manager versions for infrastructure that no longer exists.
+
+What is retained by design: the foundation's service accounts, its Secret Manager secrets,
+and its KMS key ring and key. The key ring and key can never be deleted; one enabled key
+version costs about $0.06/month, and that is the standing cost of being able to rebuild
+`environment/` safely.
+
+## What this guide does not cover
+
+Deliberately out of scope, so a reader can tell deferred from forgotten: Binary
+Authorization, Shielded Nodes secure boot, node auto-repair and auto-upgrade, a dedicated
+node service account, CMEK on the bucket and registry, bucket versioning, Cloud SQL
+automated backups, Postgres audit logging, a fully private control-plane endpoint (which
+needs a bastion or VPN before anything can be deployed), and External Secrets Operator as
+an alternative to the pre-created Secret. Each is a normal GKE or Cloud SQL setting; none
+of them is a platform concern.

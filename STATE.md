@@ -21,5 +21,6 @@ GCP deployment; slices 1-4 and slice 5's configuration landed, its acceptance re
 ## Tasks — plan 20 (remaining)
 
 - [x] Slice 4b — applied, deployed and accepted on GKE (record: docs/HISTORY.md)
-- [x] Slice 5a — mode-2 config: private nodes/NAT/private-IP SQL, non-superuser DB role
-- [ ] Slice 5b — mode-2 acceptance on GKE + `docs/deploy-gcp.md`
+- [x] Slice 5a — mode-2 config + `docs/deploy-gcp.md` (private nodes/NAT/private-IP SQL,
+  non-superuser DB role asserted by `make gcp-db-init`)
+- [ ] Slice 5b — mode-2 acceptance on GKE under the guide's own service account
