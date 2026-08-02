@@ -99,6 +99,7 @@ type harness struct {
 	queue     *queue.Queue
 	provider  *fakeProvider
 	brain     *brain.Brain
+	registry  *provider.Registry
 	sessionID domain.ID
 	envID     domain.ID
 }
@@ -119,8 +120,8 @@ func newHarness(t *testing.T, scripts [][]provider.Chunk, errs []error) *harness
 	}
 	return &harness{
 		pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
-		provider: fake, brain: brain.New(pool, reg, brain.Config{}),
-		sessionID: sid, envID: envID,
+		provider: fake, brain: brain.New(pool, reg, nil, brain.Config{}),
+		registry: reg, sessionID: sid, envID: envID,
 	}
 }
 
@@ -1055,7 +1056,7 @@ func TestLongTimeToFirstTokenKeepsLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &harness{pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
-		provider: fake, brain: brain.New(pool, reg, brain.Config{LeaseTTL: 250 * time.Millisecond}),
+		provider: fake, brain: brain.New(pool, reg, nil, brain.Config{LeaseTTL: 250 * time.Millisecond}),
 		sessionID: sid, envID: envID}
 	fake.onGenerate = func(int) {
 		// Well past the original lease, a rival brain must still find
@@ -1101,7 +1102,7 @@ func TestLostLeaseMidStreamAbandonsQuietly(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &harness{pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
-		provider: fake, brain: brain.New(pool, reg, brain.Config{LeaseTTL: 250 * time.Millisecond}),
+		provider: fake, brain: brain.New(pool, reg, nil, brain.Config{LeaseTTL: 250 * time.Millisecond}),
 		sessionID: sid, envID: envID}
 	fake.onGenerate = func(int) {
 		// Another claimant moved the lease from under us; the keeper's next
@@ -1597,7 +1598,7 @@ func TestWedgedEndpointEndsTheTurnOnTheLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &harness{pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
-		brain: brain.New(pool, reg, brain.Config{}), sessionID: sid, envID: envID}
+		brain: brain.New(pool, reg, nil, brain.Config{}), sessionID: sid, envID: envID}
 	h.wake(t, "hi")
 
 	// Run the turn off the test goroutine so an unbounded wait fails the test
@@ -1651,7 +1652,7 @@ func TestUnroutedModelFailsTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &harness{pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
-		brain: brain.New(pool, reg, brain.Config{}), sessionID: sid, envID: envID}
+		brain: brain.New(pool, reg, nil, brain.Config{}), sessionID: sid, envID: envID}
 	h.wake(t, "hi")
 	h.runOnce(t)
 

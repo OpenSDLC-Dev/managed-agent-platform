@@ -52,7 +52,7 @@ func newScriptedBrain(t *testing.T, pool *pgxpool.Pool, chunks []provider.Chunk)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return brain.New(pool, reg, brain.Config{})
+	return brain.New(pool, reg, nil, brain.Config{})
 }
 
 // suspendViaBrain creates an always_ask agent + session, wakes it, and runs one

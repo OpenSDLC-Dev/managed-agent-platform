@@ -156,6 +156,20 @@ services:
     environment:
       <<: *app-env
       MODEL_PROVIDERS_PATH: /etc/map/model-providers.json
+      # File-rubric outcome snapshots are read from the same bundled MinIO the
+      # controlplane writes them to; unset BLOB_ENDPOINT and file rubrics
+      # grade from the outcome description alone (plan 21 slice 3).
+      BLOB_ENDPOINT: minio:9000
+      BLOB_ACCESS_KEY: ${MINIO_ROOT_USER:-map}
+      BLOB_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-map-blob-dev}
+      BLOB_BUCKET: map-blob
+      BLOB_TLS: "false"
+    # An explicit depends_on replaces the anchor's, so postgres is restated.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
       # The brain's model routing (a JSON array — see internal/provider LoadRoutes).
       # Defaults to the committed example so the stack comes up out of the box;

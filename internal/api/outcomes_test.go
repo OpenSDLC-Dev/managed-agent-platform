@@ -224,6 +224,59 @@ func TestInterruptSettlesOutcomeAndAllowsChaining(t *testing.T) {
 	}
 }
 
+func TestInterruptMidGradingReferencesStart(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	echo := sendEvents(t, s, sid, defineOutcome("graded", nil))
+	outcomeID := echo[0]["outcome_id"].(string)
+
+	// Put the session mid-grading exactly as the brain's settleEndTurn
+	// commits it: the span.outcome_evaluation_start and the entry's flip to
+	// evaluating, one transaction.
+	log := events.NewLog(s.pool)
+	startEv, err := events.NewOutcomeStartEvent(domain.ID(outcomeID), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.AppendWith(context.Background(), domain.ID(sid), []events.NewEvent{startEv},
+		events.AppendOptions{
+			MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+				for i := range evals {
+					if evals[i].OutcomeID == domain.ID(outcomeID) {
+						evals[i].Result = domain.OutcomeResultEvaluating
+					}
+				}
+				return evals, nil
+			},
+		}); err != nil {
+		t.Fatalf("stage mid-grading state: %v", err)
+	}
+
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+
+	// The interrupt's terminal end event references the committed start —
+	// empty is only for a cycle that never started.
+	status, res := s.do(http.MethodGet,
+		"/v1/sessions/"+sid+"/events?types[]=span.outcome_evaluation_end", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list events: %d %v", status, res)
+	}
+	ends := listData(t, res)
+	if len(ends) != 1 {
+		t.Fatalf("span.outcome_evaluation_end events = %d, want 1", len(ends))
+	}
+	if got := ends[0]["outcome_evaluation_start_id"]; got != startEv.ID.String() {
+		t.Errorf("outcome_evaluation_start_id = %v, want %s", got, startEv.ID)
+	}
+	if ends[0]["result"] != "interrupted" {
+		t.Errorf("end result = %v, want interrupted", ends[0]["result"])
+	}
+	outs := sessionOutcomes(t, s, sid)
+	if outs[0]["result"] != "interrupted" {
+		t.Errorf("entry result = %v, want interrupted", outs[0]["result"])
+	}
+}
+
 func TestDefineOutcomeFileRubric(t *testing.T) {
 	s := newTestServer(t)
 	sid := eventsFixture(t, s)

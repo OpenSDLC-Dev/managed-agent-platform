@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -53,10 +54,14 @@ type Brain struct {
 	log      *events.Log
 	queue    *queue.Queue
 	registry *provider.Registry
-	cfg      Config
+	// blobs is read-only assembly input (file-rubric snapshots for the
+	// grader); nil deploys grade file rubrics from the description alone.
+	// The brain still never touches a sandbox.
+	blobs blob.Store
+	cfg   Config
 }
 
-func New(pool *pgxpool.Pool, registry *provider.Registry, cfg Config) *Brain {
+func New(pool *pgxpool.Pool, registry *provider.Registry, blobs blob.Store, cfg Config) *Brain {
 	if cfg.LeaseTTL <= 0 {
 		cfg.LeaseTTL = defaultLeaseTTL
 	}
@@ -68,6 +73,7 @@ func New(pool *pgxpool.Pool, registry *provider.Registry, cfg Config) *Brain {
 		log:      events.NewLog(pool),
 		queue:    queue.New(pool),
 		registry: registry,
+		blobs:    blobs,
 		cfg:      cfg,
 	}
 }
@@ -185,7 +191,7 @@ func streamUsage(turn *turnResult) *domain.ModelUsage {
 func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Time) error {
 	sid := item.SessionID
 
-	agentJSON, resourcesJSON, live, err := b.claimLiveSession(ctx, item)
+	agentJSON, resourcesJSON, outcomesJSON, live, err := b.claimLiveSession(ctx, item)
 	if err != nil || !live {
 		return err
 	}
@@ -217,6 +223,44 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		// so a lease-expiry loop would grind forever without ever telling
 		// anyone. Fail the turn visibly instead.
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session agent state is corrupt: %v", err))
+	}
+
+	// A grading wake: the settlement that scheduled an evaluation cycle
+	// flipped the outcome entry to evaluating and requeued this item, so the
+	// claim runs the grader instead of an agent turn (two-phase — no model
+	// call under a session lock; a reclaimed mid-grade item lands here too).
+	var evals []domain.OutcomeEvaluation
+	if len(outcomesJSON) > 0 {
+		if err := json.Unmarshal(outcomesJSON, &evals); err != nil {
+			return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("session outcome state is corrupt: %v", err))
+		}
+	}
+	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultEvaluating {
+		return b.runGrading(ctx, item, agent, evals)
+	}
+	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultPending {
+		// The agent begins work now: the entry leaves pending for running
+		// (the SDK: "pending" before the agent begins work, "running" while
+		// producing or revising). Entry state only — no wire event exists
+		// for the flip.
+		if _, err := b.log.AppendWith(ctx, sid, nil, events.AppendOptions{
+			MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+				for i := range evals {
+					if evals[i].OutcomeID == active.OutcomeID && evals[i].Result == domain.OutcomeResultPending {
+						evals[i].Result = domain.OutcomeResultRunning
+					}
+				}
+				return evals, nil
+			},
+			// The same lease discipline as the reclaim events above: a
+			// claimant that already lost the item must not write entry state
+			// another brain now owns.
+			Then: func(ctx context.Context, tx pgx.Tx) error {
+				return b.queue.Assert(ctx, tx, item)
+			},
+		}); err != nil {
+			return fmt.Errorf("outcome running flip: %w", err)
+		}
 	}
 
 	history, err := b.log.List(ctx, sid, events.ListQuery{})
@@ -352,28 +396,28 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 // forever) — completes the item while no concurrent trigger can interleave:
 // completing it unlocked could swallow a user.message whose enqueue this
 // still-live item had suppressed.
-func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJSON, resourcesJSON []byte, live bool, err error) {
+func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJSON, resourcesJSON, outcomesJSON []byte, live bool, err error) {
 	tx, err := b.pool.Begin(ctx)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, nil, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var status string
 	var archivedAt *time.Time
 	err = tx.QueryRow(ctx,
-		`SELECT resolved_agent, resources, status, archived_at FROM sessions WHERE id = $1 FOR UPDATE`,
-		item.SessionID.String()).Scan(&agentJSON, &resourcesJSON, &status, &archivedAt)
+		`SELECT resolved_agent, resources, outcome_evaluations, status, archived_at FROM sessions WHERE id = $1 FOR UPDATE`,
+		item.SessionID.String()).Scan(&agentJSON, &resourcesJSON, &outcomesJSON, &status, &archivedAt)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("load session: %w", err)
+		return nil, nil, nil, false, fmt.Errorf("load session: %w", err)
 	}
 	if status != string(domain.SessionRunning) || archivedAt != nil {
 		if err := b.queue.Complete(ctx, tx, item); err != nil {
-			return nil, nil, false, err
+			return nil, nil, nil, false, err
 		}
-		return nil, nil, false, tx.Commit(ctx)
+		return nil, nil, nil, false, tx.Commit(ctx)
 	}
-	return agentJSON, resourcesJSON, true, tx.Commit(ctx)
+	return agentJSON, resourcesJSON, outcomesJSON, true, tx.Commit(ctx)
 }
 
 // pendingInputTypes are the inbound events whose arrival must chain the next
@@ -585,26 +629,22 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	}
 
 	// A turn that called no tool: end_turn, and everything else —
-	// max_tokens, stop_sequence — treated as a completed turn in v1.
-	return b.settle(ctx, sid, item, watermark, opts, func(chained bool) ([]events.NewEvent, error) {
-		if chained {
-			return head, nil
-		}
-		payload, err := json.Marshal(map[string]any{"stop_reason": map[string]any{"type": "end_turn"}})
-		if err != nil {
-			return nil, err
-		}
-		return append(head, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: payload}), nil
-	})
+	// max_tokens, stop_sequence — treated as a completed turn in v1. An
+	// active outcome intercepts the idle: the work cycle ended, so the
+	// settlement schedules an evaluation cycle instead (plan 21 slice 3).
+	return b.settleEndTurn(ctx, sid, item, watermark, opts, head)
 }
 
-// settle is the one place a finished turn decides its own end: under the
-// session row lock it asks whether input arrived mid-turn, lets the caller
-// build the events that outcome calls for, and commits them together with
-// the status, the watermark, and the work item's fate. Chaining hands our
-// own item back to the queue (a fresh Enqueue would be suppressed by this
-// very item's live slot) and leaves the session running; idling completes
-// the item. Both success and failure settle here so the two can never drift.
+// settle is the failed turn's settlement: under the session row lock it asks
+// whether input arrived mid-turn, lets the caller build the events that
+// outcome calls for, and commits them together with the status, the
+// watermark, and the work item's fate. Chaining hands our own item back to
+// the queue (a fresh Enqueue would be suppressed by this very item's live
+// slot) and leaves the session running; idling completes the item.
+// Successful tool-less turns settle in settleEndTurn and grading cycles in
+// settleVerdict/settleGraderError (plan 21 slice 3) — same lock, same
+// chain-or-idle contract, restated there because outcomes fork the idle
+// path.
 func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, watermark int64,
 	opts events.AppendOptions, build func(chained bool) ([]events.NewEvent, error)) error {
 
