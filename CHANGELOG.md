@@ -25,7 +25,10 @@ copy of an entry here.
   requeue the grading turn enqueues the harvest instead, the executor claims it in its
   claim rotation, walks the regular files under `/mnt/session/outputs/` in the session's
   sandbox (bash listing, NUL-separated; forged paths from the agent-writable sandbox are
-  excluded), and publishes a **per-path snapshot** into the files registry — 
+  excluded, and each path segment is held to the upload endpoint's own filename rule —
+  valid UTF-8 included, so a stray byte can never fault the publish at the text-column
+  bind and wedge the reclaim, the #135 class), and publishes a **per-path snapshot**
+  into the files registry — 
   `filename` = relative path under a new `(scope_id, filename)` unique index,
   `scope_type:"session"`, `downloadable:true`, mime by extension — with caps of
   50 MiB/file and 200 files / 500 MiB per session, applied greedily in lexicographic

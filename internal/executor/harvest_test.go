@@ -438,6 +438,17 @@ func TestValidHarvestPathRejectsEscapes(t *testing.T) {
 		"a/",
 		"a/./b",
 		strings.Repeat("x", 1025),
+		"\xff\xfe.bin",  // invalid UTF-8: would fault the filename bind (#135 class)
+		"bad\nname.txt", // control character, the upload rule's U+0000–U+001F
+		"a\x01b",
+		"win|pipe.txt", // the upload rule's forbidden set
+		"colon:name.txt",
+		`back\slash.txt`,
+		"a<b.txt",
+		"q?.txt",
+		"star*.txt",
+		`quote".txt`,
+		"d/" + strings.Repeat("y", 256), // a segment beyond the 255-rune filename cap
 	}
 	for _, p := range reject {
 		if validHarvestPath(p) {
@@ -447,12 +458,12 @@ func TestValidHarvestPathRejectsEscapes(t *testing.T) {
 }
 
 func TestParseListingSortsDedupesAndReportsRejects(t *testing.T) {
-	out := "b.txt\x00a.txt\x00b.txt\x00/abs\x00../up\x00\x00c/d.bin\x00"
+	out := "b.txt\x00a.txt\x00b.txt\x00/abs\x00../up\x00\x00\xffraw.bin\x00c/d.bin\x00"
 	paths, rejected := parseListing(out)
 	if want := []string{"a.txt", "b.txt", "c/d.bin"}; !slices.Equal(paths, want) {
 		t.Errorf("paths = %q, want %q", paths, want)
 	}
-	if want := []string{"/abs", "../up"}; !slices.Equal(rejected, want) {
+	if want := []string{"/abs", "../up", "\xffraw.bin"}; !slices.Equal(rejected, want) {
 		t.Errorf("rejected = %q, want %q", rejected, want)
 	}
 }

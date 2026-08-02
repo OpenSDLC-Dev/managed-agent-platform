@@ -19,6 +19,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -121,7 +122,9 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess se
 	var staged []harvestFile
 	defer func() {
 		if err != nil {
-			e.discardStaged(ctx, staged)
+			// Not ctx itself: when the fault is the lease keeper cancelling
+			// this context, the discard must still reach the blob store.
+			e.discardStaged(context.WithoutCancel(ctx), staged)
 		}
 	}()
 
@@ -288,7 +291,7 @@ func (e *Executor) discardStaged(ctx context.Context, files []harvestFile) {
 	for _, f := range files {
 		if err := e.blobs.Delete(ctx, blob.FilesKey(f.id.String())); err != nil {
 			slog.WarnContext(ctx, "executor: could not delete a staged deliverable blob",
-				"session", f.id, "error", err)
+				"file", f.id, "error", err)
 		}
 	}
 }
@@ -316,16 +319,47 @@ func parseListing(out string) (paths, rejected []string) {
 	return paths, rejected
 }
 
+// harvestForbiddenChars is the Files filename rule's forbidden set
+// (internal/api's validateFilename) minus the path separators: "/" is
+// structural here — the recorded divergence (docs/DIVERGENCES.md) — and a
+// backslash stays rejected.
+const harvestForbiddenChars = `<>:"|?*\`
+
 // validHarvestPath accepts only a clean relative path that stays inside the
 // outputs tree. The listing script emits exactly that shape, but the sandbox
 // is agent-writable and the listing runs in it — a forged path must not become
-// a registry filename or a read outside the tree.
+// a registry filename or a read outside the tree. Invalid UTF-8 is rejected
+// too: a POSIX filename is arbitrary bytes, and one stray byte at the
+// filename's text-column bind would fault the settlement and loop the reclaim
+// (the #135 class).
 func validHarvestPath(p string) bool {
-	if p == "" || len(p) > 1024 || strings.HasPrefix(p, "/") {
+	if p == "" || len(p) > 1024 || strings.HasPrefix(p, "/") || !utf8.ValidString(p) {
 		return false
 	}
 	if clean := path.Clean(p); clean != p || clean == ".." || strings.HasPrefix(clean, "../") {
 		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if !validHarvestSegment(seg) {
+			return false
+		}
+	}
+	return true
+}
+
+// validHarvestSegment holds each path segment to the platform's own Files
+// filename rule (validateFilename: 1–255 runes, none of the Windows-reserved
+// set, no U+0000–U+001F) — a harvested filename the upload endpoint would
+// reject must not appear on the Files wire. An ineligible name excludes the
+// file (logged by the caller), never faults the harvest.
+func validHarvestSegment(seg string) bool {
+	if utf8.RuneCountInString(seg) > 255 || strings.ContainsAny(seg, harvestForbiddenChars) {
+		return false
+	}
+	for _, r := range seg {
+		if r < 0x20 {
+			return false
+		}
 	}
 	return true
 }
