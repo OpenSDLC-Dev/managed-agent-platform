@@ -421,8 +421,10 @@ copy of an entry here.
   treatment for the same reason, and now asks whether the daemon is Desktop *before* it asks
   which cluster flavour sits on it, Desktop's VM holding a kind network's gateway and its own
   built-in cluster alike. Verified end to end on Windows 11 / WSL2 Ubuntu 24.04 / Docker
-  Desktop 4.75.0 (engine 29.5.2) with a kind cluster: `make verify` goes from 35 packages
-  passing and 3 failing to **38 passing, 0 failing**, coverage 90.72%.
+  Desktop 4.75.0 (engine 29.5.2) with a kind cluster: the three packages above go from
+  failing to passing and `make verify` completes green there for the first time — every
+  package passing, coverage 90.78%. Each row was also run against `main` and confirmed red,
+  so the change is proven able to fail rather than merely observed passing.
 
 - **The chart no longer documents a path that runs sandboxes as root.** The
   `executor.sandboxHardening.*` row said "`0` / `none` to turn one off" for the whole group.
