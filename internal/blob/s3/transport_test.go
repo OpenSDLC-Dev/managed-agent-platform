@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -151,13 +152,26 @@ func TestASuccessIsNotBuffered(t *testing.T) {
 // every read of one would fail blob.Store's ErrNotFound contract.
 func TestADeleteMarkerBecomesTheDocumentItStandsFor(t *testing.T) {
 	body := &tracked{Reader: strings.NewReader("")}
-	resp := roundTrip(t, http.StatusNotFound, map[string]string{"x-amz-delete-marker": "true"}, body)
+	resp := roundTrip(t, http.StatusNotFound,
+		// AWS's own metadata for this answer, which the substitution replaces.
+		map[string]string{"x-amz-delete-marker": "true", "Content-Type": "text/plain"}, body)
 	read, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(read), "<Code>NoSuchKey</Code>") {
 		t.Errorf("body = %q, want the error document the header stands for", read)
 	}
 	if !body.closed {
 		t.Error("the substituted-for body was not closed")
+	}
+	// A response whose length and type describe bytes that are no longer there
+	// is one nobody downstream could read correctly.
+	if resp.ContentLength != int64(len(read)) {
+		t.Errorf("ContentLength = %d, want %d — the body it now carries", resp.ContentLength, len(read))
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/xml" {
+		t.Errorf("Content-Type = %q, want application/xml", got)
+	}
+	if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(read)) {
+		t.Errorf("Content-Length header = %q, want %d", got, len(read))
 	}
 }
 

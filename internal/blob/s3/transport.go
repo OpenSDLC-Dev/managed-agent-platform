@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -70,6 +71,13 @@ func withDeleteMarkerDocument(resp *http.Response) *http.Response {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody))
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(strings.NewReader(deleteMarkerDocument))
+	// The metadata has to follow the body it describes. minio-go reads the
+	// body directly and consults neither, but a response handed on with a
+	// length and a type belonging to bytes that are no longer there is one
+	// nobody else could read correctly either.
+	resp.ContentLength = int64(len(deleteMarkerDocument))
+	resp.Header.Set("Content-Type", "application/xml")
+	resp.Header.Set("Content-Length", strconv.Itoa(len(deleteMarkerDocument)))
 	return resp
 }
 
