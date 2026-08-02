@@ -4,20 +4,20 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**[docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) (in-progress)** — the
-Google Cloud production-deployment plan, authored and approved 2026-08-01 from GCP probes
-run the same day. Slices 1-3 have landed; slice 4 is the staging environment.
+**[docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) (in-progress)** — the session
+outcomes surface (#77, absorbing #161), started 2026-08-02.
+**[docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) (in-progress)** —
+GCP deployment; slices 1-3 + 4a landed, 4b blocked on GCP spend approval.
 
-## Tasks
+## Tasks — plan 21
 
-- [x] Plan 20 authored and approved — evidence in its Ground truth section
-- [x] Slice 1 — GCS delete convergence (`internal/blob/s3`)
-- [x] Slice 2 — sandbox pod placement and bounds:
-  - [x] 2a — `seccompProfile: RuntimeDefault`, pod-level and unconditional
-  - [x] 2b — opt-in `SANDBOX_EPHEMERAL_STORAGE_BYTES` disk cap + chart knob
-  - [x] 2c — node selection and tolerations, parsed and fail-closed
-- [x] Slice 3 — `internal/secrets/gcpkms` cipher + size guard + chart knob + `cmd/` wiring
-- [ ] Slice 4 — staging environment (`deploy/gcp/`) + mode-1 acceptance on GKE:
-  - [x] 4a — the two Terraform configurations, `make gcp-*` targets, CI fmt/validate (this PR)
-  - [ ] 4b — apply, deploy, mode-1 acceptance battery (needs GCP spend approval)
+- [x] Slice 1 — SDK bump v1.59.0→v1.61.0 + verification record (this PR; gate green on the bump)
+- [ ] Slice 2 — define_outcome acceptance + storage + rendering + initial_events
+- [ ] Slice 3 — brain grader loop (transcript-stage)
+- [ ] Slice 4 — outputs_harvest work kind + deliverables
+- [ ] Slice 5 — full-chain acceptance (doc example on latest SDK) + settlement
+
+## Tasks — plan 20 (remaining)
+
+- [ ] Slice 4b — apply, deploy, mode-1 acceptance battery (needs GCP spend approval)
 - [ ] Slice 5 — mode-2 acceptance + `docs/deploy-gcp.md`

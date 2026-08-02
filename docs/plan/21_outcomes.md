@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 issue: "#77"
 ---
 
@@ -32,8 +32,8 @@ execution day).
 
 The outcome surface landed in SDK v1.41.0 (2026-05-06, "add support for Managed Agents
 multiagents and outcomes, webhooks, vault validation") and **no changelog entry since
-touches it** — it is byte-identical between the current v1.59.0 pin and v1.61.0. Slice 1
-still bumps to v1.61.0 so acceptance runs on the latest release (the user-facing goal),
+touches it** — it is byte-identical between the v1.59.0 pin this plan was authored against and
+v1.61.0. Slice 1 bumps to v1.61.0 so acceptance runs on the latest release (the user-facing goal),
 with the two in-between releases' non-outcome surface swept and recorded.
 
 - **Inbound params** (`betasessionevent.go:6406-6416`,
@@ -53,7 +53,7 @@ with the two in-between releases' non-outcome surface swept and recorded.
   - `span.outcome_evaluation_start` (`betasessionevent.go:4875-4910`): `id`, `iteration`
     ("0-indexed revision cycle. 0 is the first evaluation; 1 is the re-evaluation after
     the first revision"), `outcome_id`, `processed_at`, `type`.
-  - `span.outcome_evaluation_ongoing` (`betasessionevent.go:4839-4873`): same fields;
+  - `span.outcome_evaluation_ongoing` (`betasessionevent.go:4835-4873`): same fields;
     "Periodic heartbeat … Distinguishes 'evaluation is actively running' from
     'evaluation is stuck'".
   - `span.outcome_evaluation_end` (`betasessionevent.go:4776-4833`): adds `explanation`,
@@ -334,7 +334,7 @@ eval belongs to the `evals/` suite later, under `RUN_EVALS` — tracked by an is
 
 ## Slices (each lands as its own PR, TDD-first, `make verify` green)
 
-Lifecycle per CLAUDE.md: slice 2's PR — the first that starts development — flips this
+Lifecycle per CLAUDE.md: slice 1's PR — the first that starts development — flips this
 plan to `in-progress` and takes over STATE.md's Active work/Tasks. **Every slice lands
 its docs/DIVERGENCES.md entries in the same PR that introduces the behavior** (the
 registry's same-PR rule; plan 15 states it verbatim as a warning against batching) —
