@@ -249,6 +249,12 @@ func TestBuildRequestRendersDefineOutcome(t *testing.T) {
 	if !strings.Contains(text, "Build a DCF model") || !strings.Contains(text, "# Rubric") {
 		t.Errorf("rendered outcome message = %s, want description and rubric text", text)
 	}
+	// The charge names the deliverables directory: nothing else in the
+	// conversation does, and files written elsewhere never reach the harvest
+	// (the live acceptance's satisfied-with-zero-deliverables run).
+	if !strings.Contains(text, "/mnt/session/outputs/") {
+		t.Errorf("rendered outcome message = %s, want the outputs directory named", text)
+	}
 
 	// A file rubric renders the description alone: its content reaches the
 	// grader from the acceptance snapshot (slice 3), not the conversation.
@@ -261,6 +267,9 @@ func TestBuildRequestRendersDefineOutcome(t *testing.T) {
 	text = string(req.Messages[0].Content)
 	if !strings.Contains(text, "Build it") || strings.Contains(text, "file_1") {
 		t.Errorf("file-rubric rendering = %s, want description only", text)
+	}
+	if !strings.Contains(text, "/mnt/session/outputs/") {
+		t.Errorf("file-rubric rendering = %s, want the outputs directory named", text)
 	}
 }
 

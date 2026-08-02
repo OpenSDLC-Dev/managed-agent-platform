@@ -227,6 +227,13 @@ func runDCF(t *testing.T, client anthropic.Client, track func(string), agentMode
 		run.Files = append(run.Files, fm)
 		run.Contents[fm.Filename] = data
 	}
+	// A satisfied outcome with nothing harvested is a hollow pass: the grader
+	// judged a deliverable the platform never collected (the first live run
+	// did exactly that — the agent wrote outside /mnt/session/outputs/ and
+	// "satisfied" arrived with zero files).
+	if run.Terminal == "satisfied" && len(run.Files) == 0 {
+		t.Errorf("outcome satisfied but no deliverables were harvested for session %s", session.ID)
+	}
 	return run
 }
 

@@ -149,6 +149,12 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 			if p.Rubric.Type == "text" {
 				text += "\n\nYour work will be evaluated against this rubric:\n" + p.Rubric.Content
 			}
+			// The deliverables contract, stated where the outcome is: the
+			// harvest walks /mnt/session/outputs/ and nothing else, so a
+			// deliverable written anywhere else never reaches the files
+			// registry or the grader (the live acceptance's first satisfied
+			// run harvested zero files for exactly this reason).
+			text += "\n\nWrite your deliverable files under /mnt/session/outputs/ — files anywhere else are not collected."
 			blk, err := json.Marshal(map[string]any{"type": "text", "text": text})
 			if err != nil {
 				return req, 0, err
