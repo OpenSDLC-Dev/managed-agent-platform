@@ -56,6 +56,23 @@ func sealFailed(err error) error {
 	return fmt.Errorf("seal credential secrets: %w", err)
 }
 
+// resealFailed is sealFailed for material an OAuth refresh returned rather than
+// material the caller sent (mcp_oauth_validate's persist of rotated tokens).
+//
+// The classification is deliberately the same. A 4xx is an imperfect fit — the
+// caller's request was fine, and they cannot shorten a token they never supplied
+// — but the alternative is the generic 500, which tells them nothing at all, and
+// there IS an action the answer enables: this credential cannot live under this
+// deployment's cipher, so it needs a different key or a different backend. So
+// the status is shared and the message says where the oversize material came
+// from, rather than implying the request carried it.
+func resealFailed(err error) error {
+	if errors.Is(err, secrets.ErrPlaintextTooLarge) {
+		return errInvalid("cannot seal the tokens the credential's token endpoint returned: %s", err)
+	}
+	return fmt.Errorf("seal refreshed secrets: %w", err)
+}
+
 func renderCredential(id, vaultID string, displayName *string, auth []byte,
 	metadata map[string]string, createdAt, updatedAt time.Time, archivedAt *time.Time) credentialJSON {
 	if metadata == nil {

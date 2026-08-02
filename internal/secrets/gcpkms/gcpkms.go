@@ -45,10 +45,25 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 )
 
-// MaxPlaintextBytes is Cloud KMS's raw-Encrypt ceiling. Measured against the
-// real service (plan 20's ground truth, 2026-08-01): 65536 bytes is accepted,
-// 65537 is refused with `max_expected_size:65536`.
-const MaxPlaintextBytes = 65536
+// The two raw-Encrypt ceilings Cloud KMS applies, and the reason the limit is
+// not a constant: which one binds is a property of the KEY, not of this code.
+//
+// Getting that wrong is not cosmetic. A plaintext between the two bounds on an
+// HSM key would pass a 64 KiB guard, be refused by the service as a bare
+// InvalidArgument, and reach the caller as exactly the generic 500 this
+// backend's size classification exists to prevent — so the ceiling is read from
+// the key at startup (see New) rather than assumed.
+const (
+	// MaxPlaintextBytes is the ceiling for a SOFTWARE, EXTERNAL or EXTERNAL_VPC
+	// key version. Measured against the real service (plan 20's ground truth,
+	// 2026-08-01): 65536 accepted, 65537 refused with `max_expected_size:65536`.
+	MaxPlaintextBytes = 65536
+
+	// MaxPlaintextBytesHSM is the ceiling for an HSM key version, where the
+	// service bounds plaintext *plus* additional authenticated data at 8 KiB.
+	// This backend sends no AAD, so the whole budget is plaintext.
+	MaxPlaintextBytesHSM = 8192
+)
 
 // markerPrefix and formatVersion compose the ciphertext marker. Split rather
 // than written as one string so Decrypt can tell "not our ciphertext at all"
@@ -84,6 +99,13 @@ type Config struct {
 type Cipher struct {
 	keyName string
 	client  *kms.KeyManagementClient
+
+	// maxPlaintext is the ceiling this key actually enforces, resolved from the
+	// protection level the startup probe reported. A key whose primary version
+	// later changes protection level needs a restart to be re-read — a bounded
+	// staleness, and the alternative is asking the service its level on every
+	// seal.
+	maxPlaintext int
 }
 
 // New validates the key name eagerly and proves the key is usable before
@@ -113,12 +135,28 @@ func New(ctx context.Context, cfg Config) (*Cipher, error) {
 			return nil, fmt.Errorf("gcpkms cipher: build client (Application Default Credentials): %w", err)
 		}
 	}
-	c := &Cipher{keyName: cfg.KeyName, client: client}
-	if _, err := c.seal(ctx, []byte("map-gcpkms-startup-probe")); err != nil {
+	// The ceiling starts at the smaller of the two, so a probe that somehow
+	// fails to establish it can only ever be over-strict. Over-strict costs a
+	// caller a 4xx naming a lower number than the service would have enforced;
+	// over-permissive costs them the uninformative 500 this whole path exists
+	// to remove. Only one of those is recoverable by the person reading it.
+	c := &Cipher{keyName: cfg.KeyName, client: client, maxPlaintext: MaxPlaintextBytesHSM}
+	_, level, err := c.seal(ctx, []byte("map-gcpkms-startup-probe"))
+	if err != nil {
 		return nil, fmt.Errorf("gcpkms cipher: probe encrypt with %s: %w", c.keyName, err)
+	}
+	// The probe answers with the CryptoKeyVersion it used and that version's
+	// protection level, so the ceiling comes from the key itself rather than
+	// from an assumption about how the operator created it.
+	if level != kmspb.ProtectionLevel_HSM {
+		c.maxPlaintext = MaxPlaintextBytes
 	}
 	return c, nil
 }
+
+// MaxPlaintext reports the plaintext ceiling this cipher's key enforces —
+// MaxPlaintextBytes, or MaxPlaintextBytesHSM for an HSM-protected key.
+func (c *Cipher) MaxPlaintext() int { return c.maxPlaintext }
 
 // Encrypt seals plaintext under the configured CryptoKey. The keyID is that
 // key's resource name.
@@ -126,7 +164,7 @@ func (c *Cipher) Encrypt(ctx context.Context, plaintext []byte) ([]byte, string,
 	if len(plaintext) == 0 {
 		return nil, "", errors.New("gcpkms cipher: empty plaintext")
 	}
-	if len(plaintext) > MaxPlaintextBytes {
+	if len(plaintext) > c.maxPlaintext {
 		// The sentinel, not the KMS client's InvalidArgument: the API turns
 		// this into a 4xx naming the limit, and an unclassified failure would
 		// leave the useful message in the server's log and nowhere else.
@@ -134,10 +172,10 @@ func (c *Cipher) Encrypt(ctx context.Context, plaintext []byte) ([]byte, string,
 		// The usual "gcpkms cipher:" prefix is deliberately absent — this is
 		// the one error here that reaches an API caller verbatim, and the
 		// sentinel already carries a package prefix of its own.
-		return nil, "", fmt.Errorf("%w: %d bytes, and Cloud KMS's raw Encrypt accepts at most %d",
-			secrets.ErrPlaintextTooLarge, len(plaintext), MaxPlaintextBytes)
+		return nil, "", fmt.Errorf("%w: %d bytes, and Cloud KMS's raw Encrypt accepts at most %d for this key",
+			secrets.ErrPlaintextTooLarge, len(plaintext), c.maxPlaintext)
 	}
-	sealed, err := c.seal(ctx, plaintext)
+	sealed, _, err := c.seal(ctx, plaintext)
 	if err != nil {
 		return nil, "", fmt.Errorf("gcpkms cipher: encrypt: %w", err)
 	}
@@ -145,15 +183,17 @@ func (c *Cipher) Encrypt(ctx context.Context, plaintext []byte) ([]byte, string,
 }
 
 // seal is Encrypt's body without the size guard, so New's startup probe
-// exercises the same call path it will use in production.
-func (c *Cipher) seal(ctx context.Context, plaintext []byte) ([]byte, error) {
+// exercises the same call path it will use in production. It also returns the
+// protection level of the key version the service used, which is what New reads
+// the plaintext ceiling from.
+func (c *Cipher) seal(ctx context.Context, plaintext []byte) ([]byte, kmspb.ProtectionLevel, error) {
 	resp, err := c.client.Encrypt(ctx, &kmspb.EncryptRequest{
 		Name:            c.keyName,
 		Plaintext:       plaintext,
 		PlaintextCrc32C: wrapperspb.Int64(int64(crc32.Checksum(plaintext, castagnoli))),
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// KMS's integrity contract, both directions. A false VerifiedPlaintextCrc32C
 	// means the service did not receive the checksum we sent — so it cannot say
@@ -162,12 +202,25 @@ func (c *Cipher) seal(ctx context.Context, plaintext []byte) ([]byte, error) {
 	// would turn a transport fault into a credential that never decrypts, which
 	// is the one failure the vault feature cannot recover from.
 	if !resp.GetVerifiedPlaintextCrc32C() {
-		return nil, errors.New("the service did not verify the request checksum")
+		return nil, 0, errors.New("the service did not verify the request checksum")
+	}
+	// Emptiness and absence are checked before the comparison, not left to it.
+	// GetValue() answers 0 for an absent wrapper and CRC32C("") is also 0, so an
+	// empty ciphertext with no checksum would compare EQUAL and be stored — as a
+	// marker with nothing after it, a credential that can never be unsealed.
+	// That is precisely the failure the paragraph above claims to prevent, so it
+	// is refused explicitly rather than by arithmetic coincidence.
+	if len(resp.GetCiphertext()) == 0 {
+		return nil, 0, errors.New("the service returned no ciphertext")
+	}
+	if resp.GetCiphertextCrc32C() == nil {
+		return nil, 0, errors.New("the response carried no ciphertext checksum")
 	}
 	if resp.GetCiphertextCrc32C().GetValue() != int64(crc32.Checksum(resp.GetCiphertext(), castagnoli)) {
-		return nil, errors.New("response checksum mismatch")
+		return nil, 0, errors.New("response checksum mismatch")
 	}
-	return append([]byte(fmt.Sprintf("%s%d:", markerPrefix, formatVersion)), resp.GetCiphertext()...), nil
+	return append([]byte(fmt.Sprintf("%s%d:", markerPrefix, formatVersion)), resp.GetCiphertext()...),
+		resp.GetProtectionLevel(), nil
 }
 
 // Decrypt reverses Encrypt. A keyID other than the configured key name is
@@ -192,6 +245,12 @@ func (c *Cipher) Decrypt(ctx context.Context, ciphertext []byte, keyID string) (
 	if len(plaintext) == 0 {
 		return nil, errors.New("gcpkms cipher: decrypt returned no plaintext")
 	}
+	// Absence checked separately, for seal's reason: an absent wrapper answers 0
+	// and would otherwise be compared against a real checksum, passing whenever
+	// that checksum happened to be 0.
+	if resp.GetPlaintextCrc32C() == nil {
+		return nil, errors.New("gcpkms cipher: decrypt: the response carried no plaintext checksum")
+	}
 	if resp.GetPlaintextCrc32C().GetValue() != int64(crc32.Checksum(plaintext, castagnoli)) {
 		return nil, errors.New("gcpkms cipher: decrypt: response checksum mismatch")
 	}
@@ -209,9 +268,18 @@ func unmark(ciphertext []byte) ([]byte, error) {
 	if !ok || len(digits) == 0 {
 		return nil, errors.New("ciphertext's format marker carries no version")
 	}
+	// Canonical digits only. strconv.Atoi would read "+1" and "01" as 1, so a
+	// marker this package could never have written would decode as v1 — and the
+	// marker's whole job is to say unambiguously which format wrote the bytes.
+	if !canonicalDigits(digits) {
+		return nil, fmt.Errorf("ciphertext's format version %q is not a canonical number", digits)
+	}
+	// Canonical and still unusable: a run of digits long enough to overflow an
+	// int. Atoi is what catches that, which is why the check above does not
+	// replace it.
 	version, err := strconv.Atoi(string(digits))
 	if err != nil {
-		return nil, fmt.Errorf("ciphertext's format version %q is not a number", digits)
+		return nil, fmt.Errorf("ciphertext's format version %q is not a number this build can read", digits)
 	}
 	if version != formatVersion {
 		return nil, fmt.Errorf("ciphertext is format version %d; this build understands version %d "+
@@ -221,4 +289,18 @@ func unmark(ciphertext []byte) ([]byte, error) {
 		return nil, errors.New("ciphertext carries a format marker and nothing else")
 	}
 	return payload, nil
+}
+
+// canonicalDigits reports whether b is a decimal integer written the one way
+// this package writes one: digits only, no sign, and no leading zero.
+func canonicalDigits(b []byte) bool {
+	if len(b) == 0 || (len(b) > 1 && b[0] == '0') {
+		return false
+	}
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

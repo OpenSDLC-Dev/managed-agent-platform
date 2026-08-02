@@ -327,10 +327,13 @@ localCipher:
 # controlplane.serviceAccount.annotations and executor.serviceAccount.annotations.
 #
 # One behavioural consequence worth knowing before choosing it: Cloud KMS's raw
-# Encrypt accepts at most 65536 bytes, which OpenBao's transit engine does not
-# bound, so a vault credential whose sealed secrets exceed that is refused with a
-# 400 naming the limit where another cipher would have stored it
-# (docs/DIVERGENCES.md). Real credential material sits orders of magnitude below.
+# Encrypt bounds plaintext where OpenBao's transit engine does not, so a vault
+# credential whose sealed secrets exceed the bound is refused with a 400 naming
+# the limit where another cipher would have stored it (docs/DIVERGENCES.md). The
+# bound depends on the key — 65536 bytes for a software-protected one, 8192 for
+# an HSM one — and the platform reads it from the key at startup, since a
+# resource name does not say which you have. Real credential material sits orders
+# of magnitude below either.
 gcpKMS:
   keyName: ""
 
@@ -338,8 +341,9 @@ gcpKMS:
 # set, the chart creates NO Secret and every process reads credentials from this
 # one, which must carry keys: controlplane-api-key, model-providers.json,
 # database-url (plus the blob-* keys if object storage is in use, and the
-# secrets-backend/bao-*/secrets-* keys if a credential cipher is in use — see
-# templates/_helpers.tpl map.secretsEnv). Incompatible with postgresql.enabled,
+# secrets-backend key if a credential cipher is in use, plus that backend's own:
+# bao-* for OpenBao, secrets-* for the local cipher, gcpkms-key-name for Cloud
+# KMS — see templates/_helpers.tpl map.secretsEnv). Incompatible with postgresql.enabled,
 # minio.enabled, and openbao.enabled (bring your own backing services in this
 # mode) — the chart fails the render otherwise.
 existingSecret: ""

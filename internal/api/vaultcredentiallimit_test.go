@@ -86,4 +86,43 @@ func TestOversizeCredentialSecretIsRefusedWithAFourHundred(t *testing.T) {
 			t.Errorf("a refused create left %d credential row(s) behind", credentials)
 		}
 	})
+
+	// The update path re-seals too, and docs/DIVERGENCES.md claims BOTH answer
+	// 400 — so both are driven. A create-only test would let the update path
+	// regress to a 500 while the registry kept saying otherwise.
+	t.Run("gcpkms refuses an oversize update too", func(t *testing.T) {
+		cipher, err := gcpkms.New(context.Background(), gcpkms.Config{
+			KeyName: gcpkmstest.KeyName,
+			Client:  gcpkmstest.NewClient(t),
+		})
+		if err != nil {
+			t.Fatalf("gcpkms.New: %v", err)
+		}
+		s := newTestServerWithCipher(t, cipher)
+		vaultID := createVault(t, s, "update under gcpkms")
+
+		// A credential small enough to store, then grown past the ceiling.
+		status, resp := s.do("POST", "/v1/vaults/"+vaultID+"/credentials", map[string]any{
+			"auth": map[string]any{
+				"type": "environment_variable", "secret_name": "TOKEN",
+				"secret_value": "small", "networking": map[string]any{"type": "unrestricted"},
+			},
+		})
+		if status != http.StatusOK {
+			t.Fatalf("seed create = %d; body %v", status, resp)
+		}
+		credID, _ := resp["id"].(string)
+
+		status, resp = s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+credID, map[string]any{
+			"auth": map[string]any{"type": "environment_variable", "secret_value": huge},
+		})
+		if status != http.StatusBadRequest {
+			t.Fatalf("oversize update = %d, want 400 (a 500 here is the defect); body %v", status, resp)
+		}
+		errObj, _ := resp["error"].(map[string]any)
+		message, _ := errObj["message"].(string)
+		if !strings.Contains(message, "65536") {
+			t.Errorf("message %q does not name the limit", message)
+		}
+	})
 }

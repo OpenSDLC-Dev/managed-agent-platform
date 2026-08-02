@@ -29,11 +29,11 @@ copy of an entry here.
   which would hand the same Google identity to the brain, a process that never touches a
   cipher.
 
-  **The interesting part is a limit, not a feature.** Cloud KMS's raw `Encrypt` accepts at
-  most 65536 bytes, and OpenBao's transit engine accepts any size. The vault API bounds a
-  request body at 4 MiB and places no length bound on any secret field, so this backend
-  genuinely cannot serve every input the surface accepts — a real difference between two
-  ciphers behind one interface. It is handled as one rather than papered over:
+  **The interesting part is a limit, not a feature.** Cloud KMS's raw `Encrypt` bounds
+  plaintext and OpenBao's transit engine does not. The vault API bounds a request body at
+  4 MiB and places no length bound on any secret field, so this backend genuinely cannot
+  serve every input the surface accepts — a real difference between two ciphers behind one
+  interface. It is handled as one rather than papered over:
 
   - `secrets.Cipher`'s seam grew **`ErrPlaintextTooLarge`**, the backend wraps it, and
     `internal/api` classifies it into the `errInvalid` family, so the caller gets a **400
@@ -44,12 +44,27 @@ copy of an entry here.
     as the defect rather than an acceptable outcome.
   - The behaviour is registered in [docs/DIVERGENCES.md](./docs/DIVERGENCES.md), because it
     is observable at the wire and switchable by configuration.
+  - **The limit is the key's, not a constant**, and getting that wrong would have quietly
+    undone the whole thing. Cloud KMS bounds plaintext at 64 KiB for a software-protected
+    key but **8 KiB** for an HSM one, and a CryptoKey resource name does not say which you
+    have. A hard-coded 64 KiB guard would have waved a 20 KiB credential through on an HSM
+    key, taken the service's bare `InvalidArgument` back, and handed the caller exactly the
+    500 this design exists to remove — on the *more* security-conscious of the two key
+    choices. So the ceiling is read from the protection level the startup probe reports,
+    and the fake KMS server can be either kind so a test proves both.
 
   Ciphertext carries a **`gcpkms:v1:` format marker** from this first commit. Envelope
   encryption removes the ceiling and is deferred, and the marker is the one piece of that
   escape hatch that is cheap now and expensive retrofitted: a later v2 can arrive without
   rewriting stored rows, and a v2 ciphertext reaching a v1 build is named rather than
   handed to KMS as if it were raw.
+
+  The same classification covers the third seal site, `mcp_oauth_validate`'s persist of
+  tokens an OAuth refresh rotated. A 4xx is an imperfect fit there — the caller's request
+  was fine and they cannot shorten a token they never sent — but the alternative is the
+  generic 500, and there *is* an action the answer enables: that credential cannot live
+  under this deployment's cipher. So the status is shared and the message says where the
+  oversize material came from.
 
   Three smaller decisions worth recording. `New` proves the key with a throwaway `Encrypt`
   rather than `GetCryptoKey` — the obvious probe needs `cloudkms.cryptoKeys.get`, which
@@ -64,9 +79,13 @@ copy of an entry here.
   Tests are hermetic — an in-process fake Cloud KMS gRPC server runs the shared
   `secretstest` contract, so `make test` never touches GCP — plus a live tier under the
   repo's standing consent contract (`RUN_LIVE_KMS_TESTS=1`, `GCPKMS_KEY_NAME` from `.env`).
-  The fake is a fake and not a stub: it seals with real AES-256-GCM and enforces the same
-  ceiling, because the contract asserts properties (fresh encryptions differ, tampering and
-  truncation detected) that a stub would pass by accident.
+  The fake is a fake and not a stub: it seals with real AES-256-GCM, verifies the CRC32C
+  checksums it is sent rather than noting their presence, and serves either protection
+  level — because the contract asserts properties (fresh encryptions differ, tampering and
+  truncation detected) that a stub would pass by accident, and because a fake that only
+  ever models the easy shape teaches the tests the wrong ceiling. It also exposes a
+  fault-injection seam, without which none of the cipher's four response-integrity guards
+  is reachable and deleting any of them would leave the suite green.
 
 - **Sandbox pods can be pinned to a node pool of their own**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2).

@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"cloud.google.com/go/kms/apiv1/kmspb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/gcpkms"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/gcpkms/gcpkmstest"
@@ -39,7 +42,7 @@ func TestTheCeilingIsExactAndClassified(t *testing.T) {
 	ctx := context.Background()
 	c := newCipher(t)
 
-	at := bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytes)
+	at := bytes.Repeat([]byte("a"), c.MaxPlaintext())
 	ct, keyID, err := c.Encrypt(ctx, at)
 	if err != nil {
 		t.Fatalf("Encrypt at the ceiling (%d bytes): %v", len(at), err)
@@ -52,7 +55,7 @@ func TestTheCeilingIsExactAndClassified(t *testing.T) {
 		t.Fatal("the ceiling-sized plaintext did not round-trip")
 	}
 
-	over := bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytes+1)
+	over := bytes.Repeat([]byte("a"), c.MaxPlaintext()+1)
 	_, _, err = c.Encrypt(ctx, over)
 	if !errors.Is(err, secrets.ErrPlaintextTooLarge) {
 		t.Fatalf("one byte over the ceiling = %v, want it to wrap ErrPlaintextTooLarge", err)
@@ -64,6 +67,157 @@ func TestTheCeilingIsExactAndClassified(t *testing.T) {
 			t.Errorf("refusal %q does not mention %s", err, want)
 		}
 	}
+	if c.MaxPlaintext() != gcpkms.MaxPlaintextBytes {
+		t.Errorf("a software key resolved to a %d-byte ceiling, want %d",
+			c.MaxPlaintext(), gcpkms.MaxPlaintextBytes)
+	}
+}
+
+// The ceiling is a property of the KEY, not of Cloud KMS: an HSM key version
+// bounds plaintext at 8 KiB, and a resource name does not say which you have.
+// A backend that assumed the software ceiling would pass every test above and
+// still hand a caller the uninformative 500 this slice exists to remove — the
+// refusal would come from the service as a bare InvalidArgument, which carries
+// no sentinel to classify. So the ceiling is read from the key at startup, and
+// this pins that.
+func TestAnHSMKeyGetsTheSmallerCeiling(t *testing.T) {
+	ctx := context.Background()
+	c, err := gcpkms.New(ctx, gcpkms.Config{
+		KeyName: gcpkmstest.KeyName,
+		Client:  gcpkmstest.NewHSMClient(t),
+	})
+	if err != nil {
+		t.Fatalf("gcpkms.New against an HSM key: %v", err)
+	}
+	if c.MaxPlaintext() != gcpkms.MaxPlaintextBytesHSM {
+		t.Fatalf("an HSM key resolved to a %d-byte ceiling, want %d",
+			c.MaxPlaintext(), gcpkms.MaxPlaintextBytesHSM)
+	}
+	if _, _, err := c.Encrypt(ctx, bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytesHSM)); err != nil {
+		t.Fatalf("Encrypt at the HSM ceiling: %v", err)
+	}
+	// The size the software ceiling would have waved through. It must be the
+	// classified refusal, not the service's InvalidArgument.
+	_, _, err = c.Encrypt(ctx, bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytesHSM+1))
+	if !errors.Is(err, secrets.ErrPlaintextTooLarge) {
+		t.Fatalf("one byte over the HSM ceiling = %v, want it to wrap ErrPlaintextTooLarge", err)
+	}
+	if !strings.Contains(err.Error(), "8192") {
+		t.Errorf("refusal %q does not name the HSM limit", err)
+	}
+}
+
+// The response-integrity guards can only be reached from a service that answers
+// wrongly, so without a fault-injection seam every one of them could be deleted
+// with the suite still green. Each row is a response shape that must not be
+// stored: the empty-ciphertext one is the sharp case, because an absent
+// checksum reads as 0 and CRC32C("") is also 0, so it would compare EQUAL and
+// be stored as a marker with nothing behind it — a credential that can never be
+// unsealed.
+func TestAMisbehavingServiceIsRefused(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, wantIn string
+		mangle       func(*kmspb.EncryptResponse)
+	}{
+		{"empty ciphertext with no checksum", "no ciphertext", func(r *kmspb.EncryptResponse) {
+			r.Ciphertext = nil
+			r.CiphertextCrc32C = nil
+		}},
+		{"no ciphertext checksum", "no ciphertext checksum", func(r *kmspb.EncryptResponse) {
+			r.CiphertextCrc32C = nil
+		}},
+		{"wrong ciphertext checksum", "checksum mismatch", func(r *kmspb.EncryptResponse) {
+			r.CiphertextCrc32C = wrapperspb.Int64(r.GetCiphertextCrc32C().GetValue() ^ 1)
+		}},
+		{"request checksum not verified", "did not verify", func(r *kmspb.EncryptResponse) {
+			r.VerifiedPlaintextCrc32C = false
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := gcpkmstest.NewClientFor(t, &mangling{
+				KeyManagementServiceServer: gcpkmstest.NewServer(t, kmspb.ProtectionLevel_SOFTWARE),
+				encrypt:                    tc.mangle,
+			})
+			// The startup probe seals too, so a service this broken cannot even
+			// produce a cipher — which is the right moment to find out.
+			_, err := gcpkms.New(ctx, gcpkms.Config{KeyName: gcpkmstest.KeyName, Client: client})
+			if err == nil {
+				t.Fatal("New accepted a service returning a corrupt response")
+			}
+			if !strings.Contains(err.Error(), tc.wantIn) {
+				t.Errorf("error %q does not mention %q", err, tc.wantIn)
+			}
+		})
+	}
+}
+
+// The decrypt half of the same contract, reached the same way.
+func TestAMisbehavingDecryptIsRefused(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, wantIn string
+		mangle       func(*kmspb.DecryptResponse)
+	}{
+		{"no plaintext checksum", "no plaintext checksum", func(r *kmspb.DecryptResponse) {
+			r.PlaintextCrc32C = nil
+		}},
+		{"wrong plaintext checksum", "checksum mismatch", func(r *kmspb.DecryptResponse) {
+			r.PlaintextCrc32C = wrapperspb.Int64(r.GetPlaintextCrc32C().GetValue() ^ 1)
+		}},
+		{"no plaintext at all", "no plaintext", func(r *kmspb.DecryptResponse) {
+			r.Plaintext = nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := gcpkmstest.NewClientFor(t, &mangling{
+				KeyManagementServiceServer: gcpkmstest.NewServer(t, kmspb.ProtectionLevel_SOFTWARE),
+				decrypt:                    tc.mangle,
+			})
+			c, err := gcpkms.New(ctx, gcpkms.Config{KeyName: gcpkmstest.KeyName, Client: client})
+			if err != nil {
+				t.Fatalf("gcpkms.New: %v", err)
+			}
+			ct, keyID, err := c.Encrypt(ctx, []byte("round trip me"))
+			if err != nil {
+				t.Fatalf("Encrypt: %v", err)
+			}
+			_, err = c.Decrypt(ctx, ct, keyID)
+			if err == nil {
+				t.Fatal("Decrypt accepted a corrupt response")
+			}
+			if !strings.Contains(err.Error(), tc.wantIn) {
+				t.Errorf("error %q does not mention %q", err, tc.wantIn)
+			}
+		})
+	}
+}
+
+// mangling wraps the fake and corrupts one field of its answer, so the cipher's
+// own response checks are the only thing standing between the corruption and a
+// stored credential.
+type mangling struct {
+	kmspb.KeyManagementServiceServer
+	encrypt func(*kmspb.EncryptResponse)
+	decrypt func(*kmspb.DecryptResponse)
+}
+
+func (m *mangling) Encrypt(ctx context.Context, req *kmspb.EncryptRequest) (*kmspb.EncryptResponse, error) {
+	resp, err := m.KeyManagementServiceServer.Encrypt(ctx, req)
+	if err != nil || m.encrypt == nil {
+		return resp, err
+	}
+	m.encrypt(resp)
+	return resp, nil
+}
+
+func (m *mangling) Decrypt(ctx context.Context, req *kmspb.DecryptRequest) (*kmspb.DecryptResponse, error) {
+	resp, err := m.KeyManagementServiceServer.Decrypt(ctx, req)
+	if err != nil || m.decrypt == nil {
+		return resp, err
+	}
+	m.decrypt(resp)
+	return resp, nil
 }
 
 // The marker is an escape hatch for envelope encryption (#242), and an escape
@@ -94,7 +248,18 @@ func TestTheCiphertextFormatMarker(t *testing.T) {
 		// named, not handed to KMS as if it were raw.
 		{"a newer format version", "version 2", append([]byte("gcpkms:v2:"), raw...)},
 		{"marker and nothing else", "nothing else", []byte(marker)},
-		{"a version that is not a number", "not a number", []byte("gcpkms:vX:payload")},
+		{"a version that is not a number", "canonical", []byte("gcpkms:vX:payload")},
+		// Canonical digits and still not a version: the overflow branch, which
+		// the canonical-form check deliberately does not subsume.
+		{"a version too large for an int", "not a number", []byte("gcpkms:v99999999999999999999:payload")},
+		// A v1 row truncated inside its own marker: the prefix matched and there
+		// is no terminator, the one unmark branch a partial write would reach.
+		{"prefix with no terminator", "no version", []byte("gcpkms:v")},
+		// Non-canonical digits this package could never have written. The marker
+		// exists to say unambiguously which format wrote the bytes, so a
+		// spelling it does not emit is not silently read as v1.
+		{"a non-canonical version", "canonical", []byte("gcpkms:v01:payload")},
+		{"a signed version", "canonical", []byte("gcpkms:v+1:payload")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := c.Decrypt(ctx, tc.in, keyID)
@@ -175,11 +340,15 @@ func TestLiveCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gcpkms.New against real Cloud KMS: %v", err)
 	}
-	if _, _, err := c.Encrypt(ctx, bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytes)); err != nil {
-		t.Errorf("real Cloud KMS refused %d bytes, which MaxPlaintextBytes says it accepts: %v",
-			gcpkms.MaxPlaintextBytes, err)
+	// Only the acceptance half reaches the service: the refusal is the cipher's
+	// own guard, which fires before any network call. So this proves real KMS
+	// accepts the ceiling we resolved for the configured key — it cannot detect
+	// the service raising its limit above ours.
+	if _, _, err := c.Encrypt(ctx, bytes.Repeat([]byte("a"), c.MaxPlaintext())); err != nil {
+		t.Errorf("real Cloud KMS refused %d bytes, which this key's ceiling says it accepts: %v",
+			c.MaxPlaintext(), err)
 	}
-	if _, _, err := c.Encrypt(ctx, bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytes+1)); !errors.Is(err, secrets.ErrPlaintextTooLarge) {
+	if _, _, err := c.Encrypt(ctx, bytes.Repeat([]byte("a"), c.MaxPlaintext()+1)); !errors.Is(err, secrets.ErrPlaintextTooLarge) {
 		t.Errorf("one byte over = %v, want ErrPlaintextTooLarge", err)
 	}
 }

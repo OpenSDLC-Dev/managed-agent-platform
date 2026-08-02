@@ -698,7 +698,9 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   500 and the limit reaches nobody but the log — and the env plumbing.
 
   That plumbing is a naming contract, so it is settled here rather than at
-  implementation time, following the shape `internal/secrets/env.go` and
+  implementation time, following the shape `internal/secrets/env.go` (moved to
+   `internal/secrets/backend` while landing this slice, to keep the seam package
+   free of its own backends) and
   `map.secretsEnv` already establish (backend selector, then backend-prefixed keys, as
   `openbao` does with `BAO_*`): **`SECRETS_BACKEND=gcpkms`** keeps its existing
   `secrets-backend` Secret key, and the CryptoKey resource name arrives as

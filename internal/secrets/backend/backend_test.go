@@ -102,3 +102,26 @@ func TestFromEnvGCPKMSNeedsAKeyName(t *testing.T) {
 		t.Errorf("error %q does not name the missing variable", err)
 	}
 }
+
+// A key name of the wrong SHAPE fails without any network call, so this arm of
+// the gcpkms branch is testable hermetically even though its happy path is not.
+// The expensive case is a CryptoKeyVersion: Encrypt accepts one where Decrypt
+// refuses it, so a deployment configured with a version would seal credentials
+// it could never unseal.
+func TestFromEnvGCPKMSRejectsAKeyNameThatIsNotACryptoKey(t *testing.T) {
+	for _, name := range []string{
+		"my-key",
+		"projects/p/locations/l/keyRings/r",
+		"projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1",
+	} {
+		t.Setenv("SECRETS_BACKEND", "gcpkms")
+		t.Setenv("GCPKMS_KEY_NAME", name)
+		c, err := backend.FromEnv(context.Background())
+		if err == nil {
+			t.Errorf("FromEnv accepted GCPKMS_KEY_NAME=%q", name)
+		}
+		if c != nil {
+			t.Errorf("FromEnv returned a cipher alongside an error for %q", name)
+		}
+	}
+}

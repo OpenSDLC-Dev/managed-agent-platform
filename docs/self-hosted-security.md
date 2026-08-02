@@ -509,10 +509,12 @@ restore-ordering constraint you own:
   above. Cloud KMS's own scheduled-destruction delay is the only thing standing
   between a `terraform destroy` of the key ring and unrecoverable ciphertext, so
   keep the key **outside** the lifecycle of anything you rebuild routinely. One
-  behavioural consequence to know before choosing it: KMS's raw `Encrypt` accepts
-  at most 65536 bytes where OpenBao's transit engine bounds nothing, so a
-  credential whose sealed secrets exceed that is refused with a `400` naming the
-  limit rather than stored (docs/DIVERGENCES.md).
+  behavioural consequence to know before choosing it: KMS's raw `Encrypt` bounds
+  plaintext where OpenBao's transit engine does not, so a credential whose sealed
+  secrets exceed the bound is refused with a `400` naming the limit rather than
+  stored (docs/DIVERGENCES.md). The bound is the key's, not a constant — 65536
+  bytes for a software-protected key and 8192 for an HSM one — and the platform
+  reads it from the key at startup.
 
 ### Host and runtime isolation
 

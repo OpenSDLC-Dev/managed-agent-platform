@@ -170,14 +170,43 @@ ServiceAccounts that hold a cipher:
 --set 'executor.serviceAccount.annotations.iam\.gke\.io/gcp-service-account=map-kms@my-project.iam.gserviceaccount.com'
 ```
 
-and, on the Google side, granting the KSAs the right to impersonate it:
+and, on the Google side, granting those two Kubernetes ServiceAccounts the right
+to impersonate it. **Use the names the chart actually created** — they are
+`<fullname>-controlplane` and `<fullname>-executor`, where `<fullname>` is the
+release name only when it already contains the chart name and `RELEASE-CHARTNAME`
+otherwise, so `helm install map ...` yields
+`map-managed-agent-platform-controlplane`. Read them off the cluster rather than
+constructing them:
 
 ```
-gcloud iam service-accounts add-iam-policy-binding map-kms@my-project.iam.gserviceaccount.com \
-  --role roles/iam.workloadIdentityUser \
-  --member 'serviceAccount:my-project.svc.id.goog[NAMESPACE/RELEASE-controlplane]'
-# ...and the same for RELEASE-executor
+kubectl get sa -n NAMESPACE -o name        # confirm the two names
+for ksa in $(kubectl get sa -n NAMESPACE -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+               | grep -E -- '-(controlplane|executor)$'); do
+  gcloud iam service-accounts add-iam-policy-binding map-kms@my-project.iam.gserviceaccount.com \
+    --role roles/iam.workloadIdentityUser \
+    --member "serviceAccount:my-project.svc.id.goog[NAMESPACE/$ksa]"
+done
 ```
+
+**The two need different key-level roles**, and granting both the same one
+over-privileges the executor. The control plane encrypts on write and decrypts
+for `mcp_oauth_validate`, so it needs
+`roles/cloudkms.cryptoKeyEncrypterDecrypter`. The executor constructs the cipher
+**only to fail fast on misconfiguration** — egress substitution decrypts
+control-plane side, at the gate-config endpoint, never in the executor — so the
+one KMS call it ever makes is the startup probe's encrypt, and
+`roles/cloudkms.cryptoKeyEncrypter` is enough:
+
+```
+gcloud kms keys add-iam-policy-binding credentials \
+  --keyring map --location us-central1 \
+  --member serviceAccount:map-kms@my-project.iam.gserviceaccount.com \
+  --role roles/cloudkms.cryptoKeyEncrypterDecrypter
+```
+
+(with a second Google service account bound only to
+`roles/cloudkms.cryptoKeyEncrypter` if you want the executor separated; a single
+account for both is simpler and is what the example above configures.)
 
 The brain deliberately gets neither the key name nor a ServiceAccount: it holds
 no cipher, so it has no reason to hold the identity either. That is also why the
@@ -188,13 +217,18 @@ pod that falls back to it.
 Two refusals are worth knowing before you deploy. A **CryptoKeyVersion** name
 (`.../cryptoKeys/K/cryptoKeyVersions/1`) fails the render: `Encrypt` accepts one
 where `Decrypt` refuses it, so a release configured with a version would seal
-credentials it could never unseal. And Cloud KMS's raw `Encrypt` accepts at most
-**65536 bytes**, which OpenBao's transit engine does not bound — so a vault
-credential whose sealed secrets exceed that is answered with a `400` naming the
-limit where another cipher would have stored it
-([docs/DIVERGENCES.md](../../../docs/DIVERGENCES.md)). Real credential material —
-OAuth and bearer tokens, environment-variable values — sits orders of magnitude
-below it.
+credentials it could never unseal. And Cloud KMS's raw `Encrypt` bounds
+plaintext where OpenBao's transit engine does not — so a vault credential whose
+sealed secrets exceed the bound is answered with a `400` naming the limit where
+another cipher would have stored it
+([docs/DIVERGENCES.md](../../../docs/DIVERGENCES.md)).
+
+That bound depends on the key you point at, which is why the platform reads it
+from the key at startup rather than assuming: **65536 bytes** for a
+software-protected key, but only **8192** for an HSM one, where the service
+bounds plaintext plus AAD together. Nothing in a resource name says which you
+have. Real credential material — OAuth and bearer tokens, environment-variable
+values — sits orders of magnitude below either.
 
 ## Security notes
 
@@ -222,8 +256,10 @@ below it.
 
 To keep credentials out of Helm values, pre-create a Secret with keys
 `controlplane-api-key`, `model-providers.json`, and `database-url` (plus the
-`blob-*` keys for object storage and the `secrets-backend`/`bao-*`/`secrets-*`
-keys for the credential cipher, if used), then set `existingSecret=<name>`. In
+`blob-*` keys for object storage and, for the credential cipher if used, the
+`secrets-backend` key plus that backend's own — `bao-*` for OpenBao, `secrets-*`
+for the local cipher, `gcpkms-key-name` for Cloud KMS), then set
+`existingSecret=<name>`. In
 this mode the chart creates no Secret and does not manage in-cluster backing
 services (`postgresql.enabled`, `minio.enabled`, and `openbao.enabled` must be
 false).

@@ -52,17 +52,42 @@ import (
 // bypassed.
 const KeyName = "projects/map-test/locations/global/keyRings/test-ring/cryptoKeys/test-key"
 
-// maxPlaintextBytes is the real service's raw-Encrypt ceiling, enforced here so
-// a test that removed the cipher's own guard would still see the refusal —
-// from the far side, as an InvalidArgument, which is exactly the unhelpful
-// error the guard exists to replace.
-const maxPlaintextBytes = 65536
+// The real service's two raw-Encrypt ceilings, enforced here so a test that
+// removed the cipher's own guard would still see the refusal — from the far
+// side, as an InvalidArgument, which is exactly the unhelpful error the guard
+// exists to replace. Which one binds depends on the key's protection level,
+// and the fake models that too: an HSM key is where a single hard-coded 64 KiB
+// ceiling turns the cipher's 4xx back into a 500, so the fake has to be able to
+// be one.
+const (
+	maxPlaintextBytes    = 65536
+	maxPlaintextBytesHSM = 8192
+)
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
-// NewClient starts a fake KMS server serving KeyName and returns a client
-// wired to it. Both are torn down when the test ends.
+// NewClient starts a fake KMS server serving KeyName as a SOFTWARE key and
+// returns a client wired to it. Both are torn down when the test ends.
 func NewClient(t *testing.T) *kms.KeyManagementClient {
+	t.Helper()
+	return NewClientFor(t, NewServer(t, kmspb.ProtectionLevel_SOFTWARE))
+}
+
+// NewHSMClient is NewClient against an HSM-protected key, whose plaintext
+// ceiling is 8 KiB rather than 64 KiB. It exists because that difference is
+// invisible in a resource name: a cipher that assumed the software ceiling
+// would pass every test against NewClient and still hand callers an
+// uninformative 500 on the first credential larger than 8 KiB.
+func NewHSMClient(t *testing.T) *kms.KeyManagementClient {
+	t.Helper()
+	return NewClientFor(t, NewServer(t, kmspb.ProtectionLevel_HSM))
+}
+
+// NewServer builds the fake serving KeyName at the given protection level. It
+// is exported so a test can wrap it — the response-integrity guards can only be
+// reached from a server that answers wrongly on purpose, and without a seam for
+// that, deleting any of them leaves the suite green.
+func NewServer(t *testing.T, level kmspb.ProtectionLevel) kmspb.KeyManagementServiceServer {
 	t.Helper()
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
@@ -76,15 +101,21 @@ func NewClient(t *testing.T) *kms.KeyManagementClient {
 	if err != nil {
 		t.Fatalf("cipher.NewGCM: %v", err)
 	}
+	return &fake{aead: aead, level: level}
+}
 
+// NewClientFor serves srv over an in-process gRPC connection and returns a KMS
+// client wired to it. Both are torn down when the test ends.
+func NewClientFor(t *testing.T, srv kmspb.KeyManagementServiceServer) *kms.KeyManagementClient {
+	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := grpc.NewServer()
-	kmspb.RegisterKeyManagementServiceServer(srv, &fake{aead: aead})
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
+	server := grpc.NewServer()
+	kmspb.RegisterKeyManagementServiceServer(server, srv)
+	go func() { _ = server.Serve(lis) }()
+	t.Cleanup(server.Stop)
 
 	conn, err := grpc.NewClient(lis.Addr().String(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -104,16 +135,28 @@ func NewClient(t *testing.T) *kms.KeyManagementClient {
 // one would fail loudly rather than silently pass.
 type fake struct {
 	kmspb.UnimplementedKeyManagementServiceServer
-	aead cipher.AEAD
+	aead  cipher.AEAD
+	level kmspb.ProtectionLevel
 }
 
 func (f *fake) Encrypt(_ context.Context, req *kmspb.EncryptRequest) (*kmspb.EncryptResponse, error) {
 	if req.GetName() != KeyName {
 		return nil, status.Errorf(codes.NotFound, "key %q not found", req.GetName())
 	}
-	if len(req.GetPlaintext()) > maxPlaintextBytes {
+	max := maxPlaintextBytes
+	if f.level == kmspb.ProtectionLevel_HSM {
+		max = maxPlaintextBytesHSM
+	}
+	if len(req.GetPlaintext()) > max {
 		return nil, status.Errorf(codes.InvalidArgument,
-			"plaintext too large: max_expected_size:%d", maxPlaintextBytes)
+			"plaintext too large: max_expected_size:%d", max)
+	}
+	// The real service VERIFIES the checksum rather than noting its presence,
+	// and rejects a mismatch. Modelled, because a client that computed the CRC
+	// wrongly would otherwise be green here and fail on every real call.
+	if req.GetPlaintextCrc32C() != nil &&
+		req.GetPlaintextCrc32C().GetValue() != int64(crc32.Checksum(req.GetPlaintext(), castagnoli)) {
+		return nil, status.Error(codes.InvalidArgument, "plaintext checksum mismatch")
 	}
 	nonce := make([]byte, f.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
@@ -128,7 +171,7 @@ func (f *fake) Encrypt(_ context.Context, req *kmspb.EncryptRequest) (*kmspb.Enc
 		Ciphertext:              ct,
 		CiphertextCrc32C:        wrapperspb.Int64(int64(crc32.Checksum(ct, castagnoli))),
 		VerifiedPlaintextCrc32C: req.GetPlaintextCrc32C() != nil,
-		ProtectionLevel:         kmspb.ProtectionLevel_SOFTWARE,
+		ProtectionLevel:         f.level,
 	}, nil
 }
 
@@ -137,6 +180,10 @@ func (f *fake) Decrypt(_ context.Context, req *kmspb.DecryptRequest) (*kmspb.Dec
 		return nil, status.Errorf(codes.NotFound, "key %q not found", req.GetName())
 	}
 	ct := req.GetCiphertext()
+	if req.GetCiphertextCrc32C() != nil &&
+		req.GetCiphertextCrc32C().GetValue() != int64(crc32.Checksum(ct, castagnoli)) {
+		return nil, status.Error(codes.InvalidArgument, "ciphertext checksum mismatch")
+	}
 	if len(ct) < f.aead.NonceSize() {
 		return nil, status.Error(codes.InvalidArgument, "ciphertext is too short")
 	}
@@ -148,7 +195,7 @@ func (f *fake) Decrypt(_ context.Context, req *kmspb.DecryptRequest) (*kmspb.Dec
 		Plaintext:       pt,
 		PlaintextCrc32C: wrapperspb.Int64(int64(crc32.Checksum(pt, castagnoli))),
 		UsedPrimary:     true,
-		ProtectionLevel: kmspb.ProtectionLevel_SOFTWARE,
+		ProtectionLevel: f.level,
 	}, nil
 }
 
