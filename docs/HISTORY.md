@@ -1598,9 +1598,10 @@ diff): `betaagentversion.go`, `betaenvironment.go`, `betaenvironmentwork.go`, `b
   mid-turn; causality would invert; the settlement batch shares one timestamp). **Recorded** as a
   new deliberate-divergence entry cross-linked to the processed_at-stamping entry, with the
   single-source caveat (SDK comment and CLI usage string are generated from the same OpenAPI
-  descriptions — one witness, not two) and the #78 recording flag. Note: plan 21 as first landed
-  misattributed this hunk's content (it described the v1.59.0 bump's own comment hunk); corrected
-  on the plan-21 PR before it merged, and the sweep here re-derived the true content from the tags.
+  descriptions — one witness, not two) and the #78 recording flag. Note: a pre-merge draft of plan 21
+  misattributed this hunk's content (it described the v1.59.0 bump's own comment hunk); the
+  verifier pass on PR #254 caught it before merge, so the plan landed correct, and the sweep
+  here re-derived the content from the tags independently.
 - *`betamessage.go`* (800 insertions / 25 deletions) — the bump's bulk, all on the beta **Messages** surface this platform
   does not mirror: `tool_addition`/`tool_removal` are **request-side param blocks only** (in
   `BetaContentBlockParamUnion` and the new mid-conversation-system content union; the literal string
@@ -1629,10 +1630,15 @@ diff): `betaagentversion.go`, `betaenvironment.go`, `betaenvironmentwork.go`, `b
   (corrected in the registry; the second drift of the same row — the v1.59.0 record noted the
   first).
 - Everything else: `betatoolrunner.go`/`lib/betafallback` (client-side helpers the platform does
-  not import — zero grep hits in non-test `internal/`), `betamessagebatch.go` (no batches endpoint
+  not import — the sole non-test mention in `internal/` is a design-reference doc
+  comment, the brain's refusal-handling note citing `executeTools`), `betamessagebatch.go` (no batches endpoint
   here), `beta.go` (+2 header constants; `anthropic-beta` is accepted and ignored),
-  `internal/apijson`/`packages/param`/`unmarshalcompat.go` (the v1.60.0 unmarshal fixes — the
-  platform never unmarshals SDK param types; its SDK decodes are response types, all suites green),
+  `internal/apijson`/`packages/param`/`unmarshalcompat.go` (the v1.60.0 unmarshal rework — a
+  rewrite of the shared decoder core, not only the param path: exactness became a
+  struct-tracked score, unknown enum values coerce instead of failing strict decodes,
+  default-tagged constants gained their own decoder — the platform's exposure is its SDK
+  *response* decodes, all exercised green under the new pin; it never unmarshals SDK
+  param types),
   auth/packaging.
 
 **Behavior-fix exposure.** The RawJSON HTML-escaping fix lands on the adapter's hot path:

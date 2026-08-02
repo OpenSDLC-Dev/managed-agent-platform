@@ -22,7 +22,8 @@ copy of an entry here.
   corrected from "slice 2's PR" to "slice 1's PR" — the flip belongs to the PR that
   starts development). Zero code required: the range's new surface is request-side beta
   Messages shapes this platform does not mirror (`tool_addition`/`tool_removal` blocks,
-  fallback-credit expansion, the `claude-opus-5` constant), and the
+  fallback-credit expansion) plus the `claude-opus-5` model constant (model ids are
+  opaque config-resolved strings here), and the
   `model_context_window_exceeded` stop reason already existed at the old pin on the beta
   surface with both stop-label registry entries naming it. One new deliberate divergence
   recorded in the same PR: v1.61.0's docs re-key the event-list `created_at[…]` filters
@@ -33,10 +34,11 @@ copy of an entry here.
   changed file resolved, 35 live citations re-read (32 hold, 3 mechanical line drifts
   corrected), version labels moved in the three standing sites plus the registry's
   twelve evidence labels — is docs/HISTORY.md's "anthropic-sdk-go v1.61.0 bump" record.
-  `make verify` green on the bump at ~90.8% total statement coverage (run-to-run jitter; independently rerun by the verifier). One comment
-  updated: the anthropic adapter's `param.SetJSON` passthrough is field- and
-  value-preserving, no longer byte-verbatim (the SDK's marshaler now compacts and
-  HTML-escapes raw JSON; no golden-byte test existed to break).
+  `make verify` green on the bump at ~90.8% total statement coverage (run-to-run jitter; independently rerun by the verifier). Code touches are
+  comment- and naming-only: the anthropic adapter's `param.SetJSON` comment now states
+  the contract as field- and value-preserving, no longer byte-verbatim (the SDK's
+  marshaler compacts and HTML-escapes raw JSON; no golden-byte test existed to break),
+  and the passthrough tests were renamed/re-worded to the same contract.
 
 ### Added
 

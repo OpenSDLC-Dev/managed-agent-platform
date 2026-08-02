@@ -486,7 +486,7 @@ func TestErrorNeverQuotesBaseURLCredentialsAsBasicAuth(t *testing.T) {
 }
 
 func TestGenerateRejectsInvalidRequestJSON(t *testing.T) {
-	// Verbatim passthrough still fails fast on structurally invalid JSON —
+	// The passthrough still fails fast on structurally invalid JSON —
 	// with the index in the error, before anything reaches the endpoint.
 	p := start(t, &fakeServer{})
 
