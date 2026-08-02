@@ -32,8 +32,8 @@ execution day).
 
 The outcome surface landed in SDK v1.41.0 (2026-05-06, "add support for Managed Agents
 multiagents and outcomes, webhooks, vault validation") and **no changelog entry since
-touches it** — it is byte-identical between the current v1.59.0 pin and v1.61.0. Slice 1
-still bumps to v1.61.0 so acceptance runs on the latest release (the user-facing goal),
+touches it** — it is byte-identical between the v1.59.0 pin this plan was authored against and
+v1.61.0. Slice 1 bumps to v1.61.0 so acceptance runs on the latest release (the user-facing goal),
 with the two in-between releases' non-outcome surface swept and recorded.
 
 - **Inbound params** (`betasessionevent.go:6406-6416`,

@@ -33,7 +33,7 @@ copy of an entry here.
   changed file resolved, 35 live citations re-read (32 hold, 3 mechanical line drifts
   corrected), version labels moved in the three standing sites plus the registry's
   twelve evidence labels — is docs/HISTORY.md's "anthropic-sdk-go v1.61.0 bump" record.
-  `make verify` green on the bump at 90.80% total statement coverage. One comment
+  `make verify` green on the bump at ~90.8% total statement coverage (run-to-run jitter; independently rerun by the verifier). One comment
   updated: the anthropic adapter's `param.SetJSON` passthrough is field- and
   value-preserving, no longer byte-verbatim (the SDK's marshaler now compacts and
   HTML-escapes raw JSON; no golden-byte test existed to break).

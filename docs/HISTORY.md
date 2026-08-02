@@ -1601,7 +1601,7 @@ diff): `betaagentversion.go`, `betaenvironment.go`, `betaenvironmentwork.go`, `b
   descriptions — one witness, not two) and the #78 recording flag. Note: plan 21 as first landed
   misattributed this hunk's content (it described the v1.59.0 bump's own comment hunk); corrected
   on the plan-21 PR before it merged, and the sweep here re-derived the true content from the tags.
-- *`betamessage.go`* (+825) — the bump's bulk, all on the beta **Messages** surface this platform
+- *`betamessage.go`* (800 insertions / 25 deletions) — the bump's bulk, all on the beta **Messages** surface this platform
   does not mirror: `tool_addition`/`tool_removal` are **request-side param blocks only** (in
   `BetaContentBlockParamUnion` and the new mid-conversation-system content union; the literal string
   `tool_change` appears in no Go source, only the changelog) — no response variant, no streaming
@@ -1654,7 +1654,7 @@ required `secret`…") stays as written, and CHANGELOG/HISTORY/archived plans ke
 citations per the standing precedent. Plan 21's own SDK ranges were re-confirmed at the tag (its
 `_ongoing` citation widened by four lines to include the quoted doc comment).
 
-**Evidence.** `make verify` green on the bumped pin at total statement coverage **90.80%** (Docker
+**Evidence.** `make verify` green on the bumped pin at total statement coverage **90.80%** (an independent verification rerun printed 90.79% — the figure moves run to run and both clear the >=90% gate; Docker
 and K8s sandbox suites included). `go mod tidy` touched only the two lines naming the SDK — the
 SDK's own go.mod is byte-identical between the tags, so the bump drags in no new module. The sweep
 itself ran as four parallel investigations (diff enumeration; live-citation re-read; list-semantics
