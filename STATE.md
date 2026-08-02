@@ -7,7 +7,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 **[docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) (in-progress)** — the session
 outcomes surface (#77, absorbing #161), started 2026-08-02.
 **[docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) (in-progress)** —
-GCP deployment; slices 1-3 and 4 landed, slice 5 remains.
+GCP deployment; slices 1-4 and slice 5's configuration landed, its acceptance remains.
 
 ## Tasks — plan 21
 
@@ -21,4 +21,5 @@ GCP deployment; slices 1-3 and 4 landed, slice 5 remains.
 ## Tasks — plan 20 (remaining)
 
 - [x] Slice 4b — applied, deployed and accepted on GKE (record: docs/HISTORY.md)
-- [ ] Slice 5 — mode-2 acceptance + `docs/deploy-gcp.md`
+- [x] Slice 5a — mode-2 config: private nodes/NAT/private-IP SQL, non-superuser DB role
+- [ ] Slice 5b — mode-2 acceptance on GKE + `docs/deploy-gcp.md`

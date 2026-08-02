@@ -18,7 +18,7 @@ SHELL := /usr/bin/env bash
 .NOTPARALLEL:
 
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
-	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-split-check-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-env-destroy gcp-env-rebuild
+	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild
 
 build:
 	go build ./...
@@ -140,7 +140,7 @@ gcp-split-check:
 	python3 deploy/gcp/check_split.py
 
 gcp-lint:
-	shellcheck deploy/gcp/bootstrap.sh
+	shellcheck deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh
 
 # shellcheck cannot know that `gcloud secrets versions describe` rejects
 # `--filter`, and it exited 0 on a bootstrap.sh that aborted on its first call in
@@ -148,6 +148,14 @@ gcp-lint:
 # free of charge, and the only check in this group that would have caught that.
 gcp-bootstrap-test:
 	python3 deploy/gcp/bootstrap_test.py
+
+# terraform validate cannot execute SQL and shellcheck cannot execute psql, so
+# without this the only thing that ever runs dbinit.sql is a billable cluster
+# talking to a billable database. This runs it against a real PostgreSQL 16 with
+# TLS on, and drives three of its assertions red on purpose — an assertion that
+# cannot fail is a comment. Needs Docker.
+gcp-dbinit-test:
+	python3 deploy/gcp/dbinit_test.py
 
 # The split guard run against the real tree proves only that the real tree is
 # compliant — a checker that had silently stopped reading would pass that too,
@@ -173,6 +181,14 @@ gcp-foundation-apply:
 gcp-env-apply:
 	$(GCP_TF) -chdir=deploy/gcp/environment init -input=false
 	$(GCP_TF) -chdir=deploy/gcp/environment apply
+
+# Creates the platform's database role OUTSIDE cloudsqlsuperuser and asserts it.
+# Runs as a Job because environment/ gives Cloud SQL a private address only:
+# the instance is reachable from the VPC and not from here. Needs kubectl
+# pointed at the cluster — see the get-credentials line in the `zone` output.
+gcp-db-init:
+	PROJECT=$(PROJECT) NAME_PREFIX=$(or $(NAME_PREFIX),map) NAMESPACE=$(or $(NAMESPACE),map) \
+		bash deploy/gcp/dbinit.sh
 
 # Destroys the staging DATABASE along with everything else, and vault ciphertext
 # lives only in Postgres — retaining the KMS key does not bring a deleted row

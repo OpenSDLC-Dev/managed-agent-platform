@@ -189,6 +189,35 @@ resource "google_secret_manager_secret" "db_password" {
   }
 }
 
+# The Cloud SQL built-in administrator's password — a SECOND database credential,
+# and the split is the point rather than an accident of layering.
+#
+# Cloud SQL creates built-in users with the cloudsqlsuperuser role, and there is
+# no way to have a first login that is not one. So this project owns exactly one
+# such account, `postgres`, and the platform is not it: the platform's own role
+# is created from SQL by deploy/gcp/dbinit.sh, which is the path that leaves it
+# outside cloudsqlsuperuser entirely (plan 20 slice 5). This password is what
+# that one bootstrap connection uses, and nothing the platform runs ever reads
+# it.
+#
+# Kept in the foundation for the same reason the others are: environment/ is
+# destroyed and rebuilt, and a rebuilt instance must be reconcilable against a
+# password that survived.
+resource "google_secret_manager_secret" "db_admin_password" {
+  secret_id       = "${var.name_prefix}-db-admin-password"
+  deletion_policy = "PREVENT"
+
+  replication {
+    auto {}
+  }
+
+  depends_on = [google_project_service.required]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 resource "google_secret_manager_secret" "blob_access_key" {
   secret_id       = "${var.name_prefix}-blob-access-key"
   deletion_policy = "PREVENT"

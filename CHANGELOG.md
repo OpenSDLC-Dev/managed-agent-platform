@@ -15,6 +15,47 @@ copy of an entry here.
 
 ### Added
 
+- **The GCP staging environment takes its production shape: private nodes, Cloud NAT, a
+  private-IP database, a Docker Hub mirror — and a platform database role that is not a
+  Cloud SQL superuser** ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md)
+  slice 5, configuration half). `environment/` now builds its own VPC rather than borrowing
+  the project default (an auto-mode network has no secondary ranges, so it cannot host a
+  VPC-native cluster), with Private Google Access for registry pulls, Cloud NAT for
+  everything else, and a reserved peering range that Cloud SQL's private address comes out
+  of. The nodes have no external addresses; the Kubernetes API endpoint stays public and
+  narrowable through `master_authorized_cidrs`, which is the one place this configuration
+  knowingly stops short — a private endpoint needs a bastion before anything can be
+  deployed at all, and the deploy guide states the production position instead.
+
+  The database change is the substantial one. Cloud SQL grants `cloudsqlsuperuser` —
+  CREATEDB and CREATEROLE — to every built-in user created through its Admin API, which is
+  the path `google_sql_user` takes, so the platform's own credential was a superuser by
+  construction. Google documents one way out: name a custom database role at creation and
+  the grant is suppressed. That role must already exist, and creating a PostgreSQL role
+  takes a SQL session against an instance that does not exist yet — a circle that cannot be
+  closed inside one apply. So Terraform now creates exactly one built-in user, the
+  administrator `postgres`, and the new `deploy/gcp/dbinit.sql` creates the platform's role
+  with plain `CREATE ROLE`, which never goes through that path at all. It then **asserts**
+  the outcome rather than the reasoning: not a superuser, no CREATEDB, no CREATEROLE, no
+  BYPASSRLS, `pg_has_role(user, 'cloudsqlsuperuser', 'member')` false, owner of the platform
+  database and of no other, over a session `pg_stat_ssl` confirms is encrypted. The role
+  attributes alone would not settle it — they are attributes, and say nothing about
+  membership.
+
+  It runs as a Kubernetes Job (`make gcp-db-init`), because a private-IP instance is
+  reachable from the VPC and from nowhere else, including not from the machine running
+  Terraform. The same run is also the rotation procedure: the ALTERs are unconditional, so
+  re-running after `bootstrap.sh` rotates the secret pushes the new password.
+
+  `make gcp-dbinit-test` is new and runs in CI. `terraform validate` cannot execute SQL and
+  shellcheck cannot execute psql, so without it the only thing that ever ran this file was a
+  billable cluster talking to a billable database. It starts a real PostgreSQL 16 with TLS
+  on, exercises idempotency and rotation, and drives three assertions red on purpose. It
+  found two defects in the file it was written for: an unguarded `pg_has_role` that raised on
+  any PostgreSQL lacking a `cloudsqlsuperuser` role — failing every run at the last
+  statement, after every assertion had passed — and a `\getenv` that turned a missing
+  password into a syntax error instead of the complaint written for that case.
+
 - **`user.define_outcome` is accepted; `outcome_evaluations` is real, stored state;
   session create takes `initial_events`**
   ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 2, closing the #77

@@ -19,14 +19,23 @@
 # so tearing it down destroys the staging database — and vault ciphertext lives
 # only in Postgres. Retaining the KMS key does not bring a deleted row back.
 #
-# Deliberately NOT here, so a reader can tell deferred from forgotten: private
-# nodes and master authorized networks, Binary Authorization, Shielded Nodes
-# secure boot, node auto-repair/upgrade, a dedicated node service account, CMEK
-# on the bucket and registry, bucket versioning, Cloud SQL backups, and Postgres
-# audit logging. Every one of them belongs to the production shape slice 5
-# documents; adding them here would make the staging environment slower to
-# rebuild and would quietly turn this file into the production example it is
-# explicitly not.
+# Deliberately NOT here, so a reader can tell deferred from forgotten: Binary
+# Authorization, Shielded Nodes secure boot, node auto-repair/upgrade, a
+# dedicated node service account, CMEK on the bucket and registry, bucket
+# versioning, Cloud SQL backups, and Postgres audit logging. Every one of them
+# belongs to the production shape docs/deploy-gcp.md documents; adding them here
+# would make the staging environment slower to rebuild and would quietly turn
+# this file into the production example it is explicitly not.
+#
+# Private nodes, Cloud NAT, a private-IP database and a Docker Hub mirror WERE
+# on that list and are now below it. They moved because slice 5 accepts mode-2
+# on this environment rather than only describing it, and mode-2's claims are
+# claims about that topology: an acceptance run against public nodes and a
+# public database would evidence a shape the guide does not recommend. The cost
+# is real and is stated rather than hidden — a Cloud NAT gateway bills whether
+# or not it forwards a packet, and a private-IP instance is unreachable from the
+# operator's own machine, which is why the database DDL runs as an in-cluster
+# Job (deploy/gcp/dbinit.sh) instead of over a local proxy.
 
 locals {
   # One definition of the taint, and one of the toleration that matches it,
@@ -47,6 +56,18 @@ locals {
     effect   = "NoSchedule"
   }
   sandbox_node_selector = { (local.sandbox_taint_key) = local.sandbox_taint_value }
+
+  # The custom database role the platform's own role is created under. A local
+  # rather than a variable: nothing outside this configuration and dbinit.sh
+  # names it, and a role name that can be overridden is one more thing that can
+  # disagree between the two.
+  #
+  # Underscore rather than hyphen, because it goes into SQL unquoted. Split
+  # across two locals so the interpolation carries no quoted string of its own —
+  # check_split.py refuses to parse those rather than risk losing its place, and
+  # a guard that cannot read this file is a guard that prints ok over it.
+  db_app_role_stem = replace(var.name_prefix, "-", "_")
+  db_app_role      = "${local.db_app_role_stem}_app"
 }
 
 resource "google_project_service" "required" {
@@ -55,6 +76,17 @@ resource "google_project_service" "required" {
     # cloudbuild.googleapis.com is deliberately NOT here — the foundation enables
     # it, because var.cloud_build_service_account cannot be read until it is on.
     "container.googleapis.com",
+    # Named rather than relied upon. container.googleapis.com pulls Compute in as
+    # a dependency on most projects, so this looks redundant — but this
+    # configuration now owns Compute resources of its own (the network, the
+    # router, the NAT gateway, the reserved peering range), and a resource whose
+    # API is enabled only as somebody else's side effect is a resource that fails
+    # to create the day that side effect changes.
+    "compute.googleapis.com",
+    # The peering that gives Cloud SQL a private address. Without it the
+    # google_service_networking_connection below fails, and it fails AFTER the
+    # cluster is built.
+    "servicenetworking.googleapis.com",
     "sqladmin.googleapis.com",
     "storage.googleapis.com",
     # The acceptance ships traces to Cloud Trace through an in-cluster OTel
@@ -105,6 +137,113 @@ data "google_service_account" "storage" {
 }
 
 # ---------------------------------------------------------------------------
+# The network. Its own VPC rather than the project's default, and that is a
+# requirement rather than tidiness: the default network is auto-mode, so its
+# subnets carry no secondary ranges and cannot host a VPC-native cluster's Pod
+# and Service ranges, and a project-wide default is the wrong thing to attach a
+# database peering to.
+#
+# Everything downstream hangs off this: private nodes need a subnet with
+# Private Google Access, Cloud NAT needs a router in this network, and the
+# database's private address is allocated out of a range reserved on it.
+# ---------------------------------------------------------------------------
+
+resource "google_compute_network" "map" {
+  name                    = "${var.name_prefix}-staging"
+  auto_create_subnetworks = false
+
+  depends_on = [google_project_service.required]
+}
+
+resource "google_compute_subnetwork" "map" {
+  name          = "${var.name_prefix}-staging"
+  network       = google_compute_network.map.id
+  region        = var.region
+  ip_cidr_range = var.subnet_cidr
+
+  # The single setting that makes private nodes workable. Without it a node with
+  # no external address cannot reach *.pkg.dev, so every image pull fails —
+  # including the platform's own components, which is a cluster that comes up
+  # and never runs anything. Cloud NAT would paper over it by sending registry
+  # traffic out to the internet and back; Private Google Access keeps it inside
+  # Google's network instead.
+  private_ip_google_access = true
+
+  # Named rather than positional. GKE's ip_allocation_policy references these by
+  # name, and a cluster pointed at a range that does not exist fails at create.
+  secondary_ip_range {
+    range_name    = "pods"
+    ip_cidr_range = var.pods_cidr
+  }
+
+  secondary_ip_range {
+    range_name    = "services"
+    ip_cidr_range = var.services_cidr
+  }
+}
+
+# Cloud NAT: the only way out for nodes with no external address. It is needed
+# even though Private Google Access covers the registry, because the platform's
+# own work reaches the public internet — the model endpoint, the web tools'
+# backends, and a Docker Hub cache miss all leave the VPC.
+#
+# It bills per gateway-hour whether or not it forwards a packet. That is the
+# standing cost of private nodes, and it is the reason this configuration is
+# torn down between slices rather than left up.
+resource "google_compute_router" "map" {
+  name    = "${var.name_prefix}-staging"
+  network = google_compute_network.map.id
+  region  = var.region
+}
+
+resource "google_compute_router_nat" "map" {
+  name   = "${var.name_prefix}-staging"
+  router = google_compute_router.map.name
+  region = var.region
+
+  nat_ip_allocate_option = "AUTO_ONLY"
+
+  # Every range in the subnet, which specifically includes the Pod range —
+  # listing only the primary range would give the nodes egress and leave every
+  # Pod without it, and Pods are what actually make the outbound calls.
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Private services access — the peering Cloud SQL's private address comes from.
+#
+# Two resources and one hazard. The reserved range is ours; the peering is a
+# connection to Google's producer network, and Terraform is historically bad at
+# removing one: a destroy can fail because the producer still holds an address
+# out of the range, leaving the whole teardown stuck behind a resource that
+# cannot be deleted. deletion_policy = "ABANDON" is the documented escape — the
+# connection is dropped from state rather than deleted, and it then disappears
+# along with the network that carries it.
+# ---------------------------------------------------------------------------
+
+resource "google_compute_global_address" "private_service_access" {
+  name          = "${var.name_prefix}-psa"
+  purpose       = "VPC_PEERING"
+  address_type  = "INTERNAL"
+  prefix_length = var.private_service_access_prefix_length
+  network       = google_compute_network.map.id
+}
+
+resource "google_service_networking_connection" "private_vpc" {
+  network                 = google_compute_network.map.id
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.private_service_access.name]
+
+  # See the header above. Without this a `make gcp-env-destroy` can wedge.
+  deletion_policy = "ABANDON"
+}
+
+# ---------------------------------------------------------------------------
 # GKE. Standard rather than Autopilot: the sandbox pool needs a node taint and a
 # kubelet podPidsLimit, and Autopilot manages node configuration itself.
 # ---------------------------------------------------------------------------
@@ -131,6 +270,56 @@ resource "google_container_cluster" "map" {
   # the in-pod iptables payload from cmd/gate applies and enforces on IPv4 and
   # IPv6.
   datapath_provider = "ADVANCED_DATAPATH"
+
+  network    = google_compute_network.map.id
+  subnetwork = google_compute_subnetwork.map.id
+
+  # VPC-native, by naming the subnet's secondary ranges. Required for private
+  # nodes, and the ranges are fixed for the life of the cluster — a cluster is
+  # rebuilt, not resized, to change them.
+  ip_allocation_policy {
+    cluster_secondary_range_name  = "pods"
+    services_secondary_range_name = "services"
+  }
+
+  private_cluster_config {
+    # No external addresses on nodes. Egress is Cloud NAT's job and registry
+    # pulls are Private Google Access's; nothing on the internet can open a
+    # connection to a node.
+    enable_private_nodes = true
+
+    # The control plane endpoint stays PUBLIC, and this is the one place this
+    # configuration knowingly stops short of the production shape. A private
+    # endpoint puts the Kubernetes API on an internal address only, which means
+    # every `kubectl`, `helm` and `terraform` run needs a bastion, a VPN or a
+    # proxy inside the VPC — real work, and work that would have to exist before
+    # the acceptance battery could run at all. Nodes being private is the
+    # property that removes the internet-facing attack surface; the endpoint
+    # being public is an authenticated, TLS-terminated API that
+    # var.master_authorized_cidrs narrows to named addresses.
+    #
+    # docs/deploy-gcp.md states the production position: set this true and reach
+    # the API from inside the VPC.
+    enable_private_endpoint = false
+
+    master_ipv4_cidr_block = var.master_cidr
+  }
+
+  # Omitted entirely when the list is empty — an empty
+  # master_authorized_networks_config is not "no restriction", it is "no address
+  # may connect", which locks out the operator running the apply.
+  dynamic "master_authorized_networks_config" {
+    for_each = length(var.master_authorized_cidrs) > 0 ? [1] : []
+    content {
+      dynamic "cidr_blocks" {
+        for_each = var.master_authorized_cidrs
+        content {
+          cidr_block   = cidr_blocks.value.cidr_block
+          display_name = cidr_blocks.value.display_name
+        }
+      }
+    }
+  }
 
   # Workload Identity: what lets the gcpKMS cipher authenticate with no key
   # material in the release at all.
@@ -221,6 +410,34 @@ resource "google_artifact_registry_repository" "images" {
   depends_on = [google_project_service.required]
 }
 
+# The Docker Hub mirror. A REMOTE repository is a read-through cache: a pull
+# that misses fetches from upstream and keeps a copy, so the second pull of
+# postgres:16-alpine does not depend on Docker Hub being reachable or on the
+# project's anonymous rate limit not having been spent by somebody else.
+#
+# It is a SEPARATE repository from the one Cloud Build pushes to, because a
+# repository is either STANDARD or REMOTE and cannot be both. The chart reaches
+# it by having its third-party image values rewritten to this prefix — see the
+# docker_hub_mirror output, which emits that prefix.
+resource "google_artifact_registry_repository" "docker_hub" {
+  count = var.docker_hub_mirror ? 1 : 0
+
+  location      = var.region
+  repository_id = "${var.name_prefix}-dockerhub"
+  format        = "DOCKER"
+  mode          = "REMOTE_REPOSITORY"
+  description   = "Read-through cache of Docker Hub for the chart's third-party images"
+
+  remote_repository_config {
+    description = "docker.io"
+    docker_repository {
+      public_repository = "DOCKER_HUB"
+    }
+  }
+
+  depends_on = [google_project_service.required]
+}
+
 resource "google_sql_database_instance" "map" {
   name             = "${var.name_prefix}-staging"
   region           = var.region
@@ -247,16 +464,25 @@ resource "google_sql_database_instance" "map" {
     deletion_protection_enabled = false
 
     ip_configuration {
-      # Slice 4 reaches the instance through the Cloud SQL Auth Proxy, which is
-      # a plain TCP tunnel and is fine — the plan's LISTEN/NOTIFY probe ran
-      # through it. Slice 5 moves this to private IP.
-      ipv4_enabled = true
+      # No public address at all. The instance is reachable only from inside the
+      # VPC, over the peering reserved above — which also means it is NOT
+      # reachable from the operator's machine, and that is the intended
+      # consequence rather than an oversight. Every step that needs a SQL
+      # connection runs inside the cluster; deploy/gcp/dbinit.sh is that step.
+      ipv4_enabled    = false
+      private_network = google_compute_network.map.id
 
-      # No authorized networks are configured, so nothing can reach this address
-      # without the proxy — but that is an access rule, not an encryption one,
-      # and the two should not be conflated. Slice 5's shape is sslmode=require;
-      # this is the server-side half of it, on from the first apply rather than
-      # arriving with the production configuration.
+      # Encryption as a server-side rule, which is the only kind worth
+      # asserting. A DSN parameter states what the CLIENT asked for; this states
+      # what the server will accept, and it rejects an unencrypted connection
+      # from any client that forgot to ask.
+      #
+      # Note what it does NOT mean for the platform's own DSN: the Cloud SQL
+      # Auth Proxy terminates the encrypted leg itself and offers the
+      # application a plain loopback socket, so the platform's DATABASE_URL
+      # carries sslmode=disable while the connection this server sees is TLS.
+      # The property is asserted where it is true — pg_stat_ssl on the backend —
+      # rather than inferred from the client's request.
       ssl_mode = "ENCRYPTED_ONLY"
     }
 
@@ -270,7 +496,17 @@ resource "google_sql_database_instance" "map" {
     }
   }
 
-  depends_on = [google_project_service.required]
+  # The peering, not just the API. `private_network` above references the
+  # network, so Terraform already orders this after the network — but a
+  # private-IP instance is created out of the RESERVED RANGE, and the range is
+  # only usable once the service networking connection exists. Nothing in the
+  # instance's arguments mentions that connection, so without this the instance
+  # is scheduled alongside the peering and fails with a range that is not yet
+  # allocated to any producer.
+  depends_on = [
+    google_project_service.required,
+    google_service_networking_connection.private_vpc,
+  ]
 }
 
 resource "google_sql_database" "map" {
@@ -278,6 +514,31 @@ resource "google_sql_database" "map" {
   instance = google_sql_database_instance.map.name
 }
 
+# ---------------------------------------------------------------------------
+# The ONLY database user this configuration creates, and it is not the
+# platform's.
+#
+# Cloud SQL grants `cloudsqlsuperuser` to every built-in user created through
+# its Admin API — which is what google_sql_user uses — and that role carries
+# CREATEDB and CREATEROLE. The documented way out is to name one or more custom
+# database roles at creation (`database_roles`), which suppresses the
+# cloudsqlsuperuser grant; but a custom role is an ordinary PostgreSQL role that
+# must already EXIST, and creating one takes a SQL connection to an instance
+# that does not exist until this resource does.
+#
+# That circle cannot be closed inside one apply, and closing it across two
+# applies would make the ordinary path a two-phase ritual. So the split is by
+# owner instead: Terraform creates the administrator, and deploy/gcp/dbinit.sh —
+# one SQL session, from inside the cluster, because the instance has no public
+# address — creates both the custom role and the platform's own role under it.
+# A role created with CREATE ROLE never goes through the Admin API's user path
+# and so is never granted cloudsqlsuperuser at all. dbinit.sh asserts that
+# rather than asserting the reasoning.
+#
+# `postgres` is the built-in PostgreSQL administrator Cloud SQL provisions with
+# the instance; naming it here sets its password rather than creating a second
+# privileged account.
+#
 # The password comes from the foundation's secret rather than being generated
 # here, which is what makes a rebuild reconcilable: a destroyed instance takes
 # its user with it, and the next apply reapplies the surviving password to the
@@ -294,15 +555,15 @@ resource "google_sql_database" "map" {
 # This makes the apply order load-bearing: bootstrap.sh must have added the
 # secret's first version before this runs. It fails loudly if not, naming the
 # secret.
-ephemeral "google_secret_manager_secret_version" "db_password" {
-  secret = "${var.name_prefix}-db-password"
+ephemeral "google_secret_manager_secret_version" "db_admin_password" {
+  secret = "${var.name_prefix}-db-admin-password"
 }
 
-resource "google_sql_user" "map" {
-  name     = var.name_prefix
+resource "google_sql_user" "admin" {
+  name     = "postgres"
   instance = google_sql_database_instance.map.name
 
-  password_wo = ephemeral.google_secret_manager_secret_version.db_password.secret_data
+  password_wo = ephemeral.google_secret_manager_secret_version.db_admin_password.secret_data
 
   # Write-only arguments are not stored, so Terraform cannot diff them. This
   # counter is what tells it to write again: bump it after bootstrap.sh rotates

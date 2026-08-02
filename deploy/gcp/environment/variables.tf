@@ -169,3 +169,91 @@ variable "db_tier" {
   description = "Cloud SQL machine tier."
   default     = "db-custom-2-7680"
 }
+
+# ---------------------------------------------------------------------------
+# The network. Four ranges that must not overlap each other, and one that must
+# not overlap anything the cluster will ever peer with.
+#
+# They are variables rather than constants because a real deployment lands in an
+# existing address plan, and a hard-coded 10.10.0.0/20 that collides with one is
+# discovered as a failed apply after the cluster has been created. Defaults are
+# picked to be unremarkable and mutually disjoint.
+# ---------------------------------------------------------------------------
+
+variable "subnet_cidr" {
+  type        = string
+  description = "Primary range of the cluster subnet — the NODES live here. Private Google Access is on, which is what lets private nodes pull from Artifact Registry with no external address."
+  default     = "10.10.0.0/20"
+}
+
+variable "pods_cidr" {
+  type        = string
+  description = "Secondary range for Pod IPs (VPC-native / alias IPs). Sized generously: it bounds how many Pods the cluster can ever run, and it cannot be resized after the cluster is created."
+  default     = "10.20.0.0/16"
+}
+
+variable "services_cidr" {
+  type        = string
+  description = "Secondary range for ClusterIP Services. Also fixed for the life of the cluster."
+  default     = "10.30.0.0/20"
+}
+
+variable "master_cidr" {
+  type        = string
+  description = <<-EOT
+    /28 for the GKE control plane's own VPC, which Google peers to this network.
+    It must not overlap any range in this configuration and must be exactly a
+    /28 — GKE rejects anything else.
+  EOT
+  default     = "172.16.0.0/28"
+
+  validation {
+    condition     = can(regex("/28$", var.master_cidr))
+    error_message = "GKE requires the master range to be exactly a /28."
+  }
+}
+
+variable "private_service_access_prefix_length" {
+  type        = number
+  description = <<-EOT
+    Prefix length of the range reserved for private services access — the block
+    Google allocates managed producer services out of, and where this Cloud SQL
+    instance's private address comes from. A /16 is Google's recommendation: the
+    range is shared by every producer service peered to this network, and it
+    cannot be grown once the peering exists.
+  EOT
+  default     = 16
+}
+
+variable "master_authorized_cidrs" {
+  type = list(object({
+    cidr_block   = string
+    display_name = string
+  }))
+  description = <<-EOT
+    Who may reach the Kubernetes API server. EMPTY MEANS EVERY ADDRESS — the
+    block is omitted entirely rather than rendered empty, because an empty
+    master_authorized_networks_config would lock out the operator applying it.
+
+    The nodes are private either way; this governs only the control plane, whose
+    endpoint stays public so `kubectl` and `helm` work without a bastion (see
+    enable_private_endpoint in main.tf). Narrowing it to the operator's own
+    address is the single highest-value hardening step this variable offers, and
+    it is left to the operator because a wrong value here is a lockout.
+  EOT
+  default     = []
+}
+
+variable "docker_hub_mirror" {
+  type        = bool
+  description = <<-EOT
+    Create an Artifact Registry remote repository that mirrors Docker Hub, so the
+    chart's third-party images (postgres, minio, openbao) are pulled through the
+    project's own registry rather than from a rate-limited anonymous upstream.
+
+    It is a mirror, not a vendoring step: a cache miss still reaches Docker Hub,
+    through Cloud NAT. What it buys is a stable pull path, one place to scan, and
+    survival of a Docker Hub rate limit — not air-gap independence.
+  EOT
+  default     = true
+}

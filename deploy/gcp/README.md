@@ -137,13 +137,38 @@ else
 fi
 
 make gcp-env-apply
+
+# The cluster must be reachable before the next step, which runs inside it.
+gcloud container clusters get-credentials \
+  "$(terraform -chdir=deploy/gcp/environment output -raw cluster_name)" \
+  --zone "$(terraform -chdir=deploy/gcp/environment output -raw zone)" \
+  --project your-project
+
+# Creates the platform's database role OUTSIDE cloudsqlsuperuser, and asserts it.
+PROJECT=your-project make gcp-db-init
 ```
 
-**The order is load-bearing.** `environment/` reads the database password ephemerally at
-apply time; run it before `gcp-bootstrap` and it fails naming the secret that has no
-version. `gcp-bootstrap` is idempotent by *skipping*: a secret that already has a version is
-left exactly as it is, because that version may be the only thing that can decrypt
-something. Re-running it after an `environment/` teardown is the normal case and is a no-op.
+**The order is load-bearing.** `environment/` reads the administrator's password
+ephemerally at apply time; run it before `gcp-bootstrap` and it fails naming the secret that
+has no version. `gcp-bootstrap` is idempotent by *skipping*: a secret that already has a
+version is left exactly as it is, because that version may be the only thing that can
+decrypt something. Re-running it after an `environment/` teardown is the normal case and is
+a no-op.
+
+`gcp-db-init` comes last for a reason that is not politeness about ordering. Cloud SQL grants
+`cloudsqlsuperuser` — CREATEDB and CREATEROLE — to every built-in user created through its
+Admin API, which is the path `google_sql_user` takes. So Terraform creates exactly one such
+account, `postgres`, and the platform is not it: `deploy/gcp/dbinit.sql` creates the
+platform's own role with plain `CREATE ROLE`, which never goes through that path, and then
+asserts the result — not a superuser, not a member of `cloudsqlsuperuser`, owner of the
+platform database and of nothing else, over an encrypted session. A failed assertion fails
+the step.
+
+It runs as a Kubernetes **Job** rather than as a local `psql` because `environment/` gives
+Cloud SQL a private address only: the instance is reachable from inside the VPC and from
+nowhere else, including not from the machine running Terraform. Re-run it after every
+`environment/` rebuild, and after rotating the password — the second case is the whole
+rotation procedure.
 
 `terraform.tfvars` is gitignored. `name_prefix` and `kms_location` must match between the two
 configurations — `environment/` finds the foundation's resources by name, so a mismatch
@@ -356,19 +381,21 @@ an import is a no-op because the versions already exist.
 ## Checking it without touching GCP
 
 ```sh
-make gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-split-check-test
+make gcp-fmt gcp-validate gcp-split-check gcp-lint \
+     gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test
 ```
 
-None of them needs credentials, state, or a project, and CI runs all six on every PR — so
+None of them needs credentials, state, or a project, and CI runs all seven on every PR — so
 neither the configuration nor the tooling can rot silently between the rare runs that
-actually provision anything.
+actually provision anything. `gcp-dbinit-test` is the one with a host requirement: it needs
+Docker, because it starts a real PostgreSQL.
 
 `gcp-split-check` is the structural enforcement of the two-configuration split:
 `environment/` may not *own* a resource of an unrecoverable kind, and every one
 `foundation/` declares must carry both guards it can — `prevent_destroy` and, where the kind
 has it, `deletion_policy = "PREVENT"`.
 
-The last two **run** the tooling rather than reading it, because the first four are static
+The last three **run** the tooling rather than reading it, because the first four are static
 and this is a place where static checking has already been insufficient. `gcp-lint` is
 shellcheck, and shellcheck cannot know that `gcloud secrets versions describe` rejects
 `--filter` — it exited 0 on a `bootstrap.sh` that aborted on its first call in every project,
@@ -378,3 +405,14 @@ a write that commits and *then* reports failure, a create whose response never p
 rollback whose own calls fail), and `gcp-split-check-test` plants violations in a scratch
 copy and requires each to come back red — a guard that had silently stopped reading its
 input would pass a run against the real tree, and twice did.
+
+`gcp-dbinit-test` is the third, and it exists because neither `terraform validate` nor
+shellcheck can execute SQL: without it the only thing that ever runs `dbinit.sql` is a
+billable cluster talking to a billable database, which is a slow and expensive way to find a
+typo in a `\gexec`. It starts a real PostgreSQL 16 with TLS on and runs the file the way the
+Job does — then drives three of its assertions red on purpose (a role granted
+`cloudsqlsuperuser`, a role owning a second database, a plaintext session), because an
+assertion that cannot fail is a comment. Writing it immediately paid for itself: it caught an
+unguarded `pg_has_role` that raised on any PostgreSQL without a `cloudsqlsuperuser` role, and
+a `\getenv` that turns a missing password into a syntax error rather than the intended
+complaint.
