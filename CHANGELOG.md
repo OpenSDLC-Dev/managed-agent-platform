@@ -407,7 +407,9 @@ copy of an entry here.
   glibc sorts a routeless family last and bash falls through to it — but it reports only the
   **last** attempt's error, so a failure anywhere in that chain surfaces as whatever the final
   address happened to say. That is what made the original diagnosis of this bug expensive: a
-  `Network is unreachable` naming the IPv6 address was read as "the dial went to IPv6", when
+  `Network is unreachable` — which bash raises against the *hostname*, never naming the
+  address it last tried — read next to a `getent hosts` answer of IPv6 says "the dial went to
+  IPv6", when
   it equally describes an IPv4 attempt that already failed first. A literal address the
   fixture derives has no such chain — and no dependency on Desktop's resolver or on the
   container's own addressing. Measured on WSL, a root dial to it is dropped by owner-match and
