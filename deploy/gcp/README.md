@@ -60,6 +60,14 @@ reach anything in the durable one. CI enforces both halves of that: `environment
 declare a `resource` of any unrecoverable kind, and every
 `foundation/` resource whose loss is unrecoverable must carry `prevent_destroy`.
 
+The check reads both halves **recursively**, so moving a resource into a child module does
+not move it out of scope — and it *refuses* rather than skips anything it cannot read: a
+`.tf.json` file, a `module` whose source is a registry or git address or resolves outside the
+half, an unterminated heredoc, unbalanced braces, or a multi-line `${...}` interpolation
+(quote tracking is per line, so a string left open would desync the brace depth for the rest
+of the file). Silently skipping any of those would print `ok` over a partial scan, which is
+worse than no check at all.
+
 ## What a destroy actually costs
 
 `environment/` owns Cloud SQL, so **`make gcp-env-destroy` destroys the staging database**,
@@ -101,6 +109,21 @@ surfaces as a missing data source rather than as a wrong-looking value. (`region
 need to match: no foundation resource is regional. `zone` must be inside `environment/`'s
 `region`, which a precondition checks.)
 
+**`bootstrap.sh` is a third consumer of that prefix**, and the only one that is not read from
+a `.tfvars` file: it derives every secret id and the storage service-account email from the
+`NAME_PREFIX` environment variable, which defaults to `map`. If you set `name_prefix` in
+tfvars, pass it here too —
+
+```sh
+NAME_PREFIX=acme PROJECT=your-project make gcp-bootstrap
+```
+
+— because the default does not fail safe. It reports `secret map-db-password does not exist —
+run 'make gcp-foundation-apply' first`, which is untrue and points at the wrong step; and if
+a `map-*` foundation happens to exist in the project from another environment, bootstrap
+fills *that* one's secrets instead and `make gcp-env-apply` then fails on a prefix it never
+touched.
+
 Neither apply target passes `-auto-approve`. Read the plan before the first one.
 
 **Cloud Build's identity is a variable** (`cloud_build_service_account`) because the answer is
@@ -109,10 +132,19 @@ the Compute Engine default service account. Empty means the legacy default. If t
 fails on a permission, that is this — `gcloud builds describe` names the account your project
 actually uses, and setting the variable grants it.
 
-**Rotating the database password**: run `gcp-bootstrap`'s `gcloud secrets versions add` by
-hand, then bump `db_password_version` and re-apply `environment/`. Write-only arguments leave
-Terraform nothing to diff, so that counter is the only signal that it should push the new
-value.
+**Rotating the database password**: add a version by hand, then bump `db_password_version`
+and re-apply `environment/`. Write-only arguments leave Terraform nothing to diff, so that
+counter is the only signal that it should push the new value.
+
+```sh
+openssl rand -hex 32 | tr -d '\n' |
+  gcloud secrets versions add map-db-password --project your-project --data-file=-
+```
+
+Keep the `tr` and keep the value on **stdin**. `--data-file=-` stores stdin byte for byte, so
+the newline `openssl` prints would end up *in* the password and then in `DATABASE_URL`, where
+a raw control character makes the DSN unparseable — long after the apply that accepted it.
+Passing the value as an argument instead would put it in `ps` output and shell history.
 
 ## Handover to Helm
 

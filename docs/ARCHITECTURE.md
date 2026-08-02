@@ -626,6 +626,10 @@ credentials and run in CI, which enforces the split structurally: no unrecoverab
 `resource` kind in `environment/`, and in `foundation/` both guards each such resource can
 carry — `prevent_destroy`, which lives in the configuration and vanishes with the block it is
 written in, and `deletion_policy = "PREVENT"`, which is read from state and survives that.
+Both halves are read recursively, so a child module is still in scope, and anything the
+checker cannot parse (`.tf.json`, a module sourced from outside the half, an unterminated
+heredoc, unbalanced braces, a multi-line interpolation) is a hard failure rather than a
+skipped file — a partial scan that prints `ok` is the one outcome worse than no check.
 
 ## Security invariants
 

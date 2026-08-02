@@ -47,10 +47,14 @@ copy of an entry here.
   may not declare a `resource` of an unrecoverable kind, and every unrecoverable
   `foundation/` resource must carry both guards it can. The check is expressed over *kinds*, so a
   resource added later is covered without anyone remembering to extend a list, and moving
-  one between files does not turn it red. Every arm was measured — including the one that
-  matters most, a `prevent_destroy = false` sitting under a comment that says
-  `prevent_destroy = true`, which an earlier text-matching version of the check read as
-  compliance.
+  one between files does not turn it red. It reads both halves recursively — a child module
+  is in scope — and refuses outright anything it cannot parse: a `.tf.json` file, a `module`
+  sourced from a registry or from outside the half, an unterminated heredoc, unbalanced
+  braces, or a multi-line `${...}` interpolation. Every arm was measured, including the two
+  that matter most: a `prevent_destroy = false` sitting under a comment that says
+  `prevent_destroy = true`, which an earlier text-matching version read as compliance, and a
+  `<<EOF` inside a quoted description, which made the rest of the file invisible — an earlier
+  version printed `ok` with a `google_kms_crypto_key` declared in the destroyed half.
 
   **Two guards, not one**, because they fail differently. `prevent_destroy` is a property of
   the *configuration* and disappears along with the block it is written in — Terraform
@@ -74,10 +78,22 @@ copy of an entry here.
   the account's key ids before creating and deletes only one it can prove is new, because the
   service account may already own a key and deleting *that* would destroy a working
   credential — the same failure the rollback exists to prevent, committed by the safety net.
+  For the same reason it asks the **server** what is stored before destroying anything: a
+  write can commit and still report failure (a dropped connection reading the response, a
+  Ctrl-C landing just after), and rolling *that* back would delete the working key while
+  leaving both secrets in place — after which the next run's "already have versions" skip
+  would bless a credential that authenticates against nothing. It also announces a deletion
+  only once the outcome is known, and drops `set -e` inside the trap, so a failing rollback
+  probe can no longer abort the handler after the banner has claimed a deletion but before the
+  manual-recovery instructions print. The database password is piped through `tr -d '\n'`:
+  `openssl rand -hex 32` ends its 64 characters with a newline, `--data-file=-` stores stdin
+  verbatim, and a stored control character would ride into `DATABASE_URL` and make the DSN
+  unparseable — a failure that surfaces nowhere near the apply that caused it.
   Exercised against a fake `gcloud` across a dozen states: fresh, re-run, half-written pair,
   missing container, empty container, unreadable secret, a `latest` that is disabled while an
-  older version is not, a failure in each window after the key exists, and a rollback with a
-  pre-existing key present.
+  older version is not, a failure in each window after the key exists, a create response that
+  does not parse, a rollback whose own list call fails, and a rollback with a pre-existing key
+  present.
   `environment/` then reads the password through an **ephemeral** resource into
   `password_wo`, a **write-only** argument, so the value reaches Cloud SQL without being
   persisted anywhere. That last part refines the plan's own mechanic — it was going to reach

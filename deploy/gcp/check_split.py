@@ -35,8 +35,23 @@ shortcut here has already produced a wrong answer in review:
     file;
   - heredoc bodies are skipped, or prose in a variable description that happens
     to begin a line with `resource "..."` is reported as an owned resource;
-  - and the resource count is asserted against a floor, so an under-scan that
-    slips past all of the above still cannot pass quietly.
+  - but `<<WORD` inside a STRING does not open one, or a shell snippet in a
+    description makes the rest of the file invisible — a silent under-scan that
+    reports ok over the resources it still saw;
+  - and every way the parser can lose its place is a hard error rather than a
+    quiet short read: an unterminated heredoc, unbalanced braces at EOF, and a
+    protected-resource count below a floor.
+
+Coverage is the other half of correctness, and a check that reads only some of
+the configuration is worse than none, because it prints ok:
+
+  - .tf files are found RECURSIVELY, so a resource moved into a child module
+    under `environment/` is still read;
+  - a `module` block whose source this checker cannot follow — a registry or git
+    module, or a local path outside the half being checked — is refused outright
+    rather than skipped, exactly as `.tf.json` is. A community module that
+    creates a service account by default would otherwise put an unrecoverable
+    resource in the disposable half with the check still green.
 """
 
 import pathlib
@@ -62,6 +77,8 @@ MIN_PROTECTED = 8
 
 ROOT = pathlib.Path(__file__).parent
 RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')
+MODULE = re.compile(r'^\s*module\s+"([^"]+)"')
+SOURCE = re.compile(r'^\s*source\s*=\s*"([^"]+)"\s*$', re.M)
 HEREDOC = re.compile(r"<<[-~]?([A-Za-z_][A-Za-z0-9_]*)")
 
 
@@ -69,8 +86,9 @@ def scrub(line: str) -> str:
     """Drop comments, and neutralize the structural characters inside strings.
 
     String TEXT is kept — the resource header is read from it. What is removed
-    is a string's ability to affect brace depth or start a comment, so that a
-    `{` in a display_name cannot swallow the rest of the file.
+    is a string's ability to affect brace depth, start a comment, or open a
+    heredoc, so that neither a `{` in a display_name nor a `<<EOF` in a shell
+    snippet can swallow the rest of the file.
     """
     out, quoted = [], False
     i = 0
@@ -85,7 +103,7 @@ def scrub(line: str) -> str:
                 quoted = False
                 out.append('"')
             else:
-                out.append("_" if ch in "{}#" else ch)
+                out.append("_" if ch in "{}#<" else ch)
             i += 1
             continue
         if ch == '"':
@@ -100,12 +118,32 @@ def scrub(line: str) -> str:
         else:
             out.append(ch)
         i += 1
+    if quoted:
+        # A string still open at end of line means a multi-line `${...}`
+        # interpolation. Quote state is tracked per line, so the closing `}"` on
+        # a later line would be counted as structure and desync the brace depth
+        # for the rest of the file — which is exactly how this was found. Reading
+        # it properly needs full HCL interpolation lexing (a `"` inside `${}` is
+        # a NESTED string, not a terminator); refusing is the honest answer.
+        raise ValueError(
+            "a string is still open at end of line — write multi-line interpolations as a "
+            "single-line `locals` value so this guard can read the file"
+        )
     return "".join(out)
 
 
 def blocks(path: pathlib.Path):
-    """Yield (kind, name, body) for each top-level resource block in a .tf file."""
-    raw = path.read_text().replace("\r\n", "\n").splitlines()
+    """Yield (btype, kind, name, body) for each top-level block in a .tf file.
+
+    btype is "resource" (kind = resource type, name = local name) or "module"
+    (kind = the module's local name, name = ""). Both are needed: resources are
+    what the two rules are about, and modules are how a resource escapes them.
+    """
+    # split("\n"), not splitlines(): the latter also breaks on U+2028, U+2029,
+    # \v, \f and \x85, which HCL treats as ordinary characters inside a string.
+    # A description containing one would otherwise be cut mid-string and desync
+    # the quote tracking for the rest of the file.
+    raw = path.read_text().replace("\r\n", "\n").split("\n")
     lines, skip_until = [], None
     for line in raw:
         if skip_until is not None:
@@ -123,14 +161,21 @@ def blocks(path: pathlib.Path):
             scrubbed = scrubbed[: m.start()]
         lines.append(scrubbed)
 
-    # `resource` is matched only at brace depth 0, and with leading whitespace
-    # allowed. `terraform fmt` would normally put a top-level block at column 0,
-    # but a check that only works when another check already passed is a check
-    # that can be bypassed by running them in the wrong order.
+    if skip_until is not None:
+        raise ValueError(
+            f"{path}: heredoc <<{skip_until} is never terminated, so the rest of the file "
+            f"was not read. Refusing to report on a partial scan."
+        )
+
+    # `resource` and `module` are matched only at brace depth 0, and with leading
+    # whitespace allowed. `terraform fmt` would normally put a top-level block at
+    # column 0, but a check that only works when another check already passed is
+    # a check that can be bypassed by running them in the wrong order.
     i, depth0 = 0, 0
     while i < len(lines):
         m = RESOURCE.match(lines[i]) if depth0 == 0 else None
-        if not m:
+        mod = MODULE.match(lines[i]) if (depth0 == 0 and not m) else None
+        if not m and not mod:
             depth0 += lines[i].count("{") - lines[i].count("}")
             i += 1
             continue
@@ -141,7 +186,21 @@ def blocks(path: pathlib.Path):
             if depth > 0:
                 body.append(lines[i])
             i += 1
-        yield m.group(1), m.group(2), "\n".join(body)
+        if depth > 0:
+            raise ValueError(
+                f"{path}: unbalanced braces — the file ended inside a block. The parser "
+                f"lost its place, so anything after it went unread."
+            )
+        if m:
+            yield "resource", m.group(1), m.group(2), "\n".join(body)
+        else:
+            yield "module", mod.group(1), "", "\n".join(body)
+
+    if depth0 != 0:
+        raise ValueError(
+            f"{path}: unbalanced braces at end of file (depth {depth0}). The parser lost "
+            f"its place, so part of the file went unread."
+        )
 
 
 def main() -> int:
@@ -150,18 +209,43 @@ def main() -> int:
     # Terraform also accepts JSON configuration, which this parser cannot read.
     # Refusing is the only safe answer: silently skipping one would let an
     # unrecoverable resource be declared in `environment/rogue.tf.json` with the
-    # check still printing ok.
+    # check still printing ok. rglob, not glob — a child module is exactly where
+    # someone would put the file that this rule is inconvenient for.
     for half in ("foundation", "environment"):
-        for path in sorted((ROOT / half).glob("*.tf.json")):
+        for path in sorted((ROOT / half).rglob("*.tf.json")):
             failures.append(
                 f"{path.relative_to(ROOT)}: JSON configuration is not readable by this check. "
                 f"Express it in HCL, or teach check_split.py to parse .tf.json — do not leave "
                 f"it unchecked."
             )
 
-    for path in sorted((ROOT / "environment").glob("*.tf")):
-        for kind, name, _ in blocks(path):
-            if kind in UNRECOVERABLE:
+    def check_modules(half: str, path: pathlib.Path, name: str, body: str):
+        """Refuse any module whose .tf files this check will not have read."""
+        src = SOURCE.search(body)
+        where = f"{path.relative_to(ROOT)}: module.{name}"
+        if not src:
+            failures.append(f"{where} has no literal `source` — this check cannot follow it.")
+            return
+        source = src.group(1)
+        if not source.startswith("./") and not source.startswith("../"):
+            failures.append(
+                f"{where} has source {source!r}, which is not a local path. A registry or git "
+                f"module's resources are invisible to this check — several community modules "
+                f"create a service account by default. Vendor it under {half}/ or do not use it."
+            )
+            return
+        target = (path.parent / source).resolve()
+        if not target.is_relative_to((ROOT / half).resolve()):
+            failures.append(
+                f"{where} has source {source!r}, which resolves outside {half}/. Only .tf files "
+                f"under {half}/ are read by this check."
+            )
+
+    for path in sorted((ROOT / "environment").rglob("*.tf")):
+        for btype, kind, name, body in blocks(path):
+            if btype == "module":
+                check_modules("environment", path, kind, body)
+            elif kind in UNRECOVERABLE:
                 failures.append(
                     f"{path.relative_to(ROOT)}: environment/ must not OWN {kind}.{name} — "
                     f"it is destroyed by `make gcp-env-destroy`. Read the foundation's copy "
@@ -169,8 +253,11 @@ def main() -> int:
                 )
 
     found = 0
-    for path in sorted((ROOT / "foundation").glob("*.tf")):
-        for kind, name, body in blocks(path):
+    for path in sorted((ROOT / "foundation").rglob("*.tf")):
+        for btype, kind, name, body in blocks(path):
+            if btype == "module":
+                check_modules("foundation", path, kind, body)
+                continue
             if kind not in UNRECOVERABLE:
                 continue
             found += 1

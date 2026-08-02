@@ -40,6 +40,12 @@ locals {
 
   controlplane_ksa = "${local.fullname}-controlplane"
   executor_ksa     = "${local.fullname}-executor"
+
+  # coalesce skips an empty string, so an unset variable falls through to the
+  # legacy default. Kept on one line and out of the resource body deliberately:
+  # a multi-line `${...}` interpolation cannot be read by check_split.py, whose
+  # brace tracking is per line — see the guard in its scrub().
+  cloud_build_member = coalesce(var.cloud_build_service_account, format("%s@cloudbuild.gserviceaccount.com", data.google_project.current.number))
 }
 
 resource "google_service_account_iam_member" "controlplane_workload_identity" {
@@ -160,10 +166,5 @@ resource "google_artifact_registry_repository_iam_member" "build_pusher" {
   repository = google_artifact_registry_repository.images.name
   role       = "roles/artifactregistry.writer"
 
-  # coalesce skips an empty string, so an unset variable falls through to the
-  # legacy default.
-  member = "serviceAccount:${coalesce(
-    var.cloud_build_service_account,
-    "${data.google_project.current.number}@cloudbuild.gserviceaccount.com",
-  )}"
+  member = "serviceAccount:${local.cloud_build_member}"
 }
