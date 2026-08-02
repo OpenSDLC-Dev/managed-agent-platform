@@ -608,7 +608,7 @@ loopback-bound control plane, optional Jaeger profile).
 developer tooling for GCP deployment only, never a dependency of the platform, its build,
 or `make verify`. **Two configurations, not one**, split by "can a rebuild recreate this
 identically?" rather than by cost: `foundation/` (KMS key ring and crypto key, the three
-service accounts, the GCS HMAC key, the Secret Manager secrets) is created once and never
+service accounts, the Secret Manager secret *containers*) is created once and never
 destroyed, because KMS key rings and crypto keys cannot be deleted at all and the vault
 ciphertext in Postgres is decryptable by that key and nothing else, and because deleting a
 service account deletes its HMAC keys — an identity in the disposable half would strand the
@@ -616,10 +616,16 @@ once-readable HMAC secret in Secret Manager, valid-looking and dead. `environmen
 cluster and node pools, Artifact Registry, Cloud SQL, the bucket, every IAM binding) is
 created and destroyed freely, reads the foundation through `data` sources by name, and
 carries the dedicated tainted sandbox node pool whose kubelet sets the `podPidsLimit` the
-Pod API cannot express. The `make gcp-*` targets wrap both; `gcp-fmt` and `gcp-validate`
-need no credentials and run in CI, which also enforces the split structurally (no
-undeletable-or-load-bearing `resource` in `environment/`, `prevent_destroy` on every
-unrecoverable resource in `foundation/`).
+Pod API cannot express. No secret VALUE is in either
+configuration: Terraform holds names, IAM bindings and preconditions, `bootstrap.sh` creates
+the values — including the GCS HMAC key, whose secret GCS returns exactly once, so a
+Terraform resource holding it would hold it in state — and `environment/` reads the database
+password through an *ephemeral* resource into the write-only `password_wo`. The `make gcp-*`
+targets wrap all of it; `gcp-fmt`, `gcp-validate`, `gcp-split-check` and `gcp-lint` need no
+credentials and run in CI, which enforces the split structurally: no unrecoverable
+`resource` kind in `environment/`, and in `foundation/` both guards each such resource can
+carry — `prevent_destroy`, which lives in the configuration and vanishes with the block it is
+written in, and `deletion_policy = "PREVENT"`, which is read from state and survives that.
 
 ## Security invariants
 

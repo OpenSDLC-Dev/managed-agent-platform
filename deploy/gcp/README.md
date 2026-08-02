@@ -103,6 +103,12 @@ need to match: no foundation resource is regional. `zone` must be inside `enviro
 
 Neither apply target passes `-auto-approve`. Read the plan before the first one.
 
+**Cloud Build's identity is a variable** (`cloud_build_service_account`) because the answer is
+bimodal: older projects build as `PROJECT_NUMBER@cloudbuild.gserviceaccount.com`, newer ones as
+the Compute Engine default service account. Empty means the legacy default. If the first push
+fails on a permission, that is this — `gcloud builds describe` names the account your project
+actually uses, and setting the variable grants it.
+
 **Rotating the database password**: run `gcp-bootstrap`'s `gcloud secrets versions add` by
 hand, then bump `db_password_version` and re-apply `environment/`. Write-only arguments leave
 Terraform nothing to diff, so that counter is the only signal that it should push the new

@@ -128,6 +128,24 @@ variable "sandbox_pod_pids_limit" {
   }
 }
 
+variable "cloud_build_service_account" {
+  type        = string
+  description = <<-EOT
+    The identity Cloud Build runs as, which needs artifactregistry.writer to push
+    the component images. Empty means the legacy default,
+    PROJECT_NUMBER@cloudbuild.gserviceaccount.com.
+
+    This is a variable rather than a constant because the answer is genuinely
+    bimodal: projects that enabled the Cloud Build API more recently run builds
+    as the Compute Engine default service account instead
+    (PROJECT_NUMBER-compute@developer.gserviceaccount.com). Guessing wrong
+    grants writer to an account no build uses and the first push fails on a
+    permission this apply could have granted. `gcloud builds describe` names the
+    one your project actually uses.
+  EOT
+  default     = ""
+}
+
 variable "db_tier" {
   type        = string
   description = "Cloud SQL machine tier."

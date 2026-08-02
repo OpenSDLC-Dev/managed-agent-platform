@@ -145,22 +145,25 @@ resource "google_project_iam_member" "executor_sql_client" {
 # WHICH identity that is depends on the project's vintage: builds run as the
 # legacy PROJECT_NUMBER@cloudbuild.gserviceaccount.com on older projects, and as
 # the Compute Engine default service account on projects that enabled the Cloud
-# Build API more recently. This grants the legacy one, which is the shape a
-# staging project created for this plan gets. If a push fails with a permission
-# error, that is this — confirm with `gcloud builds describe` and grant the
-# account it names:
+# Build API more recently. That is not something this file can decide, so it is
+# var.cloud_build_service_account — empty meaning the legacy default.
 #
-#   gcloud artifacts repositories add-iam-policy-binding REPO --location=REGION \
-#     --role=roles/artifactregistry.writer --member=serviceAccount:THE-ONE-IT-NAMES
-#
-# Deliberately not granted to both: the compute default account already holds
-# reader here for image pulls, and widening it to writer to cover a case that
-# may not apply is how a staging shortcut becomes a production default.
+# Not granted to both. The compute default account already holds reader here for
+# image pulls, and widening it to writer "just in case" would grant push rights
+# to the identity every node in the cluster runs as, which is how a staging
+# shortcut becomes a production default. `gcloud builds describe` names the one
+# your project uses; set the variable to it.
 # ---------------------------------------------------------------------------
 
 resource "google_artifact_registry_repository_iam_member" "build_pusher" {
   location   = google_artifact_registry_repository.images.location
   repository = google_artifact_registry_repository.images.name
   role       = "roles/artifactregistry.writer"
-  member     = "serviceAccount:${data.google_project.current.number}@cloudbuild.gserviceaccount.com"
+
+  # coalesce skips an empty string, so an unset variable falls through to the
+  # legacy default.
+  member = "serviceAccount:${coalesce(
+    var.cloud_build_service_account,
+    "${data.google_project.current.number}@cloudbuild.gserviceaccount.com",
+  )}"
 }

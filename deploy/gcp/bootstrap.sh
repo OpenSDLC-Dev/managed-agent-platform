@@ -47,14 +47,25 @@ storage_sa="${NAME_PREFIX}-storage@${PROJECT}.iam.gserviceaccount.com"
 # Three outcomes, not two. "Could not ask" must never read as "no version":
 # a transient auth failure answering `false` would add a SECOND version to a
 # secret that already had one, and the live system would keep using the first.
+#
+# And the question is specifically about `latest`, not about "any enabled
+# version", because `latest` is what environment/'s ephemeral read resolves.
+# A secret whose newest version is DISABLED but whose older one is enabled would
+# otherwise be skipped here and then fail the apply — bootstrap saying "already
+# done" about a version nothing will read.
 has_version() {
 	local out
-	if ! out="$(gcloud secrets versions list "$1" --project "$PROJECT" \
-		--filter="state=ENABLED" --format="value(name)" --limit=1 2>&1)"; then
-		if printf '%s' "$out" | grep -qiE "NOT_FOUND|was not found"; then
+	if ! out="$(gcloud secrets versions describe latest --secret="$1" --project "$PROJECT" \
+		--filter="state=ENABLED" --format="value(name)" 2>&1)"; then
+		if printf '%s' "$out" | grep -qiE "NOT_FOUND|was not found|has no versions"; then
+			# Either the container is missing (the foundation was not applied) or
+			# it exists and is empty, which is the normal pre-bootstrap state.
+			if gcloud secrets describe "$1" --project "$PROJECT" >/dev/null 2>&1; then
+				return 1
+			fi
 			echo "secret $1 does not exist — run 'make gcp-foundation-apply' first" >&2
 		else
-			echo "could not list versions of $1: $out" >&2
+			echo "could not read the latest version of $1: $out" >&2
 		fi
 		exit 1
 	fi

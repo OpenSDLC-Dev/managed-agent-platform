@@ -70,9 +70,14 @@ copy of an entry here.
   That once-only return is also why the script arms its rollback *before* it parses the
   create response rather than after: anything that fails between the key existing and its
   secret being stored leaves a key that is billable, indistinguishable from the real one,
-  and permanently unusable. Exercised against a fake `gcloud` — fresh project, re-run,
-  half-written pair, missing secret, unreadable secret, and a failure in each of the two
-  windows after the key exists.
+  and permanently unusable. The rollback also refuses to guess: it snapshots
+  the account's key ids before creating and deletes only one it can prove is new, because the
+  service account may already own a key and deleting *that* would destroy a working
+  credential — the same failure the rollback exists to prevent, committed by the safety net.
+  Exercised against a fake `gcloud` across a dozen states: fresh, re-run, half-written pair,
+  missing container, empty container, unreadable secret, a `latest` that is disabled while an
+  older version is not, a failure in each window after the key exists, and a rollback with a
+  pre-existing key present.
   `environment/` then reads the password through an **ephemeral** resource into
   `password_wo`, a **write-only** argument, so the value reaches Cloud SQL without being
   persisted anywhere. That last part refines the plan's own mechanic — it was going to reach
