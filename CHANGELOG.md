@@ -398,26 +398,32 @@ copy of an entry here.
   row of both sandbox provider contracts — which is `make verify` unable to go green on that
   platform at all.
 
-  **The obvious fix is the wrong one, and that is the part worth recording.** Reaching for
-  the macOS answer wherever the daemon is Desktop looks right and is not: Desktop for Windows
-  answers `host.docker.internal` with an **IPv6** address, and a gate container's netns
-  carries no IPv6 route, so the dial fails with `Network is unreachable` *before* the
-  owner-match firewall is ever consulted. The failure even survives the test's first
-  assertion — a root dial that must be dropped is "dropped" by having no route — so a fixture
-  built on that name would pin the firewall's behaviour while measuring nothing. What a
-  container in Desktop's VM can reach is this host's own address on the route out, and that
-  is what the fixture now hands it: measured on WSL, a root dial to it is dropped by
-  owner-match and a gate-uid dial is admitted, which is exactly the pair the test asserts.
+  **Why not simply reach for the macOS answer wherever the daemon is Desktop.** Because
+  `host.docker.internal` is not one address there. Desktop for Windows answers it with both
+  families — measured from the gate image's own namespace, `getent ahosts` returns
+  `192.168.65.254` and `getent hosts` returns `fdc4:f303:9324::254` — and a `/dev/tcp` dial
+  takes whichever `getaddrinfo` hands back first, without trying the other. It was observed
+  taking the IPv6 one into a netns with no IPv6 route, failing `Network is unreachable`
+  *before* the owner-match firewall was consulted; on a later measurement of the same machine
+  the same dial connected. Which family wins depends on the container's own addressing, so
+  the name is a dependency whose behaviour moves under the fixture. Worse, when it does fail
+  that way the test's first assertion still passes — a root dial that must be dropped is
+  "dropped" by having no route — so the firewall row would be pinned while measuring nothing.
+  An address the fixture derives itself has no resolution step to vary: this host's own
+  address on the route out, which a container in Desktop's VM can reach. Measured on WSL, a
+  root dial to it is dropped by owner-match and a gate-uid dial is admitted, which is exactly
+  the pair the test asserts.
 
   Scoped deliberately. The darwin branch is untouched, because `host.docker.internal` is the
   answer that works there and this platform's evidence says nothing about that one; a daemon
   sharing the test's namespace still gets the bridge gateway, so CI's native Linux runner
   takes the same path it always did. `MAP_DOCKER_HOST_ADDR` overrides all three, the escape
-  hatch `MAP_K8S_HOST_ADDR` already gave the Kubernetes harness — whose kind-network gateway
-  needed the same treatment for the same reason, a gateway being routable only while kind's
-  daemon is local. Verified end to end on Windows 11 / WSL2 Ubuntu 24.04 / Docker Desktop
-  29.5.2 with a kind cluster: `make verify` goes from 35 packages passing and 3 failing to
-  **38 passing, 0 failing**, coverage 90.72%.
+  hatch `MAP_K8S_HOST_ADDR` already gave the Kubernetes harness — which needed the same
+  treatment for the same reason, and now asks whether the daemon is Desktop *before* it asks
+  which cluster flavour sits on it, Desktop's VM holding a kind network's gateway and its own
+  built-in cluster alike. Verified end to end on Windows 11 / WSL2 Ubuntu 24.04 / Docker
+  Desktop 4.75.0 (engine 29.5.2) with a kind cluster: `make verify` goes from 35 packages
+  passing and 3 failing to **38 passing, 0 failing**, coverage 90.72%.
 
 - **The chart no longer documents a path that runs sandboxes as root.** The
   `executor.sandboxHardening.*` row said "`0` / `none` to turn one off" for the whole group.
