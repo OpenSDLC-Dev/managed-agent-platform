@@ -134,3 +134,57 @@ func TestHarvestRealSandbox(t *testing.T) {
 		t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
 	}
 }
+
+// TestHarvestTruncatedListingRealSandbox drives the truncation degradation
+// through the real stack: enough real files that the listing script's output
+// overflows the exec cap in a real Docker container (Truncated set by the
+// backend, not a fake), and the harvest still publishes the sorted prefix and
+// chains grading instead of faulting — the wedge the /code-review pass on
+// PR #260 flagged.
+func TestHarvestTruncatedListingRealSandbox(t *testing.T) {
+	provider, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("integration test requires Docker: %v", err)
+	}
+	oldFiles := harvestSessionCapFiles
+	harvestSessionCapFiles = 2 // stage only the first two — the point is the listing, not 5400 reads
+	t.Cleanup(func() { harvestSessionCapFiles = oldFiles })
+
+	h := newHarnessWith(t, provider, Config{Image: testImage})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+
+	// 5400 files with 199-char names: the NUL-separated listing is ~1.08 MiB,
+	// past sandbox.MaxOutputBytes (1 MiB), so the real exec truncates it.
+	bash, _ := json.Marshal(map[string]any{
+		"name": "bash", "input": map[string]string{"command": "mkdir -p /mnt/session/outputs && cd /mnt/session/outputs" +
+			` && pad=$(printf 'x%.0s' {1..194}) && for i in $(seq -w 5400); do printf d > "f$i$pad"; done`},
+	})
+	h.suspend(t, string(bash))
+	h.stepOnce(t)
+
+	var faulted error
+	h.exec.onFault = func(_ *queue.Item, err error) { faulted = err }
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+
+	if faulted != nil {
+		t.Fatalf("harvest faulted on the truncated listing: %v", faulted)
+	}
+	rows := h.fileRows(t)
+	pad := strings.Repeat("x", 194)
+	if len(rows) != 2 || rows[0].filename != "f0001"+pad || rows[1].filename != "f0002"+pad {
+		t.Fatalf("rows = %d, want the two lexicographically first files", len(rows))
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn live = %d, want 1 (grading chained)", got)
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (completed, not left faulting)", got)
+	}
+}

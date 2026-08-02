@@ -160,9 +160,11 @@ func (e *Executor) collectOutputs(ctx context.Context, item *queue.Item, sess se
 	var total int64
 	for _, p := range paths {
 		if len(staged) >= harvestSessionCapFiles {
-			slog.WarnContext(ctx, "executor: output excluded, session file-count cap reached",
-				"session", item.SessionID, "path", p, "cap", harvestSessionCapFiles)
-			continue
+			// No later path can be admitted once the count cap is hit — one
+			// warning for the rest, not one per path.
+			slog.WarnContext(ctx, "executor: remaining outputs excluded, session file-count cap reached",
+				"session", item.SessionID, "first_excluded", p, "cap", harvestSessionCapFiles)
+			break
 		}
 		rc, size, rerr := sb.ReadFileStream(ctx, outputsDir+"/"+p, harvestFileCapBytes)
 		if rerr != nil {

@@ -703,3 +703,36 @@ func TestOutcomeGraderExplanationTruncatesOnRuneBoundary(t *testing.T) {
 		t.Errorf("truncated explanation is not valid UTF-8")
 	}
 }
+
+func TestOutcomeGraderDeliverableSizeMismatchListsOnly(t *testing.T) {
+	// A blob whose length disagrees with its registry row is listed but never
+	// inlined: the row's size bounds the read (the rubricText posture), so a
+	// lying row can neither balloon memory nor inline a file truncated.
+	h := newHarnessWithBlobs(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("judged from the listing", "satisfied"),
+	}, nil)
+	id := domain.NewID(domain.PrefixFile)
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1, 'liar.txt', 'text/plain', 5, true, 'session', $2)`,
+		id.String(), h.sessionID.String()); err != nil {
+		t.Fatal(err)
+	}
+	longer := "0123456789-far-longer-than-five-bytes"
+	if err := h.blobs.Put(context.Background(), blob.FilesKey(id.String()),
+		strings.NewReader(longer), int64(len(longer)), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wakeOutcome(t, "Ship the report", 3)
+	h.drain(t)
+
+	user := graderUserText(t, h.harness)
+	if !strings.Contains(user, "liar.txt (text/plain, 5 bytes)") {
+		t.Fatalf("mismatched deliverable not listed: %q", user)
+	}
+	if strings.Contains(user, "## liar.txt") || strings.Contains(user, longer) {
+		t.Errorf("mismatched deliverable was inlined: %q", user)
+	}
+}

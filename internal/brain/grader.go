@@ -478,7 +478,7 @@ func (b *Brain) deliverablesSection(ctx context.Context, sid domain.ID) (string,
 		if b.blobs == nil || !inlineableMime(f.mimeType) || f.size > remaining {
 			continue
 		}
-		content, err := b.readDeliverable(ctx, f.id)
+		content, err := b.readDeliverable(ctx, f.id, f.size)
 		if err != nil {
 			// The row committed with its blob, so this is residue or a
 			// transient; the listing already names the file — grade on
@@ -506,16 +506,23 @@ func inlineableMime(m string) bool {
 	return strings.HasPrefix(mt, "text/") || mt == "application/json"
 }
 
-// readDeliverable fetches one harvested file's bytes from the blob store.
-func (b *Brain) readDeliverable(ctx context.Context, fileID string) (string, error) {
+// readDeliverable fetches one harvested file's bytes from the blob store. The
+// registry size bounds the read rather than being trusted (the rubricText
+// posture): the read caps one byte past it, and a blob whose length disagrees
+// with its row is an error — the caller lists the file instead of inlining it
+// truncated, and the budget deduction of f.size stays exact.
+func (b *Brain) readDeliverable(ctx context.Context, fileID string, size int64) (string, error) {
 	rc, _, err := b.blobs.Get(ctx, blob.FilesKey(fileID))
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = rc.Close() }()
-	data, err := io.ReadAll(rc)
+	data, err := io.ReadAll(io.LimitReader(rc, size+1))
 	if err != nil {
 		return "", err
+	}
+	if int64(len(data)) != size {
+		return "", fmt.Errorf("blob length %d disagrees with the registry's %d bytes", len(data), size)
 	}
 	return string(data), nil
 }

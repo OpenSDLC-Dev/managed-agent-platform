@@ -431,7 +431,12 @@ func TestValidHarvestPathRejectsEscapes(t *testing.T) {
 	// lost validator would pass them (proven by mutation during slice-4
 	// verification). This test fails the moment validHarvestPath stops
 	// rejecting an escape shape.
-	accept := []string{"ok.json", "sub/model.bin", "a b/c.txt", ".hidden", "..data"}
+	accept := []string{
+		"ok.json", "sub/model.bin", "a b/c.txt", ".hidden", "..data",
+		"报告.txt",                        // multibyte: 6 runes, 10 bytes
+		strings.Repeat("中", 255),        // exactly the per-segment rune cap, 765 bytes
+		"d/" + strings.Repeat("y", 255), // the cap is per segment, not per path
+	}
 	for _, p := range accept {
 		if !validHarvestPath(p) {
 			t.Errorf("validHarvestPath(%q) = false, want true", p)
