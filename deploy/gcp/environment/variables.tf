@@ -275,6 +275,16 @@ variable "private_service_access_prefix_length" {
     cannot be grown once the peering exists.
   EOT
   default     = 16
+
+  # Checked at plan time, because the alternative is discovering it at apply
+  # time — after the network, subnet, router and NAT already exist. Google
+  # documents /24 as the smallest reserved range it will accept for private
+  # services access; the lower bound is this configuration's own, since a range
+  # wider than /8 would swallow address space no staging environment needs.
+  validation {
+    condition     = var.private_service_access_prefix_length >= 8 && var.private_service_access_prefix_length <= 24
+    error_message = "private_service_access_prefix_length must be between 8 and 24 — Google accepts no range smaller than a /24 for private services access."
+  }
 }
 
 variable "master_authorized_cidrs" {
@@ -294,6 +304,19 @@ variable "master_authorized_cidrs" {
     it is left to the operator because a wrong value here is a lockout.
   EOT
   default     = []
+
+  # A malformed entry here is worse than the usual malformed value: it reaches
+  # the API as part of the cluster's authorized-networks list, and the failure
+  # mode of getting that list wrong is losing access to the control plane. Fail
+  # at plan time instead. IPv4 for the same reason the four CIDR variables
+  # above are IPv4 — this list narrows access to the same public endpoint.
+  validation {
+    condition = alltrue([
+      for c in var.master_authorized_cidrs :
+      can(cidrhost(c.cidr_block, 0)) && can(regex("^[0-9.]+/[0-9]+$", c.cidr_block))
+    ])
+    error_message = "every master_authorized_cidrs entry needs an IPv4 CIDR cidr_block, e.g. 203.0.113.4/32."
+  }
 }
 
 variable "docker_hub_mirror" {

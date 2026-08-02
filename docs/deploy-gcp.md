@@ -48,7 +48,7 @@ fails the render rather than deploying two of anything.
 The run order is in [`deploy/gcp/README.md`](../deploy/gcp/README.md#running-it) and is
 load-bearing; this is only the shape of it:
 
-```
+```sh
 make gcp-foundation-apply    # once, ever — durable identities, KMS, empty secrets
 make gcp-bootstrap           # fills the secrets, creates the GCS HMAC key
 make gcp-env-apply           # network, cluster, Cloud SQL, bucket, registry
@@ -324,7 +324,7 @@ Two credential lifecycles are not covered by a database backup, and they fail di
 
 ## Tearing it down
 
-```
+```sh
 make gcp-env-destroy
 ```
 

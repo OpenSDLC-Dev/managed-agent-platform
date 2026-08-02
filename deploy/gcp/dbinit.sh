@@ -37,7 +37,6 @@ NAMESPACE="${NAMESPACE:-map}"
 # `terraform -chdir=deploy/gcp/environment output -raw docker_hub_mirror` gives
 # the prefix, and the image is then PREFIX/library/postgres:16-alpine.
 DBINIT_IMAGE="${DBINIT_IMAGE:-postgres:16-alpine}"
-ENV_DIR="${ENV_DIR:-deploy/gcp/environment}"
 
 if [[ -z "$PROJECT" ]]; then
 	echo "PROJECT is required: PROJECT=my-project make gcp-db-init" >&2
@@ -51,6 +50,13 @@ done
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 sql="$here/dbinit.sql"
 [[ -r "$sql" ]] || { echo "cannot read $sql" >&2; exit 2; }
+
+# Anchored to the script, like $sql above, rather than to the repository root.
+# A working-directory-relative default works under `make gcp-db-init` and fails
+# everywhere else, and it fails as `terraform -chdir` not finding the directory
+# — which tf_out reports as "Run 'make gcp-env-apply' first", naming a cause
+# that is not the cause.
+ENV_DIR="${ENV_DIR:-$here/environment}"
 
 # ---------------------------------------------------------------------------
 # What to connect to. Read from Terraform rather than reconstructed, so a

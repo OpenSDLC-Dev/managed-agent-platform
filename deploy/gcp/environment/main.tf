@@ -22,7 +22,12 @@
 # Deliberately NOT here, so a reader can tell deferred from forgotten: Binary
 # Authorization, Shielded Nodes secure boot, node auto-repair/upgrade, a
 # dedicated node service account, CMEK on the bucket and registry, bucket
-# versioning, Cloud SQL backups, and Postgres audit logging. Every one of them
+# versioning, Cloud SQL backups, VPC flow logs, and Postgres audit logging.
+# Flow logs are the one on that list a scanner will flag as a plain
+# misconfiguration rather than a missing feature, so to be explicit: they are
+# omitted because they bill per gigabyte of sampled traffic for an environment
+# whose network behaviour is already the thing under test, not because the
+# subnet was written without noticing log_config exists. Every one of them
 # belongs to the production shape docs/deploy-gcp.md documents; adding them here
 # would make the staging environment slower to rebuild and would quietly turn
 # this file into the production example it is explicitly not.
@@ -561,6 +566,14 @@ resource "google_sql_database_instance" "map" {
       # carries sslmode=disable while the connection this server sees is TLS.
       # The property is asserted where it is true — pg_stat_ssl on the backend —
       # rather than inferred from the client's request.
+      #
+      # That proxy is OPERATOR-SUPPLIED and this configuration does not create
+      # it: nothing here, and no chart template, adds the sidecar. Read this
+      # comment as a description of the topology docs/deploy-gcp.md tells the
+      # operator to build, not as a promise that it exists. Its "in the same
+      # pod, not a shared Deployment" is the load-bearing half — a shared proxy
+      # would put that same sslmode=disable traffic on the pod network in
+      # cleartext.
       ssl_mode = "ENCRYPTED_ONLY"
     }
 

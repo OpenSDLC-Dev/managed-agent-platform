@@ -224,7 +224,10 @@ Terraform writes. Write-only arguments leave Terraform nothing to diff, so it is
 signal that it should push the new value. Bumping it does nothing for the platform's role,
 which Terraform does not manage.
 
-Adding the version is the same for either — name the secret you mean:
+Adding the version is the same for either — name the secret you mean. The names below carry
+the default `map` prefix; under a different `NAME_PREFIX` they are `<prefix>-db-password` and
+`<prefix>-db-admin-password`, and writing to the `map-` name instead creates a *new* secret
+that nothing reads rather than failing:
 
 ```sh
 pw="$(openssl rand -hex 32)"
@@ -383,9 +386,10 @@ terraform import google_kms_crypto_key.cipher              "$P/locations/$L/keyR
 terraform import google_service_account.controlplane       "$P/serviceAccounts/map-controlplane@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.executor           "$P/serviceAccounts/map-executor@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.storage            "$P/serviceAccounts/map-storage@your-project.iam.gserviceaccount.com"
-terraform import google_secret_manager_secret.db_password      "$P/secrets/map-db-password"
-terraform import google_secret_manager_secret.blob_access_key  "$P/secrets/map-blob-access-key"
-terraform import google_secret_manager_secret.blob_secret_key  "$P/secrets/map-blob-secret-key"
+terraform import google_secret_manager_secret.db_password       "$P/secrets/map-db-password"
+terraform import google_secret_manager_secret.db_admin_password "$P/secrets/map-db-admin-password"
+terraform import google_secret_manager_secret.blob_access_key   "$P/secrets/map-blob-access-key"
+terraform import google_secret_manager_secret.blob_secret_key   "$P/secrets/map-blob-secret-key"
 for api in cloudbuild cloudkms iam iamcredentials secretmanager; do
   terraform import "google_project_service.required[\"$api.googleapis.com\"]" "your-project/$api.googleapis.com"
 done
@@ -395,6 +399,12 @@ The same commands are how a project that **already** has a key ring adopts it on
 apply, instead of colliding on the name. Nothing here imports a secret *version* or the HMAC
 key, and nothing needs to: `bootstrap.sh` is not Terraform-managed, and re-running it after
 an import is a no-op because the versions already exist.
+
+Do not trust that list to have kept pace with the configuration — a resource added to
+`foundation/` after this was written would be missing from it, and the failure arrives as a
+name collision partway through the recovery apply. `terraform plan` after the imports is the
+authoritative check: every resource it still reports as *will be created* already exists in
+the project and is one more `terraform import` away.
 
 ## Checking it without touching GCP
 

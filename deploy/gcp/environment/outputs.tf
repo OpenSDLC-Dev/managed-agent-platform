@@ -131,10 +131,25 @@ output "network" {
 }
 
 output "docker_hub_mirror" {
-  value = try(
-    "${google_artifact_registry_repository.docker_hub[0].location}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.docker_hub[0].repository_id}",
-    "",
-  )
+  # A comprehension over the count'd resource rather than try() around an
+  # indexed reference. try() swallows ANY error in the expression, so a renamed
+  # attribute or a provider failure would emit an empty prefix — which reads
+  # exactly like "the mirror is disabled" and would send an operator looking in
+  # the wrong place. Here the empty string is produced by one path only: an
+  # empty list, which is the deliberate absence. Every other failure is raised.
+  #
+  # join over an empty list, not coalesce(one(...), ""): Terraform's coalesce
+  # rejects the empty string along with null, so `coalesce(one([]), "")` fails
+  # with "no non-null, non-empty-string arguments" — at output time, on the very
+  # apply where the mirror is switched off. join("", []) is "".
+  #
+  # A ternary on var.docker_hub_mirror would not do either: Terraform evaluates
+  # the untaken branch, and its index is out of range when count is 0. The list
+  # can hold at most one element because that same variable is the count.
+  value = join("", [
+    for r in google_artifact_registry_repository.docker_hub :
+    "${r.location}-docker.pkg.dev/${var.project_id}/${r.repository_id}"
+  ])
   description = <<-EOT
     Prefix that mirrors Docker Hub, or empty when var.docker_hub_mirror is false.
 

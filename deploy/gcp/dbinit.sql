@@ -244,7 +244,16 @@ BEGIN
     -- is one `SET ROLE` away for the platform — a group role with CREATEDB
     -- gives the platform CREATEDB while every assertion about the platform's
     -- own attributes stays false.
+    --
+    -- The NOT FOUND guard is not defence against a state reachable today: the
+    -- role is created earlier in this same script. It is defence against the
+    -- assertion going QUIET if that ever stops being true — every field of a
+    -- missing row is NULL, the condition below evaluates to NULL rather than
+    -- true, and the check the file exists for would be skipped in silence.
     SELECT * INTO g FROM pg_roles WHERE rolname = a;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'FAILED: group role % does not exist', a;
+    END IF;
     IF g.rolsuper OR g.rolcreatedb OR g.rolcreaterole OR g.rolbypassrls OR g.rolcanlogin THEN
         RAISE EXCEPTION
             'FAILED: group role % is privileged (superuser=% createdb=% createrole=% bypassrls=% login=%) and % can SET ROLE to it',

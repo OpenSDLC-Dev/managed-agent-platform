@@ -151,6 +151,11 @@ class Postgres:
         # passing vacuously: the OLD password kept working because no password
         # was ever verified. `local ... trust` is kept so the image's own health
         # probes over the unix socket are unaffected.
+        #
+        # `hba` lands in printf's FORMAT argument, not in a `%s` operand, and
+        # that is what turns the two `\n` above into real newlines. Moving it to
+        # `printf '%s' "$hba"` would stop interpreting them and write the whole
+        # file as one unparseable line.
         hba = ("local all all trust\\n"
                "host all all all scram-sha-256\\n")
         r = run("docker", "exec", "-u", "postgres", self.name, "sh", "-c",
@@ -201,8 +206,12 @@ class Postgres:
         """
         stmts = [
             "CREATE ROLE cloudsqlsuperuser CREATEDB CREATEROLE;",
-            "CREATE ROLE sqladmin LOGIN PASSWORD 'sqladminpw' "
-            "IN ROLE cloudsqlsuperuser CREATEDB CREATEROLE;",
+            # Parenthesised because it is ONE statement wrapped across two
+            # lines, not two list entries with a comma missing -- which is what
+            # bare adjacent string literals inside a list look like to a linter,
+            # and to a reader skimming for the comma.
+            ("CREATE ROLE sqladmin LOGIN PASSWORD 'sqladminpw' "
+             "IN ROLE cloudsqlsuperuser CREATEDB CREATEROLE;"),
             "ALTER DATABASE %s OWNER TO cloudsqlsuperuser;" % DB_NAME,
         ]
         for s in stmts:
@@ -215,6 +224,16 @@ class Postgres:
         return self
 
     def psql_admin(self, sql, sslmode="require", database="postgres"):
+        """Connect as the container's own superuser, NOT as self.admin_user.
+
+        Deliberate, and load-bearing in both directions. The setup in
+        as_cloud_sql_administrator has to run as a superuser, because the
+        `sqladmin` role it models does not exist yet; and the verification
+        queries after a run must not be limited by the privileges being
+        modelled, or a missing privilege would read as a passing assertion.
+        Only dbinit() connects as self.admin_user -- that connection is the
+        one under test.
+        """
         return run("docker", "exec",
                    "-e", "PGPASSWORD=" + ADMIN_PASSWORD,
                    "-e", "PGSSLMODE=" + sslmode,
