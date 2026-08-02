@@ -99,6 +99,10 @@ def main():
         case(tmp, "with a source computed at plan time",
              append("environment/main.tf", '\nmodule "rogue" {\n  source = "./${var.escape}"\n}\n'),
              expect_text="interpolated source")
+        case(tmp, "with a source built by a template directive",
+             append("environment/main.tf",
+                    '\nmodule "rogue" {\n  source = "./%{ if true }escape%{ endif }"\n}\n'),
+             expect_text="interpolated source")
         case(tmp, "with no literal source at all",
              append("environment/main.tf", '\nmodule "rogue" {\n  count = 1\n}\n'),
              expect_text="no literal `source`")

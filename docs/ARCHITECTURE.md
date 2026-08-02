@@ -630,7 +630,8 @@ written in, and `deletion_policy = "PREVENT"`, which is read from state and surv
 Both halves are read recursively, so a child module is still in scope, and anything the
 checker cannot parse (`.tf.json`, a module sourced from outside the half or computed at plan
 time, an unterminated heredoc, unbalanced braces, a multi-line interpolation, a quoted string
-inside a `${...}`) is a hard failure rather than a skipped file — a partial scan that prints
+inside a `${...}` interpolation or a `%{...}` template directive) is a hard failure rather
+than a skipped file — a partial scan that prints
 `ok` is the one outcome worse than no check. The last two targets are what keep that true:
 they run the tooling against injected faults and planted violations rather than reading it,
 because everything else in the group is static and a static gate has already passed a

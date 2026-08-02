@@ -124,9 +124,12 @@ copy of an entry here.
   response never parses, a rollback whose own list or deactivate fails, a generator that
   produces nothing, a success-path warning — and the split suite plants violations in a
   scratch copy and requires each to come back red, with decoys that must stay green. Both were
-  run against the pre-fix code first — the bootstrap suite fails 24 checks against the branch
-  point and 8 against the commit immediately before the fixes, two apiece onto each defect —
-  and each individual fix was additionally re-verified by reverting it alone.
+  run against the pre-fix code first, and each individual fix was additionally re-verified by
+  reverting it alone. The property checked is that the suites fail against *every* earlier
+  version of the tool they test and reach zero only at the commit that fixes it — stated that
+  way deliberately, because a raw count of failing checks is a function of how many scenarios
+  the suite happens to contain, and two successive attempts to quote one here went stale the
+  moment the suite grew.
   `environment/` then reads the password through an **ephemeral** resource into
   `password_wo`, a **write-only** argument, so the value reaches Cloud SQL without being
   persisted anywhere. That last part refines the plan's own mechanic — it was going to reach
