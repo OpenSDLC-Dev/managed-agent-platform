@@ -172,12 +172,26 @@ jobs:
             | grep -qF 'value: "cloud.google.com/gke-nodepool=sandbox,role=isolated"' \
             || { echo "the node selector did not render as sorted key=value pairs" >&2
                  echo "$placeOut" | grep -A1 'name: SANDBOX_K8S_NODE_SELECTOR' >&2; exit 1; }
-          # tolerationSeconds must stay a JSON number: a flat or stringified
-          # encoding would turn "30 seconds" into "unset" at the executor.
-          echo "$placeOut" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' \
-            | grep -qF '\"tolerationSeconds\":30' \
-            || { echo "tolerations did not render as JSON with a numeric tolerationSeconds" >&2
+          # The whole encoding, not one field: a substring check would pass a
+          # template regression that dropped a toleration or restyled the JSON.
+          # tolerationSeconds staying a JSON *number* is the part that matters
+          # most — stringified, "30 seconds" arrives at the executor as "unset".
+          wantTol='value: "[{\"effect\":\"NoSchedule\",\"key\":\"sandbox\",\"operator\":\"Equal\",\"value\":\"true\"},{\"effect\":\"NoExecute\",\"key\":\"other\",\"operator\":\"Exists\",\"tolerationSeconds\":30}]"'
+          echo "$placeOut" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' | grep -qF "$wantTol" \
+            || { echo "tolerations did not render as the expected JSON encoding" >&2
+                 echo "  want: $wantTol" >&2
                  echo "$placeOut" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' >&2; exit 1; }
+          # The encoding's separators are `,` and `=`, so a label carrying one
+          # would render as a different, still-valid selector the executor
+          # accepts silently. The chart refuses at render time; these rows keep
+          # that refusal, and the quoted-string rule beside it, from regressing.
+          for bad in 'role: "1,y=2"' 'role: "a=b"' 'pool: 42'; do
+            printf 'sandboxPlacement:\n  nodeSelector:\n    %s\n' "$bad" > /tmp/bad-placement.yaml
+            if helm template t "$CHART" -f "$VALUES" -f /tmp/bad-placement.yaml \
+                 --show-only templates/executor-deployment.yaml >/dev/null 2>&1; then
+              echo "a nodeSelector of {$bad} rendered instead of failing" >&2; exit 1
+            fi
+          done
           # An explicit numeric/boolean zero means "turn this cap off" and must
           # reach the executor: Helm's `empty` is true of 0 and false, so the
           # obvious emptiness test would silently substitute the default.

@@ -51,7 +51,24 @@ spec:
                    given values file always renders the same string. */}}
             {{- with .Values.sandboxPlacement.nodeSelector }}
             {{- $pairs := list }}
-            {{- range $k, $v := . }}{{ $pairs = append $pairs (printf "%s=%s" $k $v) }}{{ end }}
+            {{- range $k, $v := . }}
+            {{- /* `,` and `=` are this encoding's separators, so a value carrying
+                   one would render as a DIFFERENT, still-valid selector that the
+                   executor accepts without complaint — `{role: "a,b=c"}` becomes
+                   two labels. Neither is legal in a Kubernetes label anyway, so
+                   refusing here costs nothing and turns the one silent failure
+                   this encoding has into a render-time error. Non-strings are
+                   refused for a second reason: Helm decodes an unquoted number
+                   as float64, so `pool: 42` would render `%!s(float64=42)` and a
+                   large one would go exponential. */}}
+            {{- if not (kindIs "string" $v) }}
+            {{- fail (printf "sandboxPlacement.nodeSelector[%s]: label values must be quoted strings (got %s)" $k (kindOf $v)) }}
+            {{- end }}
+            {{- if or (contains "," $k) (contains "=" $k) (contains "," $v) (contains "=" $v) }}
+            {{- fail (printf "sandboxPlacement.nodeSelector[%s]: neither a label key nor its value may contain ',' or '=' — they separate entries in SANDBOX_K8S_NODE_SELECTOR" $k) }}
+            {{- end }}
+            {{- $pairs = append $pairs (printf "%s=%s" $k $v) }}
+            {{- end }}
             - name: SANDBOX_K8S_NODE_SELECTOR
               value: {{ join "," $pairs | quote }}
             {{- end }}

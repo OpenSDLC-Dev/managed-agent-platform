@@ -250,6 +250,10 @@ See [`values.yaml`](./values.yaml) for the full set.
 > **Deployment**; `sandboxPlacement` places the per-session **sandbox Pods** the executor
 > creates. A dedicated, tainted sandbox node pool needs the pair together — the selector
 > reaches the pool, the tolerations get admitted onto its taint — and needs the executor
-> itself to stay somewhere else. Both are validated at executor startup: a selector that
-> could match no node, or a toleration the API server would reject, stops the process
-> instead of producing Pods that sit `Pending` for the life of every session.
+> itself to stay somewhere else. Both are validated at executor startup, against the rules the
+> API server enforces at pod-create time — a malformed selector entry, an invalid label key or
+> value, or a toleration the pod-create validator refuses stops the process, instead of failing
+> every Provision for the life of the deployment. What it cannot check is whether the labels
+> exist: a well-formed selector matching no node starts fine and leaves its Pods `Pending`,
+> because only the cluster can answer that and the parse runs before there is a client to
+> ask.

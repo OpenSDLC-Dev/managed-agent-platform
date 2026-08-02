@@ -542,18 +542,30 @@ Kubernetes shapes and encode them for you. Empty applies nothing, which is the
 default and today's behaviour.
 
 Building the pool is yours, and the isolating configuration is the **pair**: a
-node pool labelled so the selector finds it, **and** tainted so nothing else
-lands there. A label alone keeps sandboxes on the pool but does not keep anything
-else off it; a taint alone keeps others off but leaves sandboxes unable to
-schedule. Keep the platform's own Deployments elsewhere — the chart's
+node pool labelled so the selector finds it, **and** tainted so other workloads
+do not land there. A label alone keeps sandboxes on the pool but does not keep
+anything else off it; a taint alone keeps others off but then needs the matching
+toleration here, or the sandboxes cannot schedule onto the pool either. Note what
+a taint is and is not: it repels pods that carry no matching toleration, so a
+workload with a cluster-wide wildcard toleration still lands on the pool. Keeping
+those off it is yours as much as the taint is. Keep the platform's own Deployments elsewhere — the chart's
 `executor.nodeSelector`/`executor.tolerations` place the executor, and are
 deliberately a different setting from `sandboxPlacement`.
 
-Both values are parsed when the executor (or BYOC worker) starts, and a malformed
-one **fails that startup**. That is the deliberate direction: a selector that
-could match no node, or a toleration the API server would reject, otherwise
-becomes a pod that sits `Pending` for the life of every session, with nothing in
-the log to say why.
+Both values are parsed when the executor (or BYOC worker) starts, against the
+rules the API server itself applies at pod-create time, and a value that would
+fail there **fails that startup** instead — an ill-formed selector entry, a label
+key or value outside the syntax, a toleration the pod-create validator refuses.
+Left to the pod, each of those fails every session's Provision for the life of
+the deployment rather than once at boot.
+
+Two boundaries on that, stated rather than left to be discovered. A *well-formed*
+selector naming a label no node carries is accepted: its pods stay `Pending`, and
+only the cluster could have answered, which the parse runs too early to ask. And
+placement binds when a sandbox pod is **created** — like `RuntimeClass` and the
+`SANDBOX_*` containment, it is not re-applied to a pod the executor adopts, so
+sandboxes already running when you enable a pool stay where they are until their
+sessions end.
 
 ### Single-tenant daemon trust (Docker backend)
 

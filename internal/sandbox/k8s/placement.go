@@ -3,7 +3,10 @@ package k8s
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -16,13 +19,25 @@ import (
 // dedicated node pool needs both halves: the selector to reach the pool, and the
 // tolerations to be admitted onto it.
 //
-// Both are parsed here rather than passed through to the pod, because the
-// failure mode of a bad value is the one an operator cannot debug: a selector
-// that matches no node, or a toleration that tolerates nothing, produces a pod
-// that sits Pending for the life of the session with nothing in the executor's
-// log to explain it. Parsing in-process makes a malformed value fail the
-// executor's (or worker's) startup instead — the same rule #65 set for the
-// SANDBOX_* containment values.
+// Both are parsed here rather than passed through to the pod so that a value the
+// cluster would refuse fails the executor's (or worker's) startup — the same
+// rule #65 set for the SANDBOX_* containment values. What that does and does not
+// cover is worth stating exactly, because the boundary is easy to overclaim:
+//
+//   - Caught here: anything the API server itself would reject — an ill-formed
+//     selector entry, a label key or value outside the syntax, a toleration the
+//     pod-create validator refuses. Left to the pod, each of those fails every
+//     Provision for the life of the deployment instead of once at startup.
+//   - NOT caught here: a well-formed selector that happens to match no node in
+//     this cluster. Nothing is refused, the pods simply stay Pending, and only
+//     the cluster can answer whether a label exists — which the parse
+//     deliberately runs too early to ask.
+//
+// One rule the parsers apply is *cluster-dependent* rather than universal, and
+// is called out where it appears: the Lt and Gt toleration operators need the
+// alpha TaintTolerationComparisonOperators feature gate, which is off by default
+// (measured on v1.36). They are accepted because they are real fields of the
+// pinned type, so refusing them would break a cluster that enables the gate.
 const (
 	envNodeSelector = "SANDBOX_K8S_NODE_SELECTOR"
 	envTolerations  = "SANDBOX_K8S_TOLERATIONS"
@@ -91,7 +106,16 @@ func parseTolerations(s string) ([]corev1.Toleration, error) {
 	if err := dec.Decode(&out); err != nil {
 		return nil, fmt.Errorf("%s=%q is not a JSON array of tolerations: %w", envTolerations, s, err)
 	}
-	if dec.More() {
+	// A JSON `null` decodes into a slice without error and leaves it nil, which
+	// would read as "no tolerations" — a shape that is not an array quietly
+	// meaning the same as an unset variable. Refused, so the only way to apply
+	// nothing is to say nothing.
+	if out == nil {
+		return nil, fmt.Errorf("%s=%q is not a JSON array of tolerations", envTolerations, s)
+	}
+	// Not dec.More(): it answers false on a stray `]` or `}`, so "[]]" passed as
+	// clean input. Decoding again must hit EOF and nothing else.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%s=%q has trailing content after the array", envTolerations, s)
 	}
 	for i, t := range out {
@@ -102,9 +126,11 @@ func parseTolerations(s string) ([]corev1.Toleration, error) {
 	return out, nil
 }
 
-// checkToleration applies the API server's own rules for a toleration, so a
-// value that would be rejected at pod-create time — once per session, forever —
-// is rejected once at startup instead.
+// checkToleration applies the pod-create validator's rules to one toleration, so
+// a value the API server would refuse — once per session, forever — is refused
+// once at startup instead. The rules are Kubernetes', not a convenient subset:
+// they were derived by probing a live v1.36 API server, which rejects several
+// shapes the vendored type's own comments describe as merely "ignored".
 func checkToleration(t corev1.Toleration) error {
 	switch t.Operator {
 	case "", corev1.TolerationOpEqual, corev1.TolerationOpExists,
@@ -118,16 +144,46 @@ func checkToleration(t corev1.Toleration) error {
 	default:
 		return fmt.Errorf("effect %q is not NoSchedule, PreferNoSchedule or NoExecute", t.Effect)
 	}
+	// A key is a label name, and the server checks it. Not checking it here was
+	// the gap that let `key: "my pool"` start an executor whose every pod create
+	// then failed.
+	if t.Key != "" {
+		if errs := validation.IsQualifiedName(t.Key); len(errs) > 0 {
+			return fmt.Errorf("key %q is not a label key: %s", t.Key, strings.Join(errs, "; "))
+		}
+	}
 	// An empty key means "match every taint key", which only means anything
 	// paired with Exists; the default operator is Equal, so the bare form is a
 	// toleration that matches nothing.
 	if t.Key == "" && t.Operator != corev1.TolerationOpExists {
 		return fmt.Errorf("an empty key needs operator Exists, not %q", t.Operator)
 	}
-	// Exists is a wildcard over values, so a value beside it is a contradiction
-	// the operator should be told about rather than have silently ignored.
-	if t.Operator == corev1.TolerationOpExists && t.Value != "" {
-		return fmt.Errorf("operator Exists takes no value, got %q", t.Value)
+	switch t.Operator {
+	case corev1.TolerationOpExists:
+		// Exists is a wildcard over values, so a value beside it is a
+		// contradiction the operator should be told about rather than have
+		// silently ignored.
+		if t.Value != "" {
+			return fmt.Errorf("operator Exists takes no value, got %q", t.Value)
+		}
+	case corev1.TolerationOpLt, corev1.TolerationOpGt:
+		// A numeric comparison against a non-number is refused even on a cluster
+		// that enables the gate.
+		if _, err := strconv.ParseInt(t.Value, 10, 64); err != nil {
+			return fmt.Errorf("operator %s compares numerically, so value %q must be an integer",
+				t.Operator, t.Value)
+		}
+	default: // "" and Equal both compare the value as a label value.
+		if errs := validation.IsValidLabelValue(t.Value); len(errs) > 0 {
+			return fmt.Errorf("value %q is not a label value: %s", t.Value, strings.Join(errs, "; "))
+		}
+	}
+	// The one the vendored type gets wrong: its comment says tolerationSeconds
+	// "is ignored" outside NoExecute, and the API server rejects it instead
+	// ("effect must be 'NoExecute' when tolerationSeconds is set"). Measured, not
+	// read.
+	if t.TolerationSeconds != nil && t.Effect != corev1.TaintEffectNoExecute {
+		return fmt.Errorf("tolerationSeconds needs effect NoExecute, not %q", t.Effect)
 	}
 	return nil
 }

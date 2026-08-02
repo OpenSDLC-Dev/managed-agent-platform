@@ -63,10 +63,10 @@ func TestParseNodeSelector(t *testing.T) {
 	}
 }
 
-// Every one of these would otherwise produce a selector that matches no node,
-// and a sandbox that sits Pending for the life of the session with nothing in
-// the executor's log to say why. Failing startup is the whole point of parsing
-// this in-process rather than passing the string through (#65's rule).
+// Every one of these is a value the API server would refuse, or one that would
+// quietly mean something other than what was written. Passed through, each fails
+// every session's pod create for the life of the deployment; refused here, it
+// fails the process once, at boot, naming the variable (#65's rule).
 func TestParseNodeSelectorRejectsMalformed(t *testing.T) {
 	for _, tc := range []struct{ name, in string }{
 		{"no separator", "role"},
@@ -142,6 +142,28 @@ func TestParseTolerationsRejectsMalformed(t *testing.T) {
 		// And its converse: Exists is a wildcard over values, so a value
 		// alongside it is a contradiction the operator should see.
 		{"Exists with a value", `[{"key":"sandbox","operator":"Exists","value":"true"}]`},
+		// The rules below were found by probing a live v1.36 API server rather
+		// than by reading the type — each of these passed this parser and was
+		// then rejected at every pod create, which is precisely the failure the
+		// parser exists to move to startup.
+		{"key is not a label key", `[{"key":"my pool","operator":"Exists"}]`},
+		{"value is not a label value", `[{"key":"sandbox","value":"pool 1"}]`},
+		// The vendored type's comment calls tolerationSeconds "ignored" outside
+		// NoExecute; the API server rejects it. Measured behaviour wins.
+		{"tolerationSeconds with NoSchedule",
+			`[{"key":"a","operator":"Exists","effect":"NoSchedule","tolerationSeconds":30}]`},
+		{"tolerationSeconds with no effect",
+			`[{"key":"a","operator":"Exists","tolerationSeconds":30}]`},
+		// Lt and Gt compare numerically, so a non-numeric value is refused even
+		// on a cluster that enables their feature gate.
+		{"Lt with a non-numeric value", `[{"key":"a","operator":"Lt","value":"abc"}]`},
+		// Not an array. `null` decodes into a slice without error and would have
+		// read as "no tolerations" — an unset variable by another spelling.
+		{"json null", "null"},
+		// dec.More() answers false on a stray closing bracket, so these two used
+		// to pass as clean input.
+		{"trailing bracket", "[]]"},
+		{"trailing brace", "[]}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseTolerations(tc.in)
@@ -155,9 +177,11 @@ func TestParseTolerationsRejectsMalformed(t *testing.T) {
 	}
 }
 
-// An empty JSON array is not the same as an unset value in intent, but it is in
-// effect, and it must not be an error — a chart rendering `tolerations: []`
-// would otherwise fail every deployment that left the list empty.
+// An empty array is a legitimate way to say "no tolerations" and must not be an
+// error. The chart cannot produce it — its `with` skips an empty list, so the
+// variable is simply absent — but a hand-written env var or another generator
+// can, and `[]` differs from `null`, which IS refused: an array that happens to
+// be empty says something, a shape that is not an array says nothing.
 func TestParseTolerationsAcceptsAnEmptyArray(t *testing.T) {
 	got, err := parseTolerations("[]")
 	if err != nil {
@@ -282,9 +306,10 @@ func TestNewRejectsMalformedPlacement(t *testing.T) {
 // The chart and this parser have to agree on an encoding neither of them owns
 // alone, and nothing else in the suite would notice them drifting: the chart
 // renders a YAML map and list into these two strings, and only the executor
-// reads them back. These are the literal values
-// `helm template` produces from the sandboxPlacement example in values.yaml —
-// re-derive them with:
+// reads them back. These are the literal values `helm template` produces from
+// the sandboxPlacement block in the CI helm job's heredoc
+// (.github/workflows/ci.yml), which is also what asserts the chart still renders
+// them — re-derive with:
 //
 //	helm template t deploy/helm/managed-agent-platform \
 //	  -f deploy/helm/managed-agent-platform/ci/example-values.yaml -f <placement.yaml> \
@@ -319,5 +344,29 @@ func TestTheChartsEncodingRoundTrips(t *testing.T) {
 	}
 	if tol[1].Operator != corev1.TolerationOpExists || tol[1].Effect != corev1.TaintEffectNoExecute {
 		t.Errorf("second toleration = %+v", tol[1])
+	}
+}
+
+// The converse of the rejection rows: the shapes a real deployment writes must
+// still pass. Lt/Gt are here because they are real fields of the pinned type —
+// refusing them would break a cluster that enables their alpha feature gate,
+// even though a default cluster rejects them, and that asymmetry is documented
+// rather than legislated away.
+func TestParseTolerationsAcceptsTheValidShapes(t *testing.T) {
+	for _, tc := range []struct{ name, in string }{
+		{"equal with an effect", `[{"key":"sandbox","operator":"Equal","value":"true","effect":"NoSchedule"}]`},
+		{"exists, no value", `[{"key":"sandbox","operator":"Exists"}]`},
+		{"wildcard key", `[{"operator":"Exists"}]`},
+		{"default operator", `[{"key":"sandbox","value":"true"}]`},
+		{"empty value with the default operator", `[{"key":"sandbox"}]`},
+		{"tolerationSeconds with NoExecute",
+			`[{"key":"a","operator":"Exists","effect":"NoExecute","tolerationSeconds":30}]`},
+		{"numeric Lt", `[{"key":"a","operator":"Lt","value":"5"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseTolerations(tc.in); err != nil {
+				t.Errorf("parseTolerations(%q) = %v, want it accepted", tc.in, err)
+			}
+		})
 	}
 }
