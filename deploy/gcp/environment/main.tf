@@ -58,11 +58,14 @@ resource "google_project_service" "required" {
     "sqladmin.googleapis.com",
     "storage.googleapis.com",
     # The acceptance ships traces to Cloud Trace through an in-cluster OTel
-    # Collector (plan 20, Decision 5). BOTH are needed, not either: the collector
-    # posts OTLP to telemetry.googleapis.com, Google's OTLP ingest service, and
-    # Google's prerequisites for that exact recipe also require the Cloud Trace
-    # API. Enabling only the first is the shape of failure that passes every
-    # static check and then produces no traces.
+    # Collector (plan 20, Decision 5). telemetry.googleapis.com is Google's OTLP
+    # ingest service and is the endpoint Decision 5's collector posts to; whether
+    # cloudtrace.googleapis.com is additionally REQUIRED or merely the alternative
+    # ingest path for the googlecloud exporter is a question two reviewers answered
+    # differently, and the docs can be read both ways. Both are enabled because the
+    # cost of an unnecessary enablement is nothing and the cost of the missing one
+    # is an acceptance criterion — "traces are visible in Cloud Trace" — failing
+    # after every static check passed. Slice 4b settles which it was.
     #
     # The collector's own IAM grant (roles/telemetry.tracesWriter, or
     # roles/cloudtrace.agent) is NOT here: the chart ships no collector — it has

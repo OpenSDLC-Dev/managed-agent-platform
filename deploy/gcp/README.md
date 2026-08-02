@@ -96,9 +96,14 @@ cp deploy/gcp/foundation/terraform.tfvars deploy/gcp/environment/terraform.tfvar
 make gcp-foundation-apply              # once, ever — creates the secrets EMPTY
 PROJECT=your-project make gcp-bootstrap  # fills them, creates the GCS HMAC key
 
-# Only now: enabling the Cloud Build API is what creates this account, and the
-# foundation apply above is what enables it. Prints projects/…/serviceAccounts/EMAIL
-# — pass only the EMAIL.
+# Only now: the foundation apply above is what enables the Cloud Build API, and the
+# lookup answers SERVICE_DISABLED until it is on. Prints
+# projects/…/serviceAccounts/EMAIL — pass only the EMAIL.
+#
+# If it still says SERVICE_DISABLED, wait a minute and retry: Service Usage can
+# report an API enabled before its serving layer agrees, which is most likely on a
+# just-created project. This is the one step in the sequence that is not idempotent
+# by construction, so it is the one worth retrying rather than debugging.
 gcloud builds get-default-service-account --project your-project
 echo 'cloud_build_service_account = "EMAIL"' >> deploy/gcp/environment/terraform.tfvars
 
