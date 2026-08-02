@@ -173,25 +173,30 @@ func loadGateImage(t *testing.T, kubeCtx, image string) {
 }
 
 // k8sHostAddr answers "an address of the test host reachable from a pod" for
-// the cluster flavors the suite runs on: the kind docker network's IPv4
-// gateway (a kind node routes to the host through it), or Docker Desktop's
-// host.docker.internal. MAP_K8S_HOST_ADDR overrides both for anything else.
+// the cluster flavors the suite runs on: whatever the Docker fixture resolves
+// when the daemon is Docker Desktop (its VM holds the cluster either way), the
+// kind docker network's IPv4 gateway for a local daemon (a kind node routes to
+// the host through it), else host.docker.internal. MAP_K8S_HOST_ADDR overrides
+// all three for anything else.
 func k8sHostAddr(t *testing.T, kubeCtx string) string {
 	t.Helper()
 	if addr := os.Getenv("MAP_K8S_HOST_ADDR"); addr != "" {
 		return addr
 	}
-	if !strings.HasPrefix(kubeCtx, "kind-") {
-		return "host.docker.internal"
-	}
-	// A kind node routes to the host through the kind network's gateway — but
-	// only when that network is on a daemon sharing this process's namespace.
-	// Under Docker Desktop it is not: the gateway belongs to Desktop's own VM,
-	// and the address a pod can reach this process by is the one the Docker
-	// fixture already works out for that case.
+	// Docker Desktop runs the daemon — and so any cluster on it, kind or its own
+	// built-in one — inside a VM of its own. Neither branch below is right there:
+	// the kind network's gateway is an address in that VM, and a fixed
+	// host.docker.internal is answered with an IPv6 address a gate pod has no
+	// route to. Ask the Docker fixture, which already works this out per
+	// platform, before the cluster flavour is consulted at all.
 	if sandboxtest.DockerDesktop(t) {
 		return sandboxtest.DockerHostAddr(t)
 	}
+	if !strings.HasPrefix(kubeCtx, "kind-") {
+		return "host.docker.internal"
+	}
+	// A kind node routes to the host through the kind network's gateway, the
+	// daemon holding that network being local by the check above.
 	out, err := exec.Command("docker", "network", "inspect", "kind",
 		"-f", `{{range .IPAM.Config}}{{.Gateway}}
 {{end}}`).CombinedOutput()
