@@ -43,10 +43,20 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Endpoint == "" || cfg.Bucket == "" {
 		return nil, errors.New("s3: endpoint and bucket are required")
 	}
+	// minio-go's own default transport, wrapped so an error response reaches
+	// the library saying what the endpoint meant (see endpointWord). It has to
+	// be built here rather than left nil, because supplying a transport is the
+	// only way in — and it has to be minio-go's rather than http's, whose
+	// transparent gzip would rewrite an object's bytes and lose its length.
+	transport, err := minio.DefaultTransport(cfg.TLS)
+	if err != nil {
+		return nil, fmt.Errorf("s3: transport: %w", err)
+	}
 	client, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
-		Secure: cfg.TLS,
-		Region: cfg.Region,
+		Creds:     credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Secure:    cfg.TLS,
+		Region:    cfg.Region,
+		Transport: endpointWord{next: transport},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("s3: client: %w", err)
@@ -70,39 +80,35 @@ func alreadyOwned(err error) bool {
 	return code == "BucketAlreadyOwnedByYou" || code == "BucketAlreadyExists"
 }
 
-// noSuchKey reports the endpoint saying the object is not there. The status is
-// required alongside the code because minio-go lets an x-minio-error-code
-// response header overwrite the parsed code whatever the response was, and
-// absence answers 404 and nothing else.
+// absent reports the endpoint's own word that there is no object at the key:
+// its <Error> document, the NoSuchKey code, and the 404 that absence answers.
+// Both operations that map absence — a Get that owes callers ErrNotFound and a
+// Delete that owes them convergence — ask for exactly this.
 //
-// This is as far as a reader can get: Get learns of absence from a HEAD, whose
-// 404 carries no body by definition, so minio-go always synthesizes the code
-// from the status there and no stronger proof exists to ask for (#244).
-func noSuchKey(err error) bool {
-	res := minio.ToErrorResponse(err)
-	return res.Code == "NoSuchKey" && res.StatusCode == http.StatusNotFound
-}
-
-// absentOnDelete reports a DELETE answered with the endpoint's own NoSuchKey
-// error document. A deleter can demand that document where a reader cannot,
-// and must: minio-go synthesizes NoSuchKey from any 404 it fails to parse, so
-// without it a misrouting proxy or an authorization layer concealing a denial
-// would be read as "already gone" and the caller told its data was deleted.
-// XMLName is the marker: minio-go keeps the decoded struct only when the body
-// parsed, and replaces it wholesale in every decode-failure branch, so a
+// All three conjuncts are load-bearing, because ErrorResponse.Code on its own
+// is not the endpoint's word. minio-go synthesizes NoSuchKey from any 404
+// whose body does not decode as an S3 error document, so without the document
+// a misrouting proxy or an authorization layer concealing a denial reads as
+// absence: a deleter told its data is gone while it is still there, a reader
+// told an object it was refused never existed. XMLName is the marker for a
+// synthesized code — minio-go keeps the decoded struct only when the body
+// parsed and replaces it wholesale in every decode-failure branch, so a
 // synthesized error always carries a zero XMLName. (encoding/xml alone would
-// not be enough — it validates the root element and assigns XMLName before
+// not be enough: it validates the root element and assigns XMLName before
 // decoding any children, so a document that starts <Error> and then breaks
-// leaves XMLName set. minio-go discarding that struct is what makes the
-// marker trustworthy.)
+// leaves XMLName set. minio-go discarding that struct is what makes the marker
+// trustworthy.) The status is required because a code can still arrive
+// detached from the document it came with.
 //
-// Measured against real GCS with this minio-go release: its DELETE of a
-// missing object answers 404 with a parsed <Error> document (XMLName "Error",
-// no Key), while the same object's HEAD answers 404 with no body at all
-// (XMLName empty, Key filled) — which is why the two paths ask for different
-// proof rather than sharing one check.
-func absentOnDelete(err error) bool {
-	return noSuchKey(err) && minio.ToErrorResponse(err).XMLName.Local == "Error"
+// What reaches this check is the endpoint's word rather than minio-go's
+// reading of it because endpointWord repairs the two places those differ: a
+// response header that overrules a parsed document, and the one absence AWS
+// reports by header instead of by document at all.
+func absent(err error) bool {
+	res := minio.ToErrorResponse(err)
+	return res.Code == "NoSuchKey" &&
+		res.StatusCode == http.StatusNotFound &&
+		res.XMLName.Local == "Error"
 }
 
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
@@ -115,21 +121,22 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64, co
 }
 
 func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, int64, error) {
-	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	// minio.Core is minio-go's low-level API — a plain S3 GET on the wire,
+	// nothing MinIO-specific — and it issues the request eagerly, where
+	// Client.GetObject is lazy and has to be forced with a Stat. That Stat is
+	// a HEAD, and a HEAD answer carries no body, so its 404 could never be the
+	// endpoint's own error document and every bare 404 read as absence (#244).
+	// The GET here is the one the caller's first read would have issued
+	// anyway, so asking for the stronger proof removes a round trip rather
+	// than adding one.
+	rc, info, _, err := minio.Core{Client: s.client}.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, 0, fmt.Errorf("s3: get %s: %w", key, err)
-	}
-	// GetObject is lazy — the request happens on first read. Stat forces it
-	// so a missing key is blob.ErrNotFound here, per the Store contract.
-	info, err := obj.Stat()
-	if err != nil {
-		_ = obj.Close()
-		if noSuchKey(err) {
+		if absent(err) {
 			return nil, 0, fmt.Errorf("s3: get %s: %w", key, blob.ErrNotFound)
 		}
-		return nil, 0, fmt.Errorf("s3: stat %s: %w", key, err)
+		return nil, 0, fmt.Errorf("s3: get %s: %w", key, err)
 	}
-	return obj, info.Size, nil
+	return rc, info.Size, nil
 }
 
 func (s *Store) Delete(ctx context.Context, key string) error {
@@ -142,7 +149,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	// deliberate trade — a delete that keeps erroring is an operator's problem,
 	// a delete that reports success on a misrouted request is a lost object.
 	err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
-	if err != nil && !absentOnDelete(err) {
+	if err != nil && !absent(err) {
 		return fmt.Errorf("s3: delete %s: %w", key, err)
 	}
 	return nil

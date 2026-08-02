@@ -148,6 +148,11 @@ resources deleted and the sweep verified empty afterwards.
   delete convergence. Everything else round-trips, including the 5 MiB payload.
   `MakeBucket` against a missing bucket **succeeds** unattended (no `x-goog-project-id`
   needed), so bucket pre-creation is least-privilege hygiene, not a requirement.
+  *(One row of this measurement has since gone stale: `GetMissingIsErrNotFound` passed here
+  against the HEAD-based `Get` that #244 replaced. The eager-GET `Get` needs GCS to answer a
+  **GET** 404 with an `<Error>` document. MinIO is verified to, by the contract suite running
+  through the new path; **no run recorded here has measured GCS's**, and this section is for
+  what was measured. Slice 5's acceptance is where it gets measured.)*
 - **Cloud KMS as a `secrets.Cipher`.** A KMS-backed cipher (key resource name as the
   keyID, decrypt refusing a foreign keyID — the OpenBao backend's guard) passes the
   `secretstest` contract 6/6, including the 64 KiB round-trip. The raw API's plaintext
@@ -623,8 +628,15 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   `Delete` demands the document (minio-go synthesizes `NoSuchKey` from any unparseable
   404, which would let a misrouting proxy's bare 404 read as "already gone") while `Get`
   can only require the code and a 404 status. Measured against real GCS while landing
-  the slice, not assumed. CHANGELOG.md carries the reasoning; #244 tracks the residue on
-  `Get`.
+  the slice, not assumed. CHANGELOG.md carries the reasoning.
+
+  The asymmetry did not survive: #244, opened on this slice's review, closed it by moving
+  `Get` off the `Stat` onto minio-go's eager low-level GET, whose 404 *can* carry the
+  document — so both paths ask for the same proof through one helper. The same fix closed
+  a second residue the review found on `Delete`, where the `x-minio-error-code` header
+  could overwrite a successfully parsed code, and added the one translation the stricter
+  proof needs: AWS answers a delete-marked key with a bodyless 404 and a header instead of
+  a document. What it left unmeasured is noted in Ground truth above.
 - **Slice 2 — sandbox pod placement and bounds (`internal/sandbox` +
   `internal/sandbox/k8s` + chart).** Plan 19/#65 delivered most of what this slice was
   originally scoped to add — CPU limit, capability drops, no-privilege-escalation,

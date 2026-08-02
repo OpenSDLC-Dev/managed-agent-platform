@@ -552,6 +552,51 @@ copy of an entry here.
 
 ### Fixed
 
+- **A read no longer mistakes a bare 404 for "there is no such object"** (#244).
+  `internal/blob/s3` decides absence from minio-go's `NoSuchKey` code, and that code is not
+  always the endpoint's own word: minio-go **synthesizes** it from the status alone whenever
+  a 404's body does not decode as an S3 error document. `Delete` was given the missing proof
+  when it landed — the endpoint's own `<Error>` document — but `Get` could not ask for the
+  same thing, because it forced its request with a `Stat`, and a `Stat` is a HEAD whose
+  answer carries no body by definition. So every bare 404 on the object path reached the
+  caller as `blob.ErrNotFound`: a reverse proxy answering 404 for a misrouted request, or an
+  authorization layer concealing a denial behind one, told a reader the object did not
+  exist.
+
+  `Get` now learns absence from the GET it was going to issue anyway, through minio-go's
+  low-level `Core.GetObject` — the same plain S3 request, issued eagerly instead of lazily.
+  A GET's 404 **can** carry the endpoint's error document, so both operations now ask for
+  one proof through a single `absent` helper, and the asymmetry slice 1 pinned as deliberate
+  is gone. Two consequences beyond the fix itself: a bare 404 now fails closed on a read as
+  it already did on a delete (an opaque error rather than `ErrNotFound`, which is the more
+  honest answer to a proxy fault), and dropping the HEAD leaves the read path one round trip
+  shorter than before.
+
+  **One absence arrives with no document to demand, and it is AWS's.** A GET for a key whose
+  current version is a delete marker is answered with a 404 carrying `x-amz-delete-marker:
+  true`, a `text/plain` content type and no body at all — which on a versioned bucket is the
+  ordinary state of every deleted key, so demanding the document would have broken
+  `ErrNotFound` for that whole deployment. The client's transport translates that header into
+  the error document it stands for. Accepting it does not reopen what the paragraph above
+  closes: it is an affirmative signal that a misrouting proxy's bare 404 does not carry.
+
+  **The second half of the same bug was on `Delete`.** minio-go applies the
+  `x-minio-error-code` response header *after* a successful decode, not only as a fallback
+  for one that failed — so a 404 whose body says `NoSuchBucket` and whose header says
+  `NoSuchKey` satisfied every conjunct of the delete check, and a delete into a vanished
+  bucket reported convergence. The client's transport now keeps the endpoint's own document
+  authoritative: it drops that header on any error response whose body decoded as `<Error>`,
+  whatever code that document names — a document naming none is still the endpoint's word,
+  and letting the header supply one there would be the same override. Where the body did not
+  decode the header is left alone: it is the only word a bodyless answer has, and it cannot
+  manufacture absence by itself, since an undecoded body leaves the document marker zero.
+
+  Both bugs were found reviewing the GCS delete-convergence fix; the delete-marker gap was
+  found reviewing this fix, before it could ship. Every guard here is pinned by a test that
+  fails without it, each one run against the code that lacked it. What stays genuinely
+  unclosable is recorded as such: an endpoint that forges a well-formed `NoSuchKey` document
+  is indistinguishable from one reporting a real absence, on any request.
+
 - **The gate fixtures now address the test host by asking the daemon where it is, so the
   egress rows run on Docker Desktop for Windows.** `sandboxtest.DockerHostAddr` answered
   `host.docker.internal` on darwin and the Docker bridge gateway everywhere else. The
@@ -665,6 +710,10 @@ copy of an entry here.
   documented intent ("only object absence maps there") already implied.
   [#244](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/244) tracks what
   remains: a reader cannot demand what a HEAD cannot send.
+
+  *(Superseded before release, by the #244 entry above: `Get` stopped learning absence from a
+  HEAD, so it asks for the document too, the asymmetry test is gone and the shared helper is
+  now `absent`. This entry stands as the record of what the slice landed.)*
 
   The MinIO-backed contract suite cannot reach any of this, so the regression tests drive
   a stub S3 endpoint — the convergence case confirmed failing against the pre-fix code and
