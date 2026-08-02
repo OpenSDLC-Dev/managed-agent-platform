@@ -559,10 +559,14 @@ key or value outside the syntax, a toleration the pod-create validator refuses.
 Left to the pod, each of those fails every session's Provision for the life of
 the deployment rather than once at boot.
 
-Two boundaries on that, stated rather than left to be discovered. A *well-formed*
-selector naming a label no node carries is accepted: its pods stay `Pending`, and
-only the cluster could have answered, which the parse runs too early to ask. And
-placement binds when a sandbox pod is **created** — like `RuntimeClass` and the
+Three boundaries on that, stated rather than left to be discovered. A
+*well-formed* selector naming a label no node carries is accepted: its pods stay
+`Pending`, and only the cluster could have answered, which the parse runs too
+early to ask. The `Lt` and `Gt` toleration operators are accepted although a
+cluster without the alpha `TaintTolerationComparisonOperators` feature gate — the
+default, including GKE — refuses them at pod create; they are real fields of the
+pinned Kubernetes type, so refusing them here would break a cluster that turns
+the gate on. And placement binds when a sandbox pod is **created** — like `RuntimeClass` and the
 `SANDBOX_*` containment, it is not re-applied to a pod the executor adopts, so
 sandboxes already running when you enable a pool stay where they are until their
 sessions end.

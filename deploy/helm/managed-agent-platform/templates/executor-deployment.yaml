@@ -65,7 +65,7 @@ spec:
             {{- fail (printf "sandboxPlacement.nodeSelector[%s]: label values must be quoted strings (got %s)" $k (kindOf $v)) }}
             {{- end }}
             {{- if or (contains "," $k) (contains "=" $k) (contains "," $v) (contains "=" $v) }}
-            {{- fail (printf "sandboxPlacement.nodeSelector[%s]: neither a label key nor its value may contain ',' or '=' — they separate entries in SANDBOX_K8S_NODE_SELECTOR" $k) }}
+            {{- fail (printf "sandboxPlacement.nodeSelector[%s]=%s: neither a label key nor its value may contain ',' or '=' — they separate entries in SANDBOX_K8S_NODE_SELECTOR" $k $v) }}
             {{- end }}
             {{- $pairs = append $pairs (printf "%s=%s" $k $v) }}
             {{- end }}

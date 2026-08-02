@@ -253,7 +253,9 @@ See [`values.yaml`](./values.yaml) for the full set.
 > itself to stay somewhere else. Both are validated at executor startup, against the rules the
 > API server enforces at pod-create time — a malformed selector entry, an invalid label key or
 > value, or a toleration the pod-create validator refuses stops the process, instead of failing
-> every Provision for the life of the deployment. What it cannot check is whether the labels
-> exist: a well-formed selector matching no node starts fine and leaves its Pods `Pending`,
-> because only the cluster can answer that and the parse runs before there is a client to
-> ask.
+> every Provision for the life of the deployment. Two things it cannot check: whether the
+> labels exist — a well-formed selector matching no node starts fine and leaves its Pods
+> `Pending`, because only the cluster can answer that and the parse runs before there is a
+> client to ask — and whether your cluster enables the alpha
+> `TaintTolerationComparisonOperators` gate, so the `Lt`/`Gt` toleration operators are accepted
+> here and refused at pod create by any cluster (including GKE) that has it off.

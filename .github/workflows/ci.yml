@@ -175,7 +175,9 @@ jobs:
           # The whole encoding, not one field: a substring check would pass a
           # template regression that dropped a toleration or restyled the JSON.
           # tolerationSeconds staying a JSON *number* is the part that matters
-          # most — stringified, "30 seconds" arrives at the executor as "unset".
+          # most. Stringified it does not silently become "unset" — the strict
+          # decoder refuses it and the executor will not start — but that is a
+          # deployment that stops working, which this catches at render instead.
           wantTol='value: "[{\"effect\":\"NoSchedule\",\"key\":\"sandbox\",\"operator\":\"Equal\",\"value\":\"true\"},{\"effect\":\"NoExecute\",\"key\":\"other\",\"operator\":\"Exists\",\"tolerationSeconds\":30}]"'
           echo "$placeOut" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' | grep -qF "$wantTol" \
             || { echo "tolerations did not render as the expected JSON encoding" >&2
