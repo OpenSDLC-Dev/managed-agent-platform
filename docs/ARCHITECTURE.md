@@ -771,5 +771,7 @@ Beside the evals sits the top-level `acceptance/` suite (plan 21): the define-ou
 doc example driven end-to-end through the latest Go SDK. Its deterministic rehearsal —
 a scripted model standing in for the real one — runs in the merge gate like any other
 suite; the live variant (`TestLiveDefineOutcomesAcceptance`) points the same harness at
-a running compose stack and a real model, consented by `RUN_LIVE_MODEL_TESTS` with the
+a running compose stack and a real model, consented by its own tier variable
+`RUN_LIVE_ACCEPTANCE_TESTS` (whole sessions cost an order of magnitude more than the
+`RUN_LIVE_MODEL_TESTS` single-turn smoke, which therefore must not buy them) with the
 `ACCEPTANCE_*` variables naming the stack's key, model, and base URL.

@@ -13,7 +13,7 @@
 //     Docker sandbox, with the model scripted. Deterministic, free, and it
 //     guards the mechanics in CI so the live run is the only paid step.
 //   - The live leg (TestLiveDefineOutcomesAcceptance) is opt-in via
-//     RUN_LIVE_MODEL_TESTS and drives an externally running stack (the compose
+//     RUN_LIVE_ACCEPTANCE_TESTS and drives an externally running stack (the compose
 //     stack, docs/plan/21_outcomes.md's acceptance) whose brain calls a real
 //     model. It is never part of `make test`'s default path.
 //

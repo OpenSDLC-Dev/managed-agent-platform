@@ -24,8 +24,10 @@ copy of an entry here.
   (`assertNoExtras` on the file, session, and outcome-evaluation resources along the
   way). A deterministic scripted-model rehearsal joins the merge gate; the same
   harness pointed at the compose stack and a real model is the live leg
-  (`TestLiveDefineOutcomesAcceptance`, consented by `RUN_LIVE_MODEL_TESTS` +
-  `ACCEPTANCE_*`; run record: docs/HISTORY.md). The live run forced two platform fixes.
+  (`TestLiveDefineOutcomesAcceptance`, consented by its own tier variable
+  `RUN_LIVE_ACCEPTANCE_TESTS` + `ACCEPTANCE_*` — whole sessions cost dollars, and the
+  cents-level `RUN_LIVE_MODEL_TESTS` smoke must not silently buy them; run record:
+  docs/HISTORY.md). The live run forced two platform fixes.
   (1) **Model-provider routes gain `max_tokens`** — the default output cap for turns
   that set none themselves (request > route > adapter default; explicit zero rejected at
   startup): the brain never sets `Request.MaxTokens`, so the anthropic adapter's 8192
