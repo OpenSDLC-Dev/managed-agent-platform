@@ -67,6 +67,18 @@ copy of an entry here.
   it can read and refuses everything else, because the only unacceptable outcome is printing
   `ok` over configuration it never looked at.
 
+  **`cloud_build_service_account` is required, with no default.** Google changed Cloud
+  Build's default identity on 2024-04-29: projects whose first build predates it use the
+  legacy `PROJECT_NUMBER@cloudbuild.gserviceaccount.com`, and projects created after it use
+  the Compute Engine default service account. A configuration that guesses is wrong for half
+  of all projects, and wrong in an expensive place — the grant lands on an account no build
+  uses, and nothing surfaces until the first image push, by which point the apply has already
+  created a GKE cluster and a Cloud SQL instance. Requiring it turns that into a plan-time
+  prompt whose description carries `gcloud builds get-default-service-account`, with a
+  `validation` block that rejects anything which is not a service account email. The compute
+  default account keeps `artifactregistry.reader` for image pulls and is deliberately not
+  widened to writer: that identity is what every node in the cluster runs as.
+
   **Two guards, not one**, because they fail differently. `prevent_destroy` is a property of
   the *configuration* and disappears along with the block it is written in — Terraform
   destroys a resource whose block you merely deleted. `deletion_policy = "PREVENT"` is read
