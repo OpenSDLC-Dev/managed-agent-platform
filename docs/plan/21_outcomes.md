@@ -74,7 +74,7 @@ with the two in-between releases' non-outcome surface swept and recorded.
   grader scores; `satisfied`/`max_iterations_reached`/`failed`/`interrupted` are
   terminal" — and `explanation` "Grader's verdict text from the **most recent**
   evaluation" (one entry mutated in place per cycle, not one entry per cycle).
-- **Session create** (`betasession.go:2083-2084`): `initial_events` — "processed in
+- **Session create** (`betasession.go:2082-2084`): `initial_events` — "processed in
   order. Supports `user.message` and `user.define_outcome` events. Maximum 50 events."
 - **No new endpoints, no new stop_reason.** The surface rides the existing session +
   events endpoints (api.md; sessions → response types lists
@@ -188,7 +188,9 @@ Decision 6).
    define_outcome landing mid-turn must chain the next turn, not idle past it). The
    registry entry already names all three events; slice 2 re-verifies its recorded
    rationale against the new wake trigger and leaves the entry standing — no rewrite,
-   same-PR confirmation only.
+   same-PR confirmation only. (Today the entry's "ours echoes all three" phrasing
+   overclaims — define_outcome is rejected, not echoed; slice 2's landing is what makes
+   the sentence true, which the confirmation pass states in its record.)
 4. **Trigger and replay.** In `sendSessionEvents`' state-machine switch, a
    `user.define_outcome` on an idle session behaves like `user.message`: flip
    `status_running` + enqueue a turn ("begins work immediately"). In replay
@@ -333,12 +335,14 @@ slice 5 adds no registry entries of its own.
    re-read at the new version. Surface facts the sweep must respect: `tool_change`
    (the `tool_addition`/`tool_removal` variants) is genuinely new at v1.61.0 → handle or
    record (#160 pattern); `model_context_window_exceeded` already exists at the v1.59.0
-   pin on the beta surface this platform mirrors (betamessage.go) and the brain's
-   turn-classification divergence entry already handles it by name — v1.60.0 only adds
-   it to the non-beta Messages surface, so it needs **no** new record; the sole
-   betasessionevent.go hunk between the pins is comment-only (it re-words why a turn
-   ends `retries_exhausted`, dropping `max_iterations` as a listed cause — noted in the
-   record because this plan's Decision 6 occupies exactly that territory).
+   pin on the beta surface this platform mirrors (betamessage.go, 3 occurrences) and the
+   brain's turn-classification divergence entry already handles it by name — the
+   in-between releases add only its non-beta appearance plus one beta doc-comment line,
+   so it needs **no** new record; the two betasessionevent.go hunks between the pins are
+   comment-only, re-wording the event-list params — the `created_at[gt/gte/lt/lte]`
+   filters and `order` are now documented as compared against / ordered by
+   `processed_at`, a list surface this platform mirrors, so the sweep checks our list
+   semantics against the re-worded contract and notes the result in the record.
    → verify: `make verify`; record complete; citation re-read done.
 2. **Domain + acceptance + storage + rendering** (closes the #77 placeholders and #161):
    `PrefixOutcome` in `internal/domain/id.go` (+`knownPrefixes`); domain outcome types
