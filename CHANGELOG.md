@@ -35,14 +35,17 @@ copy of an entry here.
     would strand the once-readable GCS HMAC secret in Secret Manager: valid-looking, and
     dead.
   - **The secrets are what a rebuild is reconciled against** — the database password
-    reapplied to a new Cloud SQL instance, the HMAC pair proven against a new bucket.
+    reapplied to a new Cloud SQL instance, the HMAC pair carried forward. (Decision 6 also
+    wants that pair *proven* to still authenticate rather than assumed valid from the mere
+    presence of a secret version. That needs a live bucket, so it belongs to slice 4b's
+    acceptance battery and is not claimed here.)
 
   So `foundation/` holds those and is never destroyed, while `environment/` holds the
   cluster, Artifact Registry, Cloud SQL, the bucket and every IAM binding, reads the
   foundation through `data` sources by name rather than by remote state, and tears down with
   one command. CI enforces the split structurally rather than by convention: `environment/`
   may not declare a `resource` of an unrecoverable kind, and every unrecoverable
-  `foundation/` resource must carry its guards. The check is expressed over *kinds*, so a
+  `foundation/` resource must carry both guards it can. The check is expressed over *kinds*, so a
   resource added later is covered without anyone remembering to extend a list, and moving
   one between files does not turn it red. Every arm was measured — including the one that
   matters most, a `prevent_destroy = false` sitting under a comment that says
@@ -64,6 +67,12 @@ copy of an entry here.
   the database password and creates the GCS HMAC key — whose secret GCS returns exactly
   once, so a Terraform resource holding it would hold it in state — and writes both to
   Secret Manager on **stdin**, never in `argv` where `ps` and shell history can read them.
+  That once-only return is also why the script arms its rollback *before* it parses the
+  create response rather than after: anything that fails between the key existing and its
+  secret being stored leaves a key that is billable, indistinguishable from the real one,
+  and permanently unusable. Exercised against a fake `gcloud` — fresh project, re-run,
+  half-written pair, missing secret, unreadable secret, and a failure in each of the two
+  windows after the key exists.
   `environment/` then reads the password through an **ephemeral** resource into
   `password_wo`, a **write-only** argument, so the value reaches Cloud SQL without being
   persisted anywhere. That last part refines the plan's own mechanic — it was going to reach

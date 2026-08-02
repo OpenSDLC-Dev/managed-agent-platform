@@ -43,7 +43,10 @@ Three things make the split necessary rather than tidy:
   its secret exactly once, so a resource holding it would hold it in state.)
 - **The secrets are the reconciliation source.** A rebuilt environment is brought back into
   agreement with them: the database password is reapplied to the new Cloud SQL instance,
-  and the HMAC pair is proven against the new bucket by an authenticated call.
+  and the HMAC pair is carried forward untouched. (Decision 6 also wants that pair *proven*
+  against the new bucket by an authenticated call rather than assumed valid from the presence of
+  a secret version. `bootstrap.sh` does not do that yet — slice 4b's acceptance battery is where
+  it belongs, because it needs a live bucket to authenticate against.)
 
 **No secret value is in either configuration.** Terraform holds names, IAM bindings and
 preconditions; `bootstrap.sh` owns value creation, and `environment/` reads the database
@@ -54,7 +57,7 @@ half that is destroyed and rebuilt routinely, so every rebuild would scatter ano
 `environment/` reads the foundation through `data` sources, by name, never by remote state.
 So the two apply independently, and a destroy in the disposable half structurally cannot
 reach anything in the durable one. CI enforces both halves of that: `environment/` may not
-declare a `resource` of the three undeletable-or-load-bearing kinds, and every
+declare a `resource` of any unrecoverable kind, and every
 `foundation/` resource whose loss is unrecoverable must carry `prevent_destroy`.
 
 ## What a destroy actually costs
@@ -68,7 +71,9 @@ the rebuilt stack, never with an old one surviving.
 ## Prerequisites
 
 - A GCP project with billing enabled, and `gcloud auth application-default login`.
-- Terraform ≥ 1.5 — `brew install hashicorp/tap/terraform`. It is not in Homebrew core.
+- Terraform ≥ 1.11 — `brew install hashicorp/tap/terraform`. It is not in Homebrew core.
+  (1.11 for `password_wo`; `foundation/` alone needs only 1.5.)
+- `python3` — `bootstrap.sh` parses one JSON response with it.
 - `kubectl` and `helm` for the deploy that follows.
 
 ## Running it
@@ -181,12 +186,13 @@ circular, and the usual fix (a hand-made state bucket outside Terraform) reintro
 untracked resource this split exists to avoid.
 
 **No secret is in either state file.** That is the point of `bootstrap.sh` and of
-`password_wo`: the database password, the HMAC pair and the model key exist in Secret Manager
-and nowhere else Terraform can reach. So a lost state file costs you bookkeeping, not
+`password_wo`: the database password and the GCS HMAC pair exist in Secret Manager and nowhere
+else Terraform can reach. (The model key is pasted from its own provider into the Helm values
+in mode-1; mode-2 gives it a secret of its own, in slice 5.) So a lost state file costs you bookkeeping, not
 credentials.
 
 Losing `foundation/`'s state is recoverable, because every resource in it is adoptable — but
-adopt **all ten**, not just the key ring. A partial import fails on the first
+adopt **every one of them**, not just the key ring. A partial import fails on the first
 already-existing resource it did not import:
 
 ```sh
@@ -217,6 +223,7 @@ make gcp-fmt gcp-validate gcp-split-check gcp-lint
 ```
 
 None of them needs credentials, state, or a project. `gcp-split-check` is the structural
-enforcement of the two-configuration split — `environment/` may not *own* a resource of an
-unrecoverable kind, and `foundation/` must protect every one it declares. CI runs both on every PR, so the
+enforcement of the two-configuration split: `environment/` may not *own* a resource of an
+unrecoverable kind, and every one `foundation/` declares must carry both guards it can —
+`prevent_destroy` and, where the kind has it, `deletion_policy = "PREVENT"`. CI runs both on every PR, so the
 configuration cannot rot silently between the rare runs that actually provision anything.

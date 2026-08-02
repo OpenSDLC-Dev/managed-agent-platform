@@ -32,7 +32,10 @@ if [[ -z "$PROJECT" ]]; then
 	exit 2
 fi
 
-for tool in gcloud openssl; do
+# python3 is in this list because it parses the HMAC create response. A missing
+# python3 discovered AFTER that create would leave an orphaned key whose secret
+# is already lost — see the rollback trap below.
+for tool in gcloud openssl python3; do
 	command -v "$tool" >/dev/null || { echo "$tool is required and not on PATH" >&2; exit 2; }
 done
 
@@ -41,9 +44,21 @@ access_secret="${NAME_PREFIX}-blob-access-key"
 secret_secret="${NAME_PREFIX}-blob-secret-key"
 storage_sa="${NAME_PREFIX}-storage@${PROJECT}.iam.gserviceaccount.com"
 
+# Three outcomes, not two. "Could not ask" must never read as "no version":
+# a transient auth failure answering `false` would add a SECOND version to a
+# secret that already had one, and the live system would keep using the first.
 has_version() {
-	gcloud secrets versions list "$1" --project "$PROJECT" \
-		--filter="state=ENABLED" --format="value(name)" --limit=1 2>/dev/null | grep -q .
+	local out
+	if ! out="$(gcloud secrets versions list "$1" --project "$PROJECT" \
+		--filter="state=ENABLED" --format="value(name)" --limit=1 2>&1)"; then
+		if printf '%s' "$out" | grep -qiE "NOT_FOUND|was not found"; then
+			echo "secret $1 does not exist — run 'make gcp-foundation-apply' first" >&2
+		else
+			echo "could not list versions of $1: $out" >&2
+		fi
+		exit 1
+	fi
+	[[ -n "$out" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -87,14 +102,32 @@ elif has_version "$access_secret" || has_version "$secret_secret"; then
 	exit 1
 else
 	hmac_json="$(gcloud storage hmac create "$storage_sa" --project "$PROJECT" --format=json)"
-	access_id="$(printf '%s' "$hmac_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["accessId"])')"
 
+	# Armed BEFORE the response is even parsed. From the instant the key exists,
+	# every path out of this block that is not "both secrets stored" must delete
+	# it: GCS returned the secret once, in that response, so a key we stop
+	# holding the secret for is permanently unusable, billable, and
+	# indistinguishable from the real one. A parse failure counts.
+	access_id=""
 	cleanup_key() {
 		echo "rolling back: deleting the HMAC key whose secret could not be stored" >&2
+		if [[ -z "$access_id" ]]; then
+			# The response did not parse, so the id must be recovered by listing.
+			access_id="$(gcloud storage hmac list --project "$PROJECT" \
+				--filter="serviceAccountEmail=$storage_sa AND state=ACTIVE" \
+				--format="value(accessId)" --limit=1 2>/dev/null || true)"
+		fi
+		if [[ -z "$access_id" ]]; then
+			echo "COULD NOT identify the HMAC key to roll back. Delete it by hand:" >&2
+			echo "  gcloud storage hmac list --project $PROJECT" >&2
+			return
+		fi
 		gcloud storage hmac update "$access_id" --project "$PROJECT" --deactivate >/dev/null 2>&1 || true
 		gcloud storage hmac delete "$access_id" --project "$PROJECT" >/dev/null 2>&1 || true
 	}
 	trap cleanup_key EXIT
+
+	access_id="$(printf '%s' "$hmac_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["accessId"])')"
 
 	printf '%s' "$access_id" |
 		gcloud secrets versions add "$access_secret" --project "$PROJECT" --data-file=- >/dev/null

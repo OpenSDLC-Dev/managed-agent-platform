@@ -141,6 +141,21 @@ resource "google_project_iam_member" "executor_sql_client" {
 # ---------------------------------------------------------------------------
 # Cloud Build pushes the component images. Without this the very next step after
 # a successful apply fails on a permission the apply could have granted.
+#
+# WHICH identity that is depends on the project's vintage: builds run as the
+# legacy PROJECT_NUMBER@cloudbuild.gserviceaccount.com on older projects, and as
+# the Compute Engine default service account on projects that enabled the Cloud
+# Build API more recently. This grants the legacy one, which is the shape a
+# staging project created for this plan gets. If a push fails with a permission
+# error, that is this — confirm with `gcloud builds describe` and grant the
+# account it names:
+#
+#   gcloud artifacts repositories add-iam-policy-binding REPO --location=REGION \
+#     --role=roles/artifactregistry.writer --member=serviceAccount:THE-ONE-IT-NAMES
+#
+# Deliberately not granted to both: the compute default account already holds
+# reader here for image pulls, and widening it to writer to cover a case that
+# may not apply is how a staging shortcut becomes a production default.
 # ---------------------------------------------------------------------------
 
 resource "google_artifact_registry_repository_iam_member" "build_pusher" {
