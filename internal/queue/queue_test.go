@@ -591,6 +591,53 @@ func TestWebExecIsClaimedForEveryEnvironmentAndNeverPolled(t *testing.T) {
 	}
 }
 
+// TestOutputsHarvestIsClaimedAndNeverPolled pins the deliverables harvest's
+// routing (docs/plan/21_outcomes.md, Decision 8): outputs_harvest is
+// internal-only work the platform executor claims, invisible to the wire work
+// API — Poll must never hand it to a BYOC worker, whose toolset has no file
+// lane. Like tool_exec it carries the enqueuing turn's trace context, so the
+// harvest's consumer span parents on the settlement that scheduled it.
+func TestOutputsHarvestIsClaimedAndNeverPolled(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sess, env := pgtest.NewSession(t, pool, "cloud")
+	selfSess, selfEnv := pgtest.NewSession(t, pool, "self_hosted")
+	q := queue.New(pool)
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f},
+		SpanID:     trace.SpanID{0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58},
+		TraceFlags: trace.FlagsSampled,
+	})
+	if _, err := q.Enqueue(trace.ContextWithSpanContext(ctx, sc), pool, env, sess, queue.OutputsHarvest); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := q.Poll(ctx, env, time.Minute); err != nil || w != nil {
+		t.Fatalf("poll served an outputs_harvest item to a worker: %+v %v", w, err)
+	}
+	it, err := q.Claim(ctx, queue.OutputsHarvest, time.Minute)
+	if err != nil || it == nil {
+		t.Fatalf("executor did not claim the outputs_harvest item: %+v %v", it, err)
+	}
+	if it.SessionID != sess || it.Kind != queue.OutputsHarvest {
+		t.Errorf("claimed item = %+v, want the session's outputs_harvest item", it)
+	}
+	want := fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID())
+	if got := it.TraceContext["traceparent"]; got != want {
+		t.Errorf("claimed trace_context[traceparent] = %q, want %q", got, want)
+	}
+
+	// Only the brain's cloud settlement enqueues the kind, but the queue does
+	// not enforce that — pin that a self_hosted item, were one ever enqueued,
+	// still never reaches a worker's poll.
+	if _, err := q.Enqueue(ctx, pool, selfEnv, selfSess, queue.OutputsHarvest); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := q.Poll(ctx, selfEnv, time.Minute); err != nil || w != nil {
+		t.Fatalf("poll served a self_hosted outputs_harvest item: %+v %v", w, err)
+	}
+}
+
 func TestCancelSessionTakesEveryLiveItem(t *testing.T) {
 	// What a user.interrupt does to the turn it ends: every item the session
 	// still has in flight is stopped, whoever holds it. A claimant's lease proof

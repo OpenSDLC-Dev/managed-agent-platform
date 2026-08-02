@@ -15,6 +15,39 @@ copy of an entry here.
 
 ### Added
 
+- **Outcome deliverables: the outputs harvest, and a grader that reads them**
+  ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 4). The doc flow's last
+  step — the agent writes to `/mnt/session/outputs/`, the caller fetches through
+  `GET /v1/files?scope_id={session_id}` — is now real on cloud environments, and the
+  grader judges the files, not just the transcript. A cloud session's grading cycle now
+  begins with an **`outputs_harvest`** work item (internal kind, migration 0017; `Poll`
+  never serves it, so nothing appears on the worker wire): the settlement that used to
+  requeue the grading turn enqueues the harvest instead, the executor claims it in its
+  claim rotation, walks the regular files under `/mnt/session/outputs/` in the session's
+  sandbox (bash listing, NUL-separated; forged paths from the agent-writable sandbox are
+  excluded), and publishes a **per-path snapshot** into the files registry — 
+  `filename` = relative path under a new `(scope_id, filename)` unique index,
+  `scope_type:"session"`, `downloadable:true`, mime by extension — with caps of
+  50 MiB/file and 200 files / 500 MiB per session, applied greedily in lexicographic
+  order (over-cap or ineligible = absent, never an error). Bytes stage to their final
+  blob keys **before** one registry transaction (delete-all + insert-all + grading-turn
+  enqueue + item completion, under the session row lock, fenced on the outcome entry
+  still `evaluating` — an interrupt mid-harvest publishes nothing, the `settleVerdict`
+  rule), so a fault at any boundary leaves the previous snapshot intact for the reclaim;
+  replaced blobs are deleted best-effort post-commit. Reading files above `ReadFile`'s
+  4 MiB cap out of a sandbox needed a new contract method, **`Sandbox.ReadFileStream`**
+  (caller-named ceiling; docker streams the archive entry through, k8s buffers up to the
+  cap because its exec transport frames stdout with a trailing marker), contract-tested
+  on both real backends. The grader's user message gains a **`# Deliverables`** section
+  between the outcome and the transcript: every harvested file listed with mime and
+  size, text-like ones (`text/*`, `application/json`) inlined whole under a 64 KiB
+  budget, greedy in filename order; a storage-less deploy lists without inlining, and
+  **self_hosted sessions get no harvest at all** — transcript-only grading, a deliberate
+  divergence (the platform cannot reach a BYOC sandbox; docs/DIVERGENCES.md). Also in
+  this PR: the grader's explanation cap now cuts on a rune boundary instead of
+  mid-character. Verified end to end against a real Docker container: a bash tool writes
+  text + random binary deliverables, the harvest publishes both, and the blobs download
+  byte-identical (`TestHarvestRealSandbox`).
 - **The outcome grader: evaluation cycles run, verdicts settle, revisions loop**
   ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 3). The loop the docs
   describe is now real: after a tool-less agent turn settles with an active outcome, the

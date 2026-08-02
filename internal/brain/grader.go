@@ -21,9 +21,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -47,6 +50,11 @@ const (
 	// claim — and is re-fed to the agent each revision cycle, so an unbounded
 	// grader reply must not become permanent per-claim state.
 	graderExplanationBudget = 20_000
+	// graderDeliverablesBudget caps the total bytes of harvested deliverables
+	// inlined into the grader's message (plan 21, Decision 5): small
+	// text-like files ride whole, greedily in filename order; the rest are
+	// named in the listing only.
+	graderDeliverablesBudget = 64 << 10
 )
 
 // graderSystem is the grader's charge (ours, INFERRED). The verdict protocol
@@ -95,6 +103,14 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	}
 	desc, _ := b.registry.Describe(agent.Model.ID)
 
+	// Read the harvested snapshot before the start event: a transient registry
+	// read faults the item here and the reclaim retries a cycle that has not
+	// visibly begun.
+	deliverables, err := b.deliverablesSection(ctx, sid)
+	if err != nil {
+		return err
+	}
+
 	sctx, oe := b.log.StartOutcomeEvaluation(ctx, sid, active.OutcomeID, active.Iteration, startID,
 		events.Backend{Provider: desc.Protocol, Model: desc.Model})
 
@@ -103,6 +119,7 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 		Messages: []provider.Message{{
 			Role: "user",
 			Content: mustTextContent("# Outcome\n\n" + d.Description +
+				deliverables +
 				"\n\n# Agent transcript\n\n" + renderTranscript(history)),
 		}},
 	}
@@ -156,7 +173,14 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	// mode, re-opened on this path if skipped).
 	verdict, explanation := parseVerdict(toolset.SanitizeText(text))
 	if len(explanation) > graderExplanationBudget {
-		explanation = explanation[:graderExplanationBudget] + "\n[truncated]"
+		// Cut on a rune boundary: a byte slice can split a multibyte
+		// character, and the mangled tail would persist into the entry (and
+		// every later revision prompt) as a replacement character.
+		cut := graderExplanationBudget
+		for cut > 0 && !utf8.RuneStart(explanation[cut]) {
+			cut--
+		}
+		explanation = explanation[:cut] + "\n[truncated]"
 	}
 	// The budget: up to max_iterations evaluation cycles total; a would-be
 	// needs_revision on the final cycle is reported as max_iterations_reached
@@ -405,6 +429,97 @@ func (b *Brain) completeStaleItem(ctx context.Context, item *queue.Item) error {
 	return tx.Commit(ctx)
 }
 
+// deliverable is one harvested registry row the grader is shown.
+type deliverable struct {
+	id       string
+	filename string
+	mimeType string
+	size     int64
+}
+
+// deliverablesSection renders the session's harvested outputs snapshot for
+// the grader (plan 21, Decision 5; shape ours, INFERRED): a listing of every
+// deliverable's path, mime, and size, then small text-like files inlined
+// whole — greedy in filename order under graderDeliverablesBudget, a file
+// that no longer fits is listed only, never truncated mid-file. An empty
+// registry (no harvest ran, or the agent left nothing) renders nothing; a
+// storage-less deploy (nil blobs) gets the listing without contents.
+func (b *Brain) deliverablesSection(ctx context.Context, sid domain.ID) (string, error) {
+	rows, err := b.pool.Query(ctx,
+		`SELECT id, filename, mime_type, size_bytes FROM files
+		  WHERE scope_type = 'session' AND scope_id = $1 ORDER BY filename`,
+		sid.String())
+	if err != nil {
+		return "", fmt.Errorf("list deliverables: %w", err)
+	}
+	defer rows.Close()
+	var files []deliverable
+	for rows.Next() {
+		var f deliverable
+		if err := rows.Scan(&f.id, &f.filename, &f.mimeType, &f.size); err != nil {
+			return "", fmt.Errorf("list deliverables: %w", err)
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("list deliverables: %w", err)
+	}
+	if len(files) == 0 {
+		return "", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n\n# Deliverables\n\nThe files the agent left in the outputs directory — the work product under judgment:\n")
+	for _, f := range files {
+		fmt.Fprintf(&sb, "\n- %s (%s, %d bytes)", f.filename, f.mimeType, f.size)
+	}
+	remaining := int64(graderDeliverablesBudget)
+	for _, f := range files {
+		if b.blobs == nil || !inlineableMime(f.mimeType) || f.size > remaining {
+			continue
+		}
+		content, err := b.readDeliverable(ctx, f.id)
+		if err != nil {
+			// The row committed with its blob, so this is residue or a
+			// transient; the listing already names the file — grade on
+			// rather than fault the cycle over an optional inline.
+			slog.WarnContext(ctx, "brain: could not read a deliverable for the grader; listed only",
+				"session", sid, "file", f.id, "error", err)
+			continue
+		}
+		remaining -= f.size
+		// Sanitized at this boundary like every other foreign text: the
+		// bytes are agent-produced and ride into a provider request.
+		fmt.Fprintf(&sb, "\n\n## %s\n\n%s", f.filename, toolset.SanitizeText(content))
+	}
+	return sb.String(), nil
+}
+
+// inlineableMime reports whether a deliverable's registry mime marks it
+// text-like enough to inline for the grader: any text/* plus
+// application/json.
+func inlineableMime(m string) bool {
+	mt, _, err := mime.ParseMediaType(m)
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(mt, "text/") || mt == "application/json"
+}
+
+// readDeliverable fetches one harvested file's bytes from the blob store.
+func (b *Brain) readDeliverable(ctx context.Context, fileID string) (string, error) {
+	rc, _, err := b.blobs.Get(ctx, blob.FilesKey(fileID))
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rc.Close() }()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 // rubricText resolves the outcome's rubric to the text the grader reads: a
 // text rubric inline from the definition, a file rubric from its acceptance
 // snapshot (the source file may be gone; the snapshot cannot be).
@@ -612,10 +727,16 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The environment kind rides the same lock acquisition: the evaluate
+	// branch routes on it (plan 21, Decision 8), and a separate read would
+	// cost a round trip on every settlement for a value only that branch uses.
 	var outcomesJSON []byte
+	var envKind string
 	if err := tx.QueryRow(ctx,
-		`SELECT outcome_evaluations FROM sessions WHERE id = $1 FOR UPDATE`,
-		sid.String()).Scan(&outcomesJSON); err != nil {
+		`SELECT s.outcome_evaluations, e.kind FROM sessions s
+		   JOIN environments e ON e.id = s.environment_id
+		  WHERE s.id = $1 FOR UPDATE OF s`,
+		sid.String()).Scan(&outcomesJSON, &envKind); err != nil {
 		return err
 	}
 
@@ -656,7 +777,21 @@ func (b *Brain) settleEndTurn(ctx context.Context, sid domain.ID, item *queue.It
 			}
 			// The session stays running — evaluating is part of the work
 			// cycle; the docs' status enum has no outcome-specific state.
+			//
+			// What runs next routes on the environment kind (Decision 8): a
+			// cloud sandbox is the platform's to reach, so the deliverables
+			// harvest chains first — this item completes and the harvest's own
+			// settlement enqueues the grading turn, which keeps the grader off
+			// stale snapshots. A self_hosted sandbox is unreachable (the
+			// reference worker has no file lane), so grading stays direct: the
+			// item requeues and its next claim runs the grader transcript-only.
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
+				if envKind == string(domain.EnvCloud) {
+					if _, err := b.queue.Enqueue(ctx, tx, item.EnvironmentID, sid, queue.OutputsHarvest); err != nil {
+						return err
+					}
+					return b.queue.Complete(ctx, tx, item)
+				}
 				return b.queue.Requeue(ctx, tx, item)
 			}
 			break

@@ -1,6 +1,7 @@
 package toolset_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,6 +40,17 @@ func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.
 		return sandbox.ExecResult{}, f.execErr
 	}
 	return f.exec, nil
+}
+
+func (f *fakeSandbox) ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error) {
+	data, err := f.ReadFile(ctx, path)
+	if err != nil {
+		return nil, 0, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, 0, sandbox.ErrFileTooLarge
+	}
+	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 
 func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {

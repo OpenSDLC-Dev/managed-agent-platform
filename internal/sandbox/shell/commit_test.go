@@ -1,6 +1,7 @@
 package shell_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -57,6 +58,16 @@ func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
 		return []byte(v), nil
 	}
 	return nil, sandbox.ErrFileNotExist
+}
+func (f *fakeSandbox) ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error) {
+	data, err := f.ReadFile(ctx, path)
+	if err != nil {
+		return nil, 0, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, 0, sandbox.ErrFileTooLarge
+	}
+	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 
 func (f *fakeSandbox) WriteFile(_ context.Context, path string, data []byte) error {

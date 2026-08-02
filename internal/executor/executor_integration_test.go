@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
@@ -71,5 +72,65 @@ func TestClosedLoopRealSandbox(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.ToolExec); got != 0 {
 		t.Errorf("tool_exec live = %d, want 0 (completed)", got)
+	}
+}
+
+// TestHarvestRealSandbox is plan 21's Decision 8 verify line at the executor
+// level: a file the agent's bash tool writes under /mnt/session/outputs/ in a
+// real Docker container ends up in the files registry, its blob byte-identical
+// to the container's copy — binary bytes included — with the grading turn
+// chained behind the snapshot.
+func TestHarvestRealSandbox(t *testing.T) {
+	provider, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("integration test requires Docker: %v", err)
+	}
+	h := newHarnessWith(t, provider, Config{Image: testImage})
+	t.Cleanup(func() {
+		sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
+		if err == nil {
+			_ = sb.Destroy(context.Background())
+		}
+	})
+
+	// The agent's work: one bash tool leaves a text deliverable and a nested
+	// binary one (random bytes, so identity is a real check, not luck).
+	bash, _ := json.Marshal(map[string]any{
+		"name": "bash", "input": map[string]string{"command": "mkdir -p /mnt/session/outputs/sub" +
+			" && printf 'npv 42\\n' > /mnt/session/outputs/report.txt" +
+			" && head -c 300 /dev/urandom > /mnt/session/outputs/sub/model.bin"},
+	})
+	h.suspend(t, string(bash))
+	h.stepOnce(t)
+
+	h.seedOutcome(t, domain.OutcomeResultEvaluating)
+	h.enqueueHarvest(t)
+	h.stepOnce(t)
+
+	rows := h.fileRows(t)
+	if len(rows) != 2 || rows[0].filename != "report.txt" || rows[1].filename != "sub/model.bin" {
+		t.Fatalf("rows = %+v, want report.txt and sub/model.bin", rows)
+	}
+	sb, err := provider.Provision(context.Background(), sandbox.Spec{SessionID: h.sid, Image: testImage})
+	if err != nil {
+		t.Fatalf("adopt sandbox: %v", err)
+	}
+	for _, r := range rows {
+		want, err := sb.ReadFile(context.Background(), outputsDir+"/"+r.filename)
+		if err != nil {
+			t.Fatalf("read back %s: %v", r.filename, err)
+		}
+		if got := h.blobBytes(t, r.id); got != string(want) {
+			t.Errorf("%s: blob differs from the container's bytes (%d vs %d bytes)", r.filename, len(got), len(want))
+		}
+		if r.size != int64(len(want)) {
+			t.Errorf("%s: size = %d, want %d", r.filename, r.size, len(want))
+		}
+	}
+	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
+		t.Errorf("model_turn live = %d, want 1 (grading chained)", got)
+	}
+	if got := h.liveOf(t, queue.OutputsHarvest); got != 0 {
+		t.Errorf("outputs_harvest live = %d, want 0 (completed)", got)
 	}
 }
