@@ -766,3 +766,10 @@ dispatch cannot borrow the credential onto an unreviewed ref — and a break in 
 whole-session path therefore surfaces on the next scheduled run instead of at whoever's next
 manual one. That job carries the same fail-not-skip rule: with the secrets unset it is red,
 never green-and-silent, so it is red until a maintainer configures them.
+
+Beside the evals sits the top-level `acceptance/` suite (plan 21): the define-outcomes
+doc example driven end-to-end through the latest Go SDK. Its deterministic rehearsal —
+a scripted model standing in for the real one — runs in the merge gate like any other
+suite; the live variant (`TestLiveDefineOutcomesAcceptance`) points the same harness at
+a running compose stack and a real model, consented by `RUN_LIVE_MODEL_TESTS` with the
+`ACCEPTANCE_*` variables naming the stack's key, model, and base URL.

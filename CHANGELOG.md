@@ -15,6 +15,27 @@ copy of an entry here.
 
 ### Added
 
+- **The define-outcomes acceptance: the doc example as a suite, and the two fixes it
+  forced** ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 5, the archiving
+  PR). The top-level **`acceptance/`** package drives the reference doc's define-outcomes
+  example — upload rubric, create session, `user.define_outcome` (file-rubric and
+  text-rubric variants), mid-outcome `user.message`, poll `outcome_evaluations` to a
+  terminal result, list and download the deliverables — through anthropic-sdk-go
+  **v1.61.0** typed end to end (`assertNoExtras` on every echo, span, and resource along
+  the way). A deterministic scripted-model rehearsal joins the merge gate; the same
+  harness pointed at the compose stack and a real model is the live leg
+  (`TestLiveDefineOutcomesAcceptance`, consented by `RUN_LIVE_MODEL_TESTS` +
+  `ACCEPTANCE_*`; run record: docs/HISTORY.md). The live run forced two platform fixes.
+  (1) **Model-provider routes gain `max_tokens`** — the default output cap for turns
+  that set none themselves (request > route > adapter default; explicit zero rejected at
+  startup): the brain never sets `Request.MaxTokens`, so the anthropic adapter's 8192
+  fallback truncated a whole-file `write` tool call mid-JSON and the turn died
+  `model_request_failed_error`. (2) **The outcome charge now names the deliverables
+  contract** — "write your deliverable files under `/mnt/session/outputs/`": the harvest
+  walks only that directory, nothing told the agent, and the first live run graded
+  *satisfied* with zero collected files; the harness now fails any satisfied outcome
+  that harvested nothing (docs/DIVERGENCES.md's outcome-charge entry records the line as
+  ours).
 - **Outcome deliverables: the outputs harvest, and a grader that reads them**
   ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 4). The doc flow's last
   step — the agent writes to `/mnt/session/outputs/`, the caller fetches through

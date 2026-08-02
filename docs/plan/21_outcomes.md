@@ -1,9 +1,13 @@
 ---
-status: in-progress
+status: archived
 issue: "#77"
 ---
 
 # Session outcomes: `user.define_outcome`, the grader loop, and `outcome_evaluations` (plan 21)
+
+> **Archived 2026-08-03 — completed.** All five slices delivered (PRs #255, #257, #258,
+> #260, and the slice-5 acceptance PR); the progress summary and the acceptance-run
+> record are docs/HISTORY.md § "Outcomes plan (21)".
 
 The outcomes surface is the reference's "give the agent a goal and a rubric, and the
 platform grades the work" loop: a client sends one `user.define_outcome` event, the agent
