@@ -34,6 +34,22 @@
 
 resource "google_project_service" "required" {
   for_each = toset([
+    # Cloud Build is enabled HERE, not in environment/, even though nothing in
+    # this configuration builds anything. The project's default build identity
+    # cannot be LOOKED UP until the API is on — `gcloud builds
+    # get-default-service-account` answers SERVICE_DISABLED otherwise — and that
+    # account's email is a REQUIRED input to environment/
+    # (var.cloud_build_service_account). (Enabling the API also creates the
+    # legacy PROJECT_NUMBER@cloudbuild account on pre-2024-04-29 projects; on
+    # newer ones the default is the Compute Engine SA and the API only makes the
+    # lookup answer. Either way the lookup is the blocker.) If
+    # environment/ enabled it, the documented order could only read the value after
+    # the apply that needs it. Not a literal Terraform cycle — enabling the API by
+    # hand, or passing -var, gets you out — but every way out is off the documented
+    # path, which is the one a reproduce-from-clean acceptance walks. The foundation runs
+    # first and is never destroyed, so putting it here makes the documented order
+    # executable: apply foundation, read the account, then apply environment.
+    "cloudbuild.googleapis.com",
     "cloudkms.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
@@ -101,7 +117,15 @@ resource "google_kms_crypto_key" "cipher" {
 # The control plane encrypts on write and decrypts on read (mcp_oauth_validate
 # and the gate-config endpoint both call Decrypt), so it is the only identity
 # that needs the decrypt half.
+# The three identities. Each waits on the API enablement above: without that
+# dependency Terraform is free to create a service account concurrently with
+# enabling iam.googleapis.com, and on a project where IAM was never enabled the
+# create reaches a disabled API and the FIRST apply fails. A retry then succeeds,
+# because the failed run already enabled it — which is exactly the kind of
+# "works on the second try" that a reproduce-from-clean acceptance must not have.
 resource "google_service_account" "controlplane" {
+  depends_on = [google_project_service.required]
+
   account_id      = "${var.name_prefix}-controlplane"
   display_name    = "managed-agent-platform control plane"
   deletion_policy = "PREVENT"
@@ -116,6 +140,8 @@ resource "google_service_account" "controlplane" {
 # the gate-config endpoint. So the one KMS call this identity ever makes is the
 # startup probe's Encrypt.
 resource "google_service_account" "executor" {
+  depends_on = [google_project_service.required]
+
   account_id      = "${var.name_prefix}-executor"
   display_name    = "managed-agent-platform executor"
   deletion_policy = "PREVENT"
@@ -132,6 +158,8 @@ resource "google_service_account" "executor" {
 # GCS returns its secret exactly once and a Terraform resource holding it would
 # hold it in state.
 resource "google_service_account" "storage" {
+  depends_on = [google_project_service.required]
+
   account_id      = "${var.name_prefix}-storage"
   display_name    = "managed-agent-platform blob storage (GCS HMAC)"
   deletion_policy = "PREVENT"

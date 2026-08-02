@@ -68,14 +68,22 @@ copy of an entry here.
   `ok` over configuration it never looked at.
 
   **`cloud_build_service_account` is required, with no default.** Google changed Cloud
-  Build's default identity on 2024-04-29: projects whose first build predates it use the
-  legacy `PROJECT_NUMBER@cloudbuild.gserviceaccount.com`, and projects created after it use
-  the Compute Engine default service account. A configuration that guesses is wrong for half
+  Build's default identity in 2024, and the split is by FIRST BUILD rather than by project
+  creation date: a project whose first build predates the rollout keeps the legacy
+  `PROJECT_NUMBER@cloudbuild.gserviceaccount.com`, and everything else — an old project that
+  has never built included — gets the Compute Engine default service account. A configuration that guesses is wrong for half
   of all projects, and wrong in an expensive place — the grant lands on an account no build
   uses, and nothing surfaces until the first image push, by which point the apply has already
   created a GKE cluster and a Cloud SQL instance. Requiring it turns that into a plan-time
   prompt whose description carries `gcloud builds get-default-service-account`, with a
-  `validation` block that rejects anything which is not a service account email. The compute
+  `validation` block that rejects anything which is not a service account email. Enabling the
+  Cloud Build API is also what *creates* that account, so the API moved from `environment/`
+  to `foundation/`: left where it was, the only configuration that turns it on would have
+  been the one that cannot plan without the value, and a clean project had no way in.
+  `environment/` also gained `cloudtrace.googleapis.com` beside the `telemetry.googleapis.com`
+  it already enabled: the collector posts OTLP to the latter, but Google's prerequisites for
+  that exact recipe require the Cloud Trace API too, and enabling only one is the shape of
+  failure that passes every static check and then silently produces no traces. The compute
   default account keeps `artifactregistry.reader` for image pulls and is deliberately not
   widened to writer: that identity is what every node in the cluster runs as.
 

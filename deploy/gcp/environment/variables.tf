@@ -136,12 +136,20 @@ variable "cloud_build_service_account" {
 
         gcloud builds get-default-service-account --project YOUR_PROJECT
 
+    Run that AFTER `make gcp-foundation-apply`, not before: enabling the Cloud
+    Build API is what creates this account, and the foundation is what enables it.
+    On a project where the API has never been on, the command fails with
+    SERVICE_DISABLED rather than printing an account.
+
     REQUIRED, with no default, because every possible default is wrong for half
-    of all projects and wrong in an expensive place. Projects that ran their
-    first build before 2024-04-29 use the legacy
-    PROJECT_NUMBER@cloudbuild.gserviceaccount.com; projects created after it use
-    the Compute Engine default service account,
-    PROJECT_NUMBER-compute@developer.gserviceaccount.com. Guessing grants writer
+    of all projects and wrong in an expensive place. The split is by FIRST BUILD,
+    not by project creation date: a project whose first build ran before Google's
+    2024 rollout keeps the legacy
+    PROJECT_NUMBER@cloudbuild.gserviceaccount.com, and everything else gets the
+    Compute Engine default service account,
+    PROJECT_NUMBER-compute@developer.gserviceaccount.com. An old project that has
+    never built lands on the new default, which is why "how old is the project"
+    is not a question you can answer this with. Guessing grants writer
     to an account no build uses, and nothing surfaces until the first image
     push — by which time the apply has already created a cluster and a database.
     A required variable turns that into a prompt with the command above in it.
@@ -151,7 +159,7 @@ variable "cloud_build_service_account" {
   EOT
 
   validation {
-    condition     = can(regex("^[^@ ]+@[^@ ]+\\.(iam\\.)?gserviceaccount\\.com$", var.cloud_build_service_account))
+    condition     = can(regex("^[^@ /]+@[^@ /]+\\.(iam\\.)?gserviceaccount\\.com$", var.cloud_build_service_account))
     error_message = "Must be a service account email, e.g. 123456789@cloudbuild.gserviceaccount.com or 123456789-compute@developer.gserviceaccount.com. `gcloud builds get-default-service-account` prints it prefixed with `projects/.../serviceAccounts/` — pass only the email."
   }
 }

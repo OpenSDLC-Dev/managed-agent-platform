@@ -52,12 +52,26 @@ locals {
 resource "google_project_service" "required" {
   for_each = toset([
     "artifactregistry.googleapis.com",
-    "cloudbuild.googleapis.com",
+    # cloudbuild.googleapis.com is deliberately NOT here — the foundation enables
+    # it, because var.cloud_build_service_account cannot be read until it is on.
     "container.googleapis.com",
     "sqladmin.googleapis.com",
     "storage.googleapis.com",
     # The acceptance ships traces to Cloud Trace through an in-cluster OTel
-    # Collector (plan 20, Decision 5).
+    # Collector (plan 20, Decision 5). telemetry.googleapis.com is Google's OTLP
+    # ingest service and is the endpoint Decision 5's collector posts to; whether
+    # cloudtrace.googleapis.com is additionally REQUIRED or merely the alternative
+    # ingest path for the googlecloud exporter is a question two reviewers answered
+    # differently, and the docs can be read both ways. Both are enabled because the
+    # cost of an unnecessary enablement is nothing and the cost of the missing one
+    # is an acceptance criterion — "traces are visible in Cloud Trace" — failing
+    # after every static check passed. Slice 4b settles which it was.
+    #
+    # The collector's own IAM grant (roles/telemetry.tracesWriter, or
+    # roles/cloudtrace.agent) is NOT here: the chart ships no collector — it has
+    # an otlpEndpoint value and nothing to point it at — so the identity to bind
+    # does not exist until slice 4b deploys one.
+    "cloudtrace.googleapis.com",
     "telemetry.googleapis.com",
   ])
   service            = each.value
