@@ -425,8 +425,9 @@ copy of an entry here.
   kind network's gateway and its own built-in cluster alike. That reorder is the one place
   macOS behaviour does change, and in its favour: a `kind-` context there skipped the
   `host.docker.internal` branch for the gateway one and had to be given
-  `MAP_K8S_HOST_ADDR=host.docker.internal` by hand — the workaround docs/HISTORY.md's plan-12
-  acceptance record still prescribes — where it now reaches that same value on its own, the
+  `MAP_K8S_HOST_ADDR=host.docker.internal` by hand — the workaround docs/HISTORY.md's #71
+  review-hardening record still prescribes under "Reproducing the acceptance on macOS" — where
+  it now reaches that same value on its own, the
   override left correct but no longer required. Read off the branch order rather than
   measured: no macOS host was available. Verified end to end on Windows 11 / WSL2 Ubuntu
   24.04 / Docker Desktop 4.75.0 (engine 29.5.2) with a kind cluster: the three packages above

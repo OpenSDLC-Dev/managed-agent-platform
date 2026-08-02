@@ -118,7 +118,12 @@ func DockerDesktop(t *testing.T) bool {
 // outboundAddr is this host's IPv4 address on the route out — the one a
 // container in another namespace can address it by. The UDP "dial" sends
 // nothing; it only asks the kernel which local address that route would use,
-// so it needs no reachable destination.
+// so it needs no reachable destination. A source-address heuristic, not a
+// reachability proof: a VPN or a host with several default routes can pick an
+// address the VM cannot reach. The rows then fail loudly rather than passing
+// for the wrong reason — the gate rows poll for a proxied 200 and the firewall
+// test asserts a gate-uid dial succeeds — and MAP_DOCKER_HOST_ADDR is the way
+// out.
 func outboundAddr(t *testing.T) string {
 	t.Helper()
 	c, err := net.Dial("udp4", "192.0.2.1:9")

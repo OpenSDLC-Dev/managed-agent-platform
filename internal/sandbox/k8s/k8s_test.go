@@ -177,7 +177,8 @@ func loadGateImage(t *testing.T, kubeCtx, image string) {
 // when the daemon is Docker Desktop (its VM holds the cluster either way), the
 // kind docker network's IPv4 gateway for a local daemon (a kind node routes to
 // the host through it), else host.docker.internal. MAP_K8S_HOST_ADDR overrides
-// all three for anything else.
+// all three for anything else; on Desktop the delegated fixture honours its own
+// MAP_DOCKER_HOST_ADDR too, MAP_K8S_HOST_ADDR winning when both are set.
 func k8sHostAddr(t *testing.T, kubeCtx string) string {
 	t.Helper()
 	if addr := os.Getenv("MAP_K8S_HOST_ADDR"); addr != "" {
