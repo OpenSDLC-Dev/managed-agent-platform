@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -45,14 +46,22 @@ func newPoolWithKey(t *testing.T) *pgxpool.Pool {
 
 func newTestServer(t *testing.T) *tserver {
 	t.Helper()
-	pool := newPoolWithKey(t)
-	blobs := blobtest.Mem()
 	// A real (local AES-GCM) cipher under a fixed test key, so the vault
 	// credential routes exercise the sealed-secret path end to end.
 	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
 	if err != nil {
 		t.Fatalf("local.New: %v", err)
 	}
+	return newTestServerWithCipher(t, cipher)
+}
+
+// newTestServerWithCipher is newTestServer with the cipher chosen by the
+// caller — for the one test that must show the SAME request answered
+// differently by two ciphers behind the one interface.
+func newTestServerWithCipher(t *testing.T, cipher secrets.Cipher) *tserver {
+	t.Helper()
+	pool := newPoolWithKey(t)
+	blobs := blobtest.Mem()
 	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher))
 	t.Cleanup(srv.Close)
 	return &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs}

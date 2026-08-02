@@ -114,7 +114,7 @@ and the processes serve with vault credential storage unavailable instead of
 crash-looping.
 */}}
 {{- define "map.secretsEnv" -}}
-{{- range $var, $key := dict "SECRETS_BACKEND" "secrets-backend" "BAO_ADDR" "bao-addr" "BAO_TOKEN" "bao-token" "BAO_TRANSIT_KEY" "bao-transit-key" "SECRETS_MASTER_KEY" "secrets-master-key" "SECRETS_KEY_ID" "secrets-key-id" }}
+{{- range $var, $key := dict "SECRETS_BACKEND" "secrets-backend" "BAO_ADDR" "bao-addr" "BAO_TOKEN" "bao-token" "BAO_TRANSIT_KEY" "bao-transit-key" "SECRETS_MASTER_KEY" "secrets-master-key" "SECRETS_KEY_ID" "secrets-key-id" "GCPKMS_KEY_NAME" "gcpkms-key-name" }}
 - name: {{ $var }}
   valueFrom:
     secretKeyRef:

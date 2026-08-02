@@ -28,6 +28,17 @@ otlp:
 controlplane:
   apiKey: ""
   replicas: 1
+  # -- Annotations for this component's Kubernetes ServiceAccount. The reason
+  # this exists is GKE Workload Identity, which is an annotation and nothing
+  # else: `iam.gke.io/gcp-service-account: NAME@PROJECT.iam.gserviceaccount.com`
+  # binds this pod's identity to a Google service account, and that is how the
+  # gcpKMS cipher authenticates without any key material in the Secret.
+  #
+  # The control plane encrypts on write and decrypts for mcp_oauth_validate, so
+  # its identity needs roles/cloudkms.cryptoKeyEncrypterDecrypter on the key.
+  # (The executor needs less — see its own serviceAccount block.)
+  serviceAccount:
+    annotations: {}
   service:
     type: ClusterIP
     port: 8080
@@ -71,6 +82,21 @@ brain:
 
 executor:
   replicas: 1
+  # -- Annotations for this component's Kubernetes ServiceAccount. The reason
+  # this exists is GKE Workload Identity, which is an annotation and nothing
+  # else: `iam.gke.io/gcp-service-account: NAME@PROJECT.iam.gserviceaccount.com`
+  # binds this pod's identity to a Google service account, and that is how the
+  # gcpKMS cipher authenticates without any key material in the Secret.
+  #
+  # The executor constructs the cipher ONLY to fail fast on a misconfigured
+  # backend — egress substitution decrypts control-plane side, at the
+  # gate-config endpoint, never here — so the one KMS call it ever makes is the
+  # startup probe's encrypt, and roles/cloudkms.cryptoKeyEncrypter is enough.
+  # Pointing both components at one Google service account holding
+  # EncrypterDecrypter is simpler and is what the chart README's example does;
+  # two accounts is the least-privilege shape.
+  serviceAccount:
+    annotations: {}
   leaseTTL: ""       # EXECUTOR_LEASE_TTL, e.g. "15m"; empty uses the binary default
   pollInterval: ""   # EXECUTOR_POLL_INTERVAL, e.g. "500ms"; empty uses the binary default
   # -- Base image for the per-session sandbox pods the executor launches.
@@ -292,12 +318,44 @@ localCipher:
   masterKey: ""
   keyId: local-1
 
+# -- Google Cloud KMS as the credential cipher — the production shape on GCP, and
+# the fourth mutually-exclusive option beside the bundled OpenBao, an external
+# OpenBao/Vault, and localCipher. Setting keyName selects it, and lets a GCP
+# deployment turn the OpenBao StatefulSet off entirely: KMS needs a key resource
+# name and nothing else, because authentication is Workload Identity rather than
+# a token the chart would have to carry.
+#
+# The name is the full CryptoKey resource name,
+# projects/P/locations/L/keyRings/R/cryptoKeys/K — a CryptoKey, not one of its
+# versions, which the executor and control plane refuse at startup: Encrypt
+# accepts a version name where Decrypt does not, so a deployment configured with
+# one would seal credentials it could never unseal.
+#
+# It rides the chart Secret for uniformity with its siblings, not for
+# confidentiality: a key resource name is not secret. What IS required and is
+# NOT expressed here is the IAM half — the Kubernetes ServiceAccounts below must
+# be bound to a Google service account holding
+# roles/cloudkms.cryptoKeyEncrypterDecrypter on this key. See
+# controlplane.serviceAccount.annotations and executor.serviceAccount.annotations.
+#
+# One behavioural consequence worth knowing before choosing it: Cloud KMS's raw
+# Encrypt bounds plaintext where OpenBao's transit engine does not, so a vault
+# credential whose sealed secrets exceed the bound is refused with a 400 naming
+# the limit where another cipher would have stored it (docs/DIVERGENCES.md). The
+# bound depends on the key — 65536 bytes for a software-protected one, 8192 for
+# an HSM one — and the platform reads it from the key at startup, since a
+# resource name does not say which you have. Real credential material sits orders
+# of magnitude below either.
+gcpKMS:
+  keyName: ""
+
 # -- Reference a pre-created Secret instead of letting the chart create one. When
 # set, the chart creates NO Secret and every process reads credentials from this
 # one, which must carry keys: controlplane-api-key, model-providers.json,
 # database-url (plus the blob-* keys if object storage is in use, and the
-# secrets-backend/bao-*/secrets-* keys if a credential cipher is in use — see
-# templates/_helpers.tpl map.secretsEnv). Incompatible with postgresql.enabled,
+# secrets-backend key if a credential cipher is in use, plus that backend's own:
+# bao-* for OpenBao, secrets-* for the local cipher, gcpkms-key-name for Cloud
+# KMS — see templates/_helpers.tpl map.secretsEnv). Incompatible with postgresql.enabled,
 # minio.enabled, and openbao.enabled (bring your own backing services in this
 # mode) — the chart fails the render otherwise.
 existingSecret: ""

@@ -5,11 +5,28 @@
 // contract suite — internal/secrets/secretstest). Postgres stays the canonical
 // store — callers persist the ciphertext and key id next to the resource row;
 // this package only transforms bytes. The production backend is OpenBao's
-// transit engine (internal/secrets/openbao); internal/secrets/local is the
-// AES-256-GCM fallback for tests and minimal deployments.
+// transit engine (internal/secrets/openbao); internal/secrets/gcpkms is the
+// Cloud KMS backend a GCP deployment uses instead, and internal/secrets/local
+// is the AES-256-GCM fallback for tests and minimal deployments.
+//
+// This package holds the interface and the errors backends wrap, so it imports
+// none of them: selecting one from the environment is internal/secrets/backend,
+// a sibling for the same structural reason internal/sandbox/backend is one.
 package secrets
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrPlaintextTooLarge reports material a cipher cannot seal because its
+// encryption service bounds the input. Not every backend has such a bound —
+// local and openbao seal any size — so this is a contract for the ones that
+// do: they wrap it, and a caller turning a Cipher failure into a response
+// classifies it as the caller's error rather than the server's. Without that,
+// the refusal reaches the client as a generic 500 and the useful message lives
+// only in the server's log (docs/plan/20_gcp-deployment.md, Decision 3).
+var ErrPlaintextTooLarge = errors.New("secrets: plaintext is too large for this cipher")
 
 // Cipher encrypts and decrypts vault secret material. Implementations must
 // bind each ciphertext to the key that produced it: Decrypt with a keyID the

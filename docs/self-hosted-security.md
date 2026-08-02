@@ -480,8 +480,9 @@ The vaults feature ([#50](https://github.com/OpenSDLC-Dev/managed-agent-platform
 docs/plan/12_vaults-credentials.md — landing incrementally, cipher and deployment
 first) encrypts vault credential material through `internal/secrets`: ciphertext
 lives in Postgres, but the key that decrypts it lives **outside** — in your
-OpenBao/Vault's own storage (`SECRETS_BACKEND=openbao`, the transit engine) or in
-the `SECRETS_MASTER_KEY` you configured (`SECRETS_BACKEND=local`). That split is
+OpenBao/Vault's own storage (`SECRETS_BACKEND=openbao`, the transit engine), in
+Cloud KMS (`SECRETS_BACKEND=gcpkms`, where it never leaves the service at all), or
+in the `SECRETS_MASTER_KEY` you configured (`SECRETS_BACKEND=local`). That split is
 the point — a Postgres dump alone cannot leak secrets — and it is also a
 restore-ordering constraint you own:
 
@@ -501,6 +502,25 @@ restore-ordering constraint you own:
   data PVC) — a documented dev-grade convenience. Production points
   `externalOpenBao` / `BAO_ADDR` at an instance whose unseal and audit story you
   run yourself.
+- **Under `gcpkms` the pairing is the same shape with a sharper edge.** There is
+  no key material to back up and none in the release — authentication is Workload
+  Identity, and the CryptoKey resource name is not a secret — but what replaces
+  a lost key file is a lost key *version*, and the two failure modes are not the
+  same. **Disabling** a CryptoKeyVersion is a reversible outage: decryption fails
+  until you re-enable it. **Destroying** one is not — after the
+  scheduled-destruction window elapses the version reaches `DESTROYED`, its key
+  material is gone, and every credential sealed under it is unrecoverable. Note
+  what the boundary is NOT: Cloud KMS does not let you delete a key ring or a
+  CryptoKey at all, so no `terraform destroy` can take them; only a version
+  destruction can, which is why the scheduled-destruction window is the thing to
+  watch and why the key belongs **outside** the lifecycle of anything you rebuild
+  routinely. One
+  behavioural consequence to know before choosing it: KMS's raw `Encrypt` bounds
+  plaintext where OpenBao's transit engine does not, so a credential whose sealed
+  secrets exceed the bound is refused with a `400` naming the limit rather than
+  stored (docs/DIVERGENCES.md). The bound is the key's, not a constant — 65536
+  bytes for a software-protected key and 8192 for an HSM one — and the platform
+  reads it from the key at startup.
 
 ### Host and runtime isolation
 

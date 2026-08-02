@@ -213,7 +213,7 @@ func (s *server) validateVaultCredential(r *http.Request) (any, error) {
 			}
 			ciphertext, keyID, err := s.cipher.Encrypt(ctx, sealed)
 			if err != nil {
-				return nil, fmt.Errorf("seal refreshed secrets: %w", err)
+				return nil, resealFailed(err)
 			}
 			newAuthDoc, err := json.Marshal(doc)
 			if err != nil {

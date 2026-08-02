@@ -14,15 +14,19 @@
 //	BLOB_REGION           optional bucket region
 //	BLOB_TLS              "true" for https to the endpoint (default plain)
 //	SECRETS_BACKEND       secrets cipher for vault credential material
-//	                      (docs/plan/12): "openbao", "local", or empty to
-//	                      deploy without one (vault credential storage
-//	                      reports it)
+//	                      (docs/plan/12): "openbao", "local", "gcpkms", or
+//	                      empty to deploy without one (vault credential
+//	                      storage reports it)
 //	BAO_ADDR / BAO_TOKEN  OpenBao transit endpoint and token, required with
 //	                      SECRETS_BACKEND=openbao
 //	BAO_TRANSIT_KEY       transit key name (default "map-secrets")
 //	SECRETS_MASTER_KEY    base64 32-byte key, required with SECRETS_BACKEND=local
 //	SECRETS_KEY_ID        key id stored beside local-cipher ciphertext
 //	                      (default "local-1")
+//	GCPKMS_KEY_NAME       Cloud KMS CryptoKey resource name, required with
+//	                      SECRETS_BACKEND=gcpkms. No credential accompanies
+//	                      it: authentication is Application Default
+//	                      Credentials (Workload Identity on GKE)
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
 //	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
 //
@@ -53,7 +57,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
@@ -135,7 +139,7 @@ func run(ctx context.Context) error {
 	// than on the first credential write. The vaults API consumes it to seal
 	// credential secrets; without one, the secret-bearing routes report the
 	// absence and everything else serves.
-	cipher, err := secrets.FromEnv(ctx)
+	cipher, err := backend.FromEnv(ctx)
 	if err != nil {
 		return err
 	}

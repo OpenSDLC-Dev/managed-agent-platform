@@ -6,7 +6,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 **[docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) (in-progress)** — the
 Google Cloud production-deployment plan, authored and approved 2026-08-01 from GCP probes
-run the same day. Slice 2 is split into three sub-PRs, one per deliverable.
+run the same day. Slices 1 and 2 have landed; slice 3 is the Cloud KMS cipher.
 
 ## Tasks
 
@@ -15,7 +15,7 @@ run the same day. Slice 2 is split into three sub-PRs, one per deliverable.
 - [x] Slice 2 — sandbox pod placement and bounds:
   - [x] 2a — `seccompProfile: RuntimeDefault`, pod-level and unconditional
   - [x] 2b — opt-in `SANDBOX_EPHEMERAL_STORAGE_BYTES` disk cap + chart knob
-  - [x] 2c — node selection and tolerations, parsed and fail-closed (this PR)
-- [ ] Slice 3 — `internal/secrets/gcpkms` cipher + size guard + chart knob + `cmd/` wiring
+  - [x] 2c — node selection and tolerations, parsed and fail-closed
+- [x] Slice 3 — `internal/secrets/gcpkms` cipher + size guard + chart knob + `cmd/` wiring (this PR)
 - [ ] Slice 4 — staging environment (`deploy/gcp/`) + mode-1 acceptance on GKE
 - [ ] Slice 5 — mode-2 acceptance + `docs/deploy-gcp.md`

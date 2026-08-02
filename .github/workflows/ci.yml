@@ -247,6 +247,85 @@ jobs:
             echo "expected the openbao-vs-localCipher ambiguity guard to fail the render" >&2; exit 1
           fi
           echo "ok: cipher paths (positive and guards)"
+      - name: gcpkms cipher path renders (and its guards fire)
+        run: |
+          KEY=projects/p/locations/global/keyRings/r/cryptoKeys/k
+          out="$(helm template t "$CHART" -f "$VALUES" \
+            --set openbao.enabled=false --set "gcpKMS.keyName=$KEY")"
+          # The value is base64 in the Secret, so decode it: a substring check
+          # against the encoded blob would pass on a truncated or re-encoded
+          # name, which is precisely the failure that would strand every
+          # credential write behind a key the service does not hold.
+          got="$(echo "$out" | awk '/^  gcpkms-key-name:/ { gsub(/"/, "", $2); print $2 }' | base64 -d)"
+          [ "$got" = "$KEY" ] \
+            || { echo "gcpkms-key-name decoded to '${got:-<none>}', want '$KEY'" >&2; exit 1; }
+          echo "$out" | grep -q 'secrets-backend: "Z2Nwa21z"' \
+            || { echo "expected secrets-backend to be gcpkms (base64 Z2Nwa21z)" >&2; exit 1; }
+          # Both processes that hold the cipher must receive the name, and must
+          # read it from the Secret key the Secret actually writes. Asserting
+          # only that the env var exists would pass a secretKeyRef pointing at a
+          # key nothing renders — the variable would simply arrive unset
+          # (optional: true) and the process would run cipher-less, silently.
+          # So the assertion is the env NAME and its KEY together.
+          for t in controlplane executor; do
+            rendered="$(helm template t "$CHART" -f "$VALUES" --set openbao.enabled=false \
+              --set "gcpKMS.keyName=$KEY" --show-only "templates/$t-deployment.yaml")"
+            echo "$rendered" | grep -A4 'name: GCPKMS_KEY_NAME' | grep -q 'key: gcpkms-key-name' \
+              || { echo "$t does not read GCPKMS_KEY_NAME from the gcpkms-key-name Secret key" >&2
+                   echo "$rendered" | grep -A4 'name: GCPKMS_KEY_NAME' >&2; exit 1; }
+          done
+          # The brain holds no cipher, so it must receive neither the name nor a
+          # ServiceAccount that could be annotated into holding the identity.
+          brain="$(helm template t "$CHART" -f "$VALUES" --set openbao.enabled=false \
+            --set "gcpKMS.keyName=$KEY" --show-only templates/brain-deployment.yaml)"
+          echo "$brain" | grep -qE 'GCPKMS_KEY_NAME|serviceAccountName' \
+            && { echo "the brain must hold neither the KMS key name nor a ServiceAccount" >&2; exit 1; }
+          # Workload Identity is an annotation and nothing else, so a chart that
+          # silently dropped it would leave ADC with no identity and every
+          # credential write failing at runtime with nothing rendered to blame.
+          for t in controlplane executor; do
+            tpl=templates/controlplane-serviceaccount.yaml
+            [ "$t" = executor ] && tpl=templates/executor-rbac.yaml
+            helm template t "$CHART" -f "$VALUES" \
+              --set "$t.serviceAccount.annotations.iam\.gke\.io/gcp-service-account=map@p.iam.gserviceaccount.com" \
+              --show-only "$tpl" \
+              | grep -q 'iam.gke.io/gcp-service-account: map@p.iam.gserviceaccount.com' \
+              || { echo "the $t ServiceAccount dropped its annotations" >&2; exit 1; }
+          done
+          # An annotated ServiceAccount the Deployment does not USE grants
+          # nothing, and that mismatch renders perfectly: assert the binding
+          # between the two, not just that each exists.
+          for t in controlplane executor; do
+            sa="$(helm template t "$CHART" -f "$VALUES" --show-only "templates/$t-deployment.yaml" \
+              | awk '$1 == "serviceAccountName:" { print $2; exit }')"
+            [ "$sa" = "t-managed-agent-platform-$t" ] \
+              || { echo "$t Deployment serviceAccountName is '${sa:-<none>}', want t-managed-agent-platform-$t" >&2; exit 1; }
+          done
+          # A CryptoKeyVersion is the expensive typo: Encrypt accepts one and
+          # Decrypt refuses it, so a release configured with one seals
+          # credentials it can never unseal. Refused at render, not at runtime.
+          # The same rows internal/secrets/gcpkms's
+          # TestTheChartAndTheCipherAgreeOnKeyNames feeds to the real
+          # constructor, so the template's expression and the executor's cannot
+          # drift apart unnoticed. The last two are Cloud KMS's own id syntax
+          # for the ring and key segments (`[a-zA-Z0-9_-]{1,63}`).
+          for bad in \
+            "$KEY/cryptoKeyVersions/1" \
+            projects/p/locations/global/keyRings/r \
+            my-key \
+            'projects/p/locations/global/keyRings/has space/cryptoKeys/k' \
+            projects/p/locations/global/keyRings/r/cryptoKeys/has.dot; do
+            if helm template t "$CHART" -f "$VALUES" --set openbao.enabled=false \
+                 --set "gcpKMS.keyName=$bad" >/dev/null 2>&1; then
+              echo "gcpKMS.keyName='$bad' rendered instead of failing" >&2; exit 1
+            fi
+          done
+          # Two ciphers at once is ambiguous; the bundled OpenBao is on by
+          # default, so this is the mistake a GCP operator actually makes.
+          if helm template t "$CHART" -f "$VALUES" --set "gcpKMS.keyName=$KEY" >/dev/null 2>&1; then
+            echo "gcpKMS.keyName alongside the bundled OpenBao rendered instead of failing" >&2; exit 1
+          fi
+          echo "ok: gcpkms cipher path"
       - name: bundled MinIO gates readiness on its object layer
         # Both assertions read rendered `path:` keys rather than grepping the
         # template for a substring: a substring match also reads the comment

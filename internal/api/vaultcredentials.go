@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -34,6 +35,44 @@ type credentialJSON struct {
 // metadata CRUD stays available.
 var errSecretsUnavailable = &apiError{http.StatusInternalServerError, errTypeAPI,
 	"a secrets cipher is not configured on this deployment; vault credential secrets are unavailable"}
+
+// sealFailed classifies a Cipher.Encrypt failure on a credential write.
+//
+// Most such failures are the deployment's — an unreachable OpenBao, a revoked
+// token — and stay a 500. One is the caller's: a cipher that bounds plaintext
+// size refuses material this API itself would have accepted, since maxBodyBytes
+// admits 4 MiB and no credential secret field carries a length bound of its
+// own. Today that is gcpkms, where Cloud KMS's Encrypt stops at the ceiling the
+// key's protection level implies — 64 KiB, or 8 KiB on an HSM key
+// (docs/plan/20_gcp-deployment.md, Decision 3, and the DIVERGENCES entry).
+//
+// Left unclassified it would render as a generic api_error 500 whose useful
+// text — the size and the limit — appears only in the server's log, telling the
+// one person who could shorten the value nothing at all. The sentinel is the
+// seam's, not the backend's, so a second bounded cipher inherits this.
+func sealFailed(err error) error {
+	if errors.Is(err, secrets.ErrPlaintextTooLarge) {
+		return errInvalid("cannot seal the credential's secrets: %s", err)
+	}
+	return fmt.Errorf("seal credential secrets: %w", err)
+}
+
+// resealFailed is sealFailed for material an OAuth refresh returned rather than
+// material the caller sent (mcp_oauth_validate's persist of rotated tokens).
+//
+// The classification is deliberately the same. A 4xx is an imperfect fit — the
+// caller's request was fine, and they cannot shorten a token they never supplied
+// — but the alternative is the generic 500, which tells them nothing at all, and
+// there IS an action the answer enables: this credential cannot live under this
+// deployment's cipher, so it needs a different key or a different backend. So
+// the status is shared and the message says where the oversize material came
+// from, rather than implying the request carried it.
+func resealFailed(err error) error {
+	if errors.Is(err, secrets.ErrPlaintextTooLarge) {
+		return errInvalid("cannot seal the tokens the credential's token endpoint returned: %s", err)
+	}
+	return fmt.Errorf("seal refreshed secrets: %w", err)
+}
 
 func renderCredential(id, vaultID string, displayName *string, auth []byte,
 	metadata map[string]string, createdAt, updatedAt time.Time, archivedAt *time.Time) credentialJSON {
@@ -100,7 +139,7 @@ func (s *server) createVaultCredential(r *http.Request) (any, error) {
 	}
 	ciphertext, keyID, err := s.cipher.Encrypt(ctx, sealed)
 	if err != nil {
-		return nil, fmt.Errorf("seal credential secrets: %w", err)
+		return nil, sealFailed(err)
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -361,7 +400,7 @@ func (s *server) resealCredAuth(ctx context.Context, raw json.RawMessage, base *
 	}
 	ciphertext, keyID, err := s.cipher.Encrypt(ctx, sealed)
 	if err != nil {
-		return nil, fmt.Errorf("seal credential secrets: %w", err)
+		return nil, sealFailed(err)
 	}
 	return &credAuthReseal{doc: newDoc, ciphertext: ciphertext, keyID: keyID, baseCiphertext: base.ciphertext}, nil
 }
