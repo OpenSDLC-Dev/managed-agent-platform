@@ -126,8 +126,12 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// rubric-sized file — DB-backed like the tool-result cross-checks. An
 	// interrupt in the same batch settles the active outcome first (its case
 	// below), which is the documented way to chain a new outcome, so it
-	// clears the stored-entry half of the check.
-	if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), newEvents, hasInterrupt); err != nil {
+	// clears the stored-entry half of the check — but only when the interrupt
+	// can actually settle (idle or running): the waiver shares the settling
+	// case's own guard rather than silently depending on it.
+	interruptCanSettle := hasInterrupt &&
+		(status == string(domain.SessionIdle) || status == string(domain.SessionRunning))
+	if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), newEvents, interruptCanSettle); err != nil {
 		return nil, errInvalid("%s", err)
 	}
 	defs, err := events.DefineOutcomes(newEvents)

@@ -1,12 +1,15 @@
 package brain
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 func ev(seq int64, typ domain.EventType, body string) domain.Event {
@@ -267,4 +270,39 @@ func TestDefineOutcomeChainsMidTurn(t *testing.T) {
 	if !slices.Contains(pendingInputTypes, string(domain.EventUserDefineOutcome)) {
 		t.Errorf("pendingInputTypes = %v, want user.define_outcome included", pendingInputTypes)
 	}
+}
+
+func TestPendingInputChainsDefineOutcome(t *testing.T) {
+	// The DB contract behind mid-turn chaining: an unprocessed
+	// user.define_outcome past the watermark reports pending input; at or
+	// before the watermark (or once processed) it does not.
+	pool := pgtest.NewPool(t)
+	sid, _ := pgtest.NewSession(t, pool, "cloud")
+	log := events.NewLog(pool)
+	appended, err := log.Append(context.Background(), sid, []events.NewEvent{{
+		Type:    domain.EventUserDefineOutcome,
+		Payload: []byte(`{"description":"d","rubric":{"type":"text","content":"r"},"max_iterations":3,"outcome_id":"outc_1"}`),
+	}})
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	seq := appended[0].Seq
+
+	check := func(watermark int64, want bool) {
+		t.Helper()
+		tx, err := pool.Begin(context.Background())
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(context.Background())
+		got, err := pendingInput(context.Background(), tx, sid, watermark)
+		if err != nil {
+			t.Fatalf("pendingInput: %v", err)
+		}
+		if got != want {
+			t.Errorf("pendingInput(watermark=%d) = %v, want %v", watermark, got, want)
+		}
+	}
+	check(seq-1, true) // unprocessed define_outcome past the watermark chains
+	check(seq, false)  // at the watermark: already consumed by this turn
 }

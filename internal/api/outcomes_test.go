@@ -116,6 +116,9 @@ func TestDefineOutcomeSingleActive(t *testing.T) {
 	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events",
 		map[string]any{"events": []any{defineOutcome("second", nil)}})
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := res["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "is still pending") {
+		t.Errorf("stored-entry message = %q, want the still-pending wording (the stored branch, not the batch one)", msg)
+	}
 
 	// Two in one batch, on a FRESH session so the batch rule itself is pinned
 	// (not shadowed by the stored-entry rule the case above exercises).
@@ -137,6 +140,11 @@ func TestDefineOutcomeTextRubricCap(t *testing.T) {
 			"rubric": map[string]any{"type": "text", "content": strings.Repeat("x", 262145)},
 		})}})
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	// Exactly at the cap (rune-counted) is accepted.
+	sendEvents(t, s, sid, defineOutcome("d", map[string]any{
+		"rubric": map[string]any{"type": "text", "content": strings.Repeat("界", 262144)},
+	}))
 }
 
 func TestOutcomeEvaluationsOnListEndpoint(t *testing.T) {
@@ -259,6 +267,12 @@ func TestDefineOutcomeFileRubricRejections(t *testing.T) {
 			"rubric": map[string]any{"type": "file", "file_id": up["id"].(string)},
 		})}})
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	// Exactly at the byte cap is accepted.
+	atCap := s.uploadFile(t, "cap.md", nil, strings.Repeat("x", 256*1024))
+	sendEvents(t, s, sid, defineOutcome("d", map[string]any{
+		"rubric": map[string]any{"type": "file", "file_id": atCap["id"].(string)},
+	}))
 }
 
 // --- initial_events on POST /v1/sessions (absorbing #161) ---
@@ -349,9 +363,24 @@ func TestCreateSessionInitialEventsRejections(t *testing.T) {
 	status, res = create(many)
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 
+	// More than 100 file-sourced document blocks across the list.
+	blocks := make([]any, 101)
+	for i := range blocks {
+		blocks[i] = map[string]any{"type": "document",
+			"source": map[string]any{"type": "file", "file_id": "file_0123456789abcdefghjkmnpq"}}
+	}
+	status, res = create([]any{map[string]any{"type": "user.message", "content": blocks}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
 	// An empty list creates an ordinary idle session with no events.
 	status, res = create([]any{})
 	if status != http.StatusOK || res["status"] != "idle" {
 		t.Fatalf("empty initial_events: status %d session status %v, want 200/idle", status, res["status"])
+	}
+
+	// The SDK content union's plain-string form is accepted and echoed.
+	status, res = create([]any{map[string]any{"type": "user.message", "content": "plain string"}})
+	if status != http.StatusOK || res["status"] != "running" {
+		t.Fatalf("string-content initial event: status %d session %v, want 200/running", status, res["status"])
 	}
 }

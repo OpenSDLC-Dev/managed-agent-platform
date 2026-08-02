@@ -366,6 +366,13 @@ func parseInitialEvents(obj map[string]json.RawMessage) ([]json.RawMessage, erro
 	}
 	defineOutcomes, fileDocs := 0, 0
 	for i, item := range items {
+		var head struct {
+			Type    string          `json:"type"`
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(item, &head); err != nil {
+			return nil, errInvalid("initial_events[%d] must be an event object", i)
+		}
 		var probe struct {
 			Type    string `json:"type"`
 			Content []struct {
@@ -375,9 +382,10 @@ func parseInitialEvents(obj map[string]json.RawMessage) ([]json.RawMessage, erro
 				} `json:"source"`
 			} `json:"content"`
 		}
-		if err := json.Unmarshal(item, &probe); err != nil {
-			return nil, errInvalid("initial_events[%d] must be an event object", i)
-		}
+		// Best-effort: the count only matters for a well-formed block array;
+		// a string or malformed content is NormalizeInbound's to judge.
+		_ = json.Unmarshal(item, &probe)
+		probe.Type = head.Type
 		switch probe.Type {
 		case string(domain.EventUserMessage):
 			for _, b := range probe.Content {

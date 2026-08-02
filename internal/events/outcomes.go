@@ -193,6 +193,7 @@ func InterruptOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID) ([]N
 // FlipNonTerminalOutcomes is the MutateOutcomes half of an interrupt: every
 // non-terminal entry goes terminal as interrupted, completed_at stamped now.
 func FlipNonTerminalOutcomes(now time.Time) func([]domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+	now = now.UTC() // completed_at is wire-visible; never render a local offset
 	return func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
 		for i := range evals {
 			if !domain.OutcomeResultTerminal(evals[i].Result) {

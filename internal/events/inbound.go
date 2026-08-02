@@ -153,6 +153,15 @@ func normalizeUserMessage(obj map[string]json.RawMessage) (NewEvent, error) {
 	if err := allowKeys(obj, "type", "content"); err != nil {
 		return NewEvent{}, err
 	}
+	// The SDK's content union accepts a plain string alongside the block
+	// array (OfString); it is stored verbatim so the echo round-trips, and
+	// replay already renders the string form.
+	if raw, ok := obj["content"]; ok && !isNullRaw(raw) {
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			return newEvent(domain.EventUserMessage, fields{"content": raw})
+		}
+	}
 	content, err := requireBlocks(obj, "content", blocksUserMessage)
 	if err != nil {
 		return NewEvent{}, err
