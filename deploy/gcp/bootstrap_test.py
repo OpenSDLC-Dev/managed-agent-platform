@@ -258,11 +258,25 @@ def main():
         r2 = run(tmp, "committhenfail-rerun", reuse=r.state)
         check("and the next run recovers cleanly", r2.code == 0 and "left alone" in r2.out, r2.out)
 
+        print("a half-written pair names the version that would block the next run")
+        # The FIRST write commits and then fails, so one secret holds a version
+        # and the other does not. The key is unusable and goes -- but the stray
+        # version survives, and the next run would stop at the generic "exactly one
+        # of" refusal without saying which secret to clear.
+        r = run(tmp, "halfwritten", faults=["add.map-blob-access-key"])
+        check("deletes the key", len(r.deletions()) == 1, str(r.deletions()))
+        check("names the stray version", "map-blob-access-key" in r.out
+              and "versions disable" in r.out, r.out)
+        check("names only the one that was written",
+              "disable latest --secret=map-blob-secret-key" not in r.out, r.out)
+
         print("an unparseable create response rolls the new key back")
         r = run(tmp, "badjson", faults=["badjson"])
         check("refuses", r.code != 0)
         check("deletes exactly one key", len(r.deletions()) == 1, str(r.deletions()))
         check("leaves no key behind", r.keys() == [], str(r.keys()))
+        check("mentions no stray version, because nothing was written",
+              "versions disable" not in r.out, r.out)
 
         print("a key created in the window before the response is still rolled back")
         r = run(tmp, "orphanwindow", faults=["createorphans"])

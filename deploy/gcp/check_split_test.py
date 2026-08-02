@@ -114,10 +114,19 @@ def main():
              append("environment/main.tf",
                     '\nvariable "note" {\n  default = "build with: docker build - <<EOF"\n}\n' + ROGUE_KEY),
              expect_text="must not OWN")
+        # Both forms, because they are one hazard with two syntaxes and the first
+        # fix covered only `${`: nested quotes shift the parity seen from outside,
+        # so the `{` here and the `}` in the closer both fall out of the string.
+        # Depth desyncs around the rogue resource and still balances at EOF, so
+        # nothing downstream notices.
         case(tmp, "a nested quote inside ${...} is refused",
              append("environment/main.tf",
                     '\nlocals {\n  opener = "${format("%s", "{")}"\n}\n' + ROGUE_KEY),
-             expect_text="quoted string inside a ${...} interpolation")
+             expect_text="cannot be read by this guard")
+        case(tmp, "a nested quote inside a %{...} template directive is refused",
+             append("environment/main.tf",
+                    '\nlocals {\n  opener = "%{ if "x{" == "y" }t%{ endif }"\n}\n' + ROGUE_KEY),
+             expect_text="cannot be read by this guard")
         case(tmp, "an unterminated heredoc is refused",
              append("environment/main.tf", '\nlocals {\n  x = <<NEVERCLOSED\nbody\n}\n'),
              expect_text="never terminated")

@@ -137,14 +137,22 @@ and re-apply `environment/`. Write-only arguments leave Terraform nothing to dif
 counter is the only signal that it should push the new value.
 
 ```sh
-openssl rand -hex 32 | tr -d '\n' |
-  gcloud secrets versions add map-db-password --project your-project --data-file=-
+pw="$(openssl rand -hex 32)"
+[[ "$pw" =~ ^[0-9a-f]{64}$ ]] || { echo "generator failed — nothing written"; return 1; }
+printf '%s' "$pw" | gcloud secrets versions add map-db-password \
+  --project your-project --data-file=-
+unset pw
 ```
 
-Keep the `tr` and keep the value on **stdin**. `--data-file=-` stores stdin byte for byte, so
-the newline `openssl` prints would end up *in* the password and then in `DATABASE_URL`, where
-a raw control character makes the DSN unparseable — long after the apply that accepted it.
-Passing the value as an argument instead would put it in `ps` output and shell history.
+Generate and **check** before writing, exactly as `bootstrap.sh` does, rather than piping
+`openssl` straight into `gcloud`. In a pipeline a failure on the left does not stop the
+right: `gcloud` starts anyway, reads EOF, and stores an *enabled* zero-byte version. Here
+that version becomes `latest` and then rides `db_password_version` into Cloud SQL.
+
+The command substitution also strips the newline `openssl` prints, which `--data-file=-`
+would otherwise store as a 65th byte — and a raw control character in `DATABASE_URL` makes
+the DSN unparseable, long after the apply that accepted it. Keep the value on **stdin** via a
+shell builtin: passing it as an argument would put it in `ps` output and shell history.
 
 ## Handover to Helm
 

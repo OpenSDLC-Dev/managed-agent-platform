@@ -57,10 +57,15 @@ copy of an entry here.
   version printed `ok` with a `google_kms_crypto_key` declared in the destroyed half. A
   quoted string *inside* a `${...}` interpolation does the same thing more quietly: it shifts
   the quote parity seen from outside, so a later `{` and a later `}` both move out of the
-  string and the depth desyncs while still balancing at end of file. That one is refused
-  rather than parsed, as is a module `source` computed at plan time — Terraform 1.15 allows
-  constant variables there, so `"./${var.escape}"` can resolve anywhere, including outside the
-  half this check reads.
+  string and the depth desyncs while still balancing at end of file. Both that and its
+  `%{...}` template-directive twin are refused rather than parsed — covering only `${` left
+  the identical hole one syntax over, which is how the second one was found — as is a module
+  `source` computed at plan time, since Terraform 1.15 allows constant variables there and
+  `"./${var.escape}"` can resolve outside the half this check reads.
+
+  The guard is explicitly **not** an HCL parser and does not try to become one. It reads what
+  it can read and refuses everything else, because the only unacceptable outcome is printing
+  `ok` over configuration it never looked at.
 
   **Two guards, not one**, because they fail differently. `prevent_destroy` is a property of
   the *configuration* and disappears along with the block it is written in — Terraform
@@ -91,10 +96,14 @@ copy of an entry here.
   would bless a credential that authenticates against nothing. It also announces a deletion
   only once the outcome is known, and drops `set -e` inside the trap, so a failing rollback
   probe can no longer abort the handler after the banner has claimed a deletion but before the
-  manual-recovery instructions print. The database password is piped through `tr -d '\n'`:
-  `openssl rand -hex 32` ends its 64 characters with a newline, `--data-file=-` stores stdin
-  verbatim, and a stored control character would ride into `DATABASE_URL` and make the DSN
-  unparseable — a failure that surfaces nowhere near the apply that caused it.
+  manual-recovery instructions print. The trap is armed BEFORE the create rather than after
+  it, so a create that commits server-side and loses its response cannot leak the very orphan
+  the trap exists for; when the recovery diff finds nothing new it returns silently instead of
+  claiming a rollback. When it does delete, it checks both gcloud statuses — a key must be
+  INACTIVE before it can be deleted, so a failed deactivate guarantees a failed delete, and
+  discarding the statuses would print `rolling back` over a key that is still there and still
+  billable — and it names the leftover secret version that would otherwise block the next run
+  at the generic "exactly one of" refusal.
   The state probe also asks whether ANY returned line is the enabled state rather than
   comparing the whole capture: stderr is merged in so the error branch can classify it, and
   gcloud writes warnings there on **success** too — configured service-account impersonation
@@ -115,8 +124,9 @@ copy of an entry here.
   response never parses, a rollback whose own list or deactivate fails, a generator that
   produces nothing, a success-path warning — and the split suite plants violations in a
   scratch copy and requires each to come back red, with decoys that must stay green. Both were
-  run against the pre-fix code first: the bootstrap suite fails 17 checks there, and each
-  individual fix was re-verified by reverting it alone.
+  run against the pre-fix code first — the bootstrap suite fails 24 checks against the branch
+  point and 8 against the commit immediately before the fixes, two apiece onto each defect —
+  and each individual fix was additionally re-verified by reverting it alone.
   `environment/` then reads the password through an **ephemeral** resource into
   `password_wo`, a **write-only** argument, so the value reaches Cloud SQL without being
   persisted anywhere. That last part refines the plan's own mechanic — it was going to reach

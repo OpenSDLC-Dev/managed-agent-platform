@@ -38,9 +38,17 @@ shortcut here has already produced a wrong answer in review:
   - but `<<WORD` inside a STRING does not open one, or a shell snippet in a
     description makes the rest of the file invisible — a silent under-scan that
     reports ok over the resources it still saw;
+  - a quoted string inside a ${...} interpolation or a %{...} template directive
+    is REFUSED rather than parsed: nested quotes shift the parity seen from
+    outside, so a later `{` and a later `}` both fall out of the string and the
+    depth desyncs around an unread resource while still balancing at EOF;
   - and every way the parser can lose its place is a hard error rather than a
-    quiet short read: an unterminated heredoc, unbalanced braces at EOF, and a
-    protected-resource count below a floor.
+    quiet short read: an unterminated heredoc, unbalanced braces at EOF, a string
+    still open at end of line, and a protected-resource count below a floor.
+
+None of that makes this an HCL parser, and it is not trying to be one. It reads
+what it can read and refuses everything else, because the only unacceptable
+outcome is printing `ok` over configuration it did not look at.
 
 Coverage is the other half of correctness, and a check that reads only some of
 the configuration is worse than none, because it prints ok:
@@ -48,10 +56,11 @@ the configuration is worse than none, because it prints ok:
   - .tf files are found RECURSIVELY, so a resource moved into a child module
     under `environment/` is still read;
   - a `module` block whose source this checker cannot follow — a registry or git
-    module, or a local path outside the half being checked — is refused outright
-    rather than skipped, exactly as `.tf.json` is. A community module that
-    creates a service account by default would otherwise put an unrecoverable
-    resource in the disposable half with the check still green.
+    module, a local path outside the half being checked, or one computed at plan
+    time (Terraform 1.15 permits constant variables in a source) — is refused
+    outright rather than skipped, exactly as `.tf.json` is. A community module
+    that creates a service account by default would otherwise put an
+    unrecoverable resource in the disposable half with the check still green.
 """
 
 import pathlib
@@ -99,14 +108,20 @@ def scrub(line: str) -> str:
                 out.append("_")
                 i += 2
                 continue
-            if line[i : i + 2] == "${":
-                # An interpolation: its own braces are not structure, but its
-                # CONTENTS are HCL again — including nested strings. The `$` is
-                # kept deliberately: it is the only surviving marker that a string
-                # was computed rather than literal, and check_modules() reads it to
-                # refuse a module source it cannot resolve.
+            if line[i : i + 2] in ("${", "%{"):
+                # An interpolation `${...}` or a template directive `%{...}`.
+                # BOTH, because they are the same hazard: their own braces are not
+                # structure, but their CONTENTS are HCL again — including nested
+                # strings. Handling only `${` leaves `%{ if "x{" == "y" }` free to
+                # shift the quote parity and hide a resource, which is the very
+                # defect this tracking was added to close.
+                #
+                # The leading character is kept deliberately: it is the only
+                # surviving marker that a string was computed rather than literal,
+                # and check_modules() reads it to refuse a module source it cannot
+                # resolve.
                 interp += 1
-                out.append("$_")
+                out.append(ch + "_")
                 i += 2
                 continue
             if interp:
@@ -123,8 +138,9 @@ def scrub(line: str) -> str:
                     # would report `ok` over the part of it that went unread, which is
                     # precisely how an unrecoverable resource hides in `environment/`.
                     raise ValueError(
-                        "a quoted string inside a ${...} interpolation cannot be read by this "
-                        "guard — assign it to a `locals` value and interpolate that instead"
+                        "a quoted string inside a ${...} interpolation or %{...} directive "
+                        "cannot be read by this guard — assign it to a `locals` value and "
+                        "interpolate that instead"
                     )
                 out.append("_" if ch in "{}#<" else ch)
                 i += 1
@@ -257,9 +273,10 @@ def main() -> int:
             failures.append(f"{where} has no literal `source` — this check cannot follow it.")
             return
         source = src.group(1)
-        if "$" in source:
+        if "$" in source or "%" in source:
             # Terraform 1.15 allows constant variables and locals in a module
             # source, so `source = "./${var.escape}"` can resolve anywhere —
+            # `%` is caught too, for the template-directive form —
             # including outside this half. The literal cannot be resolved here,
             # and resolving it as written would accept a path that Terraform
             # never uses.
