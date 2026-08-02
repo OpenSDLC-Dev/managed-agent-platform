@@ -76,14 +76,14 @@ func DockerHostAddr(t *testing.T) string {
 	if DockerDesktop(t) {
 		// Desktop on Windows: the daemon is a VM of its own, so the bridge
 		// gateway belongs to a namespace this process is not in. Desktop's
-		// host.docker.internal is not the answer either, because it is not one
-		// address: from a container it resolves to both families (an IPv4 and
-		// an IPv6), and a /dev/tcp dial takes whichever getaddrinfo returns
-		// first without trying the other. Taking the IPv6 one into a netns with
-		// no IPv6 route fails "Network is unreachable" before the firewall is
-		// consulted — and the row that must see a *drop* passes on it anyway,
-		// so the fixture would measure nothing. An address resolved here has no
-		// such step to vary.
+		// host.docker.internal does reach this host from a container, but it is
+		// not one address — it carries both families, and which of them a lookup
+		// even sees differs by lookup (getent ahosts answers IPv4 here, getent
+		// hosts answers IPv6, ahostsv6 answers nothing). A dial walks them in
+		// turn, yet reports only the last attempt's error, so a failure anywhere
+		// in the chain is described by whichever address happened to be tried
+		// last. An address resolved here is one address, and a failure through
+		// it says what actually happened.
 		return outboundAddr(t)
 	}
 	out, err := exec.Command("docker", "network", "inspect", "bridge",

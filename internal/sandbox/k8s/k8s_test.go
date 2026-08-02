@@ -184,12 +184,11 @@ func k8sHostAddr(t *testing.T, kubeCtx string) string {
 		return addr
 	}
 	// Docker Desktop runs the daemon — and so any cluster on it, kind or its own
-	// built-in one — inside a VM of its own. Neither branch below is right there:
-	// the kind network's gateway is an address in that VM, and a fixed
-	// host.docker.internal resolves to both address families, leaving which one
-	// a dial takes up to the pod's own addressing. Ask the Docker fixture, which
-	// already works this out per platform, before the cluster flavour is
-	// consulted at all.
+	// built-in one — inside a VM of its own, which makes the kind network's
+	// gateway an address in that VM rather than one this process answers on.
+	// Ask the Docker fixture, which already works out what a container there can
+	// reach this host by, per platform, before the cluster flavour is consulted
+	// at all: the flavour is not what decides the answer.
 	if sandboxtest.DockerDesktop(t) {
 		return sandboxtest.DockerHostAddr(t)
 	}

@@ -398,21 +398,20 @@ copy of an entry here.
   row of both sandbox provider contracts — which is `make verify` unable to go green on that
   platform at all.
 
-  **Why not simply reach for the macOS answer wherever the daemon is Desktop.** Because
-  `host.docker.internal` is not one address there. Desktop for Windows answers it with both
-  families — measured from the gate image's own namespace, `getent ahosts` returns
-  `192.168.65.254` and `getent hosts` returns `fdc4:f303:9324::254` — and a `/dev/tcp` dial
-  takes whichever `getaddrinfo` hands back first, without trying the other. It was observed
-  taking the IPv6 one into a netns with no IPv6 route, failing `Network is unreachable`
-  *before* the owner-match firewall was consulted; on a later measurement of the same machine
-  the same dial connected. Which family wins depends on the container's own addressing, so
-  the name is a dependency whose behaviour moves under the fixture. Worse, when it does fail
-  that way the test's first assertion still passes — a root dial that must be dropped is
-  "dropped" by having no route — so the firewall row would be pinned while measuring nothing.
-  An address the fixture derives itself has no resolution step to vary: this host's own
-  address on the route out, which a container in Desktop's VM can reach. Measured on WSL, a
-  root dial to it is dropped by owner-match and a gate-uid dial is admitted, which is exactly
-  the pair the test asserts.
+  **Why an address rather than Desktop's `host.docker.internal`.** Not because that name
+  cannot work — measured on this machine it does. Because it is not one address, and a
+  fixture that resolves nothing cannot be surprised by which one it gets. From the gate
+  image's own namespace the name carries both families and the lookups disagree about what is
+  visible: `getent ahosts` returns `192.168.65.254`, `getent hosts` returns
+  `fdc4:f303:9324::254`, `ahostsv6` returns nothing at all. A dial does try each in turn —
+  glibc sorts a routeless family last and bash falls through to it — but it reports only the
+  **last** attempt's error, so a failure anywhere in that chain surfaces as whatever the final
+  address happened to say. That is what made the original diagnosis of this bug expensive: a
+  `Network is unreachable` naming the IPv6 address was read as "the dial went to IPv6", when
+  it equally describes an IPv4 attempt that already failed first. A literal address the
+  fixture derives has no such chain — and no dependency on Desktop's resolver or on the
+  container's own addressing. Measured on WSL, a root dial to it is dropped by owner-match and
+  a gate-uid dial is admitted, which is exactly the pair the test asserts.
 
   Scoped deliberately. The darwin branch is untouched, because `host.docker.internal` is the
   answer that works there and this platform's evidence says nothing about that one; a daemon
