@@ -228,7 +228,7 @@ Adding the version is the same for either — name the secret you mean. Both nam
 `NAME_PREFIX` the environment was built with, so set it once at the top of the snippet rather
 than relying on `NAME_PREFIX` being exported in whatever shell this gets pasted into:
 
-```sh
+```bash
 prefix=map                          # the NAME_PREFIX this environment was built with
 secret="$prefix-db-password"        # or "$prefix-db-admin-password"
 
@@ -241,6 +241,9 @@ else
 fi
 unset pw
 ```
+
+Bash (or zsh), not `sh`: `[[ ... =~ ... ]]` is a bash construct and a POSIX shell such as
+`dash` rejects it. Under bash 3.2 — the one macOS ships — it works as written.
 
 A prefix that names no secret is safe — `gcloud secrets versions add` creates a version of an
 **existing** secret and errors when there is none. The unsafe case is a prefix that names a

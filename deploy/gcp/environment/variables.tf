@@ -281,9 +281,14 @@ variable "private_service_access_prefix_length" {
   # documents /24 as the smallest reserved range it will accept for private
   # services access; the lower bound is this configuration's own, since a range
   # wider than /8 would swallow address space no staging environment needs.
+  # The floor() half is not pedantry: Terraform's `number` is not an integer
+  # type, so 16.5 satisfies the bounds on either side of it and then reaches the
+  # API as a prefix length that cannot exist.
   validation {
-    condition     = var.private_service_access_prefix_length >= 8 && var.private_service_access_prefix_length <= 24
-    error_message = "private_service_access_prefix_length must be between 8 and 24 — Google accepts no range smaller than a /24 for private services access."
+    condition = (var.private_service_access_prefix_length >= 8
+      && var.private_service_access_prefix_length <= 24
+    && var.private_service_access_prefix_length == floor(var.private_service_access_prefix_length))
+    error_message = "private_service_access_prefix_length must be a whole number between 8 and 24 — Google accepts no range smaller than a /24 for private services access."
   }
 }
 
