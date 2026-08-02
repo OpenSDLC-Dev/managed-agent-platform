@@ -19,10 +19,10 @@ copy of an entry here.
   forced** ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 5, the archiving
   PR). The top-level **`acceptance/`** package drives the reference doc's define-outcomes
   example — upload rubric, create session, `user.define_outcome` (file-rubric and
-  text-rubric variants), mid-outcome `user.message`, poll `outcome_evaluations` to a
-  terminal result, list and download the deliverables — through anthropic-sdk-go
-  **v1.61.0** typed end to end (`assertNoExtras` on every echo, span, and resource along
-  the way). A deterministic scripted-model rehearsal joins the merge gate; the same
+  text-rubric variants), poll `outcome_evaluations` to a terminal result, list and
+  download the deliverables — through anthropic-sdk-go **v1.61.0** typed end to end
+  (`assertNoExtras` on the file, session, and outcome-evaluation resources along the
+  way). A deterministic scripted-model rehearsal joins the merge gate; the same
   harness pointed at the compose stack and a real model is the live leg
   (`TestLiveDefineOutcomesAcceptance`, consented by `RUN_LIVE_MODEL_TESTS` +
   `ACCEPTANCE_*`; run record: docs/HISTORY.md). The live run forced two platform fixes.
