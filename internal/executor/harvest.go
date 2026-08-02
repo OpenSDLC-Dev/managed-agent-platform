@@ -42,8 +42,13 @@ const outputsDir = "/mnt/session/outputs"
 // an empty snapshot, not an error. Symlinks are skipped: eligible means a
 // regular file, and following links could pull in bytes from outside the tree.
 // Bash at /bin/bash is the sandbox contract's guarantee (Exec runs under it),
-// and globstar needs nothing newer than the contract's bash.
-const harvestListScript = `cd ` + outputsDir + ` 2>/dev/null || exit 0
+// and globstar needs nothing newer than the contract's bash. LC_ALL=C pins the
+// glob's emission to byte order whatever locale the image defaults to — the
+// truncation degradation keeps the listing's complete-entry prefix, and that
+// prefix is only the lexicographic one (Go's sort.Strings order) under C
+// collation.
+const harvestListScript = `export LC_ALL=C
+cd ` + outputsDir + ` 2>/dev/null || exit 0
 shopt -s globstar dotglob nullglob
 for f in **/*; do
   if [ -f "$f" ] && [ ! -L "$f" ]; then printf '%s\0' "$f"; fi

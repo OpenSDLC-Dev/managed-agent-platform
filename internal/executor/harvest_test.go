@@ -461,6 +461,7 @@ func TestValidHarvestPathRejectsEscapes(t *testing.T) {
 		"colon:name.txt",
 		`back\slash.txt`,
 		"a<b.txt",
+		"a>b.txt",
 		"q?.txt",
 		"star*.txt",
 		`quote".txt`,
