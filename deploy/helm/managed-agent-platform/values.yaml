@@ -28,6 +28,13 @@ otlp:
 controlplane:
   apiKey: ""
   replicas: 1
+  # -- Annotations for this component's Kubernetes ServiceAccount. The reason
+  # this exists is GKE Workload Identity, which is an annotation and nothing
+  # else: `iam.gke.io/gcp-service-account: NAME@PROJECT.iam.gserviceaccount.com`
+  # binds this pod's identity to a Google service account, and that is how the
+  # gcpKMS cipher authenticates without any key material in the Secret.
+  serviceAccount:
+    annotations: {}
   service:
     type: ClusterIP
     port: 8080
@@ -71,6 +78,13 @@ brain:
 
 executor:
   replicas: 1
+  # -- Annotations for this component's Kubernetes ServiceAccount. The reason
+  # this exists is GKE Workload Identity, which is an annotation and nothing
+  # else: `iam.gke.io/gcp-service-account: NAME@PROJECT.iam.gserviceaccount.com`
+  # binds this pod's identity to a Google service account, and that is how the
+  # gcpKMS cipher authenticates without any key material in the Secret.
+  serviceAccount:
+    annotations: {}
   leaseTTL: ""       # EXECUTOR_LEASE_TTL, e.g. "15m"; empty uses the binary default
   pollInterval: ""   # EXECUTOR_POLL_INTERVAL, e.g. "500ms"; empty uses the binary default
   # -- Base image for the per-session sandbox pods the executor launches.
@@ -291,6 +305,34 @@ externalOpenBao:
 localCipher:
   masterKey: ""
   keyId: local-1
+
+# -- Google Cloud KMS as the credential cipher — the production shape on GCP, and
+# the fourth mutually-exclusive option beside the bundled OpenBao, an external
+# OpenBao/Vault, and localCipher. Setting keyName selects it, and lets a GCP
+# deployment turn the OpenBao StatefulSet off entirely: KMS needs a key resource
+# name and nothing else, because authentication is Workload Identity rather than
+# a token the chart would have to carry.
+#
+# The name is the full CryptoKey resource name,
+# projects/P/locations/L/keyRings/R/cryptoKeys/K — a CryptoKey, not one of its
+# versions, which the executor and control plane refuse at startup: Encrypt
+# accepts a version name where Decrypt does not, so a deployment configured with
+# one would seal credentials it could never unseal.
+#
+# It rides the chart Secret for uniformity with its siblings, not for
+# confidentiality: a key resource name is not secret. What IS required and is
+# NOT expressed here is the IAM half — the Kubernetes ServiceAccounts below must
+# be bound to a Google service account holding
+# roles/cloudkms.cryptoKeyEncrypterDecrypter on this key. See
+# controlplane.serviceAccount.annotations and executor.serviceAccount.annotations.
+#
+# One behavioural consequence worth knowing before choosing it: Cloud KMS's raw
+# Encrypt accepts at most 65536 bytes, which OpenBao's transit engine does not
+# bound, so a vault credential whose sealed secrets exceed that is refused with a
+# 400 naming the limit where another cipher would have stored it
+# (docs/DIVERGENCES.md). Real credential material sits orders of magnitude below.
+gcpKMS:
+  keyName: ""
 
 # -- Reference a pre-created Secret instead of letting the chart create one. When
 # set, the chart creates NO Secret and every process reads credentials from this

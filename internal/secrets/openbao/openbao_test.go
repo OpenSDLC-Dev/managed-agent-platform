@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/openbao"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/secretstest"
 )
@@ -206,7 +207,7 @@ func TestFromEnvOpenBao(t *testing.T) {
 	t.Setenv("BAO_ADDR", secretstest.Addr(t))
 	t.Setenv("BAO_TOKEN", secretstest.RootToken)
 	t.Setenv("BAO_TRANSIT_KEY", secretstest.FreshKey(t))
-	c, err := secrets.FromEnv(ctx)
+	c, err := backend.FromEnv(ctx)
 	if err != nil {
 		t.Fatalf("FromEnv: %v", err)
 	}
@@ -220,7 +221,7 @@ func TestFromEnvOpenBao(t *testing.T) {
 	}
 
 	t.Setenv("BAO_TOKEN", "")
-	if _, err := secrets.FromEnv(ctx); err == nil {
+	if _, err := backend.FromEnv(ctx); err == nil {
 		t.Fatal("FromEnv accepted openbao backend without BAO_TOKEN")
 	}
 }

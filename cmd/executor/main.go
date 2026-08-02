@@ -45,12 +45,12 @@
 //	BLOB_ACCESS_KEY / BLOB_SECRET_KEY / BLOB_BUCKET / BLOB_REGION / BLOB_TLS
 //	                         the rest of the storage config (as controlplane)
 //	SECRETS_BACKEND          secrets cipher for vault credential material
-//	                         (docs/plan/12): "openbao", "local", or empty to
-//	                         run without one; validated at startup for deploy
-//	                         parity — egress substitution itself decrypts
+//	                         (docs/plan/12): "openbao", "local", "gcpkms", or
+//	                         empty to run without one; validated at startup for
+//	                         deploy parity — egress substitution itself decrypts
 //	                         controlplane-side, for the per-session gate
-//	BAO_ADDR / BAO_TOKEN / BAO_TRANSIT_KEY / SECRETS_MASTER_KEY / SECRETS_KEY_ID
-//	                         the rest of the cipher config (as controlplane)
+//	BAO_ADDR / BAO_TOKEN / BAO_TRANSIT_KEY / SECRETS_MASTER_KEY / SECRETS_KEY_ID /
+//	GCPKMS_KEY_NAME          the rest of the cipher config (as controlplane)
 //	TAVILY_API_KEY           web_search backend key; unset leaves the tool
 //	                         unconfigured (it answers is_error naming it)
 //	JINA_API_KEY             web_fetch backend key; web_fetch needs this OR
@@ -82,7 +82,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/backend"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	secretsbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
@@ -202,7 +202,7 @@ func run(ctx context.Context) error {
 	// unreachable backend, matching the controlplane's wiring): egress
 	// substitution decrypts controlplane-side — the gate-config endpoint —
 	// never in the executor.
-	cipher, err := secrets.FromEnv(ctx)
+	cipher, err := secretsbackend.FromEnv(ctx)
 	if err != nil {
 		return err
 	}

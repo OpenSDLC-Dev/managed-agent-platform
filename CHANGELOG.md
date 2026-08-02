@@ -15,6 +15,59 @@ copy of an entry here.
 
 ### Added
 
+- **Google Cloud KMS as a credential cipher**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 3).
+  `SECRETS_BACKEND=gcpkms` + `GCPKMS_KEY_NAME` (chart: `gcpKMS.keyName`) seals vault
+  credential material through Cloud KMS's raw `Encrypt`/`Decrypt`. It is what lets a GCP
+  deployment drop the bundled OpenBao StatefulSet entirely: KMS needs a CryptoKey resource
+  name, which is not a secret, and Workload Identity — so unlike every other cipher this
+  one puts **no key material in the release at all**, and there is no token to rotate or
+  leak. Authentication is Application Default Credentials, wired by annotating the
+  Kubernetes ServiceAccounts (`controlplane.serviceAccount.annotations`,
+  `executor.serviceAccount.annotations`); the control plane gained a dedicated
+  ServiceAccount so that annotation does not have to land on the namespace's `default`,
+  which would hand the same Google identity to the brain, a process that never touches a
+  cipher.
+
+  **The interesting part is a limit, not a feature.** Cloud KMS's raw `Encrypt` accepts at
+  most 65536 bytes, and OpenBao's transit engine accepts any size. The vault API bounds a
+  request body at 4 MiB and places no length bound on any secret field, so this backend
+  genuinely cannot serve every input the surface accepts — a real difference between two
+  ciphers behind one interface. It is handled as one rather than papered over:
+
+  - `secrets.Cipher`'s seam grew **`ErrPlaintextTooLarge`**, the backend wraps it, and
+    `internal/api` classifies it into the `errInvalid` family, so the caller gets a **400
+    naming the size and the limit**. Left unclassified it renders as a generic `api_error`
+    500 whose useful text reaches only the server's log — told to the one party who cannot
+    act on it, and not to the one who can. An API-level test pins both halves: the same
+    request stored under the local cipher, refused under gcpkms, with a 500 there treated
+    as the defect rather than an acceptable outcome.
+  - The behaviour is registered in [docs/DIVERGENCES.md](./docs/DIVERGENCES.md), because it
+    is observable at the wire and switchable by configuration.
+
+  Ciphertext carries a **`gcpkms:v1:` format marker** from this first commit. Envelope
+  encryption removes the ceiling and is deferred, and the marker is the one piece of that
+  escape hatch that is cheap now and expensive retrofitted: a later v2 can arrive without
+  rewriting stored rows, and a v2 ciphertext reaching a v1 build is named rather than
+  handed to KMS as if it were raw.
+
+  Three smaller decisions worth recording. `New` proves the key with a throwaway `Encrypt`
+  rather than `GetCryptoKey` — the obvious probe needs `cloudkms.cryptoKeys.get`, which
+  `roles/cloudkms.cryptoKeyEncrypterDecrypter` does not carry, so probing with the
+  privilege the runtime path already needs keeps the required IAM grant at exactly
+  encrypt/decrypt. A **CryptoKeyVersion** name is refused by both the chart and the
+  process: `Encrypt` accepts one where `Decrypt` refuses it, so a deployment configured
+  with a version would seal credentials it could never unseal. And both calls verify KMS's
+  CRC32C integrity fields, since the one failure the vault feature cannot recover from is a
+  ciphertext that was corrupted before it was stored.
+
+  Tests are hermetic — an in-process fake Cloud KMS gRPC server runs the shared
+  `secretstest` contract, so `make test` never touches GCP — plus a live tier under the
+  repo's standing consent contract (`RUN_LIVE_KMS_TESTS=1`, `GCPKMS_KEY_NAME` from `.env`).
+  The fake is a fake and not a stub: it seals with real AES-256-GCM and enforces the same
+  ceiling, because the contract asserts properties (fresh encryptions differ, tampering and
+  truncation detected) that a stub would pass by accident.
+
 - **Sandbox pods can be pinned to a node pool of their own**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2).
   `SANDBOX_K8S_NODE_SELECTOR` and `SANDBOX_K8S_TOLERATIONS` (chart:
@@ -289,6 +342,11 @@ copy of an entry here.
   blocked-domain answer stay unobserved).
 
 ### Changed
+
+- **`secrets.FromEnv` moved to `internal/secrets/backend`.** Structural, not cosmetic: the
+  seam package now holds a sentinel error that a backend must wrap, so it can no longer
+  import its own backends — the shape `internal/sandbox/backend` already has, for the same
+  reason. Call sites are `cmd/controlplane` and `cmd/executor`; no behaviour changed.
 
 - **The `bash` tool tells the model to redirect a backgrounded process's output**
   ([#65](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/65)). A process the model

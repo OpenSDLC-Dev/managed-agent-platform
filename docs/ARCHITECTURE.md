@@ -384,17 +384,25 @@ the BYOC worker stays wire-only and receives blob bytes through the control plan
 The credential-cipher seam (docs/plan/12_vaults-credentials.md, D1): reversible
 encryption of vault secret material behind one interface, ciphertext + key id persisted
 by the caller in Postgres — the cipher only transforms bytes. Optional like object
-storage: `FromEnv` returns `(nil, nil)` when `SECRETS_BACKEND` is unset, and a selected
-but misconfigured backend fails construction at startup (the modeltest opt-in rule).
-Only controlplane and executor construct it; the BYOC worker never talks to the secrets
-backend.
+storage: `backend.FromEnv` returns `(nil, nil)` when `SECRETS_BACKEND` is unset, and a
+selected but misconfigured backend fails construction at startup (the modeltest opt-in
+rule). Only controlplane and executor construct it; the BYOC worker never talks to the
+secrets backend.
+
+Selection lives in the sibling `internal/secrets/backend`, not here — the shape
+`internal/sandbox/backend` already has, and for the same structural reason: this package
+holds the interface **and** the sentinel errors backends wrap, so it must import none of
+them. `FromEnv` lived here until the gcpkms backend needed `ErrPlaintextTooLarge`, which
+would have closed the loop into an import cycle.
 
 | File | Contents |
 |---|---|
-| `secrets.go` | `Cipher` — `Encrypt(ctx, plaintext) → (ciphertext, keyID)` / `Decrypt(ctx, ciphertext, keyID)`; every ciphertext is bound to the key that produced it, so a foreign `keyID` is an error, never a silent success. |
-| `env.go` | `FromEnv` — the one construction controlplane and executor share: `SECRETS_BACKEND` empty → `(nil, nil)`; `local` → `SECRETS_MASTER_KEY` (base64, 32 bytes) + optional `SECRETS_KEY_ID` (default `local-1`); `openbao` → `BAO_ADDR`+`BAO_TOKEN` + optional `BAO_TRANSIT_KEY` (default `map-secrets`). Logs the configured backend, never a token or key. |
+| `secrets.go` | `Cipher` — `Encrypt(ctx, plaintext) → (ciphertext, keyID)` / `Decrypt(ctx, ciphertext, keyID)`; every ciphertext is bound to the key that produced it, so a foreign `keyID` is an error. Plus `ErrPlaintextTooLarge`, the sentinel a size-bounded backend wraps so a caller can tell the deployment's failure from the caller's: `internal/api`'s `sealFailed` classifies it into the `errInvalid` family, which is what turns gcpkms's ceiling into a 4xx naming the limit rather than a 500 whose text reaches only the log, never a silent success. |
+| `backend/backend.go` | `FromEnv` — the one construction controlplane and executor share: `SECRETS_BACKEND` empty → `(nil, nil)`; `local` → `SECRETS_MASTER_KEY` (base64, 32 bytes) + optional `SECRETS_KEY_ID` (default `local-1`); `openbao` → `BAO_ADDR`+`BAO_TOKEN` + optional `BAO_TRANSIT_KEY` (default `map-secrets`). Logs the configured backend, never a token or key.; `gcpkms` → `GCPKMS_KEY_NAME` (a CryptoKey resource name; no credential accompanies it, since authentication is Application Default Credentials) |
 | `local/local.go` | AES-256-GCM under a configured master key, for tests and bao-less installs: fresh 12-byte nonce per encryption (`nonce ‖ sealed`), the key id as additional authenticated data so re-labelling a key without re-encrypting is caught, eager 32-byte validation at `New`. |
 | `openbao/openbao.go` | The production backend: OpenBao transit (any Vault-compatible transit endpoint) over its plain HTTP API — deliberately not the official client library. `New` validates eagerly and idempotently ensures the named transit key; ciphertext keeps the engine's `vault:vN:` version prefix so bao-side key rotation needs no schema change; error text carries the server's `errors` array but never the token or any secret value. |
+| `gcpkms/gcpkms.go` | The Cloud KMS backend (docs/plan/20, Decision 3), and what lets a GCP deployment drop the OpenBao StatefulSet — KMS needs a key resource name, which is not a secret, plus Workload Identity, so there is no static token to distribute. `New` refuses anything but a CryptoKey resource name (`Encrypt` accepts a CryptoKeyVersion where `Decrypt` refuses one, so a deployment configured with a version would seal credentials it could never unseal) and then proves the key with a throwaway `Encrypt` — deliberately not `GetCryptoKey`, which needs `cloudkms.cryptoKeys.get` and would widen the required IAM role past `roles/cloudkms.cryptoKeyEncrypterDecrypter`. Both directions verify KMS's CRC32C integrity fields, since a corrupted ciphertext stored is a credential that never decrypts. Two properties are deliberate: plaintext above `MaxPlaintextBytes` (65536, the service's raw-Encrypt ceiling) is refused with `secrets.ErrPlaintextTooLarge` rather than the client's raw `InvalidArgument` (docs/DIVERGENCES.md), and ciphertext carries a `gcpkms:v1:` **format marker** so envelope encryption can arrive as v2 without rewriting stored rows — a v2 row reaching a v1 build is named rather than handed to KMS as if it were raw |
+| `gcpkms/gcpkmstest/` | Test support: an in-process fake Cloud KMS gRPC server, so the contract runs hermetically and `make test` never touches GCP. A fake rather than a stub — it seals with real AES-256-GCM and enforces the same 65536-byte ceiling, because the contract asserts properties a stub cannot honour (fresh encryptions differ, tampering and truncation detected, a foreign key refused). Plus the `RUN_LIVE_KMS_TESTS=1` consent gate, reading `GCPKMS_KEY_NAME` from the environment or the repo-root `.env` |
 | `secretstest/` | Test support: one dev-mode OpenBao per test binary (`Main`, pinned to the same `openbao/openbao:2.6.1` release as compose and the chart) with the transit engine mounted, per-test `FreshKey` names, and `Run` — the shared cipher contract suite (round-trip incl. binary + 64 KiB payloads, ciphertext hides plaintext, fresh nonces, tamper/truncation rejection, unknown-key rejection) run against both backends. |
 
 ### internal/skills
@@ -528,7 +536,10 @@ hard failure, never a skip). `internal/blob/blobtest` is its MinIO twin for the 
 seam (see above).
 `internal/secrets/secretstest` is the OpenBao twin for the
 secrets-cipher seam: one dev-mode OpenBao per test binary with the transit engine
-mounted, per-test key names, and the shared cipher contract suite.
+mounted, per-test key names, and the shared cipher contract suite —
+`internal/secrets/gcpkms/gcpkmstest` runs that same suite against an in-process fake
+Cloud KMS gRPC server, and carries the `RUN_LIVE_KMS_TESTS=1` consent gate for the tier
+that calls the real service.
 `internal/webtool/webtooltest` is the webtool seam's suite-and-consent twin: the shared
 Searcher/Fetcher contract suites (hit mapping, credential-never-in-an-error, cap
 semantics, torn bodies, zero-network URL rejection) plus the `RUN_LIVE_WEB_TESTS=1`

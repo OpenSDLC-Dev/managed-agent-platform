@@ -480,8 +480,9 @@ The vaults feature ([#50](https://github.com/OpenSDLC-Dev/managed-agent-platform
 docs/plan/12_vaults-credentials.md — landing incrementally, cipher and deployment
 first) encrypts vault credential material through `internal/secrets`: ciphertext
 lives in Postgres, but the key that decrypts it lives **outside** — in your
-OpenBao/Vault's own storage (`SECRETS_BACKEND=openbao`, the transit engine) or in
-the `SECRETS_MASTER_KEY` you configured (`SECRETS_BACKEND=local`). That split is
+OpenBao/Vault's own storage (`SECRETS_BACKEND=openbao`, the transit engine), in
+Cloud KMS (`SECRETS_BACKEND=gcpkms`, where it never leaves the service at all), or
+in the `SECRETS_MASTER_KEY` you configured (`SECRETS_BACKEND=local`). That split is
 the point — a Postgres dump alone cannot leak secrets — and it is also a
 restore-ordering constraint you own:
 
@@ -501,6 +502,17 @@ restore-ordering constraint you own:
   data PVC) — a documented dev-grade convenience. Production points
   `externalOpenBao` / `BAO_ADDR` at an instance whose unseal and audit story you
   run yourself.
+- **Under `gcpkms` the pairing is the same shape with a sharper edge.** There is
+  no key material to back up and none in the release — authentication is Workload
+  Identity, and the CryptoKey resource name is not a secret — but destroying or
+  disabling the CryptoKey, or losing the project, is exactly "losing the key"
+  above. Cloud KMS's own scheduled-destruction delay is the only thing standing
+  between a `terraform destroy` of the key ring and unrecoverable ciphertext, so
+  keep the key **outside** the lifecycle of anything you rebuild routinely. One
+  behavioural consequence to know before choosing it: KMS's raw `Encrypt` accepts
+  at most 65536 bytes where OpenBao's transit engine bounds nothing, so a
+  credential whose sealed secrets exceed that is refused with a `400` naming the
+  limit rather than stored (docs/DIVERGENCES.md).
 
 ### Host and runtime isolation
 
