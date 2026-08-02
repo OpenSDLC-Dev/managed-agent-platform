@@ -26,7 +26,9 @@ func TestGateImageOwnerMatchFirewall(t *testing.T) {
 	image := sandboxtest.BuildGateImage(t)
 
 	// A host listener the probes dial: reachable from the gate's netns by
-	// construction, so a refused dial can only be the firewall's doing.
+	// construction, except on Desktop for Windows, where DockerHostAddr
+	// derives the address heuristically and the gate-uid dial below is what
+	// establishes it. Either way a refused root dial is the firewall's doing.
 	ln, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatal(err)

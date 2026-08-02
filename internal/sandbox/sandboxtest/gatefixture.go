@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -59,12 +60,31 @@ func BuildGateImage(t *testing.T) string {
 
 // DockerHostAddr returns an address of the test host reachable from a
 // container on Docker's default bridge network: host.docker.internal under
-// Docker Desktop (darwin), the bridge gateway IP on Linux. Listeners meant to
-// be reached this way must bind all interfaces, not loopback.
+// Docker Desktop for Mac, this host's own routable address under Docker
+// Desktop on Windows/WSL, and the bridge gateway IP when the daemon shares
+// this process's network namespace. MAP_DOCKER_HOST_ADDR overrides all three,
+// as MAP_K8S_HOST_ADDR does for the Kubernetes harness. Listeners meant to be
+// reached this way must bind all interfaces, not loopback.
 func DockerHostAddr(t *testing.T) string {
 	t.Helper()
+	if addr := os.Getenv("MAP_DOCKER_HOST_ADDR"); addr != "" {
+		return addr
+	}
 	if runtime.GOOS == "darwin" {
 		return "host.docker.internal"
+	}
+	if DockerDesktop(t) {
+		// Desktop on Windows: the daemon is a VM of its own, so the bridge
+		// gateway belongs to a namespace this process is not in. Desktop's
+		// host.docker.internal does reach this host from a container, but it is
+		// not one address — it carries both families, and which of them a lookup
+		// even sees differs by lookup (getent ahosts answers IPv4 here, getent
+		// hosts answers IPv6, ahostsv6 answers nothing). A dial walks them in
+		// turn, yet reports only the last attempt's error, so a failure anywhere
+		// in the chain is described by whichever address happened to be tried
+		// last. An address resolved here is one address, and a failure through
+		// it says what actually happened.
+		return outboundAddr(t)
 	}
 	out, err := exec.Command("docker", "network", "inspect", "bridge",
 		"--format", "{{(index .IPAM.Config 0).Gateway}}").Output()
@@ -76,6 +96,42 @@ func DockerHostAddr(t *testing.T) string {
 		t.Fatal("docker bridge network reports no gateway")
 	}
 	return addr
+}
+
+// DockerDesktop reports whether the daemon under test is Docker Desktop, which
+// runs the engine inside its own VM. That — not GOOS — is what decides how a
+// container addresses the test process. On macOS the two agree, which is why a
+// compile-time check served; under WSL they part company, because the test
+// binary is GOOS=linux while the daemon is still a Desktop VM, so the bridge
+// gateway names a namespace this process is not in and nothing answers there.
+// A daemon that cannot be asked is treated as sharing this namespace: that is
+// the pre-existing behaviour, and the caller's own error is the better one.
+func DockerDesktop(t *testing.T) bool {
+	t.Helper()
+	out, err := exec.Command("docker", "info", "--format", "{{.OperatingSystem}}").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "Docker Desktop")
+}
+
+// outboundAddr is this host's IPv4 address on the route out — the one a
+// container in another namespace can address it by. The UDP "dial" sends
+// nothing; it only asks the kernel which local address that route would use,
+// so it needs no reachable destination. A source-address heuristic, not a
+// reachability proof: a VPN or a host with several default routes can pick an
+// address the VM cannot reach. The rows then fail loudly rather than passing
+// for the wrong reason — the gate rows poll for a proxied 200 and the firewall
+// test asserts a gate-uid dial succeeds — and MAP_DOCKER_HOST_ADDR is the way
+// out.
+func outboundAddr(t *testing.T) string {
+	t.Helper()
+	c, err := net.Dial("udp4", "192.0.2.1:9")
+	if err != nil {
+		t.Fatalf("no outbound route to address this host by: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	return c.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
 // GateStub is a stand-in controlplane and egress origin on one host listener:
