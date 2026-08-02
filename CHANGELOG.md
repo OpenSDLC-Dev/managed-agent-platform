@@ -41,6 +41,53 @@ copy of an entry here.
   build — one digest behind all three, so they cannot drift — while `--target gate` builds
   the per-session egress sidecar as a fourth. A `.gcloudignore` keeps history, Terraform
   state and local caches out of the uploaded build context.
+### Changed
+
+- **anthropic-sdk-go bumped v1.59.0 → v1.61.0** — the latest release, so plan 21's
+  outcomes acceptance verifies against the newest SDK
+  ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 1, starting the plan:
+  frontmatter → `in-progress`, STATE.md takeover, and the plan's lifecycle sentence
+  corrected from "slice 2's PR" to "slice 1's PR" — the flip belongs to the PR that
+  starts development). Zero code required: the range's new surface is request-side beta
+  Messages shapes this platform does not mirror (`tool_addition`/`tool_removal` blocks,
+  fallback-credit expansion) plus the `claude-opus-5` model constant (model ids are
+  opaque config-resolved strings here), and the
+  `model_context_window_exceeded` stop reason already existed at the old pin on the beta
+  surface with both stop-label registry entries naming it. One new deliberate divergence
+  recorded in the same PR: v1.61.0's docs re-key the event-list `created_at[…]` filters
+  and `order` on `processed_at`; ours stay on `created_at`/`seq`, which is the only
+  coherent choice under the platform's deliberate null-until-settlement stamping model
+  (cross-linked to the standing processed_at entry; single-source-spec caveat; #78
+  recording flag). The full enumeration — 14 mirrored files byte-identical, every
+  changed file resolved, 35 live citations re-read (32 hold, 3 mechanical line drifts
+  corrected), version labels moved in the three standing sites plus the registry's
+  twelve evidence labels — is docs/HISTORY.md's "anthropic-sdk-go v1.61.0 bump" record.
+  `make verify` green on the bump at ~90.8% total statement coverage (run-to-run jitter; independently rerun by the verifier). Code touches are
+  comment- and naming-only: the anthropic adapter's `param.SetJSON` comment now states
+  the contract as field- and value-preserving, no longer byte-verbatim (the SDK's
+  marshaler compacts and HTML-escapes raw JSON; no golden-byte test existed to break),
+  and the passthrough tests were renamed/re-worded to the same contract.
+
+### Added
+
+- **Plan 21 authored (draft): the session outcomes surface**
+  ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md), tracking #77, absorbing #161).
+  Deep-researched against the reference on 2026-08-02 — the public define-outcomes guide
+  (whose DCF-rubric example the plan's acceptance replays end-to-end), the
+  anthropic-sdk-go typed schema (the outcome surface landed in SDK v1.41.0 and is
+  byte-identical from the pinned v1.59.0 through the latest v1.61.0), and the `ant` CLI
+  source (pure pass-through: no outcome subcommand, no typed construction, no
+  delta-preview for outcome events). Five slices: the v1.61.0 SDK bump, the
+  `user.define_outcome` acceptance + `outcome_evaluations` storage/rendering +
+  `initial_events` (#161), the brain's grader loop (separate-context single-call grading
+  at turn settlement, the `span.outcome_evaluation_*` trio from one instrumentation
+  point, revise-to-`max_iterations` with the documented terminal verdicts), the
+  session-outputs harvest that opens plan 08's reserved `scope`/`downloadable` seam, and
+  a recorded live acceptance driving the doc example through the latest Go SDK, the real
+  `ant` CLI, and raw curl. Every wire shape in the plan is pinned to SDK types
+  file:line; everything no source pins (grader model/prompt/inputs, heartbeat cadence,
+  event ordering, boundary semantics) is pre-declared as INFERRED-divergence
+  obligations for the implementing slices.
 
 - **Terraform for the GCP staging environment**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 4).

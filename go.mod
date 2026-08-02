@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	cloud.google.com/go/kms v1.33.0
-	github.com/anthropics/anthropic-sdk-go v1.59.0
+	github.com/anthropics/anthropic-sdk-go v1.61.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jackc/puddle/v2 v2.2.2
 	github.com/minio/minio-go/v7 v7.2.1

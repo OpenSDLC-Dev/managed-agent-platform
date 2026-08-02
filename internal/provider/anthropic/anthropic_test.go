@@ -252,10 +252,12 @@ func TestGenerateEmptyToolInputAndStringContent(t *testing.T) {
 	}
 }
 
-func TestGenerateVerbatimPassthrough(t *testing.T) {
+func TestGeneratePassthroughPreservesFields(t *testing.T) {
 	// Fields and tool types unknown to the pinned SDK version must survive
-	// to the wire byte-preserved: round-tripping through the SDK's typed
-	// variants would silently drop anything the SDK doesn't model yet.
+	// to the wire value-preserved (the SDK marshaler may compact and
+	// HTML-escape, so JSON-equivalent, not byte-equal): round-tripping
+	// through the SDK's typed variants would silently drop anything the
+	// SDK doesn't model yet.
 	f := &fakeServer{sse: []string{
 		`{"type":"message_start","message":{"id":"msg_7","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}`,
@@ -484,7 +486,7 @@ func TestErrorNeverQuotesBaseURLCredentialsAsBasicAuth(t *testing.T) {
 }
 
 func TestGenerateRejectsInvalidRequestJSON(t *testing.T) {
-	// Verbatim passthrough still fails fast on structurally invalid JSON —
+	// The passthrough still fails fast on structurally invalid JSON —
 	// with the index in the error, before anything reaches the endpoint.
 	p := start(t, &fakeServer{})
 
