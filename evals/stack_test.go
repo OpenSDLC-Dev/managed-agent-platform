@@ -111,7 +111,7 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 
 	loopCtx, stop := context.WithCancel(ctx)
 	brainDone := runLoop(func() error {
-		return brain.New(pool, registry, brain.Config{
+		return brain.New(pool, registry, blobs, brain.Config{
 			LeaseTTL:     2 * time.Minute,
 			PollInterval: 100 * time.Millisecond,
 		}).Run(loopCtx)
