@@ -30,6 +30,14 @@ type Config struct {
 	// minutes to send its first byte. See StallGuard for what it bounds and why
 	// it is not an HTTP client timeout.
 	StallTimeout time.Duration
+	// MaxTokens is the default output cap for turns that set none themselves;
+	// a Request.MaxTokens always wins. Per route because the right cap is a
+	// property of the endpoint and the workload behind it: an agent that
+	// writes whole files through tool calls dies mid-input on a cap sized for
+	// chat (the outcomes acceptance hit exactly that). Zero keeps the
+	// adapter's own default — anthropic sends its required-field fallback,
+	// openai omits the field so the endpoint's default applies.
+	MaxTokens int64
 }
 
 // Request is one model turn in Anthropic Messages semantics. Content and

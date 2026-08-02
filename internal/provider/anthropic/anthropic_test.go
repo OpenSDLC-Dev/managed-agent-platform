@@ -847,3 +847,47 @@ func TestConfigValidation(t *testing.T) {
 		t.Error("missing model should error")
 	}
 }
+
+// The route config's max_tokens is the default output cap for this endpoint:
+// applied when the request sets none, overridden by a request that does.
+func TestGenerateConfigMaxTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  int64
+		want float64
+	}{
+		{"request unset takes the config cap", 0, 4096},
+		{"request wins over the config cap", 512, 512},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeServer{t: t, sse: []string{
+				`{"type":"message_start","message":{"id":"msg_11","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":3}}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}`,
+				`{"type":"message_stop"}`,
+			}}
+			srv := httptest.NewServer(http.HandlerFunc(f.handler))
+			t.Cleanup(srv.Close)
+			p, err := anthropic.New(provider.Config{
+				Protocol:  "anthropic",
+				Model:     "upstream-model",
+				BaseURL:   srv.URL,
+				APIKey:    testAPIKey,
+				MaxTokens: 4096,
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			stream, err := p.Generate(context.Background(), provider.Request{
+				Messages:  []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+				MaxTokens: tc.req,
+			})
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			collect(t, stream)
+			if got := f.gotBody["max_tokens"]; got != tc.want {
+				t.Errorf("max_tokens = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

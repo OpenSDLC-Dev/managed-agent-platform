@@ -53,13 +53,14 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		return nil, fmt.Errorf("openai provider requires a model")
 	}
 	return &openaiProvider{
-		endpoint: strings.TrimRight(cfg.BaseURL, "/") + "/v1/chat/completions",
-		apiKey:   cfg.APIKey,
-		model:    cfg.Model,
-		headers:  cfg.Headers,
-		client:   http.DefaultClient,
-		stall:    cfg.StallTimeout,
-		redact:   provider.NewRedactor(cfg),
+		endpoint:  strings.TrimRight(cfg.BaseURL, "/") + "/v1/chat/completions",
+		apiKey:    cfg.APIKey,
+		model:     cfg.Model,
+		headers:   cfg.Headers,
+		client:    http.DefaultClient,
+		stall:     cfg.StallTimeout,
+		maxTokens: cfg.MaxTokens,
+		redact:    provider.NewRedactor(cfg),
 	}, nil
 }
 
@@ -73,8 +74,11 @@ type openaiProvider struct {
 	// abandoned; zero takes provider.DefaultStallTimeout. It bounds the request
 	// rather than the client because http.DefaultClient is shared with every
 	// other provider instance — see provider.StallGuard and Registry.
-	stall  time.Duration
-	redact provider.Redactor
+	stall time.Duration
+	// maxTokens is the route's default output cap for turns that set none;
+	// zero keeps the field off the wire so the endpoint's default applies.
+	maxTokens int64
+	redact    provider.Redactor
 }
 
 func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (provider.Stream, error) {
@@ -86,10 +90,14 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 	if err != nil {
 		return nil, err
 	}
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = p.maxTokens
+	}
 	body := chatRequest{
 		Model:         p.model,
 		Messages:      messages,
-		MaxTokens:     req.MaxTokens,
+		MaxTokens:     maxTokens,
 		Stream:        true,
 		StreamOptions: &streamOptions{IncludeUsage: true},
 		Tools:         tools,
