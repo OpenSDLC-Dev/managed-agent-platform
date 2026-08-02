@@ -378,8 +378,8 @@ jobs:
       - name: the split guard actually bites
         run: make gcp-split-check-test
       # And neither terraform validate nor shellcheck can execute SQL. This runs
-      # dbinit.sql against a real PostgreSQL 16 with TLS on — including three
-      # cases that drive its assertions red on purpose — so the only thing that
+      # dbinit.sql against a real PostgreSQL 16 with TLS on — including the cases
+      # that drive its assertions red on purpose — so the only thing that
       # exercises it is not a billable cluster. ubuntu-latest ships Docker.
       - name: the database role SQL establishes what it claims
         run: make gcp-dbinit-test

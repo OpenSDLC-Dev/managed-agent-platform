@@ -16,7 +16,8 @@ What this covers that a read cannot:
     whole rotation procedure — proven by authenticating as the platform role
     with the new password and failing to with the old one;
   - and, most of all, that the assertions can FAIL. An assertion that cannot go
-    red is a comment. Three of them are driven red deliberately below.
+    red is a comment, so each state the assertions exist to catch is set up
+    deliberately below and the run is required to go red for that reason.
 
 What it cannot cover: Cloud SQL's own behaviour. `cloudsqlsuperuser` does not
 exist on stock PostgreSQL, so the membership assertion is exercised here against
@@ -415,6 +416,24 @@ def main():
                             % (DB_USER, APP_ROLE)).stdout.strip() == "t"
               and pg.psql_admin("SELECT rolcreatedb FROM pg_roles WHERE rolname = '%s';"
                                 % APP_ROLE).stdout.strip() == "f")
+
+    # The boundary of the narrowing above, under the privileges that actually
+    # apply. Altering a role needs ADMIN OPTION on it, which the administrator
+    # holds only for roles it created; a group role belonging to somebody else
+    # cannot be narrowed at all. What matters is that this is a LOUD failure
+    # before any password is set -- not a run that proceeds under a group whose
+    # privileges it could not strip.
+    print("a group role owned by SOMEONE ELSE stops the run rather than passing")
+    with Postgres() as pg:
+        pg.psql_admin("CREATE ROLE %s CREATEDB;" % APP_ROLE)  # created by the superuser
+        pg.as_cloud_sql_administrator()
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("says it may not alter the role",
+              "permission denied to alter role" in (r.stderr + r.stdout),
+              r.stderr + r.stdout)
+        check("and sets no password on the way out",
+              pg.psql_as(DB_USER, "pw", "SELECT 1;").returncode != 0)
 
     print("the privileged-group-role assertion FIRES when the group cannot be narrowed")
     with Postgres() as pg:

@@ -266,12 +266,16 @@ it, a fork bomb in a sandbox is bounded by nothing the platform sets.
 `var.sandbox_pod_pids_limit` (default 4096; GKE accepts 1024–4194304). If you build node
 pools by hand, set it yourself.
 
-What the sandbox provider *does* apply by default: a CPU limit, and the
+What the sandbox provider *does* apply by default: a CPU limit, the
 `NET_RAW`/`SETUID`/`SETGID` capability drops with privilege escalation forbidden alongside
-them. Note that the escalation guard rides on the drop set — `SANDBOX_CAP_DROP=none`
-removes it too. A memory cap, a read-only rootfs and a non-root uid are opt-in. No seccomp
-profile is set by any code or template in this repo, so sandbox pods run under the
-runtime's unconfined default.
+them, and — on Kubernetes — a pod-level `seccompProfile: RuntimeDefault`, set
+unconditionally and deliberately not configurable. Note that the escalation guard rides on
+the drop set: `SANDBOX_CAP_DROP=none` removes it too, while the seccomp profile stands on
+its own and is unaffected. A memory cap, a read-only rootfs and a non-root uid are opt-in.
+
+Two consequences of the seccomp default worth knowing before you meet them: on a cluster
+whose kubelet already runs with `--seccomp-default` it changes nothing, and an image that
+needs a syscall the runtime's curated filter blocks has no exception to ask for.
 
 ## gVisor
 

@@ -192,8 +192,13 @@ variable "subnet_cidr" {
   default     = "10.10.0.0/20"
 
   validation {
-    condition     = can(cidrhost(var.subnet_cidr, 0))
-    error_message = "subnet_cidr must be a CIDR block, e.g. 10.10.0.0/20."
+    # IPv4 only, and asserted rather than assumed. A GKE subnet, its
+    # secondary ranges and the control-plane range are all IPv4 here, and an
+    # IPv6 value would otherwise pass this check and then fail inside the
+    # overlap arithmetic in main.tf as a raw cidrhost() error rather than as
+    # the curated message that precondition exists to print.
+    condition     = can(cidrhost(var.subnet_cidr, 0)) && can(regex("^[0-9.]+/[0-9]+$", var.subnet_cidr))
+    error_message = "subnet_cidr must be an IPv4 CIDR block, e.g. 10.10.0.0/20."
   }
 }
 
@@ -203,8 +208,13 @@ variable "pods_cidr" {
   default     = "10.20.0.0/16"
 
   validation {
-    condition     = can(cidrhost(var.pods_cidr, 0))
-    error_message = "pods_cidr must be a CIDR block, e.g. 10.20.0.0/16."
+    # IPv4 only, and asserted rather than assumed. A GKE subnet, its
+    # secondary ranges and the control-plane range are all IPv4 here, and an
+    # IPv6 value would otherwise pass this check and then fail inside the
+    # overlap arithmetic in main.tf as a raw cidrhost() error rather than as
+    # the curated message that precondition exists to print.
+    condition     = can(cidrhost(var.pods_cidr, 0)) && can(regex("^[0-9.]+/[0-9]+$", var.pods_cidr))
+    error_message = "pods_cidr must be an IPv4 CIDR block, e.g. 10.20.0.0/16."
   }
 }
 
@@ -214,8 +224,13 @@ variable "services_cidr" {
   default     = "10.30.0.0/20"
 
   validation {
-    condition     = can(cidrhost(var.services_cidr, 0))
-    error_message = "services_cidr must be a CIDR block, e.g. 10.30.0.0/20."
+    # IPv4 only, and asserted rather than assumed. A GKE subnet, its
+    # secondary ranges and the control-plane range are all IPv4 here, and an
+    # IPv6 value would otherwise pass this check and then fail inside the
+    # overlap arithmetic in main.tf as a raw cidrhost() error rather than as
+    # the curated message that precondition exists to print.
+    condition     = can(cidrhost(var.services_cidr, 0)) && can(regex("^[0-9.]+/[0-9]+$", var.services_cidr))
+    error_message = "services_cidr must be an IPv4 CIDR block, e.g. 10.30.0.0/20."
   }
 }
 
@@ -235,8 +250,13 @@ variable "master_cidr" {
   # reaches the API as a malformed range after the network and subnet have
   # already been created.
   validation {
-    condition     = can(cidrhost(var.master_cidr, 0))
-    error_message = "master_cidr must be a CIDR block, e.g. 172.16.0.0/28."
+    # IPv4 only, and asserted rather than assumed. A GKE subnet, its
+    # secondary ranges and the control-plane range are all IPv4 here, and an
+    # IPv6 value would otherwise pass this check and then fail inside the
+    # overlap arithmetic in main.tf as a raw cidrhost() error rather than as
+    # the curated message that precondition exists to print.
+    condition     = can(cidrhost(var.master_cidr, 0)) && can(regex("^[0-9.]+/[0-9]+$", var.master_cidr))
+    error_message = "master_cidr must be an IPv4 CIDR block, e.g. 172.16.0.0/28."
   }
 
   validation {

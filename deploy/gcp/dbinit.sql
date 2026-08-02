@@ -73,6 +73,17 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_role')
 -- role holds. A pre-existing group role with CREATEDB would therefore give the
 -- platform CREATEDB while every assertion about the platform's OWN attributes
 -- stayed false. NOLOGIN because nothing should ever authenticate as the group.
+--
+-- ONE case this cannot repair, and it fails loudly rather than quietly: altering
+-- a role needs ADMIN OPTION on it, which the administrator holds only for roles
+-- it created itself (PostgreSQL 16 grants it implicitly at CREATE ROLE). A group
+-- role pre-created by some OTHER role therefore stops the run here with
+-- `permission denied to alter role`, before any password is set and before any
+-- assertion can report success. That is the correct outcome — the alternative
+-- would be proceeding under a group whose privileges this session cannot see the
+-- end of — but it means "narrowed on every run" holds for the roles this
+-- administrator owns, not universally. Fix such a role by hand, or drop it and
+-- let this file create it.
 SELECT format('ALTER ROLE %I NOLOGIN NOCREATEDB NOCREATEROLE', :'app_role')
 \gexec
 

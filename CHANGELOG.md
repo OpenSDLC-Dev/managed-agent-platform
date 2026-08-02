@@ -50,8 +50,8 @@ copy of an entry here.
   `make gcp-dbinit-test` is new and runs in CI. `terraform validate` cannot execute SQL and
   shellcheck cannot execute psql, so without it the only thing that ever ran this file was a
   billable cluster talking to a billable database. It starts a real PostgreSQL 16 with TLS
-  on, exercises idempotency and rotation, and drives three assertions red on purpose. It
-  found four defects in the file it was written for. Two were ordinary: an unguarded
+  on, exercises idempotency and rotation, and requires the run to go red once for each state
+  its assertions exist to catch. It found four defects in the file it was written for. Two were ordinary: an unguarded
   `pg_has_role` that raised on any PostgreSQL lacking a `cloudsqlsuperuser` role — failing
   every run at the last statement, after every assertion had passed — and a `\getenv` that
   turned a missing password into a syntax error instead of the complaint written for that

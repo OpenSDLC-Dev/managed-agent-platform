@@ -92,20 +92,35 @@ cluster_zone="$(tf_out zone)"
 # a local label an operator may rename freely, and `gke_PROJECT_ZONE_CLUSTER` is
 # only its default; the endpoint is the cluster's own identity.
 # ---------------------------------------------------------------------------
-expected_endpoint="$(gcloud container clusters describe "$cluster_name" \
-	--zone "$cluster_zone" --project "$PROJECT" --format='value(endpoint)' 2>/dev/null)" || expected_endpoint=""
-if [[ -z "$expected_endpoint" ]]; then
-	echo "could not read the endpoint of cluster $cluster_name in $cluster_zone." >&2
-	echo "Has 'make gcp-env-apply' finished?" >&2
+# ALL of the cluster's endpoints, not just the public one. A kubeconfig written
+# with --internal-ip stores the private address, and one written while gcloud's
+# container/use_dns_endpoint property is set stores the DNS endpoint — both are
+# the same cluster, and matching only `endpoint` would refuse a correct setup
+# while printing a get-credentials command that reproduces the very form it just
+# rejected. Missing fields come back empty and are dropped.
+mapfile -t cluster_endpoints < <(gcloud container clusters describe "$cluster_name" \
+	--zone "$cluster_zone" --project "$PROJECT" \
+	--format='value[separator=" "](endpoint,privateClusterConfig.privateEndpoint,controlPlaneEndpointsConfig.dnsEndpointConfig.endpoint)' \
+	2>/dev/null | tr ' ' '\n' | grep -v '^$') || true
+
+if [[ ${#cluster_endpoints[@]} -eq 0 ]]; then
+	echo "could not read any endpoint of cluster $cluster_name in $cluster_zone." >&2
+	echo "Has 'make gcp-env-apply' finished, and is PROJECT correct?" >&2
 	exit 1
 fi
 
 current_server="$(kubectl config view --minify \
 	-o 'jsonpath={.clusters[0].cluster.server}' 2>/dev/null)" || current_server=""
-if [[ "$current_server" != "https://$expected_endpoint" ]]; then
+
+matched=0
+for ep in "${cluster_endpoints[@]}"; do
+	[[ "$current_server" == "https://$ep" ]] && matched=1
+done
+
+if [[ "$matched" -ne 1 ]]; then
 	echo "REFUSING: kubectl is not pointed at ${cluster_name}." >&2
 	echo "  current context server: ${current_server:-<none>}" >&2
-	echo "  this environment's:     https://${expected_endpoint}" >&2
+	echo "  this cluster's endpoints: ${cluster_endpoints[*]}" >&2
 	echo "Both database passwords would be written into that cluster as a Secret." >&2
 	echo "Point kubectl at the right cluster first:" >&2
 	echo "  gcloud container clusters get-credentials ${cluster_name} --zone ${cluster_zone} --project ${PROJECT}" >&2

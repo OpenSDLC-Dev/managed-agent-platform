@@ -428,9 +428,18 @@ input would pass a run against the real tree, and twice did.
 shellcheck can execute SQL: without it the only thing that ever runs `dbinit.sql` is a
 billable cluster talking to a billable database, which is a slow and expensive way to find a
 typo in a `\gexec`. It starts a real PostgreSQL 16 with TLS on and runs the file the way the
-Job does — then drives three of its assertions red on purpose (a role granted
-`cloudsqlsuperuser`, a role owning a second database, a plaintext session), because an
-assertion that cannot fail is a comment. Writing it immediately paid for itself: it caught an
-unguarded `pg_has_role` that raised on any PostgreSQL without a `cloudsqlsuperuser` role, and
-a `\getenv` that turns a missing password into a syntax error rather than the intended
-complaint.
+Job does — then sets up each state its assertions exist to catch and requires the run to go
+red for that reason, because an assertion that cannot fail is a comment. It also runs the
+whole file under a deliberately **non-superuser** administrator, which is what Cloud SQL's
+actually is: `cloudsqlsuperuser` carries CREATEDB and CREATEROLE and nothing more, while a
+local `postgres` is a true superuser that bypasses the very checks a Cloud SQL run has to
+satisfy.
+
+Writing it paid for itself four times over. Two ordinary defects: an unguarded `pg_has_role`
+that raised on any PostgreSQL without a `cloudsqlsuperuser` role, and a `\getenv` that turned
+a missing password into a syntax error rather than the intended complaint. And two that would
+have failed **only** on the real instance — `ALTER ROLE ... NOSUPERUSER` is refused outright
+(PostgreSQL lets only a superuser change SUPERUSER, REPLICATION and BYPASSRLS, even to turn
+them off), and `ALTER DATABASE ... OWNER TO` failed with `must be able to SET ROLE` because
+the membership PostgreSQL 16's `CREATE ROLE` implicitly grants its creator does not carry the
+SET option.

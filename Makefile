@@ -152,8 +152,9 @@ gcp-bootstrap-test:
 # terraform validate cannot execute SQL and shellcheck cannot execute psql, so
 # without this the only thing that ever runs dbinit.sql is a billable cluster
 # talking to a billable database. This runs it against a real PostgreSQL 16 with
-# TLS on, and drives three of its assertions red on purpose — an assertion that
-# cannot fail is a comment. Needs Docker.
+# TLS on, sets up the states its assertions exist to catch, and requires the run
+# to go red for that reason — an assertion that cannot fail is a comment. Needs
+# Docker.
 gcp-dbinit-test:
 	python3 deploy/gcp/dbinit_test.py
 
