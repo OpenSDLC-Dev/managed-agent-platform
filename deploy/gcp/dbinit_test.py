@@ -80,20 +80,29 @@ class Postgres:
         self.admin_password = ADMIN_PASSWORD
 
     def __enter__(self):
-        r = run("docker", "run", "-d", "--name", self.name,
-                "-e", "POSTGRES_PASSWORD=" + ADMIN_PASSWORD,
-                IMAGE)
-        if r.returncode != 0:
-            raise RuntimeError("could not start %s: %s" % (IMAGE, r.stderr))
         # __exit__ is NOT called when __enter__ raises, so setup failures have to
         # clean up after themselves -- otherwise every failed run leaves a
         # container behind, which is exactly what happened while writing this.
+        #
+        # `docker run` is INSIDE the guard, not before it: a run that fails after
+        # the daemon created the container -- a failed start, or the CLI
+        # interrupted between creation and the reply -- leaves the named
+        # container behind while returning non-zero. `docker rm -f` on a name
+        # that does not exist is a harmless no-op, so covering the case costs
+        # nothing and not covering it leaks under exactly the conditions nobody
+        # reproduces on demand. The temp directory goes the same way.
         try:
+            r = run("docker", "run", "-d", "--name", self.name,
+                    "-e", "POSTGRES_PASSWORD=" + ADMIN_PASSWORD,
+                    IMAGE)
+            if r.returncode != 0:
+                raise RuntimeError("could not start %s: %s" % (IMAGE, r.stderr))
             self._wait_ready()
             self._enable_tls()
             self._create_database()
         except BaseException:
             run("docker", "rm", "-f", self.name)
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
             raise
         return self
 
@@ -342,6 +351,25 @@ def main():
         check("the rotated password works",
               pg.psql_as(DB_USER, "pw2", "SELECT 1;").returncode == 0)
 
+    # NOLOGIN is the drift every other assertion is blind to: the role still
+    # exists, still has no CREATEDB, still owns the database and still is not a
+    # member of cloudsqlsuperuser. Only a check for it stops a run reporting
+    # success over a credential the platform cannot authenticate with.
+    print("a role stripped of LOGIN is repaired, and would otherwise pass everything")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        pg.psql_admin("ALTER ROLE %s NOLOGIN NOINHERIT;" % DB_USER)
+        check("the role really cannot log in now",
+              pg.psql_as(DB_USER, "pw", "SELECT 1;").returncode != 0)
+        check("and every containment assertion still holds, which is the point",
+              role_attrs(pg) == "f|f|f|f", role_attrs(pg))
+        r = pg.dbinit("pw")
+        check("exits 0", r.returncode == 0, r.stderr + r.stdout)
+        check("LOGIN is back", pg.psql_as(DB_USER, "pw", "SELECT 1;").returncode == 0)
+        check("INHERIT is back",
+              pg.psql_admin("SELECT rolinherit FROM pg_roles WHERE rolname = '%s';"
+                            % DB_USER).stdout.strip() == "t")
+
     print("an empty password is refused rather than stored")
     with Postgres() as pg:
         r = pg.dbinit("")
@@ -363,6 +391,43 @@ def main():
     # the DDL does NOT correct, so reaching the assertion block is the only
     # possible outcome -- if the file still exits 0, that assertion is dead.
     # ---------------------------------------------------------------------
+
+    # Containment applied to the platform's role alone is not containment. The
+    # role is created IN ROLE the group, membership carries SET by default, so
+    # a privileged GROUP role hands the platform those privileges one SET ROLE
+    # away — while every assertion about the platform's own attributes stays
+    # false. This is the case where a pre-existing group role is the attack.
+    print("a PRE-EXISTING privileged group role is narrowed, not inherited")
+    with Postgres() as pg:
+        pg.psql_admin("CREATE ROLE %s CREATEDB CREATEROLE;" % APP_ROLE)
+        check("the group role starts out privileged",
+              pg.psql_admin("SELECT rolcreatedb, rolcreaterole FROM pg_roles "
+                            "WHERE rolname = '%s';" % APP_ROLE).stdout.strip() == "t|t")
+        r = pg.dbinit("pw")
+        check("exits 0", r.returncode == 0, r.stderr + r.stdout)
+        check("the group role was narrowed",
+              pg.psql_admin("SELECT rolcreatedb, rolcreaterole, rolcanlogin FROM pg_roles "
+                            "WHERE rolname = '%s';" % APP_ROLE).stdout.strip() == "f|f|f")
+        # The property that actually matters: what the platform can reach
+        # THROUGH the group, not what the group's row says.
+        check("so the platform cannot reach CREATEDB through it",
+              pg.psql_admin("SELECT pg_has_role('%s', '%s', 'member');"
+                            % (DB_USER, APP_ROLE)).stdout.strip() == "t"
+              and pg.psql_admin("SELECT rolcreatedb FROM pg_roles WHERE rolname = '%s';"
+                                % APP_ROLE).stdout.strip() == "f")
+
+    print("the privileged-group-role assertion FIRES when the group cannot be narrowed")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        # Re-privilege the group AFTER the corrective ALTER would have run, by
+        # granting it a superuser attribute the script's own ALTER cannot strip
+        # -- which is exactly the state the assertion, rather than the repair,
+        # has to catch.
+        pg.psql_admin("ALTER ROLE %s SUPERUSER;" % APP_ROLE)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("names the group role", "group role" in (r.stderr + r.stdout),
+              r.stderr + r.stdout)
 
     print("the cloudsqlsuperuser membership assertion FIRES when it should")
     with Postgres() as pg:

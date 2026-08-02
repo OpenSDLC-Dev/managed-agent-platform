@@ -74,6 +74,43 @@ db_name="$(tf_out sql_database)"
 db_user="$(tf_out sql_user)"
 db_admin="$(tf_out sql_admin_user)"
 app_role="$(tf_out sql_app_role)"
+cluster_name="$(tf_out cluster_name)"
+cluster_zone="$(tf_out zone)"
+
+# ---------------------------------------------------------------------------
+# Prove that kubectl points at the cluster this Terraform built, BEFORE writing
+# any credential into it.
+#
+# Everything above comes from one Terraform state; everything below goes to
+# whichever kubectl context happens to be current, and nothing connects the two.
+# Leave a context pointing at another cluster — a different project, a
+# colleague's, a kind cluster — and this script writes both of THIS project's
+# database passwords into it as a Secret, and only then fails to reach a private
+# IP it cannot route to. The credentials are already there by then.
+#
+# Compared by API SERVER ENDPOINT rather than by context name. A context name is
+# a local label an operator may rename freely, and `gke_PROJECT_ZONE_CLUSTER` is
+# only its default; the endpoint is the cluster's own identity.
+# ---------------------------------------------------------------------------
+expected_endpoint="$(gcloud container clusters describe "$cluster_name" \
+	--zone "$cluster_zone" --project "$PROJECT" --format='value(endpoint)' 2>/dev/null)" || expected_endpoint=""
+if [[ -z "$expected_endpoint" ]]; then
+	echo "could not read the endpoint of cluster $cluster_name in $cluster_zone." >&2
+	echo "Has 'make gcp-env-apply' finished?" >&2
+	exit 1
+fi
+
+current_server="$(kubectl config view --minify \
+	-o 'jsonpath={.clusters[0].cluster.server}' 2>/dev/null)" || current_server=""
+if [[ "$current_server" != "https://$expected_endpoint" ]]; then
+	echo "REFUSING: kubectl is not pointed at ${cluster_name}." >&2
+	echo "  current context server: ${current_server:-<none>}" >&2
+	echo "  this environment's:     https://${expected_endpoint}" >&2
+	echo "Both database passwords would be written into that cluster as a Secret." >&2
+	echo "Point kubectl at the right cluster first:" >&2
+	echo "  gcloud container clusters get-credentials ${cluster_name} --zone ${cluster_zone} --project ${PROJECT}" >&2
+	exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # The credentials. Read into a private temp directory rather than into shell
@@ -99,7 +136,15 @@ cleanup() {
 		kubectl -n "$NAMESPACE" delete job "$job" --ignore-not-found >/dev/null 2>&1
 		kubectl -n "$NAMESPACE" delete configmap "$job" --ignore-not-found >/dev/null 2>&1
 	fi
-	kubectl -n "$NAMESPACE" delete secret "$job" --ignore-not-found >/dev/null 2>&1
+	# CHECKED, not fired and forgotten. The one thing this function must not do
+	# is stay silent about a credential it failed to remove — and the timeout
+	# path, which is where the Secret matters most, is also the path where the
+	# API server is most likely to be the reason the delete fails.
+	if ! kubectl -n "$NAMESPACE" delete secret "$job" --ignore-not-found >/dev/null 2>&1; then
+		echo "WARNING: could not delete Secret ${NAMESPACE}/${job}. It still holds both" >&2
+		echo "database passwords. Remove it by hand:" >&2
+		echo "  kubectl -n ${NAMESPACE} delete secret ${job}" >&2
+	fi
 	rm -rf "$workdir"
 }
 trap cleanup EXIT
@@ -252,15 +297,25 @@ failed)
 	exit 1
 	;;
 *)
-	# Kept, and the Secret is still deleted — so what remains is a Job that can
-	# be described and a pod whose events explain the wait, with no credential
-	# left behind in the cluster.
+	# Kept, because a Job that never reached a terminal state is the one case
+	# where the pod itself is the evidence — its events carry the pull error or
+	# the pending reason, and deleting it takes them with it.
 	keep_job=1
 	echo "TIMED OUT after 300s waiting for ${job} to reach a terminal state." >&2
-	echo "The Job is LEFT IN PLACE so it can be inspected (its Secret is not):" >&2
+	echo "The Job is LEFT IN PLACE so it can be inspected:" >&2
 	echo "  kubectl -n ${NAMESPACE} describe job ${job}" >&2
 	echo "  kubectl -n ${NAMESPACE} get pods -l job-name=${job}" >&2
-	echo "Delete it with: kubectl -n ${NAMESPACE} delete job ${job} configmap/${job}" >&2
+	echo >&2
+	# Said plainly rather than implied by the Secret being gone. Deleting the
+	# Secret object does NOT scrub the environment of a container that already
+	# started: PGPASSWORD and MAP_DB_PASSWORD were resolved at pod creation and
+	# live in that process. Anyone who can exec into the pod, or read its
+	# /proc/1/environ, has both passwords for as long as it exists.
+	echo "NOTE: the Secret is deleted, but the pod that was already running still" >&2
+	echo "carries both passwords in its container environment — deleting the Secret" >&2
+	echo "does not scrub a container that has already started. Delete the Job as soon" >&2
+	echo "as you are done looking:" >&2
+	echo "  kubectl -n ${NAMESPACE} delete job ${job} configmap/${job}" >&2
 	exit 1
 	;;
 esac

@@ -123,11 +123,32 @@ resource "google_storage_bucket_iam_member" "blob_bucket_reader" {
 
 data "google_project" "current" {}
 
+locals {
+  node_service_account = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+}
+
 resource "google_artifact_registry_repository_iam_member" "node_puller" {
   location   = google_artifact_registry_repository.images.location
   repository = google_artifact_registry_repository.images.name
   role       = "roles/artifactregistry.reader"
-  member     = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+  member     = local.node_service_account
+}
+
+# The SAME grant on the Docker Hub mirror, because a repository IAM binding is
+# scoped to one repository and the mirror is a second one — a remote repository
+# cannot also be the standard repository Cloud Build pushes to.
+#
+# Without this, pointing the chart's third-party images at the mirror produces
+# ImagePullBackOff with a 403 from Artifact Registry, and only in projects that
+# have not been handed the broad automatic Editor grant — so it would work on
+# the project it was developed in and fail on a properly locked-down one.
+resource "google_artifact_registry_repository_iam_member" "node_puller_mirror" {
+  count = var.docker_hub_mirror ? 1 : 0
+
+  location   = google_artifact_registry_repository.docker_hub[0].location
+  repository = google_artifact_registry_repository.docker_hub[0].name
+  role       = "roles/artifactregistry.reader"
+  member     = local.node_service_account
 }
 
 # ---------------------------------------------------------------------------

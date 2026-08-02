@@ -127,10 +127,21 @@ the application a plain loopback socket — so an application behind the proxy u
 downgrade, and `ssl_mode = ENCRYPTED_ONLY` on the instance is what makes it checkable: the
 server rejects an unencrypted connection whatever the client asked for.
 
-The chart templates no sidecar, so the proxy is not a Helm value today. Run it as its own
-Deployment and Service in the namespace and point `database-url` at that Service, or add a
-sidecar to the deployments yourself. This is a chart gap, not a platform limitation — the
-same gap that leaves `brain` without a ServiceAccount to annotate.
+**Run the proxy as a sidecar, in the same pod.** The `sslmode=disable` above is only safe
+because the hop it describes is a loopback socket inside one pod. Run the proxy as a shared
+Deployment and Service instead — which looks tidier and is the obvious workaround — and that
+same `sslmode=disable` now sends the password, every query and every result across the pod
+network in cleartext, on the near side of the encryption. `ssl_mode = ENCRYPTED_ONLY` and
+`pg_stat_ssl` cannot see that hop at all: they describe the proxy's connection to Cloud SQL,
+not your application's connection to the proxy. Google recommends colocation for exactly
+this reason.
+
+The chart templates no sidecar, so this is not a Helm value today: add the container to the
+`controlplane`, `brain` and `executor` deployments yourself. That is a chart gap, not a
+platform limitation — the same gap that leaves `brain` without a ServiceAccount to annotate.
+If you must use a shared proxy Service as an interim step, treat the database credential as
+exposed to anything that can watch pod-network traffic, and say so in your threat model
+rather than inheriting the `sslmode=disable` from this page as though it were still local.
 
 ## Exposing the control plane
 
@@ -147,30 +158,27 @@ When you do expose it, a GKE Gateway with a Google-managed certificate is the le
 surprising way:
 
 ```yaml
-apiVersion: networking.gke.io/v1
-kind: ManagedCertificate
-metadata:
-  name: map
-spec:
-  domains:
-    - map.example.com
----
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: map
-  annotations:
-    networking.gke.io/certmap: ""            # or reference the ManagedCertificate
 spec:
   gatewayClassName: gke-l7-global-external-managed
   listeners:
     - name: https
       protocol: HTTPS
       port: 443
+      hostname: map.example.com
       tls:
         mode: Terminate
         certificateRefs:
-          - name: map-tls                     # a Secret, or a Certificate Manager map
+          # A kubernetes.io/tls Secret. For a Google-MANAGED certificate
+          # instead, drop this whole `certificateRefs` block and annotate the
+          # Gateway with `networking.gke.io/certmap: <your-certificate-map>`,
+          # having created the map in Certificate Manager. Do not reach for the
+          # `ManagedCertificate` CRD here — that one belongs to Ingress, not to
+          # Gateway.
+          - name: map-tls
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute

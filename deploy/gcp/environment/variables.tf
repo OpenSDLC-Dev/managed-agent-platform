@@ -39,10 +39,16 @@ variable "zone" {
 variable "db_password_version" {
   type        = number
   description = <<-EOT
-    Bump this after bootstrap.sh rotates the database password. `password_wo` is
-    a write-only argument, so Terraform holds no copy to diff against and cannot
-    tell that the secret changed; this counter is the signal that it should push
-    the current value to the instance again.
+    Bump this after rotating the ADMINISTRATOR's password
+    (<name_prefix>-db-admin-password). `password_wo` is a write-only argument, so
+    Terraform holds no copy to diff against and cannot tell that the secret
+    changed; this counter is the signal that it should push the current value to
+    the instance again.
+
+    It does NOTHING for the platform's own database role, which Terraform does
+    not create or manage — that one is rotated by adding a version to
+    <name_prefix>-db-password and re-running `make gcp-db-init`. Bumping this
+    counter for it would leave the new secret version applied nowhere.
   EOT
   default     = 1
 }
@@ -184,18 +190,33 @@ variable "subnet_cidr" {
   type        = string
   description = "Primary range of the cluster subnet — the NODES live here. Private Google Access is on, which is what lets private nodes pull from Artifact Registry with no external address."
   default     = "10.10.0.0/20"
+
+  validation {
+    condition     = can(cidrhost(var.subnet_cidr, 0))
+    error_message = "subnet_cidr must be a CIDR block, e.g. 10.10.0.0/20."
+  }
 }
 
 variable "pods_cidr" {
   type        = string
   description = "Secondary range for Pod IPs (VPC-native / alias IPs). Sized generously: it bounds how many Pods the cluster can ever run, and it cannot be resized after the cluster is created."
   default     = "10.20.0.0/16"
+
+  validation {
+    condition     = can(cidrhost(var.pods_cidr, 0))
+    error_message = "pods_cidr must be a CIDR block, e.g. 10.20.0.0/16."
+  }
 }
 
 variable "services_cidr" {
   type        = string
   description = "Secondary range for ClusterIP Services. Also fixed for the life of the cluster."
   default     = "10.30.0.0/20"
+
+  validation {
+    condition     = can(cidrhost(var.services_cidr, 0))
+    error_message = "services_cidr must be a CIDR block, e.g. 10.30.0.0/20."
+  }
 }
 
 variable "master_cidr" {
@@ -203,9 +224,20 @@ variable "master_cidr" {
   description = <<-EOT
     /28 for the GKE control plane's own VPC, which Google peers to this network.
     It must not overlap any range in this configuration and must be exactly a
-    /28 — GKE rejects anything else.
+    /28 — GKE rejects anything else. The overlap half is checked by a
+    precondition in main.tf, which can see the other ranges; this can only check
+    the shape.
   EOT
   default     = "172.16.0.0/28"
+
+  # Two conditions, because the obvious one alone is not a check. A bare
+  # `regex("/28$")` is satisfied by the string `not-a-cidr/28`, which then
+  # reaches the API as a malformed range after the network and subnet have
+  # already been created.
+  validation {
+    condition     = can(cidrhost(var.master_cidr, 0))
+    error_message = "master_cidr must be a CIDR block, e.g. 172.16.0.0/28."
+  }
 
   validation {
     condition     = can(regex("/28$", var.master_cidr))

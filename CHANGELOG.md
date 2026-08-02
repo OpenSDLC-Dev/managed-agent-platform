@@ -70,6 +70,34 @@ copy of an entry here.
   first. Both would have surfaced as a failed acceptance run against billable
   infrastructure.
 
+  Review hardening on top of that, each with a test that goes red without the fix: the
+  corrective `ALTER ROLE` restores `LOGIN` and `INHERIT`, and the assertions now check them
+  — a role stripped of LOGIN satisfied every other assertion while the platform failed to
+  authenticate; the **group** role is narrowed and asserted too, because membership carries
+  the SET option by default, so a pre-existing privileged group role handed the platform
+  CREATEDB one `SET ROLE` away while every assertion about the platform's own attributes
+  stayed false; and `dbinit.sh` now refuses to run unless `kubectl`'s current context is the
+  cluster this Terraform built, compared by API-server endpoint rather than by context name
+  — otherwise a stale context meant writing both of one project's database passwords into
+  another project's cluster, and only then failing to reach a private IP.
+
+- **`terraform destroy` reliability and CIDR preconditions.** `deletion_policy = "ABANDON"`
+  on the service-networking connection is *removed*, not added: it does not delete the
+  peering, only drops it from state, so Google then refuses to delete the VPC that peering
+  still references — the destroy fails anyway, and now Terraform cannot clean it up on a
+  retry either. It is right for a configuration that does not own its network; this one
+  does. The Docker Hub mirror also gained the node-identity `artifactregistry.reader` grant
+  it was missing — a repository binding is scoped to one repository, so pulling through the
+  mirror was an `ImagePullBackOff` in any project without a broad automatic Editor grant.
+
+  The four cluster ranges are now checked against each other by a plan-time precondition.
+  Terraform has no `cidrcontains`, so containment is computed by reinterpreting one range's
+  network address under the other's prefix length; the arithmetic was verified against known
+  overlapping and disjoint pairs before being written, and each variable additionally
+  validates that it is a CIDR at all — the previous `regex("/28$")` was satisfied by
+  `not-a-cidr/28`. An overlap otherwise surfaces as GKE rejecting the cluster *after* the
+  network, subnet, router and NAT have been created.
+
 - **[docs/deploy-gcp.md](./docs/deploy-gcp.md) — the GCP deployment guide.** What the
   Terraform builds and what it deliberately does not, the two modes, and the settings that
   are **required** rather than recommended: `podPidsLimit` as node configuration (the Pod

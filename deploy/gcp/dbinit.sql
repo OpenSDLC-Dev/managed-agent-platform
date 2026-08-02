@@ -66,6 +66,16 @@ SELECT format('CREATE ROLE %I', :'app_role')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_role')
 \gexec
 
+-- Narrowed on EVERY run, not only when it was just created — and this is not
+-- symmetry for its own sake. Containment applied to the platform's role alone
+-- is not containment: the role is created IN ROLE this one, membership carries
+-- the SET option by default, so `SET ROLE <app_role>` hands over whatever this
+-- role holds. A pre-existing group role with CREATEDB would therefore give the
+-- platform CREATEDB while every assertion about the platform's OWN attributes
+-- stayed false. NOLOGIN because nothing should ever authenticate as the group.
+SELECT format('ALTER ROLE %I NOLOGIN NOCREATEDB NOCREATEROLE', :'app_role')
+\gexec
+
 -- ---------------------------------------------------------------------------
 -- The platform's own role, created under it.
 -- ---------------------------------------------------------------------------
@@ -97,8 +107,15 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'db_user')
 -- server log with the password in clear when log_statement is `ddl` or `all`.
 -- Cloud SQL's default is `none`; if you have turned it up, turn it down for the
 -- duration of this run.
+-- LOGIN and INHERIT are restored here, not only set at CREATE. They are the two
+-- properties whose absence is invisible to every other check in this file: a
+-- role stripped of LOGIN still exists, still has no CREATEDB, still owns the
+-- database and still is not a member of cloudsqlsuperuser, so the assertions
+-- below would all pass and the platform would fail at startup with
+-- `role "..." is not permitted to log in`. Without INHERIT it would authenticate
+-- and then not have the privileges of its own group role.
 SELECT format(
-    'ALTER ROLE %I NOCREATEDB NOCREATEROLE PASSWORD %L',
+    'ALTER ROLE %I LOGIN INHERIT NOCREATEDB NOCREATEROLE PASSWORD %L',
     :'db_user', :'db_password')
 \gexec
 
@@ -159,11 +176,23 @@ DECLARE
     a    text := (SELECT v FROM _dbinit_names WHERE k = 'app_role');
     d    text := (SELECT v FROM _dbinit_names WHERE k = 'db_name');
     r    record;
+    g    record;
     owns text;
 BEGIN
     SELECT * INTO r FROM pg_roles WHERE rolname = u;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'FAILED: role % does not exist', u;
+    END IF;
+
+    -- The two properties that are about the role being USABLE rather than about
+    -- it being contained. Every other assertion here is happy with a role that
+    -- cannot log in, so without these a run could report success over a
+    -- credential the platform then fails to authenticate with.
+    IF NOT r.rolcanlogin THEN
+        RAISE EXCEPTION 'FAILED: % cannot log in', u;
+    END IF;
+    IF NOT r.rolinherit THEN
+        RAISE EXCEPTION 'FAILED: % does not inherit the privileges of its roles', u;
     END IF;
 
     -- Role ATTRIBUTES. Necessary and, on their own, nowhere near sufficient —
@@ -197,6 +226,18 @@ BEGIN
 
     IF NOT pg_has_role(u, a, 'member') THEN
         RAISE EXCEPTION 'FAILED: % is not a member of its own role %', u, a;
+    END IF;
+
+    -- And the group role's OWN attributes, which the checks above are blind to.
+    -- Membership carries the SET option by default, so anything this role holds
+    -- is one `SET ROLE` away for the platform — a group role with CREATEDB
+    -- gives the platform CREATEDB while every assertion about the platform's
+    -- own attributes stays false.
+    SELECT * INTO g FROM pg_roles WHERE rolname = a;
+    IF g.rolsuper OR g.rolcreatedb OR g.rolcreaterole OR g.rolbypassrls OR g.rolcanlogin THEN
+        RAISE EXCEPTION
+            'FAILED: group role % is privileged (superuser=% createdb=% createrole=% bypassrls=% login=%) and % can SET ROLE to it',
+            a, g.rolsuper, g.rolcreatedb, g.rolcreaterole, g.rolbypassrls, g.rolcanlogin, u;
     END IF;
 
     -- OWNERSHIP: the platform database, and no other.

@@ -209,9 +209,22 @@ only at the first image push, after the apply has already created a cluster and 
 uses. Run it **after** `make gcp-foundation-apply`: the foundation is what enables the Cloud
 Build API, and the lookup fails with `SERVICE_DISABLED` until it is on.
 
-**Rotating the database password**: add a version by hand, then bump `db_password_version`
-and re-apply `environment/`. Write-only arguments leave Terraform nothing to diff, so that
-counter is the only signal that it should push the new value.
+**Rotating a database password** — and there are now two, rotated by different mechanisms.
+Getting this backwards leaves a new secret version that nothing ever applies, so the value
+in Secret Manager and the value the database will accept silently disagree until the next
+restart:
+
+| Secret | Whose password | How the rotation is applied |
+| --- | --- | --- |
+| `map-db-password` | the **platform's** role, the one in `DATABASE_URL` | add a version, then re-run `make gcp-db-init` — its `ALTER ROLE` is unconditional |
+| `map-db-admin-password` | the Cloud SQL built-in **administrator** | add a version, then bump `db_password_version` and re-apply `environment/` |
+
+The counter belongs to the administrator's password alone, because that is the only one
+Terraform writes. Write-only arguments leave Terraform nothing to diff, so it is the only
+signal that it should push the new value. Bumping it does nothing for the platform's role,
+which Terraform does not manage.
+
+Adding the version is the same for either — name the secret you mean:
 
 ```sh
 pw="$(openssl rand -hex 32)"
@@ -230,7 +243,9 @@ would close the terminal and `return` is an error outside a function.)
 Generate and **check** before writing, exactly as `bootstrap.sh` does, rather than piping
 `openssl` straight into `gcloud`. In a pipeline a failure on the left does not stop the
 right: `gcloud` starts anyway, reads EOF, and stores an *enabled* zero-byte version. Here
-that version becomes `latest` and then rides `db_password_version` into Cloud SQL.
+that version becomes `latest` and then rides into Cloud SQL — through
+`db_password_version` for the administrator, or through the next `make gcp-db-init` for the
+platform's role.
 
 The command substitution also strips the newline `openssl` prints, which `--data-file=-`
 would otherwise store as a 65th byte — and a raw control character in `DATABASE_URL` makes

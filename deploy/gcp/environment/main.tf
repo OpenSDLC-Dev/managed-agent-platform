@@ -68,6 +68,64 @@ locals {
   # a guard that cannot read this file is a guard that prints ok over it.
   db_app_role_stem = replace(var.name_prefix, "-", "_")
   db_app_role      = "${local.db_app_role_stem}_app"
+
+  # ---------------------------------------------------------------------------
+  # The four ranges that must be mutually disjoint, and the arithmetic that
+  # proves it. Each variable validates its own SHAPE; only something that can see
+  # all four can check them against each other, and an overlap is not a
+  # cosmetic error: GKE rejects the cluster for it, but only after the network,
+  # the subnet, the router and the NAT gateway have been created — so the apply
+  # half-builds an environment and then stops.
+  #
+  # Terraform has no cidrcontains (checked: the function does not exist in
+  # 1.15.8), so containment is computed. Reinterpreting one range's network
+  # address under the OTHER's prefix length and asking whether that lands on the
+  # other's network address answers "does this range start inside that one" —
+  # and two CIDRs overlap if and only if one starts inside the other. Verified
+  # against both answers before being written here.
+  # ---------------------------------------------------------------------------
+  checked_cidrs = {
+    subnet_cidr   = var.subnet_cidr
+    pods_cidr     = var.pods_cidr
+    services_cidr = var.services_cidr
+    master_cidr   = var.master_cidr
+  }
+
+  # Each unordered pair once. Two details that are not style:
+  #
+  #   - paired by INDEX rather than by comparing the names, because Terraform's
+  #     `<` accepts numbers only and `name_a < name_b` fails to evaluate rather
+  #     than ordering the strings;
+  #   - each pair is an OBJECT, not a two-element list, because flatten() is
+  #     recursive: a list of two-element lists comes back as a flat list of
+  #     strings, and every `p[0]` downstream then indexes into a string.
+  cidr_names = keys(local.checked_cidrs)
+
+  cidr_pairs = flatten([
+    for i, a in local.cidr_names : [
+      for j, b in local.cidr_names : { first = a, second = b } if j > i
+    ]
+  ])
+
+  cidr_overlaps = [
+    for p in local.cidr_pairs :
+    format("%s (%s) overlaps %s (%s)",
+    p.first, local.checked_cidrs[p.first], p.second, local.checked_cidrs[p.second])
+    if cidrhost(format("%s/%s",
+      cidrhost(local.checked_cidrs[p.first], 0),
+      split("/", local.checked_cidrs[p.second])[1]), 0
+    ) == cidrhost(local.checked_cidrs[p.second], 0)
+    || cidrhost(format("%s/%s",
+      cidrhost(local.checked_cidrs[p.second], 0),
+      split("/", local.checked_cidrs[p.first])[1]), 0
+    ) == cidrhost(local.checked_cidrs[p.first], 0)
+  ]
+
+  # Pre-joined, because an error_message is a template and check_split.py
+  # refuses to parse a quoted string inside a ${...} interpolation — it cannot
+  # tell where such a string ends, and a guard that loses its place prints `ok`
+  # over configuration it never read.
+  cidr_overlap_report = join("; ", local.cidr_overlaps)
 }
 
 resource "google_project_service" "required" {
@@ -217,13 +275,25 @@ resource "google_compute_router_nat" "map" {
 # ---------------------------------------------------------------------------
 # Private services access — the peering Cloud SQL's private address comes from.
 #
-# Two resources and one hazard. The reserved range is ours; the peering is a
-# connection to Google's producer network, and Terraform is historically bad at
-# removing one: a destroy can fail because the producer still holds an address
-# out of the range, leaving the whole teardown stuck behind a resource that
-# cannot be deleted. deletion_policy = "ABANDON" is the documented escape — the
-# connection is dropped from state rather than deleted, and it then disappears
-# along with the network that carries it.
+# Two resources and one hazard, and the hazard is on the way OUT. The reserved
+# range is ours; the peering is a connection to Google's producer network, and
+# Terraform is historically bad at removing one — a destroy can fail because the
+# producer still holds an address out of the range.
+#
+# deletion_policy = "ABANDON" is the widely-cited escape and this configuration
+# deliberately does NOT use it, because here it makes the teardown strictly
+# worse rather than better. ABANDON does not delete the connection; it only
+# drops it from state. The connection then still references this VPC, Google
+# refuses to delete a network anything still references, and the destroy fails
+# anyway — except that now the connection is no longer in state, so Terraform
+# cannot clean it up on a retry either. It is the right setting for a
+# configuration that does not own its network. This one owns its network.
+#
+# So the default is kept: the provider actually deletes the connection, ordered
+# after Cloud SQL by the dependency below. If a destroy does fail here, the
+# cause is usually that the instance's addresses have not been released yet —
+# retry, and see docs/deploy-gcp.md for the manual
+# `gcloud services vpc-peerings delete` if a retry is not enough.
 # ---------------------------------------------------------------------------
 
 resource "google_compute_global_address" "private_service_access" {
@@ -239,8 +309,7 @@ resource "google_service_networking_connection" "private_vpc" {
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_service_access.name]
 
-  # See the header above. Without this a `make gcp-env-destroy` can wedge.
-  deletion_policy = "ABANDON"
+  # No deletion_policy — see the header for why ABANDON is wrong here.
 }
 
 # ---------------------------------------------------------------------------
@@ -336,6 +405,15 @@ resource "google_container_cluster" "map" {
     precondition {
       condition     = startswith(var.zone, "${var.region}-")
       error_message = "var.zone must be inside var.region — the cluster would otherwise sit in a different region from the registry, database and bucket it talks to."
+    }
+
+    # Checked HERE rather than in the variables, because a variable validation
+    # cannot see its siblings. It still fires at plan time, before anything is
+    # created — which is the whole point: GKE's own rejection of an overlap
+    # arrives after the network, subnet, router and NAT already exist.
+    precondition {
+      condition     = length(local.cidr_overlaps) == 0
+      error_message = "The cluster's address ranges must not overlap: ${local.cidr_overlap_report}."
     }
   }
 }
