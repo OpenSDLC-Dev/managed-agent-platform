@@ -362,6 +362,21 @@ resources deleted and the sweep verified empty afterwards.
      model key is pasted from its own provider. Terraform never sees any of these; it
      holds names, IAM bindings, and preconditions only.
 
+     **Refined in slice 4a, in the direction this decision already points.** Two of the
+     three mechanics above turned out to have a better form once the code was written,
+     and both keep the invariant that motivated them rather than bending it. The database
+     password no longer needs the Cloud SQL Admin API `users.update` dance: the provider
+     offers `google_sql_user.password_wo`, a **write-only** argument, fed from an
+     **ephemeral** `google_secret_manager_secret_version` — the value reaches the instance
+     without being persisted in either state file, which is strictly what `users.update`
+     on stdin was working around. And `deletion_policy = "PREVENT"` joins `prevent_destroy`
+     on every durable resource, because the two guard different failure modes:
+     `prevent_destroy` lives in the *configuration* and disappears with the block it is
+     written in, while `deletion_policy` is read from *state*. The bootstrap script keeps
+     job one — generating values and writing them to Secret Manager, including the GCS HMAC
+     key, whose secret GCS returns exactly once and which is therefore not a Terraform
+     resource at all.
+
      **The script has two jobs, and only the first is idempotent-by-skipping.** Job one:
      ensure Secret Manager holds a value — a no-op when the secret already has a
      version, because the acceptance criterion is reproduce-from-clean, not

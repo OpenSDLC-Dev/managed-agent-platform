@@ -15,6 +15,171 @@ copy of an entry here.
 
 ### Added
 
+- **Terraform for the GCP staging environment**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 4).
+  `deploy/gcp/` and the `make gcp-*` targets that wrap it. Developer tooling for GCP
+  deployment only: never a dependency of the platform, its build, or `make verify`, and the
+  Helm chart stays the portable installation path.
+
+  **It is two configurations, and that is the whole design.** The line between them is not
+  "expensive versus cheap" but *can a rebuild recreate this identically?* — because three
+  GCP behaviours make a single configuration quietly destructive:
+
+  - **KMS key rings and crypto keys cannot be deleted.** `terraform destroy` removes them
+    from state and leaves them in the project, so a naive setup collides on the name at the
+    next apply. For the crypto key the stakes are higher than a collision: the vault
+    ciphertext in Postgres is decryptable by that key and nothing else, so a teardown that
+    scheduled its key versions for destruction would be silent, irreversible data loss
+    discovered at the next credential read.
+  - **Deleting a service account deletes its HMAC keys.** An identity in the disposable half
+    would strand the once-readable GCS HMAC secret in Secret Manager: valid-looking, and
+    dead.
+  - **The secrets are what a rebuild is reconciled against** — the database password
+    reapplied to a new Cloud SQL instance, the HMAC pair carried forward. (Decision 6 also
+    wants that pair *proven* to still authenticate rather than assumed valid from the mere
+    presence of a secret version. That needs a live bucket, so it belongs to slice 4b's
+    acceptance battery and is not claimed here.)
+
+  So `foundation/` holds those and is never destroyed, while `environment/` holds the
+  cluster, Artifact Registry, Cloud SQL, the bucket and every IAM binding, reads the
+  foundation through `data` sources by name rather than by remote state, and tears down with
+  one command. CI enforces the split structurally rather than by convention: `environment/`
+  may not declare a `resource` of an unrecoverable kind, and every unrecoverable
+  `foundation/` resource must carry both guards it can. The check is expressed over *kinds*, so a
+  resource added later is covered without anyone remembering to extend a list, and moving
+  one between files does not turn it red. It reads both halves recursively — a child module
+  is in scope — and refuses outright anything it cannot parse: a `.tf.json` file, a `module`
+  sourced from a registry or from outside the half, an unterminated heredoc, unbalanced
+  braces, or a multi-line `${...}` interpolation. Every arm was measured, including the two
+  that matter most: a `prevent_destroy = false` sitting under a comment that says
+  `prevent_destroy = true`, which an earlier text-matching version read as compliance, and a
+  `<<EOF` inside a quoted description, which made the rest of the file invisible — an earlier
+  version printed `ok` with a `google_kms_crypto_key` declared in the destroyed half. A
+  quoted string *inside* a `${...}` interpolation does the same thing more quietly: it shifts
+  the quote parity seen from outside, so a later `{` and a later `}` both move out of the
+  string and the depth desyncs while still balancing at end of file. Both that and its
+  `%{...}` template-directive twin are refused rather than parsed — covering only `${` left
+  the identical hole one syntax over, which is how the second one was found — as is a module
+  `source` computed at plan time, since Terraform 1.15 allows constant variables there and
+  `"./${var.escape}"` can resolve outside the half this check reads.
+
+  The guard is explicitly **not** an HCL parser and does not try to become one. It reads what
+  it can read and refuses everything else, because the only unacceptable outcome is printing
+  `ok` over configuration it never looked at.
+
+  **`cloud_build_service_account` is required, with no default.** Google changed Cloud
+  Build's default identity on 2024-04-29: projects whose first build predates it use the
+  legacy `PROJECT_NUMBER@cloudbuild.gserviceaccount.com`, and projects created after it use
+  the Compute Engine default service account. A configuration that guesses is wrong for half
+  of all projects, and wrong in an expensive place — the grant lands on an account no build
+  uses, and nothing surfaces until the first image push, by which point the apply has already
+  created a GKE cluster and a Cloud SQL instance. Requiring it turns that into a plan-time
+  prompt whose description carries `gcloud builds get-default-service-account`, with a
+  `validation` block that rejects anything which is not a service account email. The compute
+  default account keeps `artifactregistry.reader` for image pulls and is deliberately not
+  widened to writer: that identity is what every node in the cluster runs as.
+
+  **Two guards, not one**, because they fail differently. `prevent_destroy` is a property of
+  the *configuration* and disappears along with the block it is written in — Terraform
+  destroys a resource whose block you merely deleted. `deletion_policy = "PREVENT"` is read
+  from *state* and survives that. The pair also makes a rename loud rather than silent:
+  `name`, `location`, `key_ring` and `account_id` all force replacement, so editing
+  `name_prefix` aborts the plan instead of quietly recreating the key. And the default this
+  replaces is worse than it sounds — a `google_kms_crypto_key` destroyed with the provider's
+  default `DELETE` policy schedules **every key version** for destruction, so the name stays
+  taken *and* the key becomes unusable.
+
+  **No secret value is in either state file**, which is what plan 20's Decision 6 asks for
+  ("Terraform holds names, IAM bindings, and preconditions only"). `bootstrap.sh` generates
+  the database password and creates the GCS HMAC key — whose secret GCS returns exactly
+  once, so a Terraform resource holding it would hold it in state — and writes both to
+  Secret Manager on **stdin**, never in `argv` where `ps` and shell history can read them.
+  That once-only return is also why the script arms its rollback *before* it parses the
+  create response rather than after: anything that fails between the key existing and its
+  secret being stored leaves a key that is billable, indistinguishable from the real one,
+  and permanently unusable. The rollback also refuses to guess: it snapshots
+  the account's key ids before creating and deletes only one it can prove is new, because the
+  service account may already own a key and deleting *that* would destroy a working
+  credential — the same failure the rollback exists to prevent, committed by the safety net.
+  For the same reason it asks the **server** what is stored before destroying anything: a
+  write can commit and still report failure (a dropped connection reading the response, a
+  Ctrl-C landing just after), and rolling *that* back would delete the working key while
+  leaving both secrets in place — after which the next run's "already have versions" skip
+  would bless a credential that authenticates against nothing. It also announces a deletion
+  only once the outcome is known, and drops `set -e` inside the trap, so a failing rollback
+  probe can no longer abort the handler after the banner has claimed a deletion but before the
+  manual-recovery instructions print. The trap is armed BEFORE the create rather than after
+  it, so a create that commits server-side and loses its response cannot leak the very orphan
+  the trap exists for; when the recovery diff finds nothing new it returns silently instead of
+  claiming a rollback. When it does delete, it checks both gcloud statuses — a key must be
+  INACTIVE before it can be deleted, so a failed deactivate guarantees a failed delete, and
+  discarding the statuses would print `rolling back` over a key that is still there and still
+  billable — and it names the leftover secret version that would otherwise block the next run
+  at the generic "exactly one of" refusal.
+  The state probe also asks whether ANY returned line is the enabled state rather than
+  comparing the whole capture: stderr is merged in so the error branch can classify it, and
+  gcloud writes warnings there on **success** too — configured service-account impersonation
+  prints one on every call — so a whole-string comparison would read `WARNING: …\nENABLED` as
+  "no version" and write a second version over a live secret. And the database password is
+  generated into a variable and checked before anything is written, rather than piped
+  straight into gcloud: in a pipeline a failure on the left does not stop the right, so
+  gcloud would start anyway, read EOF, and store an enabled **zero-byte** version that every
+  later run then skips as already done.
+
+  **Both tools are now exercised by committed suites that CI runs** (`make gcp-bootstrap-test`,
+  `make gcp-split-check-test`), because the other four checking targets are static and static
+  checking was demonstrably not enough here: `gcp-lint` is shellcheck, which cannot know that
+  `gcloud secrets versions describe` rejects `--filter`, and it exited 0 on a script that
+  aborted on its first call in every project. The bootstrap suite runs the script against a
+  fake `gcloud` across states a live run cannot reproduce on demand — a write that commits and
+  *then* reports failure, a create that commits and loses its response, a create whose
+  response never parses, a rollback whose own list or deactivate fails, a generator that
+  produces nothing, a success-path warning — and the split suite plants violations in a
+  scratch copy and requires each to come back red, with decoys that must stay green. Both were
+  run against the pre-fix code first, and each individual fix was additionally re-verified by
+  reverting it alone. The property checked is that the suites fail against *every* earlier
+  version of the tool they test and reach zero only at the commit that fixes it — stated that
+  way deliberately, because a raw count of failing checks is a function of how many scenarios
+  the suite happens to contain, and two successive attempts to quote one here went stale the
+  moment the suite grew.
+  `environment/` then reads the password through an **ephemeral** resource into
+  `password_wo`, a **write-only** argument, so the value reaches Cloud SQL without being
+  persisted anywhere. That last part refines the plan's own mechanic — it was going to reach
+  for the Admin API's `users.update` on stdin to keep the value out of `argv`, and the
+  write-only argument achieves the same thing with the provider doing the work.
+
+  Two more are set for the ordinary reason: `ssl_mode = "ENCRYPTED_ONLY"` on the instance,
+  because nothing reaching it without the proxy is an *access* rule and not an encryption one
+  and the two should not be conflated; and `public_access_prevention = "enforced"` on the
+  bucket, because uniform bucket-level access decides where permissions come from without
+  stopping one of them being a grant to `allUsers`, and the bucket holds session files and
+  skill archives.
+
+  Five settings are not the provider's defaults, stated visibly rather than discovered
+  mid-teardown: `deletion_protection = false` on the cluster, **both** Cloud SQL deletion
+  flags (there are two, and either one blocks a destroy), `force_destroy` on the bucket (the
+  acceptance battery leaves objects in it by construction), a **zonal** cluster — on a
+  regional one a node pool's `node_count` is *per zone* across three zones, so the defaults
+  would quietly bill three times what the variable descriptions promise — and one that is
+  *not* a staging choice at all: Cloud SQL's managed connection pooling stays **off**,
+  because transaction-mode pooling breaks a persistent `LISTEN`, which is the exact failure
+  mode `internal/events/broker.go` names and which SSE delivery depends on.
+
+  The sandbox node pool is where slice 2's code becomes usable: a dedicated pool, tainted so
+  the platform's own components stay off it, whose kubelet sets the **`podPidsLimit`** that
+  the Pod API cannot express — the one containment `Hardening.PidsLimit` is Docker-only for,
+  and without which a fork bomb in a GKE sandbox is bounded by nothing the platform sets.
+  The outputs hand the matching `sandboxPlacement` values to Helm in the shape the chart
+  actually takes (a YAML map, a list of Toleration objects), as a pair whose halves fail
+  differently and visibly: no tolerations and every sandbox pod stays `Pending` forever; no
+  selector and they land on the platform pool, which is the pool the taint existed to
+  protect.
+
+  `make gcp-fmt`, `gcp-validate`, `gcp-split-check` and `gcp-lint` need no credentials, no
+  state and no project, so CI runs them all on every PR — the configuration cannot rot silently between the rare runs that
+  provision anything, where the first symptom would be a failed apply halfway through
+  creating a cluster.
+
 - **Google Cloud KMS as a credential cipher**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 3).
   `SECRETS_BACKEND=gcpkms` + `GCPKMS_KEY_NAME` (chart: `gcpKMS.keyName`) seals vault
