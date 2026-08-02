@@ -33,6 +33,40 @@ recorded nowhere else.
 
 ---
 
+## Blob absence proof (#244) — rejected alternatives, 2026-08-02
+
+The narrative is in CHANGELOG.md. What it cannot hold is why the fix does not look like the
+remedy the issue itself proposed.
+
+**Evaluated and rejected: a ranged GET.** The issue's own leading option was to learn absence
+from `Range: bytes=0-0` rather than a HEAD, so an error response *could* carry the document,
+and it priced the option honestly: empty objects, the 200-vs-206-vs-416 variation across
+endpoints, an extra request on the hot path, and reader/size handling all to be worked out.
+Every one of those costs is an artifact of the range, not of the requirement. `minio.Core` —
+minio-go's low-level API, plain S3 on the wire — exposes the same `GetObject` **eagerly**,
+returning `(io.ReadCloser, ObjectInfo, http.Header, error)` from one unranged GET. No `Range`
+header means no 206/416 question and no empty-object special case; the reader and the size
+are what the call already returns; and because `Get` was going to issue that GET on the
+caller's first read anyway, the request replaces the `Stat`'s HEAD instead of joining it. The
+ranged GET buys nothing the eager GET does not, and costs a round trip.
+
+**Evaluated and rejected: no fix for `Delete`'s header override.** The issue left that residue
+open on the ground that the actor required — a server contradicting its own error document,
+or an intermediary injecting a MinIO-dialect header — could equally forge a well-formed
+`NoSuchKey` body, which is out of scope for any remedy. True, and not a reason to leave it:
+forging a document takes an adversary, while contradicting one takes only a buggy proxy, and
+the transport wrapper that closes it is small enough that the asymmetry it removes is worth
+more than the lines. The forged-document case remains genuinely unclosable and is documented
+rather than defended against.
+
+**Not done: `Get`'s `blob.ErrNotFound` kept for bare 404s.** Preserving today's behavior for
+reads while hardening only `Delete` was the conservative option, and it was rejected because
+the two failure modes differ only in severity, not in kind — a read told "no such object"
+when it was refused is a wrong answer given confidently, and the callers that turn
+`ErrNotFound` into a client 404 will now surface an operator incident instead.
+
+---
+
 ## Sandbox hardening (plan 19) — archived 2026-08-01, delivered in one PR (#65)
 
 docs/plan/19_sandbox-hardening.md is archived complete: every sandbox is now created with cgroup limits and capability drops by default, with a memory cap, a read-only root filesystem, a non-root uid and a Kubernetes `runtimeClassName` available on request. The narrative is in CHANGELOG.md; what follows is only what a changelog cannot hold — the alternatives that were evaluated and rejected, and the measurements that decided them.

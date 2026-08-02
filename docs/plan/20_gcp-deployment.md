@@ -608,8 +608,13 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   `Delete` demands the document (minio-go synthesizes `NoSuchKey` from any unparseable
   404, which would let a misrouting proxy's bare 404 read as "already gone") while `Get`
   can only require the code and a 404 status. Measured against real GCS while landing
-  the slice, not assumed. CHANGELOG.md carries the reasoning; #244 tracks the residue on
-  `Get`.
+  the slice, not assumed. CHANGELOG.md carries the reasoning.
+
+  The asymmetry did not survive: #244, opened on this slice's review, closed it by moving
+  `Get` off the `Stat` onto minio-go's eager low-level GET, whose 404 *can* carry the
+  document — so both paths ask for the same proof through one helper. The same fix closed
+  a second residue the review found on `Delete`, where the `x-minio-error-code` header
+  could overwrite a successfully parsed code.
 - **Slice 2 — sandbox pod placement and bounds (`internal/sandbox` +
   `internal/sandbox/k8s` + chart).** Plan 19/#65 delivered most of what this slice was
   originally scoped to add — CPU limit, capability drops, no-privilege-escalation,
