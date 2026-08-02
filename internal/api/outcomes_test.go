@@ -117,10 +117,48 @@ func TestDefineOutcomeSingleActive(t *testing.T) {
 		map[string]any{"events": []any{defineOutcome("second", nil)}})
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 
-	// Two in one batch: same rule.
-	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid+"/events",
+	// Two in one batch, on a FRESH session so the batch rule itself is pinned
+	// (not shadowed by the stored-entry rule the case above exercises).
+	sid2 := eventsFixture(t, s)
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid2+"/events",
 		map[string]any{"events": []any{defineOutcome("a", nil), defineOutcome("b", nil)}})
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	if msg, _ := res["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "send the next user.define_outcome") {
+		t.Errorf("batch-rule message = %q, want the chaining guidance (the batch branch, not the stored-entry one)", msg)
+	}
+}
+
+func TestDefineOutcomeTextRubricCap(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events",
+		map[string]any{"events": []any{defineOutcome("d", map[string]any{
+			"rubric": map[string]any{"type": "text", "content": strings.Repeat("x", 262145)},
+		})}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+}
+
+func TestOutcomeEvaluationsOnListEndpoint(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	sendEvents(t, s, sid, defineOutcome("listed", nil))
+
+	status, res := s.do(http.MethodGet, "/v1/sessions", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list sessions: %d", status)
+	}
+	for _, sess := range listData(t, res) {
+		if sess["id"] != sid {
+			continue
+		}
+		outs, ok := sess["outcome_evaluations"].([]any)
+		if !ok || len(outs) != 1 {
+			t.Fatalf("list rendering outcome_evaluations = %v, want the one pending entry", sess["outcome_evaluations"])
+		}
+		return
+	}
+	t.Fatalf("session %s not in list", sid)
 }
 
 func TestInterruptSettlesOutcomeAndAllowsChaining(t *testing.T) {

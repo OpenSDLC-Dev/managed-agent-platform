@@ -207,7 +207,8 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// the log.
 		interruptible := status == string(domain.SessionIdle) || status == string(domain.SessionRunning)
 		// Nothing to stop: an idle session with no outstanding call has no turn
-		// to end, so the event is logged and settles nothing. Emitting a
+		// to end, so the event is logged and settles no turn (a non-terminal
+		// outcome still settles below — the flip does not depend on settling). Emitting a
 		// session.status_idle for a session that never left idle would announce a
 		// transition that did not happen.
 		settling := interruptible && (status == string(domain.SessionRunning) || len(abandoned) > 0)

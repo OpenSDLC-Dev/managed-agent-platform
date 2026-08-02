@@ -2,6 +2,7 @@ package brain
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -257,5 +258,13 @@ func TestBuildRequestRendersDefineOutcome(t *testing.T) {
 	text = string(req.Messages[0].Content)
 	if !strings.Contains(text, "Build it") || strings.Contains(text, "file_1") {
 		t.Errorf("file-rubric rendering = %s, want description only", text)
+	}
+}
+
+func TestDefineOutcomeChainsMidTurn(t *testing.T) {
+	// The wake trigger only fires on idle sessions; a define_outcome landing
+	// mid-turn must chain the next turn through the pending-input check.
+	if !slices.Contains(pendingInputTypes, string(domain.EventUserDefineOutcome)) {
+		t.Errorf("pendingInputTypes = %v, want user.define_outcome included", pendingInputTypes)
 	}
 }
