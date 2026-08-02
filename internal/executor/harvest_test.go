@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -410,5 +411,48 @@ func TestHarvestHostileListingPathsAreExcluded(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.ModelTurn); got != 1 {
 		t.Errorf("model_turn live = %d, want 1", got)
+	}
+}
+
+func TestValidHarvestPathRejectsEscapes(t *testing.T) {
+	// Direct guard coverage: the harness tests above cannot distinguish a
+	// validator rejection from the fake sandbox's file-not-found skip, so a
+	// lost validator would pass them (proven by mutation during slice-4
+	// verification). This test fails the moment validHarvestPath stops
+	// rejecting an escape shape.
+	accept := []string{"ok.json", "sub/model.bin", "a b/c.txt", ".hidden", "..data"}
+	for _, p := range accept {
+		if !validHarvestPath(p) {
+			t.Errorf("validHarvestPath(%q) = false, want true", p)
+		}
+	}
+	reject := []string{
+		"",
+		"/etc/shadow",
+		"..",
+		"../peer",
+		"../../../etc/passwd",
+		"a/../b",
+		"a//b",
+		"./a",
+		"a/",
+		"a/./b",
+		strings.Repeat("x", 1025),
+	}
+	for _, p := range reject {
+		if validHarvestPath(p) {
+			t.Errorf("validHarvestPath(%q) = true, want false", p)
+		}
+	}
+}
+
+func TestParseListingSortsDedupesAndReportsRejects(t *testing.T) {
+	out := "b.txt\x00a.txt\x00b.txt\x00/abs\x00../up\x00\x00c/d.bin\x00"
+	paths, rejected := parseListing(out)
+	if want := []string{"a.txt", "b.txt", "c/d.bin"}; !slices.Equal(paths, want) {
+		t.Errorf("paths = %q, want %q", paths, want)
+	}
+	if want := []string{"/abs", "../up"}; !slices.Equal(rejected, want) {
+		t.Errorf("rejected = %q, want %q", rejected, want)
 	}
 }
