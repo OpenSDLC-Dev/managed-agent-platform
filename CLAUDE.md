@@ -105,7 +105,7 @@ static: shellcheck cannot know that `gcloud secrets versions describe` rejects `
 and it passed a `bootstrap.sh` that aborted on its first call in every project; nor can
 `terraform validate` or shellcheck execute the SQL in `dbinit.sql`, so `gcp-dbinit-test`
 runs it against a real PostgreSQL 16 with TLS on (Docker required) and requires the run to
-go red once for each state its assertions exist to catch. Terraform is not installed by this repo — it is not in Homebrew
+go red once for each state its assertions guard and the DDL does not repair. Terraform is not installed by this repo — it is not in Homebrew
 core, so `brew install hashicorp/tap/terraform`.
 
 CI (`.github/workflows/ci.yml`) invokes the same targets, so the gate cannot drift between the docs, the verifier, and the merge check. The coverage gate is **total statement coverage ≥ 90%** over the **logic packages** under `./internal/...` — deliberately outside the denominator: `cmd/` main glue and the test-support packages (`internal/pgtest`, `internal/sandbox/sandboxtest`, `internal/modeltest`, `internal/blob/blobtest`, `internal/provider/providertest`, `internal/secrets/secretstest`, `internal/secrets/gcpkms/gcpkmstest`, `internal/webtool/webtooltest`), whose uncovered statements are the branches that fire only when a suite fails or a live tier is misconfigured. `make test` needs Docker (store/API/sandbox suites) and a Kubernetes cluster (the K8s sandbox contract test; a local kind cluster works) — a missing daemon or cluster is a hard failure, not a skip.

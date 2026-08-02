@@ -445,8 +445,12 @@ input would pass a run against the real tree, and twice did.
 shellcheck can execute SQL: without it the only thing that ever runs `dbinit.sql` is a
 billable cluster talking to a billable database, which is a slow and expensive way to find a
 typo in a `\gexec`. It starts a real PostgreSQL 16 with TLS on and runs the file the way the
-Job does — then sets up each state its assertions exist to catch and requires the run to go
-red for that reason, because an assertion that cannot fail is a comment. It also runs the
+Job does — then sets up every state its assertions guard and the DDL does not repair, and
+requires the run to go red for that reason, because an assertion that cannot fail is a
+comment. That split matters: LOGIN, INHERIT, CREATEDB, CREATEROLE and database ownership are
+*corrected* by the file, so their assertions cannot fire and the repair cases cover them
+instead; SUPERUSER and BYPASSRLS cannot be corrected by a Cloud SQL administrator at all, so
+those two are asserted-only and have negative cases of their own. It also runs the
 whole file under a deliberately **non-superuser** administrator, which is what Cloud SQL's
 actually is: `cloudsqlsuperuser` carries CREATEDB and CREATEROLE and nothing more, while a
 local `postgres` is a true superuser that bypasses the very checks a Cloud SQL run has to

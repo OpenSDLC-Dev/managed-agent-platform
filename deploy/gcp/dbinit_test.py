@@ -16,8 +16,11 @@ What this covers that a read cannot:
     whole rotation procedure — proven by authenticating as the platform role
     with the new password and failing to with the old one;
   - and, most of all, that the assertions can FAIL. An assertion that cannot go
-    red is a comment, so each state the assertions exist to catch is set up
-    deliberately below and the run is required to go red for that reason.
+    red is a comment, so every state the assertions guard and the DDL does not
+    repair is set up deliberately below and the run is required to go red for
+    that reason. The repaired ones -- LOGIN, INHERIT, CREATEDB, CREATEROLE,
+    database ownership -- are unreachable by the time the assertion runs, and
+    are covered by the repair cases instead.
 
 What it cannot cover: Cloud SQL's own behaviour. `cloudsqlsuperuser` does not
 exist on stock PostgreSQL, so the membership assertion is exercised here against
@@ -493,6 +496,45 @@ def main():
         check("fails", r.returncode != 0, r.stdout)
         check("says the session is not encrypted",
               "not encrypted" in (r.stderr + r.stdout), r.stderr + r.stdout)
+
+    # The three attributes the corrective ALTER deliberately does NOT name.
+    # `ALTER ROLE ... LOGIN INHERIT NOCREATEDB NOCREATEROLE` cannot revoke
+    # SUPERUSER or BYPASSRLS, because PostgreSQL lets only a superuser change
+    # those -- even to turn them off -- and Cloud SQL's administrator is not
+    # one. So they are asserted and not repaired, and these two cases are what
+    # make "asserted" mean something: without them the assertions guard a
+    # reachable state that nothing ever demonstrates.
+    print("the SUPERUSER assertion FIRES on a role it cannot revoke it from")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        pg.psql_admin("ALTER ROLE %s SUPERUSER;" % DB_USER)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("says SUPERUSER", "is SUPERUSER" in (r.stderr + r.stdout),
+              r.stderr + r.stdout)
+
+    print("the BYPASSRLS assertion FIRES on a role it cannot revoke it from")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        pg.psql_admin("ALTER ROLE %s BYPASSRLS;" % DB_USER)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("says BYPASSRLS", "has BYPASSRLS" in (r.stderr + r.stdout),
+              r.stderr + r.stdout)
+
+    # A login role that already exists skips the guarded `CREATE ROLE ... IN
+    # ROLE`, and nothing later grants the membership -- so a role created by
+    # hand before the first run would authenticate fine and hold none of the
+    # group's grants. That is a silent partial install, which is exactly what
+    # this assertion is for.
+    print("the member-of-its-own-role assertion FIRES on a hand-made role")
+    with Postgres() as pg:
+        pg.psql_admin("CREATE ROLE %s LOGIN PASSWORD 'preexisting';" % DB_USER)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("says it is not a member of its own role",
+              "is not a member of its own role" in (r.stderr + r.stdout),
+              r.stderr + r.stdout)
 
     print()
     if failures:

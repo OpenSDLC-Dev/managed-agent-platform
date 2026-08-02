@@ -139,8 +139,24 @@ gcp-validate:
 gcp-split-check:
 	python3 deploy/gcp/check_split.py
 
+# The second half is a portability guard shellcheck does not offer: it checks
+# syntax and quoting, not which bash a construct needs. These scripts are run BY
+# THE OPERATOR, on a laptop, and macOS ships bash 3.2.57 and always will — so a
+# bash-4 builtin here is not a nicety, it is `make gcp-db-init` dying on the
+# machine it was written for while CI (Linux, bash 5) stays green. `mapfile` got
+# in exactly that way. A list of constructs, not an analysis, and honest about
+# it: it catches a recurrence of this class, not every possible one.
 gcp-lint:
 	shellcheck deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh
+	@set -euo pipefail; \
+	found=0; \
+	for f in deploy/gcp/bootstrap.sh deploy/gcp/dbinit.sh; do \
+		if grep -nE '(^|[^[:alnum:]_-])(mapfile|readarray)[[:space:]]|declare[[:space:]]+-[A-Za-z]*A|\$${[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)' "$$f"; then \
+			echo "  ^ in $$f: needs bash 4; macOS ships 3.2" >&2; \
+			found=1; \
+		fi; \
+	done; \
+	if [ "$$found" -ne 0 ]; then exit 1; fi
 
 # shellcheck cannot know that `gcloud secrets versions describe` rejects
 # `--filter`, and it exited 0 on a bootstrap.sh that aborted on its first call in
@@ -152,9 +168,9 @@ gcp-bootstrap-test:
 # terraform validate cannot execute SQL and shellcheck cannot execute psql, so
 # without this the only thing that ever runs dbinit.sql is a billable cluster
 # talking to a billable database. This runs it against a real PostgreSQL 16 with
-# TLS on, sets up the states its assertions exist to catch, and requires the run
-# to go red for that reason — an assertion that cannot fail is a comment. Needs
-# Docker.
+# TLS on, sets up every state its assertions guard and the DDL does not repair,
+# and requires the run to go red for that reason — an assertion that cannot fail
+# is a comment. Needs Docker.
 gcp-dbinit-test:
 	python3 deploy/gcp/dbinit_test.py
 

@@ -51,7 +51,9 @@ copy of an entry here.
   shellcheck cannot execute psql, so without it the only thing that ever ran this file was a
   billable cluster talking to a billable database. It starts a real PostgreSQL 16 with TLS
   on, exercises idempotency and rotation, and requires the run to go red once for each state
-  its assertions exist to catch. It found four defects in the file it was written for. Two were ordinary: an unguarded
+  its assertions guard and the DDL does not repair — including SUPERUSER and BYPASSRLS,
+  which a Cloud SQL administrator cannot revoke and the file therefore asserts without
+  correcting. It found four defects in the file it was written for. Two were ordinary: an unguarded
   `pg_has_role` that raised on any PostgreSQL lacking a `cloudsqlsuperuser` role — failing
   every run at the last statement, after every assertion had passed — and a `\getenv` that
   turned a missing password into a syntax error instead of the complaint written for that
@@ -80,6 +82,24 @@ copy of an entry here.
   cluster this Terraform built, compared by API-server endpoint rather than by context name
   — otherwise a stale context meant writing both of one project's database passwords into
   another project's cluster, and only then failing to reach a private IP.
+
+  That endpoint guard then shipped with a defect of its own, caught by verification: it read
+  the endpoints with `mapfile`, which is bash 4, and **macOS ships bash 3.2.57 and always
+  will**. `make gcp-db-init` is run by an operator on a laptop, so the guard would have died
+  on the machine it was written for — and died badly, since `command not found` was swallowed
+  by a `|| true` and what surfaced under `set -u` was `cluster_endpoints: unbound variable`,
+  naming nothing about the cluster. Nothing caught it: shellcheck checks syntax and quoting,
+  not which bash a construct needs, and CI is Linux with bash 5. It is now a `while read`
+  loop, and `gcp-lint` gained a portability guard for the class — a list of bash-4
+  constructs, honest about being a list rather than an analysis, proven to go red on a
+  planted `mapfile`.
+
+  `gcp-dbinit-test` also grew three negative cases, because the phrasing "goes red for each
+  state its assertions catch" was not yet literally true: `SUPERUSER`, `BYPASSRLS` and
+  membership-in-its-own-role guard states that are reachable and that the DDL does not
+  repair, and nothing demonstrated any of the three. The suite is now 59 checks across 8
+  deliberately-red blocks, and the docs distinguish the asserted-and-repaired attributes from
+  the asserted-only ones instead of implying every assertion gets a negative case.
 
 - **`terraform destroy` reliability and CIDR preconditions.** `deletion_policy = "ABANDON"`
   on the service-networking connection is *removed*, not added: it does not delete the

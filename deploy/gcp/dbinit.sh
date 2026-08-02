@@ -104,10 +104,21 @@ cluster_zone="$(tf_out zone)"
 # the same cluster, and matching only `endpoint` would refuse a correct setup
 # while printing a get-credentials command that reproduces the very form it just
 # rejected. Missing fields come back empty and are dropped.
-mapfile -t cluster_endpoints < <(gcloud container clusters describe "$cluster_name" \
+#
+# A read loop and not `mapfile`, which is bash 4. macOS ships bash 3.2.57 and
+# will not ship a newer one, so `mapfile` here is not a portability nicety — it
+# is this script dying on the operator's own laptop, and dying badly: the
+# `command not found` is swallowed by the `|| true`, and what surfaces under
+# `set -u` is `cluster_endpoints: unbound variable`, which names nothing about
+# the cluster. bootstrap.sh is already 3.2-clean; this keeps the pair
+# consistent.
+cluster_endpoints=()
+while IFS= read -r endpoint; do
+	[[ -n "$endpoint" ]] && cluster_endpoints+=("$endpoint")
+done < <(gcloud container clusters describe "$cluster_name" \
 	--zone "$cluster_zone" --project "$PROJECT" \
 	--format='value[separator=" "](endpoint,privateClusterConfig.privateEndpoint,controlPlaneEndpointsConfig.dnsEndpointConfig.endpoint)' \
-	2>/dev/null | tr ' ' '\n' | grep -v '^$') || true
+	2>/dev/null | tr ' ' '\n')
 
 if [[ ${#cluster_endpoints[@]} -eq 0 ]]; then
 	echo "could not read any endpoint of cluster $cluster_name in $cluster_zone." >&2
