@@ -94,11 +94,15 @@ func TestRenderTranscriptTotalBudget(t *testing.T) {
 }
 
 // contentText's fallbacks: a bare string, a block array, an unknown content
-// shape kept raw, and bodies with no readable content at all.
+// shape kept raw, and bodies with no readable content at all. A search_result
+// block has no top-level text — its title, source, and nested text blocks
+// flatten instead (web_search evidence must reach the grader).
 func TestContentText(t *testing.T) {
 	cases := []struct{ name, body, want string }{
 		{"string", `{"content":"plain"}`, "plain"},
 		{"blocks", `{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}`, "a\nb"},
+		{"search results", `{"content":[{"type":"search_result","title":"Go 1.26 notes","source":"https://go.dev/doc","content":[{"type":"text","text":"release highlights"}]},{"type":"text","text":"plain"}]}`,
+			"Go 1.26 notes\nhttps://go.dev/doc\nrelease highlights\nplain"},
 		{"unknown shape", `{"content":{"k":1}}`, `{"k":1}`},
 		{"no content", `{}`, ""},
 		{"invalid json", `{`, ""},

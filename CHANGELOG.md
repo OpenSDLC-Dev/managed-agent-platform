@@ -40,9 +40,12 @@ copy of an entry here.
   work" boundary — entry state only); grader replies are NUL-sanitized before landing in
   jsonb (#228's lane); a message arriving between the grading commit and its claim
   chains a turn from the verdict settlement instead of stranding (grading marks nothing
-  processed, so its pending-input probe is unfiltered); and both deployment surfaces
-  hand the brain its new blob env (compose's bundled MinIO; the chart's optional
-  `blob-*` Secret keys). Ten scripted state-machine tests drive every path against real
+  processed, so its pending-input probe is unfiltered); grader transcripts flatten
+  `search_result` blocks (title + source + nested text — web_search evidence would
+  otherwise vanish); heartbeats are fenced on the entry still evaluating and the
+  heartbeat worker joins before settlement, so no `_ongoing` lands after an end event;
+  and both deployment surfaces hand the brain its new blob env (compose's bundled
+  MinIO; the chart's optional `blob-*` Secret keys). Ten scripted state-machine tests drive every path against real
   Postgres, plus an API-level interrupt-mid-grading test. Everything the
   reference keeps opaque — the grader's prompt, inputs, verdict protocol, cadence,
   scheduling, failure posture — is registered as one consolidated INFERRED divergence in

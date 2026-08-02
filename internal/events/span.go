@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -195,9 +196,20 @@ type OutcomeEvaluation struct {
 	backend   Backend
 }
 
+// errHeartbeatStale aborts a heartbeat append whose grading cycle already
+// settled underneath it.
+var errHeartbeatStale = errors.New("outcome evaluation no longer live")
+
 // Heartbeat appends one span.outcome_evaluation_ongoing — the liveness
 // signal the docs describe as distinguishing "actively running" from
-// "stuck" while the grader's reasoning stays opaque.
+// "stuck" while the grader's reasoning stays opaque. The append is fenced
+// on the entry still being `evaluating`, under the same session row lock
+// every settlement takes: a cycle settled underneath us (an interrupt's flip
+// commits with a queue cancel the grader only notices at its next lease
+// renewal) must not put a liveness signal after its terminal end event, so
+// the stale append aborts instead — a skip, not an error. The fence is
+// cycle liveness, not lease ownership: a reclaimed cycle being re-graded is
+// still live, and its old brain's heartbeat stays truthful.
 func (o *OutcomeEvaluation) Heartbeat(ctx context.Context) error {
 	payload, err := json.Marshal(map[string]any{
 		"outcome_id": o.outcomeID, "iteration": o.iteration,
@@ -206,9 +218,21 @@ func (o *OutcomeEvaluation) Heartbeat(ctx context.Context) error {
 		return err
 	}
 	now := time.Now().UTC()
-	_, err = o.log.Append(ctx, o.sessionID, []NewEvent{{
+	_, err = o.log.AppendWith(ctx, o.sessionID, []NewEvent{{
 		Type: domain.EventSpanOutcomeEvalOngoing, Payload: payload, ProcessedAt: &now,
-	}})
+	}}, AppendOptions{
+		MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+			for _, e := range evals {
+				if e.OutcomeID == o.outcomeID && e.Result == domain.OutcomeResultEvaluating {
+					return evals, nil
+				}
+			}
+			return nil, errHeartbeatStale
+		},
+	})
+	if errors.Is(err, errHeartbeatStale) {
+		return nil
+	}
 	return err
 }
 

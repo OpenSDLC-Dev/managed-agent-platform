@@ -104,7 +104,9 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 
 	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL)
 	hbStop := make(chan struct{})
+	hbDone := make(chan struct{})
 	go func() {
+		defer close(hbDone)
 		t := time.NewTicker(graderHeartbeatInterval)
 		defer t.Stop()
 		for {
@@ -120,6 +122,9 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	}()
 	text, usage, streamErr := consumeGraderStream(kctx, p, req)
 	close(hbStop)
+	// Join before settling: a tick in flight as the stream ended must commit
+	// (or be fenced) before the end event does, never after it.
+	<-hbDone
 	if err := keeper.Close(); err != nil {
 		// Lease gone: the outcome may already be settled by an interrupt (its
 		// flip cancels our item). Nothing of ours may commit.
@@ -518,23 +523,55 @@ func contentText(body []byte) string {
 	if json.Unmarshal(p.Content, &s) == nil {
 		return s
 	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+	if text, ok := flattenBlocks(p.Content); ok {
+		return text
 	}
-	if json.Unmarshal(p.Content, &blocks) != nil {
-		return string(p.Content)
+	return string(p.Content)
+}
+
+// flattenBlocks renders a content-block array as plain text. Most blocks
+// carry their text at the top level; a search_result block carries its
+// evidence as title + source + nested text blocks, so those flatten too —
+// web_search answers would otherwise vanish from the transcript.
+func flattenBlocks(raw json.RawMessage) (string, bool) {
+	var blocks []struct {
+		Type    string          `json:"type"`
+		Text    string          `json:"text"`
+		Title   string          `json:"title"`
+		Source  string          `json:"source"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(raw, &blocks) != nil {
+		return "", false
 	}
 	var sb strings.Builder
-	for _, b := range blocks {
-		if b.Text != "" {
-			if sb.Len() > 0 {
-				sb.WriteString("\n")
-			}
-			sb.WriteString(b.Text)
+	add := func(text string) {
+		if text == "" {
+			return
 		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(text)
 	}
-	return sb.String()
+	for _, b := range blocks {
+		if b.Type == "search_result" {
+			var parts []string
+			if b.Title != "" {
+				parts = append(parts, b.Title)
+			}
+			if b.Source != "" {
+				parts = append(parts, b.Source)
+			}
+			if nested, ok := flattenBlocks(b.Content); ok && nested != "" {
+				parts = append(parts, nested)
+			}
+			add(strings.Join(parts, "\n"))
+			continue
+		}
+		add(b.Text)
+	}
+	return sb.String(), true
 }
 
 // mustTextContent marshals one text block array; a plain string cannot fail.
