@@ -5,9 +5,7 @@
 package s3
 
 import (
-	"bytes"
 	"context"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -45,10 +43,11 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Endpoint == "" || cfg.Bucket == "" {
 		return nil, errors.New("s3: endpoint and bucket are required")
 	}
-	// minio-go's own default transport, wrapped so that an endpoint's error
-	// document outranks the x-minio-error-code header (see bodyCodeWins). It
-	// has to be built here rather than left nil, because supplying a transport
-	// is the only way in.
+	// minio-go's own default transport, wrapped so an error response reaches
+	// the library saying what the endpoint meant (see endpointWord). It has to
+	// be built here rather than left nil, because supplying a transport is the
+	// only way in — and it has to be minio-go's rather than http's, whose
+	// transparent gzip would rewrite an object's bytes and lose its length.
 	transport, err := minio.DefaultTransport(cfg.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("s3: transport: %w", err)
@@ -57,7 +56,7 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		Creds:     credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure:    cfg.TLS,
 		Region:    cfg.Region,
-		Transport: bodyCodeWins{next: transport},
+		Transport: endpointWord{next: transport},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("s3: client: %w", err)
@@ -99,60 +98,17 @@ func alreadyOwned(err error) bool {
 // decoding any children, so a document that starts <Error> and then breaks
 // leaves XMLName set. minio-go discarding that struct is what makes the marker
 // trustworthy.) The status is required because a code can still arrive
-// detached from the document it came with — see bodyCodeWins for the response
-// header that does it, and for why the document outranks it.
+// detached from the document it came with.
+//
+// What reaches this check is the endpoint's word rather than minio-go's
+// reading of it because endpointWord repairs the two places those differ: a
+// response header that overrules a parsed document, and the one absence AWS
+// reports by header instead of by document at all.
 func absent(err error) bool {
 	res := minio.ToErrorResponse(err)
 	return res.Code == "NoSuchKey" &&
 		res.StatusCode == http.StatusNotFound &&
 		res.XMLName.Local == "Error"
-}
-
-// maxErrorBody bounds what bodyCodeWins buffers to read a code, matching the
-// limit minio-go itself puts on decoding an error body.
-const maxErrorBody = 1 << 20
-
-// bodyCodeWins keeps an endpoint's own error document authoritative over the
-// x-minio-error-code response header. minio-go applies that header after a
-// successful decode and not merely as a fallback for one that failed, so a 404
-// whose body says NoSuchBucket and whose header says NoSuchKey reaches absent
-// as NoSuchKey with the document marker intact — every conjunct satisfied by a
-// response that says, in the endpoint's own document, that the bucket is gone.
-//
-// Dropping the header only where the body already carries a code leaves the
-// dialect working wherever it is the only source, such as a HEAD answer that
-// has no body to carry one.
-type bodyCodeWins struct{ next http.RoundTripper }
-
-func (t bodyCodeWins) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := t.next.RoundTrip(req)
-	// Only an error response can carry an error document, and only a response
-	// carrying the header has anything to overrule — so a successful read's
-	// object bytes are never buffered here.
-	if err != nil || resp.StatusCode < http.StatusBadRequest ||
-		resp.Header.Get("x-minio-error-code") == "" {
-		return resp, err
-	}
-	body := resp.Body
-	// A read error leaves head short, which then fails to decode below and
-	// keeps the header — the same outcome as never having intervened. Handing
-	// back what was read, followed by the original body, leaves minio-go to
-	// meet the same bytes and the same error.
-	head, _ := io.ReadAll(io.LimitReader(body, maxErrorBody))
-	resp.Body = struct {
-		io.Reader
-		io.Closer
-	}{io.MultiReader(bytes.NewReader(head), body), body}
-	// XMLName is what makes this reject a body that is not an S3 error
-	// document at all, such as a proxy's HTML 404 page.
-	var doc struct {
-		XMLName xml.Name `xml:"Error"`
-		Code    string   `xml:"Code"`
-	}
-	if xml.Unmarshal(head, &doc) == nil && doc.Code != "" {
-		resp.Header.Del("x-minio-error-code")
-	}
-	return resp, nil
 }
 
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {

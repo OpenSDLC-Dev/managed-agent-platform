@@ -407,6 +407,14 @@ copy of an entry here.
   honest answer to a proxy fault), and dropping the HEAD leaves the read path one round trip
   shorter than before.
 
+  **One absence arrives with no document to demand, and it is AWS's.** A GET for a key whose
+  current version is a delete marker is answered with a 404 carrying `x-amz-delete-marker:
+  true`, a `text/plain` content type and no body at all — which on a versioned bucket is the
+  ordinary state of every deleted key, so demanding the document would have broken
+  `ErrNotFound` for that whole deployment. The client's transport translates that header into
+  the error document it stands for. Accepting it does not reopen what the paragraph above
+  closes: it is an affirmative signal that a misrouting proxy's bare 404 does not carry.
+
   **The second half of the same bug was on `Delete`.** minio-go applies the
   `x-minio-error-code` response header *after* a successful decode, not only as a fallback
   for one that failed — so a 404 whose body says `NoSuchBucket` and whose header says
@@ -416,10 +424,11 @@ copy of an entry here.
   `<Code>`, which leaves the header working where it is the only source (a HEAD answer has
   none) and stops it contradicting a document that decoded.
 
-  Both were found reviewing the GCS delete-convergence fix, and both were reproduced against
-  the pre-fix code before being fixed. What stays genuinely unclosable is recorded as such:
-  an endpoint that forges a well-formed `NoSuchKey` document is indistinguishable from one
-  reporting a real absence, on any request.
+  Both bugs were found reviewing the GCS delete-convergence fix; the delete-marker gap was
+  found reviewing this fix, before it could ship. Every guard here is pinned by a test that
+  fails without it, each one run against the code that lacked it. What stays genuinely
+  unclosable is recorded as such: an endpoint that forges a well-formed `NoSuchKey` document
+  is indistinguishable from one reporting a real absence, on any request.
 
 - **The chart no longer documents a path that runs sandboxes as root.** The
   `executor.sandboxHardening.*` row said "`0` / `none` to turn one off" for the whole group.
@@ -486,6 +495,10 @@ copy of an entry here.
   documented intent ("only object absence maps there") already implied.
   [#244](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/244) tracks what
   remains: a reader cannot demand what a HEAD cannot send.
+
+  *(Superseded before release, by the #244 entry above: `Get` stopped learning absence from a
+  HEAD, so it asks for the document too, the asymmetry test is gone and the shared helper is
+  now `absent`. This entry stands as the record of what the slice landed.)*
 
   The MinIO-backed contract suite cannot reach any of this, so the regression tests drive
   a stub S3 endpoint — the convergence case confirmed failing against the pre-fix code and

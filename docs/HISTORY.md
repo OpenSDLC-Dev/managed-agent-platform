@@ -62,8 +62,26 @@ rather than defended against.
 **Not done: `Get`'s `blob.ErrNotFound` kept for bare 404s.** Preserving today's behavior for
 reads while hardening only `Delete` was the conservative option, and it was rejected because
 the two failure modes differ only in severity, not in kind — a read told "no such object"
-when it was refused is a wrong answer given confidently, and the callers that turn
-`ErrNotFound` into a client 404 will now surface an operator incident instead.
+when it was refused is a wrong answer given confidently. No caller loses a client 404 by the
+change: both API download paths already mapped *every* `Get` error, `ErrNotFound` included,
+to a 500 (`internal/api/files.go`, `internal/api/skills.go` — "a row whose object is gone is
+an operator incident, not a client 404"), and the executor's two readers still skip the mount
+or the skill and carry on. What moves is the outcome they record, from a miss to a failure,
+which is the point of the change.
+
+**Evaluated and rejected: relaxing `Get`'s proof again for AWS delete markers.** Review found
+one absence that arrives with no document to demand. AWS answers a GET for a key whose current
+version is a delete marker with a 404 carrying `x-amz-delete-marker: true`, `Content-Type:
+text/plain` and no body at all — its GetObject reference's "If the Latest Object Is a Delete
+Marker" sample response, which stands in deliberate contrast to the `<Error>` document the
+sample immediately above it carries. On a versioned bucket that is the ordinary state of every
+deleted key, so demanding the document would have broken `ErrNotFound` for the whole store
+there. Dropping the document requirement for reads would have undone the fix; reading the
+header inside the absence check was impossible, since `minio.ErrorResponse` carries no headers.
+So the transport translates: on that one answer it writes in the error document the header
+stands for. The translation cannot launder an ordinary bare 404 into absence, because a
+misrouting proxy's 404 does not carry an affirmative AWS delete-marker header — which is the
+whole point of asking for an affirmative signal rather than accepting a missing one.
 
 ---
 

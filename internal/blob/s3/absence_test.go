@@ -217,3 +217,23 @@ func TestGetReadsAbsenceFromTheEndpointsErrorDocument(t *testing.T) {
 		t.Errorf("endpoint saw %v, want exactly [GET /stub-bucket/gone]", got)
 	}
 }
+
+// TestGetReadsAbsenceFromAnAwsDeleteMarker is the one absence that arrives
+// with no document to demand. AWS answers a GET for a key whose current
+// version is a delete marker with a 404 carrying x-amz-delete-marker: true and
+// no body at all — its GetObject reference's "If the Latest Object Is a Delete
+// Marker" sample response. On a versioned bucket that is the ordinary state of
+// every deleted key, so a Get that insisted on the document would fail
+// blob.Store's ErrNotFound contract for the whole store; the backend reads the
+// header as the document it stands for. A bare 404 without that affirmative
+// header stays an error, which is the test above this one.
+func TestGetReadsAbsenceFromAnAwsDeleteMarker(t *testing.T) {
+	s, _ := stubStore(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("x-amz-delete-marker", "true")
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusNotFound)
+	})
+	if _, _, err := s.Get(context.Background(), "deleted"); !errors.Is(err, blob.ErrNotFound) {
+		t.Fatalf("get of a delete-marked key = %v, want blob.ErrNotFound", err)
+	}
+}
