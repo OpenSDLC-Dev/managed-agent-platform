@@ -105,9 +105,17 @@ type harness struct {
 }
 
 func newHarness(t *testing.T, scripts [][]provider.Chunk, errs []error) *harness {
+	return newHarnessEnv(t, "self_hosted", scripts, errs)
+}
+
+// newHarnessEnv is newHarness over an environment of the given kind. Grading's
+// settlement routes on it: a cloud end_turn chains a deliverables harvest
+// before the grading turn, while self_hosted grades directly (plan 21,
+// Decision 8).
+func newHarnessEnv(t *testing.T, envKind string, scripts [][]provider.Chunk, errs []error) *harness {
 	t.Helper()
 	pool := pgtest.NewPool(t)
-	sid, envID := pgtest.NewSession(t, pool, "self_hosted")
+	sid, envID := pgtest.NewSession(t, pool, envKind)
 	fake := &fakeProvider{scripts: scripts, errs: errs}
 	reg, err := provider.NewRegistry(
 		[]provider.Route{{Model: "*", Config: provider.Config{Protocol: "fake", BaseURL: "http://fake"}}},

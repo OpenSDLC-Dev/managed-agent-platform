@@ -31,7 +31,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 16
+const wantMigrations = 17
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -216,11 +216,43 @@ func TestEnumCheckConstraints(t *testing.T) {
 	}
 	valid = append(valid,
 		`INSERT INTO work_items (id, environment_id, session_id, kind) VALUES ('work_mt', 'env_1', 'sesn_1', 'model_turn')`,
+		`INSERT INTO work_items (id, environment_id, session_id, kind) VALUES ('work_oh', 'env_1', 'sesn_1', 'outputs_harvest')`,
 		`INSERT INTO environments (id, name, kind, config) VALUES ('env_sh', 'e2', 'self_hosted', '{"type":"self_hosted"}')`,
 	)
 	for _, q := range valid {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			t.Errorf("valid insert rejected: %q: %v", q, err)
+		}
+	}
+}
+
+// TestHarvestedFilePathUniquePerScope pins the snapshot key the deliverables
+// harvest relies on (0017): one files row per (scope_id, filename), so a
+// re-harvest replaces per path instead of accumulating. The index is partial —
+// plain uploads carry no scope and stay free to repeat a name.
+func TestHarvestedFilePathUniquePerScope(t *testing.T) {
+	pool := open(t, pgtest.FreshDB(t))
+	ctx := context.Background()
+
+	insert := `INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+	           VALUES ($1, $2, 'text/plain', 1, true, 'session', $3)`
+	if _, err := pool.Exec(ctx, insert, "file_1", "reports/dcf.md", "sesn_1"); err != nil {
+		t.Fatalf("first scoped row: %v", err)
+	}
+	_, err := pool.Exec(ctx, insert, "file_2", "reports/dcf.md", "sesn_1")
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != pgUniqueViolation {
+		t.Errorf("duplicate (scope_id, filename) => %v, want unique violation %s", err, pgUniqueViolation)
+	}
+	// The same path under another session's scope is fine.
+	if _, err := pool.Exec(ctx, insert, "file_3", "reports/dcf.md", "sesn_2"); err != nil {
+		t.Errorf("same path in another scope: %v", err)
+	}
+	// Unscoped uploads may repeat a filename freely.
+	upload := `INSERT INTO files (id, filename, mime_type, size_bytes) VALUES ($1, 'dup.txt', 'text/plain', 1)`
+	for _, id := range []string{"file_u1", "file_u2"} {
+		if _, err := pool.Exec(ctx, upload, id); err != nil {
+			t.Errorf("unscoped duplicate filename rejected: %v", err)
 		}
 	}
 }

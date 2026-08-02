@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"testing"
@@ -647,6 +648,83 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		short := workdir + "/short.bin"
 		if err := sb.WriteFileStream(ctx, short, strings.NewReader("hi"), 100); err == nil {
 			t.Error("stream write with a short src returned nil, want an error")
+		}
+	})
+
+	// ReadFileStream is the read-out counterpart: the deliverables harvest
+	// moves files above the fixed ReadFile cap out of the sandbox, so the
+	// ceiling is per-call. The payload is deliberately over MaxFileBytes —
+	// the size this method exists for — and deterministic so a mismatch
+	// names the first bad offset.
+	t.Run("ReadFileStreamRoundTripAndCap", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		want := make([]byte, sandbox.MaxFileBytes+1<<20)
+		x := uint32(0xBADC0DE)
+		for i := range want {
+			x ^= x << 13
+			x ^= x >> 17
+			x ^= x << 5
+			want[i] = byte(x)
+		}
+		path := workdir + "/outputs/report.bin"
+		if err := sb.WriteFileStream(ctx, path, bytes.NewReader(want), int64(len(want))); err != nil {
+			t.Fatalf("write %d bytes: %v", len(want), err)
+		}
+		// Over the fixed cap, ReadFile refuses — this is the read only the
+		// streaming method can make.
+		if _, err := sb.ReadFile(ctx, path); !errors.Is(err, sandbox.ErrFileTooLarge) {
+			t.Fatalf("ReadFile above the cap = %v, want ErrFileTooLarge", err)
+		}
+		rc, size, err := sb.ReadFileStream(ctx, path, int64(len(want))+1)
+		if err != nil {
+			t.Fatalf("ReadFileStream: %v", err)
+		}
+		got, err := io.ReadAll(rc)
+		if cerr := rc.Close(); cerr != nil {
+			t.Errorf("close: %v", cerr)
+		}
+		if err != nil {
+			t.Fatalf("read stream: %v", err)
+		}
+		if size != int64(len(want)) || !bytes.Equal(got, want) {
+			t.Errorf("streamed %d bytes (size %d), want %d; first difference at %d",
+				len(got), size, len(want), firstDiff(got, want))
+		}
+
+		// A file over the caller's ceiling is refused before its bytes travel.
+		if _, _, err := sb.ReadFileStream(ctx, path, 1024); !errors.Is(err, sandbox.ErrFileTooLarge) {
+			t.Errorf("over maxBytes = %v, want ErrFileTooLarge", err)
+		}
+
+		// An empty file streams zero bytes, not an error.
+		empty := workdir + "/outputs/empty.txt"
+		if err := sb.WriteFile(ctx, empty, nil); err != nil {
+			t.Fatalf("write empty: %v", err)
+		}
+		rc, size, err = sb.ReadFileStream(ctx, empty, 1024)
+		if err != nil {
+			t.Fatalf("stream empty: %v", err)
+		}
+		if got, err := io.ReadAll(rc); err != nil || size != 0 || len(got) != 0 {
+			t.Errorf("empty stream = %d bytes (size %d), err %v", len(got), size, err)
+		}
+		_ = rc.Close()
+
+		// The same path sentinels as ReadFile: a missing file, a directory,
+		// and a symlink (never followed — its target's size is not the
+		// link's, so following would defeat the ceiling).
+		if _, _, err := sb.ReadFileStream(ctx, workdir+"/outputs/nope", 1024); !errors.Is(err, sandbox.ErrFileNotExist) {
+			t.Errorf("missing file = %v, want ErrFileNotExist", err)
+		}
+		if _, _, err := sb.ReadFileStream(ctx, workdir+"/outputs", 1024); !errors.Is(err, sandbox.ErrIsDirectory) {
+			t.Errorf("directory = %v, want ErrIsDirectory", err)
+		}
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "ln -s report.bin " + workdir + "/outputs/link.bin"}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("ln: %+v %v", res, err)
+		}
+		if _, _, err := sb.ReadFileStream(ctx, workdir+"/outputs/link.bin", 1<<30); !errors.Is(err, sandbox.ErrNotRegularFile) {
+			t.Errorf("symlink = %v, want ErrNotRegularFile", err)
 		}
 	})
 

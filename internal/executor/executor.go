@@ -153,9 +153,9 @@ type Executor struct {
 	// onFault, when set, receives every per-item fault. Left nil in production
 	// (the queue's reclaim is the recovery); tests set it to observe faults.
 	onFault func(*queue.Item, error)
-	// webFirst alternates step's claim order between the two kinds — see step.
+	// kindOffset rotates step's claim order across the kinds — see step.
 	// Touched only by Run's single goroutine.
-	webFirst bool
+	kindOffset int
 }
 
 func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.Provider, blobs blob.Store, cfg Config) *Executor {
@@ -198,23 +198,22 @@ func (e *Executor) Run(ctx context.Context) error {
 }
 
 // step claims and processes at most one item, reporting whether it found work.
-// The two kinds are tried in alternating order across steps: a fixed
-// web-always-first order would be strict cross-session priority — under
-// sustained web load, one session's queued sandbox work could wait behind
-// every other session's later web calls indefinitely — while alternation
-// bounds the wait at one item of the other kind. Within a kind the queue is
-// FIFO by age. A per-item fault (sandbox gone, database hiccup, lost lease)
-// is not fatal to the loop: the item keeps its lease until it lapses, then
-// another claim reclaims and retries it. Only a claim failure is returned up.
+// The kinds are tried in rotating order across steps: a fixed order would be
+// strict cross-kind priority — under sustained load of one kind, another
+// session's queued work of a different kind could wait behind it indefinitely
+// — while rotation bounds the wait at one item of each other kind. Within a
+// kind the queue is FIFO by age. A per-item fault (sandbox gone, database
+// hiccup, lost lease) is not fatal to the loop: the item keeps its lease until
+// it lapses, then another claim reclaims and retries it. Only a claim failure
+// is returned up.
 func (e *Executor) step(ctx context.Context) (bool, error) {
-	// Faults are reported by process/processWeb themselves, from inside their
-	// spans — see report. webFirst is loop-local state: Run is one goroutine.
-	kinds := [2]queue.Kind{queue.WebExec, queue.ToolExec}
-	if !e.webFirst {
-		kinds[0], kinds[1] = kinds[1], kinds[0]
-	}
-	e.webFirst = !e.webFirst
-	for _, kind := range kinds {
+	// Faults are reported by the processors themselves, from inside their
+	// spans — see report. kindOffset is loop-local state: Run is one goroutine.
+	kinds := [3]queue.Kind{queue.WebExec, queue.ToolExec, queue.OutputsHarvest}
+	start := e.kindOffset
+	e.kindOffset = (e.kindOffset + 1) % len(kinds)
+	for i := range kinds {
+		kind := kinds[(start+i)%len(kinds)]
 		item, err := e.queue.Claim(ctx, kind, e.cfg.LeaseTTL)
 		if err != nil {
 			return false, err
@@ -222,9 +221,12 @@ func (e *Executor) step(ctx context.Context) (bool, error) {
 		if item == nil {
 			continue
 		}
-		if kind == queue.WebExec {
+		switch kind {
+		case queue.WebExec:
 			_ = e.processWeb(ctx, item)
-		} else {
+		case queue.OutputsHarvest:
+			_ = e.processHarvest(ctx, item)
+		default:
 			_ = e.process(ctx, item)
 		}
 		return true, nil
@@ -366,22 +368,9 @@ func consumerSpan(ctx context.Context, item *queue.Item, name string) (context.C
 // setup error from provisioning or reading the log — which stops the item with
 // nothing committed, distinct from a tool fault, which commits what did run.
 func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess sessionRun) ([]events.NewEvent, error, error) {
-	env, err := e.sandboxEnv(ctx, item.SessionID, sess.vaultIDs)
+	sb, err := e.provisionSandbox(ctx, item.SessionID, sess)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve vault credentials: %w", err)
-	}
-	gate := e.gateSpec(sess)
-	sb, err := e.provider.Provision(ctx, sandbox.Spec{
-		SessionID:  item.SessionID,
-		Image:      e.cfg.Image,
-		Workdir:    e.cfg.Workdir,
-		Networking: sess.networking,
-		Env:        env,
-		Hardening:  e.cfg.Hardening,
-		Gate:       gate,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("provision sandbox: %w", err)
+		return nil, nil, err
 	}
 	e.materializeSkills(ctx, sb, item.SessionID, sess.skills)
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files)
@@ -396,6 +385,29 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 	uses = slices.DeleteFunc(uses, func(u toolUse) bool { return toolset.IsWebTool(u.name) })
 	results, faultErr := e.runTools(ctx, sb, item.SessionID, uses)
 	return results, faultErr, nil
+}
+
+// provisionSandbox resolves the session's credential env and gate spec and
+// provisions (or adopts) its sandbox — the front half of provisionAndRun,
+// shared with the outputs harvest, which reads the sandbox but runs no tools.
+func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, sess sessionRun) (sandbox.Sandbox, error) {
+	env, err := e.sandboxEnv(ctx, sessionID, sess.vaultIDs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve vault credentials: %w", err)
+	}
+	sb, err := e.provider.Provision(ctx, sandbox.Spec{
+		SessionID:  sessionID,
+		Image:      e.cfg.Image,
+		Workdir:    e.cfg.Workdir,
+		Networking: sess.networking,
+		Env:        env,
+		Hardening:  e.cfg.Hardening,
+		Gate:       e.gateSpec(sess),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("provision sandbox: %w", err)
+	}
+	return sb, nil
 }
 
 // sandboxEnv resolves the session's attached vaults into the environment
