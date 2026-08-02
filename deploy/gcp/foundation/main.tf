@@ -34,6 +34,15 @@
 
 resource "google_project_service" "required" {
   for_each = toset([
+    # Cloud Build is enabled HERE, not in environment/, even though nothing in
+    # this configuration builds anything. Enabling it is what creates the
+    # project's default Cloud Build service account, and that account's email is
+    # a REQUIRED input to environment/ (var.cloud_build_service_account). If
+    # environment/ enabled it, the value could only be read after the apply that
+    # needs it — a circle with no way in on a clean project. The foundation runs
+    # first and is never destroyed, so putting it here makes the documented order
+    # executable: apply foundation, read the account, then apply environment.
+    "cloudbuild.googleapis.com",
     "cloudkms.googleapis.com",
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",

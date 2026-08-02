@@ -52,7 +52,8 @@ locals {
 resource "google_project_service" "required" {
   for_each = toset([
     "artifactregistry.googleapis.com",
-    "cloudbuild.googleapis.com",
+    # cloudbuild.googleapis.com is deliberately NOT here — the foundation enables
+    # it, because var.cloud_build_service_account cannot be read until it is on.
     "container.googleapis.com",
     "sqladmin.googleapis.com",
     "storage.googleapis.com",

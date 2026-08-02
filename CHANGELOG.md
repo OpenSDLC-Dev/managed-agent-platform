@@ -75,7 +75,10 @@ copy of an entry here.
   uses, and nothing surfaces until the first image push, by which point the apply has already
   created a GKE cluster and a Cloud SQL instance. Requiring it turns that into a plan-time
   prompt whose description carries `gcloud builds get-default-service-account`, with a
-  `validation` block that rejects anything which is not a service account email. The compute
+  `validation` block that rejects anything which is not a service account email. Enabling the
+  Cloud Build API is also what *creates* that account, so the API moved from `environment/`
+  to `foundation/`: left where it was, the only configuration that turns it on would have
+  been the one that cannot plan without the value, and a clean project had no way in. The compute
   default account keeps `artifactregistry.reader` for image pulls and is deliberately not
   widened to writer: that identity is what every node in the cluster runs as.
 

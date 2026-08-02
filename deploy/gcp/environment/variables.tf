@@ -136,6 +136,11 @@ variable "cloud_build_service_account" {
 
         gcloud builds get-default-service-account --project YOUR_PROJECT
 
+    Run that AFTER `make gcp-foundation-apply`, not before: enabling the Cloud
+    Build API is what creates this account, and the foundation is what enables it.
+    On a project where the API has never been on, the command fails with
+    SERVICE_DISABLED rather than printing an account.
+
     REQUIRED, with no default, because every possible default is wrong for half
     of all projects and wrong in an expensive place. Projects that ran their
     first build before 2024-04-29 use the legacy

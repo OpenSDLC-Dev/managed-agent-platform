@@ -93,12 +93,15 @@ project_id = "your-project"
 EOF
 cp deploy/gcp/foundation/terraform.tfvars deploy/gcp/environment/terraform.tfvars
 
-# environment/ additionally needs the identity Cloud Build runs as (see below)
-gcloud builds get-default-service-account --project your-project   # prints projects/…/serviceAccounts/EMAIL
-echo 'cloud_build_service_account = "EMAIL"' >> deploy/gcp/environment/terraform.tfvars
-
 make gcp-foundation-apply              # once, ever — creates the secrets EMPTY
 PROJECT=your-project make gcp-bootstrap  # fills them, creates the GCS HMAC key
+
+# Only now: enabling the Cloud Build API is what creates this account, and the
+# foundation apply above is what enables it. Prints projects/…/serviceAccounts/EMAIL
+# — pass only the EMAIL.
+gcloud builds get-default-service-account --project your-project
+echo 'cloud_build_service_account = "EMAIL"' >> deploy/gcp/environment/terraform.tfvars
+
 make gcp-env-apply
 ```
 
