@@ -259,14 +259,24 @@ Helm accepts the duplicate key silently and the later mapping wins whole, so `re
 verified by rendering the duplicate, which produced
 `ghcr.io/opensdlc-dev/managed-agent-platform/brain:TAG`.
 
+Set `tag` **once** and let it drive both the build and the install. Deriving it twice — a
+`_TAG` for the build and a fresh `git rev-parse` for the install — is how they come to
+disagree: commit anything in between and the second one names an image that was never
+pushed.
+
 ```sh
-tag="$(git rev-parse --short HEAD)"   # whatever _TAG the build used
+tag="$(git rev-parse --short HEAD)"
+prefix="$(terraform -chdir=deploy/gcp/environment output -raw artifact_registry)"
+
+# From the repository root: the build context is the whole module.
+gcloud builds submit --config deploy/gcp/cloudbuild.yaml \
+  --substitutions=_IMAGE_PREFIX="$prefix",_TAG="$tag" .
 
 helm install map deploy/helm/managed-agent-platform \
   --namespace map --create-namespace \
   -f ~/map-values-gcp.yaml \
   --set "image.tag=$tag" \
-  --set "executor.gateImage=$(terraform output -raw artifact_registry)/gate:$tag"
+  --set "executor.gateImage=$prefix/gate:$tag"
 ```
 
 The sandbox-placement values in that fragment are a **pair, and neither half works alone**.
