@@ -27,6 +27,12 @@
 //	                             in-cluster config, then the default loading rules
 //	SANDBOX_K8S_CONTEXT          kubeconfig context for the k8s backend
 //	SANDBOX_K8S_NAMESPACE        namespace for sandbox pods (default "default")
+//	SANDBOX_K8S_NODE_SELECTOR    node labels every sandbox pod requires, as
+//	                             comma-separated key=value; empty places nothing.
+//	                             Malformed fails startup
+//	SANDBOX_K8S_TOLERATIONS      taints every sandbox pod tolerates, as a JSON
+//	                             array of Kubernetes Toleration objects; empty
+//	                             tolerates nothing. Malformed fails startup
 //	SANDBOX_K8S_NETSETUP_IMAGE   image carrying `ip` for the limited-networking
 //	                             init container (default "busybox")
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
@@ -81,6 +87,8 @@ func run(ctx context.Context) error {
 		K8sNamespace:     os.Getenv("SANDBOX_K8S_NAMESPACE"),
 		K8sNetSetupImage: os.Getenv("SANDBOX_K8S_NETSETUP_IMAGE"),
 		K8sRuntimeClass:  os.Getenv("SANDBOX_K8S_RUNTIME_CLASS"),
+		K8sNodeSelector:  os.Getenv("SANDBOX_K8S_NODE_SELECTOR"),
+		K8sTolerations:   os.Getenv("SANDBOX_K8S_TOLERATIONS"),
 	})
 	if err != nil {
 		return err

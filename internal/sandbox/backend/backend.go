@@ -36,6 +36,12 @@ type Config struct {
 	// gVisor's runsc). Empty uses the cluster default. Docker has no analogue —
 	// a runtime there is a daemon-level choice, not a per-container one.
 	K8sRuntimeClass string
+	// k8s: where sandbox pods may run — a comma-separated key=value node
+	// selector and a JSON array of tolerations. Both are raw here and parsed by
+	// the k8s provider, which rejects a malformed value at startup; a dedicated,
+	// tainted sandbox node pool needs both halves. Docker has no analogue.
+	K8sNodeSelector string
+	K8sTolerations  string
 }
 
 // New builds the named sandbox provider, or an error naming the accepted set.
@@ -50,6 +56,8 @@ func New(cfg Config) (sandbox.Provider, error) {
 			Namespace:     cfg.K8sNamespace,
 			NetSetupImage: cfg.K8sNetSetupImage,
 			RuntimeClass:  cfg.K8sRuntimeClass,
+			NodeSelector:  cfg.K8sNodeSelector,
+			Tolerations:   cfg.K8sTolerations,
 		})
 	default:
 		return nil, fmt.Errorf("sandbox backend %q is not one of docker, k8s", cfg.Backend)

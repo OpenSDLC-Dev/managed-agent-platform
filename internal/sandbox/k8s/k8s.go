@@ -68,12 +68,27 @@ type Provider struct {
 	client        *client
 	netSetupImage string
 	runtimeClass  string
+	nodeSelector  map[string]string
+	tolerations   []corev1.Toleration
 	// pidsWarnOnce keeps warnUnenforceablePidsLimit to one line per provider
 	// rather than one per provisioned pod.
 	pidsWarnOnce sync.Once
 }
 
 func New(cfg Config) (*Provider, error) {
+	// Placement is parsed before the cluster is reached, deliberately: a
+	// malformed value is wrong whether or not the cluster answers, and putting
+	// the parse first means the executor's startup fails on the value itself
+	// rather than on whatever the connection attempt happened to say
+	// (placement.go).
+	sel, err := parseNodeSelector(cfg.NodeSelector)
+	if err != nil {
+		return nil, err
+	}
+	tol, err := parseTolerations(cfg.Tolerations)
+	if err != nil {
+		return nil, err
+	}
 	cl, err := newClient(cfg)
 	if err != nil {
 		return nil, err
@@ -82,7 +97,13 @@ func New(cfg Config) (*Provider, error) {
 	if img == "" {
 		img = defaultNetSetupImage
 	}
-	return &Provider{client: cl, netSetupImage: img, runtimeClass: cfg.RuntimeClass}, nil
+	return &Provider{
+		client:        cl,
+		netSetupImage: img,
+		runtimeClass:  cfg.RuntimeClass,
+		nodeSelector:  sel,
+		tolerations:   tol,
+	}, nil
 }
 
 // podName derives a DNS-1123 pod name from the session id. Session ids carry one
@@ -356,6 +377,10 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 			AutomountServiceAccountToken: &noAutomount,
 			RuntimeClassName:             runtimeClassName(p.runtimeClass),
 			SecurityContext:              podSecurityContext(),
+			// Both nil unless configured, so an unplaced deployment produces the
+			// pod it produced before these existed.
+			NodeSelector: p.nodeSelector,
+			Tolerations:  p.tolerations,
 			Containers: []corev1.Container{{
 				Name:            containerName,
 				Image:           spec.Image,

@@ -15,6 +15,63 @@ copy of an entry here.
 
 ### Added
 
+- **Sandbox pods can be pinned to a node pool of their own**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2).
+  `SANDBOX_K8S_NODE_SELECTOR` and `SANDBOX_K8S_TOLERATIONS` (chart:
+  `sandboxPlacement.nodeSelector` / `.tolerations`) put a `nodeSelector` and `tolerations`
+  on every sandbox pod. Until now the platform said where a sandbox may *run* only in terms
+  of its runtime; on a shared cluster the more consequential question is which machine it
+  lands on, because a sandbox running untrusted, model-directed commands beside a database
+  or a CI runner is one container escape away from them.
+
+  The isolating configuration is the **pair**, and the docs say so rather than leaving it to
+  be discovered: a pool labelled so the selector finds it *and* tainted so other workloads do
+  not land there by default (a taint repels only pods without a matching toleration — a
+  cluster-wide wildcard toleration still lands, which is the operator's to police). A label alone keeps sandboxes on the pool without keeping anything else off it; a
+  taint alone keeps others off but leaves every sandbox `Pending`. This is also why the chart
+  keys are top-level: `executor.nodeSelector`/`executor.tolerations` already exist and place
+  the executor's own Deployment — a different pod, and usually deliberately a different pool.
+
+  **A value the cluster would refuse fails executor (and worker) startup**, before the
+  provider reaches for a cluster at all. Left to the pod, such a value fails *every* Provision
+  for the life of the deployment instead of once at boot. The rules are the pod-create
+  validator's, derived by probing a live v1.36 API server rather than read off the type —
+  which matters, because the vendored type is wrong in one place: its comment says
+  `tolerationSeconds` is "ignored" outside `NoExecute`, and the server rejects it. So the
+  parser checks label key and value validity on **both** the selector and a toleration's own
+  key and value, the operator and effect enums, the two key/operator pairings, the canonical
+  decimal integer `Lt`/`Gt` require, and that `tolerationSeconds` implies `NoExecute` — plus a strict
+  JSON decode, since a permissive one drops a misspelled `"efect"` and leaves a toleration
+  that tolerates nothing.
+
+  What it deliberately does **not** catch is worth stating too, because the boundary is easy
+  to overclaim: a *well-formed* selector that happens to match no node in this cluster is
+  accepted, and its pods simply stay `Pending`. Only the cluster can answer whether a label
+  exists, and the parse runs before there is one to ask. The `Lt`/`Gt` operators are the
+  mirror case — real fields of the pinned type, but rejected by any cluster without the alpha
+  `TaintTolerationComparisonOperators` gate, so they are accepted here rather than legislated
+  away from a cluster that enables it. Their values are held to the server's rule regardless,
+  which took a second cluster to establish: a gate-off server refuses every `Lt`/`Gt`
+  toleration before it looks at the value, so only a gate-**on** v1.36.1 API server could show
+  that it demands a canonical decimal integer — `0100`, `+5`, `-0` and `-01` are refused there,
+  and `strconv.ParseInt` alone had accepted all four.
+
+  The chart refuses at **render** time what the encoding cannot carry: a label key or value
+  containing a `,` or an `=` — this encoding's separators — would otherwise render as a
+  different, still-valid selector the executor accepts without complaint (`{role: "a,b=c"}`
+  becoming two labels). Neither is legal in a Kubernetes label anyway, so the check costs
+  nothing and closes the one place where a wrong value stayed silent. Unquoted numbers are
+  refused for a second reason: Helm decodes them as `float64`, so `pool: 42` renders
+  `%!s(float64=42)` and a large one goes exponential.
+
+  The encodings are the plan's, and are what a chart can produce from Kubernetes-shaped YAML:
+  comma-separated `key=value` for the selector — the form `kubectl` already uses — and a JSON
+  array for tolerations, because `tolerationSeconds` is a *pointer* and any flat dialect that
+  kept "absent" distinct from "0" would be a worse JSON. Operators write a map and a list in
+  values.yaml; the chart encodes. The two sides are pinned against drift from both ends: CI
+  asserts the exact rendered strings, and a Go test feeds those same literals to the real
+  parsers.
+
 - **An opt-in disk cap for sandbox pods on Kubernetes**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 2).
   `SANDBOX_EPHEMERAL_STORAGE_BYTES` (chart: `executor.sandboxHardening.ephemeralStorageBytes`)

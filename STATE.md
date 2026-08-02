@@ -12,10 +12,10 @@ run the same day. Slice 2 is split into three sub-PRs, one per deliverable.
 
 - [x] Plan 20 authored and approved — evidence in its Ground truth section
 - [x] Slice 1 — GCS delete convergence (`internal/blob/s3`)
-- [ ] Slice 2 — sandbox pod placement and bounds:
+- [x] Slice 2 — sandbox pod placement and bounds:
   - [x] 2a — `seccompProfile: RuntimeDefault`, pod-level and unconditional
-  - [x] 2b — opt-in `SANDBOX_EPHEMERAL_STORAGE_BYTES` disk cap + chart knob (this PR)
-  - [ ] 2c — node selection and tolerations (`SANDBOX_K8S_NODE_SELECTOR`/`_TOLERATIONS`)
+  - [x] 2b — opt-in `SANDBOX_EPHEMERAL_STORAGE_BYTES` disk cap + chart knob
+  - [x] 2c — node selection and tolerations, parsed and fail-closed (this PR)
 - [ ] Slice 3 — `internal/secrets/gcpkms` cipher + size guard + chart knob + `cmd/` wiring
 - [ ] Slice 4 — staging environment (`deploy/gcp/`) + mode-1 acceptance on GKE
 - [ ] Slice 5 — mode-2 acceptance + `docs/deploy-gcp.md`

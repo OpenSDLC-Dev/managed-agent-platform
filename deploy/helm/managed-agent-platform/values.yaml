@@ -155,6 +155,30 @@ sandboxRuntimeClass:
   # -- CRI handler the created RuntimeClass points at; gVisor's is `runsc`.
   handler: runsc
 
+# Where sandbox pods may run. Top-level, and NOT under `executor`, because
+# `executor.nodeSelector`/`executor.tolerations` place the executor's OWN
+# Deployment — a different pod, usually on a different pool. Nesting these there
+# would put two unrelated meanings behind one name.
+#
+# Both are how a dedicated, tainted sandbox node pool is reached: the selector
+# finds it, the tolerations get admitted onto it. Empty applies nothing, which is
+# today's behaviour. A malformed value fails executor startup rather than
+# producing a pod that sits Pending forever with nothing in the log.
+sandboxPlacement:
+  # -- Node labels a sandbox pod requires, as an ordinary YAML map. The chart
+  # encodes it as the `key=value,key=value` the executor parses, so write it the
+  # way a Kubernetes `nodeSelector` is written.
+  nodeSelector: {}
+  #   cloud.google.com/gke-nodepool: sandbox
+  # -- Taints a sandbox pod tolerates, as an ordinary YAML list of Kubernetes
+  # Toleration objects — the chart passes it through as JSON. `tolerationSeconds`
+  # works, which is why this is not a flat string.
+  tolerations: []
+  #   - key: sandbox
+  #     operator: Equal
+  #     value: "true"
+  #     effect: NoSchedule
+
 # -- In-cluster Postgres. For production, disable this and point externalDatabase
 # at your own managed Postgres. This is a deliberate divergence from a Postgres
 # subchart: a self-hostable, air-gap-friendly platform should not require pulling
