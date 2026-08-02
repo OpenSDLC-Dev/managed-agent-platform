@@ -51,10 +51,24 @@ copy of an entry here.
   shellcheck cannot execute psql, so without it the only thing that ever ran this file was a
   billable cluster talking to a billable database. It starts a real PostgreSQL 16 with TLS
   on, exercises idempotency and rotation, and drives three assertions red on purpose. It
-  found two defects in the file it was written for: an unguarded `pg_has_role` that raised on
-  any PostgreSQL lacking a `cloudsqlsuperuser` role — failing every run at the last
-  statement, after every assertion had passed — and a `\getenv` that turned a missing
-  password into a syntax error instead of the complaint written for that case.
+  found four defects in the file it was written for. Two were ordinary: an unguarded
+  `pg_has_role` that raised on any PostgreSQL lacking a `cloudsqlsuperuser` role — failing
+  every run at the last statement, after every assertion had passed — and a `\getenv` that
+  turned a missing password into a syntax error instead of the complaint written for that
+  case.
+
+  The other two would have failed only on the real instance, and were found by running the
+  file under a deliberately **non-superuser** administrator, which is what Cloud SQL's
+  actually is: `cloudsqlsuperuser` carries CREATEDB and CREATEROLE and nothing more, while a
+  local `postgres` is a true superuser that bypasses the checks in question. Under those real
+  privileges, `ALTER ROLE ... NOSUPERUSER` is refused outright — PostgreSQL lets only a
+  superuser change `SUPERUSER`, `REPLICATION` and `BYPASSRLS`, *even to turn them off* — so
+  the corrective statement now names only what it can actually revoke and the other three
+  stay asserted-but-not-repaired. And `ALTER DATABASE ... OWNER TO` failed with `must be able
+  to SET ROLE`, because in PostgreSQL 16 the membership `CREATE ROLE` implicitly grants its
+  creator does not carry the SET option; the file now grants the role to the administrator
+  first. Both would have surfaced as a failed acceptance run against billable
+  infrastructure.
 
 - **[docs/deploy-gcp.md](./docs/deploy-gcp.md) — the GCP deployment guide.** What the
   Terraform builds and what it deliberately does not, the two modes, and the settings that

@@ -80,14 +80,48 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'db_user')
 -- by hand since. Asserting below without correcting here would turn a drift
 -- into a failed deploy rather than a fixed one.
 --
+-- CREATEDB and CREATEROLE ONLY, and the omissions are not an oversight.
+-- PostgreSQL lets only a SUPERUSER change the SUPERUSER, REPLICATION and
+-- BYPASSRLS attributes — even to turn them OFF — and the administrator this
+-- runs as is not one: Cloud SQL's `postgres` holds `cloudsqlsuperuser`, which
+-- carries CREATEDB and CREATEROLE and nothing more. Naming NOSUPERUSER here
+-- fails the whole statement with `permission denied to alter role / Only roles
+-- with the SUPERUSER attribute may change the SUPERUSER attribute`, so a run
+-- that tried to be thorough would not run at all. Those three are still
+-- ASSERTED below; what changes is only that a drift in them is reported rather
+-- than silently repaired, which is the honest outcome for a privilege this
+-- session genuinely cannot revoke.
+--
 -- The password rides along on the same statement because it must be applied on
 -- every run for rotation to work. NOTE: PostgreSQL writes ALTER ROLE to the
 -- server log with the password in clear when log_statement is `ddl` or `all`.
 -- Cloud SQL's default is `none`; if you have turned it up, turn it down for the
 -- duration of this run.
 SELECT format(
-    'ALTER ROLE %I NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION PASSWORD %L',
+    'ALTER ROLE %I NOCREATEDB NOCREATEROLE PASSWORD %L',
     :'db_user', :'db_password')
+\gexec
+
+-- The grant that makes the ownership transfer below legal.
+--
+-- `ALTER DATABASE ... OWNER TO` requires the caller to be able to SET ROLE to
+-- the new owner. A superuser can always, which is why this line looks
+-- unnecessary and is not: the administrator this actually runs as is NOT a
+-- superuser — Cloud SQL's `postgres` holds `cloudsqlsuperuser`, no more — and
+-- in PostgreSQL 16 the membership CREATE ROLE implicitly grants its creator
+-- does not carry the SET option. Without this the next statement fails with
+-- `must be able to SET ROLE "<role>"`, on the real instance and never on a
+-- workstation where the test happens to connect as a superuser.
+--
+-- The direction is the safe one and worth being explicit about: this makes the
+-- ADMINISTRATOR a member of the platform's role, not the reverse. The platform's
+-- role gains nothing, and in particular does not become a member of
+-- cloudsqlsuperuser — which the assertions below re-check.
+--
+-- Unconditional because GRANT is idempotent. If the role pre-existed and this
+-- administrator has no ADMIN OPTION on it, this fails loudly here rather than
+-- producing a confusing ownership error one statement later.
+SELECT format('GRANT %I TO CURRENT_USER', :'db_user')
 \gexec
 
 -- Ownership of the platform's own database, and of the schema the migrations

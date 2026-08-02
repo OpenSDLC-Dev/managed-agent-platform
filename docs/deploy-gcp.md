@@ -105,6 +105,19 @@ Re-run `make gcp-db-init` after every `environment/` rebuild. It is also the who
 rotation procedure: rotate the secret, re-run, and the unconditional `ALTER ROLE` pushes the
 new value.
 
+One consequence of the administrator not being a real superuser is worth knowing before you
+read the SQL and wonder about an omission. PostgreSQL lets only a `SUPERUSER` change the
+`SUPERUSER`, `REPLICATION` and `BYPASSRLS` attributes — **even to turn them off** — and
+`cloudsqlsuperuser` is not one. So the corrective `ALTER ROLE` names `NOCREATEDB NOCREATEROLE`
+and stops there: those three are asserted but not repaired, because this session genuinely
+cannot revoke them. A drift in them fails the step with a message rather than being silently
+fixed. For the same reason the file grants the platform role to the administrator before
+transferring database ownership — `ALTER DATABASE ... OWNER TO` requires the caller to be
+able to `SET ROLE` to the new owner, and in PostgreSQL 16 the membership `CREATE ROLE`
+implicitly gives its creator does not carry that. Both of these were found by running the
+file under a non-superuser administrator locally; a superuser executes them without
+complaint, which is exactly why the test does not use one.
+
 ### Connecting to a private-IP instance
 
 The instance has `ipv4_enabled = false`. Google's documented path from GKE is the **Cloud

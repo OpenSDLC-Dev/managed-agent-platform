@@ -42,8 +42,11 @@ Three things make the split necessary rather than tidy:
   (The HMAC *key* is not a Terraform resource at all; `bootstrap.sh` creates it. GCS returns
   its secret exactly once, so a resource holding it would hold it in state.)
 - **The secrets are the reconciliation source.** A rebuilt environment is brought back into
-  agreement with them: the database password is reapplied to the new Cloud SQL instance,
-  and the HMAC pair is carried forward untouched. (Decision 6 also wants that pair *proven*
+  agreement with them, and by two different mechanisms now that there are two database
+  credentials: the **administrator's** password is reapplied to the new Cloud SQL instance by
+  the apply itself, through `password_wo`; the **platform's** is reapplied by re-running
+  `make gcp-db-init`, which is the same run that re-creates its role. The HMAC pair is
+  carried forward untouched. (Decision 6 also wants that pair *proven*
   against the new bucket by an authenticated call rather than assumed valid from the presence of
   a secret version. `bootstrap.sh` does not do that; slice 4b's acceptance battery did,
   because it needs a live bucket to authenticate against — PUT, GET and DELETE in the

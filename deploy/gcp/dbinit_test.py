@@ -73,6 +73,11 @@ class Postgres:
     def __init__(self):
         self.name = "map-dbinit-test-%s" % uuid.uuid4().hex[:12]
         self._tmpdir = tempfile.mkdtemp(prefix="map-dbinit-test-")
+        # Who dbinit.sql runs as. The container's `postgres` is a true
+        # PostgreSQL SUPERUSER, which Cloud SQL's administrator is NOT --
+        # see as_cloud_sql_administrator().
+        self.admin_user = "postgres"
+        self.admin_password = ADMIN_PASSWORD
 
     def __enter__(self):
         r = run("docker", "run", "-d", "--name", self.name,
@@ -166,6 +171,39 @@ class Postgres:
         if r.returncode != 0:
             raise RuntimeError("could not create the database: %s" % r.stderr)
 
+    def as_cloud_sql_administrator(self):
+        """Re-shape this instance to look like Cloud SQL, and run as its admin.
+
+        The difference that matters: Cloud SQL's `postgres` user is NOT a
+        PostgreSQL superuser. It is an ordinary role holding `cloudsqlsuperuser`,
+        which carries CREATEDB and CREATEROLE and nothing else -- and a superuser
+        bypasses privilege checks that an ordinary role must actually satisfy. So
+        every run against the container's own `postgres` proves the SQL works
+        under privileges the real administrator does not have.
+
+        The statement this exists for is `ALTER DATABASE ... OWNER TO`.
+        PostgreSQL requires the caller to own the database AND be able to SET ROLE
+        to the new owner AND hold CREATEDB. A superuser satisfies all three
+        vacuously. Here none of them is vacuous: ownership arrives through
+        membership in cloudsqlsuperuser (which owns the database, as on Cloud
+        SQL), and membership in the new owner arrives only because CREATE ROLE
+        grants the creator ADMIN OPTION.
+        """
+        stmts = [
+            "CREATE ROLE cloudsqlsuperuser CREATEDB CREATEROLE;",
+            "CREATE ROLE sqladmin LOGIN PASSWORD 'sqladminpw' "
+            "IN ROLE cloudsqlsuperuser CREATEDB CREATEROLE;",
+            "ALTER DATABASE %s OWNER TO cloudsqlsuperuser;" % DB_NAME,
+        ]
+        for s in stmts:
+            r = self.psql_admin(s)
+            if r.returncode != 0:
+                raise RuntimeError("could not shape the instance (%s): %s"
+                                   % (s, r.stderr))
+        self.admin_user = "sqladmin"
+        self.admin_password = "sqladminpw"
+        return self
+
     def psql_admin(self, sql, sslmode="require", database="postgres"):
         return run("docker", "exec",
                    "-e", "PGPASSWORD=" + ADMIN_PASSWORD,
@@ -189,8 +227,8 @@ class Postgres:
                    "-e", "PGHOST=127.0.0.1",
                    "-e", "PGPORT=5432",
                    "-e", "PGDATABASE=" + DB_NAME,
-                   "-e", "PGUSER=postgres",
-                   "-e", "PGPASSWORD=" + ADMIN_PASSWORD,
+                   "-e", "PGUSER=" + self.admin_user,
+                   "-e", "PGPASSWORD=" + self.admin_password,
                    "-e", "PGSSLMODE=" + sslmode,
                    "-e", "MAP_DB_PASSWORD=" + password,
                    self.name,
@@ -205,8 +243,8 @@ class Postgres:
         return run("docker", "exec",
                    "-e", "PGHOST=127.0.0.1",
                    "-e", "PGDATABASE=" + DB_NAME,
-                   "-e", "PGUSER=postgres",
-                   "-e", "PGPASSWORD=" + ADMIN_PASSWORD,
+                   "-e", "PGUSER=" + self.admin_user,
+                   "-e", "PGPASSWORD=" + self.admin_password,
                    "-e", "PGSSLMODE=require",
                    self.name,
                    "psql", "--no-psqlrc",
@@ -273,6 +311,36 @@ def main():
         check("exits 0", r3.returncode == 0, r3.stderr + r3.stdout)
         check("attributes are back to false", role_attrs(pg) == "f|f|f|f",
               role_attrs(pg))
+
+    # The case the container's own `postgres` cannot exercise, because it is a
+    # true superuser and Cloud SQL's administrator is not. Everything above runs
+    # under privileges the real administrator does not have; this block is the
+    # one that establishes the file works under the privileges it will actually
+    # be given.
+    print("it works under a NON-superuser administrator, the way Cloud SQL is")
+    with Postgres() as pg:
+        pg.as_cloud_sql_administrator()
+        check("the administrator really is not a superuser",
+              pg.psql_admin("SELECT rolsuper FROM pg_roles "
+                            "WHERE rolname = 'sqladmin';").stdout.strip() == "f")
+        r = pg.dbinit("pw")
+        check("exits 0", r.returncode == 0, r.stderr + r.stdout)
+        # ALTER DATABASE ... OWNER TO is the statement at risk: PostgreSQL wants
+        # the caller to own the database, to be able to SET ROLE to the new
+        # owner, and to hold CREATEDB -- all three of which a superuser gets for
+        # free and this administrator has to genuinely satisfy.
+        check("the platform role owns the database anyway",
+              pg.psql_admin(
+                  "SELECT r.rolname FROM pg_database d JOIN pg_roles r "
+                  "ON r.oid = d.datdba WHERE d.datname = '%s';" % DB_NAME
+              ).stdout.strip() == DB_USER)
+        check("and is still outside cloudsqlsuperuser",
+              pg.psql_admin("SELECT pg_has_role('%s', 'cloudsqlsuperuser', 'member');"
+                            % DB_USER).stdout.strip() == "f")
+        check("re-running under that administrator is still a no-op",
+              pg.dbinit("pw2").returncode == 0)
+        check("the rotated password works",
+              pg.psql_as(DB_USER, "pw2", "SELECT 1;").returncode == 0)
 
     print("an empty password is refused rather than stored")
     with Postgres() as pg:
