@@ -174,8 +174,12 @@ func checkToleration(t corev1.Toleration) error {
 		// shapes a gate-enabled v1.36 server rejects ("0100", "+5", "-0",
 		// "-01"): canonical form comes first, so a leading zero cannot be
 		// mistaken for octal, and only then the int64 range check that refuses
-		// an overflowing run of digits. Both are applied, in that order, for
-		// the same reason and with the same error text as the server's.
+		// an overflowing run of digits. Both are applied, in that order,
+		// through the same validator the server calls — so the accept/reject
+		// set matches it exactly. The wording does not always: a value failing
+		// both checks is reported here by the first one alone, where the server
+		// lists both, and the range message is this package's rather than
+		// strconv's. What is refused is identical; only the prose differs.
 		if errs := content.IsDecimalInteger(t.Value); len(errs) > 0 {
 			return fmt.Errorf("operator %s compares numerically, so value %q %s",
 				t.Operator, t.Value, strings.Join(errs, "; "))
