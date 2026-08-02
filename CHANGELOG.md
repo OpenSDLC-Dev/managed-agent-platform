@@ -15,6 +15,59 @@ copy of an entry here.
 
 ### Added
 
+- **Terraform for the GCP staging environment**
+  ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 4).
+  `deploy/gcp/` and the `make gcp-*` targets that wrap it. Developer tooling for GCP
+  deployment only: never a dependency of the platform, its build, or `make verify`, and the
+  Helm chart stays the portable installation path.
+
+  **It is two configurations, and that is the whole design.** The line between them is not
+  "expensive versus cheap" but *can a rebuild recreate this identically?* — because three
+  GCP behaviours make a single configuration quietly destructive:
+
+  - **KMS key rings and crypto keys cannot be deleted.** `terraform destroy` removes them
+    from state and leaves them in the project, so a naive setup collides on the name at the
+    next apply. For the crypto key the stakes are higher than a collision: the vault
+    ciphertext in Postgres is decryptable by that key and nothing else, so a teardown that
+    scheduled its key versions for destruction would be silent, irreversible data loss
+    discovered at the next credential read.
+  - **Deleting a service account deletes its HMAC keys.** An identity in the disposable half
+    would strand the once-readable GCS HMAC secret in Secret Manager: valid-looking, and
+    dead.
+  - **The secrets are what a rebuild is reconciled against** — the database password
+    reapplied to a new Cloud SQL instance, the HMAC pair proven against a new bucket.
+
+  So `foundation/` holds those and is never destroyed (`prevent_destroy` throughout, and no
+  destroy target exists for it), while `environment/` holds the cluster, Artifact Registry,
+  Cloud SQL, the bucket and every IAM binding, reads the foundation through `data` sources
+  by name rather than by remote state, and tears down with one command. CI enforces the
+  split structurally rather than by convention: `environment/` may not declare a `resource`
+  of the three undeletable-or-load-bearing kinds, and every unrecoverable `foundation/`
+  resource must carry `prevent_destroy`. Both arms were measured red before landing.
+
+  Four settings are not the provider's defaults, stated visibly rather than discovered
+  mid-teardown: `deletion_protection = false` on the cluster, **both** Cloud SQL deletion
+  flags (there are two, and either one blocks a destroy), `force_destroy` on the bucket
+  (the acceptance battery leaves objects in it by construction) — and one that is *not* a
+  staging choice at all: Cloud SQL's managed connection pooling stays **off**, because
+  transaction-mode pooling breaks a persistent `LISTEN`, which is the exact failure mode
+  `internal/events/broker.go` names and which SSE delivery depends on.
+
+  The sandbox node pool is where slice 2's code becomes usable: a dedicated pool, tainted so
+  the platform's own components stay off it, whose kubelet sets the **`podPidsLimit`** that
+  the Pod API cannot express — the one containment `Hardening.PidsLimit` is Docker-only for,
+  and without which a fork bomb in a GKE sandbox is bounded by nothing the platform sets.
+  The outputs hand the matching `sandboxPlacement` values to Helm in the shape the chart
+  actually takes (a YAML map, a list of Toleration objects), as a pair whose halves fail
+  differently and visibly: no tolerations and every sandbox pod stays `Pending` forever; no
+  selector and they land on the platform pool, which is the pool the taint existed to
+  protect.
+
+  `make gcp-fmt` and `make gcp-validate` need no credentials, no state and no project, so CI
+  runs them on every PR — the configuration cannot rot silently between the rare runs that
+  provision anything, where the first symptom would be a failed apply halfway through
+  creating a cluster.
+
 - **Google Cloud KMS as a credential cipher**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 3).
   `SECRETS_BACKEND=gcpkms` + `GCPKMS_KEY_NAME` (chart: `gcpKMS.keyName`) seals vault

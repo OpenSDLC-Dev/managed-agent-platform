@@ -41,3 +41,13 @@ model-providers.json
 # shows up as untracked files in the main one. See .worktreeinclude.
 .claude/worktrees/
 /gate
+
+# Terraform working directories and state (deploy/gcp). The provider plugins and
+# the state file are machine-local; .terraform.lock.hcl is NOT ignored — it pins
+# provider versions and belongs in the repo, exactly like go.sum.
+deploy/gcp/*/.terraform/
+deploy/gcp/*/*.tfstate
+deploy/gcp/*/*.tfstate.*
+deploy/gcp/*/*.tfvars
+deploy/gcp/*/*.tfvars.json
+deploy/gcp/*/tfplan

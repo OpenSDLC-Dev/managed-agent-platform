@@ -351,6 +351,56 @@ jobs:
   # that the control plane comes up and serves (migrations + auth) and the brain
   # loads its model-providers config. The executor is left out — it wants the host
   # Docker socket, which a CI runner should not hand a build.
+  # The GCP staging Terraform (docs/plan/20, Decision 9). fmt and validate need
+  # no credentials, no state and no GCP project, which is what lets them run on
+  # every PR: the configuration would otherwise rot silently between the rare
+  # runs that actually touch GCP, and the first symptom would be a failed apply
+  # halfway through provisioning a cluster.
+  terraform:
+    name: terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_wrapper: false
+      - name: terraform fmt
+        run: make gcp-fmt
+      - name: terraform validate
+        run: make gcp-validate
+      - name: the two configurations stay independent
+        run: |
+          set -euo pipefail
+          # environment/ must reach the foundation through data sources only. A
+          # resource block owning a KMS key ring, crypto key or service account
+          # here would put an undeletable resource — or the identity whose
+          # deletion silently kills the stored HMAC secret — inside the half
+          # `make gcp-env-destroy` tears down.
+          for kind in google_kms_key_ring google_kms_crypto_key google_service_account; do
+            if grep -REn "^resource \"$kind\"" deploy/gcp/environment; then
+              echo "environment/ must not OWN $kind — read the foundation's copy with a data source" >&2
+              exit 1
+            fi
+          done
+          # foundation/ carries prevent_destroy on everything whose loss is not
+          # recoverable by re-running apply.
+          for res in google_kms_key_ring.map google_kms_crypto_key.cipher \
+                     google_service_account.controlplane google_service_account.executor \
+                     google_service_account.storage google_storage_hmac_key.blob; do
+            name="${res#*.}"
+            kind="${res%%.*}"
+            awk -v kind="$kind" -v name="$name" '
+              $0 ~ "^resource \"" kind "\" \"" name "\"" { inblock=1 }
+              inblock && /prevent_destroy = true/ { found=1 }
+              inblock && /^}/ { inblock=0 }
+              END { exit(found ? 0 : 1) }
+            ' deploy/gcp/foundation/main.tf || {
+              echo "foundation/ $res is missing prevent_destroy" >&2; exit 1; }
+          done
+          echo "ok: foundation/environment split holds"
+
   compose:
     name: compose
     runs-on: ubuntu-latest

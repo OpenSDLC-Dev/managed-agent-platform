@@ -73,7 +73,7 @@ internal/
   queue/      # work queue (Postgres FOR UPDATE SKIP LOCKED; redis optional later)
   telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
   store/      # Postgres schema/migrations, reserved multi-tenant columns
-deploy/{helm,compose}
+deploy/{helm,compose,gcp}
 ```
 
 (Plus test-support: `internal/{pgtest,modeltest}`, `internal/sandbox/sandboxtest`, `internal/blob/blobtest`, `internal/provider/providertest`, `internal/secrets/secretstest`, `internal/secrets/gcpkms/gcpkmstest`, `internal/webtool/webtooltest`, and the top-level `evals/` live suite. There is no `internal/mcp` or `internal/policy`: no MCP client is built yet, and permission policy lives across `domain`/`toolset`/`brain`/`api`.) What each package's files actually do: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) → "Package reference".
@@ -92,7 +92,15 @@ make build crossbuild     # host build + linux/arm cross-compile of ./internal/.
 make vet fmt-check        # lint
 make test cover-gate      # go test -count=1 with the coverage profile, then the ≥90% gate
 docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres+MinIO+OpenBao(+Jaeger)
+make gcp-fmt gcp-validate # the GCP staging Terraform, credential-free (CI runs both)
 ```
+
+The `gcp-*` targets are the one group in that Makefile that is **not** part of the gate:
+`deploy/gcp/`'s Terraform is developer tooling for GCP deployment only (plan 20,
+Decision 9), never a dependency of the platform, its build, or `make verify`. `gcp-fmt` and
+`gcp-validate` need no credentials and run in CI; the apply targets cost money and are
+interactive on purpose. Terraform is not installed by this repo — it is not in Homebrew
+core, so `brew install hashicorp/tap/terraform`.
 
 CI (`.github/workflows/ci.yml`) invokes the same targets, so the gate cannot drift between the docs, the verifier, and the merge check. The coverage gate is **total statement coverage ≥ 90%** over the **logic packages** under `./internal/...` — deliberately outside the denominator: `cmd/` main glue and the test-support packages (`internal/pgtest`, `internal/sandbox/sandboxtest`, `internal/modeltest`, `internal/blob/blobtest`, `internal/provider/providertest`, `internal/secrets/secretstest`, `internal/secrets/gcpkms/gcpkmstest`, `internal/webtool/webtooltest`), whose uncovered statements are the branches that fire only when a suite fails or a live tier is misconfigured. `make test` needs Docker (store/API/sandbox suites) and a Kubernetes cluster (the K8s sandbox contract test; a local kind cluster works) — a missing daemon or cluster is a hard failure, not a skip.
 

@@ -604,6 +604,23 @@ from the controlplane Service to the executor);
 four binaries, bundled Postgres + MinIO + OpenBao with its init one-shot,
 loopback-bound control plane, optional Jaeger profile).
 
+`deploy/gcp` is Terraform for the GCP staging environment (docs/plan/20, Decision 9) —
+developer tooling for GCP deployment only, never a dependency of the platform, its build,
+or `make verify`. **Two configurations, not one**, split by "can a rebuild recreate this
+identically?" rather than by cost: `foundation/` (KMS key ring and crypto key, the three
+service accounts, the GCS HMAC key, the Secret Manager secrets) is created once and never
+destroyed, because KMS key rings and crypto keys cannot be deleted at all and the vault
+ciphertext in Postgres is decryptable by that key and nothing else, and because deleting a
+service account deletes its HMAC keys — an identity in the disposable half would strand the
+once-readable HMAC secret in Secret Manager, valid-looking and dead. `environment/` (GKE
+cluster and node pools, Artifact Registry, Cloud SQL, the bucket, every IAM binding) is
+created and destroyed freely, reads the foundation through `data` sources by name, and
+carries the dedicated tainted sandbox node pool whose kubelet sets the `podPidsLimit` the
+Pod API cannot express. The `make gcp-*` targets wrap both; `gcp-fmt` and `gcp-validate`
+need no credentials and run in CI, which also enforces the split structurally (no
+undeletable-or-load-bearing `resource` in `environment/`, `prevent_destroy` on every
+unrecoverable resource in `foundation/`).
+
 ## Security invariants
 
 - **Credentials never enter the sandbox.** Tool credentials (vaults) reach the wire only
