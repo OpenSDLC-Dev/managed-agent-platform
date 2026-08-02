@@ -1801,7 +1801,33 @@ and 318 `internal/` files. The archives were deleted, the bucket's seven-day sof
 retention cleared (three recoverable copies purged, verified zero remaining), and the
 Cloud Build bucket removed. Rotating the exposed keys is the operator's call.
 
-**Cleanup.** `environment/` was destroyed after the run and the IAM added by hand for the
-OTel collector removed; `foundation/` is retained by design (Decision 9) and its KMS key
-ring can never be deleted in GCP. Nothing billable remains: no cluster, no Cloud SQL
-instance, no Artifact Registry repository, no buckets.
+**Cleanup, and what it missed.** `environment/` was destroyed after the run and the IAM
+added by hand for the OTel collector removed; `foundation/` is retained by design
+(Decision 9) and its KMS key ring can never be deleted in GCP. The teardown left no
+cluster, no Cloud SQL instance, no Artifact Registry repository and no buckets — and this
+record originally stopped there, saying nothing billable remained. **That was wrong**, and
+a project-wide audit the same day found what it had missed.
+
+`terraform destroy` does not reclaim the PersistentVolumes GKE creates for a
+StatefulSet's PVCs. The chart's bundled Postgres, MinIO and OpenBao each get one, the GKE
+PD CSI driver creates a Compute Engine disk for each, and those disks are not in
+Terraform's state — so the destroy took the cluster and left them. **Six** were still
+billing: two 8 GiB (Postgres), two 8 GiB (MinIO) and two 1 GiB (OpenBao), one set per
+build-up because the environment was created and destroyed twice, 34 GiB at roughly
+$3.40/month with nothing able to re-attach them. The two OpenBao volumes held the vault's
+own state, so this was a data-remanence question as well as a cost one. They were deleted;
+`gcloud compute disks list` then returned nothing project-wide.
+
+**There is a trap in cleaning these up**, and it is the reason this is written down rather
+than fixed silently: only the older three still carried `goog-k8s-cluster-name=map-staging`
+and `goog-terraform-provisioned=true`. The newer three had **no labels at all**, so a
+label-filtered sweep removes exactly half the leak and reports success. Identify them by
+the PVC name in the disk's `description` instead. `docs/deploy-gcp.md` states this as a
+required teardown step rather than an optional tidy-up.
+
+The audit also found an **active GCS HMAC key** for the storage service account that had
+outlived the bucket it was made for — a working S3-interop credential surviving the
+teardown — together with the three Secret Manager secrets holding it and the database
+password. All four were removed. What is retained, and costs about $0.06/month, is the
+foundation's single enabled KMS key version; that is Decision 9 working as intended, not a
+leak.
