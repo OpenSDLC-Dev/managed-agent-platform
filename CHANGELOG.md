@@ -15,6 +15,25 @@ copy of an entry here.
 
 ### Added
 
+- **Plan 21 authored (draft): the session outcomes surface**
+  ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md), tracking #77, absorbing #161).
+  Deep-researched against the reference on 2026-08-02 — the public define-outcomes guide
+  (whose DCF-rubric example the plan's acceptance replays end-to-end), the
+  anthropic-sdk-go typed schema (the outcome surface landed in SDK v1.41.0 and is
+  byte-identical from the pinned v1.59.0 through the latest v1.61.0), and the `ant` CLI
+  source (pure pass-through: no outcome subcommand, no typed construction, no
+  delta-preview for outcome events). Five slices: the v1.61.0 SDK bump, the
+  `user.define_outcome` acceptance + `outcome_evaluations` storage/rendering +
+  `initial_events` (#161), the brain's grader loop (separate-context single-call grading
+  at turn settlement, the `span.outcome_evaluation_*` trio from one instrumentation
+  point, revise-to-`max_iterations` with the documented terminal verdicts), the
+  session-outputs harvest that opens plan 08's reserved `scope`/`downloadable` seam, and
+  a recorded live acceptance driving the doc example through the latest Go SDK, the real
+  `ant` CLI, and raw curl. Every wire shape in the plan is pinned to SDK types
+  file:line; everything no source pins (grader model/prompt/inputs, heartbeat cadence,
+  event ordering, boundary semantics) is pre-declared as INFERRED-divergence
+  obligations for the implementing slices.
+
 - **Terraform for the GCP staging environment**
   ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md), slice 4).
   `deploy/gcp/` and the `make gcp-*` targets that wrap it. Developer tooling for GCP
