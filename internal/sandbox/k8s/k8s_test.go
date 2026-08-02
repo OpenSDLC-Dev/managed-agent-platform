@@ -181,7 +181,11 @@ func k8sHostAddr(t *testing.T, kubeCtx string) string {
 	if addr := os.Getenv("MAP_K8S_HOST_ADDR"); addr != "" {
 		return addr
 	}
-	if !strings.HasPrefix(kubeCtx, "kind-") {
+	// A kind node routes to the host through the kind network's gateway — but
+	// only when that network is on a daemon sharing this process's namespace.
+	// On Docker Desktop the gateway is an address inside Desktop's own VM, so
+	// kind or not, the reachable name is the one Desktop injects.
+	if !strings.HasPrefix(kubeCtx, "kind-") || sandboxtest.DockerDesktop(t) {
 		return "host.docker.internal"
 	}
 	out, err := exec.Command("docker", "network", "inspect", "kind",

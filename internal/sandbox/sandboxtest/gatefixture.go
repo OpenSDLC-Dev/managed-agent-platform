@@ -58,12 +58,13 @@ func BuildGateImage(t *testing.T) string {
 }
 
 // DockerHostAddr returns an address of the test host reachable from a
-// container on Docker's default bridge network: host.docker.internal under
-// Docker Desktop (darwin), the bridge gateway IP on Linux. Listeners meant to
-// be reached this way must bind all interfaces, not loopback.
+// container on Docker's default bridge network: host.docker.internal when the
+// daemon is Docker Desktop, the bridge gateway IP when the daemon shares this
+// process's network namespace. Listeners meant to be reached this way must
+// bind all interfaces, not loopback.
 func DockerHostAddr(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS == "darwin" {
+	if DockerDesktop(t) {
 		return "host.docker.internal"
 	}
 	out, err := exec.Command("docker", "network", "inspect", "bridge",
@@ -76,6 +77,23 @@ func DockerHostAddr(t *testing.T) string {
 		t.Fatal("docker bridge network reports no gateway")
 	}
 	return addr
+}
+
+// DockerDesktop reports whether the daemon under test is Docker Desktop, which
+// runs the engine inside its own VM. That — not GOOS — is what decides how a
+// container addresses the test process. On macOS the two agree, which is why a
+// compile-time check served; under WSL they part company, because the test
+// binary is GOOS=linux while the daemon is still a Desktop VM, so the bridge
+// gateway names a namespace this process is not in and nothing answers there.
+// A daemon that cannot be asked is treated as sharing this namespace: that is
+// the pre-existing behaviour, and the caller's own error is the better one.
+func DockerDesktop(t *testing.T) bool {
+	t.Helper()
+	out, err := exec.Command("docker", "info", "--format", "{{.OperatingSystem}}").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "Docker Desktop")
 }
 
 // GateStub is a stand-in controlplane and egress origin on one host listener:
