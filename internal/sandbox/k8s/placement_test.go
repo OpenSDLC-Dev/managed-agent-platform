@@ -155,8 +155,20 @@ func TestParseTolerationsRejectsMalformed(t *testing.T) {
 		{"tolerationSeconds with no effect",
 			`[{"key":"a","operator":"Exists","tolerationSeconds":30}]`},
 		// Lt and Gt compare numerically, so a non-numeric value is refused even
-		// on a cluster that enables their feature gate.
+		// on a cluster that enables their feature gate. The four canonical-form
+		// rows below are the ones ParseInt alone let through: measured against a
+		// v1.36.1 server with TaintTolerationComparisonOperators ON — the only
+		// cluster shape that can answer, since a gate-off server refuses every
+		// Lt/Gt toleration before it ever looks at the value.
 		{"Lt with a non-numeric value", `[{"key":"a","operator":"Lt","value":"abc"}]`},
+		{"Lt with a leading zero", `[{"key":"a","operator":"Lt","value":"0100"}]`},
+		{"Gt with a plus sign", `[{"key":"a","operator":"Gt","value":"+5"}]`},
+		{"Lt with negative zero", `[{"key":"a","operator":"Lt","value":"-0"}]`},
+		{"Gt with a negative leading zero", `[{"key":"a","operator":"Gt","value":"-01"}]`},
+		// Canonical form is not enough on its own: a run of digits can be
+		// canonical and still overflow the int64 the comparison parses into.
+		{"Lt overflowing int64", `[{"key":"a","operator":"Lt","value":"99999999999999999999"}]`},
+		{"Gt with an empty value", `[{"key":"a","operator":"Gt","value":""}]`},
 		// Not an array. `null` decodes into a slice without error and would have
 		// read as "no tolerations" — an unset variable by another spelling.
 		{"json null", "null"},
@@ -362,6 +374,11 @@ func TestParseTolerationsAcceptsTheValidShapes(t *testing.T) {
 		{"tolerationSeconds with NoExecute",
 			`[{"key":"a","operator":"Exists","effect":"NoExecute","tolerationSeconds":30}]`},
 		{"numeric Lt", `[{"key":"a","operator":"Lt","value":"5"}]`},
+		// Canonical form has exactly three accepted shapes, and a rule that
+		// refused any of them would be as wrong as one that accepted "0100":
+		// "0" alone, a positive with no leading zero, and a negative.
+		{"Gt zero", `[{"key":"a","operator":"Gt","value":"0"}]`},
+		{"Lt negative", `[{"key":"a","operator":"Lt","value":"-5"}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := parseTolerations(tc.in); err != nil {

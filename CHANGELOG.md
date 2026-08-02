@@ -39,8 +39,8 @@ copy of an entry here.
   which matters, because the vendored type is wrong in one place: its comment says
   `tolerationSeconds` is "ignored" outside `NoExecute`, and the server rejects it. So the
   parser checks label key and value validity on **both** the selector and a toleration's own
-  key and value, the operator and effect enums, the two key/operator pairings, the numeric
-  value `Lt`/`Gt` require, and that `tolerationSeconds` implies `NoExecute` — plus a strict
+  key and value, the operator and effect enums, the two key/operator pairings, the canonical
+  decimal integer `Lt`/`Gt` require, and that `tolerationSeconds` implies `NoExecute` — plus a strict
   JSON decode, since a permissive one drops a misspelled `"efect"` and leaves a toleration
   that tolerates nothing.
 
@@ -50,7 +50,11 @@ copy of an entry here.
   exists, and the parse runs before there is one to ask. The `Lt`/`Gt` operators are the
   mirror case — real fields of the pinned type, but rejected by any cluster without the alpha
   `TaintTolerationComparisonOperators` gate, so they are accepted here rather than legislated
-  away from a cluster that enables it.
+  away from a cluster that enables it. Their values are held to the server's rule regardless,
+  which took a second cluster to establish: a gate-off server refuses every `Lt`/`Gt`
+  toleration before it looks at the value, so only a gate-**on** v1.36.1 API server could show
+  that it demands a canonical decimal integer — `0100`, `+5`, `-0` and `-01` are refused there,
+  and `strconv.ParseInt` alone had accepted all four.
 
   The chart refuses at **render** time what the encoding cannot carry: a label key or value
   containing a `,` or an `=` — this encoding's separators — would otherwise render as a

@@ -258,4 +258,6 @@ See [`values.yaml`](./values.yaml) for the full set.
 > `Pending`, because only the cluster can answer that and the parse runs before there is a
 > client to ask — and whether your cluster enables the alpha
 > `TaintTolerationComparisonOperators` gate, so the `Lt`/`Gt` toleration operators are accepted
-> here and refused at pod create by any cluster (including GKE) that has it off.
+> here and refused at pod create by any cluster (including GKE) that has it off. Their values
+> are still held to the server's rule — a canonical decimal integer fitting in 64 bits, so `5`,
+> `0` and `-5` pass and `0100`, `+5` and `-0` do not.

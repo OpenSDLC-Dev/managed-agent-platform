@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/validate/content"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -168,9 +169,19 @@ func checkToleration(t corev1.Toleration) error {
 		}
 	case corev1.TolerationOpLt, corev1.TolerationOpGt:
 		// A numeric comparison against a non-number is refused even on a cluster
-		// that enables the gate.
+		// that enables the gate — and the server applies TWO rules here, not
+		// one. ParseInt alone was the first implementation and accepted four
+		// shapes a gate-enabled v1.36 server rejects ("0100", "+5", "-0",
+		// "-01"): canonical form comes first, so a leading zero cannot be
+		// mistaken for octal, and only then the int64 range check that refuses
+		// an overflowing run of digits. Both are applied, in that order, for
+		// the same reason and with the same error text as the server's.
+		if errs := content.IsDecimalInteger(t.Value); len(errs) > 0 {
+			return fmt.Errorf("operator %s compares numerically, so value %q %s",
+				t.Operator, t.Value, strings.Join(errs, "; "))
+		}
 		if _, err := strconv.ParseInt(t.Value, 10, 64); err != nil {
-			return fmt.Errorf("operator %s compares numerically, so value %q must be an integer",
+			return fmt.Errorf("operator %s compares numerically, so value %q must fit in a 64-bit integer",
 				t.Operator, t.Value)
 		}
 	default: // "" and Equal both compare the value as a label value.

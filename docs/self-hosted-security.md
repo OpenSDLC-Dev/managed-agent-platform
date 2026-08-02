@@ -566,7 +566,9 @@ early to ask. The `Lt` and `Gt` toleration operators are accepted although a
 cluster without the alpha `TaintTolerationComparisonOperators` feature gate — the
 default, including GKE — refuses them at pod create; they are real fields of the
 pinned Kubernetes type, so refusing them here would break a cluster that turns
-the gate on. And placement binds when a sandbox pod is **created** — like `RuntimeClass` and the
+the gate on. Their *values* are held to the server's rule even so: a canonical decimal
+integer that fits in 64 bits, so `5`, `0` and `-5` pass while `0100`, `+5` and
+`-0` do not. And placement binds when a sandbox pod is **created** — like `RuntimeClass` and the
 `SANDBOX_*` containment, it is not re-applied to a pod the executor adopts, so
 sandboxes already running when you enable a pool stay where they are until their
 sessions end.
