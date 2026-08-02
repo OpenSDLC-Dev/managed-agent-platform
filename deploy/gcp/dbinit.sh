@@ -120,15 +120,24 @@ cluster_zone="$(tf_out zone)"
 # nicety — it would be this script dying on the operator's own laptop, and dying
 # in a way that names nothing about the cluster. bootstrap.sh is already
 # 3.2-clean; this keeps the pair consistent, and `make gcp-lint` now checks it.
+# stderr to its own file rather than folded into the capture with 2>&1: gcloud
+# writes deprecation and auth WARNINGs to stderr on a perfectly successful
+# describe, and folding them in word-splits them into the endpoint array — which
+# fails closed, but prints a diagnosis listing "WARNING:" as one of the cluster's
+# endpoints. Kept, not discarded, because on failure it is the only useful thing
+# there is to say.
+describe_err="$(mktemp "${TMPDIR:-/tmp}/map-dbinit-describe.XXXXXX")"
 if ! endpoints_raw="$(gcloud container clusters describe "$cluster_name" \
 	--zone "$cluster_zone" --project "$PROJECT" \
 	--format='value[separator=" "](endpoint,privateClusterConfig.privateEndpoint,controlPlaneEndpointsConfig.dnsEndpointConfig.endpoint)' \
-	2>&1)"; then
+	2>"$describe_err")"; then
 	echo "could not describe cluster $cluster_name in $cluster_zone (project $PROJECT):" >&2
-	echo "$endpoints_raw" >&2
+	cat "$describe_err" >&2
+	rm -f "$describe_err"
 	echo "Has 'make gcp-env-apply' finished, and is PROJECT correct?" >&2
 	exit 1
 fi
+rm -f "$describe_err"
 
 cluster_endpoints=()
 while IFS= read -r endpoint; do

@@ -112,6 +112,13 @@ copy of an entry here.
   containment the rest of the block establishes. The assertion now exists, with its own
   red-drive case.
 
+  A further verification pass found the same class of gap one level down: the **group** role's
+  assertion is a disjunction, and only its `SUPERUSER` arm was ever demonstrated. `BYPASSRLS`
+  on the group is equally unrepairable by a Cloud SQL administrator — the corrective `ALTER`
+  names `NOLOGIN NOCREATEDB NOCREATEROLE` and none of the superuser-only three — so deleting
+  `g.rolbypassrls` from the condition left the whole suite green. It now has its own case,
+  proven by deleting that arm and watching exactly those two checks go red.
+
 - **`terraform destroy` reliability and CIDR preconditions.** `deletion_policy = "ABANDON"`
   on the service-networking connection is *removed*, not added: it does not delete the
   peering, only drops it from state, so Google then refuses to delete the VPC that peering

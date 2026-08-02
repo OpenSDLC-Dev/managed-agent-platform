@@ -452,8 +452,8 @@ Job does — then sets up every state its assertions guard and the DDL does not 
 requires the run to go red for that reason, because an assertion that cannot fail is a
 comment. That split matters: LOGIN, INHERIT, CREATEDB, CREATEROLE and database ownership are
 *corrected* by the file, so their assertions cannot fire and the repair cases cover them
-instead; SUPERUSER and BYPASSRLS cannot be corrected by a Cloud SQL administrator at all, so
-those two are asserted-only and have negative cases of their own. It also runs the
+instead; SUPERUSER, BYPASSRLS and REPLICATION cannot be corrected by a Cloud SQL
+administrator at all, so those are asserted-only and each has a negative case of its own. It also runs the
 whole file under a deliberately **non-superuser** administrator, which is what Cloud SQL's
 actually is: it holds CREATEDB and CREATEROLE — the two attributes that matter here — but
 it is **not** a PostgreSQL SUPERUSER, and a local `postgres` is, so a local `postgres`

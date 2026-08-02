@@ -194,8 +194,9 @@ class Postgres:
 
         The difference that matters: Cloud SQL's `postgres` user is NOT a
         PostgreSQL superuser. It is an ordinary role holding `cloudsqlsuperuser`,
-        which carries CREATEDB and CREATEROLE and nothing else -- and a superuser
-        bypasses privilege checks that an ordinary role must actually satisfy. So
+        which carries CREATEDB and CREATEROLE -- the attributes that matter here
+        -- but not SUPERUSER, and a superuser bypasses privilege checks that an
+        ordinary role must actually satisfy. So
         every run against the container's own `postgres` proves the SQL works
         under privileges the real administrator does not have.
 
@@ -470,6 +471,20 @@ def main():
         check("names the group role", "group role" in (r.stderr + r.stdout),
               r.stderr + r.stdout)
 
+    # SUPERUSER above is one disjunct of that assertion; BYPASSRLS is another,
+    # and it is the one the group's corrective ALTER cannot strip either
+    # (`NOLOGIN NOCREATEDB NOCREATEROLE` names none of the three superuser-only
+    # attributes). Without this case, deleting `g.rolbypassrls` from the
+    # condition leaves the whole suite green.
+    print("the group-role assertion FIRES on BYPASSRLS too, not only SUPERUSER")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        pg.psql_admin("ALTER ROLE %s BYPASSRLS;" % APP_ROLE)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("reports bypassrls on the group role",
+              "bypassrls=t" in (r.stderr + r.stdout), r.stderr + r.stdout)
+
     print("the cloudsqlsuperuser membership assertion FIRES when it should")
     with Postgres() as pg:
         check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
@@ -499,11 +514,12 @@ def main():
 
     # The three attributes the corrective ALTER deliberately does NOT name.
     # `ALTER ROLE ... LOGIN INHERIT NOCREATEDB NOCREATEROLE` cannot revoke
-    # SUPERUSER or BYPASSRLS, because PostgreSQL lets only a superuser change
-    # those -- even to turn them off -- and Cloud SQL's administrator is not
-    # one. So they are asserted and not repaired, and these two cases are what
-    # make "asserted" mean something: without them the assertions guard a
-    # reachable state that nothing ever demonstrates.
+    # SUPERUSER, BYPASSRLS or REPLICATION, because PostgreSQL lets only a
+    # superuser change those -- even to turn them off -- and Cloud SQL's
+    # administrator is not one. So all three are asserted and not repaired,
+    # and the three cases below are what make "asserted" mean something:
+    # without them the assertions guard a reachable state that nothing ever
+    # demonstrates.
     print("the SUPERUSER assertion FIRES on a role it cannot revoke it from")
     with Postgres() as pg:
         check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)

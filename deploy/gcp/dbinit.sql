@@ -105,9 +105,10 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'db_user')
 -- PostgreSQL lets only a SUPERUSER change the SUPERUSER, REPLICATION and
 -- BYPASSRLS attributes — even to turn them OFF — and the administrator this
 -- runs as is not one: Cloud SQL's `postgres` holds `cloudsqlsuperuser`, which
--- carries CREATEDB and CREATEROLE and nothing more. Naming NOSUPERUSER here
--- fails the whole statement with `permission denied to alter role / Only roles
--- with the SUPERUSER attribute may change the SUPERUSER attribute`, so a run
+-- carries CREATEDB and CREATEROLE — the attributes that matter here — but is
+-- not SUPERUSER itself. Naming NOSUPERUSER here fails the whole statement with
+-- `permission denied to alter role / Only roles with the SUPERUSER attribute
+-- may change the SUPERUSER attribute`, so a run
 -- that tried to be thorough would not run at all. Those three are still
 -- ASSERTED below; what changes is only that a drift in them is reported rather
 -- than silently repaired, which is the honest outcome for a privilege this
@@ -135,7 +136,7 @@ SELECT format(
 -- `ALTER DATABASE ... OWNER TO` requires the caller to be able to SET ROLE to
 -- the new owner. A superuser can always, which is why this line looks
 -- unnecessary and is not: the administrator this actually runs as is NOT a
--- superuser — Cloud SQL's `postgres` holds `cloudsqlsuperuser`, no more — and
+-- superuser — Cloud SQL's `postgres` holds `cloudsqlsuperuser`, not SUPERUSER — and
 -- in PostgreSQL 16 the membership CREATE ROLE implicitly grants its creator
 -- does not carry the SET option. Without this the next statement fails with
 -- `must be able to SET ROLE "<role>"`, on the real instance and never on a
