@@ -415,16 +415,22 @@ copy of an entry here.
   container's own addressing. Measured on WSL, a root dial to it is dropped by owner-match and
   a gate-uid dial is admitted, which is exactly the pair the test asserts.
 
-  Scoped deliberately. The darwin branch is untouched, because `host.docker.internal` is the
-  answer that works there and this platform's evidence says nothing about that one; a daemon
-  sharing the test's namespace still gets the bridge gateway, so CI's native Linux runner
-  takes the same path it always did. `MAP_DOCKER_HOST_ADDR` overrides all three, the escape
-  hatch `MAP_K8S_HOST_ADDR` already gave the Kubernetes harness — which needed the same
-  treatment for the same reason, and now asks whether the daemon is Desktop *before* it asks
-  which cluster flavour sits on it, Desktop's VM holding a kind network's gateway and its own
-  built-in cluster alike. Verified end to end on Windows 11 / WSL2 Ubuntu 24.04 / Docker
-  Desktop 4.75.0 (engine 29.5.2) with a kind cluster: the three packages above go from
-  failing to passing and `make verify` completes green there for the first time — every
+  Scoped deliberately. `DockerHostAddr`'s darwin branch is untouched, because
+  `host.docker.internal` is the answer that works there and this platform's evidence says
+  nothing about that one; a daemon sharing the test's namespace still gets the bridge gateway,
+  so CI's native Linux runner takes the same path it always did. `MAP_DOCKER_HOST_ADDR`
+  overrides all three, the escape hatch `MAP_K8S_HOST_ADDR` already gave the Kubernetes
+  harness — which needed the same treatment for the same reason, and now asks whether the
+  daemon is Desktop *before* it asks which cluster flavour sits on it, Desktop's VM holding a
+  kind network's gateway and its own built-in cluster alike. That reorder is the one place
+  macOS behaviour does change, and in its favour: a `kind-` context there skipped the
+  `host.docker.internal` branch for the gateway one and had to be given
+  `MAP_K8S_HOST_ADDR=host.docker.internal` by hand — the workaround docs/HISTORY.md's plan-12
+  acceptance record still prescribes — where it now reaches that same value on its own, the
+  override left correct but no longer required. Read off the branch order rather than
+  measured: no macOS host was available. Verified end to end on Windows 11 / WSL2 Ubuntu
+  24.04 / Docker Desktop 4.75.0 (engine 29.5.2) with a kind cluster: the three packages above
+  go from failing to passing and `make verify` completes green there for the first time — every
   package passing, coverage 90.78%. Each row was also run against `main` and confirmed red,
   so the change is proven able to fail rather than merely observed passing.
 
