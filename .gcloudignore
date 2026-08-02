@@ -1,0 +1,17 @@
+# Keeps `gcloud builds submit` from uploading history, Terraform state and local
+# caches to Cloud Build. Without this file gcloud generates one from .gitignore
+# and writes it into the checkout as an untracked file.
+#
+# The include below is not decoration and must not be dropped: a custom
+# .gcloudignore REPLACES gcloud's default behaviour, so without it every
+# gitignored-because-secret file in a working checkout — `.env.*`, a filled-in
+# model-providers.json, generated Helm values — would ride into the uploaded
+# source archive. .dockerignore does not help: it filters what reaches the
+# build, long after the upload happened.
+#!include:.gitignore
+
+.git/
+.github/
+.claude/
+**/.terraform/
+**/tfplan

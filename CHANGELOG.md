@@ -13,6 +13,24 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`environment/`'s Workload Identity bindings no longer race the cluster that creates
+  the pool they name.** Their member string is `PROJECT.svc.id.goog[...]`, built from
+  `var.project_id` — so Terraform saw no reference to `google_container_cluster.map` and
+  scheduled both bindings in the first wave, where they failed with `Identity Pool does not
+  exist` about ten minutes before the cluster brought that pool into existence. The pool is
+  created by the first cluster configured with `workload_identity_config`, which is a
+  dependency no interpolation can express here, so it is written out as `depends_on`.
+
+- **Cloud SQL names its edition instead of letting the API pick one.** With `edition`
+  unset the API selected ENTERPRISE_PLUS, and Plus rejects every `db-custom-*` tier —
+  `var.db_tier`'s default included — so the first real apply died on `Invalid Tier
+  (db-custom-2-7680) for (ENTERPRISE_PLUS) Edition` after the cluster had already been
+  built. `edition = "ENTERPRISE"` settles it: it is the edition db-custom tiers belong to
+  and the cheaper of the two, and the existing `connection_pool_config` block is accepted
+  alongside it.
+
 ### Changed
 
 - **anthropic-sdk-go bumped v1.59.0 → v1.61.0** — the latest release, so plan 21's
@@ -41,6 +59,21 @@ copy of an entry here.
   and the passthrough tests were renamed/re-worded to the same contract.
 
 ### Added
+
+- **`deploy/gcp/cloudbuild.yaml` — the image build.** One Dockerfile, whose three stages
+  (`build`, `gate`, `server`) yield the two images the deployment needs, and the chart
+  composes an image reference as
+  `registry/repository/COMPONENT:tag`, so the server stage is published under three
+  per-component names (`controlplane`, `brain`, `executor`) as three tags on a single
+  build — one digest behind all three, so they cannot drift — while `--target gate` builds
+  the per-session egress sidecar as a fourth. The accompanying `.gcloudignore` keeps
+  history, Terraform state and local caches out of the uploaded build context — and opens
+  with `#!include:.gitignore`, which is load-bearing rather than tidy: a custom
+  `.gcloudignore` *replaces* gcloud's default behaviour, so without it every
+  gitignored-because-secret file in a working checkout (`.env`, a filled-in
+  `model-providers.json`, `*.tfvars`) rides into the uploaded source archive.
+  `.dockerignore` does not cover this — it filters what reaches the build, after the
+  upload.
 
 - **Plan 21 authored (draft): the session outcomes surface**
   ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md), tracking #77, absorbing #161).

@@ -1,0 +1,44 @@
+# Builds the images this platform deploys, from one Dockerfile.
+#
+# The server stage carries all four binaries (controlplane, brain, executor,
+# worker) and each Deployment picks one with its container command — but the
+# chart composes an image reference as `registry/repository/COMPONENT:tag`
+# (templates/_helpers.tpl, "map.image"), so it looks for three per-component
+# names. They are three tags on ONE build here, so all three resolve to the same
+# digest and nothing can drift between them.
+#
+# `--target gate` is a separate image: the per-session egress sidecar needs
+# iptables and a dedicated UID that do not belong in the server image. It is a
+# full reference in the chart (executor.gateImage), not a composed one.
+#
+# Submit from the repository root, so the build context is the whole module:
+#   gcloud builds submit --config deploy/gcp/cloudbuild.yaml \
+#     --substitutions=_IMAGE_PREFIX="$(terraform -chdir=deploy/gcp/environment output -raw artifact_registry)",_TAG="$(git rev-parse --short HEAD)" .
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: server
+    args:
+      - build
+      - -t
+      - "${_IMAGE_PREFIX}/controlplane:${_TAG}"
+      - -t
+      - "${_IMAGE_PREFIX}/brain:${_TAG}"
+      - -t
+      - "${_IMAGE_PREFIX}/executor:${_TAG}"
+      - .
+  # Reuses the build stage's layers from the same daemon, so this is cheap.
+  - name: gcr.io/cloud-builders/docker
+    id: gate
+    args: ["build", "--target", "gate", "-t", "${_IMAGE_PREFIX}/gate:${_TAG}", "."]
+images:
+  - "${_IMAGE_PREFIX}/controlplane:${_TAG}"
+  - "${_IMAGE_PREFIX}/brain:${_TAG}"
+  - "${_IMAGE_PREFIX}/executor:${_TAG}"
+  - "${_IMAGE_PREFIX}/gate:${_TAG}"
+# An explicit 40-minute ceiling. This LOWERS the limit rather than raising it — with
+# `builds/timeout` unset the API allows 60 minutes — so a wedged build fails in 40
+# instead of billing for an hour. Both images built in about 2m20s from a cold
+# module cache, so the margin is large.
+timeout: 2400s
+options:
+  machineType: E2_HIGHCPU_8
