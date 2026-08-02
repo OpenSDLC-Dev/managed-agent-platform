@@ -76,7 +76,9 @@ func DefineOutcomes(evs []NewEvent) ([]DefineOutcome, error) {
 //     entry is non-terminal, is rejected (the 400's shape is ours, INFERRED);
 //   - a file rubric's file_id must name a stored file within the org scope
 //     (v1's single-tenant boundary — the registry itself) whose size fits the
-//     rubric cap.
+//     rubric cap. The row is taken FOR SHARE so a concurrent DELETE /v1/files
+//     cannot remove the row and object between this check and the snapshot —
+//     the deleter blocks until this transaction commits.
 //
 // batchInterrupts reports a user.interrupt in the same batch: the interrupt
 // settles the active outcome as `interrupted` in the same transaction — the
@@ -113,7 +115,7 @@ func ValidateDefineOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID,
 	if d.RubricType == "file" {
 		var sizeBytes int64
 		err := tx.QueryRow(ctx,
-			`SELECT size_bytes FROM files WHERE id = $1`, d.RubricFileID).Scan(&sizeBytes)
+			`SELECT size_bytes FROM files WHERE id = $1 FOR SHARE`, d.RubricFileID).Scan(&sizeBytes)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("rubric file %s not found", d.RubricFileID)
 		}

@@ -60,16 +60,22 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// batch is validated against the session's environment kind.
 	var envKind, status string
 	var envID domain.ID
+	var sessionArchivedAt *time.Time
 	err = tx.QueryRow(ctx,
-		`SELECT e.kind, s.status, s.environment_id
+		`SELECT e.kind, s.status, s.environment_id, s.archived_at
 		 FROM sessions s JOIN environments e ON e.id = s.environment_id
 		 WHERE s.id = $1 FOR UPDATE OF s`,
-		id).Scan(&envKind, &status, &envID)
+		id).Scan(&envKind, &status, &envID, &sessionArchivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("session %s not found", id)
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Checked before any side effect (the rubric snapshot writes a blob), not
+	// only at append time: a rejected send must leave nothing behind.
+	if sessionArchivedAt != nil {
+		return nil, errInvalid("session %s is archived and read-only", id)
 	}
 
 	newEvents, err := events.NormalizeInbound(envKind, rawEvents)
