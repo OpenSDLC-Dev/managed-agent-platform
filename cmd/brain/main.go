@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/anthropic"
@@ -84,6 +85,17 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 
+	// Read-only assembly input: the grader reads file-rubric snapshots from
+	// object storage. Optional the same way it is on the control plane — a
+	// nil store grades file rubrics from the description alone.
+	blobs, err := s3.FromEnv(ctx)
+	if err != nil {
+		return err
+	}
+	if blobs == nil {
+		slog.Info("object storage not configured; file-rubric outcomes grade from the description alone")
+	}
+
 	slog.Info("brain running", "providers", providersPath)
-	return brain.New(pool, registry, cfg).Run(ctx)
+	return brain.New(pool, registry, blobs, cfg).Run(ctx)
 }

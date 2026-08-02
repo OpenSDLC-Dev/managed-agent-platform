@@ -206,3 +206,68 @@ func FlipNonTerminalOutcomes(now time.Time) func([]domain.OutcomeEvaluation) ([]
 		return evals, nil
 	}
 }
+
+// ActiveOutcome returns the first non-terminal outcome entry, if any. The
+// reference allows one active outcome at a time, so first is only.
+func ActiveOutcome(evals []domain.OutcomeEvaluation) (domain.OutcomeEvaluation, bool) {
+	for _, e := range evals {
+		if !domain.OutcomeResultTerminal(e.Result) {
+			return e, true
+		}
+	}
+	return domain.OutcomeEvaluation{}, false
+}
+
+// FindDefineOutcome scans a session's history for the user.define_outcome
+// event that minted outcomeID and returns its normalized payload.
+func FindDefineOutcome(history []domain.Event, outcomeID domain.ID) (DefineOutcome, bool) {
+	for _, ev := range history {
+		if ev.Type != domain.EventUserDefineOutcome {
+			continue
+		}
+		d, err := ParseDefineOutcome(ev.Body)
+		if err != nil || d.OutcomeID != outcomeID {
+			continue
+		}
+		return d, true
+	}
+	return DefineOutcome{}, false
+}
+
+// LatestOutcomeStartID returns the id of the most recent
+// span.outcome_evaluation_start for outcomeID in the history — the start the
+// cycle's end event references. A reclaimed cycle re-grades under a fresh
+// start, so the latest is the live one; earlier dangling starts are the
+// recorded crash-window residue.
+func LatestOutcomeStartID(history []domain.Event, outcomeID domain.ID) domain.ID {
+	var id domain.ID
+	for _, ev := range history {
+		if ev.Type != domain.EventSpanOutcomeEvalStart {
+			continue
+		}
+		var p struct {
+			OutcomeID string `json:"outcome_id"`
+		}
+		if json.Unmarshal(ev.Body, &p) == nil && p.OutcomeID == outcomeID.String() {
+			id = ev.ID
+		}
+	}
+	return id
+}
+
+// NewOutcomeStartEvent renders a span.outcome_evaluation_start with a
+// pre-minted id, for the settlement that schedules a grading cycle to commit
+// atomically with the entry flip.
+func NewOutcomeStartEvent(outcomeID domain.ID, iteration int64) (NewEvent, error) {
+	payload, err := json.Marshal(map[string]any{
+		"outcome_id": outcomeID, "iteration": iteration,
+	})
+	if err != nil {
+		return NewEvent{}, err
+	}
+	now := time.Now().UTC()
+	return NewEvent{
+		ID: domain.NewID(domain.PrefixEvent), Type: domain.EventSpanOutcomeEvalStart,
+		Payload: payload, ProcessedAt: &now,
+	}, nil
+}

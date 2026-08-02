@@ -158,6 +158,43 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 			}
 			blocks = append(blocks, blk)
 
+		case domain.EventSpanOutcomeEvalEnd:
+			// Grader feedback re-enters the conversation deterministically
+			// from the log (no extra persisted event — crash-safe replay;
+			// renderings ours, INFERRED). needs_revision carries the failed
+			// criteria into the next revision cycle; max_iterations_reached
+			// prompts the one final acknowledgment turn the docs describe.
+			// Terminal satisfied/failed/interrupted ends are state, not
+			// conversation.
+			var p struct {
+				Result      string `json:"result"`
+				Explanation string `json:"explanation"`
+			}
+			if err := json.Unmarshal(ev.Body, &p); err != nil {
+				return req, 0, fmt.Errorf("event %s: %w", ev.ID, err)
+			}
+			var text string
+			switch p.Result {
+			case "needs_revision":
+				text = "The outcome grader reviewed your work and found it does not yet satisfy the rubric:\n\n" +
+					p.Explanation + "\n\nRevise your work to address these findings."
+			case "max_iterations_reached":
+				text = "The outcome's evaluation budget is exhausted and the rubric is still unmet:\n\n" +
+					p.Explanation + "\n\nDo not continue working. Briefly acknowledge what was completed and what remains."
+			default:
+				break
+			}
+			if text != "" {
+				blk, err := json.Marshal(map[string]any{"type": "text", "text": text})
+				if err != nil {
+					return req, 0, err
+				}
+				if err := turn("user"); err != nil {
+					return req, 0, err
+				}
+				blocks = append(blocks, blk)
+			}
+
 		case domain.EventSystemMessage:
 			var p struct {
 				Content []domain.ContentBlock `json:"content"`

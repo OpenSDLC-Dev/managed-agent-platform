@@ -163,3 +163,83 @@ func (m *ModelRequest) Finish(ctx context.Context, isError bool, commitErr error
 	m.recordMetrics(ctx, isError, commitErr)
 	m.span.End()
 }
+
+// StartOutcomeEvaluation opens the OTel span for one grading cycle from the
+// same instrumentation point that owns its wire events (CLAUDE.md principle
+// 3). Unlike StartModelRequest it appends no start event itself: the
+// span.outcome_evaluation_start committed in the settlement transaction that
+// scheduled this cycle (the two-phase design keeps the model call outside
+// every session lock), so the caller passes that event's id in.
+func (l *Log) StartOutcomeEvaluation(ctx context.Context, sessionID domain.ID, outcomeID domain.ID, iteration int64, startID domain.ID, backend Backend) (context.Context, *OutcomeEvaluation) {
+	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "outcome_evaluation",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("session.id", sessionID.String()),
+			attribute.String("outcome.id", outcomeID.String()),
+			attribute.Int64("outcome.iteration", iteration),
+		))
+	return ctx, &OutcomeEvaluation{
+		log: l, sessionID: sessionID, outcomeID: outcomeID,
+		iteration: iteration, startID: startID, span: span, backend: backend,
+	}
+}
+
+// OutcomeEvaluation is one in-flight grading cycle being traced.
+type OutcomeEvaluation struct {
+	log       *Log
+	sessionID domain.ID
+	outcomeID domain.ID
+	iteration int64
+	startID   domain.ID
+	span      trace.Span
+	backend   Backend
+}
+
+// Heartbeat appends one span.outcome_evaluation_ongoing — the liveness
+// signal the docs describe as distinguishing "actively running" from
+// "stuck" while the grader's reasoning stays opaque.
+func (o *OutcomeEvaluation) Heartbeat(ctx context.Context) error {
+	payload, err := json.Marshal(map[string]any{
+		"outcome_id": o.outcomeID, "iteration": o.iteration,
+	})
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	_, err = o.log.Append(ctx, o.sessionID, []NewEvent{{
+		Type: domain.EventSpanOutcomeEvalOngoing, Payload: payload, ProcessedAt: &now,
+	}})
+	return err
+}
+
+// EndEvent renders the terminal (or cycle-ending) span.outcome_evaluation_end
+// for the caller's settlement to commit atomically with the entry mutation.
+func (o *OutcomeEvaluation) EndEvent(result, explanation string, usage domain.ModelUsage) (NewEvent, error) {
+	payload, err := json.Marshal(map[string]any{
+		"outcome_id":                  o.outcomeID,
+		"outcome_evaluation_start_id": o.startID.String(),
+		"iteration":                   o.iteration,
+		"result":                      result,
+		"explanation":                 explanation,
+		"usage":                       usage,
+	})
+	if err != nil {
+		return NewEvent{}, err
+	}
+	now := time.Now().UTC()
+	return NewEvent{Type: domain.EventSpanOutcomeEvalEnd, Payload: payload, ProcessedAt: &now}, nil
+}
+
+// Finish closes the OTel span. commitErr is the fate of the transaction that
+// carried the EndEvent, so the trace never masks an aborted cycle as clean.
+func (o *OutcomeEvaluation) Finish(result string, commitErr error) {
+	switch {
+	case commitErr != nil:
+		o.span.SetStatus(codes.Error, "span.outcome_evaluation_end not committed: "+commitErr.Error())
+	case result == domain.OutcomeResultFailed:
+		// failed is a verdict about the deliverables, not a platform fault —
+		// the span stays clean; the result attribute carries it.
+	}
+	o.span.SetAttributes(attribute.String("outcome.result", result))
+	o.span.End()
+}
