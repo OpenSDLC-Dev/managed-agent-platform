@@ -171,6 +171,10 @@ Decision 6).
    authorization boundary, the same policy every management-key file reference gets),
    with a rubric-file byte cap mirroring the text rubric's bound (256 KiB, ours) —
    and the slice's tests cover missing, foreign-scope, and oversized rubric files.
+   The accepted rubric's bytes are **snapshotted at acceptance** to an outcome-owned
+   blob key (`outcomes/{outcome_id}/rubric`, written in the send transaction's wake):
+   replay and the grader read the snapshot, never the source file, so deleting the
+   source file mid-outcome cannot break replay — a delete-then-replay test pins it.
    Field validation in `normalizeDefineOutcome` (`internal/events/inbound.go`): strict
    `allowKeys(type, description, rubric, max_iterations)`; `description` required and
    non-empty (the SDK pins only requiredness — rejecting the present-but-empty string
@@ -292,11 +296,20 @@ Decision 6).
    `filename` plus a unique index on `(scope_id, filename)` — re-harvest replaces
    content per path, **deletes registry rows whose path no longer exists** (a rename is
    naturally delete+add; blob bytes removed best-effort, the plan-20 delete-convergence
-   posture), and the listing and grader input therefore always mirror the directory as
-   of the last harvest — no stale rows (semantics ours, INFERRED; deletion and rename
-   tests included). Caps named here so the slice cannot silently invent them: 50 MiB
-   per file, 200 files / 500 MiB per session, oversize skipped with a logged marker
-   (bounds ours).
+   posture), and the listing and grader input therefore always mirror the **eligible
+   snapshot** of the directory as of the last harvest — no stale rows (semantics ours,
+   INFERRED; deletion and rename tests included). **Publication is atomic**: content
+   uploads stage to the blob store first, then one registry transaction commits the
+   whole snapshot (upserts + stale-row deletions) and enqueues the grading pass — a
+   crash before that transaction leaves the previous snapshot fully intact (staged
+   blobs orphaned by a crash are reaped best-effort), and crash tests sit at the
+   upload, registry-commit, and grading-enqueue boundaries. Caps named here so the
+   slice cannot silently invent them: 50 MiB per file, 200 files / 500 MiB per session
+   (bounds ours), applied **deterministically** — paths in lexicographic order until a
+   cap is hit; an ineligible file (oversize, or past the aggregate cap) is excluded
+   from the snapshot exactly like an absent path, its prior row deleted, the exclusion
+   logged — so clients and the grader always see the eligible snapshot and nothing
+   half-in (growth-past-cap and aggregate-cap-selection tests included).
    Harvest is scoped to sessions with outcomes in this plan (the deliverables surface is
    documented on the outcomes page); generalizing to every session is a follow-up issue
    slice 5 files. `self_hosted` environments get no harvest — the platform cannot reach
@@ -427,7 +440,11 @@ Three clients, in order of authority:
 3. **curl** — the raw-wire tab, captured as the acceptance record's transcript
    (docs/HISTORY.md) with the `anthropic-beta: managed-agents-2026-04-01` header
    asserted present on every request the example sends it on, giving the byte-level
-   evidence the typed clients abstract away.
+   evidence the typed clients abstract away. **Transcripts are redacted before they
+   are committed**: `x-api-key`/`Authorization` values and any live endpoint identity
+   replaced with placeholders, no sensitive file contents, and `.env` /
+   `model-providers.json` stay gitignored as ever — the record proves shapes and
+   ordering, never credentials.
 
 The recorded run (transcripts, event orderings, session projections) lands in
 docs/HISTORY.md as this plan's acceptance record — and doubles as the platform-side
