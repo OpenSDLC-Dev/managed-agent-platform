@@ -220,3 +220,42 @@ func TestBuildRequestFilesBlockPlacement(t *testing.T) {
 		t.Errorf("system with only files = %q", req.System)
 	}
 }
+
+func TestBuildRequestRendersDefineOutcome(t *testing.T) {
+	agent := domain.ResolvedAgent{
+		Type: "agent", ID: "agent_1", Version: 1, Name: "n",
+		AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}, System: "base"},
+	}
+	history := []domain.Event{
+		ev(1, domain.EventUserDefineOutcome,
+			`{"description":"Build a DCF model","rubric":{"type":"text","content":"# Rubric"},"max_iterations":3,"outcome_id":"outc_1"}`),
+		ev(2, domain.EventSessionStatusRunning, `{}`),
+	}
+	req, watermark, err := buildRequest(agent, history, "", "")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if watermark != 2 {
+		t.Errorf("watermark = %d, want 2", watermark)
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
+		t.Fatalf("messages = %+v, want one user message", req.Messages)
+	}
+	text := string(req.Messages[0].Content)
+	if !strings.Contains(text, "Build a DCF model") || !strings.Contains(text, "# Rubric") {
+		t.Errorf("rendered outcome message = %s, want description and rubric text", text)
+	}
+
+	// A file rubric renders the description alone: its content reaches the
+	// grader from the acceptance snapshot (slice 3), not the conversation.
+	history[0] = ev(1, domain.EventUserDefineOutcome,
+		`{"description":"Build it","rubric":{"type":"file","file_id":"file_1"},"max_iterations":3,"outcome_id":"outc_2"}`)
+	req, _, err = buildRequest(agent, history, "", "")
+	if err != nil {
+		t.Fatalf("buildRequest (file rubric): %v", err)
+	}
+	text = string(req.Messages[0].Content)
+	if !strings.Contains(text, "Build it") || strings.Contains(text, "file_1") {
+		t.Errorf("file-rubric rendering = %s, want description only", text)
+	}
+}

@@ -13,6 +13,42 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Added
+
+- **`user.define_outcome` is accepted; `outcome_evaluations` is real, stored state;
+  session create takes `initial_events`**
+  ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 2, closing the #77
+  placeholders and #161). The three v1 seams open: `internal/events/inbound.go` validates
+  the event field-by-field against the v1.61.0 schema (strict keys; non-empty
+  description; the text/file rubric union with the reference's 262144-character content
+  cap; `max_iterations` 1–20 defaulting to 3) and mints the server-generated `outc_` id
+  into the payload, so the echo carries every required wire field; a `0016` migration
+  stores per-outcome evaluation state as a jsonb array on the sessions row in the wire
+  shape, mutated only inside append transactions under the session row lock (the new
+  `AppendOptions.MutateOutcomes`, the `AddUsage` pattern), and every session-returning
+  endpoint renders it. A define_outcome wakes an idle session exactly as a user.message
+  does — the docs' "begins work immediately" — chains mid-turn, and replays into the
+  conversation as a user-role message (description + inline text rubric). The DB-backed
+  checks run in the send transaction like the tool-result cross-checks: one active
+  outcome at a time (chaining allowed after a terminal result, or via an interrupt in
+  the same batch), and a file rubric must name a stored, org-scoped file within a
+  256 KiB cap whose bytes are snapshotted to `outcomes/{outcome_id}/rubric` at
+  acceptance — deleting the source file mid-outcome cannot break replay. A
+  user.interrupt settles a non-terminal outcome as `interrupted` (terminal
+  `span.outcome_evaluation_end` with the documented empty start id), which is what frees
+  the session for the docs' chain-after-interrupt pattern. `initial_events` lands whole:
+  the two documented types only, max 50, one define_outcome, the 100-file-document
+  bound, events appended in order and the session created directly in `running` with the
+  turn queued. Registry moves in the same PR: the define_outcome-rejection and
+  initial_events entries retire, the stats entry narrows to stats/deployment_id, and one
+  consolidated INFERRED entry records every choice no source settles (error shapes,
+  rubric cap/snapshot, interrupt-settlement shape, wake/rendering semantics, the 4 MiB
+  body bound vs the documented 32 MB, pending-birth timing) — with the standing
+  processed_at entry's "ours echoes all three" phrasing becoming literally true now that
+  define_outcome is echoed with `processed_at: null` like its two siblings. Evaluation
+  itself — the grader, the span start/ongoing cycle, verdicts — is slice 3; until it
+  lands an accepted outcome's entry stays `pending` while the agent works.
+
 ### Changed
 
 - **anthropic-sdk-go bumped v1.59.0 → v1.61.0** — the latest release, so plan 21's

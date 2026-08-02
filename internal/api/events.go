@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -115,6 +116,19 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			hasInterrupt = true
 		}
 	}
+	// One active outcome at a time, and a file rubric must name a stored,
+	// rubric-sized file — DB-backed like the tool-result cross-checks. An
+	// interrupt in the same batch settles the active outcome first (its case
+	// below), which is the documented way to chain a new outcome, so it
+	// clears the stored-entry half of the check.
+	if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), newEvents, hasInterrupt); err != nil {
+		return nil, errInvalid("%s", err)
+	}
+	defs, err := events.DefineOutcomes(newEvents)
+	if err != nil {
+		return nil, errInvalid("%s", err)
+	}
+	hasDefineOutcome := len(defs) > 0
 	batch := newEvents
 	var opts events.AppendOptions
 	// The status transitions this batch actually makes, in order, recorded once
@@ -149,6 +163,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Set by the interrupt case when a non-terminal outcome entry must flip to
+	// interrupted; consumed by the MutateOutcomes composition after the switch.
+	var outcomeFlip bool
 
 	// Order matters twice here. The interrupt comes first because it ends the
 	// turn in progress, so a batch carrying one settles on its terms whatever
@@ -212,14 +229,28 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 				setStatus(domain.SessionIdle)
 			}
 		}
-		// The interrupt leaves nothing outstanding, so a user.message in the same
-		// batch resumes exactly as it would on any idle session — the documented
-		// way to steer a running agent, in one send.
-		if hasUserMessage && interruptible {
+		// An active outcome settles with the turn — the docs mark it
+		// interrupted "even if evaluation hadn't started yet", with an empty
+		// outcome_evaluation_start_id when no start fired — freeing the
+		// session for a new define_outcome, possibly one in this same batch
+		// (the documented chaining pattern).
+		if interruptible {
+			ends, flip, err := events.InterruptOutcomes(ctx, tx, domain.ID(id))
+			if err != nil {
+				return nil, err
+			}
+			batch = append(batch, ends...)
+			outcomeFlip = flip
+		}
+		// The interrupt leaves nothing outstanding, so a user.message — or a
+		// new user.define_outcome — in the same batch resumes exactly as it
+		// would on any idle session: the documented way to steer a running
+		// agent, or to chain outcomes, in one send.
+		if (hasUserMessage || hasDefineOutcome) && interruptible {
 			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusRunning})
 			setStatus(domain.SessionRunning)
 		}
-		if settling || (hasUserMessage && interruptible) {
+		if settling || ((hasUserMessage || hasDefineOutcome) && interruptible) {
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 				// Cancel first, then enqueue: the cancel frees the (session,
 				// kind) slot the redirect's own model_turn needs, and takes the
@@ -229,7 +260,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 						return err
 					}
 				}
-				if hasUserMessage {
+				if hasUserMessage || hasDefineOutcome {
 					return enqueueTurn(ctx, tx)
 				}
 				return nil
@@ -316,7 +347,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		if !anyPending {
 			opts.Then = enqueueTurn
 		}
-	case hasUserMessage && status == string(domain.SessionIdle) && len(askBlocking) == 0:
+	case (hasUserMessage || hasDefineOutcome) && status == string(domain.SessionIdle) && len(askBlocking) == 0:
 		// Waking on a message must not step past an unanswered tool call, for
 		// the reason the two enqueue sites above gate on the same check: the
 		// resumed turn would replay an assistant tool_use that no tool_result
@@ -339,7 +370,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 			return nil, err
 		}
 		if unanswered {
-			slog.WarnContext(ctx, "user.message not resumed: session is idle with an unanswered tool_use",
+			slog.WarnContext(ctx, "wake event not resumed: session is idle with an unanswered tool_use",
 				"session_id", id)
 			break
 		}
@@ -354,6 +385,28 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		if !unanswered {
 			opts.Then = enqueueTurn
 		}
+	}
+
+	// The outcome projection moves with the events that change it, under the
+	// same lock: an interrupt flips every non-terminal entry to interrupted;
+	// an accepted define_outcome appends its entry, born pending.
+	if outcomeFlip || hasDefineOutcome {
+		flip := events.FlipNonTerminalOutcomes(time.Now().UTC())
+		opts.MutateOutcomes = func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+			if outcomeFlip {
+				var err error
+				if evals, err = flip(evals); err != nil {
+					return nil, err
+				}
+			}
+			for _, d := range defs {
+				evals = append(evals, events.NewOutcomeEntry(d))
+			}
+			return evals, nil
+		}
+	}
+	if err := s.snapshotRubrics(ctx, defs); err != nil {
+		return nil, err
 	}
 
 	appended, err := s.log.AppendInTx(ctx, tx, domain.ID(id), batch, opts)
@@ -390,6 +443,31 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		data = append(data, wire)
 	}
 	return map[string]any{"data": data}, nil
+}
+
+// snapshotRubrics copies each file rubric's bytes to an outcome-owned blob
+// key at acceptance, so deleting the source file mid-outcome cannot break
+// replay or grading. A snapshot orphaned by a failed commit is harmless —
+// keyed by an outcome id that never came to exist.
+func (s *server) snapshotRubrics(ctx context.Context, defs []events.DefineOutcome) error {
+	for _, d := range defs {
+		if d.RubricType != "file" {
+			continue
+		}
+		if s.blobs == nil {
+			return errInvalid("file rubrics require the files surface, which this deployment does not configure")
+		}
+		rc, size, err := s.blobs.Get(ctx, blob.FilesKey(d.RubricFileID))
+		if err != nil {
+			return fmt.Errorf("read rubric file %s: %w", d.RubricFileID, err)
+		}
+		err = s.blobs.Put(ctx, events.RubricSnapshotKey(d.OutcomeID), rc, size, "application/octet-stream")
+		_ = rc.Close()
+		if err != nil {
+			return fmt.Errorf("snapshot rubric for %s: %w", d.OutcomeID, err)
+		}
+	}
+	return nil
 }
 
 // denyToolResults turns each denied user.tool_confirmation in a batch into the

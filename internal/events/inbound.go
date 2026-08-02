@@ -14,11 +14,12 @@ import (
 // kept as the client's raw bytes after validation, so they round-trip
 // byte-for-byte.
 //
-// v1 divergences (documented in docs/DIVERGENCES.md): user.define_outcome is rejected
-// (outcome surface is deferred) and session_thread_id must be null/absent
-// (threads are deferred). Tool-result references are cross-checked against
-// the log by ValidateToolResults (toolflow.go) — that needs a database, so
-// it runs in the API's send transaction, not here.
+// Divergences (documented in docs/DIVERGENCES.md): session_thread_id must be
+// null/absent (threads are deferred). Tool-result references are cross-checked
+// against the log by ValidateToolResults (toolflow.go) — that needs a
+// database, so it runs in the API's send transaction, not here; so do
+// user.define_outcome's single-active check and file-rubric validation
+// (ValidateDefineOutcomes in the API layer).
 
 // NormalizeInbound validates one send batch. envKind is the session's
 // environment kind ("cloud" | "self_hosted"), which gates user.tool_result.
@@ -123,7 +124,7 @@ func normalizeOne(envKind string, raw json.RawMessage) (NewEvent, error) {
 	case domain.EventSystemMessage:
 		return normalizeSystemMessage(obj)
 	case domain.EventUserDefineOutcome:
-		return NewEvent{}, fmt.Errorf("user.define_outcome is not supported in v1 (outcome evaluation is deferred)")
+		return normalizeDefineOutcome(obj)
 	case domain.EventStart, domain.EventDelta:
 		return NewEvent{}, fmt.Errorf("%q is a stream-only preview frame and cannot be sent", typ)
 	}
@@ -144,6 +145,8 @@ var platformEmitted = map[domain.EventType]bool{
 	domain.EventSessionStatusRescheduled: true, domain.EventSessionStatusTerminated: true,
 	domain.EventSessionError: true, domain.EventSessionUpdated: true, domain.EventSessionDeleted: true,
 	domain.EventSpanModelRequestStart: true, domain.EventSpanModelRequestEnd: true,
+	domain.EventSpanOutcomeEvalStart: true, domain.EventSpanOutcomeEvalOngoing: true,
+	domain.EventSpanOutcomeEvalEnd: true,
 }
 
 func normalizeUserMessage(obj map[string]json.RawMessage) (NewEvent, error) {
@@ -238,6 +241,98 @@ func normalizeToolResult(obj map[string]json.RawMessage, typ domain.EventType, r
 		"is_error":          isError,
 		"session_thread_id": nullRaw,
 	})
+}
+
+// Rubric bounds, from the SDK's typed schema and the plan's own choices:
+// the text rubric's content cap is the reference's (BetaManagedAgentsTextRubricParams,
+// "Maximum 262144 characters"); max_iterations 1–20 defaulting to 3 mirrors
+// "Default 3, max 20" with the out-of-range 400 being ours (INFERRED).
+const (
+	maxRubricChars       = 262144
+	defaultMaxIterations = 3
+	maxMaxIterations     = 20
+)
+
+// normalizeDefineOutcome validates a user.define_outcome and mints the
+// outcome's server-generated outc_ id into the payload, so the echo — a plain
+// merge of payload + envelope — carries every field the wire requires
+// (description, rubric, max_iterations, outcome_id). The DB-backed checks
+// (one active outcome at a time; the file rubric's existence, scope, and byte
+// cap) run in the API's send transaction, not here.
+func normalizeDefineOutcome(obj map[string]json.RawMessage) (NewEvent, error) {
+	if err := allowKeys(obj, "type", "description", "rubric", "max_iterations"); err != nil {
+		return NewEvent{}, err
+	}
+	// Required and non-empty: the SDK pins only requiredness; rejecting the
+	// present-but-empty string is ours (INFERRED, docs/DIVERGENCES.md).
+	description, err := requireString(obj, "description")
+	if err != nil {
+		return NewEvent{}, err
+	}
+	rubric, err := normalizeRubric(obj["rubric"])
+	if err != nil {
+		return NewEvent{}, err
+	}
+	maxIterations := int64(defaultMaxIterations)
+	if raw, set := obj["max_iterations"]; set && !isNullRaw(raw) {
+		var n json.Number
+		if err := json.Unmarshal(raw, &n); err != nil {
+			return NewEvent{}, fmt.Errorf("max_iterations must be an integer")
+		}
+		v, err := n.Int64()
+		if err != nil {
+			return NewEvent{}, fmt.Errorf("max_iterations must be an integer")
+		}
+		if v < 1 || v > maxMaxIterations {
+			return NewEvent{}, fmt.Errorf("max_iterations must be between 1 and %d", maxMaxIterations)
+		}
+		maxIterations = v
+	}
+	return newEvent(domain.EventUserDefineOutcome, fields{
+		"description":    mustJSON(description),
+		"rubric":         rubric,
+		"max_iterations": mustJSON(maxIterations),
+		"outcome_id":     mustJSON(domain.NewID(domain.PrefixOutcome).String()),
+	})
+}
+
+// normalizeRubric validates the rubric union: {type:"text", content} with the
+// reference's content cap, or {type:"file", file_id}.
+func normalizeRubric(raw json.RawMessage) (json.RawMessage, error) {
+	if raw == nil || isNullRaw(raw) {
+		return nil, fmt.Errorf("rubric is required")
+	}
+	obj, err := asObject(raw, "rubric")
+	if err != nil {
+		return nil, err
+	}
+	typ, err := requireString(obj, "type")
+	if err != nil {
+		return nil, fmt.Errorf("rubric %w", err)
+	}
+	switch typ {
+	case "text":
+		if err := allowKeys(obj, "type", "content"); err != nil {
+			return nil, fmt.Errorf("rubric: %w", err)
+		}
+		content, err := requireString(obj, "content")
+		if err != nil {
+			return nil, fmt.Errorf("rubric %w", err)
+		}
+		if n := len([]rune(content)); n > maxRubricChars {
+			return nil, fmt.Errorf("rubric content must be at most %d characters (got %d)", maxRubricChars, n)
+		}
+	case "file":
+		if err := allowKeys(obj, "type", "file_id"); err != nil {
+			return nil, fmt.Errorf("rubric: %w", err)
+		}
+		if _, err := requireString(obj, "file_id"); err != nil {
+			return nil, fmt.Errorf("rubric %w", err)
+		}
+	default:
+		return nil, fmt.Errorf(`rubric type must be "text" or "file"`)
+	}
+	return json.Marshal(obj)
 }
 
 func normalizeSystemMessage(obj map[string]json.RawMessage) (NewEvent, error) {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -70,18 +71,19 @@ type sessionRow struct {
 	status, title        string
 	metaJSON, usageJSON  []byte
 	resourcesJSON        []byte
+	outcomesJSON         []byte
 	vaultIDs             []string
 	createdAt, updatedAt time.Time
 	archivedAt           *time.Time
 }
 
 const sessionColumns = `id, resolved_agent, environment_id, status, title,
-	metadata, usage, resources, vault_ids, created_at, updated_at, archived_at`
+	metadata, usage, resources, outcome_evaluations, vault_ids, created_at, updated_at, archived_at`
 
 func scanSession(row pgx.Row) (sessionRow, error) {
 	var r sessionRow
 	err := row.Scan(&r.id, &r.agentJSON, &r.environmentID, &r.status, &r.title,
-		&r.metaJSON, &r.usageJSON, &r.resourcesJSON, &r.vaultIDs,
+		&r.metaJSON, &r.usageJSON, &r.resourcesJSON, &r.outcomesJSON, &r.vaultIDs,
 		&r.createdAt, &r.updatedAt, &r.archivedAt)
 	return r, err
 }
@@ -115,13 +117,24 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	if resources == nil {
 		resources = []json.RawMessage{}
 	}
+	// Stored in the wire shape (one entry per define_outcome, mutated in
+	// place per evaluation cycle), so rendering is a raw echo of the column.
+	outcomes := []json.RawMessage{}
+	if len(r.outcomesJSON) > 0 {
+		if err := json.Unmarshal(r.outcomesJSON, &outcomes); err != nil {
+			return sessionJSON{}, err
+		}
+	}
+	if outcomes == nil {
+		outcomes = []json.RawMessage{}
+	}
 	if r.vaultIDs == nil {
 		r.vaultIDs = []string{}
 	}
 	return sessionJSON{
 		ID: r.id, Type: "session", Agent: agent, EnvironmentID: r.environmentID,
 		Status: r.status, Title: r.title, Metadata: metadata, Usage: usage,
-		Stats: statsJSON{}, OutcomeEvaluations: []json.RawMessage{},
+		Stats: statsJSON{}, OutcomeEvaluations: outcomes,
 		Resources: resources, VaultIDs: r.vaultIDs,
 		CreatedAt: r.createdAt.UTC(), UpdatedAt: r.updatedAt.UTC(), ArchivedAt: utcPtr(r.archivedAt),
 	}, nil
@@ -325,6 +338,68 @@ func validateAttachedVaults(ctx context.Context, tx pgx.Tx, ids []string) error 
 	return nil
 }
 
+// initialEventsMax mirrors the reference's create-time bound: "processed in
+// order. Supports `user.message` and `user.define_outcome` events. Maximum 50
+// events"; more than one define_outcome, or more than 100 file-sourced
+// document blocks across the list, is the documented 400.
+const (
+	initialEventsMax         = 50
+	initialFileDocBlocksMax  = 100
+	initialEventsAllowedNote = "initial_events supports user.message and user.define_outcome events only"
+)
+
+// parseInitialEvents structurally validates the create-time initial_events
+// list (presence, size, the two-type allowlist, the define_outcome and
+// file-document bounds); the per-type field validation runs later through the
+// same NormalizeInbound a posted batch gets.
+func parseInitialEvents(obj map[string]json.RawMessage) ([]json.RawMessage, error) {
+	raw, set := obj["initial_events"]
+	if !set || isNull(raw) {
+		return nil, nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, errInvalid("initial_events must be an array of events")
+	}
+	if len(items) > initialEventsMax {
+		return nil, errInvalid("initial_events supports at most %d events (got %d)", initialEventsMax, len(items))
+	}
+	defineOutcomes, fileDocs := 0, 0
+	for i, item := range items {
+		var probe struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type   string `json:"type"`
+				Source struct {
+					Type string `json:"type"`
+				} `json:"source"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(item, &probe); err != nil {
+			return nil, errInvalid("initial_events[%d] must be an event object", i)
+		}
+		switch probe.Type {
+		case string(domain.EventUserMessage):
+			for _, b := range probe.Content {
+				if b.Type == "document" && b.Source.Type == "file" {
+					fileDocs++
+				}
+			}
+		case string(domain.EventUserDefineOutcome):
+			defineOutcomes++
+		default:
+			return nil, errInvalid("initial_events[%d]: %s", i, initialEventsAllowedNote)
+		}
+	}
+	if defineOutcomes > 1 {
+		return nil, errInvalid("initial_events supports at most one user.define_outcome event")
+	}
+	if fileDocs > initialFileDocBlocksMax {
+		return nil, errInvalid("initial_events supports at most %d file-sourced document blocks (got %d)", initialFileDocBlocksMax, fileDocs)
+	}
+	return items, nil
+}
+
 func (s *server) createSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	obj, err := decodeObject(r)
@@ -332,7 +407,11 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if err := rejectUnknownKeys(obj, "agent", "environment_id", "title", "metadata",
-		"resources", "vault_ids"); err != nil {
+		"resources", "vault_ids", "initial_events"); err != nil {
+		return nil, err
+	}
+	rawInitial, err := parseInitialEvents(obj)
+	if err != nil {
 		return nil, err
 	}
 	envID, err := requiredString(obj, "environment_id")
@@ -374,8 +453,9 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var envArchivedAt *time.Time
+	var envKind string
 	err = tx.QueryRow(ctx,
-		`SELECT archived_at FROM environments WHERE id = $1 FOR SHARE`, envID).Scan(&envArchivedAt)
+		`SELECT archived_at, kind FROM environments WHERE id = $1 FOR SHARE`, envID).Scan(&envArchivedAt, &envKind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("environment %s not found", envID)
 	}
@@ -406,16 +486,34 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 	resourcesJSON := mustJSON(resources)
 
+	// Initial events are validated through the same per-type normalizers a
+	// posted batch gets, before the row exists (fail fast); the DB-backed
+	// outcome checks run after the insert, against the fresh row.
+	var initialEvents []events.NewEvent
+	if len(rawInitial) > 0 {
+		initialEvents, err = events.NormalizeInbound(envKind, rawInitial)
+		if err != nil {
+			return nil, errInvalid("initial_events: %s", err)
+		}
+	}
+
 	id := domain.NewID(domain.PrefixSession).String()
 	var createdBy *string
 	if p := principalFrom(ctx); p != "" {
 		createdBy = &p
 	}
+	// A non-empty initial_events list starts the agent loop in the same call:
+	// the session is created directly in the running status.
+	status := string(domain.SessionIdle)
+	if len(initialEvents) > 0 {
+		status = string(domain.SessionRunning)
+	}
 	row := sessionRow{
 		id: id, agentJSON: agentJSON, environmentID: envID,
-		status: string(domain.SessionIdle), title: title,
+		status: status, title: title,
 		metaJSON: mustJSON(metadata), usageJSON: []byte(`{}`), resourcesJSON: resourcesJSON,
-		vaultIDs: vaultIDs,
+		outcomesJSON: []byte(`[]`),
+		vaultIDs:     vaultIDs,
 	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id,
@@ -434,8 +532,51 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if len(initialEvents) > 0 {
+		if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), initialEvents, false); err != nil {
+			return nil, errInvalid("initial_events: %s", err)
+		}
+		defs, err := events.DefineOutcomes(initialEvents)
+		if err != nil {
+			return nil, errInvalid("initial_events: %s", err)
+		}
+		if err := s.snapshotRubrics(ctx, defs); err != nil {
+			return nil, err
+		}
+		// The log announces the status the session was born into, after the
+		// initial events it processes in order (placement ours, INFERRED).
+		batch := append(initialEvents, events.NewEvent{Type: domain.EventSessionStatusRunning})
+		opts := events.AppendOptions{
+			Then: func(ctx context.Context, tx pgx.Tx) error {
+				_, err := s.queue.Enqueue(ctx, tx, domain.ID(envID), domain.ID(id), queue.ModelTurn)
+				return err
+			},
+		}
+		if len(defs) > 0 {
+			opts.MutateOutcomes = func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+				for _, d := range defs {
+					evals = append(evals, events.NewOutcomeEntry(d))
+				}
+				return evals, nil
+			}
+		}
+		if _, err := s.log.AppendInTx(ctx, tx, domain.ID(id), batch, opts); err != nil {
+			return nil, err
+		}
+		row.outcomesJSON = nil // re-read below: MutateOutcomes moved it
+		if err := tx.QueryRow(ctx,
+			`SELECT outcome_evaluations, updated_at FROM sessions WHERE id = $1`, id).
+			Scan(&row.outcomesJSON, &row.updatedAt); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+	if len(initialEvents) > 0 {
+		events.RecordSessionStatus(ctx, domain.SessionRunning)
 	}
 	if len(resources) > 0 {
 		recordResourceMutation(ctx, resourceOutcomeOK, len(resources))

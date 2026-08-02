@@ -127,6 +127,37 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 			}
 			blocks = append(blocks, items...)
 
+		case domain.EventUserDefineOutcome:
+			// The outcome definition renders as a user-role message built
+			// deterministically from the payload — the task description plus
+			// an inline text rubric — so any fresh brain reconstructs the same
+			// conversation (rendering ours, INFERRED — docs/DIVERGENCES.md).
+			// A file rubric's content reaches the grader from its acceptance
+			// snapshot (plan 21 slice 3); the conversation carries the
+			// description alone.
+			var p struct {
+				Description string `json:"description"`
+				Rubric      struct {
+					Type    string `json:"type"`
+					Content string `json:"content"`
+				} `json:"rubric"`
+			}
+			if err := json.Unmarshal(ev.Body, &p); err != nil {
+				return req, 0, fmt.Errorf("event %s: %w", ev.ID, err)
+			}
+			text := "Work toward this outcome: " + p.Description
+			if p.Rubric.Type == "text" {
+				text += "\n\nYour work will be evaluated against this rubric:\n" + p.Rubric.Content
+			}
+			blk, err := json.Marshal(map[string]any{"type": "text", "text": text})
+			if err != nil {
+				return req, 0, err
+			}
+			if err := turn("user"); err != nil {
+				return req, 0, err
+			}
+			blocks = append(blocks, blk)
+
 		case domain.EventSystemMessage:
 			var p struct {
 				Content []domain.ContentBlock `json:"content"`

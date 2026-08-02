@@ -64,6 +64,10 @@ type AppendOptions struct {
 	// at seq <= the watermark — the brain recording which inbound events its
 	// turn consumed. Zero means no stamping.
 	MarkProcessedThrough int64
+	// MutateOutcomes read-modify-writes sessions.outcome_evaluations under the
+	// same row lock (the AddUsage pattern): the projection changes atomically
+	// with the events that change it, so log and resource can never disagree.
+	MutateOutcomes func([]domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error)
 	// Then runs inside the same transaction after the insert (work enqueue,
 	// counters). An error aborts the whole append.
 	Then func(ctx context.Context, tx pgx.Tx) error
@@ -109,7 +113,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	// An empty batch is allowed when the options carry side effects (a turn
 	// that suspends on tool use changes state without saying anything new).
 	if len(evs) == 0 && opts.SetStatus == nil && opts.AddUsage == nil &&
-		opts.MarkProcessedThrough == 0 && opts.Then == nil {
+		opts.MarkProcessedThrough == 0 && opts.MutateOutcomes == nil && opts.Then == nil {
 		return nil, errors.New("append requires at least one event")
 	}
 	for _, ev := range evs {
@@ -220,6 +224,34 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		if _, err := tx.Exec(ctx,
 			`UPDATE sessions SET usage = $2, updated_at = now() WHERE id = $1`,
 			sessionID.String(), usage); err != nil {
+			return nil, err
+		}
+	}
+	if opts.MutateOutcomes != nil {
+		// Read-modify-write is race-free here: the session row lock is held.
+		var raw []byte
+		if err := tx.QueryRow(ctx,
+			`SELECT outcome_evaluations FROM sessions WHERE id = $1`, sessionID.String()).Scan(&raw); err != nil {
+			return nil, err
+		}
+		var evals []domain.OutcomeEvaluation
+		if err := json.Unmarshal(raw, &evals); err != nil {
+			return nil, fmt.Errorf("decode stored outcome_evaluations: %w", err)
+		}
+		evals, err := opts.MutateOutcomes(evals)
+		if err != nil {
+			return nil, err
+		}
+		if evals == nil {
+			evals = []domain.OutcomeEvaluation{}
+		}
+		buf, err := json.Marshal(evals)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE sessions SET outcome_evaluations = $2, updated_at = now() WHERE id = $1`,
+			sessionID.String(), buf); err != nil {
 			return nil, err
 		}
 	}

@@ -12,7 +12,8 @@ GCP deployment; slices 1-3 + 4a landed, 4b blocked on GCP spend approval.
 ## Tasks — plan 21
 
 - [x] Slice 1 — SDK bump v1.59.0→v1.61.0 + verification record (this PR; gate green on the bump)
-- [ ] Slice 2 — define_outcome acceptance + storage + rendering + initial_events
+- [x] Slice 2 — define_outcome acceptance + storage + rendering + initial_events
+  (this PR; interrupt-settlement pulled forward from slice 3 so chaining works)
 - [ ] Slice 3 — brain grader loop (transcript-stage)
 - [ ] Slice 4 — outputs_harvest work kind + deliverables
 - [ ] Slice 5 — full-chain acceptance (doc example on latest SDK) + settlement

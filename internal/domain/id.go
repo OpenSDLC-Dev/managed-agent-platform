@@ -31,6 +31,7 @@ const (
 	PrefixFile          = "file"
 	PrefixSkill         = "skill"
 	PrefixSkillVersion  = "skillver"
+	PrefixOutcome       = "outc"
 )
 
 // altSessionPrefix is accepted on input for wire compatibility: some Anthropic
@@ -53,7 +54,7 @@ var knownPrefixes = map[string]bool{
 	PrefixAgent: true, PrefixEnvironment: true, PrefixSession: true, PrefixEvent: true,
 	PrefixWork: true, PrefixVault: true, PrefixCredential: true, PrefixResource: true,
 	PrefixDeployment: true, PrefixDeploymentRun: true, PrefixFile: true,
-	PrefixSkillVersion: true, PrefixSkill: true,
+	PrefixSkillVersion: true, PrefixSkill: true, PrefixOutcome: true,
 	altSessionPrefix: true,
 }
 
