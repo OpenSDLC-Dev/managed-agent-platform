@@ -111,20 +111,21 @@ func TestHeaderStaysWithoutAnErrorDocument(t *testing.T) {
 	}
 }
 
-// TestABodyThatFailsPartWayStaysAFailure is what keeps the buffering from
-// laundering a broken response into a trusted one. net/http reports a body
-// shorter than its Content-Length as io.ErrUnexpectedEOF once and plain
-// io.EOF thereafter, so replaying only the bytes would hand minio-go a
-// document whose framing never completed — and a complete-looking NoSuchKey
-// document is exactly what absence rests on.
-func TestABodyThatFailsPartWayStaysAFailure(t *testing.T) {
-	short := errors.New("unexpected EOF")
+// TestABodyThatFailsPartWayDecidesNothing pins the rule that bytes off a
+// failed transfer are not the endpoint's document, however complete they look.
+// The stub's failure repeats, which is what a RoundTripper actually meets:
+// net/http hands back a bodyEOFSignal whose read error is sticky, so the
+// replayed body fails the same way the second time round. That makes the
+// header the observable half of the rule — dropping it would be this wrapper
+// concluding, from a transfer that broke, that the endpoint had spoken.
+func TestABodyThatFailsPartWayDecidesNothing(t *testing.T) {
+	broke := errors.New("unexpected EOF")
 	resp := roundTrip(t, http.StatusNotFound, map[string]string{minioHeader: "NoSuchKey"},
-		&tracked{Reader: io.MultiReader(strings.NewReader(bucketDocument), errorReader{short})})
+		&tracked{Reader: io.MultiReader(strings.NewReader(bucketDocument), errorReader{broke})})
 	if got := resp.Header.Get(minioHeader); got != "NoSuchKey" {
 		t.Errorf("header = %q, want it kept — nothing decoded", got)
 	}
-	if _, err := io.ReadAll(resp.Body); !errors.Is(err, short) {
+	if _, err := io.ReadAll(resp.Body); !errors.Is(err, broke) {
 		t.Errorf("reading the handed-back body = %v, want the original failure", err)
 	}
 }

@@ -150,9 +150,9 @@ resources deleted and the sweep verified empty afterwards.
   needed), so bucket pre-creation is least-privilege hygiene, not a requirement.
   *(One row of this measurement has since gone stale: `GetMissingIsErrNotFound` passed here
   against the HEAD-based `Get` that #244 replaced. The eager-GET `Get` needs GCS to answer a
-  **GET** 404 with an `<Error>` document — which its XML API documents for every method that
-  can carry a body, and which MinIO is verified to do, but which no run recorded here has
-  measured. Slice 5's acceptance is where it gets measured for real.)*
+  **GET** 404 with an `<Error>` document. MinIO is verified to, by the contract suite running
+  through the new path; **no run recorded here has measured GCS's**, and this section is for
+  what was measured. Slice 5's acceptance is where it gets measured.)*
 - **Cloud KMS as a `secrets.Cipher`.** A KMS-backed cipher (key resource name as the
   keyID, decrypt refusing a foreign keyID — the OpenBao backend's guard) passes the
   `secretstest` contract 6/6, including the 64 KiB round-trip. The raw API's plaintext

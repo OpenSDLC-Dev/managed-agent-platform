@@ -420,9 +420,11 @@ copy of an entry here.
   for one that failed — so a 404 whose body says `NoSuchBucket` and whose header says
   `NoSuchKey` satisfied every conjunct of the delete check, and a delete into a vanished
   bucket reported convergence. The client's transport now keeps the endpoint's own document
-  authoritative: it drops that header on an error response whose body already carries a
-  `<Code>`, which leaves the header working where it is the only source (a HEAD answer has
-  none) and stops it contradicting a document that decoded.
+  authoritative: it drops that header on any error response whose body decoded as `<Error>`,
+  whatever code that document names — a document naming none is still the endpoint's word,
+  and letting the header supply one there would be the same override. Where the body did not
+  decode the header is left alone: it is the only word a bodyless answer has, and it cannot
+  manufacture absence by itself, since an undecoded body leaves the document marker zero.
 
   Both bugs were found reviewing the GCS delete-convergence fix; the delete-marker gap was
   found reviewing this fix, before it could ship. Every guard here is pinned by a test that

@@ -79,11 +79,13 @@ func withoutOverridingHeader(resp *http.Response) *http.Response {
 	body := resp.Body
 	head, err := io.ReadAll(io.LimitReader(body, maxErrorBody))
 	if err != nil {
-		// The body failed part-way. Replaying only the bytes would hide that:
-		// net/http reports a short Content-Length body as io.ErrUnexpectedEOF
-		// once and plain io.EOF thereafter, so minio-go would parse a document
-		// whose framing never completed. Re-raise the failure after the bytes
-		// that did arrive, and leave the header alone — nothing here decoded.
+		// Bytes off a transfer that failed are not a document, so nothing here
+		// decides anything from them: the failure is re-raised after them and
+		// the header left alone. Nothing downstream depends on this — net/http
+		// makes a read error sticky (bodyEOFSignal.rerr), and minio-go's
+		// executeMethod surfaces it before it classifies anything at all — so
+		// this is only the rule stated where it is decided, rather than the
+		// last thing standing between a broken transfer and a wrong answer.
 		resp.Body = readCloser{io.MultiReader(bytes.NewReader(head), errorReader{err}), body}
 		return resp
 	}
