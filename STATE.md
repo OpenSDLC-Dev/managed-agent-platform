@@ -18,6 +18,7 @@ run the same day. Slices 1-3 have landed; slice 4 is the staging environment.
   - [x] 2c — node selection and tolerations, parsed and fail-closed
 - [x] Slice 3 — `internal/secrets/gcpkms` cipher + size guard + chart knob + `cmd/` wiring
 - [ ] Slice 4 — staging environment (`deploy/gcp/`) + mode-1 acceptance on GKE:
-  - [x] 4a — the two Terraform configurations, `make gcp-*` targets, CI fmt/validate (this PR)
-  - [ ] 4b — apply, deploy, mode-1 acceptance battery (needs GCP spend approval)
+  - [x] 4a — the two Terraform configurations, `make gcp-*` targets, CI fmt/validate
+  - [x] 4b — applied both configurations on a real project, deployed mode-1 on GKE, ran the
+        acceptance battery and the teardown proof; record in docs/HISTORY.md (this PR)
 - [ ] Slice 5 — mode-2 acceptance + `docs/deploy-gcp.md`

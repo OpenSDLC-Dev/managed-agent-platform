@@ -1557,3 +1557,126 @@ node with one drive the default parity is zero, so both quorums are 1 and the tw
 equivalent — confirmed from the live headers (`X-Minio-Write-Quorum: 1`, `X-Minio-Read-Quorum: 1`).
 The chart hardcodes `replicas: 1` with no value to raise it, so the multi-node trap the milder gate
 would avoid is not reachable from the chart's own surface.
+
+## GCP staging environment (#20 slice 4b) — acceptance record (2026-08-02)
+
+The first real execution of `deploy/gcp/`: both Terraform configurations applied against a
+live project (`opensdlc-managed-agents`, project number 460647310105), the platform
+deployed on GKE in mode 1, the acceptance battery driven by the **real `ant` CLI 1.21.0**
+built from the read-only checkout, and the teardown proven by destroy → apply. This also
+narrows [#75](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/75) — images
+published and a real `helm install` accepted end to end, on GCP rather than generically.
+
+**What was created.** `foundation/` applied 13 resources (three service accounts, the KMS
+key ring and crypto key, three empty Secret Manager secrets). `bootstrap.sh` filled them
+and created the GCS HMAC key; run a second time it skipped every one, leaving exactly one
+version per secret and exactly one HMAC key — the idempotency its unit suite simulates,
+here against the live API. `environment/` applied 24 resources (zonal GKE cluster, the
+platform and tainted sandbox node pools, Cloud SQL, Artifact Registry, the GCS bucket, and
+the IAM and Workload Identity bindings).
+
+**Three configuration defects, all found by running it.**
+
+1. *The Cloud Build API was in the wrong configuration.* Fixed before the run in #253: the
+   API lookup that names the build identity cannot answer until the API is on, and only
+   `foundation/` runs early enough to enable it.
+2. *The Workload Identity bindings raced the cluster.* Their member string names the pool
+   `PROJECT.svc.id.goog`, which is created by the first cluster configured with
+   `workload_identity_config` — but it is built from `var.project_id`, so Terraform saw no
+   dependency and scheduled both bindings in the first wave. They failed with `Identity
+   Pool does not exist` roughly ten minutes before the pool existed. Fixed with an explicit
+   `depends_on` on the cluster.
+3. *Cloud SQL chose the wrong edition.* With `edition` unset the API selected
+   ENTERPRISE_PLUS, which rejects every `db-custom-*` tier — including `var.db_tier`'s
+   default — with `Invalid Tier (db-custom-2-7680) for (ENTERPRISE_PLUS) Edition`. Naming
+   `edition = "ENTERPRISE"` settles it; the `connection_pool_config` block is accepted
+   alongside it, which is the combination the instance was created with.
+
+**The image build.** One Dockerfile, two stages, four published images. The chart composes
+`registry/repository/COMPONENT:tag`, so the server stage is pushed under three
+per-component names — `controlplane`, `brain`, `executor` — as three tags on one build, and
+all three resolved to the same digest (`sha256:39c0cad9…`), so nothing can drift between
+them. `--target gate` is the fourth. `deploy/gcp/cloudbuild.yaml` is that build.
+
+**Acceptance, all through the real CLI over `kubectl port-forward` (nothing public).**
+
+- *Sessions and the async loop.* Agent, environment and session created with wire-correct
+  id prefixes (`agent_`, `env_`, `sesn_`, `sevt_`). A bash turn closed the full loop —
+  `agent.tool_use` → executor → `agent.tool_result` → `agent.message` — and the sandbox
+  reported hostname `map-sesn-…`, so the tool ran in the per-session pod, not the executor.
+- *Sandbox placement and bounds (slice 2, live).* The pod landed on a sandbox-pool node
+  carrying `map.opensdlc.dev/sandbox` in both its nodeSelector and its toleration, with
+  `allowPrivilegeEscalation: false` and `NET_RAW`/`SETUID`/`SETGID` dropped.
+- *`file-answer`.* A file uploaded through the API, mounted as a session resource and
+  materialized into the sandbox; the model read the mount and returned the recall token
+  that appeared in no prompt.
+- *`skill-answer`.* A skill uploaded, injected as Level-1 metadata, materialized, and
+  followed: the model read `SKILL.md`, then `answer.txt`, and returned that token exactly.
+- *HITL.* An `always_ask` toolset suspended the first tool call with
+  `stop_reason: requires_action`; a `user.tool_confirmation` with `result: allow` released
+  it and the turn completed.
+- *The egress gate on K8s.* For a `limited`, vault-attached session the executor attached
+  the gate as a **native Kubernetes sidecar** — an entry in `initContainers` with
+  `restartPolicy: Always`, which is where to look for it. The sandbox held only the
+  placeholder `vltph_…`; the origin received a value whose SHA-256 equalled the stored
+  secret's, so substitution happened at the gate and the credential never entered the
+  sandbox. A host outside `allowed_hosts` was refused by the gate with `403 host not
+  permitted by the environment's networking policy`.
+
+**Traces reach Cloud Trace.** An OTel Collector with the `googlecloud` exporter, the chart
+pointed at it via `otlp.endpoint`. Cloud Trace recorded the platform's own spans —
+`model_turn`, `model_request`, `tool_exec`, and the HTTP server spans for `POST
+/v1/sessions` and the events endpoint, plus the gate's `GET /internal/v1/gate/config`.
+
+Two things about this are worth writing down for the deploy guide. First, on a
+Workload-Identity cluster the node service account's project roles do **not** reach pods:
+GKE stops serving the node identity through the metadata server, so the collector needed
+its own annotated KSA bound to a Google service account holding `roles/cloudtrace.agent`.
+Granting the node account `roles/editor` — which this project already does — changes
+nothing. Second, the Cloud Trace v1 `traces.list` API shards its results: the first page
+came back empty with a `nextPageToken`, and following it produced 22 traces. An empty first
+page is not an empty result.
+
+**Two measurements, recorded rather than discovered.**
+
+- *Sandbox capacity before scheduling degrades (#64).* Pods shaped exactly like a sandbox
+  (100m CPU request, the pool's selector and toleration) were scheduled until they stopped
+  fitting: **68 sandbox pods** across two `e2-standard-4` nodes, then `Unschedulable —
+  Insufficient cpu`. The binding constraint is **CPU requests, not the 110-pod cap**. With
+  no production caller of `Sandbox.Destroy`, every session holds its 100m forever, so this
+  pool degrades at roughly 68 sessions — which is what turns #64 from tidiness into a
+  sizing constraint.
+- *Workspace disk per session.* A session that wrote a three-file Python project and ran
+  its tests used **0.43 MiB** of ephemeral storage; sessions doing trivial work used
+  0.04–0.09 MiB. At these rates the 100 GiB sandbox boot disk is dominated by the image,
+  not by workspaces, and disk is nowhere near the binding constraint that CPU is.
+
+**Teardown proof — destroy → apply, against the three things a rebuild can fail at.**
+
+1. *The second apply succeeds with no KMS name collision.* `environment/` destroyed all 24
+   resources cleanly — the object-bearing GCS bucket included — and re-applied all 24. The
+   foundation's key ring and crypto key survive untouched because `environment/` only reads
+   them.
+2. *The surviving secrets reconcile against freshly created resources.* The 64-byte
+   database password from Secret Manager authenticated against the **new** Cloud SQL
+   instance (`AUTHENTICATED as map on map`) — the destroy took the old user with it and the
+   apply reapplied the surviving password through `password_wo`. The stored GCS HMAC pair
+   was proven by an **authenticated call** rather than by resolving its access ID: PUT, GET
+   and DELETE of an object in the rebuilt bucket, over the S3-compatible endpoint.
+3. *A fresh vault credential round-trips on the rebuilt stack.* Deliberately fresh, not an
+   old one surviving: `environment/` owns Cloud SQL, so the destroy takes the vault
+   ciphertext with it by design. A credential created after the rebuild produced a
+   placeholder in the sandbox and the real secret at the origin, hashes equal.
+
+**Two observations that are not defects.** The three platform pods restart two or three
+times on a first install while Postgres finishes coming up — the DSN host does not resolve
+yet, they exit, and the backoff resolves it without intervention. And the real `ant` CLI
+cannot upload a multi-file skill to this server: its form encoder names each part
+`path.Base(file.Name())` (`internal/apiform/encoder.go`), so it can only ever send bare
+basenames, while the server requires names qualified under the skill's top-level directory.
+The zip upload form carries the paths inside the archive and works, which is how the
+`skill-answer` skill was uploaded. Whether the reference API accepts bare basenames was not
+established here.
+
+**Cleanup.** `environment/` was destroyed after the run; `foundation/` is retained by
+design (Decision 9) and its KMS key ring can never be deleted in GCP.

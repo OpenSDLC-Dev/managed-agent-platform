@@ -1,0 +1,12 @@
+# Keeps `gcloud builds submit` from uploading history, Terraform state and local
+# caches to Cloud Build. Without it gcloud generates one from .gitignore, which
+# is close but writes itself into the checkout as an untracked file.
+.git/
+.github/
+.claude/
+**/.terraform/
+**/*.tfstate*
+**/*.tfvars
+**/tfplan
+.env
+coverage.out

@@ -110,8 +110,10 @@ sa="$(gcloud builds get-default-service-account --project your-project)"
 tfvars=deploy/gcp/environment/terraform.tfvars
 touch "$tfvars"
 { grep -v '^cloud_build_service_account' "$tfvars" || true
-  # The lookup prints projects/…/serviceAccounts/EMAIL; ${sa##*/} keeps only the
-  # EMAIL, and leaves a bare email untouched if the output shape ever changes.
+  # ${sa##*/} keeps only the EMAIL. Which form comes back is not fixed — gcloud
+  # 578.0.0 printed a bare email here, and the documented shape is
+  # projects/…/serviceAccounts/EMAIL — and this strips a prefix if present and
+  # leaves a bare email alone, so it does not matter which you get.
   echo "cloud_build_service_account = \"${sa##*/}\""
 } > "$tfvars.new" && mv "$tfvars.new" "$tfvars"
 

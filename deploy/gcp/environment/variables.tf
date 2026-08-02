@@ -160,7 +160,7 @@ variable "cloud_build_service_account" {
 
   validation {
     condition     = can(regex("^[^@ /]+@[^@ /]+\\.(iam\\.)?gserviceaccount\\.com$", var.cloud_build_service_account))
-    error_message = "Must be a service account email, e.g. 123456789@cloudbuild.gserviceaccount.com or 123456789-compute@developer.gserviceaccount.com. `gcloud builds get-default-service-account` prints it prefixed with `projects/.../serviceAccounts/` — pass only the email."
+    error_message = "Must be a service account email, e.g. 123456789@cloudbuild.gserviceaccount.com or 123456789-compute@developer.gserviceaccount.com. `gcloud builds get-default-service-account` may print it prefixed with `projects/.../serviceAccounts/` — pass only the email."
   }
 }
 

@@ -1,0 +1,41 @@
+# Builds the images this platform deploys, from one Dockerfile.
+#
+# The server stage carries all four binaries (controlplane, brain, executor,
+# worker) and each Deployment picks one with its container command — but the
+# chart composes an image reference as `registry/repository/COMPONENT:tag`
+# (templates/_helpers.tpl, "map.image"), so it looks for three per-component
+# names. They are three tags on ONE build here, so all three resolve to the same
+# digest and nothing can drift between them.
+#
+# `--target gate` is a separate image: the per-session egress sidecar needs
+# iptables and a dedicated UID that do not belong in the server image. It is a
+# full reference in the chart (executor.gateImage), not a composed one.
+#
+# Submit from the repository root, so the build context is the whole module:
+#   gcloud builds submit --config deploy/gcp/cloudbuild.yaml \
+#     --substitutions=_IMAGE_PREFIX="$(terraform -chdir=deploy/gcp/environment output -raw artifact_registry)",_TAG="$(git rev-parse --short HEAD)" .
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: server
+    args:
+      - build
+      - -t
+      - "${_IMAGE_PREFIX}/controlplane:${_TAG}"
+      - -t
+      - "${_IMAGE_PREFIX}/brain:${_TAG}"
+      - -t
+      - "${_IMAGE_PREFIX}/executor:${_TAG}"
+      - .
+  # Reuses the build stage's layers from the same daemon, so this is cheap.
+  - name: gcr.io/cloud-builders/docker
+    id: gate
+    args: ["build", "--target", "gate", "-t", "${_IMAGE_PREFIX}/gate:${_TAG}", "."]
+images:
+  - "${_IMAGE_PREFIX}/controlplane:${_TAG}"
+  - "${_IMAGE_PREFIX}/brain:${_TAG}"
+  - "${_IMAGE_PREFIX}/executor:${_TAG}"
+  - "${_IMAGE_PREFIX}/gate:${_TAG}"
+# The Go build of four binaries from a cold module cache outruns the 10m default.
+timeout: 2400s
+options:
+  machineType: E2_HIGHCPU_8
