@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -58,14 +59,28 @@ func BuildGateImage(t *testing.T) string {
 }
 
 // DockerHostAddr returns an address of the test host reachable from a
-// container on Docker's default bridge network: host.docker.internal when the
-// daemon is Docker Desktop, the bridge gateway IP when the daemon shares this
-// process's network namespace. Listeners meant to be reached this way must
-// bind all interfaces, not loopback.
+// container on Docker's default bridge network: host.docker.internal under
+// Docker Desktop for Mac, this host's own routable address under Docker
+// Desktop on Windows/WSL, and the bridge gateway IP when the daemon shares
+// this process's network namespace. MAP_DOCKER_HOST_ADDR overrides all three,
+// as MAP_K8S_HOST_ADDR does for the Kubernetes harness. Listeners meant to be
+// reached this way must bind all interfaces, not loopback.
 func DockerHostAddr(t *testing.T) string {
 	t.Helper()
-	if DockerDesktop(t) {
+	if addr := os.Getenv("MAP_DOCKER_HOST_ADDR"); addr != "" {
+		return addr
+	}
+	if runtime.GOOS == "darwin" {
 		return "host.docker.internal"
+	}
+	if DockerDesktop(t) {
+		// Desktop on Windows: the daemon is a VM of its own, so the bridge
+		// gateway belongs to a namespace this process is not in. Desktop's
+		// host.docker.internal is no help either — it is answered with an IPv6
+		// address, and a gate container, whose netns carries no IPv6 route,
+		// gets "Network is unreachable" before the firewall is ever consulted.
+		// What a container can reach is this host's own address.
+		return outboundAddr(t)
 	}
 	out, err := exec.Command("docker", "network", "inspect", "bridge",
 		"--format", "{{(index .IPAM.Config 0).Gateway}}").Output()
@@ -94,6 +109,20 @@ func DockerDesktop(t *testing.T) bool {
 		return false
 	}
 	return strings.Contains(string(out), "Docker Desktop")
+}
+
+// outboundAddr is this host's IPv4 address on the route out — the one a
+// container in another namespace can address it by. The UDP "dial" sends
+// nothing; it only asks the kernel which local address that route would use,
+// so it needs no reachable destination.
+func outboundAddr(t *testing.T) string {
+	t.Helper()
+	c, err := net.Dial("udp4", "192.0.2.1:9")
+	if err != nil {
+		t.Fatalf("no outbound route to address this host by: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	return c.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
 // GateStub is a stand-in controlplane and egress origin on one host listener:
