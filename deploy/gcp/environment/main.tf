@@ -233,6 +233,17 @@ resource "google_sql_database_instance" "map" {
   settings {
     tier = var.db_tier
 
+    # Written out rather than left to the API's default. Left unset, the first
+    # real apply was rejected with `Invalid Tier (db-custom-2-7680) for
+    # (ENTERPRISE_PLUS) Edition`: the API chose Plus on its own, and Plus accepts
+    # none of the db-custom-* tiers var.db_tier defaults to. Why it chose Plus is
+    # not established here — what is established is that naming the edition
+    # settles it, and that Enterprise is both the edition db-custom tiers belong
+    # to and the cheaper of the two. The connection_pool_config block below is
+    # accepted on Enterprise; that combination is what this instance was created
+    # with.
+    edition = "ENTERPRISE"
+
     deletion_protection_enabled = false
 
     ip_configuration {

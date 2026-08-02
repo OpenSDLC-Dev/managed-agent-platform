@@ -42,16 +42,29 @@ locals {
   executor_ksa     = "${local.fullname}-executor"
 }
 
+# Both bindings depend on the CLUSTER, and the dependency has to be written out:
+# the member string names the identity pool `PROJECT.svc.id.goog`, which is not a
+# project-level fact but is created by the first cluster configured with
+# `workload_identity_config`. Terraform sees no reference from these resources to
+# that cluster — the pool name is built from var.project_id — so without this it
+# schedules them in the first wave and they fail with
+# `Identity Pool does not exist`. Observed on the first real apply: both bindings
+# were attempted before the cluster had even started creating, ~10 minutes before
+# the pool came into existence.
 resource "google_service_account_iam_member" "controlplane_workload_identity" {
   service_account_id = data.google_service_account.controlplane.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${local.controlplane_ksa}]"
+
+  depends_on = [google_container_cluster.map]
 }
 
 resource "google_service_account_iam_member" "executor_workload_identity" {
   service_account_id = data.google_service_account.executor.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${local.executor_ksa}]"
+
+  depends_on = [google_container_cluster.map]
 }
 
 # ---------------------------------------------------------------------------
