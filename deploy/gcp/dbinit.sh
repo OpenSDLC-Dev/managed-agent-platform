@@ -105,24 +105,39 @@ cluster_zone="$(tf_out zone)"
 # while printing a get-credentials command that reproduces the very form it just
 # rejected. Missing fields come back empty and are dropped.
 #
-# A read loop and not `mapfile`, which is bash 4. macOS ships bash 3.2.57 and
-# will not ship a newer one, so `mapfile` here is not a portability nicety — it
-# is this script dying on the operator's own laptop, and dying badly: the
-# `command not found` is swallowed by the `|| true`, and what surfaces under
-# `set -u` is `cluster_endpoints: unbound variable`, which names nothing about
-# the cluster. bootstrap.sh is already 3.2-clean; this keeps the pair
-# consistent.
+# Read in two steps, and both steps are deliberate.
+#
+# Command substitution first, rather than reading straight from a process
+# substitution: a process substitution discards the producer's exit status, so a
+# `describe` that failed on auth, on a wrong project or on a missing cluster
+# would arrive as an empty list and be reported as "no endpoints" — the same
+# words a live cluster in a state we do not understand would get. Here the two
+# are separate messages. stderr is captured for the same reason: gcloud's own
+# diagnosis beats any this could invent.
+#
+# Then a read loop and not `mapfile`, which is bash 4. macOS's /bin/bash is
+# 3.2.57 and has been for years, so `mapfile` here would not be a portability
+# nicety — it would be this script dying on the operator's own laptop, and dying
+# in a way that names nothing about the cluster. bootstrap.sh is already
+# 3.2-clean; this keeps the pair consistent, and `make gcp-lint` now checks it.
+if ! endpoints_raw="$(gcloud container clusters describe "$cluster_name" \
+	--zone "$cluster_zone" --project "$PROJECT" \
+	--format='value[separator=" "](endpoint,privateClusterConfig.privateEndpoint,controlPlaneEndpointsConfig.dnsEndpointConfig.endpoint)' \
+	2>&1)"; then
+	echo "could not describe cluster $cluster_name in $cluster_zone (project $PROJECT):" >&2
+	echo "$endpoints_raw" >&2
+	echo "Has 'make gcp-env-apply' finished, and is PROJECT correct?" >&2
+	exit 1
+fi
+
 cluster_endpoints=()
 while IFS= read -r endpoint; do
 	[[ -n "$endpoint" ]] && cluster_endpoints+=("$endpoint")
-done < <(gcloud container clusters describe "$cluster_name" \
-	--zone "$cluster_zone" --project "$PROJECT" \
-	--format='value[separator=" "](endpoint,privateClusterConfig.privateEndpoint,controlPlaneEndpointsConfig.dnsEndpointConfig.endpoint)' \
-	2>/dev/null | tr ' ' '\n')
+done < <(printf '%s\n' "$endpoints_raw" | tr ' ' '\n')
 
 if [[ ${#cluster_endpoints[@]} -eq 0 ]]; then
-	echo "could not read any endpoint of cluster $cluster_name in $cluster_zone." >&2
-	echo "Has 'make gcp-env-apply' finished, and is PROJECT correct?" >&2
+	echo "cluster $cluster_name in $cluster_zone reports no endpoint at all." >&2
+	echo "That is not a lookup failure — the describe succeeded and returned none." >&2
 	exit 1
 fi
 

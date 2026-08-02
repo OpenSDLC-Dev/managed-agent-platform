@@ -455,9 +455,9 @@ comment. That split matters: LOGIN, INHERIT, CREATEDB, CREATEROLE and database o
 instead; SUPERUSER and BYPASSRLS cannot be corrected by a Cloud SQL administrator at all, so
 those two are asserted-only and have negative cases of their own. It also runs the
 whole file under a deliberately **non-superuser** administrator, which is what Cloud SQL's
-actually is: `cloudsqlsuperuser` carries CREATEDB and CREATEROLE and nothing more, while a
-local `postgres` is a true superuser that bypasses the very checks a Cloud SQL run has to
-satisfy.
+actually is: it holds CREATEDB and CREATEROLE — the two attributes that matter here — but
+it is **not** a PostgreSQL SUPERUSER, and a local `postgres` is, so a local `postgres`
+bypasses the very checks a Cloud SQL run has to satisfy.
 
 Writing it paid for itself four times over. Two ordinary defects: an unguarded `pg_has_role`
 that raised on any PostgreSQL without a `cloudsqlsuperuser` role, and a `\getenv` that turned

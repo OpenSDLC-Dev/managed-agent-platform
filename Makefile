@@ -141,7 +141,8 @@ gcp-split-check:
 
 # The second half is a portability guard shellcheck does not offer: it checks
 # syntax and quoting, not which bash a construct needs. These scripts are run BY
-# THE OPERATOR, on a laptop, and macOS ships bash 3.2.57 and always will — so a
+# THE OPERATOR, on a laptop, and macOS has shipped bash 3.2.57 as /bin/bash for
+# years (GPLv3 licensing, not inertia — Apple moved to zsh instead) — so a
 # bash-4 builtin here is not a nicety, it is `make gcp-db-init` dying on the
 # machine it was written for while CI (Linux, bash 5) stays green. `mapfile` got
 # in exactly that way. A list of constructs, not an analysis, and honest about

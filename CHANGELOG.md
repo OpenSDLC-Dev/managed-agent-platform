@@ -61,8 +61,9 @@ copy of an entry here.
 
   The other two would have failed only on the real instance, and were found by running the
   file under a deliberately **non-superuser** administrator, which is what Cloud SQL's
-  actually is: `cloudsqlsuperuser` carries CREATEDB and CREATEROLE and nothing more, while a
-  local `postgres` is a true superuser that bypasses the checks in question. Under those real
+  actually is: it holds CREATEDB and CREATEROLE — the attributes that matter here — but is
+  **not** a PostgreSQL SUPERUSER, while a local `postgres` is and therefore bypasses the
+  checks in question. Under those real
   privileges, `ALTER ROLE ... NOSUPERUSER` is refused outright — PostgreSQL lets only a
   superuser change `SUPERUSER`, `REPLICATION` and `BYPASSRLS`, *even to turn them off* — so
   the corrective statement now names only what it can actually revoke and the other three
@@ -84,8 +85,8 @@ copy of an entry here.
   another project's cluster, and only then failing to reach a private IP.
 
   That endpoint guard then shipped with a defect of its own, caught by verification: it read
-  the endpoints with `mapfile`, which is bash 4, and **macOS ships bash 3.2.57 and always
-  will**. `make gcp-db-init` is run by an operator on a laptop, so the guard would have died
+  the endpoints with `mapfile`, which is bash 4, and **macOS's `/bin/bash` is 3.2.57** and
+  has been for years. `make gcp-db-init` is run by an operator on a laptop, so the guard would have died
   on the machine it was written for — and died badly, since `command not found` was swallowed
   by a `|| true` and what surfaced under `set -u` was `cluster_endpoints: unbound variable`,
   naming nothing about the cluster. Nothing caught it: shellcheck checks syntax and quoting,
@@ -97,9 +98,19 @@ copy of an entry here.
   `gcp-dbinit-test` also grew three negative cases, because the phrasing "goes red for each
   state its assertions catch" was not yet literally true: `SUPERUSER`, `BYPASSRLS` and
   membership-in-its-own-role guard states that are reachable and that the DDL does not
-  repair, and nothing demonstrated any of the three. The suite is now 59 checks across 8
-  deliberately-red blocks, and the docs distinguish the asserted-and-repaired attributes from
-  the asserted-only ones instead of implying every assertion gets a negative case.
+  repair, and nothing demonstrated any of the three. The docs now distinguish the
+  asserted-and-repaired attributes from the asserted-only ones instead of implying every
+  assertion gets a negative case. (No check count is written down here. The one drafted for
+  this very paragraph was stale before the branch merged — the `REPLICATION` case below
+  landed the next commit.)
+
+  Writing that down then exposed a gap in the SQL rather than in the prose. The guide named
+  `SUPERUSER`, `REPLICATION` and `BYPASSRLS` as "asserted but not repaired" — but only two of
+  the three were ever asserted; `rolreplication` appeared nowhere in `dbinit.sql`. It is a
+  real hole and not a symmetry one: a replication connection streams the WAL, which carries
+  every database on the instance, so `REPLICATION` reads straight around the ownership
+  containment the rest of the block establishes. The assertion now exists, with its own
+  red-drive case.
 
 - **`terraform destroy` reliability and CIDR preconditions.** `deletion_policy = "ABANDON"`
   on the service-networking connection is *removed*, not added: it does not delete the

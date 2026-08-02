@@ -96,6 +96,7 @@ step:
 | --- | --- |
 | not `SUPERUSER` | the floor |
 | no `CREATEDB`, no `CREATEROLE`, no `BYPASSRLS` | role attributes |
+| no `REPLICATION` | a replication connection streams the WAL, which carries every database on the instance — so it reads around the ownership containment the rows below establish |
 | `pg_has_role(user, 'cloudsqlsuperuser', 'member')` is false | **the one that settles it** — the attributes above are attributes and say nothing about membership, so a role with every flag false is still a superuser in effect if it is a member of one |
 | owns the platform database | the migrations need it |
 | owns no other database | scope |
@@ -108,9 +109,9 @@ new value.
 One consequence of the administrator not being a real superuser is worth knowing before you
 read the SQL and wonder about an omission. PostgreSQL lets only a `SUPERUSER` change the
 `SUPERUSER`, `REPLICATION` and `BYPASSRLS` attributes — **even to turn them off** — and
-`cloudsqlsuperuser` is not one. So the corrective `ALTER ROLE` names `NOCREATEDB NOCREATEROLE`
-and stops there: those three are asserted but not repaired, because this session genuinely
-cannot revoke them. A drift in them fails the step with a message rather than being silently
+the administrator is not one. So the corrective `ALTER ROLE` names
+`NOCREATEDB NOCREATEROLE` and stops there: all three of those are asserted but not repaired,
+because this session genuinely cannot revoke them. A drift in them fails the step with a message rather than being silently
 fixed. For the same reason the file grants the platform role to the administrator before
 transferring database ownership — `ALTER DATABASE ... OWNER TO` requires the caller to be
 able to `SET ROLE` to the new owner, and in PostgreSQL 16 the membership `CREATE ROLE`

@@ -522,6 +522,15 @@ def main():
         check("says BYPASSRLS", "has BYPASSRLS" in (r.stderr + r.stdout),
               r.stderr + r.stdout)
 
+    print("the REPLICATION assertion FIRES on a role it cannot revoke it from")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        pg.psql_admin("ALTER ROLE %s REPLICATION;" % DB_USER)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("says REPLICATION", "has REPLICATION" in (r.stderr + r.stdout),
+              r.stderr + r.stdout)
+
     # A login role that already exists skips the guarded `CREATE ROLE ... IN
     # ROLE`, and nothing later grants the membership -- so a role created by
     # hand before the first run would authenticate fine and hold none of the

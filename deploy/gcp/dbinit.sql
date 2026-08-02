@@ -221,6 +221,15 @@ BEGIN
     IF r.rolbypassrls THEN
         RAISE EXCEPTION 'FAILED: % has BYPASSRLS', u;
     END IF;
+    -- REPLICATION belongs with SUPERUSER and BYPASSRLS, not with the two
+    -- above: it is the third attribute only a real superuser may change, so it
+    -- is asserted and never repaired. It is worth asserting on its own merits
+    -- rather than for symmetry — a replication connection streams the WAL,
+    -- which carries every database on the instance, so it reads around the
+    -- ownership containment the rest of this block establishes.
+    IF r.rolreplication THEN
+        RAISE EXCEPTION 'FAILED: % has REPLICATION', u;
+    END IF;
 
     -- MEMBERSHIP, which the attributes above say nothing about: a role with
     -- every attribute false is still a superuser in effect if it is a member of
