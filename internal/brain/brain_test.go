@@ -99,6 +99,7 @@ type harness struct {
 	queue     *queue.Queue
 	provider  *fakeProvider
 	brain     *brain.Brain
+	registry  *provider.Registry
 	sessionID domain.ID
 	envID     domain.ID
 }
@@ -120,7 +121,7 @@ func newHarness(t *testing.T, scripts [][]provider.Chunk, errs []error) *harness
 	return &harness{
 		pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
 		provider: fake, brain: brain.New(pool, reg, nil, brain.Config{}),
-		sessionID: sid, envID: envID,
+		registry: reg, sessionID: sid, envID: envID,
 	}
 }
 

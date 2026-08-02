@@ -42,6 +42,11 @@ const (
 	// graderItemBudget caps any single transcript item (a tool result can be
 	// 100 KiB on its own; the grader needs the shape, not every byte).
 	graderItemBudget = 4_000
+	// graderExplanationBudget caps the verdict explanation: it persists into
+	// the end event and the sessions projection — re-decoded on every later
+	// claim — and is re-fed to the agent each revision cycle, so an unbounded
+	// grader reply must not become permanent per-claim state.
+	graderExplanationBudget = 20_000
 )
 
 // graderSystem is the grader's charge (ours, INFERRED). The verdict protocol
@@ -137,8 +142,11 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 			oe.Finish("", streamErr)
 			return streamErr
 		}
-		err := b.settleGraderError(ctx, item, active, toolset.SanitizeText(streamErr.Error()))
-		oe.Finish("", err)
+		err := b.settleGraderError(ctx, item, active, streamErr.Error())
+		// The span must carry the grader's failure even when the settlement
+		// committed cleanly (err nil would export a healthy cycle); Join
+		// keeps a settlement failure visible alongside it.
+		oe.Finish("", errors.Join(streamErr, err))
 		return err
 	}
 
@@ -147,6 +155,9 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	// byte would fault the settlement and loop the reclaim (#228's failure
 	// mode, re-opened on this path if skipped).
 	verdict, explanation := parseVerdict(toolset.SanitizeText(text))
+	if len(explanation) > graderExplanationBudget {
+		explanation = explanation[:graderExplanationBudget] + "\n[truncated]"
+	}
 	// The budget: up to max_iterations evaluation cycles total; a would-be
 	// needs_revision on the final cycle is reported as max_iterations_reached
 	// (boundary reading ours, INFERRED).
@@ -251,14 +262,14 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 		},
 	}
 
-	switch {
-	case result == verdictNeedsRevision:
+	switch result {
+	case verdictNeedsRevision:
 		// Another agent cycle: the session stays running and this item is the
 		// revision turn's slot. Replay injects the feedback from the end event.
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			return b.queue.Requeue(ctx, tx, item)
 		}
-	case result == domain.OutcomeResultMaxIterationsReached:
+	case domain.OutcomeResultMaxIterationsReached:
 		// Terminal, but "one final acknowledgment turn follows before the
 		// session goes idle" — the requeued item runs it; replay injects the
 		// acknowledgment prompt from this terminal end event.
@@ -311,6 +322,9 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 // the platform's no-automatic-retry posture). The outcome resumes with the
 // session's next wake. Ours, INFERRED.
 func (b *Brain) settleGraderError(ctx context.Context, item *queue.Item, active domain.OutcomeEvaluation, msg string) error {
+	// Owned here, not by the callers: msg lands in a jsonb payload, and
+	// Postgres jsonb rejects NUL (#228's failure mode on any unsanitized path).
+	msg = toolset.SanitizeText(msg)
 	sid := item.SessionID
 	tx, err := b.pool.Begin(ctx)
 	if err != nil {

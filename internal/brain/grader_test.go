@@ -21,10 +21,19 @@ import (
 // transaction, as the API commits it.
 func (h *harness) wakeOutcome(t *testing.T, description string, maxIterations int64) domain.ID {
 	t.Helper()
-	outcomeID := domain.NewID(domain.PrefixOutcome)
+	return h.wakeOutcomeRubric(t, description, maxIterations,
+		map[string]any{"type": "text", "content": "# Rubric\n- complete"},
+		domain.NewID(domain.PrefixOutcome))
+}
+
+// wakeOutcomeRubric is wakeOutcome with a caller-supplied rubric and outcome
+// id (a file rubric's snapshot must be seeded under the id before the wake).
+func (h *harness) wakeOutcomeRubric(t *testing.T, description string, maxIterations int64,
+	rubric map[string]any, outcomeID domain.ID) domain.ID {
+	t.Helper()
 	payload, _ := json.Marshal(map[string]any{
 		"description":    description,
-		"rubric":         map[string]any{"type": "text", "content": "# Rubric\n- complete"},
+		"rubric":         rubric,
 		"max_iterations": maxIterations,
 		"outcome_id":     outcomeID,
 	})
@@ -429,17 +438,9 @@ func newHarnessWithBlobs(t *testing.T, scripts [][]provider.Chunk, errs []error)
 	t.Helper()
 	h := newHarness(t, scripts, errs)
 	blobs := blobtest.Mem()
-	// Rebuild the brain with the store; the registry inside the harness brain
-	// is not reachable, so mirror newHarness's registry wiring.
-	reg, err := provider.NewRegistry(
-		[]provider.Route{{Model: "*", Config: provider.Config{Protocol: "fake", BaseURL: "http://fake"}}},
-		map[string]provider.Factory{"fake": func(cfg provider.Config) (provider.Provider, error) {
-			return h.provider, nil
-		}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.brain = brain.New(h.pool, reg, blobs, brain.Config{})
+	// Rebuild the brain with the store, reusing the harness's registry so the
+	// fake provider keeps newHarness's exact wiring.
+	h.brain = brain.New(h.pool, h.registry, blobs, brain.Config{})
 	return &blobHarness{harness: h, blobs: blobs}
 }
 
@@ -454,31 +455,8 @@ func TestOutcomeFileRubricSnapshot(t *testing.T) {
 		strings.NewReader("# Snapshotted rubric\n- from the file"), int64(len("# Snapshotted rubric\n- from the file")), "text/markdown"); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
-	payload, _ := json.Marshal(map[string]any{
-		"description":    "Build it",
-		"rubric":         map[string]any{"type": "file", "file_id": "file_0123456789abcdefghjkmnpq"},
-		"max_iterations": int64(3),
-		"outcome_id":     outcomeID,
-	})
-	running := domain.SessionRunning
-	if _, err := h.log.AppendWith(context.Background(), h.sessionID, []events.NewEvent{
-		{Type: domain.EventUserDefineOutcome, Payload: payload},
-		{Type: domain.EventSessionStatusRunning},
-	}, events.AppendOptions{
-		SetStatus: &running,
-		MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
-			return append(evals, domain.OutcomeEvaluation{
-				Type: "outcome_evaluation", OutcomeID: outcomeID,
-				Description: "Build it", Result: domain.OutcomeResultPending,
-			}), nil
-		},
-		Then: func(ctx context.Context, tx pgx.Tx) error {
-			_, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn)
-			return err
-		},
-	}); err != nil {
-		t.Fatalf("wake: %v", err)
-	}
+	h.wakeOutcomeRubric(t, "Build it", 3,
+		map[string]any{"type": "file", "file_id": "file_0123456789abcdefghjkmnpq"}, outcomeID)
 	h.drain(t)
 
 	if evals := h.outcomes(t); evals[0].Result != domain.OutcomeResultSatisfied {

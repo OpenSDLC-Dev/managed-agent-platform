@@ -44,6 +44,7 @@ copy of an entry here.
   `search_result` blocks (title + source + nested text — web_search evidence would
   otherwise vanish); heartbeats are fenced on the entry still evaluating and the
   heartbeat worker joins before settlement, so no `_ongoing` lands after an end event;
+  the persisted verdict explanation is capped (it is re-read on every session claim);
   and both deployment surfaces hand the brain its new blob env (compose's bundled
   MinIO; the chart's optional `blob-*` Secret keys). Ten scripted state-machine tests drive every path against real
   Postgres, plus an API-level interrupt-mid-grading test. Everything the

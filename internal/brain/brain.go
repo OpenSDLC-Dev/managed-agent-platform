@@ -252,6 +252,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 				}
 				return evals, nil
 			},
+			// The same lease discipline as the reclaim events above: a
+			// claimant that already lost the item must not write entry state
+			// another brain now owns.
+			Then: func(ctx context.Context, tx pgx.Tx) error {
+				return b.queue.Assert(ctx, tx, item)
+			},
 		}); err != nil {
 			return fmt.Errorf("outcome running flip: %w", err)
 		}

@@ -175,14 +175,12 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 			}
 			var text string
 			switch p.Result {
-			case "needs_revision":
+			case verdictNeedsRevision:
 				text = "The outcome grader reviewed your work and found it does not yet satisfy the rubric:\n\n" +
 					p.Explanation + "\n\nRevise your work to address these findings."
-			case "max_iterations_reached":
+			case domain.OutcomeResultMaxIterationsReached:
 				text = "The outcome's evaluation budget is exhausted and the rubric is still unmet:\n\n" +
 					p.Explanation + "\n\nDo not continue working. Briefly acknowledge what was completed and what remains."
-			default:
-				break
 			}
 			if text != "" {
 				blk, err := json.Marshal(map[string]any{"type": "text", "text": text})

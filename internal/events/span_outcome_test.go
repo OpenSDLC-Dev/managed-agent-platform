@@ -94,4 +94,26 @@ func TestOutcomeEvaluationHeartbeatAndFailedFinish(t *testing.T) {
 	if got := spans[0].Status().Code; got != codes.Error {
 		t.Errorf("span status = %v, want Error for an uncommitted end", got)
 	}
+
+	// A failed verdict that committed is a judgment about the deliverables,
+	// not a platform fault: the span stays clean and carries the result.
+	_, clean := log.StartOutcomeEvaluation(ctx, sid, "outc_hb", 2, "sevt_start",
+		events.Backend{Provider: "anthropic", Model: "claude-x"})
+	clean.Finish(domain.OutcomeResultFailed, nil)
+	spans = recorder.Ended()
+	if len(spans) != 2 {
+		t.Fatalf("exported %d spans, want 2", len(spans))
+	}
+	if got := spans[1].Status().Code; got != codes.Unset {
+		t.Errorf("span status = %v, want Unset for a committed failed verdict", got)
+	}
+	var result string
+	for _, kv := range spans[1].Attributes() {
+		if string(kv.Key) == "outcome.result" {
+			result = kv.Value.AsString()
+		}
+	}
+	if result != domain.OutcomeResultFailed {
+		t.Errorf("outcome.result attribute = %q, want failed", result)
+	}
 }
