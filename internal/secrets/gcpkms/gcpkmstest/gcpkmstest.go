@@ -73,16 +73,6 @@ func NewClient(t *testing.T) *kms.KeyManagementClient {
 	return NewClientFor(t, NewServer(t, kmspb.ProtectionLevel_SOFTWARE))
 }
 
-// NewHSMClient is NewClient against an HSM-protected key, whose plaintext
-// ceiling is 8 KiB rather than 64 KiB. It exists because that difference is
-// invisible in a resource name: a cipher that assumed the software ceiling
-// would pass every test against NewClient and still hand callers an
-// uninformative 500 on the first credential larger than 8 KiB.
-func NewHSMClient(t *testing.T) *kms.KeyManagementClient {
-	t.Helper()
-	return NewClientFor(t, NewServer(t, kmspb.ProtectionLevel_HSM))
-}
-
 // NewServer builds the fake serving KeyName at the given protection level. It
 // is exported so a test can wrap it — the response-integrity guards can only be
 // reached from a server that answers wrongly on purpose, and without a seam for

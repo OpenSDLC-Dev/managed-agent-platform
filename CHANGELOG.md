@@ -53,7 +53,7 @@ copy of an entry here.
     key, taken the service's bare `InvalidArgument` back, and handed the caller exactly the
     500 this design exists to remove — on the *more* security-conscious of the two key
     choices. So the ceiling is read from the protection level the startup probe reports,
-    and the fake KMS server can be either kind so a test proves both. The read is
+    and the fake KMS server serves any of them so a test can prove every one. The read is
     fail-closed: the larger bound is taken only on a level that *affirmatively* names
     itself software or external. Testing "not HSM" would have read the protobuf zero value
     — what an omitted field decodes to — as permission to raise the ceiling, which is the

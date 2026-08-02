@@ -82,28 +82,41 @@ func TestTheCeilingIsExactAndClassified(t *testing.T) {
 // this pins that.
 func TestAnHSMKeyGetsTheSmallerCeiling(t *testing.T) {
 	ctx := context.Background()
-	c, err := gcpkms.New(ctx, gcpkms.Config{
-		KeyName: gcpkmstest.KeyName,
-		Client:  gcpkmstest.NewHSMClient(t),
-	})
-	if err != nil {
-		t.Fatalf("gcpkms.New against an HSM key: %v", err)
-	}
-	if c.MaxPlaintext() != gcpkms.MaxPlaintextBytesHSM {
-		t.Fatalf("an HSM key resolved to a %d-byte ceiling, want %d",
-			c.MaxPlaintext(), gcpkms.MaxPlaintextBytesHSM)
-	}
-	if _, _, err := c.Encrypt(ctx, bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytesHSM)); err != nil {
-		t.Fatalf("Encrypt at the HSM ceiling: %v", err)
-	}
-	// The size the software ceiling would have waved through. It must be the
-	// classified refusal, not the service's InvalidArgument.
-	_, _, err = c.Encrypt(ctx, bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytesHSM+1))
-	if !errors.Is(err, secrets.ErrPlaintextTooLarge) {
-		t.Fatalf("one byte over the HSM ceiling = %v, want it to wrap ErrPlaintextTooLarge", err)
-	}
-	if !strings.Contains(err.Error(), "8192") {
-		t.Errorf("refusal %q does not name the HSM limit", err)
+	// Both HSM levels, because both carry the 8 KiB bound and the fake enforces
+	// it for both — a level the fake limits but no test ever seals against is a
+	// limit nobody has checked, on either side.
+	for _, level := range []kmspb.ProtectionLevel{
+		kmspb.ProtectionLevel_HSM,
+		kmspb.ProtectionLevel_HSM_SINGLE_TENANT,
+	} {
+		t.Run(level.String(), func(t *testing.T) {
+			c, err := gcpkms.New(ctx, gcpkms.Config{
+				KeyName: gcpkmstest.KeyName,
+				Client:  gcpkmstest.NewClientFor(t, gcpkmstest.NewServer(t, level)),
+			})
+			if err != nil {
+				t.Fatalf("gcpkms.New against an HSM key: %v", err)
+			}
+			if c.MaxPlaintext() != gcpkms.MaxPlaintextBytesHSM {
+				t.Fatalf("an HSM key resolved to a %d-byte ceiling, want %d",
+					c.MaxPlaintext(), gcpkms.MaxPlaintextBytesHSM)
+			}
+			if _, _, err := c.Encrypt(ctx, bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytesHSM)); err != nil {
+				t.Fatalf("Encrypt at the HSM ceiling: %v", err)
+			}
+			// The size the software ceiling would have waved through. It must be
+			// the classified refusal, not the service's InvalidArgument — and the
+			// service must be the kind that would actually have refused it, which
+			// is what makes this an end-to-end check rather than a restatement of
+			// the cipher's own guard.
+			_, _, err = c.Encrypt(ctx, bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytesHSM+1))
+			if !errors.Is(err, secrets.ErrPlaintextTooLarge) {
+				t.Fatalf("one byte over the HSM ceiling = %v, want it to wrap ErrPlaintextTooLarge", err)
+			}
+			if !strings.Contains(err.Error(), "8192") {
+				t.Errorf("refusal %q does not name the HSM limit", err)
+			}
+		})
 	}
 }
 

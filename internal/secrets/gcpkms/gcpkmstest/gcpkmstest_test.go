@@ -1,9 +1,52 @@
 package gcpkmstest
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"testing"
+
+	kmspb "cloud.google.com/go/kms/apiv1/kmspb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+// The fake's own ceiling, tested here rather than through the cipher, because
+// through the cipher it is unreachable: the cipher refuses oversize plaintext
+// locally, so the fake's limit only ever fires in the bug state where the two
+// disagree. That is exactly when a test needs the fake to be right — a fake
+// that quietly accepted 9 KiB on an HSM key would let a broken ceiling
+// resolution look green. Both HSM levels, since Cloud KMS bounds plaintext plus
+// AAD at 8 KiB for single-tenant HSM as much as for shared.
+func TestTheFakeEnforcesTheHSMBoundAtBothHSMLevels(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		level kmspb.ProtectionLevel
+		limit int
+	}{
+		{kmspb.ProtectionLevel_SOFTWARE, maxPlaintextBytes},
+		{kmspb.ProtectionLevel_HSM, maxPlaintextBytesHSM},
+		{kmspb.ProtectionLevel_HSM_SINGLE_TENANT, maxPlaintextBytesHSM},
+	} {
+		t.Run(tc.level.String(), func(t *testing.T) {
+			client := NewClientFor(t, NewServer(t, tc.level))
+			seal := func(n int) error {
+				_, err := client.Encrypt(ctx, &kmspb.EncryptRequest{
+					Name: KeyName, Plaintext: bytes.Repeat([]byte("a"), n),
+				})
+				return err
+			}
+			if err := seal(tc.limit); err != nil {
+				t.Fatalf("Encrypt at the %s ceiling (%d bytes): %v", tc.level, tc.limit, err)
+			}
+			err := seal(tc.limit + 1)
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("one byte over the %s ceiling = %v, want InvalidArgument as the real service answers",
+					tc.level, err)
+			}
+		})
+	}
+}
 
 // The consent rule, tested on the rule function rather than through the
 // environment, so a machine that happens to have RUN_LIVE_KMS_TESTS set cannot
