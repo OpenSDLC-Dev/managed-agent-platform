@@ -170,7 +170,9 @@ Decision 6).
    against the files registry — existence within the org scope (v1's single-tenant
    authorization boundary, the same policy every management-key file reference gets),
    with a rubric-file byte cap mirroring the text rubric's bound (256 KiB, ours) —
-   and the slice's tests cover missing, foreign-scope, and oversized rubric files.
+   and the slice's tests cover missing and oversized rubric files (a foreign-scope
+   case is unconstructible under v1's single-tenant registry — the whole registry is
+   the org scope; the test lands when multi-tenancy does).
    The accepted rubric's bytes are **snapshotted at acceptance** to an outcome-owned
    blob key (`outcomes/{outcome_id}/rubric`, written in the send transaction's wake):
    replay and the grader read the snapshot, never the source file, so deleting the

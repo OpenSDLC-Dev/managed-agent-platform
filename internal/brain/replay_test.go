@@ -1,11 +1,15 @@
 package brain
 
 import (
+	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 func ev(seq int64, typ domain.EventType, body string) domain.Event {
@@ -219,4 +223,86 @@ func TestBuildRequestFilesBlockPlacement(t *testing.T) {
 	if req.System != "FILES" {
 		t.Errorf("system with only files = %q", req.System)
 	}
+}
+
+func TestBuildRequestRendersDefineOutcome(t *testing.T) {
+	agent := domain.ResolvedAgent{
+		Type: "agent", ID: "agent_1", Version: 1, Name: "n",
+		AgentSpec: domain.AgentSpec{Model: domain.Model{ID: "m"}, System: "base"},
+	}
+	history := []domain.Event{
+		ev(1, domain.EventUserDefineOutcome,
+			`{"description":"Build a DCF model","rubric":{"type":"text","content":"# Rubric"},"max_iterations":3,"outcome_id":"outc_1"}`),
+		ev(2, domain.EventSessionStatusRunning, `{}`),
+	}
+	req, watermark, err := buildRequest(agent, history, "", "")
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if watermark != 2 {
+		t.Errorf("watermark = %d, want 2", watermark)
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
+		t.Fatalf("messages = %+v, want one user message", req.Messages)
+	}
+	text := string(req.Messages[0].Content)
+	if !strings.Contains(text, "Build a DCF model") || !strings.Contains(text, "# Rubric") {
+		t.Errorf("rendered outcome message = %s, want description and rubric text", text)
+	}
+
+	// A file rubric renders the description alone: its content reaches the
+	// grader from the acceptance snapshot (slice 3), not the conversation.
+	history[0] = ev(1, domain.EventUserDefineOutcome,
+		`{"description":"Build it","rubric":{"type":"file","file_id":"file_1"},"max_iterations":3,"outcome_id":"outc_2"}`)
+	req, _, err = buildRequest(agent, history, "", "")
+	if err != nil {
+		t.Fatalf("buildRequest (file rubric): %v", err)
+	}
+	text = string(req.Messages[0].Content)
+	if !strings.Contains(text, "Build it") || strings.Contains(text, "file_1") {
+		t.Errorf("file-rubric rendering = %s, want description only", text)
+	}
+}
+
+func TestDefineOutcomeChainsMidTurn(t *testing.T) {
+	// The wake trigger only fires on idle sessions; a define_outcome landing
+	// mid-turn must chain the next turn through the pending-input check.
+	if !slices.Contains(pendingInputTypes, string(domain.EventUserDefineOutcome)) {
+		t.Errorf("pendingInputTypes = %v, want user.define_outcome included", pendingInputTypes)
+	}
+}
+
+func TestPendingInputChainsDefineOutcome(t *testing.T) {
+	// The DB contract behind mid-turn chaining: an unprocessed
+	// user.define_outcome past the watermark reports pending input; at or
+	// before the watermark (or once processed) it does not.
+	pool := pgtest.NewPool(t)
+	sid, _ := pgtest.NewSession(t, pool, "cloud")
+	log := events.NewLog(pool)
+	appended, err := log.Append(context.Background(), sid, []events.NewEvent{{
+		Type:    domain.EventUserDefineOutcome,
+		Payload: []byte(`{"description":"d","rubric":{"type":"text","content":"r"},"max_iterations":3,"outcome_id":"outc_1"}`),
+	}})
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	seq := appended[0].Seq
+
+	check := func(watermark int64, want bool) {
+		t.Helper()
+		tx, err := pool.Begin(context.Background())
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(context.Background())
+		got, err := pendingInput(context.Background(), tx, sid, watermark)
+		if err != nil {
+			t.Fatalf("pendingInput: %v", err)
+		}
+		if got != want {
+			t.Errorf("pendingInput(watermark=%d) = %v, want %v", watermark, got, want)
+		}
+	}
+	check(seq-1, true) // unprocessed define_outcome past the watermark chains
+	check(seq, false)  // at the watermark: already consumed by this turn
 }

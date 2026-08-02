@@ -378,12 +378,15 @@ func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJS
 
 // pendingInputTypes are the inbound events whose arrival must chain the next
 // turn rather than let the session idle past them: a user.message appended
-// mid-turn (its trigger saw a running session and only appended) or a tool
-// result whose enqueue this turn's live item suppressed.
+// mid-turn (its trigger saw a running session and only appended), a tool
+// result whose enqueue this turn's live item suppressed, or a
+// user.define_outcome appended mid-turn (the agent begins work on it
+// immediately, so it chains for the same reason a message does).
 var pendingInputTypes = []string{
 	string(domain.EventUserMessage),
 	string(domain.EventUserToolResult),
 	string(domain.EventUserCustomToolRes),
+	string(domain.EventUserDefineOutcome),
 }
 
 func pendingInput(ctx context.Context, tx pgx.Tx, sid domain.ID, watermark int64) (bool, error) {

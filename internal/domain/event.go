@@ -48,6 +48,12 @@ const (
 const (
 	EventSpanModelRequestStart EventType = "span.model_request_start"
 	EventSpanModelRequestEnd   EventType = "span.model_request_end" // carries model_usage
+
+	// The outcome-evaluation cycle trio (plan 21). _end carries the verdict
+	// and the grader call's usage; _ongoing is the liveness heartbeat.
+	EventSpanOutcomeEvalStart   EventType = "span.outcome_evaluation_start"
+	EventSpanOutcomeEvalOngoing EventType = "span.outcome_evaluation_ongoing"
+	EventSpanOutcomeEvalEnd     EventType = "span.outcome_evaluation_end"
 )
 
 // Stream-only preview frames. These are NOT persisted and never carry their own
