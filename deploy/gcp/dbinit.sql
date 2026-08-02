@@ -31,6 +31,29 @@
 
 \set ON_ERROR_STOP on
 
+-- PINNED BEFORE ANYTHING ELSE, and this is a privilege boundary rather than
+-- hygiene. Every statement below builds its DDL with format() and runs it with
+-- \gexec, and function resolution follows search_path. After the first run the
+-- platform's role owns this database and its `public` schema, which is exactly
+-- enough to (a) `ALTER DATABASE ... SET search_path = public, pg_catalog` and
+-- (b) `CREATE FUNCTION public.format(text, text)` returning any DDL it likes.
+-- The next run of this file — the rotation path, executed by the Cloud SQL
+-- ADMINISTRATOR — would then resolve the planted format(), and \gexec would
+-- execute the attacker's string with the administrator's privileges. The
+-- assertions at the end would not notice: they inspect the roles this file
+-- names, not roles it was tricked into creating. A compromised platform
+-- credential would escalate to the administrator on the next rotation, which
+-- inverts the containment this whole file exists to establish.
+--
+-- pg_catalog first, so the built-ins cannot be shadowed. pg_temp named
+-- EXPLICITLY and LAST: left unnamed it is searched FIRST, and it is writable.
+-- It has to be on the path at all because the assertion block reads its
+-- parameters out of a temp table.
+--
+-- The %I/%L quoting below defends against hostile NAMES. It does nothing about
+-- a hostile function resolution, which is why both are needed.
+SET search_path = pg_catalog, pg_temp;
+
 -- Defaulted BEFORE \getenv, which leaves the psql variable alone when the
 -- environment variable is absent. Without this line an unset MAP_DB_PASSWORD
 -- reaches the next statement as the nine literal characters `:'db_password'`
@@ -276,6 +299,25 @@ BEGIN
     WHERE db.datname = d;
     IF owns IS DISTINCT FROM u THEN
         RAISE EXCEPTION 'FAILED: database % is owned by %, not by %', d, coalesce(owns, '<none>'), u;
+    END IF;
+
+    -- The SCHEMA, asserted separately from the database and not implied by it.
+    -- The ALTER SCHEMA above is conditional, and its condition is a scalar
+    -- subquery: with no `public` schema at all that subquery is NULL, the
+    -- comparison is NULL rather than true, and the statement is skipped. That
+    -- is a silent success over a database the migrations cannot use —
+    -- internal/store/migrations creates unqualified objects, so it needs a
+    -- schema to create them in. Asserted here so the failure lands in this Job
+    -- rather than in the platform's first startup.
+    IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'public') THEN
+        RAISE EXCEPTION 'FAILED: database % has no public schema for the migrations to use', d;
+    END IF;
+    SELECT r2.rolname INTO owns
+    FROM pg_namespace n JOIN pg_roles r2 ON r2.oid = n.nspowner
+    WHERE n.nspname = 'public';
+    IF owns IS DISTINCT FROM u AND owns IS DISTINCT FROM 'pg_database_owner' THEN
+        RAISE EXCEPTION 'FAILED: schema public is owned by %, not by % or pg_database_owner',
+            coalesce(owns, '<none>'), u;
     END IF;
 
     IF EXISTS (SELECT 1 FROM pg_database db JOIN pg_roles r2 ON r2.oid = db.datdba

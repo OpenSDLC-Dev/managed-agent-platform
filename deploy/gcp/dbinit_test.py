@@ -505,6 +505,49 @@ def main():
               "owns a database other than" in (r.stderr + r.stdout),
               r.stderr + r.stdout)
 
+    # The escalation this file exists to prevent, run in the direction that
+    # actually matters. Everything above asks "did the platform role end up
+    # contained?"; this asks "can the CONTAINED role climb back out on the next
+    # run?" -- which is the question a compromised platform credential poses.
+    #
+    # After a first run the platform role owns the database and `public`, which
+    # is exactly enough to set a database-level search_path and plant a
+    # public.format(text,text). Every DDL statement in dbinit.sql is built with
+    # format() and run with \gexec, so an unpinned search_path would resolve the
+    # planted function and execute its return value as the ADMINISTRATOR.
+    # Verified before the fix: format('CREATE ROLE %I','someRole') returned
+    # `CREATE ROLE pwned LOGIN SUPERUSER`.
+    print("a hostile search_path cannot make the admin run the platform's SQL")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        pg.psql_admin("ALTER DATABASE %s SET search_path = public, pg_catalog;" % DB_NAME)
+        plant = pg.psql_as(DB_USER, "pw",
+                           "CREATE FUNCTION public.format(text, text) RETURNS text "
+                           "AS $$ SELECT 'CREATE ROLE pwned LOGIN SUPERUSER' $$ "
+                           "LANGUAGE sql;")
+        check("the platform role really can plant the shadow function",
+              plant.returncode == 0, plant.stderr)
+        r = pg.dbinit("pw")
+        check("the run still succeeds", r.returncode == 0, r.stderr + r.stdout)
+        pwned = pg.psql_admin(
+            "SELECT count(*) FROM pg_roles WHERE rolname = 'pwned';")
+        check("and no role the attacker named was created",
+              pwned.stdout.strip() == "0", pwned.stdout + pwned.stderr)
+
+    # A conditional statement whose condition is a scalar subquery does nothing
+    # when the subquery is NULL -- so with no `public` schema the ALTER SCHEMA
+    # is skipped, silently, and the platform's unqualified migrations then have
+    # nowhere to create their tables. That has to fail HERE, not at startup.
+    print("a missing public schema fails the run rather than passing it")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        drop = pg.psql_admin("DROP SCHEMA public CASCADE;", database=DB_NAME)
+        check("the schema is gone", drop.returncode == 0, drop.stderr)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("says the migrations have no schema",
+              "no public schema" in (r.stderr + r.stdout), r.stderr + r.stdout)
+
     print("the session-encrypted assertion FIRES on a plaintext connection")
     with Postgres() as pg:
         r = pg.dbinit("pw", sslmode="disable")

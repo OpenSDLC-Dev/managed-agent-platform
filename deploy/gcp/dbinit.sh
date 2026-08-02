@@ -203,6 +203,14 @@ cleanup() {
 	fi
 	rm -rf "$workdir"
 }
+# EXIT alone, and deliberately: a review argued that an unhandled SIGTERM would
+# skip this and strand both plaintext passwords, which would be worth extra
+# traps if it were true. It is not — bash runs the EXIT trap on its way out of a
+# fatal signal. Measured both ways (external `kill -TERM` and a self-kill)
+# against the two bashes that matter here: macOS's 3.2.57, which is what an
+# operator runs, and 5.3.15, which is CI's and the Job container's. The trap ran
+# and the directory was removed in every case. SIGKILL is the real gap, and no
+# trap can close that one.
 trap cleanup EXIT
 
 read_secret() {
