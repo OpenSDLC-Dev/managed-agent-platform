@@ -38,6 +38,7 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- include "map.commonEnv" . | nindent 12 }}
+            {{- include "map.blobEnv" . | nindent 12 }}
           volumeMounts:
             - name: model-providers
               mountPath: /etc/managed-agent-platform

@@ -34,8 +34,16 @@ copy of an entry here.
   documented acknowledgment turn follows before idle. A grader failure renders no end
   event — the entry reverts to `running` and the session settles like a failed model
   turn, resuming the outcome on its next wake; an interrupt landing mid-grade wins over
-  the in-flight verdict (the settlement re-checks the entry under the lock). Seven
-  scripted state-machine tests drive every path against real Postgres. Everything the
+  the in-flight verdict (the settlement re-checks the entry under the lock) and its end
+  event references the committed start. Review hardening in the same PR: the agent turn
+  that claims a `pending` entry first flips it to `running` (the SDK's "agent begins
+  work" boundary — entry state only); grader replies are NUL-sanitized before landing in
+  jsonb (#228's lane); a message arriving between the grading commit and its claim
+  chains a turn from the verdict settlement instead of stranding (grading marks nothing
+  processed, so its pending-input probe is unfiltered); and both deployment surfaces
+  hand the brain its new blob env (compose's bundled MinIO; the chart's optional
+  `blob-*` Secret keys). Ten scripted state-machine tests drive every path against real
+  Postgres, plus an API-level interrupt-mid-grading test. Everything the
   reference keeps opaque — the grader's prompt, inputs, verdict protocol, cadence,
   scheduling, failure posture — is registered as one consolidated INFERRED divergence in
   the same PR.

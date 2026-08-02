@@ -336,6 +336,89 @@ func TestOutcomeInterruptDuringGrading(t *testing.T) {
 	}
 }
 
+func TestOutcomeMidScheduleMessageChains(t *testing.T) {
+	// A user.message that lands between the settlement that schedules grading
+	// and the grading claim sits below every seq the grading wake reads.
+	// Grading marks nothing processed, so the verdict settlement must chain a
+	// turn for any unprocessed input — a seq-filtered probe would idle past
+	// this message and strand it unprocessed forever.
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("fine", "satisfied"),
+		agentReply("answering the late message"),
+	}, nil)
+	h.wakeOutcome(t, "Build it", 3)
+	// Exactly the agent turn: its settlement commits the start event, flips
+	// the entry to evaluating, and requeues the item for grading.
+	if _, err := h.brain.RunOnce(context.Background()); err != nil {
+		t.Fatalf("agent turn: %v", err)
+	}
+	if _, err := h.log.Append(context.Background(), h.sessionID, []events.NewEvent{{
+		Type: domain.EventUserMessage, Payload: json.RawMessage(`{"content":"one more thing"}`),
+	}}); err != nil {
+		t.Fatalf("late message: %v", err)
+	}
+	h.drain(t)
+
+	if len(h.provider.calls) != 3 {
+		t.Fatalf("provider calls = %d, want 3 (agent, grader, chained answer)", len(h.provider.calls))
+	}
+	var stranded bool
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM events
+		  WHERE session_id = $1 AND type = 'user.message' AND processed_at IS NULL)`,
+		h.sessionID.String()).Scan(&stranded); err != nil {
+		t.Fatal(err)
+	}
+	if stranded {
+		t.Error("late user.message left unprocessed")
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle", got)
+	}
+}
+
+func TestGraderReplyNULSanitized(t *testing.T) {
+	// One NUL byte in the grader's reply must not fault the settlement's two
+	// jsonb writes (#228's reclaim loop, re-opened on this path if the model
+	// text went in raw).
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("contains a NUL \x00 byte", "satisfied"),
+	}, nil)
+	h.wakeOutcome(t, "Build it", 3)
+	h.drain(t)
+
+	evals := h.outcomes(t)
+	if evals[0].Result != domain.OutcomeResultSatisfied {
+		t.Fatalf("entry = %+v, want satisfied", evals[0])
+	}
+	if evals[0].Explanation != "contains a NUL  byte" {
+		t.Errorf("explanation = %q, want the NUL stripped", evals[0].Explanation)
+	}
+}
+
+func TestOutcomePendingFlipsRunningAtTurnStart(t *testing.T) {
+	// "pending" is before the agent begins work; "running" while producing.
+	// The flip commits when the turn claims, so a client polling mid-turn
+	// sees running, not pending.
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("fine", "satisfied"),
+	}, nil)
+	h.wakeOutcome(t, "Build it", 3)
+	var during string
+	h.provider.onGenerate = func(call int) {
+		if call == 0 {
+			during = h.outcomes(t)[0].Result
+		}
+	}
+	h.drain(t)
+	if during != domain.OutcomeResultRunning {
+		t.Errorf("entry during the first agent turn = %q, want running", during)
+	}
+}
+
 // blobHarness is the harness plus the in-memory object store its brain reads.
 type blobHarness struct {
 	*harness

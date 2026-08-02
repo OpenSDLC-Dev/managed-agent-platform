@@ -238,6 +238,24 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultEvaluating {
 		return b.runGrading(ctx, item, agent, evals)
 	}
+	if active, ok := events.ActiveOutcome(evals); ok && active.Result == domain.OutcomeResultPending {
+		// The agent begins work now: the entry leaves pending for running
+		// (the SDK: "pending" before the agent begins work, "running" while
+		// producing or revising). Entry state only — no wire event exists
+		// for the flip.
+		if _, err := b.log.AppendWith(ctx, sid, nil, events.AppendOptions{
+			MutateOutcomes: func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+				for i := range evals {
+					if evals[i].OutcomeID == active.OutcomeID && evals[i].Result == domain.OutcomeResultPending {
+						evals[i].Result = domain.OutcomeResultRunning
+					}
+				}
+				return evals, nil
+			},
+		}); err != nil {
+			return fmt.Errorf("outcome running flip: %w", err)
+		}
+	}
 
 	history, err := b.log.List(ctx, sid, events.ListQuery{})
 	if err != nil {
@@ -611,13 +629,16 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	return b.settleEndTurn(ctx, sid, item, watermark, opts, head)
 }
 
-// settle is the one place a finished turn decides its own end: under the
-// session row lock it asks whether input arrived mid-turn, lets the caller
-// build the events that outcome calls for, and commits them together with
-// the status, the watermark, and the work item's fate. Chaining hands our
-// own item back to the queue (a fresh Enqueue would be suppressed by this
-// very item's live slot) and leaves the session running; idling completes
-// the item. Both success and failure settle here so the two can never drift.
+// settle is the failed turn's settlement: under the session row lock it asks
+// whether input arrived mid-turn, lets the caller build the events that
+// outcome calls for, and commits them together with the status, the
+// watermark, and the work item's fate. Chaining hands our own item back to
+// the queue (a fresh Enqueue would be suppressed by this very item's live
+// slot) and leaves the session running; idling completes the item.
+// Successful tool-less turns settle in settleEndTurn and grading cycles in
+// settleVerdict/settleGraderError (plan 21 slice 3) — same lock, same
+// chain-or-idle contract, restated there because outcomes fork the idle
+// path.
 func (b *Brain) settle(ctx context.Context, sid domain.ID, item *queue.Item, watermark int64,
 	opts events.AppendOptions, build func(chained bool) ([]events.NewEvent, error)) error {
 

@@ -73,15 +73,12 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	if err != nil {
 		return fmt.Errorf("grading replay: %w", err)
 	}
-	watermark := int64(0)
-	if len(history) > 0 {
-		watermark = history[len(history)-1].Seq
-	}
+	startID := events.LatestOutcomeStartID(history, active.OutcomeID)
 	d, found := events.FindDefineOutcome(history, active.OutcomeID)
 	if !found {
 		// Deterministic corruption: the entry exists but its definition is
 		// not on the log. Retrying cannot fix it; settle the outcome failed.
-		return b.settleVerdict(ctx, item, nil, active, events.DefineOutcome{}, watermark,
+		return b.settleVerdict(ctx, item, nil, active, startID,
 			domain.OutcomeResultFailed,
 			"The outcome's definition event is missing from the session log; the rubric cannot be applied.",
 			domain.ModelUsage{})
@@ -89,11 +86,10 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 
 	p, err := b.registry.Provider(agent.Model.ID)
 	if err != nil {
-		return b.settleGraderError(ctx, item, active, watermark, fmt.Sprintf("no provider for grader model %q: %v", agent.Model.ID, err))
+		return b.settleGraderError(ctx, item, active, fmt.Sprintf("no provider for grader model %q: %v", agent.Model.ID, err))
 	}
 	desc, _ := b.registry.Describe(agent.Model.ID)
 
-	startID := events.LatestOutcomeStartID(history, active.OutcomeID)
 	sctx, oe := b.log.StartOutcomeEvaluation(ctx, sid, active.OutcomeID, active.Iteration, startID,
 		events.Backend{Provider: desc.Protocol, Model: desc.Model})
 
@@ -136,12 +132,16 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 			oe.Finish("", streamErr)
 			return streamErr
 		}
-		err := b.settleGraderError(ctx, item, active, watermark, toolset.SanitizeText(streamErr.Error()))
+		err := b.settleGraderError(ctx, item, active, toolset.SanitizeText(streamErr.Error()))
 		oe.Finish("", err)
 		return err
 	}
 
-	verdict, explanation := parseVerdict(text)
+	// Sanitize before parsing: the explanation lands in two jsonb sinks (the
+	// end event and the entry), and Postgres jsonb rejects NUL — one stray
+	// byte would fault the settlement and loop the reclaim (#228's failure
+	// mode, re-opened on this path if skipped).
+	verdict, explanation := parseVerdict(toolset.SanitizeText(text))
 	// The budget: up to max_iterations evaluation cycles total; a would-be
 	// needs_revision on the final cycle is reported as max_iterations_reached
 	// (boundary reading ours, INFERRED).
@@ -154,7 +154,7 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 	if usage != nil {
 		u = *usage
 	}
-	err = b.settleVerdict(ctx, item, oe, active, d, watermark, result, explanation, u)
+	err = b.settleVerdict(ctx, item, oe, active, startID, result, explanation, u)
 	oe.Finish(result, err)
 	return err
 }
@@ -167,7 +167,7 @@ const verdictNeedsRevision = "needs_revision"
 // entry mutation, and the item's fate — one transaction under the session
 // row lock, mirroring the agent turn's settlement discipline.
 func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.OutcomeEvaluation,
-	active domain.OutcomeEvaluation, d events.DefineOutcome, watermark int64,
+	active domain.OutcomeEvaluation, startID domain.ID,
 	result, explanation string, usage domain.ModelUsage) error {
 
 	sid := item.SessionID
@@ -204,10 +204,11 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 		}
 	} else {
 		// The definition-missing edge settles without a traced cycle: render
-		// the end event directly against the latest start (possibly absent).
+		// the end event directly against the latest start (empty only if the
+		// log is so corrupt that even the scheduling start is gone).
 		payload, merr := json.Marshal(map[string]any{
 			"outcome_id":                  active.OutcomeID,
-			"outcome_evaluation_start_id": "",
+			"outcome_evaluation_start_id": startID.String(),
 			"iteration":                   active.Iteration,
 			"result":                      result,
 			"explanation":                 explanation,
@@ -260,11 +261,14 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 			return b.queue.Requeue(ctx, tx, item)
 		}
 	default: // satisfied | failed: the session idles — unless input arrived
-		chained := false
-		if watermark > 0 {
-			if chained, err = pendingInput(ctx, tx, sid, watermark); err != nil {
-				return err
-			}
+		// Grading marks nothing processed (the grader consumes no user input;
+		// only an agent turn can answer it), so ANY unprocessed inbound event
+		// chains — including one that landed between the scheduling commit
+		// and the grading claim, whose seq is below everything this wake
+		// read. A seq-filtered probe would idle past it and strand it forever.
+		chained, err := pendingInput(ctx, tx, sid, 0)
+		if err != nil {
+			return err
 		}
 		if chained {
 			opts.Then = func(ctx context.Context, tx pgx.Tx) error {
@@ -301,7 +305,7 @@ func (b *Brain) settleVerdict(ctx context.Context, item *queue.Item, oe *events.
 // settles exactly like a failed model turn (session.error + retries_exhausted;
 // the platform's no-automatic-retry posture). The outcome resumes with the
 // session's next wake. Ours, INFERRED.
-func (b *Brain) settleGraderError(ctx context.Context, item *queue.Item, active domain.OutcomeEvaluation, watermark int64, msg string) error {
+func (b *Brain) settleGraderError(ctx context.Context, item *queue.Item, active domain.OutcomeEvaluation, msg string) error {
 	sid := item.SessionID
 	tx, err := b.pool.Begin(ctx)
 	if err != nil {
@@ -312,11 +316,11 @@ func (b *Brain) settleGraderError(ctx context.Context, item *queue.Item, active 
 		return err
 	}
 
-	chained := false
-	if watermark > 0 {
-		if chained, err = pendingInput(ctx, tx, sid, watermark); err != nil {
-			return err
-		}
+	// Unfiltered for the same reason as settleVerdict: grading marks nothing
+	// processed, so any unprocessed inbound event must chain.
+	chained, err := pendingInput(ctx, tx, sid, 0)
+	if err != nil {
+		return err
 	}
 	retry := "exhausted"
 	if chained {

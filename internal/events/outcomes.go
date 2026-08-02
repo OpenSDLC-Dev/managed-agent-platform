@@ -156,9 +156,12 @@ const InterruptedExplanation = "The outcome was interrupted by a user.interrupt 
 // InterruptOutcomes builds the terminal span.outcome_evaluation_end for every
 // non-terminal outcome entry — the docs: an interrupt marks the result
 // interrupted "even if evaluation hadn't started yet", with
-// outcome_evaluation_start_id an empty string when no start fired. Returns
-// the end events and whether any entry needs flipping (the caller composes
-// the matching MutateOutcomes under the same lock).
+// outcome_evaluation_start_id an empty string when no start fired. An
+// evaluating entry is the exception: its cycle's start committed with the
+// flip, so the end references it (the latest start is the live one; earlier
+// dangling starts are crash-window residue). Returns the end events and
+// whether any entry needs flipping (the caller composes the matching
+// MutateOutcomes under the same lock).
 func InterruptOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID) ([]NewEvent, bool, error) {
 	var raw []byte
 	if err := tx.QueryRow(ctx,
@@ -174,9 +177,21 @@ func InterruptOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID) ([]N
 		if domain.OutcomeResultTerminal(e.Result) {
 			continue
 		}
+		startID := ""
+		if e.Result == domain.OutcomeResultEvaluating {
+			err := tx.QueryRow(ctx,
+				`SELECT id FROM events
+				  WHERE session_id = $1 AND type = $2 AND payload->>'outcome_id' = $3
+				  ORDER BY seq DESC LIMIT 1`,
+				sessionID.String(), string(domain.EventSpanOutcomeEvalStart), e.OutcomeID.String(),
+			).Scan(&startID)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return nil, false, err
+			}
+		}
 		payload, err := json.Marshal(map[string]any{
 			"outcome_id":                  e.OutcomeID,
-			"outcome_evaluation_start_id": "",
+			"outcome_evaluation_start_id": startID,
 			"iteration":                   e.Iteration,
 			"result":                      domain.OutcomeResultInterrupted,
 			"explanation":                 InterruptedExplanation,
