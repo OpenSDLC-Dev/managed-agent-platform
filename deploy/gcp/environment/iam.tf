@@ -142,10 +142,12 @@ resource "google_project_iam_member" "executor_sql_client" {
 # Cloud Build pushes the component images. Without this the very next step after
 # a successful apply fails on a permission the apply could have granted.
 #
-# WHICH identity that is depends on the project's vintage: builds run as the
-# legacy PROJECT_NUMBER@cloudbuild.gserviceaccount.com on projects whose first
-# build predates 2024-04-29, and as the Compute Engine default service account on
-# projects created after it. This file cannot decide that, and neither default is
+# WHICH identity that is depends on when the project FIRST BUILT, not on when it
+# was created: builds run as the legacy
+# PROJECT_NUMBER@cloudbuild.gserviceaccount.com only where the first build
+# predates Google's 2024 rollout, and as the Compute Engine default service
+# account everywhere else — including in an old project that has never built.
+# This file cannot decide that, and neither default is
 # safe to assume — so var.cloud_build_service_account is REQUIRED. Terraform
 # prompts for it, and its description carries the command that prints it.
 #

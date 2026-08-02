@@ -97,15 +97,23 @@ make gcp-foundation-apply              # once, ever — creates the secrets EMPT
 PROJECT=your-project make gcp-bootstrap  # fills them, creates the GCS HMAC key
 
 # Only now: the foundation apply above is what enables the Cloud Build API, and the
-# lookup answers SERVICE_DISABLED until it is on. Prints
-# projects/…/serviceAccounts/EMAIL — pass only the EMAIL.
+# lookup answers SERVICE_DISABLED until it is on.
 #
 # If it still says SERVICE_DISABLED, wait a minute and retry: Service Usage can
 # report an API enabled before its serving layer agrees, which is most likely on a
 # just-created project. This is the one step in the sequence that is not idempotent
 # by construction, so it is the one worth retrying rather than debugging.
-gcloud builds get-default-service-account --project your-project
-echo 'cloud_build_service_account = "EMAIL"' >> deploy/gcp/environment/terraform.tfvars
+#
+# Written by replacing rather than appending: Terraform rejects a tfvars file that
+# assigns the same variable twice, so a plain `>>` breaks the second time you run it.
+sa="$(gcloud builds get-default-service-account --project your-project)"
+tfvars=deploy/gcp/environment/terraform.tfvars
+touch "$tfvars"
+{ grep -v '^cloud_build_service_account' "$tfvars" || true
+  # The lookup prints projects/…/serviceAccounts/EMAIL; ${sa##*/} keeps only the
+  # EMAIL, and leaves a bare email untouched if the output shape ever changes.
+  echo "cloud_build_service_account = \"${sa##*/}\""
+} > "$tfvars.new" && mv "$tfvars.new" "$tfvars"
 
 make gcp-env-apply
 ```
@@ -140,9 +148,11 @@ touched.
 Neither apply target passes `-auto-approve`. Read the plan before the first one.
 
 **Cloud Build's identity is a required variable** (`cloud_build_service_account`) because the
-answer is bimodal and neither answer is safe to default: projects whose first build predates
-2024-04-29 build as `PROJECT_NUMBER@cloudbuild.gserviceaccount.com`, and projects created
-after it build as the Compute Engine default service account. There is no "empty means the
+answer is bimodal and neither answer is safe to default. The split is by FIRST BUILD, not by
+project creation date: a project whose first build ran before Google's 2024 rollout keeps
+`PROJECT_NUMBER@cloudbuild.gserviceaccount.com`, and everything else — including an old
+project that has never built — gets the Compute Engine default service account. So "how old
+is this project" is not a question you can answer this with. There is no "empty means the
 legacy default" — a default would grant writer to an account no build uses, and that surfaces
 only at the first image push, after the apply has already created a cluster and a database.
 
