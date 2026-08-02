@@ -31,16 +31,6 @@ copy of an entry here.
   and the cheaper of the two, and the existing `connection_pool_config` block is accepted
   alongside it.
 
-### Added
-
-- **`deploy/gcp/cloudbuild.yaml` — the image build.** One Dockerfile, whose three stages
-  (`build`, `gate`, `server`) yield the two images the deployment needs, and the chart
-  composes an image reference as
-  `registry/repository/COMPONENT:tag`, so the server stage is published under three
-  per-component names (`controlplane`, `brain`, `executor`) as three tags on a single
-  build — one digest behind all three, so they cannot drift — while `--target gate` builds
-  the per-session egress sidecar as a fourth. A `.gcloudignore` keeps history, Terraform
-  state and local caches out of the uploaded build context.
 ### Changed
 
 - **anthropic-sdk-go bumped v1.59.0 → v1.61.0** — the latest release, so plan 21's
@@ -69,6 +59,21 @@ copy of an entry here.
   and the passthrough tests were renamed/re-worded to the same contract.
 
 ### Added
+
+- **`deploy/gcp/cloudbuild.yaml` — the image build.** One Dockerfile, whose three stages
+  (`build`, `gate`, `server`) yield the two images the deployment needs, and the chart
+  composes an image reference as
+  `registry/repository/COMPONENT:tag`, so the server stage is published under three
+  per-component names (`controlplane`, `brain`, `executor`) as three tags on a single
+  build — one digest behind all three, so they cannot drift — while `--target gate` builds
+  the per-session egress sidecar as a fourth. The accompanying `.gcloudignore` keeps
+  history, Terraform state and local caches out of the uploaded build context — and opens
+  with `#!include:.gitignore`, which is load-bearing rather than tidy: a custom
+  `.gcloudignore` *replaces* gcloud's default behaviour, so without it every
+  gitignored-because-secret file in a working checkout (`.env`, a filled-in
+  `model-providers.json`, `*.tfvars`) rides into the uploaded source archive.
+  `.dockerignore` does not cover this — it filters what reaches the build, after the
+  upload.
 
 - **Plan 21 authored (draft): the session outcomes surface**
   ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md), tracking #77, absorbing #161).
