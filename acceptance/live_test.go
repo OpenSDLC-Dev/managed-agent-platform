@@ -30,7 +30,13 @@ const acceptanceEnv = "RUN_LIVE_ACCEPTANCE_TESTS"
 //	ACCEPTANCE_MODEL     the agent model string the stack's routing resolves
 //
 // Both rubric variants run, each as its own full agent session; expect minutes
-// and real model spend. Sandbox containers this leg creates on the target
+// and real model spend — and pass an explicit -timeout, because go test's
+// default 10-minute binary budget is shorter than one variant's 25-minute cap:
+//
+//	RUN_LIVE_ACCEPTANCE_TESTS=1 ACCEPTANCE_API_KEY=... ACCEPTANCE_MODEL=... \
+//	  go test ./acceptance -run TestLiveDefineOutcomesAcceptance -count=1 -timeout 90m -v
+//
+// Sandbox containers this leg creates on the target
 // stack's daemon are named map-<session_id> and are the operator's to remove
 // once the run is recorded.
 func TestLiveDefineOutcomesAcceptance(t *testing.T) {

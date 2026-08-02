@@ -8,7 +8,7 @@
 //
 // Two legs share one harness (runDCF):
 //
-//   - The rehearsal (TestRehearsalDCF*) runs in the ordinary `go test ./...`
+//   - The rehearsal (TestRehearsalDefineOutcomes*) runs in the ordinary `go test ./...`
 //     path: the whole platform in-process over pgtest's Postgres and a real
 //     Docker sandbox, with the model scripted. Deterministic, free, and it
 //     guards the mechanics in CI so the live run is the only paid step.

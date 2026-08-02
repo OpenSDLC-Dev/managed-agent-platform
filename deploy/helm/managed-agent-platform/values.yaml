@@ -63,7 +63,7 @@ brain:
   # (default 10m; every byte received buys the budget back, so it never ends a healthy
   # turn, only a wedged one — #121) — and max_tokens, the default output cap for turns
   # that set none themselves (omitted, anthropic sends 8192 and openai defers to the
-  # endpoint). (The loader also accepts api_key_env,
+  # endpoint; must be positive — zero or negative fails the brain at startup). (The loader also accepts api_key_env,
   # but this chart injects no extra env into the brain, so supply api_key here instead.)
   # No other keys — the loader rejects unknown fields. Contains api_key, so it is stored
   # in a Secret. REQUIRED (at least one route). base_url is the API ROOT — the adapter

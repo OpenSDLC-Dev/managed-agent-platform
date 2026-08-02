@@ -294,6 +294,7 @@ func watchStream(ctx context.Context, client anthropic.Client, sessionID string)
 	w := &streamWatch{done: make(chan struct{})}
 	go func() {
 		defer close(w.done)
+		defer stream.Close()
 		terminal := false
 		for stream.Next() {
 			ev := stream.Current()
