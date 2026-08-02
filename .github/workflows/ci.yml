@@ -304,10 +304,17 @@ jobs:
           # A CryptoKeyVersion is the expensive typo: Encrypt accepts one and
           # Decrypt refuses it, so a release configured with one seals
           # credentials it can never unseal. Refused at render, not at runtime.
+          # The same rows internal/secrets/gcpkms's
+          # TestTheChartAndTheCipherAgreeOnKeyNames feeds to the real
+          # constructor, so the template's expression and the executor's cannot
+          # drift apart unnoticed. The last two are Cloud KMS's own id syntax
+          # for the ring and key segments (`[a-zA-Z0-9_-]{1,63}`).
           for bad in \
             "$KEY/cryptoKeyVersions/1" \
             projects/p/locations/global/keyRings/r \
-            my-key; do
+            my-key \
+            'projects/p/locations/global/keyRings/has space/cryptoKeys/k' \
+            projects/p/locations/global/keyRings/r/cryptoKeys/has.dot; do
             if helm template t "$CHART" -f "$VALUES" --set openbao.enabled=false \
                  --set "gcpKMS.keyName=$bad" >/dev/null 2>&1; then
               echo "gcpKMS.keyName='$bad' rendered instead of failing" >&2; exit 1

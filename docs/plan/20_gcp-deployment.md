@@ -260,7 +260,7 @@ resources deleted and the sweep verified empty afterwards.
    the Secret carries today — KMS needs only a key resource name, which is not a secret,
    plus Workload Identity. keyID is the CryptoKey resource name and Decrypt refuses any
    other (the OpenBao backend's guard).
-   Auth is ADC — Workload Identity on GKE, no static key material. **The 65536-byte
+   Auth is ADC — Workload Identity on GKE, no static key material. **The key-dependent
    plaintext ceiling is accepted as a backend-visible behavioural limit**, and the plan
    states it that way rather than as a theoretical ceiling nothing approaches, because
    the code says otherwise: the API bounds a request body at 4 MiB
@@ -692,7 +692,7 @@ Each slice is one PR unless noted; TDD per CLAUDE.md (the failing test first).
   GKE that containment is the kubelet's `podPidsLimit` — node configuration, set on the
   sandbox node pool in slice 4 and documented as required in slice 5.
 - **Slice 3 — `internal/secrets/gcpkms` + chart knob + `cmd/` wiring.** The direct-KMS
-  cipher of Decision 3: the ciphertext format marker, the 65536-byte plaintext guard
+  cipher of Decision 3: the ciphertext format marker, the plaintext guard
   behind a **`secrets` sentinel error** that the vault-credential handler classifies
   into the `errInvalid` family — without that classification the refusal is a generic
   500 and the limit reaches nobody but the log — and the env plumbing.

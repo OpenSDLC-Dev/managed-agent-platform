@@ -77,7 +77,18 @@ const (
 // CryptoKeyVersion. Encrypt would accept a version name and Decrypt would then
 // refuse it, so a deployment configured with one would seal credentials it
 // could never unseal.
-var keyNameRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/keyRings/[^/]+/cryptoKeys/[^/]+$`)
+//
+// The key-ring and key segments are held to Cloud KMS's own id syntax
+// (`[a-zA-Z0-9_-]{1,63}`) rather than "anything but a slash", so a typo is a
+// startup failure instead of a NOT_FOUND on the first credential write. Project
+// and location stay permissive: their syntaxes are Google-wide rather than KMS's,
+// and refusing a name the service would have accepted is the worse error here.
+//
+// The chart carries the identical expression at render time — see
+// templates/secret.yaml, and TestTheChartAndTheCipherAgreeOnKeyNames, which
+// keeps the two from drifting.
+var keyNameRE = regexp.MustCompile(
+	`^projects/[^/]+/locations/[^/]+/keyRings/[a-zA-Z0-9_-]{1,63}/cryptoKeys/[a-zA-Z0-9_-]{1,63}$`)
 
 // castagnoli is the CRC32C polynomial KMS's integrity fields use.
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
@@ -124,7 +135,7 @@ func New(ctx context.Context, cfg Config) (*Cipher, error) {
 		return nil, fmt.Errorf("gcpkms cipher: KeyName %q is not a CryptoKey resource name "+
 			"(projects/P/locations/L/keyRings/R/cryptoKeys/K)", cfg.KeyName)
 	}
-	client := cfg.Client
+	client, owned := cfg.Client, false
 	if client == nil {
 		var err error
 		// No credential option: Application Default Credentials, which on GKE
@@ -134,6 +145,7 @@ func New(ctx context.Context, cfg Config) (*Cipher, error) {
 		if err != nil {
 			return nil, fmt.Errorf("gcpkms cipher: build client (Application Default Credentials): %w", err)
 		}
+		owned = true
 	}
 	// The ceiling starts at the smaller of the two, so a probe that somehow
 	// fails to establish it can only ever be over-strict. Over-strict costs a
@@ -143,19 +155,34 @@ func New(ctx context.Context, cfg Config) (*Cipher, error) {
 	c := &Cipher{keyName: cfg.KeyName, client: client, maxPlaintext: MaxPlaintextBytesHSM}
 	_, level, err := c.seal(ctx, []byte("map-gcpkms-startup-probe"))
 	if err != nil {
+		// The client this function built owns a gRPC connection and is about to
+		// become unreachable, so it is closed here; an injected one belongs to
+		// the caller (Config.Client) and is left alone.
+		if owned {
+			_ = client.Close()
+		}
 		return nil, fmt.Errorf("gcpkms cipher: probe encrypt with %s: %w", c.keyName, err)
 	}
 	// The probe answers with the CryptoKeyVersion it used and that version's
 	// protection level, so the ceiling comes from the key itself rather than
 	// from an assumption about how the operator created it.
-	if level != kmspb.ProtectionLevel_HSM {
+	//
+	// The larger bound is taken only on a level that affirmatively documents it.
+	// Testing `!= HSM` would read the zero value — PROTECTION_LEVEL_UNSPECIFIED,
+	// what an omitted field decodes to — as a licence to raise the ceiling, and
+	// an HSM service that ever answered without the field would then be handed
+	// 64 KiB and reply with the bare InvalidArgument this path exists to remove.
+	// Silence must leave the fail-closed bound alone.
+	switch level {
+	case kmspb.ProtectionLevel_SOFTWARE, kmspb.ProtectionLevel_EXTERNAL, kmspb.ProtectionLevel_EXTERNAL_VPC:
 		c.maxPlaintext = MaxPlaintextBytes
 	}
 	return c, nil
 }
 
 // MaxPlaintext reports the plaintext ceiling this cipher's key enforces —
-// MaxPlaintextBytes, or MaxPlaintextBytesHSM for an HSM-protected key.
+// MaxPlaintextBytes, or MaxPlaintextBytesHSM for an HSM-protected key and for
+// one whose probe did not report a protection level at all.
 func (c *Cipher) MaxPlaintext() int { return c.maxPlaintext }
 
 // Encrypt seals plaintext under the configured CryptoKey. The keyID is that

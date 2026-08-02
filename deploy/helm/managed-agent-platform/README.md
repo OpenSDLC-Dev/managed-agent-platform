@@ -179,9 +179,16 @@ otherwise, so `helm install map ...` yields
 constructing them:
 
 ```
-kubectl get sa -n NAMESPACE -o name        # confirm the two names
-for ksa in $(kubectl get sa -n NAMESPACE -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
-               | grep -E -- '-(controlplane|executor)$'); do
+# Select by THIS release's instance label, never by a name suffix: a namespace
+# holding another release — or any unrelated ServiceAccount ending in
+# -controlplane — would otherwise be granted the right to impersonate the KMS
+# identity and inherit its key permissions.
+kubectl get sa -n NAMESPACE \
+  -l app.kubernetes.io/instance=RELEASE \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'   # confirm the two names
+
+for ksa in $(kubectl get sa -n NAMESPACE -l app.kubernetes.io/instance=RELEASE \
+               -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
   gcloud iam service-accounts add-iam-policy-binding map-kms@my-project.iam.gserviceaccount.com \
     --role roles/iam.workloadIdentityUser \
     --member "serviceAccount:my-project.svc.id.goog[NAMESPACE/$ksa]"

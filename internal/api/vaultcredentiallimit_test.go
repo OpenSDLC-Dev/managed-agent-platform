@@ -1,7 +1,9 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -113,6 +115,20 @@ func TestOversizeCredentialSecretIsRefusedWithAFourHundred(t *testing.T) {
 		}
 		credID, _ := resp["id"].(string)
 
+		sealed := func() []byte {
+			t.Helper()
+			var ct []byte
+			if err := s.pool.QueryRow(context.Background(),
+				`SELECT secret_ciphertext FROM vault_credentials WHERE id = $1`, credID).Scan(&ct); err != nil {
+				t.Fatalf("read stored ciphertext: %v", err)
+			}
+			return ct
+		}
+		before := sealed()
+		if len(before) == 0 {
+			t.Fatal("the seeded credential stored no ciphertext, so the comparison below would be vacuous")
+		}
+
 		status, resp = s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+credID, map[string]any{
 			"auth": map[string]any{"type": "environment_variable", "secret_value": huge},
 		})
@@ -120,9 +136,86 @@ func TestOversizeCredentialSecretIsRefusedWithAFourHundred(t *testing.T) {
 			t.Fatalf("oversize update = %d, want 400 (a 500 here is the defect); body %v", status, resp)
 		}
 		errObj, _ := resp["error"].(map[string]any)
+		if errObj["type"] != "invalid_request_error" {
+			t.Errorf("error type = %v, want invalid_request_error", errObj["type"])
+		}
 		message, _ := errObj["message"].(string)
 		if !strings.Contains(message, "65536") {
 			t.Errorf("message %q does not name the limit", message)
 		}
+		// The create subtest proves a refusal writes no row; the update path's
+		// equivalent is that it overwrites none. The re-seal runs before the
+		// transaction opens, so the seeded ciphertext must still be exactly
+		// what it was — a partial update here would leave a credential whose
+		// stored secret nobody chose.
+		if !bytes.Equal(before, sealed()) {
+			t.Error("a refused update changed the stored ciphertext")
+		}
 	})
+}
+
+// The third seal in the codebase is the one mcp_oauth_validate performs on the
+// tokens a refresh returned. It is the awkward one: the caller sent nothing
+// oversize, the token endpoint did, and the rotation may already have burned
+// the old refresh token — so the answer cannot be "your request was fine".
+// resealFailed still classifies it 4xx, because the alternative is a bare 500
+// that tells the operator nothing about why their credential stopped working.
+// Without this test that whole branch is unexecuted.
+func TestAnOversizeRefreshedTokenIsRefusedWithAFourHundred(t *testing.T) {
+	cipher, err := gcpkms.New(context.Background(), gcpkms.Config{
+		KeyName: gcpkmstest.KeyName,
+		Client:  gcpkmstest.NewClient(t),
+	})
+	if err != nil {
+		t.Fatalf("gcpkms.New: %v", err)
+	}
+	s := newTestServerWithCipher(t, cipher)
+	f := newOAuthMCPFixture(t)
+	vaultID := createVault(t, s, "reseal under gcpkms")
+
+	// Reaching the re-seal takes a credential that ALREADY holds a large
+	// secret, and that is not an artificial setup — it is the only way in.
+	// readProbeBody caps the token-endpoint response at validateBodyMax plus
+	// the longest stored secret, so a small credential can never be handed a
+	// response big enough to burst the ceiling: the read truncates it first and
+	// the exchange fails as unparseable long before any seal. The stored
+	// refresh token is what raises that cap. Sized to leave room under the
+	// ceiling for the rest of the sealed object.
+	seeded := strings.Repeat("r", gcpkms.MaxPlaintextBytes-2000)
+	credID := createCredential(t, s, vaultID, map[string]any{
+		"type": "mcp_oauth", "mcp_server_url": f.mcp.URL, "access_token": "at-original",
+		"refresh": map[string]any{
+			"client_id": "client-1", "refresh_token": seeded,
+			"token_endpoint":      f.token.URL,
+			"token_endpoint_auth": map[string]any{"type": "client_secret_basic", "client_secret": "cs-secret"},
+		},
+	})["id"].(string)
+
+	// Now the endpoint rotates in an access token that fits through that raised
+	// read cap and still does not fit under the cipher's ceiling.
+	f.grantJSON = fmt.Sprintf(
+		`{"access_token":%q,"refresh_token":"rt-new","expires_in":3600,"token_type":"Bearer"}`,
+		strings.Repeat("t", gcpkms.MaxPlaintextBytes+500))
+
+	status, resp := s.do("POST", validatePath(vaultID, credID), nil)
+	if status != http.StatusBadRequest {
+		t.Fatalf("validate with an oversize refreshed token = %d, want 400 (a 500 here is the defect); body %v",
+			status, resp)
+	}
+	errObj, _ := resp["error"].(map[string]any)
+	if errObj["type"] != "invalid_request_error" {
+		t.Errorf("error type = %v, want invalid_request_error", errObj["type"])
+	}
+	message, _ := errObj["message"].(string)
+	// Provenance is the whole point: the operator must read that their token
+	// endpoint returned something too large, not that their own request was.
+	for _, want := range []string{"token endpoint", "65536"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("message %q does not mention %q", message, want)
+		}
+	}
+	// And the refusal does not carry the token it refused to seal.
+	if strings.Contains(message, strings.Repeat("t", 64)) {
+		t.Error("the refusal echoed the token it refused to seal")
+	}
 }

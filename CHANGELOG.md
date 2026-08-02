@@ -21,8 +21,10 @@ copy of an entry here.
   credential material through Cloud KMS's raw `Encrypt`/`Decrypt`. It is what lets a GCP
   deployment drop the bundled OpenBao StatefulSet entirely: KMS needs a CryptoKey resource
   name, which is not a secret, and Workload Identity — so unlike every other cipher this
-  one puts **no key material in the release at all**, and there is no token to rotate or
-  leak. Authentication is Application Default Credentials, wired by annotating the
+  one puts **no key material in the release at all** — nothing to rotate, escrow, or leak
+  from the Secret. (Runtime credentials still exist: ADC obtains short-lived access tokens
+  from the GKE metadata server and refreshes them itself. What is gone is the long-lived
+  material a deployment would otherwise have to carry.) Authentication is Application Default Credentials, wired by annotating the
   Kubernetes ServiceAccounts (`controlplane.serviceAccount.annotations`,
   `executor.serviceAccount.annotations`); the control plane gained a dedicated
   ServiceAccount so that annotation does not have to land on the namespace's `default`,
@@ -51,7 +53,11 @@ copy of an entry here.
     key, taken the service's bare `InvalidArgument` back, and handed the caller exactly the
     500 this design exists to remove — on the *more* security-conscious of the two key
     choices. So the ceiling is read from the protection level the startup probe reports,
-    and the fake KMS server can be either kind so a test proves both.
+    and the fake KMS server can be either kind so a test proves both. The read is
+    fail-closed: the larger bound is taken only on a level that *affirmatively* names
+    itself software or external. Testing "not HSM" would have read the protobuf zero value
+    — what an omitted field decodes to — as permission to raise the ceiling, which is the
+    same 500 arriving by a quieter route.
 
   Ciphertext carries a **`gcpkms:v1:` format marker** from this first commit. Envelope
   encryption removes the ceiling and is deferred, and the marker is the one piece of that
@@ -64,7 +70,11 @@ copy of an entry here.
   was fine and they cannot shorten a token they never sent — but the alternative is the
   generic 500, and there *is* an action the answer enables: that credential cannot live
   under this deployment's cipher. So the status is shared and the message says where the
-  oversize material came from.
+  oversize material came from. Reaching that branch in a test takes a credential that
+  already holds a large secret, and that is not a contrivance: the refresh response is read
+  under a cap of 4 KiB plus the longest stored secret, so a small credential can never be
+  handed a response big enough to burst the ceiling — the read truncates it and the
+  exchange fails as unparseable long before any seal.
 
   Three smaller decisions worth recording. `New` proves the key with a throwaway `Encrypt`
   rather than `GetCryptoKey` — the obvious probe needs `cloudkms.cryptoKeys.get`, which

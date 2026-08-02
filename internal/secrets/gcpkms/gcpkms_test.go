@@ -107,6 +107,72 @@ func TestAnHSMKeyGetsTheSmallerCeiling(t *testing.T) {
 	}
 }
 
+// Every protection level the pinned SDK defines, and the ceiling each resolves
+// to. HSM_SINGLE_TENANT is the row that matters: it is an HSM, it carries the
+// 8 KiB bound, and a `!= HSM` test would have handed it 64 KiB. Resolving on an
+// affirmative software/external level instead means a protection level added to
+// the SDK after this code was written also lands on the smaller bound rather
+// than on a limit nobody checked.
+func TestEveryProtectionLevelResolvesItsCeiling(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		level kmspb.ProtectionLevel
+		want  int
+	}{
+		{kmspb.ProtectionLevel_SOFTWARE, gcpkms.MaxPlaintextBytes},
+		{kmspb.ProtectionLevel_EXTERNAL, gcpkms.MaxPlaintextBytes},
+		{kmspb.ProtectionLevel_EXTERNAL_VPC, gcpkms.MaxPlaintextBytes},
+		{kmspb.ProtectionLevel_HSM, gcpkms.MaxPlaintextBytesHSM},
+		{kmspb.ProtectionLevel_HSM_SINGLE_TENANT, gcpkms.MaxPlaintextBytesHSM},
+		{kmspb.ProtectionLevel_PROTECTION_LEVEL_UNSPECIFIED, gcpkms.MaxPlaintextBytesHSM},
+	} {
+		t.Run(tc.level.String(), func(t *testing.T) {
+			c, err := gcpkms.New(ctx, gcpkms.Config{
+				KeyName: gcpkmstest.KeyName,
+				Client:  gcpkmstest.NewClientFor(t, gcpkmstest.NewServer(t, tc.level)),
+			})
+			if err != nil {
+				t.Fatalf("gcpkms.New: %v", err)
+			}
+			if c.MaxPlaintext() != tc.want {
+				t.Errorf("%s resolved to a %d-byte ceiling, want %d", tc.level, c.MaxPlaintext(), tc.want)
+			}
+		})
+	}
+}
+
+// A probe that does not say which protection level it used must not be read as
+// saying "not HSM". PROTECTION_LEVEL_UNSPECIFIED is the zero value, so an
+// omitted field decodes to it, and a `!= HSM` test would hand an HSM key the
+// 64 KiB ceiling — restoring the unclassified 500 for everything between the
+// two bounds. Real Cloud KMS populates the field; this pins that the code does
+// not depend on it doing so.
+func TestAnUnreportedProtectionLevelKeepsTheSmallerCeiling(t *testing.T) {
+	ctx := context.Background()
+	// An HSM-limited service — it refuses anything over 8192 — that answers
+	// without naming its level.
+	client := gcpkmstest.NewClientFor(t, &mangling{
+		KeyManagementServiceServer: gcpkmstest.NewServer(t, kmspb.ProtectionLevel_HSM),
+		encrypt: func(r *kmspb.EncryptResponse) {
+			r.ProtectionLevel = kmspb.ProtectionLevel_PROTECTION_LEVEL_UNSPECIFIED
+		},
+	})
+	c, err := gcpkms.New(ctx, gcpkms.Config{KeyName: gcpkmstest.KeyName, Client: client})
+	if err != nil {
+		t.Fatalf("gcpkms.New: %v", err)
+	}
+	if c.MaxPlaintext() != gcpkms.MaxPlaintextBytesHSM {
+		t.Fatalf("an unreported protection level resolved to a %d-byte ceiling, want the fail-closed %d",
+			c.MaxPlaintext(), gcpkms.MaxPlaintextBytesHSM)
+	}
+	// And the consequence that matters: the refusal is the classified one the
+	// API turns into a 400, not the service's InvalidArgument behind a 500.
+	_, _, err = c.Encrypt(ctx, bytes.Repeat([]byte("a"), gcpkms.MaxPlaintextBytesHSM+1))
+	if !errors.Is(err, secrets.ErrPlaintextTooLarge) {
+		t.Fatalf("over the ceiling = %v, want it to wrap ErrPlaintextTooLarge", err)
+	}
+}
+
 // The response-integrity guards can only be reached from a service that answers
 // wrongly, so without a fault-injection seam every one of them could be deleted
 // with the suite still green. Each row is a response shape that must not be
@@ -120,9 +186,20 @@ func TestAMisbehavingServiceIsRefused(t *testing.T) {
 		name, wantIn string
 		mangle       func(*kmspb.EncryptResponse)
 	}{
-		{"empty ciphertext with no checksum", "no ciphertext", func(r *kmspb.EncryptResponse) {
+		// "returned no ciphertext", not "no ciphertext": the latter is also a
+		// substring of the nil-checksum guard's message, so deleting the
+		// empty-ciphertext guard would leave this row passing on the wrong one.
+		{"empty ciphertext with no checksum", "returned no ciphertext", func(r *kmspb.EncryptResponse) {
 			r.Ciphertext = nil
 			r.CiphertextCrc32C = nil
+		}},
+		// The same hole, arrived at from the other side: a checksum that is
+		// PRESENT and zero. Only the empty-ciphertext guard refuses this one —
+		// the nil-wrapper guard sees a wrapper, and the comparison sees
+		// CRC32C("") == 0 == the reported value, so it agrees.
+		{"empty ciphertext with a zero checksum", "returned no ciphertext", func(r *kmspb.EncryptResponse) {
+			r.Ciphertext = nil
+			r.CiphertextCrc32C = wrapperspb.Int64(0)
 		}},
 		{"no ciphertext checksum", "no ciphertext checksum", func(r *kmspb.EncryptResponse) {
 			r.CiphertextCrc32C = nil
@@ -350,5 +427,42 @@ func TestLiveCeiling(t *testing.T) {
 	}
 	if _, _, err := c.Encrypt(ctx, bytes.Repeat([]byte("a"), c.MaxPlaintext()+1)); !errors.Is(err, secrets.ErrPlaintextTooLarge) {
 		t.Errorf("one byte over = %v, want ErrPlaintextTooLarge", err)
+	}
+}
+
+// The chart refuses a malformed key name at render time and the cipher refuses
+// it at startup, with the same expression written twice — once in Go and once
+// in a Helm template. Nothing else would notice the two drifting, so the rows
+// below are the ones CI feeds to `helm template`, fed here to the real
+// constructor: what the chart renders, the process must accept, and what the
+// chart refuses, the process must refuse too.
+func TestTheChartAndTheCipherAgreeOnKeyNames(t *testing.T) {
+	for _, tc := range []struct {
+		in     string
+		accept bool
+	}{
+		{"projects/p/locations/global/keyRings/r/cryptoKeys/k", true},
+		{"projects/my-project-123/locations/us-central1/keyRings/map/cryptoKeys/credentials", true},
+		{"projects/p/locations/global/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1", false},
+		{"projects/p/locations/global/keyRings/r", false},
+		{"my-key", false},
+		// Cloud KMS's own id syntax for the ring and key segments.
+		{"projects/p/locations/global/keyRings/has space/cryptoKeys/k", false},
+		{"projects/p/locations/global/keyRings/r/cryptoKeys/has.dot", false},
+		{"projects/p/locations/global/keyRings/" + strings.Repeat("a", 64) + "/cryptoKeys/k", false},
+		{"projects/p/locations/global/keyRings/" + strings.Repeat("a", 63) + "/cryptoKeys/k", true},
+	} {
+		_, err := gcpkms.New(context.Background(), gcpkms.Config{
+			KeyName: tc.in, Client: gcpkmstest.NewClient(t),
+		})
+		// An accepted name still fails the startup probe unless it is the one
+		// the fake serves, so acceptance is judged on the SHAPE check alone:
+		// a rejected shape names the resource-name rule, a probe failure does
+		// not.
+		shapeRejected := err != nil && strings.Contains(err.Error(), "is not a CryptoKey resource name")
+		if shapeRejected == tc.accept {
+			t.Errorf("New(%q): shape rejected = %v, want accepted = %v (err: %v)",
+				tc.in, shapeRejected, tc.accept, err)
+		}
 	}
 }

@@ -143,13 +143,15 @@ func (f *fake) Encrypt(_ context.Context, req *kmspb.EncryptRequest) (*kmspb.Enc
 	if req.GetName() != KeyName {
 		return nil, status.Errorf(codes.NotFound, "key %q not found", req.GetName())
 	}
-	max := maxPlaintextBytes
-	if f.level == kmspb.ProtectionLevel_HSM {
-		max = maxPlaintextBytesHSM
+	limit := maxPlaintextBytes
+	// Both HSM levels carry the smaller bound — single-tenant HSM is still an
+	// HSM as far as Encrypt's input limit is concerned.
+	if f.level == kmspb.ProtectionLevel_HSM || f.level == kmspb.ProtectionLevel_HSM_SINGLE_TENANT {
+		limit = maxPlaintextBytesHSM
 	}
-	if len(req.GetPlaintext()) > max {
+	if len(req.GetPlaintext()) > limit {
 		return nil, status.Errorf(codes.InvalidArgument,
-			"plaintext too large: max_expected_size:%d", max)
+			"plaintext too large: max_expected_size:%d", limit)
 	}
 	// The real service VERIFIES the checksum rather than noting its presence,
 	// and rejects a mismatch. Modelled, because a client that computed the CRC

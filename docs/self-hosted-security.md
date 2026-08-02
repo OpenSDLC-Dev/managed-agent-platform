@@ -504,11 +504,17 @@ restore-ordering constraint you own:
   run yourself.
 - **Under `gcpkms` the pairing is the same shape with a sharper edge.** There is
   no key material to back up and none in the release — authentication is Workload
-  Identity, and the CryptoKey resource name is not a secret — but destroying or
-  disabling the CryptoKey, or losing the project, is exactly "losing the key"
-  above. Cloud KMS's own scheduled-destruction delay is the only thing standing
-  between a `terraform destroy` of the key ring and unrecoverable ciphertext, so
-  keep the key **outside** the lifecycle of anything you rebuild routinely. One
+  Identity, and the CryptoKey resource name is not a secret — but what replaces
+  a lost key file is a lost key *version*, and the two failure modes are not the
+  same. **Disabling** a CryptoKeyVersion is a reversible outage: decryption fails
+  until you re-enable it. **Destroying** one is not — after the
+  scheduled-destruction window elapses the version reaches `DESTROYED`, its key
+  material is gone, and every credential sealed under it is unrecoverable. Note
+  what the boundary is NOT: Cloud KMS does not let you delete a key ring or a
+  CryptoKey at all, so no `terraform destroy` can take them; only a version
+  destruction can, which is why the scheduled-destruction window is the thing to
+  watch and why the key belongs **outside** the lifecycle of anything you rebuild
+  routinely. One
   behavioural consequence to know before choosing it: KMS's raw `Encrypt` bounds
   plaintext where OpenBao's transit engine does not, so a credential whose sealed
   secrets exceed the bound is refused with a `400` naming the limit rather than

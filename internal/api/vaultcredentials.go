@@ -42,7 +42,8 @@ var errSecretsUnavailable = &apiError{http.StatusInternalServerError, errTypeAPI
 // token — and stay a 500. One is the caller's: a cipher that bounds plaintext
 // size refuses material this API itself would have accepted, since maxBodyBytes
 // admits 4 MiB and no credential secret field carries a length bound of its
-// own. Today that is gcpkms, where Cloud KMS's raw Encrypt stops at 64 KiB
+// own. Today that is gcpkms, where Cloud KMS's Encrypt stops at the ceiling the
+// key's protection level implies — 64 KiB, or 8 KiB on an HSM key
 // (docs/plan/20_gcp-deployment.md, Decision 3, and the DIVERGENCES entry).
 //
 // Left unclassified it would render as a generic api_error 500 whose useful
