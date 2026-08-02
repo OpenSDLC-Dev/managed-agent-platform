@@ -116,13 +116,24 @@ if ! sa="$(gcloud builds get-default-service-account --project your-project)" ||
 else
   tfvars=deploy/gcp/environment/terraform.tfvars
   touch "$tfvars"
-  { grep -vE '^[[:space:]]*cloud_build_service_account' "$tfvars" || true
+  # grep exits 1 when it selects nothing — the valid case where the file held
+  # only this assignment — and 2 on a read error. A blanket `|| true` would treat
+  # a half-read file as an empty one and let the mv below replace a good tfvars
+  # with a truncated one, so only status 1 is accepted. (`rc`, not `status`:
+  # `status` is read-only in zsh, where it is a synonym for `$?`.)
+  rc=0
+  grep -vE '^[[:space:]]*cloud_build_service_account' "$tfvars" > "$tfvars.new" || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "could not read $tfvars — left untouched" >&2
+    rm -f "$tfvars.new"
+  else
     # ${sa##*/} keeps only the EMAIL. Which form comes back is not fixed —
     # gcloud 578.0.0 printed a bare email here, and the documented shape is
     # projects/…/serviceAccounts/EMAIL — and this strips a prefix if present
     # and leaves a bare email alone, so it does not matter which you get.
-    echo "cloud_build_service_account = \"${sa##*/}\""
-  } > "$tfvars.new" && mv "$tfvars.new" "$tfvars"
+    echo "cloud_build_service_account = \"${sa##*/}\"" >> "$tfvars.new"
+    mv "$tfvars.new" "$tfvars"
+  fi
 fi
 
 make gcp-env-apply
@@ -240,14 +251,22 @@ without them — which is why they are called out here rather than left to be di
 | `image.tag` | the tag `cloudbuild.yaml` pushed. Empty falls back to the chart's `appVersion` (`0.1.0`), which nothing publishes, so all three platform pods sit in `ImagePullBackOff` |
 | `executor.gateImage` | the full `…/gate:TAG` reference. Empty is *valid* and means no gate: `limited` and vault-attached sessions fall back to the backend's own fail-closed networking, and credential substitution does not happen |
 
+Pass them on the `helm` command line, **not** by appending to the values file. The fragment
+already contains a top-level `image:` mapping, and a second one does not merge with it:
+Helm accepts the duplicate key silently and the later mapping wins whole, so `registry` and
+`repository` revert to the chart's `ghcr.io` defaults. That is the same
+`ImagePullBackOff` this section exists to prevent, arrived at by trying to prevent it —
+verified by rendering the duplicate, which produced
+`ghcr.io/opensdlc-dev/managed-agent-platform/brain:TAG`.
+
 ```sh
 tag="$(git rev-parse --short HEAD)"   # whatever _TAG the build used
-cat >> ~/map-values-gcp.yaml <<EOF
-image:
-  tag: "$tag"
-executor:
-  gateImage: "$(terraform output -raw artifact_registry)/gate:$tag"
-EOF
+
+helm install map deploy/helm/managed-agent-platform \
+  --namespace map --create-namespace \
+  -f ~/map-values-gcp.yaml \
+  --set "image.tag=$tag" \
+  --set "executor.gateImage=$(terraform output -raw artifact_registry)/gate:$tag"
 ```
 
 The sandbox-placement values in that fragment are a **pair, and neither half works alone**.

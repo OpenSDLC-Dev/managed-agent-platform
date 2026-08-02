@@ -19,6 +19,5 @@ GCP deployment; slices 1-3 and 4 landed, slice 5 remains.
 
 ## Tasks — plan 20 (remaining)
 
-- [x] Slice 4b — applied both configurations on a real project, deployed mode-1 on GKE, ran
-      the acceptance battery and the teardown proof; record in docs/HISTORY.md (this PR)
+- [x] Slice 4b — applied, deployed and accepted on GKE (record: docs/HISTORY.md)
 - [ ] Slice 5 — mode-2 acceptance + `docs/deploy-gcp.md`
