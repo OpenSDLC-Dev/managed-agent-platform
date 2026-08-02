@@ -1557,3 +1557,107 @@ node with one drive the default parity is zero, so both quorums are 1 and the tw
 equivalent — confirmed from the live headers (`X-Minio-Write-Quorum: 1`, `X-Minio-Read-Quorum: 1`).
 The chart hardcodes `replicas: 1` with no value to raise it, so the multi-node trap the milder gate
 would avoid is not reachable from the chart's own surface.
+
+## anthropic-sdk-go v1.61.0 bump — wire-schema verification record (2026-08-02, plan 21 slice 1)
+
+The third bump record, and the quietest of the three: the range moved no shape this repo mirrors,
+required zero code, and its one genuinely new fact is a documentation sentence — the reference's
+event-list params are now documented as keyed on `processed_at`, which this platform deliberately
+does not do (new DIVERGENCES entry, below). The bump exists for plan 21's acceptance goal: the
+outcomes surface verifies against the latest SDK release, and v1.61.0 is the latest
+(released 2026-07-24; confirmed against the upstream tag list on 2026-08-02).
+
+**What the range contains.** Two upstream releases: v1.60.0 (2026-07-23 — the
+`model_context_window_exceeded` stop reason, apijson param-unmarshal fixes (#73), RawJSON
+HTML-escaping in the marshaler, `ant` naming in auth errors) and v1.61.0 (2026-07-24 — the
+`claude-opus-5` model constant, request-side `tool_addition`/`tool_removal` blocks, client-side
+fallback-credit token types and the server-side `fallbacks: "default"` option). Endpoint count is
+unchanged at **131** (`.stats.yml`); the spec hash moved, so all change is to existing endpoints'
+schemas. The outcome surface plan 21 mirrors is untouched — `betasession.go`, `betawebhook.go`,
+`betadeployment.go` are byte-identical between the pins, and `betasessionevent.go`'s only change is
+comment-only (below).
+
+**The enumeration.** Every SDK file defining a shape this repo mirrors, `git diff`ed pairwise
+between the tags rather than sampled. Unchanged (each proven by an individually-run empty pairwise
+diff): `betaagentversion.go`, `betaenvironment.go`, `betaenvironmentwork.go`, `betasession.go`,
+`betasessionresource.go`, `betasessionthread.go`, `betasessionthreadevent.go`,
+`betasessiontoolrunner.go`, `betaskill.go`, `betaskillversion.go`, `betafile.go`,
+`betavaultcredential.go`, `betadeployment.go`, `betawebhook.go`. Changed, each resolved:
+
+- *`betaagent.go`* — exactly one added line: `BetaManagedAgentsModelClaudeOpus5 = "claude-opus-5"`.
+  `BetaManagedAgentsModel` is a `= string` alias, the platform mirrors no model list (design
+  principle 4: model ids are opaque config-resolved strings), so this is a no-op — but the insertion
+  shifts two live registry citations (see citation durability).
+- *`betasessionevent.go`* — **comment-only, proven** (the diff filtered to changed non-comment
+  lines is empty): the `BetaSessionEventListParams` docs now say each `created_at[gt/gte/lt/lte]`
+  filter is "Compared against the event's `processed_at` value" and `order` is "ordered by the
+  event's `processed_at`" where both previously said `created_at`. Param names, tags, and types are
+  unchanged. This platform filters on the `created_at` column and orders by `seq` (≡ created_at —
+  appends serialize per session), and keying on processed_at is incoherent under its deliberate
+  null-until-settlement stamping model (every queued inbound event would vanish from filtered lists
+  mid-turn; causality would invert; the settlement batch shares one timestamp). **Recorded** as a
+  new deliberate-divergence entry cross-linked to the processed_at-stamping entry, with the
+  single-source caveat (SDK comment and CLI usage string are generated from the same OpenAPI
+  descriptions — one witness, not two) and the #78 recording flag. Note: plan 21 as first landed
+  misattributed this hunk's content (it described the v1.59.0 bump's own comment hunk); corrected
+  on the plan-21 PR before it merged, and the sweep here re-derived the true content from the tags.
+- *`betamessage.go`* (+825) — the bump's bulk, all on the beta **Messages** surface this platform
+  does not mirror: `tool_addition`/`tool_removal` are **request-side param blocks only** (in
+  `BetaContentBlockParamUnion` and the new mid-conversation-system content union; the literal string
+  `tool_change` appears in no Go source, only the changelog) — no response variant, no streaming
+  event, no session-event variant exists, so a model cannot emit one and the platform's inbound
+  content-block allowlist (`internal/events/inbound.go`, text/image/document plus search_result on
+  tool results) 400s one posted from outside before it reaches the log. Fallback-credit expansion:
+  request param retypes, a new required `usage.fallback_credit` on beta usage types,
+  `stop_details.fallback_credit_token`, and two new beta-header gates — all on beta Messages
+  request/response shapes the platform neither emits nor decodes (the adapter reads its four usage
+  counters through the non-beta types). No-op.
+- *`message.go` / `betamessage.go` stop reasons* — v1.60.0 adds `model_context_window_exceeded` to
+  the non-beta `StopReason` (and one beta doc-comment line; the beta enum value already existed at
+  v1.59.0 — three occurrences). The adapter passes stop reasons through as opaque strings with no
+  switch; the brain classifies turns on tool blocks, not the label, and both registry entries that
+  reason about stop labels already name `model_context_window_exceeded` explicitly. No-op.
+- *`shared/constant/constants.go`* — **additions only: 21 inserted lines, 0 deletions**, so the
+  v1.59.0 bump's dangerous class (unchanged identifier, moved literal) is structurally empty this
+  time — a moved literal would appear as a minus/plus pair. Seven new constants (`Default`,
+  `MCPToolReference`, `MCPToolsetReference`, `NotApplied`, `Redeemed`, `ToolAddition`,
+  `ToolRemoval`), all belonging to the fallback/tool-change surface above. No new stop reason, no
+  new session event type; the managed-agents stop-reason union is still exactly
+  `end_turn`/`requires_action`/`retries_exhausted`.
+- *`api.md`* (+10) — new params/response type rows for the fallback and tool-change types, all
+  above line 683; the route table is unchanged. The Stop Work entry's citation drifts 683 → 693
+  (corrected in the registry; the second drift of the same row — the v1.59.0 record noted the
+  first).
+- Everything else: `betatoolrunner.go`/`lib/betafallback` (client-side helpers the platform does
+  not import — zero grep hits in non-test `internal/`), `betamessagebatch.go` (no batches endpoint
+  here), `beta.go` (+2 header constants; `anthropic-beta` is accepted and ignored),
+  `internal/apijson`/`packages/param`/`unmarshalcompat.go` (the v1.60.0 unmarshal fixes — the
+  platform never unmarshals SDK param types; its SDK decodes are response types, all suites green),
+  auth/packaging.
+
+**Behavior-fix exposure.** The RawJSON HTML-escaping fix lands on the adapter's hot path:
+`param.SetJSON` passthrough bytes are now compacted and HTML-escaped (a literal `<` becomes its
+`\u003c` escape) — JSON-equal, not byte-equal. No golden-byte test exists to break (the provider fake
+decodes bodies and compares semantically; no fixture contains escape-sensitive bytes), and the
+adapter's comment claiming "verbatim" serialization was updated to say field- and value-preserving.
+The apijson param fix has no platform exposure (nothing unmarshals SDK param types).
+
+**Citation durability — 35 live citations re-read at v1.61.0, 32 hold, 3 drifted.** All three are
+mechanical line shifts with the underlying claims intact: the Stop Work entry's `api.md:683 → 693`
+(the +10 api.md lines), and the `claude-opus-5` insertion shifting `betaagent.go:2117 → 2118`
+(model-config `Effort`) and `betaagent.go:2866-2870 → 2867-2871` (optional update `Version`) — all
+corrected in the registry. The live pinned-version label moved in the same three places as the
+v1.59.0 bump (`.claude/agents/verifier.md`, `docs/REFERENCE_PROJECTS.md`,
+`internal/toolset/definitions.go` — safe to advance: the `agent_toolset_20260401` input types are
+untouched) plus the registry's twelve live evidence labels; version-history prose ("v1.59.0 added a
+required `secret`…") stays as written, and CHANGELOG/HISTORY/archived plans keep their historical
+citations per the standing precedent. Plan 21's own SDK ranges were re-confirmed at the tag (its
+`_ongoing` citation widened by four lines to include the quoted doc comment).
+
+**Evidence.** `make verify` green on the bumped pin at total statement coverage **90.80%** (Docker
+and K8s sandbox suites included). `go mod tidy` touched only the two lines naming the SDK — the
+SDK's own go.mod is byte-identical between the tags, so the bump drags in no new module. The sweep
+itself ran as four parallel investigations (diff enumeration; live-citation re-read; list-semantics
+analysis; provider-stream impact) whose reports cross-checked each other's file lists, and the
+provider/worker/toolset suites — the packages that drive the SDK against the platform's own API —
+were additionally run standalone under the new pin before the full gate.

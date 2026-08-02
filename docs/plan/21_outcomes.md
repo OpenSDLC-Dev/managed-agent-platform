@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 issue: "#77"
 ---
 
@@ -53,7 +53,7 @@ with the two in-between releases' non-outcome surface swept and recorded.
   - `span.outcome_evaluation_start` (`betasessionevent.go:4875-4910`): `id`, `iteration`
     ("0-indexed revision cycle. 0 is the first evaluation; 1 is the re-evaluation after
     the first revision"), `outcome_id`, `processed_at`, `type`.
-  - `span.outcome_evaluation_ongoing` (`betasessionevent.go:4839-4873`): same fields;
+  - `span.outcome_evaluation_ongoing` (`betasessionevent.go:4835-4873`): same fields;
     "Periodic heartbeat … Distinguishes 'evaluation is actively running' from
     'evaluation is stuck'".
   - `span.outcome_evaluation_end` (`betasessionevent.go:4776-4833`): adds `explanation`,
@@ -334,8 +334,10 @@ eval belongs to the `evals/` suite later, under `RUN_EVALS` — tracked by an is
 
 ## Slices (each lands as its own PR, TDD-first, `make verify` green)
 
-Lifecycle per CLAUDE.md: slice 2's PR — the first that starts development — flips this
-plan to `in-progress` and takes over STATE.md's Active work/Tasks. **Every slice lands
+Lifecycle per CLAUDE.md: slice 1's PR — the first that starts development — flips this
+plan to `in-progress` and takes over STATE.md's Active work/Tasks. (The plan as first
+landed said slice 2; corrected when the user started development at slice 1, since
+CLAUDE.md ties the flip to the PR that starts the work.) **Every slice lands
 its docs/DIVERGENCES.md entries in the same PR that introduces the behavior** (the
 registry's same-PR rule; plan 15 states it verbatim as a warning against batching) —
 slice 5 adds no registry entries of its own.

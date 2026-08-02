@@ -13,6 +13,31 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Changed
+
+- **anthropic-sdk-go bumped v1.59.0 → v1.61.0** — the latest release, so plan 21's
+  outcomes acceptance verifies against the newest SDK
+  ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 1, starting the plan:
+  frontmatter → `in-progress`, STATE.md takeover, and the plan's lifecycle sentence
+  corrected from "slice 2's PR" to "slice 1's PR" — the flip belongs to the PR that
+  starts development). Zero code required: the range's new surface is request-side beta
+  Messages shapes this platform does not mirror (`tool_addition`/`tool_removal` blocks,
+  fallback-credit expansion, the `claude-opus-5` constant), and the
+  `model_context_window_exceeded` stop reason already existed at the old pin on the beta
+  surface with both stop-label registry entries naming it. One new deliberate divergence
+  recorded in the same PR: v1.61.0's docs re-key the event-list `created_at[…]` filters
+  and `order` on `processed_at`; ours stay on `created_at`/`seq`, which is the only
+  coherent choice under the platform's deliberate null-until-settlement stamping model
+  (cross-linked to the standing processed_at entry; single-source-spec caveat; #78
+  recording flag). The full enumeration — 14 mirrored files byte-identical, every
+  changed file resolved, 35 live citations re-read (32 hold, 3 mechanical line drifts
+  corrected), version labels moved in the three standing sites plus the registry's
+  twelve evidence labels — is docs/HISTORY.md's "anthropic-sdk-go v1.61.0 bump" record.
+  `make verify` green on the bump at 90.80% total statement coverage. One comment
+  updated: the anthropic adapter's `param.SetJSON` passthrough is field- and
+  value-preserving, no longer byte-verbatim (the SDK's marshaler now compacts and
+  HTML-escapes raw JSON; no golden-byte test existed to break).
+
 ### Added
 
 - **Plan 21 authored (draft): the session outcomes surface**
