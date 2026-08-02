@@ -224,21 +224,28 @@ Terraform writes. Write-only arguments leave Terraform nothing to diff, so it is
 signal that it should push the new value. Bumping it does nothing for the platform's role,
 which Terraform does not manage.
 
-Adding the version is the same for either — name the secret you mean. The names below carry
-the default `map` prefix; under a different `NAME_PREFIX` they are `<prefix>-db-password` and
-`<prefix>-db-admin-password`, and writing to the `map-` name instead creates a *new* secret
-that nothing reads rather than failing:
+Adding the version is the same for either — name the secret you mean. Both names carry the
+`NAME_PREFIX` the environment was built with, so set it once at the top of the snippet rather
+than relying on `NAME_PREFIX` being exported in whatever shell this gets pasted into:
 
 ```sh
+prefix=map                          # the NAME_PREFIX this environment was built with
+secret="$prefix-db-password"        # or "$prefix-db-admin-password"
+
 pw="$(openssl rand -hex 32)"
 if [[ "$pw" =~ ^[0-9a-f]{64}$ ]]; then
-  printf '%s' "$pw" | gcloud secrets versions add map-db-password \
+  printf '%s' "$pw" | gcloud secrets versions add "$secret" \
     --project your-project --data-file=-
 else
   echo "generator failed — nothing written" >&2
 fi
 unset pw
 ```
+
+A prefix that names no secret is safe — `gcloud secrets versions add` creates a version of an
+**existing** secret and errors when there is none. The unsafe case is a prefix that names a
+*different* environment's secret in the same project: that rotation succeeds, and what breaks
+is the other environment, at its next restart rather than here.
 
 (An `if`, not `... || { …; exit 1; }`: this is meant to be pasted into a shell, where `exit`
 would close the terminal and `return` is an error outside a function.)
