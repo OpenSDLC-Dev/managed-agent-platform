@@ -18,6 +18,15 @@
 # What a destroy actually costs, said plainly: this configuration owns Cloud SQL,
 # so tearing it down destroys the staging database — and vault ciphertext lives
 # only in Postgres. Retaining the KMS key does not bring a deleted row back.
+#
+# Deliberately NOT here, so a reader can tell deferred from forgotten: private
+# nodes and master authorized networks, Binary Authorization, Shielded Nodes
+# secure boot, node auto-repair/upgrade, a dedicated node service account, CMEK
+# on the bucket and registry, bucket versioning, Cloud SQL backups, and Postgres
+# audit logging. Every one of them belongs to the production shape slice 5
+# documents; adding them here would make the staging environment slower to
+# rebuild and would quietly turn this file into the production example it is
+# explicitly not.
 
 locals {
   # One definition of the taint, and one of the toleration that matches it,
@@ -217,6 +226,13 @@ resource "google_sql_database_instance" "map" {
       # a plain TCP tunnel and is fine — the plan's LISTEN/NOTIFY probe ran
       # through it. Slice 5 moves this to private IP.
       ipv4_enabled = true
+
+      # No authorized networks are configured, so nothing can reach this address
+      # without the proxy — but that is an access rule, not an encryption one,
+      # and the two should not be conflated. Slice 5's shape is sslmode=require;
+      # this is the server-side half of it, on from the first apply rather than
+      # arriving with the production configuration.
+      ssl_mode = "ENCRYPTED_ONLY"
     }
 
     # Managed connection pooling stays OFF, and this is not a default worth
@@ -280,6 +296,11 @@ resource "google_storage_bucket" "blob" {
   # Uniform access, so the bucket's permissions are the IAM grants in iam.tf and
   # nothing else. Legacy ACLs would make the least-privilege claim untestable.
   uniform_bucket_level_access = true
+
+  # Uniform access decides WHERE permissions come from; it does not stop one of
+  # them from being a grant to allUsers. This does. The bucket holds session
+  # files and skill archives, so the difference is not theoretical.
+  public_access_prevention = "enforced"
 
   depends_on = [google_project_service.required]
 }

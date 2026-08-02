@@ -101,6 +101,15 @@ elif has_version "$access_secret" || has_version "$secret_secret"; then
 	echo "Delete the GCS HMAC key and disable both secrets' versions, then re-run." >&2
 	exit 1
 else
+	# Snapshot first. The rollback below may have to identify the new key by
+	# listing, and "the one active key" is not a safe answer: this service
+	# account may already own an active HMAC key created out of band, and
+	# deleting THAT would destroy a working credential — the precise failure this
+	# whole script exists to avoid. Only a key that was not here a moment ago is
+	# ours to delete.
+	before="$(gcloud storage hmac list --project "$PROJECT" \
+		--filter="serviceAccountEmail=$storage_sa" --format="value(accessId)" | sort)"
+
 	hmac_json="$(gcloud storage hmac create "$storage_sa" --project "$PROJECT" --format=json)"
 
 	# Armed BEFORE the response is even parsed. From the instant the key exists,
@@ -112,14 +121,20 @@ else
 	cleanup_key() {
 		echo "rolling back: deleting the HMAC key whose secret could not be stored" >&2
 		if [[ -z "$access_id" ]]; then
-			# The response did not parse, so the id must be recovered by listing.
-			access_id="$(gcloud storage hmac list --project "$PROJECT" \
-				--filter="serviceAccountEmail=$storage_sa AND state=ACTIVE" \
-				--format="value(accessId)" --limit=1 2>/dev/null || true)"
+			# The response did not parse, so recover the id as the difference
+			# against the snapshot — and only when that difference is exactly one.
+			local after new
+			after="$(gcloud storage hmac list --project "$PROJECT" \
+				--filter="serviceAccountEmail=$storage_sa" --format="value(accessId)" 2>/dev/null | sort)"
+			new="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -c . || true)"
+			if [[ "$new" == "1" ]]; then
+				access_id="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
+			fi
 		fi
 		if [[ -z "$access_id" ]]; then
-			echo "COULD NOT identify the HMAC key to roll back. Delete it by hand:" >&2
-			echo "  gcloud storage hmac list --project $PROJECT" >&2
+			echo "COULD NOT identify the key to roll back, and will NOT guess — deleting the" >&2
+			echo "wrong HMAC key would destroy a working credential. Delete it by hand:" >&2
+			echo "  gcloud storage hmac list --project $PROJECT --filter=serviceAccountEmail=$storage_sa" >&2
 			return
 		fi
 		gcloud storage hmac update "$access_id" --project "$PROJECT" --deactivate >/dev/null 2>&1 || true

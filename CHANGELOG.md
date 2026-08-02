@@ -79,6 +79,13 @@ copy of an entry here.
   for the Admin API's `users.update` on stdin to keep the value out of `argv`, and the
   write-only argument achieves the same thing with the provider doing the work.
 
+  Two more are set for the ordinary reason: `ssl_mode = "ENCRYPTED_ONLY"` on the instance,
+  because nothing reaching it without the proxy is an *access* rule and not an encryption one
+  and the two should not be conflated; and `public_access_prevention = "enforced"` on the
+  bucket, because uniform bucket-level access decides where permissions come from without
+  stopping one of them being a grant to `allUsers`, and the bucket holds session files and
+  skill archives.
+
   Five settings are not the provider's defaults, stated visibly rather than discovered
   mid-teardown: `deletion_protection = false` on the cluster, **both** Cloud SQL deletion
   flags (there are two, and either one blocks a destroy), `force_destroy` on the bucket (the

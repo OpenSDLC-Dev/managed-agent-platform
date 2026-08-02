@@ -61,7 +61,7 @@ UNRECOVERABLE = {
 MIN_PROTECTED = 8
 
 ROOT = pathlib.Path(__file__).parent
-RESOURCE = re.compile(r'^resource\s+"([^"]+)"\s+"([^"]+)"')
+RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')
 HEREDOC = re.compile(r"<<[-~]?([A-Za-z_][A-Za-z0-9_]*)")
 
 
@@ -123,10 +123,15 @@ def blocks(path: pathlib.Path):
             scrubbed = scrubbed[: m.start()]
         lines.append(scrubbed)
 
-    i = 0
+    # `resource` is matched only at brace depth 0, and with leading whitespace
+    # allowed. `terraform fmt` would normally put a top-level block at column 0,
+    # but a check that only works when another check already passed is a check
+    # that can be bypassed by running them in the wrong order.
+    i, depth0 = 0, 0
     while i < len(lines):
-        m = RESOURCE.match(lines[i])
+        m = RESOURCE.match(lines[i]) if depth0 == 0 else None
         if not m:
+            depth0 += lines[i].count("{") - lines[i].count("}")
             i += 1
             continue
         depth = lines[i].count("{") - lines[i].count("}")
@@ -141,6 +146,18 @@ def blocks(path: pathlib.Path):
 
 def main() -> int:
     failures = []
+
+    # Terraform also accepts JSON configuration, which this parser cannot read.
+    # Refusing is the only safe answer: silently skipping one would let an
+    # unrecoverable resource be declared in `environment/rogue.tf.json` with the
+    # check still printing ok.
+    for half in ("foundation", "environment"):
+        for path in sorted((ROOT / half).glob("*.tf.json")):
+            failures.append(
+                f"{path.relative_to(ROOT)}: JSON configuration is not readable by this check. "
+                f"Express it in HCL, or teach check_split.py to parse .tf.json — do not leave "
+                f"it unchecked."
+            )
 
     for path in sorted((ROOT / "environment").glob("*.tf")):
         for kind, name, _ in blocks(path):
