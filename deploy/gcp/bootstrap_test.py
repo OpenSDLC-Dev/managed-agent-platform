@@ -203,10 +203,18 @@ def main():
         # `openssl | gcloud --data-file=-` pipeline the right-hand side still
         # runs, reads EOF, and stores an enabled ZERO-BYTE password that every
         # later run skips as "already done".
+        # Resolved before the fake bin goes on PATH, and by lookup rather than a
+        # fixed path: the wrapper cannot call bare `openssl` without recursing
+        # into itself, and `/usr/bin/openssl` does not exist everywhere (Homebrew
+        # puts it under /opt/homebrew/bin, and container images vary).
+        real_openssl = shutil.which("openssl")
+        if real_openssl is None:
+            print("openssl is not on PATH; bootstrap.sh requires it", file=sys.stderr)
+            return 1
         (binp / "openssl").write_text(
             '#!/usr/bin/env bash\n'
             'if [[ -e "$FAKE_STATE/fault.openssl" ]]; then exit 1; fi\n'
-            'exec /usr/bin/openssl "$@"\n'
+            'exec %s "$@"\n' % real_openssl
         )
         (binp / "openssl").chmod(0o755)
 

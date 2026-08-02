@@ -63,9 +63,10 @@ declare a `resource` of any unrecoverable kind, and every
 The check reads both halves **recursively**, so moving a resource into a child module does
 not move it out of scope — and it *refuses* rather than skips anything it cannot read: a
 `.tf.json` file, a `module` whose source is a registry or git address or resolves outside the
-half, an unterminated heredoc, unbalanced braces, or a multi-line `${...}` interpolation
-(quote tracking is per line, so a string left open would desync the brace depth for the rest
-of the file). Silently skipping any of those would print `ok` over a partial scan, which is
+half or computed at plan time, an unterminated heredoc, unbalanced braces, a multi-line
+`${...}` interpolation, or a quoted string inside a `${...}` interpolation or a `%{...}`
+template directive (quote tracking is per line, so either a string left open or a nested
+quote would desync the brace depth for the rest of the file). Silently skipping any of those would print `ok` over a partial scan, which is
 worse than no check at all.
 
 ## What a destroy actually costs
@@ -91,6 +92,10 @@ cat > deploy/gcp/foundation/terraform.tfvars <<'EOF'
 project_id = "your-project"
 EOF
 cp deploy/gcp/foundation/terraform.tfvars deploy/gcp/environment/terraform.tfvars
+
+# environment/ additionally needs the identity Cloud Build runs as (see below)
+gcloud builds get-default-service-account --project your-project   # prints projects/…/serviceAccounts/EMAIL
+echo 'cloud_build_service_account = "EMAIL"' >> deploy/gcp/environment/terraform.tfvars
 
 make gcp-foundation-apply              # once, ever — creates the secrets EMPTY
 PROJECT=your-project make gcp-bootstrap  # fills them, creates the GCS HMAC key

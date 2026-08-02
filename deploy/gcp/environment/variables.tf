@@ -132,18 +132,28 @@ variable "cloud_build_service_account" {
   type        = string
   description = <<-EOT
     The identity Cloud Build runs as, which needs artifactregistry.writer to push
-    the component images. Empty means the legacy default,
-    PROJECT_NUMBER@cloudbuild.gserviceaccount.com.
+    the component images. Get it with:
 
-    This is a variable rather than a constant because the answer is genuinely
-    bimodal: projects that enabled the Cloud Build API more recently run builds
-    as the Compute Engine default service account instead
-    (PROJECT_NUMBER-compute@developer.gserviceaccount.com). Guessing wrong
-    grants writer to an account no build uses and the first push fails on a
-    permission this apply could have granted. `gcloud builds describe` names the
-    one your project actually uses.
+        gcloud builds get-default-service-account --project YOUR_PROJECT
+
+    REQUIRED, with no default, because every possible default is wrong for half
+    of all projects and wrong in an expensive place. Projects that ran their
+    first build before 2024-04-29 use the legacy
+    PROJECT_NUMBER@cloudbuild.gserviceaccount.com; projects created after it use
+    the Compute Engine default service account,
+    PROJECT_NUMBER-compute@developer.gserviceaccount.com. Guessing grants writer
+    to an account no build uses, and nothing surfaces until the first image
+    push — by which time the apply has already created a cluster and a database.
+    A required variable turns that into a prompt with the command above in it.
+
+    If your builds use a trigger-specific service account, name that one instead:
+    the default is only what a build runs as when a trigger does not override it.
   EOT
-  default     = ""
+
+  validation {
+    condition     = can(regex("^[^@ ]+@[^@ ]+\\.(iam\\.)?gserviceaccount\\.com$", var.cloud_build_service_account))
+    error_message = "Must be a service account email, e.g. 123456789@cloudbuild.gserviceaccount.com or 123456789-compute@developer.gserviceaccount.com. `gcloud builds get-default-service-account` prints it prefixed with `projects/.../serviceAccounts/` — pass only the email."
+  }
 }
 
 variable "db_tier" {
