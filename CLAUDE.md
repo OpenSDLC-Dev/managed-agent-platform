@@ -73,7 +73,7 @@ internal/
   queue/      # work queue (Postgres FOR UPDATE SKIP LOCKED; redis optional later)
   telemetry/  # OTel/OTLP init; span ↔ span.* same-source instrumentation
   store/      # Postgres schema/migrations, reserved multi-tenant columns
-deploy/{helm,compose}
+deploy/{helm,compose,gcp}
 ```
 
 (Plus test-support: `internal/{pgtest,modeltest}`, `internal/sandbox/sandboxtest`, `internal/blob/blobtest`, `internal/provider/providertest`, `internal/secrets/secretstest`, `internal/secrets/gcpkms/gcpkmstest`, `internal/webtool/webtooltest`, and the top-level `evals/` live suite. There is no `internal/mcp` or `internal/policy`: no MCP client is built yet, and permission policy lives across `domain`/`toolset`/`brain`/`api`.) What each package's files actually do: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) → "Package reference".
@@ -84,7 +84,7 @@ Primary deps: `github.com/anthropics/anthropic-sdk-go`, `go.opentelemetry.io/ote
 
 > Go 1.26 is installed (via Homebrew). Docker is available; `psql` is **not** — use the Postgres container.
 
-The Go merge gate has one executable source — the root **`Makefile`**; prose and CI name its targets instead of duplicating commands (CI additionally runs its `helm` and `compose` jobs — chart lint/render and a compose smoke test — which stay in ci.yml, and a PR needs the whole workflow green):
+The Go merge gate has one executable source — the root **`Makefile`**; prose and CI name its targets instead of duplicating commands (CI additionally runs its `helm`, `terraform` and `compose` jobs — chart lint/render, the GCP staging Terraform's credential-free checks, and a compose smoke test — which stay in ci.yml, and a PR needs the whole workflow green):
 
 ```
 make verify               # the whole Go gate: build + crossbuild + vet + fmt-check + test + cover-gate
@@ -92,7 +92,18 @@ make build crossbuild     # host build + linux/arm cross-compile of ./internal/.
 make vet fmt-check        # lint
 make test cover-gate      # go test -count=1 with the coverage profile, then the ≥90% gate
 docker compose -f deploy/compose/docker-compose.yml up   # local: controlplane+brain+executor+Postgres+MinIO+OpenBao(+Jaeger)
+make gcp-fmt gcp-validate gcp-split-check gcp-lint  # GCP staging Terraform, credential-free
+make gcp-bootstrap-test gcp-split-check-test         # ...and its tooling, run rather than read
 ```
+
+The `gcp-*` targets are the one group in that Makefile that is **not** part of the gate:
+`deploy/gcp/`'s Terraform is developer tooling for GCP deployment only (plan 20,
+Decision 9), never a dependency of the platform, its build, or `make verify`. The six
+checking targets above need no credentials and all run in CI; the apply targets cost money
+and are interactive on purpose. The two `*-test` targets exist because the other four are
+static: shellcheck cannot know that `gcloud secrets versions describe` rejects `--filter`,
+and it passed a `bootstrap.sh` that aborted on its first call in every project. Terraform is not installed by this repo — it is not in Homebrew
+core, so `brew install hashicorp/tap/terraform`.
 
 CI (`.github/workflows/ci.yml`) invokes the same targets, so the gate cannot drift between the docs, the verifier, and the merge check. The coverage gate is **total statement coverage ≥ 90%** over the **logic packages** under `./internal/...` — deliberately outside the denominator: `cmd/` main glue and the test-support packages (`internal/pgtest`, `internal/sandbox/sandboxtest`, `internal/modeltest`, `internal/blob/blobtest`, `internal/provider/providertest`, `internal/secrets/secretstest`, `internal/secrets/gcpkms/gcpkmstest`, `internal/webtool/webtooltest`), whose uncovered statements are the branches that fire only when a suite fails or a live tier is misconfigured. `make test` needs Docker (store/API/sandbox suites) and a Kubernetes cluster (the K8s sandbox contract test; a local kind cluster works) — a missing daemon or cluster is a hard failure, not a skip.
 

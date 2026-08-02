@@ -604,6 +604,39 @@ from the controlplane Service to the executor);
 four binaries, bundled Postgres + MinIO + OpenBao with its init one-shot,
 loopback-bound control plane, optional Jaeger profile).
 
+`deploy/gcp` is Terraform for the GCP staging environment (docs/plan/20, Decision 9) —
+developer tooling for GCP deployment only, never a dependency of the platform, its build,
+or `make verify`. **Two configurations, not one**, split by "can a rebuild recreate this
+identically?" rather than by cost: `foundation/` (KMS key ring and crypto key, the three
+service accounts, the Secret Manager secret *containers*) is created once and never
+destroyed, because KMS key rings and crypto keys cannot be deleted at all and the vault
+ciphertext in Postgres is decryptable by that key and nothing else, and because deleting a
+service account deletes its HMAC keys — an identity in the disposable half would strand the
+once-readable HMAC secret in Secret Manager, valid-looking and dead. `environment/` (GKE
+cluster and node pools, Artifact Registry, Cloud SQL, the bucket, every IAM binding) is
+created and destroyed freely, reads the foundation through `data` sources by name, and
+carries the dedicated tainted sandbox node pool whose kubelet sets the `podPidsLimit` the
+Pod API cannot express. No secret VALUE is in either
+configuration: Terraform holds names, IAM bindings and preconditions, `bootstrap.sh` creates
+the values — including the GCS HMAC key, whose secret GCS returns exactly once, so a
+Terraform resource holding it would hold it in state — and `environment/` reads the database
+password through an *ephemeral* resource into the write-only `password_wo`. The `make gcp-*`
+targets wrap all of it; `gcp-fmt`, `gcp-validate`, `gcp-split-check`, `gcp-lint`,
+`gcp-bootstrap-test` and `gcp-split-check-test` need no
+credentials and run in CI, which enforces the split structurally: no unrecoverable
+`resource` kind in `environment/`, and in `foundation/` both guards each such resource can
+carry — `prevent_destroy`, which lives in the configuration and vanishes with the block it is
+written in, and `deletion_policy = "PREVENT"`, which is read from state and survives that.
+Both halves are read recursively, so a child module is still in scope, and anything the
+checker cannot parse (`.tf.json`, a module sourced from outside the half or computed at plan
+time, an unterminated heredoc, unbalanced braces, a multi-line interpolation, a quoted string
+inside a `${...}` interpolation or a `%{...}` template directive) is a hard failure rather
+than a skipped file — a partial scan that prints
+`ok` is the one outcome worse than no check. The last two targets are what keep that true:
+they run the tooling against injected faults and planted violations rather than reading it,
+because everything else in the group is static and a static gate has already passed a
+`bootstrap.sh` that could not complete a single run.
+
 ## Security invariants
 
 - **Credentials never enter the sandbox.** Tool credentials (vaults) reach the wire only

@@ -347,6 +347,37 @@ jobs:
           fi
           echo "ok: guard fired"
 
+  # The GCP staging Terraform (docs/plan/20, Decision 9). fmt and validate need
+  # no credentials, no state and no GCP project, which is what lets them run on
+  # every PR: the configuration would otherwise rot silently between the rare
+  # runs that actually touch GCP, and the first symptom would be a failed apply
+  # halfway through provisioning a cluster.
+  terraform:
+    name: terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_wrapper: false
+      - name: terraform fmt
+        run: make gcp-fmt
+      - name: terraform validate
+        run: make gcp-validate
+      - name: the two configurations stay independent
+        run: make gcp-split-check
+      - name: bootstrap script lints
+        run: make gcp-lint
+      # shellcheck cannot know that `gcloud secrets versions describe` rejects
+      # `--filter`; it exited 0 on a bootstrap.sh that aborted on its first call
+      # in every project. These two RUN the tooling instead of reading it.
+      - name: bootstrap script behaves
+        run: make gcp-bootstrap-test
+      - name: the split guard actually bites
+        run: make gcp-split-check-test
+
   # Local dev stack: validate the compose file, build the image, and smoke-test
   # that the control plane comes up and serves (migrations + auth) and the brain
   # loads its model-providers config. The executor is left out — it wants the host

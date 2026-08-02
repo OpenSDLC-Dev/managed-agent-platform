@@ -67,7 +67,7 @@ be hollowed out.
 make build                 # build (go build ./...)
 make test                  # unit + contract tests (go test -count=1, with coverage profile)
 make vet fmt-check         # lint
-make verify                # the whole Go gate (CI additionally runs its helm/compose jobs)
+make verify                # the whole Go gate (CI additionally runs its helm, terraform and compose jobs)
 make eval                  # RUN_EVALS=1: the live end-to-end eval suite (real model + sandboxes)
 ```
 
