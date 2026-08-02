@@ -18,23 +18,38 @@ identically?"**
 | | `foundation/` | `environment/` |
 | --- | --- | --- |
 | Lifecycle | created once, **never destroyed** | created and destroyed freely |
-| Holds | KMS key ring + crypto key, the three service accounts, the GCS HMAC key, the Secret Manager secrets | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
+| Holds | KMS key ring + crypto key, the three service accounts, the Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
 | Idle cost | cents a month | a running cluster and database |
-| `terraform destroy` | not supported — resources carry `prevent_destroy` | `make gcp-env-destroy` |
+| `terraform destroy` | not supported — `prevent_destroy` **and** `deletion_policy = "PREVENT"` | `make gcp-env-destroy` |
 
 Three things make the split necessary rather than tidy:
 
-- **KMS key rings and crypto keys cannot be deleted.** `terraform destroy` removes them
-  from state and leaves them in the project, so a single-configuration setup collides on
-  the name at the next apply. For the crypto key the stakes are higher than a name
-  collision: the vault ciphertext in Postgres is decryptable by that key and nothing else,
-  so a teardown that scheduled its key versions for destruction would be silent,
-  irreversible data loss discovered at the next credential read.
+- **KMS key rings and crypto keys cannot be deleted — and destroying the *resource* is
+  worse than leaving it.** The provider's default `deletion_policy` is `DELETE`, which
+  schedules every `CryptoKeyVersion` for destruction: the name stays taken, so a
+  single-configuration setup still collides at the next apply, and the key is now unusable.
+  The vault ciphertext in Postgres is decryptable by that key and nothing else, so that is
+  silent, irreversible data loss discovered at the next credential read.
+
+  Hence **two** guards, not one. `prevent_destroy` is a property of the *configuration* and
+  vanishes along with the block it is written in — Terraform will destroy a resource whose
+  block you simply deleted. `deletion_policy = "PREVENT"` is read from *state*, so it
+  survives that. Between them they also make a rename loud: `name`, `location`, `key_ring`
+  and `account_id` force replacement, so editing `name_prefix` or `kms_location` aborts the
+  plan instead of quietly recreating the key.
 - **Deleting a service account deletes its HMAC keys.** An identity in the disposable half
   would strand the once-readable HMAC secret in Secret Manager — valid-looking, and dead.
+  (The HMAC *key* is not a Terraform resource at all; `bootstrap.sh` creates it. GCS returns
+  its secret exactly once, so a resource holding it would hold it in state.)
 - **The secrets are the reconciliation source.** A rebuilt environment is brought back into
   agreement with them: the database password is reapplied to the new Cloud SQL instance,
   and the HMAC pair is proven against the new bucket by an authenticated call.
+
+**No secret value is in either configuration.** Terraform holds names, IAM bindings and
+preconditions; `bootstrap.sh` owns value creation, and `environment/` reads the database
+password through an *ephemeral* resource into a *write-only* argument, so neither state file
+contains it. A value in `secret_data` would be plaintext in state — and in the state of the
+half that is destroyed and rebuilt routinely, so every rebuild would scatter another copy.
 
 `environment/` reads the foundation through `data` sources, by name, never by remote state.
 So the two apply independently, and a destroy in the disposable half structurally cannot
@@ -64,15 +79,29 @@ project_id = "your-project"
 EOF
 cp deploy/gcp/foundation/terraform.tfvars deploy/gcp/environment/terraform.tfvars
 
-make gcp-foundation-apply   # once, ever
+make gcp-foundation-apply              # once, ever — creates the secrets EMPTY
+PROJECT=your-project make gcp-bootstrap  # fills them, creates the GCS HMAC key
 make gcp-env-apply
 ```
 
-`terraform.tfvars` is gitignored. `name_prefix`, `region` and `kms_location` must match
-between the two configurations — `environment/` finds the foundation's resources by name,
-so a mismatch surfaces as a missing data source rather than as a wrong-looking value.
+**The order is load-bearing.** `environment/` reads the database password ephemerally at
+apply time; run it before `gcp-bootstrap` and it fails naming the secret that has no
+version. `gcp-bootstrap` is idempotent by *skipping*: a secret that already has a version is
+left exactly as it is, because that version may be the only thing that can decrypt
+something. Re-running it after an `environment/` teardown is the normal case and is a no-op.
 
-Neither target passes `-auto-approve`. Read the plan before the first one.
+`terraform.tfvars` is gitignored. `name_prefix` and `kms_location` must match between the two
+configurations — `environment/` finds the foundation's resources by name, so a mismatch
+surfaces as a missing data source rather than as a wrong-looking value. (`region` does not
+need to match: no foundation resource is regional. `zone` must be inside `environment/`'s
+`region`, which a precondition checks.)
+
+Neither apply target passes `-auto-approve`. Read the plan before the first one.
+
+**Rotating the database password**: run `gcp-bootstrap`'s `gcloud secrets versions add` by
+hand, then bump `db_password_version` and re-apply `environment/`. Write-only arguments leave
+Terraform nothing to diff, so that counter is the only signal that it should push the new
+value.
 
 ## Handover to Helm
 
@@ -86,17 +115,27 @@ two of them.
 ```sh
 cd deploy/gcp/environment
 gcloud container clusters get-credentials "$(terraform output -raw cluster_name)" \
-  --region "$(terraform output -raw region)"
+  --zone "$(terraform output -raw zone)"
 
-terraform output -raw helm_values_mode1 > values-gcp.yaml
+terraform output -raw helm_values_mode1 > ~/map-values-gcp.yaml
 ```
 
+Write it **outside the repo tree**. The chart also needs credentials Terraform does not
+supply, the natural place to put them is that same file, and a file of live credentials
+inside a checkout is one `git add -A` from being committed.
+
 That fragment carries exactly what mode-1 needs from Terraform — where the images live and
-where sandboxes run — and nothing else. The bundled services still need their own
-credentials, which the chart deliberately does not generate (a generated credential is
-unstable under `helm template` and GitOps), so `openbao.staticSealKey`,
-`openbao.platformToken`, `minio.*` and `controlplane.apiKey` are yours to supply alongside
-it.
+where sandboxes run — and nothing else. The chart deliberately generates no credentials (a
+generated credential is unstable under `helm template` and GitOps), so these are yours to
+supply alongside it, and the render fails naming each one you miss:
+
+| Value | Why |
+| --- | --- |
+| `controlplane.apiKey` | the management API key |
+| `brain.modelProviders` | at least one model route, as a JSON array |
+| `postgresql.password` | bundled Postgres; must be URL-safe — it is embedded in `DATABASE_URL` |
+| `minio.rootUser` / `minio.rootPassword` | bundled object storage |
+| `openbao.staticSealKey` / `openbao.platformToken` | bundled OpenBao; the seal key is base64 of exactly 32 bytes |
 
 The sandbox-placement values in that fragment are a **pair, and neither half works alone**.
 Without the tolerations every sandbox pod stays `Pending` forever — the pool's taint has no
@@ -121,9 +160,9 @@ account is created here; the **annotation** on that KSA comes from the chart val
 `namespace` and `release_name` are what the binding names — install the chart somewhere
 else and ADC fails at pod startup rather than denying a permission later.
 
-## Four settings that are not the provider's defaults
+## Five settings that are not the provider's defaults
 
-Three are staging choices and the fourth is not — it is correct everywhere, and is listed
+Four are staging choices and the fifth is not — it is correct everywhere, and is listed
 here because it is equally easy to leave at the default and equally expensive to discover:
 
 | Setting | Why | Why not in production |
@@ -131,6 +170,7 @@ here because it is equally easy to leave at the default and equally expensive to
 | `deletion_protection = false` on the GKE cluster | teardown must be one command | it exists to stop exactly this |
 | `deletion_protection = false` **and** `settings.deletion_protection_enabled = false` on Cloud SQL | two separate flags, both of which block a destroy | ditto |
 | `force_destroy = true` on the bucket | the acceptance battery leaves objects in it by construction | it deletes the objects |
+| zonal cluster (`location = var.zone`) | on a *regional* cluster `node_count` is per zone across three zones, so the defaults would provision 12 nodes where the variables promise 4 | production wants the zone redundancy — and should then read `node_count` as per-zone |
 | `connection_pool_config { connection_pooling_enabled = false }` | **not** staging-only — keep it off everywhere | transaction-mode pooling breaks a persistent `LISTEN`, the failure mode `internal/events/broker.go` names; SSE delivery depends on one pooled connection holding `LISTEN` for the life of the subscription |
 
 ## State, and recovering it
@@ -140,28 +180,43 @@ bucket, and a bucket is the kind of thing the foundation exists to own — the b
 circular, and the usual fix (a hand-made state bucket outside Terraform) reintroduces the
 untracked resource this split exists to avoid.
 
-Losing `foundation/`'s state does not lose the resources, because every resource in it is
-adoptable:
+**No secret is in either state file.** That is the point of `bootstrap.sh` and of
+`password_wo`: the database password, the HMAC pair and the model key exist in Secret Manager
+and nowhere else Terraform can reach. So a lost state file costs you bookkeeping, not
+credentials.
+
+Losing `foundation/`'s state is recoverable, because every resource in it is adoptable — but
+adopt **all ten**, not just the key ring. A partial import fails on the first
+already-existing resource it did not import:
 
 ```sh
 cd deploy/gcp/foundation
-terraform import google_kms_key_ring.map projects/P/locations/L/keyRings/map-keyring
-terraform import google_kms_crypto_key.cipher projects/P/locations/L/keyRings/map-keyring/cryptoKeys/map-credentials
+P=projects/your-project; L=us-central1; R=map-keyring
+terraform import google_kms_key_ring.map                   "$P/locations/$L/keyRings/$R"
+terraform import google_kms_crypto_key.cipher              "$P/locations/$L/keyRings/$R/cryptoKeys/map-credentials"
+terraform import google_service_account.controlplane       "$P/serviceAccounts/map-controlplane@your-project.iam.gserviceaccount.com"
+terraform import google_service_account.executor           "$P/serviceAccounts/map-executor@your-project.iam.gserviceaccount.com"
+terraform import google_service_account.storage            "$P/serviceAccounts/map-storage@your-project.iam.gserviceaccount.com"
+terraform import google_secret_manager_secret.db_password      "$P/secrets/map-db-password"
+terraform import google_secret_manager_secret.blob_access_key  "$P/secrets/map-blob-access-key"
+terraform import google_secret_manager_secret.blob_secret_key  "$P/secrets/map-blob-secret-key"
+for api in cloudkms iam iamcredentials secretmanager; do
+  terraform import "google_project_service.required[\"$api.googleapis.com\"]" "your-project/$api.googleapis.com"
+done
 ```
 
 The same commands are how a project that **already** has a key ring adopts it on the first
-apply, instead of colliding on the name.
-
-One consequence of Terraform owning the HMAC key: **its secret is in the state file.** GCS
-returns an HMAC secret exactly once, at creation, so any tool that creates one holds it.
-Treat `foundation/terraform.tfstate` as a credential — it is gitignored, and Secret Manager
-holds the authoritative copy the deployment actually reads.
+apply, instead of colliding on the name. Nothing here imports a secret *version* or the HMAC
+key, and nothing needs to: `bootstrap.sh` is not Terraform-managed, and re-running it after
+an import is a no-op because the versions already exist.
 
 ## Checking it without touching GCP
 
 ```sh
-make gcp-fmt gcp-validate
+make gcp-fmt gcp-validate gcp-split-check gcp-lint
 ```
 
-Neither needs credentials, state, or a project. CI runs both on every PR, so the
+None of them needs credentials, state, or a project. `gcp-split-check` is the structural
+enforcement of the two-configuration split — `environment/` may not *own* a resource of an
+unrecoverable kind, and `foundation/` must protect every one it declares. CI runs both on every PR, so the
 configuration cannot rot silently between the rare runs that actually provision anything.

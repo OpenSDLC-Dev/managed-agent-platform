@@ -84,7 +84,7 @@ Primary deps: `github.com/anthropics/anthropic-sdk-go`, `go.opentelemetry.io/ote
 
 > Go 1.26 is installed (via Homebrew). Docker is available; `psql` is **not** — use the Postgres container.
 
-The Go merge gate has one executable source — the root **`Makefile`**; prose and CI name its targets instead of duplicating commands (CI additionally runs its `helm` and `compose` jobs — chart lint/render and a compose smoke test — which stay in ci.yml, and a PR needs the whole workflow green):
+The Go merge gate has one executable source — the root **`Makefile`**; prose and CI name its targets instead of duplicating commands (CI additionally runs its `helm`, `terraform` and `compose` jobs — chart lint/render, the GCP staging Terraform's credential-free checks, and a compose smoke test — which stay in ci.yml, and a PR needs the whole workflow green):
 
 ```
 make verify               # the whole Go gate: build + crossbuild + vet + fmt-check + test + cover-gate

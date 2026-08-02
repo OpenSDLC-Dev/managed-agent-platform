@@ -4,25 +4,38 @@
 # cheap" but "can a rebuild recreate this identically?" (plan 20, Decision 9).
 # Everything here answers no:
 #
-#   - KMS key rings and crypto keys CANNOT BE DELETED. `terraform destroy`
-#     removes them from state and leaves them in the project, so a naive
-#     single-configuration setup collides on the name at the next apply — and
-#     for the crypto key the stakes are higher than a name collision, because
-#     the vault ciphertext in Postgres is decryptable by that key and nothing
-#     else.
+#   - KMS key rings and crypto keys cannot be deleted from a project. Destroying
+#     the Terraform resource does NOT leave a working key behind: the provider's
+#     default deletion_policy is DELETE, which schedules every CryptoKeyVersion
+#     for destruction and renders the key unusable while the name stays taken.
+#     The vault ciphertext in Postgres is decryptable by that key and nothing
+#     else, so that is silent, irreversible data loss discovered at the next
+#     credential read. Hence deletion_policy = "PREVENT" below, and not only
+#     prevent_destroy: prevent_destroy is a property of the CONFIGURATION and
+#     disappears along with the block it is written in, while deletion_policy is
+#     read from STATE and so survives someone deleting the resource block.
 #   - Deleting a service account deletes its HMAC keys. An identity in the
 #     disposable half would strand the once-readable HMAC secret in Secret
 #     Manager: valid-looking, and dead.
-#   - The secrets themselves, which are the reconciliation source a rebuilt
+#   - The Secret Manager secrets, which are the reconciliation source a rebuilt
 #     environment is brought back into agreement with.
 #
-# So `terraform destroy` is not a supported operation here. Every resource that
-# would lose data carries prevent_destroy, and `make gcp-env-destroy` does not
-# touch this state.
+# What is deliberately NOT here: any secret VALUE. Terraform holds names, IAM
+# bindings and preconditions only (plan 20, Decision 6). Putting a value in
+# `secret_data` writes it into state in plaintext, and `environment/` reading it
+# back would put a second copy in the state of the half that is destroyed and
+# rebuilt routinely. So this configuration creates the secret *containers* and
+# `bootstrap.sh` adds the first version of each — including the GCS HMAC key,
+# whose secret GCS returns exactly once and which therefore must not be a
+# Terraform resource either.
+#
+# `terraform destroy` is not a supported operation here, and `make
+# gcp-env-destroy` does not touch this state.
 
 resource "google_project_service" "required" {
   for_each = toset([
     "cloudkms.googleapis.com",
+    "iam.googleapis.com",
     "iamcredentials.googleapis.com",
     "secretmanager.googleapis.com",
   ])
@@ -45,6 +58,11 @@ resource "google_kms_key_ring" "map" {
 
   depends_on = [google_project_service.required]
 
+  # A key ring has no deletion_policy because it has no deletion: the API offers
+  # no delete at all. prevent_destroy is the whole guard here, and its real job
+  # is to stop a RENAME — `name` and `location` force replacement, so editing
+  # name_prefix or kms_location would otherwise plan a destroy of a resource
+  # that cannot be destroyed. With the guard the plan fails loudly instead.
   lifecycle {
     prevent_destroy = true
   }
@@ -57,6 +75,9 @@ resource "google_kms_crypto_key" "cipher" {
   # ENCRYPT_DECRYPT, not RAW_ENCRYPT_DECRYPT: the backend calls the standard
   # Encrypt/Decrypt methods. A RAW_ENCRYPT_DECRYPT key fails the startup probe.
   purpose = "ENCRYPT_DECRYPT"
+
+  # The default is DELETE, which destroys every key version. See the header.
+  deletion_policy = "PREVENT"
 
   # SOFTWARE, stated rather than defaulted, because the protection level decides
   # the plaintext ceiling the cipher enforces: 64 KiB here, 8 KiB on an HSM key
@@ -81,8 +102,9 @@ resource "google_kms_crypto_key" "cipher" {
 # and the gate-config endpoint both call Decrypt), so it is the only identity
 # that needs the decrypt half.
 resource "google_service_account" "controlplane" {
-  account_id   = "${var.name_prefix}-controlplane"
-  display_name = "managed-agent-platform control plane"
+  account_id      = "${var.name_prefix}-controlplane"
+  display_name    = "managed-agent-platform control plane"
+  deletion_policy = "PREVENT"
 
   lifecycle {
     prevent_destroy = true
@@ -94,8 +116,9 @@ resource "google_service_account" "controlplane" {
 # the gate-config endpoint. So the one KMS call this identity ever makes is the
 # startup probe's Encrypt.
 resource "google_service_account" "executor" {
-  account_id   = "${var.name_prefix}-executor"
-  display_name = "managed-agent-platform executor"
+  account_id      = "${var.name_prefix}-executor"
+  display_name    = "managed-agent-platform executor"
+  deletion_policy = "PREVENT"
 
   lifecycle {
     prevent_destroy = true
@@ -105,10 +128,13 @@ resource "google_service_account" "executor" {
 # Blob storage is reached over the S3 protocol (internal/blob/s3, minio-go), so
 # it authenticates with an HMAC key rather than with Workload Identity. The key
 # belongs to this account, which is why the account cannot live in the
-# disposable half.
+# disposable half — and why the key itself is bootstrap.sh's to create, since
+# GCS returns its secret exactly once and a Terraform resource holding it would
+# hold it in state.
 resource "google_service_account" "storage" {
-  account_id   = "${var.name_prefix}-storage"
-  display_name = "managed-agent-platform blob storage (GCS HMAC)"
+  account_id      = "${var.name_prefix}-storage"
+  display_name    = "managed-agent-platform blob storage (GCS HMAC)"
+  deletion_policy = "PREVENT"
 
   lifecycle {
     prevent_destroy = true
@@ -116,41 +142,13 @@ resource "google_service_account" "storage" {
 }
 
 # ---------------------------------------------------------------------------
-# The GCS HMAC key. Its secret is returned exactly once, at creation, and is
-# therefore in Terraform state — the README says so plainly rather than leaving
-# an operator to assume otherwise.
+# Secret Manager: the containers, with their replication. The VALUES are
+# bootstrap.sh's job — see the header, and plan 20's Decision 6.
 # ---------------------------------------------------------------------------
-
-resource "google_storage_hmac_key" "blob" {
-  service_account_email = google_service_account.storage.email
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
-# ---------------------------------------------------------------------------
-# Secret Manager. These are what a rebuilt environment is reconciled against:
-# the database password is reapplied to the new Cloud SQL instance, and the
-# HMAC pair is proven against the new bucket by an authenticated call.
-# ---------------------------------------------------------------------------
-
-resource "random_password" "db" {
-  length = 32
-  # Cloud SQL accepts far more than this, but the password travels through a
-  # DSN in a Kubernetes Secret and through psql command lines during
-  # acceptance; restricting to characters that survive both unquoted removes a
-  # class of failure that looks like an authentication bug.
-  special          = true
-  override_special = "-_.~"
-
-  lifecycle {
-    ignore_changes = all
-  }
-}
 
 resource "google_secret_manager_secret" "db_password" {
-  secret_id = "${var.name_prefix}-db-password"
+  secret_id       = "${var.name_prefix}-db-password"
+  deletion_policy = "PREVENT"
 
   replication {
     auto {}
@@ -161,15 +159,11 @@ resource "google_secret_manager_secret" "db_password" {
   lifecycle {
     prevent_destroy = true
   }
-}
-
-resource "google_secret_manager_secret_version" "db_password" {
-  secret      = google_secret_manager_secret.db_password.id
-  secret_data = random_password.db.result
 }
 
 resource "google_secret_manager_secret" "blob_access_key" {
-  secret_id = "${var.name_prefix}-blob-access-key"
+  secret_id       = "${var.name_prefix}-blob-access-key"
+  deletion_policy = "PREVENT"
 
   replication {
     auto {}
@@ -180,15 +174,11 @@ resource "google_secret_manager_secret" "blob_access_key" {
   lifecycle {
     prevent_destroy = true
   }
-}
-
-resource "google_secret_manager_secret_version" "blob_access_key" {
-  secret      = google_secret_manager_secret.blob_access_key.id
-  secret_data = google_storage_hmac_key.blob.access_id
 }
 
 resource "google_secret_manager_secret" "blob_secret_key" {
-  secret_id = "${var.name_prefix}-blob-secret-key"
+  secret_id       = "${var.name_prefix}-blob-secret-key"
+  deletion_policy = "PREVENT"
 
   replication {
     auto {}
@@ -199,9 +189,4 @@ resource "google_secret_manager_secret" "blob_secret_key" {
   lifecycle {
     prevent_destroy = true
   }
-}
-
-resource "google_secret_manager_secret_version" "blob_secret_key" {
-  secret      = google_secret_manager_secret.blob_secret_key.id
-  secret_data = google_storage_hmac_key.blob.secret
 }

@@ -8,12 +8,17 @@
 
 output "cluster_name" {
   value       = google_container_cluster.map.name
-  description = "GKE cluster name. `gcloud container clusters get-credentials $(terraform output -raw cluster_name) --region $(terraform output -raw region)`."
+  description = "GKE cluster name. See the zone output for the get-credentials invocation."
+}
+
+output "zone" {
+  value       = var.zone
+  description = "Zone the cluster lives in. `gcloud container clusters get-credentials $(terraform output -raw cluster_name) --zone $(terraform output -raw zone)`."
 }
 
 output "region" {
   value       = var.region
-  description = "Region the cluster and its backing services live in."
+  description = "Region Artifact Registry, Cloud SQL and the bucket live in."
 }
 
 output "artifact_registry" {
@@ -22,33 +27,15 @@ output "artifact_registry" {
 }
 
 # ---------------------------------------------------------------------------
-# Sandbox placement. A pair: neither half works alone. Without the tolerations
-# every sandbox pod stays Pending forever, because the pool's taint has no other
-# tolerator; without the selector sandbox pods land on the platform pool and the
-# dedicated pool buys nothing.
-# ---------------------------------------------------------------------------
-
-output "sandbox_node_selector" {
-  value       = { (local.sandbox_taint_key) = "true" }
-  description = "Chart: sandboxPlacement.nodeSelector — an ordinary YAML map, which the chart encodes into SANDBOX_K8S_NODE_SELECTOR's comma-separated key=value form."
-}
-
-output "sandbox_tolerations" {
-  value = [{
-    key      = local.sandbox_taint_key
-    operator = "Equal"
-    value    = "true"
-    effect   = "NoSchedule"
-  }]
-  description = "Chart: sandboxPlacement.tolerations — a YAML list of Kubernetes Toleration objects, which the chart passes through as the JSON array SANDBOX_K8S_TOLERATIONS parses."
-}
-
-# ---------------------------------------------------------------------------
 # Mode-1: bundled Postgres/MinIO/OpenBao with inline values (plan 20,
 # Decision 4). Only two things in that install come from this configuration —
 # where the images live and where sandboxes run — so this fragment holds exactly
-# those and nothing else. The bundled services still need their own credentials,
-# which the chart deliberately does not generate; the README says so.
+# those and nothing else, and holds them once. The sandbox placement is a PAIR
+# whose halves fail differently: without the tolerations every sandbox pod stays
+# Pending forever, because the pool's taint has no other tolerator; without the
+# selector they land on the platform pool, which is the pool the taint existed
+# to protect. Emitting them as one values file rather than as separate strings
+# is what stops an operator applying half of it.
 # ---------------------------------------------------------------------------
 
 output "helm_values_mode1" {
@@ -61,13 +48,8 @@ output "helm_values_mode1" {
       repository = "${var.project_id}/${google_artifact_registry_repository.images.repository_id}"
     }
     sandboxPlacement = {
-      nodeSelector = { (local.sandbox_taint_key) = "true" }
-      tolerations = [{
-        key      = local.sandbox_taint_key
-        operator = "Equal"
-        value    = "true"
-        effect   = "NoSchedule"
-      }]
+      nodeSelector = local.sandbox_node_selector
+      tolerations  = [local.sandbox_toleration]
     }
   })
   description = "Ready-to-use Helm values fragment for the mode-1 install: `terraform output -raw helm_values_mode1 > values-gcp.yaml`."

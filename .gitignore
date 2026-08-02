@@ -51,3 +51,6 @@ deploy/gcp/*/*.tfstate.*
 deploy/gcp/*/*.tfvars
 deploy/gcp/*/*.tfvars.json
 deploy/gcp/*/tfplan
+# A generated Helm values file, in case one is written here anyway — the README
+# says to keep it outside the tree precisely because credentials get appended to it.
+deploy/gcp/**/values*.yaml

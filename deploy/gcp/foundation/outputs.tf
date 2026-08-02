@@ -24,7 +24,7 @@ output "executor_service_account" {
 
 output "storage_service_account" {
   value       = google_service_account.storage.email
-  description = "Google service account owning the GCS HMAC key. Reached over the S3 protocol, so it is NOT bound to any Kubernetes ServiceAccount."
+  description = "Google service account bootstrap.sh creates the GCS HMAC key under. Reached over the S3 protocol, so it is NOT bound to any Kubernetes ServiceAccount."
 }
 
 output "db_password_secret" {

@@ -18,7 +18,7 @@ SHELL := /usr/bin/env bash
 .NOTPARALLEL:
 
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
-	gcp-fmt gcp-validate gcp-foundation-apply gcp-env-apply gcp-env-destroy gcp-env-rebuild
+	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-env-destroy gcp-env-rebuild
 
 build:
 	go build ./...
@@ -131,6 +131,24 @@ gcp-validate:
 		$(GCP_TF) -chdir=$$d init -backend=false -input=false >/dev/null; \
 		$(GCP_TF) -chdir=$$d validate; \
 	done
+
+# The structural half of Decision 9: environment/ may not OWN an unrecoverable
+# resource kind, and foundation/ must protect every one it declares. Expressed
+# over kinds rather than a list of addresses, so adding a resource cannot slip
+# past it and moving one between files cannot false-fail it.
+gcp-split-check:
+	python3 deploy/gcp/check_split.py
+
+gcp-lint:
+	shellcheck deploy/gcp/bootstrap.sh
+
+# Adds the first version of each Secret Manager secret and creates the GCS HMAC
+# key. Runs BETWEEN the two applies: the foundation creates the secrets empty,
+# this fills them, and environment/ reads them ephemerally. Idempotent by
+# skipping — a secret that already has a version is left alone, because that
+# version may be the only thing that can decrypt something.
+gcp-bootstrap:
+	PROJECT=$(PROJECT) NAME_PREFIX=$(or $(NAME_PREFIX),map) bash deploy/gcp/bootstrap.sh
 
 # Applies below cost money and are interactive on purpose — no -auto-approve.
 # Read the plan before the first one.

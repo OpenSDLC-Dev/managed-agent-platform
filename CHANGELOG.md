@@ -37,21 +37,48 @@ copy of an entry here.
   - **The secrets are what a rebuild is reconciled against** — the database password
     reapplied to a new Cloud SQL instance, the HMAC pair proven against a new bucket.
 
-  So `foundation/` holds those and is never destroyed (`prevent_destroy` throughout, and no
-  destroy target exists for it), while `environment/` holds the cluster, Artifact Registry,
-  Cloud SQL, the bucket and every IAM binding, reads the foundation through `data` sources
-  by name rather than by remote state, and tears down with one command. CI enforces the
-  split structurally rather than by convention: `environment/` may not declare a `resource`
-  of the three undeletable-or-load-bearing kinds, and every unrecoverable `foundation/`
-  resource must carry `prevent_destroy`. Both arms were measured red before landing.
+  So `foundation/` holds those and is never destroyed, while `environment/` holds the
+  cluster, Artifact Registry, Cloud SQL, the bucket and every IAM binding, reads the
+  foundation through `data` sources by name rather than by remote state, and tears down with
+  one command. CI enforces the split structurally rather than by convention: `environment/`
+  may not declare a `resource` of an unrecoverable kind, and every unrecoverable
+  `foundation/` resource must carry its guards. The check is expressed over *kinds*, so a
+  resource added later is covered without anyone remembering to extend a list, and moving
+  one between files does not turn it red. Every arm was measured — including the one that
+  matters most, a `prevent_destroy = false` sitting under a comment that says
+  `prevent_destroy = true`, which an earlier text-matching version of the check read as
+  compliance.
 
-  Four settings are not the provider's defaults, stated visibly rather than discovered
+  **Two guards, not one**, because they fail differently. `prevent_destroy` is a property of
+  the *configuration* and disappears along with the block it is written in — Terraform
+  destroys a resource whose block you merely deleted. `deletion_policy = "PREVENT"` is read
+  from *state* and survives that. The pair also makes a rename loud rather than silent:
+  `name`, `location`, `key_ring` and `account_id` all force replacement, so editing
+  `name_prefix` aborts the plan instead of quietly recreating the key. And the default this
+  replaces is worse than it sounds — a `google_kms_crypto_key` destroyed with the provider's
+  default `DELETE` policy schedules **every key version** for destruction, so the name stays
+  taken *and* the key becomes unusable.
+
+  **No secret value is in either state file**, which is what plan 20's Decision 6 asks for
+  ("Terraform holds names, IAM bindings, and preconditions only"). `bootstrap.sh` generates
+  the database password and creates the GCS HMAC key — whose secret GCS returns exactly
+  once, so a Terraform resource holding it would hold it in state — and writes both to
+  Secret Manager on **stdin**, never in `argv` where `ps` and shell history can read them.
+  `environment/` then reads the password through an **ephemeral** resource into
+  `password_wo`, a **write-only** argument, so the value reaches Cloud SQL without being
+  persisted anywhere. That last part refines the plan's own mechanic — it was going to reach
+  for the Admin API's `users.update` on stdin to keep the value out of `argv`, and the
+  write-only argument achieves the same thing with the provider doing the work.
+
+  Five settings are not the provider's defaults, stated visibly rather than discovered
   mid-teardown: `deletion_protection = false` on the cluster, **both** Cloud SQL deletion
-  flags (there are two, and either one blocks a destroy), `force_destroy` on the bucket
-  (the acceptance battery leaves objects in it by construction) — and one that is *not* a
-  staging choice at all: Cloud SQL's managed connection pooling stays **off**, because
-  transaction-mode pooling breaks a persistent `LISTEN`, which is the exact failure mode
-  `internal/events/broker.go` names and which SSE delivery depends on.
+  flags (there are two, and either one blocks a destroy), `force_destroy` on the bucket (the
+  acceptance battery leaves objects in it by construction), a **zonal** cluster — on a
+  regional one a node pool's `node_count` is *per zone* across three zones, so the defaults
+  would quietly bill three times what the variable descriptions promise — and one that is
+  *not* a staging choice at all: Cloud SQL's managed connection pooling stays **off**,
+  because transaction-mode pooling breaks a persistent `LISTEN`, which is the exact failure
+  mode `internal/events/broker.go` names and which SSE delivery depends on.
 
   The sandbox node pool is where slice 2's code becomes usable: a dedicated pool, tainted so
   the platform's own components stay off it, whose kubelet sets the **`podPidsLimit`** that
@@ -63,8 +90,8 @@ copy of an entry here.
   selector and they land on the platform pool, which is the pool the taint existed to
   protect.
 
-  `make gcp-fmt` and `make gcp-validate` need no credentials, no state and no project, so CI
-  runs them on every PR — the configuration cannot rot silently between the rare runs that
+  `make gcp-fmt`, `gcp-validate`, `gcp-split-check` and `gcp-lint` need no credentials, no
+  state and no project, so CI runs them all on every PR — the configuration cannot rot silently between the rare runs that
   provision anything, where the first symptom would be a failed apply halfway through
   creating a cluster.
 

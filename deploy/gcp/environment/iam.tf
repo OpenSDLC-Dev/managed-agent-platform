@@ -16,16 +16,26 @@
 # ---------------------------------------------------------------------------
 
 locals {
-  # The chart's map.fullname: the release name alone when it already contains
-  # the chart name, RELEASE-managed-agent-platform otherwise. Mirrored here so a
-  # release named "map" produces map-managed-agent-platform-controlplane and a
-  # release named "managed-agent-platform" produces
-  # managed-agent-platform-controlplane, exactly as helm renders them.
+  # The chart's map.fullname, mirrored: the release name alone when it already
+  # contains the chart name, RELEASE-managed-agent-platform otherwise — then
+  # `trunc 50 | trimSuffix "-"`. The truncation is not decoration. Helm allows a
+  # release name up to 53 characters, and without it a long release name would
+  # bind Workload Identity to a ServiceAccount that does not exist while the one
+  # that does gets nothing: an ADC failure at pod startup with no permission
+  # denial to point at it.
+  #
+  # NOT mirrored: nameOverride and fullnameOverride, which replace the chart name
+  # this arithmetic is built on. Set either and these bindings name the wrong
+  # ServiceAccount — see var.release_name.
   chart_name = "managed-agent-platform"
-  fullname = (
+  fullname_untruncated = (
     strcontains(var.release_name, local.chart_name)
     ? var.release_name
     : "${var.release_name}-${local.chart_name}"
+  )
+  fullname = trimsuffix(
+    substr(local.fullname_untruncated, 0, min(50, length(local.fullname_untruncated))),
+    "-",
   )
 
   controlplane_ksa = "${local.fullname}-controlplane"
@@ -105,4 +115,37 @@ resource "google_artifact_registry_repository_iam_member" "node_puller" {
   repository = google_artifact_registry_repository.images.name
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+}
+
+# ---------------------------------------------------------------------------
+# Cloud SQL. Mode-1 runs on the chart's bundled Postgres and does not touch
+# this; mode-2 reaches the instance through the Cloud SQL Auth Proxy, which
+# authenticates as the pod's Google identity and needs roles/cloudsql.client.
+# Granted to the two identities the chart can annotate — the brain also opens
+# the database, but the chart gives it no ServiceAccount to bind, which is a
+# chart gap rather than something this configuration can fix.
+# ---------------------------------------------------------------------------
+
+resource "google_project_iam_member" "controlplane_sql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${data.google_service_account.controlplane.email}"
+}
+
+resource "google_project_iam_member" "executor_sql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${data.google_service_account.executor.email}"
+}
+
+# ---------------------------------------------------------------------------
+# Cloud Build pushes the component images. Without this the very next step after
+# a successful apply fails on a permission the apply could have granted.
+# ---------------------------------------------------------------------------
+
+resource "google_artifact_registry_repository_iam_member" "build_pusher" {
+  location   = google_artifact_registry_repository.images.location
+  repository = google_artifact_registry_repository.images.name
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${data.google_project.current.number}@cloudbuild.gserviceaccount.com"
 }

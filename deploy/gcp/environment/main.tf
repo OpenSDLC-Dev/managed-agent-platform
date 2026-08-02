@@ -20,18 +20,36 @@
 # only in Postgres. Retaining the KMS key does not bring a deleted row back.
 
 locals {
-  # One definition, referenced by the node pool's taint and label and by the two
-  # sandbox-placement outputs — so the taint a node carries and the toleration
-  # the chart is told to set cannot drift apart.
-  sandbox_taint_key = "map.opensdlc.dev/sandbox"
+  # One definition of the taint, and one of the toleration that matches it,
+  # referenced by the node pool and by the Helm handover — so the taint a node
+  # carries and the toleration the chart is told to set cannot drift apart.
+  # Sharing only the KEY would not achieve that: change the value here and the
+  # outputs would still say "true", and every sandbox pod would stay Pending
+  # forever, which is the exact failure this local exists to prevent.
+  sandbox_taint_key   = "map.opensdlc.dev/sandbox"
+  sandbox_taint_value = "true"
+
+  # GKE's node-pool API spells the effect NO_SCHEDULE; the Kubernetes Toleration
+  # the chart passes through spells it NoSchedule. Not drift — two APIs.
+  sandbox_toleration = {
+    key      = local.sandbox_taint_key
+    operator = "Equal"
+    value    = local.sandbox_taint_value
+    effect   = "NoSchedule"
+  }
+  sandbox_node_selector = { (local.sandbox_taint_key) = local.sandbox_taint_value }
 }
 
 resource "google_project_service" "required" {
   for_each = toset([
     "artifactregistry.googleapis.com",
+    "cloudbuild.googleapis.com",
     "container.googleapis.com",
     "sqladmin.googleapis.com",
     "storage.googleapis.com",
+    # The acceptance ships traces to Cloud Trace through an in-cluster OTel
+    # Collector (plan 20, Decision 5).
+    "telemetry.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false
@@ -69,8 +87,16 @@ data "google_service_account" "storage" {
 # ---------------------------------------------------------------------------
 
 resource "google_container_cluster" "map" {
-  name     = "${var.name_prefix}-staging"
-  location = var.region
+  name = "${var.name_prefix}-staging"
+
+  # ZONAL, and that is a decision rather than a shortcut. On a regional cluster
+  # `node_count` is per zone and GKE spreads across three, so the pool defaults
+  # below would silently provision twelve nodes where the variable descriptions
+  # promise four — on a cluster Decision 9 keeps up between slices. A staging
+  # environment does not need zone redundancy; it needs the number in
+  # variables.tf to be the number an operator is billed for. A production
+  # deployment should be regional, and should then read node_count as per-zone.
+  location = var.zone
 
   # The default pool is replaced immediately by the two below. Terraform's own
   # documented idiom, kept because the pools differ in taints and kubelet config
@@ -93,6 +119,13 @@ resource "google_container_cluster" "map" {
   deletion_protection = false
 
   depends_on = [google_project_service.required]
+
+  lifecycle {
+    precondition {
+      condition     = startswith(var.zone, "${var.region}-")
+      error_message = "var.zone must be inside var.region — the cluster would otherwise sit in a different region from the registry, database and bucket it talks to."
+    }
+  }
 }
 
 resource "google_container_node_pool" "platform" {
@@ -132,13 +165,11 @@ resource "google_container_node_pool" "sandbox" {
     # egress gate — not the scheduler — is what governs that.
     taint {
       key    = local.sandbox_taint_key
-      value  = "true"
+      value  = local.sandbox_taint_value
       effect = "NO_SCHEDULE"
     }
 
-    labels = {
-      (local.sandbox_taint_key) = "true"
-    }
+    labels = local.sandbox_node_selector
 
     # The per-pod process limit the Pod API cannot express. Node configuration,
     # so it belongs here rather than to any slice of platform code.
@@ -210,14 +241,32 @@ resource "google_sql_database" "map" {
 # here, which is what makes a rebuild reconcilable: a destroyed instance takes
 # its user with it, and the next apply reapplies the surviving password to the
 # new one.
-data "google_secret_manager_secret_version" "db_password" {
+#
+# It is read EPHEMERALLY and written through `password_wo` — a write-only
+# argument. Neither leaves a copy in this state file, which matters more here
+# than in the foundation: this is the half that is destroyed and rebuilt
+# routinely, so an ordinary data source plus `password` would scatter plaintext
+# copies of the credential across every rebuild's state (plan 20, Decision 6 —
+# "Terraform never sees any of these; it holds names, IAM bindings and
+# preconditions only").
+#
+# This makes the apply order load-bearing: bootstrap.sh must have added the
+# secret's first version before this runs. It fails loudly if not, naming the
+# secret.
+ephemeral "google_secret_manager_secret_version" "db_password" {
   secret = "${var.name_prefix}-db-password"
 }
 
 resource "google_sql_user" "map" {
   name     = var.name_prefix
   instance = google_sql_database_instance.map.name
-  password = data.google_secret_manager_secret_version.db_password.secret_data
+
+  password_wo = ephemeral.google_secret_manager_secret_version.db_password.secret_data
+
+  # Write-only arguments are not stored, so Terraform cannot diff them. This
+  # counter is what tells it to write again: bump it after bootstrap.sh rotates
+  # the secret, and the next apply pushes the new value to the instance.
+  password_wo_version = var.db_password_version
 }
 
 resource "google_storage_bucket" "blob" {

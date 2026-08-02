@@ -5,19 +5,46 @@ variable "project_id" {
 
 variable "region" {
   type        = string
-  description = "Region for the cluster, Artifact Registry, Cloud SQL and the bucket."
+  description = "Region for Artifact Registry, Cloud SQL and the bucket. The cluster is zonal — see var.zone, which must be inside this region."
   default     = "us-central1"
 }
 
 variable "name_prefix" {
   type        = string
-  description = "Must match foundation/'s name_prefix — this configuration finds the foundation's resources by name."
+  description = "Must match foundation/'s name_prefix — this configuration finds the foundation's resources by name. Same 17-character bound, for the same service-account-id reason."
   default     = "map"
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{0,19}$", var.name_prefix))
-    error_message = "name_prefix must start with a lowercase letter and be 1-20 characters of [a-z0-9-]."
+    condition     = can(regex("^[a-z][a-z0-9-]{0,16}$", var.name_prefix))
+    error_message = "name_prefix must start with a lowercase letter and be 1-17 characters of [a-z0-9-] — a service account id is capped at 30 and this config appends up to '-controlplane' (13)."
   }
+}
+
+variable "zone" {
+  type        = string
+  description = <<-EOT
+    Zone for the GKE cluster. Zonal rather than regional deliberately: on a
+    regional cluster a node pool's node_count is PER ZONE across three zones, so
+    the pool sizes below would provision three times what they say. Must be
+    inside var.region.
+  EOT
+  default     = "us-central1-a"
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+-[a-z]$", var.zone))
+    error_message = "zone must be a GCP zone such as us-central1-a, not a region."
+  }
+}
+
+variable "db_password_version" {
+  type        = number
+  description = <<-EOT
+    Bump this after bootstrap.sh rotates the database password. `password_wo` is
+    a write-only argument, so Terraform holds no copy to diff against and cannot
+    tell that the secret changed; this counter is the signal that it should push
+    the current value to the instance again.
+  EOT
+  default     = 1
 }
 
 variable "kms_location" {
@@ -43,8 +70,13 @@ variable "release_name" {
     Helm release name. Combined with the chart name to derive the Kubernetes
     ServiceAccount names the Workload Identity bindings target: the chart's
     map.fullname is the release name alone when it already contains the chart
-    name, and RELEASE-managed-agent-platform otherwise. Getting this wrong binds
-    an identity to a ServiceAccount nothing uses.
+    name, and RELEASE-managed-agent-platform otherwise, truncated to 50. Getting
+    this wrong binds an identity to a ServiceAccount nothing uses, which surfaces
+    as an ADC failure at pod startup rather than as a permission denial.
+
+    The chart's nameOverride and fullnameOverride are NOT accounted for here —
+    they replace the chart name the mirrored arithmetic is built on. Set either
+    and you must write the two iam.workloadIdentityUser bindings by hand.
   EOT
   default     = "map"
 }
