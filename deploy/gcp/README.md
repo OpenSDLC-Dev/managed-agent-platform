@@ -138,11 +138,17 @@ counter is the only signal that it should push the new value.
 
 ```sh
 pw="$(openssl rand -hex 32)"
-[[ "$pw" =~ ^[0-9a-f]{64}$ ]] || { echo "generator failed — nothing written"; return 1; }
-printf '%s' "$pw" | gcloud secrets versions add map-db-password \
-  --project your-project --data-file=-
+if [[ "$pw" =~ ^[0-9a-f]{64}$ ]]; then
+  printf '%s' "$pw" | gcloud secrets versions add map-db-password \
+    --project your-project --data-file=-
+else
+  echo "generator failed — nothing written" >&2
+fi
 unset pw
 ```
+
+(An `if`, not `... || { …; exit 1; }`: this is meant to be pasted into a shell, where `exit`
+would close the terminal and `return` is an error outside a function.)
 
 Generate and **check** before writing, exactly as `bootstrap.sh` does, rather than piping
 `openssl` straight into `gcloud`. In a pipeline a failure on the left does not stop the
