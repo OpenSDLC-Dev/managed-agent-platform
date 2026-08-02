@@ -387,6 +387,38 @@ copy of an entry here.
 
 ### Fixed
 
+- **The gate fixtures now address the test host by asking the daemon where it is, so the
+  egress rows run on Docker Desktop for Windows.** `sandboxtest.DockerHostAddr` answered
+  `host.docker.internal` on darwin and the Docker bridge gateway everywhere else. The
+  question it is really asking is whether the daemon runs in a VM of its own, and `GOOS`
+  only coincides with the answer on macOS: under WSL the test binary is `GOOS=linux` while
+  the daemon is still a Desktop VM, so the gateway named a network namespace the test
+  process was not in and nothing answered on it. Three rows failed for that one reason —
+  `cmd/gate`'s `TestGateImageOwnerMatchFirewall` and the `GatedLimitedEgressOnlyThroughGate`
+  row of both sandbox provider contracts — which is `make verify` unable to go green on that
+  platform at all.
+
+  **The obvious fix is the wrong one, and that is the part worth recording.** Reaching for
+  the macOS answer wherever the daemon is Desktop looks right and is not: Desktop for Windows
+  answers `host.docker.internal` with an **IPv6** address, and a gate container's netns
+  carries no IPv6 route, so the dial fails with `Network is unreachable` *before* the
+  owner-match firewall is ever consulted. The failure even survives the test's first
+  assertion — a root dial that must be dropped is "dropped" by having no route — so a fixture
+  built on that name would pin the firewall's behaviour while measuring nothing. What a
+  container in Desktop's VM can reach is this host's own address on the route out, and that
+  is what the fixture now hands it: measured on WSL, a root dial to it is dropped by
+  owner-match and a gate-uid dial is admitted, which is exactly the pair the test asserts.
+
+  Scoped deliberately. The darwin branch is untouched, because `host.docker.internal` is the
+  answer that works there and this platform's evidence says nothing about that one; a daemon
+  sharing the test's namespace still gets the bridge gateway, so CI's native Linux runner
+  takes the same path it always did. `MAP_DOCKER_HOST_ADDR` overrides all three, the escape
+  hatch `MAP_K8S_HOST_ADDR` already gave the Kubernetes harness — whose kind-network gateway
+  needed the same treatment for the same reason, a gateway being routable only while kind's
+  daemon is local. Verified end to end on Windows 11 / WSL2 Ubuntu 24.04 / Docker Desktop
+  29.5.2 with a kind cluster: `make verify` goes from 35 packages passing and 3 failing to
+  **38 passing, 0 failing**, coverage 90.72%.
+
 - **The chart no longer documents a path that runs sandboxes as root.** The
   `executor.sandboxHardening.*` row said "`0` / `none` to turn one off" for the whole group.
   That is right for the numeric caps and for `capDrop`, and wrong for the two that are not
