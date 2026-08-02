@@ -167,11 +167,16 @@ Decision 6).
    shape unrecorded → INFERRED). Enforced in the send transaction alongside
    `ValidateToolResults` (it needs the DB, so it lives in the API transaction, not in
    `NormalizeInbound`). The same transaction validates a `file` rubric's `file_id`
-   against the files registry. Field validation in `normalizeDefineOutcome`
-   (`internal/events/inbound.go`): strict `allowKeys(type, description, rubric,
-   max_iterations)`; `description` required non-empty; rubric union exact (`text`
-   content ≤ 262144 chars, `file` requires `file_id`); `max_iterations` integer 1–20,
-   default 3 (out-of-range → 400, our choice, INFERRED). The normalizer mints
+   against the files registry — existence within the org scope (v1's single-tenant
+   authorization boundary, the same policy every management-key file reference gets),
+   with a rubric-file byte cap mirroring the text rubric's bound (256 KiB, ours) —
+   and the slice's tests cover missing, foreign-scope, and oversized rubric files.
+   Field validation in `normalizeDefineOutcome` (`internal/events/inbound.go`): strict
+   `allowKeys(type, description, rubric, max_iterations)`; `description` required and
+   non-empty (the SDK pins only requiredness — rejecting the present-but-empty string
+   is ours, INFERRED); rubric union exact (`text` content ≤ 262144 chars, `file`
+   requires `file_id`); `max_iterations` integer 1–20, default 3 (out-of-range → 400,
+   our choice, INFERRED). The normalizer mints
    `outcome_id: domain.NewID(domain.PrefixOutcome)` into the payload so the echo is the
    usual payload+envelope merge.
 3. **`processed_at`: extend the existing recorded divergence, not the docs' words.**
@@ -207,7 +212,14 @@ Decision 6).
    model request" — corroborates single-call grading) in a fresh context; emits
    heartbeat `span.outcome_evaluation_ongoing` every 30s (cadence ours, INFERRED) while
    the call runs; then emits `span.outcome_evaluation_end` with the verdict,
-   explanation, and the call's usage. Grader inputs, in two stages so the brain/hands
+   explanation, and the call's usage. **Lock discipline mirrors a model turn's**: the
+   start commits in its own short append transaction, the grader call runs with **no
+   session lock held** — the work item's lease keeps ownership, exactly as `runTurn`
+   holds no lock while streaming a model response — heartbeats are short appends, and
+   only the verdict/state commit takes the settle-shaped locked transaction; a grading
+   pass that serialized event sends (or the documented `user.interrupt`) behind a
+   minutes-long lock would be a defect, and the slice's tests assert an interrupt lands
+   mid-grading. Grader inputs, in two stages so the brain/hands
    split survives: **slice 3** — grader instructions (ours), the rubric content (text
    inline; file rubric via the Decision-4 blob read), the outcome description, and a
    read-only rendering of the session transcript (which already carries every tool call
@@ -242,7 +254,16 @@ Decision 6).
    `retries_exhausted`, or idles `requires_action` on a blocking tool ask, leaves the
    entry non-terminal (`running`) and the outcome resumes with the session's next wake;
    a session terminated mid-outcome leaves the entry frozen as-is (both ours, INFERRED,
-   recording-flagged).
+   recording-flagged). **Grading-failure recovery**: a provider error or timeout during
+   the grader call retries under the brain's existing bounded turn-retry machinery; on
+   exhaustion — and on a brain crash mid-grading (the item lease reclaims) — the cycle's
+   committed `span.outcome_evaluation_start` is left dangling (the recorded
+   crash-window-residue divergence pattern), the entry reverts to `running`, and the
+   outcome re-evaluates at the session's next settlement. `iteration` increments only on
+   a committed `needs_revision` end event, so a re-run repeats the same cycle number,
+   and an entry can never stick in `evaluating` — that state is held only while a live
+   leased item is actually grading. Tests cover provider-fault, crash-replay, and
+   interrupt-mid-grading paths.
 7. **`initial_events` lands whole (#161).** `createSession` accepts the key: an ordered
    list restricted to **exactly** `user.message` and `user.define_outcome` (the docs
    name only these two; any other event type → 400), max 50, running each element
@@ -263,12 +284,17 @@ Decision 6).
    in"), and making `GET /v1/files?scope_id={session_id}` + content download work as the
    doc example's step 4 expects. Harvest completion enqueues the brain's grading pass in
    the same transaction (the existing chaining pattern), so the grader always sees the
-   cycle's current deliverables and a crash between the two loses nothing. Idempotency:
-   the harvest migration adds what the `0008_files.sql` schema deliberately lacks — the
-   sandbox-relative path stored as `filename` plus a unique index on
-   `(scope_id, filename)`, re-harvest replacing content per path (semantics ours,
-   INFERRED). Caps named here so the slice cannot silently invent them: 50 MiB per file,
-   200 files / 500 MiB per session, oversize skipped with a logged marker (bounds ours).
+   cycle's current deliverables and a crash between the two loses nothing. **Each
+   harvest is a snapshot** of `/mnt/session/outputs/`: the migration adds what the
+   `0008_files.sql` schema deliberately lacks — the sandbox-relative path stored as
+   `filename` plus a unique index on `(scope_id, filename)` — re-harvest replaces
+   content per path, **deletes registry rows whose path no longer exists** (a rename is
+   naturally delete+add; blob bytes removed best-effort, the plan-20 delete-convergence
+   posture), and the listing and grader input therefore always mirror the directory as
+   of the last harvest — no stale rows (semantics ours, INFERRED; deletion and rename
+   tests included). Caps named here so the slice cannot silently invent them: 50 MiB
+   per file, 200 files / 500 MiB per session, oversize skipped with a logged marker
+   (bounds ours).
    Harvest is scoped to sessions with outcomes in this plan (the deliverables surface is
    documented on the outcomes page); generalizing to every session is a follow-up issue
    slice 5 files. `self_hosted` environments get no harvest — the platform cannot reach
@@ -382,16 +408,22 @@ Three clients, in order of authority:
    `span.outcome_evaluation_start/_ongoing/_end` trio → poll
    `client.Beta.Sessions.Get` reading `outcome_evaluations[].result` through
    `pending/running/evaluating` to a terminal value → list deliverables
-   `client.Beta.Files.List(scope_id)` and download. Every response decodes through the
-   SDK's typed structs with zero `ExtraFields` surprises and all `api:"required"`
-   fields present.
+   `client.Beta.Files.List` with `ScopeID` **and**
+   `Betas: []anthropic.AnthropicBeta{anthropic.AnthropicBetaManagedAgents2026_04_01}`
+   (the doc example passes the managed-agents beta on the scope-filtered files call;
+   our server ignores the header, but the replay is byte-faithful) and download. Every
+   response decodes through the SDK's typed structs with zero `ExtraFields` surprises
+   and all `api:"required"` fields present.
 2. **The real `ant` CLI** (built from the read-only checkout; it embeds SDK v1.61.0) —
    the example's CLI tab: `ant beta:sessions create --initial-event` (the
    define_outcome-in-initial_events variant the page's Note describes),
    `beta:sessions:events send`, `beta:sessions retrieve --transform
-   'outcome_evaluations'`, `beta:files list --scope-id`, `beta:files download`.
+   'outcome_evaluations'`, `beta:files list --scope-id … --beta
+   managed-agents-2026-04-01`, `beta:files download`.
 3. **curl** — the raw-wire tab, captured as the acceptance record's transcript
-   (docs/HISTORY.md), giving the byte-level evidence the typed clients abstract away.
+   (docs/HISTORY.md) with the `anthropic-beta: managed-agents-2026-04-01` header
+   asserted present on every request the example sends it on, giving the byte-level
+   evidence the typed clients abstract away.
 
 The recorded run (transcripts, event orderings, session projections) lands in
 docs/HISTORY.md as this plan's acceptance record — and doubles as the platform-side
