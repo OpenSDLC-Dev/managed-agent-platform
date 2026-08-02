@@ -90,7 +90,7 @@ def scrub(line: str) -> str:
     heredoc, so that neither a `{` in a display_name nor a `<<EOF` in a shell
     snippet can swallow the rest of the file.
     """
-    out, quoted = [], False
+    out, quoted, interp = [], False, 0
     i = 0
     while i < len(line):
         ch = line[i]
@@ -98,6 +98,36 @@ def scrub(line: str) -> str:
             if ch == "\\":
                 out.append("_")
                 i += 2
+                continue
+            if line[i : i + 2] == "${":
+                # An interpolation: its own braces are not structure, but its
+                # CONTENTS are HCL again — including nested strings. The `$` is
+                # kept deliberately: it is the only surviving marker that a string
+                # was computed rather than literal, and check_modules() reads it to
+                # refuse a module source it cannot resolve.
+                interp += 1
+                out.append("$_")
+                i += 2
+                continue
+            if interp:
+                if ch == "{":
+                    interp += 1
+                elif ch == "}":
+                    interp -= 1
+                elif ch == '"':
+                    # A quoted string INSIDE `${...}` — e.g. `"${format("%s", "{")}"`.
+                    # Reading it needs real HCL lexing, because from the outside the
+                    # quote parity is shifted: a later `{` or `}` silently moves from
+                    # inside a string to outside one, and the brace depth desyncs for
+                    # the rest of the file. Terraform accepts that config; this guard
+                    # would report `ok` over the part of it that went unread, which is
+                    # precisely how an unrecoverable resource hides in `environment/`.
+                    raise ValueError(
+                        "a quoted string inside a ${...} interpolation cannot be read by this "
+                        "guard — assign it to a `locals` value and interpolate that instead"
+                    )
+                out.append("_" if ch in "{}#<" else ch)
+                i += 1
                 continue
             if ch == '"':
                 quoted = False
@@ -227,6 +257,18 @@ def main() -> int:
             failures.append(f"{where} has no literal `source` — this check cannot follow it.")
             return
         source = src.group(1)
+        if "$" in source:
+            # Terraform 1.15 allows constant variables and locals in a module
+            # source, so `source = "./${var.escape}"` can resolve anywhere —
+            # including outside this half. The literal cannot be resolved here,
+            # and resolving it as written would accept a path that Terraform
+            # never uses.
+            failures.append(
+                f"{where} has an interpolated source {source!r}. This check resolves module "
+                f"paths literally and cannot follow one computed at plan time — write it as a "
+                f"literal relative path."
+            )
+            return
         if not source.startswith("./") and not source.startswith("../"):
             failures.append(
                 f"{where} has source {source!r}, which is not a local path. A registry or git "

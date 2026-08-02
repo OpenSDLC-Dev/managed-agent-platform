@@ -370,6 +370,13 @@ jobs:
         run: make gcp-split-check
       - name: bootstrap script lints
         run: make gcp-lint
+      # shellcheck cannot know that `gcloud secrets versions describe` rejects
+      # `--filter`; it exited 0 on a bootstrap.sh that aborted on its first call
+      # in every project. These two RUN the tooling instead of reading it.
+      - name: bootstrap script behaves
+        run: make gcp-bootstrap-test
+      - name: the split guard actually bites
+        run: make gcp-split-check-test
 
   # Local dev stack: validate the compose file, build the image, and smoke-test
   # that the control plane comes up and serves (migrations + auth) and the brain

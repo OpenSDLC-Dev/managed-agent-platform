@@ -65,17 +65,23 @@ storage_sa="${NAME_PREFIX}-storage@${PROJECT}.iam.gserviceaccount.com"
 # below, so it would surface as "could not read" and abort the whole script.
 probe_error=""
 probe_version() {
-	local out state
+	local out
 	if ! out="$(gcloud secrets versions describe latest --secret="$1" --project "$PROJECT" \
 		--format="value(state)" 2>&1)"; then
 		printf '%s' "$out" | grep -qiE "NOT_FOUND|was not found|has no versions" && return 1
 		probe_error="$out"
 		return 2
 	fi
-	# gcloud renders this enum uppercase through value() and lowercase in its
-	# list table; fold the case rather than betting on one of the two.
-	state="$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')"
-	[[ "$state" == "enabled" ]]
+	# Ask whether ANY line is exactly the enabled state, rather than comparing the
+	# whole capture. stderr is merged in above so the error branch can classify
+	# it, and gcloud writes warnings there on SUCCESS too — service-account
+	# impersonation prints one on every call. Comparing the whole string would
+	# read `WARNING: ...\nENABLED` as "not enabled", which reports a stored secret
+	# as missing and writes a second version over a live one.
+	#
+	# Case is folded because gcloud renders this enum uppercase through value()
+	# and lowercase in its list table.
+	printf '%s\n' "$out" | grep -qix "enabled"
 }
 
 has_version() {
@@ -111,14 +117,27 @@ has_version() {
 if has_version "$db_secret"; then
 	echo "ok: $db_secret already has a version (left alone)"
 else
-	# `openssl rand -hex 32` terminates its 64 characters with a newline, and
-	# --data-file=- stores stdin VERBATIM — so without the `tr` the stored secret
-	# is 65 bytes ending in 0x0a. Nothing would surface at provisioning time:
-	# google_sql_user accepts it and Cloud SQL sets that password. It surfaces at
-	# consumption, where the value is embedded in DATABASE_URL and a raw control
-	# character makes the DSN unparseable. Both HMAC writes below are newline-free
-	# by construction; this is the one path that has to be made so.
-	openssl rand -hex 32 | tr -d '\n' |
+	# Generated and CHECKED before anything is written, rather than piped straight
+	# into gcloud. In a pipeline, a failure on the left does not stop the right:
+	# gcloud starts regardless, reads EOF, and can store an enabled ZERO-BYTE
+	# version. `set -o pipefail` reports that pipeline as failed — after the write
+	# has already landed — and every later run then skips the secret as "already
+	# done", leaving an empty database password nothing will ever correct.
+	#
+	# The command substitution also strips the trailing newline `openssl` prints,
+	# which --data-file=- would otherwise store VERBATIM as a 65th byte. That
+	# never surfaces at provisioning time — google_sql_user accepts it and Cloud
+	# SQL sets it — but the value is embedded in DATABASE_URL, where a raw control
+	# character makes the DSN unparseable.
+	#
+	# `printf` is a shell builtin, so the value still never reaches a process
+	# argument list where `ps` could read it.
+	db_password="$(openssl rand -hex 32)"
+	if [[ ! "$db_password" =~ ^[0-9a-f]{64}$ ]]; then
+		echo "openssl did not produce 64 hex characters — refusing to store it" >&2
+		exit 1
+	fi
+	printf '%s' "$db_password" |
 		gcloud secrets versions add "$db_secret" --project "$PROJECT" --data-file=- >/dev/null
 	echo "created: $db_secret"
 fi
@@ -158,13 +177,16 @@ else
 	before="$(gcloud storage hmac list --project "$PROJECT" \
 		--filter="serviceAccountEmail=$storage_sa" --format="value(accessId)" | sort)"
 
-	hmac_json="$(gcloud storage hmac create "$storage_sa" --project "$PROJECT" --format=json)"
-
-	# Armed BEFORE the response is even parsed. From the instant the key exists,
-	# every path out of this block that is not "both secrets stored" must delete
-	# it: GCS returned the secret once, in that response, so a key we stop
-	# holding the secret for is permanently unusable, billable, and
-	# indistinguishable from the real one. A parse failure counts.
+	# Armed BEFORE the create, not after it. `gcloud storage hmac create` can
+	# commit server-side and still report failure, and a key born in that window
+	# is precisely the orphan this trap exists for — billable, valid-looking, and
+	# permanently unusable, because its secret was in the response that was lost.
+	# Arming afterwards would leave that one window uncovered, with no banner and
+	# no recovery instructions. The snapshot above is what lets the handler find
+	# such a key without an access id to go on.
+	#
+	# From the instant the key can exist, every path out of this block that is not
+	# "both secrets stored" must delete it. A parse failure counts.
 	access_id=""
 	cleanup_key() {
 		# The trap inherits `set -euo pipefail`, and every probe below is allowed
@@ -201,15 +223,27 @@ else
 		fi
 
 		if [[ -z "$access_id" ]]; then
-			# The response did not parse, so recover the id as the difference
-			# against the snapshot — and only when that difference is exactly one.
-			local after new
+			# No id to go on — the create failed, or committed and reported
+			# failure, or its response did not parse. Recover the key as the
+			# difference against the snapshot, and act only on an unambiguous one.
+			local after new listed=1
 			after="$(gcloud storage hmac list --project "$PROJECT" \
-				--filter="serviceAccountEmail=$storage_sa" --format="value(accessId)" 2>/dev/null | sort)"
-			new="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -c .)"
-			if [[ "$new" == "1" ]]; then
-				access_id="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
+				--filter="serviceAccountEmail=$storage_sa" --format="value(accessId)" 2>/dev/null | sort)" || listed=0
+			if [[ $listed -eq 1 ]]; then
+				new="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -c .)"
+				if [[ "$new" == "0" ]]; then
+					# Nothing was added, so there is nothing to roll back — the
+					# ordinary case when the create itself failed. Saying anything
+					# here would be crying wolf.
+					return
+				fi
+				if [[ "$new" == "1" ]]; then
+					access_id="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
+				fi
 			fi
+			# A failed list, or more than one new key, falls through to the
+			# refuse-and-instruct block below. Both are states where guessing
+			# could delete a working credential.
 		fi
 		if [[ -z "$access_id" ]]; then
 			echo "COULD NOT identify the key to roll back, and will NOT guess — deleting the" >&2
@@ -219,11 +253,34 @@ else
 		fi
 		# Announced only now that the outcome is known, so the log can never
 		# assert a deletion that did not happen.
-		echo "rolling back: deleting the HMAC key whose secret could not be stored" >&2
-		gcloud storage hmac update "$access_id" --project "$PROJECT" --deactivate >/dev/null 2>&1
-		gcloud storage hmac delete "$access_id" --project "$PROJECT" >/dev/null 2>&1
+		echo "rolling back: deleting HMAC key $access_id, whose secret could not be stored" >&2
+		# A key must be INACTIVE before it can be deleted, so a failed deactivate
+		# guarantees a failed delete. Discarding both statuses would print
+		# "rolling back" over a key that is still there, still billable, and still
+		# unusable — with the id never shown, so nothing tells the operator what
+		# to clean up or that there is anything to clean up at all.
+		if ! gcloud storage hmac update "$access_id" --project "$PROJECT" --deactivate >/dev/null 2>&1 ||
+			! gcloud storage hmac delete "$access_id" --project "$PROJECT" >/dev/null 2>&1; then
+			echo "ROLLBACK FAILED: HMAC key $access_id still exists and cannot authenticate." >&2
+			echo "It is billable. Delete it by hand (deactivate first — an active key cannot be deleted):" >&2
+			echo "  gcloud storage hmac update $access_id --project $PROJECT --deactivate" >&2
+			echo "  gcloud storage hmac delete $access_id --project $PROJECT" >&2
+		fi
+
+		# One half can commit before the other fails. The key is gone, so that
+		# leftover version is now a credential to nothing — and the next run would
+		# stop at the generic "exactly one of ..." refusal without saying which
+		# secret is at fault. Name it, and give the command that clears it.
+		if [[ $a -eq 0 || $s -eq 0 ]]; then
+			echo "NOTE: a version was written before the failure and will block the next run." >&2
+			echo "It cannot authenticate — its key no longer exists. Disable it with:" >&2
+			[[ $a -eq 0 ]] && echo "  gcloud secrets versions disable latest --secret=$access_secret --project $PROJECT" >&2
+			[[ $s -eq 0 ]] && echo "  gcloud secrets versions disable latest --secret=$secret_secret --project $PROJECT" >&2
+		fi
 	}
 	trap cleanup_key EXIT
+
+	hmac_json="$(gcloud storage hmac create "$storage_sa" --project "$PROJECT" --format=json)"
 
 	access_id="$(printf '%s' "$hmac_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["metadata"]["accessId"])')"
 

@@ -54,7 +54,13 @@ copy of an entry here.
   that matter most: a `prevent_destroy = false` sitting under a comment that says
   `prevent_destroy = true`, which an earlier text-matching version read as compliance, and a
   `<<EOF` inside a quoted description, which made the rest of the file invisible — an earlier
-  version printed `ok` with a `google_kms_crypto_key` declared in the destroyed half.
+  version printed `ok` with a `google_kms_crypto_key` declared in the destroyed half. A
+  quoted string *inside* a `${...}` interpolation does the same thing more quietly: it shifts
+  the quote parity seen from outside, so a later `{` and a later `}` both move out of the
+  string and the depth desyncs while still balancing at end of file. That one is refused
+  rather than parsed, as is a module `source` computed at plan time — Terraform 1.15 allows
+  constant variables there, so `"./${var.escape}"` can resolve anywhere, including outside the
+  half this check reads.
 
   **Two guards, not one**, because they fail differently. `prevent_destroy` is a property of
   the *configuration* and disappears along with the block it is written in — Terraform
@@ -89,11 +95,28 @@ copy of an entry here.
   `openssl rand -hex 32` ends its 64 characters with a newline, `--data-file=-` stores stdin
   verbatim, and a stored control character would ride into `DATABASE_URL` and make the DSN
   unparseable — a failure that surfaces nowhere near the apply that caused it.
-  Exercised against a fake `gcloud` across a dozen states: fresh, re-run, half-written pair,
-  missing container, empty container, unreadable secret, a `latest` that is disabled while an
-  older version is not, a failure in each window after the key exists, a create response that
-  does not parse, a rollback whose own list call fails, and a rollback with a pre-existing key
-  present.
+  The state probe also asks whether ANY returned line is the enabled state rather than
+  comparing the whole capture: stderr is merged in so the error branch can classify it, and
+  gcloud writes warnings there on **success** too — configured service-account impersonation
+  prints one on every call — so a whole-string comparison would read `WARNING: …\nENABLED` as
+  "no version" and write a second version over a live secret. And the database password is
+  generated into a variable and checked before anything is written, rather than piped
+  straight into gcloud: in a pipeline a failure on the left does not stop the right, so
+  gcloud would start anyway, read EOF, and store an enabled **zero-byte** version that every
+  later run then skips as already done.
+
+  **Both tools are now exercised by committed suites that CI runs** (`make gcp-bootstrap-test`,
+  `make gcp-split-check-test`), because the other four checking targets are static and static
+  checking was demonstrably not enough here: `gcp-lint` is shellcheck, which cannot know that
+  `gcloud secrets versions describe` rejects `--filter`, and it exited 0 on a script that
+  aborted on its first call in every project. The bootstrap suite runs the script against a
+  fake `gcloud` across states a live run cannot reproduce on demand — a write that commits and
+  *then* reports failure, a create that commits and loses its response, a create whose
+  response never parses, a rollback whose own list or deactivate fails, a generator that
+  produces nothing, a success-path warning — and the split suite plants violations in a
+  scratch copy and requires each to come back red, with decoys that must stay green. Both were
+  run against the pre-fix code first: the bootstrap suite fails 17 checks there, and each
+  individual fix was re-verified by reverting it alone.
   `environment/` then reads the password through an **ephemeral** resource into
   `password_wo`, a **write-only** argument, so the value reaches Cloud SQL without being
   persisted anywhere. That last part refines the plan's own mechanic — it was going to reach

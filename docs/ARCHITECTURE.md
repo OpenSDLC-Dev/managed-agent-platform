@@ -621,15 +621,20 @@ configuration: Terraform holds names, IAM bindings and preconditions, `bootstrap
 the values — including the GCS HMAC key, whose secret GCS returns exactly once, so a
 Terraform resource holding it would hold it in state — and `environment/` reads the database
 password through an *ephemeral* resource into the write-only `password_wo`. The `make gcp-*`
-targets wrap all of it; `gcp-fmt`, `gcp-validate`, `gcp-split-check` and `gcp-lint` need no
+targets wrap all of it; `gcp-fmt`, `gcp-validate`, `gcp-split-check`, `gcp-lint`,
+`gcp-bootstrap-test` and `gcp-split-check-test` need no
 credentials and run in CI, which enforces the split structurally: no unrecoverable
 `resource` kind in `environment/`, and in `foundation/` both guards each such resource can
 carry — `prevent_destroy`, which lives in the configuration and vanishes with the block it is
 written in, and `deletion_policy = "PREVENT"`, which is read from state and survives that.
 Both halves are read recursively, so a child module is still in scope, and anything the
-checker cannot parse (`.tf.json`, a module sourced from outside the half, an unterminated
-heredoc, unbalanced braces, a multi-line interpolation) is a hard failure rather than a
-skipped file — a partial scan that prints `ok` is the one outcome worse than no check.
+checker cannot parse (`.tf.json`, a module sourced from outside the half or computed at plan
+time, an unterminated heredoc, unbalanced braces, a multi-line interpolation, a quoted string
+inside a `${...}`) is a hard failure rather than a skipped file — a partial scan that prints
+`ok` is the one outcome worse than no check. The last two targets are what keep that true:
+they run the tooling against injected faults and planted violations rather than reading it,
+because everything else in the group is static and a static gate has already passed a
+`bootstrap.sh` that could not complete a single run.
 
 ## Security invariants
 

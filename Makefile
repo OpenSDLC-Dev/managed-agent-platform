@@ -18,7 +18,7 @@ SHELL := /usr/bin/env bash
 .NOTPARALLEL:
 
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
-	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-env-destroy gcp-env-rebuild
+	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-split-check-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-env-destroy gcp-env-rebuild
 
 build:
 	go build ./...
@@ -141,6 +141,20 @@ gcp-split-check:
 
 gcp-lint:
 	shellcheck deploy/gcp/bootstrap.sh
+
+# shellcheck cannot know that `gcloud secrets versions describe` rejects
+# `--filter`, and it exited 0 on a bootstrap.sh that aborted on its first call in
+# every project. This RUNS the script against a fake gcloud — credential-free,
+# free of charge, and the only check in this group that would have caught that.
+gcp-bootstrap-test:
+	python3 deploy/gcp/bootstrap_test.py
+
+# The split guard run against the real tree proves only that the real tree is
+# compliant — a checker that had silently stopped reading would pass that too,
+# and twice did. This plants violations in a scratch copy and requires each one
+# to come back red, plus decoys that must stay green.
+gcp-split-check-test:
+	python3 deploy/gcp/check_split_test.py
 
 # Adds the first version of each Secret Manager secret and creates the GCS HMAC
 # key. Runs BETWEEN the two applies: the foundation creates the secrets empty,

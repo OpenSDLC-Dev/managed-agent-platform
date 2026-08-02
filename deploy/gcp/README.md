@@ -257,11 +257,25 @@ an import is a no-op because the versions already exist.
 ## Checking it without touching GCP
 
 ```sh
-make gcp-fmt gcp-validate gcp-split-check gcp-lint
+make gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-split-check-test
 ```
 
-None of them needs credentials, state, or a project. `gcp-split-check` is the structural
-enforcement of the two-configuration split: `environment/` may not *own* a resource of an
-unrecoverable kind, and every one `foundation/` declares must carry both guards it can —
-`prevent_destroy` and, where the kind has it, `deletion_policy = "PREVENT"`. CI runs both on every PR, so the
-configuration cannot rot silently between the rare runs that actually provision anything.
+None of them needs credentials, state, or a project, and CI runs all six on every PR — so
+neither the configuration nor the tooling can rot silently between the rare runs that
+actually provision anything.
+
+`gcp-split-check` is the structural enforcement of the two-configuration split:
+`environment/` may not *own* a resource of an unrecoverable kind, and every one
+`foundation/` declares must carry both guards it can — `prevent_destroy` and, where the kind
+has it, `deletion_policy = "PREVENT"`.
+
+The last two **run** the tooling rather than reading it, because the first four are static
+and this is a place where static checking has already been insufficient. `gcp-lint` is
+shellcheck, and shellcheck cannot know that `gcloud secrets versions describe` rejects
+`--filter` — it exited 0 on a `bootstrap.sh` that aborted on its first call in every project,
+with the whole documented deploy path dead behind a green gate. So `gcp-bootstrap-test` runs
+the script against a fake `gcloud` (including states no live run would reproduce on demand:
+a write that commits and *then* reports failure, a create whose response never parses, a
+rollback whose own calls fail), and `gcp-split-check-test` plants violations in a scratch
+copy and requires each to come back red — a guard that had silently stopped reading its
+input would pass a run against the real tree, and twice did.
