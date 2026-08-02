@@ -164,6 +164,12 @@ services:
       BLOB_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-map-blob-dev}
       BLOB_BUCKET: map-blob
       BLOB_TLS: "false"
+    # An explicit depends_on replaces the anchor's, so postgres is restated.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     volumes:
       # The brain's model routing (a JSON array — see internal/provider LoadRoutes).
       # Defaults to the committed example so the stack comes up out of the box;
