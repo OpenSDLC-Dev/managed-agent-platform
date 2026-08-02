@@ -432,6 +432,54 @@ copy of an entry here.
   unclosable is recorded as such: an endpoint that forges a well-formed `NoSuchKey` document
   is indistinguishable from one reporting a real absence, on any request.
 
+- **The gate fixtures now address the test host by asking the daemon where it is, so the
+  egress rows run on Docker Desktop for Windows.** `sandboxtest.DockerHostAddr` answered
+  `host.docker.internal` on darwin and the Docker bridge gateway everywhere else. The
+  question it is really asking is whether the daemon runs in a VM of its own, and `GOOS`
+  only coincides with the answer on macOS: under WSL the test binary is `GOOS=linux` while
+  the daemon is still a Desktop VM, so the gateway named a network namespace the test
+  process was not in and nothing answered on it. Three rows failed for that one reason —
+  `cmd/gate`'s `TestGateImageOwnerMatchFirewall` and the `GatedLimitedEgressOnlyThroughGate`
+  row of both sandbox provider contracts — which is `make verify` unable to go green on that
+  platform at all.
+
+  **Why an address rather than Desktop's `host.docker.internal`.** Not because that name
+  cannot work — measured on this machine it does. Because it is not one address, and a
+  fixture that resolves nothing cannot be surprised by which one it gets. From the gate
+  image's own namespace the name carries both families and the lookups disagree about what is
+  visible: `getent ahosts` returns `192.168.65.254`, `getent hosts` returns
+  `fdc4:f303:9324::254`, `ahostsv6` returns nothing at all. A dial does try each in turn —
+  glibc sorts a routeless family last and bash falls through to it — but it reports only the
+  **last** attempt's error, so a failure anywhere in that chain surfaces as whatever the final
+  address happened to say. That is what made the original diagnosis of this bug expensive: a
+  `Network is unreachable` — which bash raises against the *hostname*, never naming the
+  address it last tried — read next to a `getent hosts` answer of IPv6 says "the dial went to
+  IPv6", when
+  it equally describes an IPv4 attempt that already failed first. A literal address the
+  fixture derives has no such chain — and no dependency on Desktop's resolver or on the
+  container's own addressing. Measured on WSL, a root dial to it is dropped by owner-match and
+  a gate-uid dial is admitted, which is exactly the pair the test asserts.
+
+  Scoped deliberately. `DockerHostAddr`'s darwin branch is untouched, because
+  `host.docker.internal` is the answer that works there and this platform's evidence says
+  nothing about that one; a daemon sharing the test's namespace still gets the bridge gateway,
+  so CI's native Linux runner takes the same path it always did. `MAP_DOCKER_HOST_ADDR`
+  overrides all three, the escape hatch `MAP_K8S_HOST_ADDR` already gave the Kubernetes
+  harness — which needed the same treatment for the same reason, and now asks whether the
+  daemon is Desktop *before* it asks which cluster flavour sits on it, Desktop's VM holding a
+  kind network's gateway and its own built-in cluster alike. That reorder is the one place
+  macOS behaviour does change, and in its favour: a `kind-` context there skipped the
+  `host.docker.internal` branch for the gateway one and had to be given
+  `MAP_K8S_HOST_ADDR=host.docker.internal` by hand — the workaround docs/HISTORY.md's #71
+  review-hardening record still prescribes under "Reproducing the acceptance on macOS" — where
+  it now reaches that same value on its own, the
+  override left correct but no longer required. Read off the branch order rather than
+  measured: no macOS host was available. Verified end to end on Windows 11 / WSL2 Ubuntu
+  24.04 / Docker Desktop 4.75.0 (engine 29.5.2) with a kind cluster: the three packages above
+  go from failing to passing and `make verify` completes green there for the first time — every
+  package passing, coverage 90.78%. Each row was also run against `main` and confirmed red,
+  so the change is proven able to fail rather than merely observed passing.
+
 - **The chart no longer documents a path that runs sandboxes as root.** The
   `executor.sandboxHardening.*` row said "`0` / `none` to turn one off" for the whole group.
   That is right for the numeric caps and for `capDrop`, and wrong for the two that are not
