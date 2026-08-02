@@ -78,7 +78,11 @@ copy of an entry here.
   `validation` block that rejects anything which is not a service account email. Enabling the
   Cloud Build API is also what *creates* that account, so the API moved from `environment/`
   to `foundation/`: left where it was, the only configuration that turns it on would have
-  been the one that cannot plan without the value, and a clean project had no way in. The compute
+  been the one that cannot plan without the value, and a clean project had no way in.
+  `environment/` also gained `cloudtrace.googleapis.com` beside the `telemetry.googleapis.com`
+  it already enabled: the collector posts OTLP to the latter, but Google's prerequisites for
+  that exact recipe require the Cloud Trace API too, and enabling only one is the shape of
+  failure that passes every static check and then silently produces no traces. The compute
   default account keeps `artifactregistry.reader` for image pulls and is deliberately not
   widened to writer: that identity is what every node in the cluster runs as.
 

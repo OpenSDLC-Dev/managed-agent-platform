@@ -35,9 +35,14 @@
 resource "google_project_service" "required" {
   for_each = toset([
     # Cloud Build is enabled HERE, not in environment/, even though nothing in
-    # this configuration builds anything. Enabling it is what creates the
-    # project's default Cloud Build service account, and that account's email is
-    # a REQUIRED input to environment/ (var.cloud_build_service_account). If
+    # this configuration builds anything. The project's default build identity
+    # cannot be LOOKED UP until the API is on — `gcloud builds
+    # get-default-service-account` answers SERVICE_DISABLED otherwise — and that
+    # account's email is a REQUIRED input to environment/
+    # (var.cloud_build_service_account). (Enabling the API also creates the
+    # legacy PROJECT_NUMBER@cloudbuild account on pre-2024-04-29 projects; on
+    # newer ones the default is the Compute Engine SA and the API only makes the
+    # lookup answer. Either way the lookup is the blocker.) If
     # environment/ enabled it, the value could only be read after the apply that
     # needs it — a circle with no way in on a clean project. The foundation runs
     # first and is never destroyed, so putting it here makes the documented order

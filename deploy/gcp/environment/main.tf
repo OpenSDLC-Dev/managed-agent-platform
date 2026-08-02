@@ -58,7 +58,17 @@ resource "google_project_service" "required" {
     "sqladmin.googleapis.com",
     "storage.googleapis.com",
     # The acceptance ships traces to Cloud Trace through an in-cluster OTel
-    # Collector (plan 20, Decision 5).
+    # Collector (plan 20, Decision 5). BOTH are needed, not either: the collector
+    # posts OTLP to telemetry.googleapis.com, Google's OTLP ingest service, and
+    # Google's prerequisites for that exact recipe also require the Cloud Trace
+    # API. Enabling only the first is the shape of failure that passes every
+    # static check and then produces no traces.
+    #
+    # The collector's own IAM grant (roles/telemetry.tracesWriter, or
+    # roles/cloudtrace.agent) is NOT here: the chart ships no collector — it has
+    # an otlpEndpoint value and nothing to point it at — so the identity to bind
+    # does not exist until slice 4b deploys one.
+    "cloudtrace.googleapis.com",
     "telemetry.googleapis.com",
   ])
   service            = each.value

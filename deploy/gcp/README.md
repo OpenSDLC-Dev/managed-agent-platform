@@ -134,11 +134,16 @@ touched.
 
 Neither apply target passes `-auto-approve`. Read the plan before the first one.
 
-**Cloud Build's identity is a variable** (`cloud_build_service_account`) because the answer is
-bimodal: older projects build as `PROJECT_NUMBER@cloudbuild.gserviceaccount.com`, newer ones as
-the Compute Engine default service account. Empty means the legacy default. If the first push
-fails on a permission, that is this — `gcloud builds describe` names the account your project
-actually uses, and setting the variable grants it.
+**Cloud Build's identity is a required variable** (`cloud_build_service_account`) because the
+answer is bimodal and neither answer is safe to default: projects whose first build predates
+2024-04-29 build as `PROJECT_NUMBER@cloudbuild.gserviceaccount.com`, and projects created
+after it build as the Compute Engine default service account. There is no "empty means the
+legacy default" — a default would grant writer to an account no build uses, and that surfaces
+only at the first image push, after the apply has already created a cluster and a database.
+
+`gcloud builds get-default-service-account --project your-project` names the one your project
+uses. Run it **after** `make gcp-foundation-apply`: the foundation is what enables the Cloud
+Build API, and the lookup fails with `SERVICE_DISABLED` until it is on.
 
 **Rotating the database password**: add a version by hand, then bump `db_password_version`
 and re-apply `environment/`. Write-only arguments leave Terraform nothing to diff, so that
@@ -266,7 +271,7 @@ terraform import google_service_account.storage            "$P/serviceAccounts/m
 terraform import google_secret_manager_secret.db_password      "$P/secrets/map-db-password"
 terraform import google_secret_manager_secret.blob_access_key  "$P/secrets/map-blob-access-key"
 terraform import google_secret_manager_secret.blob_secret_key  "$P/secrets/map-blob-secret-key"
-for api in cloudkms iam iamcredentials secretmanager; do
+for api in cloudbuild cloudkms iam iamcredentials secretmanager; do
   terraform import "google_project_service.required[\"$api.googleapis.com\"]" "your-project/$api.googleapis.com"
 done
 ```
