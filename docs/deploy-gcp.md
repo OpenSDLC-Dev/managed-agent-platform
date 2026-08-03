@@ -410,13 +410,19 @@ the database from Terraform's state without an API call and lets the instance ta
 you copy this Terraform and drop that line, the first teardown after a `gcp-db-init` will
 strand a Cloud SQL instance.
 
-**Expect to run the destroy twice, and not because anything is wrong.** Cloud SQL releases
-the VPC peering it uses for its private address *asynchronously*, so the
+**Expect to run the destroy more than once, and not because anything is wrong.** Cloud SQL
+releases the VPC peering it uses for its private address *asynchronously*, so the
 `google_service_networking_connection` delete lands while the release is still in flight and
 fails with `Producer services (e.g. CloudSQL, Cloud Memstore, etc.) are still using this
-connection` — with the instance already gone. Re-running `make gcp-env-destroy` a few
-minutes later completes it. This is GCP's timing rather than a fault in the configuration,
-but it is guaranteed enough on a private-IP instance to plan for.
+connection` — with the instance already gone from `gcloud sql instances list`. Re-run
+`make gcp-env-destroy`; the mode-2 acceptance teardown needed several attempts over well
+more than the "wait a minute" the error implies.
+
+**Check what is actually left before you worry about it.** What that failure strands is the
+VPC, the reserved peering range, the connection itself and the API enablements — **none of
+them billable**. The run that hits this has already deleted the cluster, the instance, the
+bucket and the registry, so the cost is settled and the remainder is bookkeeping. This is
+GCP's timing rather than a fault in the configuration.
 
 **Then check for orphaned disks. `terraform destroy` does not reclaim them.**
 

@@ -225,15 +225,24 @@ defect in the delivered teardown path.**
 3. *The guide claimed mode 2 had never been accepted.* True when written; this run is what
    changes it.
 
-**Teardown took three runs, and only the first failure was a defect.** Run 1 removed 21
+**Teardown needed several runs, and only the first failure was a defect.** Run 1 removed 21
 resources and stopped on finding 0 above. Run 2, after the database was taken out of state
-by hand, removed the rest of the billable infrastructure — the Cloud SQL instance included —
-and then failed on the VPC peering with `Producer services (e.g. CloudSQL, Cloud Memstore,
-etc.) are still using this connection`, because Cloud SQL releases the peering
-asynchronously and the delete landed while the release was in flight. Run 3, a few minutes
-later, completed. That second failure is GCP's timing rather than a fault in the
-configuration, but it is reliable enough on a private-IP instance that the guide now tells
-operators to expect two runs. `foundation/` is untouched by design.
+by hand, removed **every remaining billable resource** — the Cloud SQL instance, the
+cluster, the bucket and the registry — and then failed on the VPC peering with
+`Producer services (e.g. CloudSQL, Cloud Memstore, etc.) are still using this connection`,
+because Cloud SQL releases the peering asynchronously and the delete landed while the
+release was still in flight. Subsequent runs kept hitting the same wall for far longer than
+the "wait a minute" the error implies: the peering was still `ACTIVE` well after the
+instance had disappeared from `gcloud sql instances list`.
+
+What that leaves behind is worth stating precisely rather than rounding to "clean": eleven
+resources — the VPC, the reserved peering range, the service-networking connection and
+eight API enablements — **none of which is billable**. Project-wide, after run 2 there was
+no cluster, no Cloud SQL instance, no Artifact Registry repository, no bucket and **zero
+Compute Engine disks**. So the cost was settled by run 2 and everything after it is
+bookkeeping. That failure is GCP's timing rather than a fault in the configuration, but it
+is reliable enough on a private-IP instance that the guide now tells operators to expect
+more than one run. `foundation/` is untouched by design.
 
 **A hazard that mode 2 structurally does not have.** The mode-1 record's
 orphaned-PersistentVolume trap **cannot fire here**: mode 2 runs all three bundled services
