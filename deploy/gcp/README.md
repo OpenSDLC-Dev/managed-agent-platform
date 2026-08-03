@@ -394,7 +394,8 @@ untracked resource this split exists to avoid.
 **No secret is in either state file.** That is the point of `bootstrap.sh` and of
 `password_wo`: the database password and the GCS HMAC pair exist in Secret Manager and nowhere
 else Terraform can reach. (The model key is pasted from its own provider into the Helm values
-in mode-1; mode-2 gives it a secret of its own, in slice 5.) So a lost state file costs you bookkeeping, not
+in mode-1; in mode-2 it rides `model-providers.json` inside the pre-created Secret, so it
+never reaches a values file either.) So a lost state file costs you bookkeeping, not
 credentials.
 
 Losing `foundation/`'s state is recoverable, because every resource in it is adoptable — but

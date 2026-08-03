@@ -101,7 +101,7 @@ variable "platform_machine_type" {
 
 variable "sandbox_node_count" {
   type        = number
-  description = "Nodes in the dedicated sandbox pool. Sized in slice 5 from slice 4's measurements; while #64 leaves pods unreaped, every leaked pod holds its CPU and ephemeral-storage reservation."
+  description = "Nodes in the dedicated sandbox pool. The sizing guidance built on the mode-1 run's measurements is in docs/deploy-gcp.md; while #64 leaves pods unreaped, every leaked pod holds its CPU and ephemeral-storage reservation."
   default     = 2
 }
 

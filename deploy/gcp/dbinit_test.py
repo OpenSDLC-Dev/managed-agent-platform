@@ -491,6 +491,21 @@ def main():
         check("reports bypassrls on the group role",
               "bypassrls=t" in (r.stderr + r.stdout), r.stderr + r.stdout)
 
+    # REPLICATION is the third of the three superuser-only attributes, and it
+    # was the disjunct the group-role condition originally lacked — asserted on
+    # the platform role, unasserted on the role the platform can SET ROLE to, so
+    # a replication-capable group passed while the summary still printed the
+    # platform row's replication=f. Found by a reviewer reading the two
+    # assertions side by side after the summary gained its replication field.
+    print("the group-role assertion FIRES on REPLICATION too")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        pg.psql_admin("ALTER ROLE %s REPLICATION;" % APP_ROLE)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("reports replication on the group role",
+              "replication=t" in (r.stderr + r.stdout), r.stderr + r.stdout)
+
     print("the cloudsqlsuperuser membership assertion FIRES when it should")
     with Postgres() as pg:
         check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)

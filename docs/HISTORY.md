@@ -40,8 +40,9 @@ supported, documented, acceptance-proven path to run the platform on GKE with
 Google-managed backing services — exists in `deploy/gcp/` (a `foundation/` applied once
 and never destroyed, an `environment/` created and destroyed freely), in the chart's
 Cloud-native seams, and in [docs/deploy-gcp.md](./deploy-gcp.md). The plan itself landed
-approved in PR #243. Slice 1: GCS delete convergence in `internal/blob/s3` — a bare 404 no
-longer reads as a missing object (#244, PR #252). Slice 2: sandbox containment and
+approved in PR #243. Slice 1: GCS delete convergence in `internal/blob/s3`, in two PRs —
+deleting an already-deleted object converges (PR #245), then a bare 404 stops reading as a
+missing object (#244, PR #252). Slice 2: sandbox containment and
 placement, in three PRs — the runtime's seccomp filter (#246), an opt-in ephemeral-storage
 cap (#247), and pinning sandbox pods to a node pool of their own (#248). Slice 3:
 `internal/secrets/gcpkms`, the Cloud KMS credential cipher, with its own live tier and its
@@ -143,19 +144,29 @@ transfer runs the other way, so the set closes cleanly.
     sandbox — **timed out**, because the gate's rules live in the pod's network namespace.
     The mode-1 record proved the policy; this adds the structure underneath it.
 
-**Every backing service was reached as the deploy guide's own service account.** Cloud
-Audit Logs cannot show it — KMS crypto operations are data-access logs and are off by
-default — so it was established directly: a pod running under the chart's controlplane
-ServiceAccount asked the GKE metadata server who it was and got
-`map-controlplane@…iam.gserviceaccount.com`; the same probe under the executor's
-ServiceAccount got `map-executor@…`. Neither is the node service account, which is what
-Decision 11's privilege set requires and what the `iam.gke.io/gcp-service-account`
-annotations exist to produce. GCS was reached with the `map-storage` HMAC pair, whose only
-project roles are `roles/storage.objectAdmin` and `roles/storage.legacyBucketReader` on the
-one bucket — and the second of those is not decoration: `blob.Open` calls `BucketExists`
-before serving, which needs `storage.buckets.get`, which `objectAdmin` alone does not
-grant. All three processes logged `object storage configured` at startup, so that call
-succeeded.
+**Every backing service was reached with this deployment's own credential rather than the
+operator's — three different kinds of credential, and the distinction matters.**
+
+- *Cloud KMS: Workload Identity, no key material anywhere.* Cloud Audit Logs cannot show
+  this — KMS crypto operations are data-access logs and are off by default — so it was
+  established directly: a pod running under the chart's controlplane ServiceAccount asked
+  the GKE metadata server who it was and got `map-controlplane@…iam.gserviceaccount.com`;
+  the same probe under the executor's ServiceAccount got `map-executor@…`. Neither is the
+  node service account, which is what the `iam.gke.io/gcp-service-account` annotations
+  exist to produce, and the node account holds no role on the key.
+- *GCS: the `map-storage` service account's HMAC pair* — a static credential belonging to
+  that account, not Workload Identity. Its only roles are `roles/storage.objectAdmin` and
+  `roles/storage.legacyBucketReader` **on the one bucket**, and the second is not
+  decoration: `s3.New` calls `BucketExists` before returning a store, which needs
+  `storage.buckets.get`, which `objectAdmin` alone does not grant. All three processes
+  logged `object storage configured` at startup, so that call succeeded — which is
+  Decision 11's privilege set proving itself sufficient as well as minimal.
+- *Cloud SQL: **no Google identity at all**.* This run took the direct private-IP path the
+  guide documents — `sslmode=require` from inside the VPC — so the credential is the
+  platform's own non-superuser **database** role and its password. The Cloud SQL Auth Proxy
+  path, which is the one that would involve `roles/cloudsql.client` and a per-component
+  Google identity, was not exercised; the guide already says the chart templates no sidecar
+  for it.
 
 **Traces reach Cloud Trace, and the pagination trap reproduced.** 82 traces over the run,
 including 11 `model_turn`, 4 `google.cloud.kms.v1.KeyManagementService/Encrypt` — the KMS
@@ -225,8 +236,9 @@ configuration, but it is reliable enough on a private-IP instance that the guide
 operators to expect two runs. `foundation/` is untouched by design.
 
 **A hazard that mode 2 structurally does not have.** The mode-1 record's
-orphaned-PersistentVolume trap **cannot fire here**: `existingSecret` disables all three
-bundled services, so the release renders no StatefulSet and claims no volume — the run
+orphaned-PersistentVolume trap **cannot fire here**: mode 2 runs all three bundled services
+off — `existingSecret` does not disable them, it makes leaving them on a render error — so
+the release renders no StatefulSet and claims no volume; the run
 finished with zero PVCs and zero PVs, and the only disks in the project were the four node
 boot disks the destroy reclaims. The OTel collector's Google service account and its two
 project role bindings were created by hand for this run and removed after it.

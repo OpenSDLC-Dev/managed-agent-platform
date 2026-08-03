@@ -24,9 +24,13 @@ copy of an entry here.
   vault-attached session in which the sandbox held only a `vltph_…` placeholder while the
   origin received the real secret — one SHA-256 equality proving the whole mode-2
   credential path, since the ciphertext lives in Cloud SQL and the key in Cloud KMS. Each
-  backing service was reached as the deploy guide's **own** service account, established by
-  asking the GKE metadata server from inside the pods rather than inferred from the
-  annotations. Traces reached Cloud Trace, including the Cloud KMS calls. The full record,
+  backing service was reached with this deployment's **own** credential rather than the
+  operator's, and with three different kinds of it: Cloud KMS through Workload Identity
+  (established by asking the GKE metadata server from inside the pods rather than inferred
+  from the annotations), GCS through the storage service account's single-bucket HMAC pair,
+  and Cloud SQL through the platform's non-superuser database role with **no Google identity
+  at all** — the direct private-IP path this repo documents. Traces reached Cloud Trace,
+  including the Cloud KMS calls. The full record,
   including the two limits this acceptance does not claim, is in
   [docs/HISTORY.md](./docs/HISTORY.md).
 

@@ -440,9 +440,12 @@ An unattached disk shows an empty `users` column.
 The OpenBao volume holds the vault's own state, so this is a data-remanence question as
 well as a cost one.
 
-**In mode 2 this trap cannot fire, and the reason is structural rather than lucky.**
-`existingSecret` turns off all three bundled services, so the release renders no
-StatefulSet, and a release with no StatefulSet claims no volume: the mode-2 acceptance run
+**In mode 2 this trap cannot fire, and the reason is structural rather than lucky.** Note
+what `existingSecret` does and does not do: it does not turn the bundled services off, it
+makes leaving them **on** a render error — you set `postgresql.enabled`, `minio.enabled` and
+`openbao.enabled` to `false` yourself, and the chart refuses to deploy if you forget. With
+all three off the release renders no StatefulSet, and a release with no StatefulSet claims
+no volume: the mode-2 acceptance run
 finished with zero PersistentVolumeClaims and zero PersistentVolumes in the cluster, and
 the only disks in the project were the four node boot disks the destroy reclaims. Check
 anyway — the command above costs nothing and a mode-1 experiment in the same project would
