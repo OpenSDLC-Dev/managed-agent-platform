@@ -27,10 +27,22 @@ copy of an entry here.
   backing service was reached as the deploy guide's **own** service account, established by
   asking the GKE metadata server from inside the pods rather than inferred from the
   annotations. Traces reached Cloud Trace, including the Cloud KMS calls. The full record,
-  with the teardown proof it re-ran and the two limits it does not claim, is in
+  including the two limits this acceptance does not claim, is in
   [docs/HISTORY.md](./docs/HISTORY.md).
 
-  Three defects the run found, fixed here. `deploy/gcp/dbinit.sql` asserted that the
+  **The teardown found a real defect, and it is the one worth reading.**
+  `make gcp-env-destroy` could not complete against any environment that had
+  `make gcp-db-init` run against it: the Cloud SQL Admin API's database-delete runs as
+  `cloudsqlsuperuser`, and `gcp-db-init` deliberately hands the platform database to the
+  platform's own role, so the delete fails with `must be owner of database map` and the
+  destroy stops with the instance still running. Slice 4b's teardown proof passed only
+  because mode 1 never runs `gcp-db-init`. Handing ownership back first is impossible
+  rather than merely awkward — the instance is private, so only a Pod in the cluster can
+  reach it, and Terraform destroys the cluster first — so
+  `google_sql_database.map` now carries `deletion_policy = "ABANDON"`, which drops it from
+  state without an API call and lets the instance destroyed in the same run take it.
+
+  Three more defects the run found, fixed here. `deploy/gcp/dbinit.sql` asserted that the
   platform role has no `REPLICATION` but left it out of the summary `NOTICE` that evidences
   the assertion — the record now carries `replication=`, and `dbinit_test.py` asserts it.
   `docs/deploy-gcp.md` told operators to point a collector at `otlp.endpoint` without

@@ -165,7 +165,33 @@ exercised. The first page came back with 22 traces and a `nextPageToken`; follow
 produced 60 more. The mode-1 record's warning about an empty or short first page now has a
 second data point.
 
-**Three findings, all fed back as fixes in the slice-5b PR.**
+**Four findings, all fed back as fixes in the slice-5b PR — and the first one is a real
+defect in the delivered teardown path.**
+
+0. ***`make gcp-env-destroy` could not complete on any environment that had
+   `make gcp-db-init` run against it.*** The destroy removed 21 resources and then stopped:
+
+   ```
+   Error: failed to delete database "map". Detail: pq: must be owner of database map.
+   (Please use psql client to delete database that is not owned by "cloudsqlsuperuser")
+   ```
+
+   The cause is slice 5a's own design meeting the Admin API. `dbinit.sql` deliberately
+   transfers the platform database to the platform's own role — that is the containment the
+   whole slice exists to establish — and the Admin API's database-delete runs as
+   `cloudsqlsuperuser`, which is not a member of that role and therefore cannot drop what it
+   owns. Slice 4b's teardown proof passed because mode 1 never runs `gcp-db-init` at all, so
+   no destroy had ever met this.
+
+   The obvious remedy — hand ownership back before destroying — is not merely awkward, it is
+   **impossible**: the instance has no public address, so only a Pod in the cluster can run
+   SQL against it, and Terraform destroys the cluster *before* it reaches Cloud SQL. By the
+   time the delete is attempted there is nothing left that could have prepared for it. The
+   fix is therefore `deletion_policy = "ABANDON"` on `google_sql_database.map`, which drops
+   the resource from state without calling the API and lets the instance destroyed in the
+   same run take the database with it — the lifetime that was always true. This run's own
+   teardown was completed by removing the resource from state by hand and re-running the
+   destroy, which is exactly the manual step the fix removes.
 
 1. *The dbinit record omitted `REPLICATION`.* Slice 5a added the assertion
    (`dbinit.sql`) and a row for it in the deploy guide's asserted-properties table, but not
@@ -189,7 +215,8 @@ second data point.
    changes it.
 
 **Teardown, and a hazard that mode 2 structurally does not have.** `terraform destroy`
-removed all 34 resources; `foundation/` is untouched by design. The mode-1 record's
+removed all 34 resources — 21 on the first attempt, the rest after finding 0 above was
+worked around by hand; `foundation/` is untouched by design. The mode-1 record's
 orphaned-PersistentVolume trap **cannot fire here**: `existingSecret` disables all three
 bundled services, so the release renders no StatefulSet and claims no volume — the run
 finished with zero PVCs and zero PVs, and the only disks in the project were the four node

@@ -176,8 +176,7 @@ session's prompts and outputs, and the entire SSE event stream in cleartext acro
 network the balancer sits on. This is a prerequisite for any exposed deployment, not an
 optional hardening step.
 
-The **mode-1** acceptance run behind this guide used `kubectl port-forward` and exposed
-nothing.
+Both acceptance runs behind this guide used `kubectl port-forward` and exposed nothing.
 
 When you do expose it, a GKE Gateway with a Google-managed certificate is the least
 surprising way:
@@ -399,6 +398,17 @@ alone. Three settings make that possible and are deliberately non-default: the c
 `deletion_protection`, Cloud SQL's two separate deletion-protection flags, and the bucket's
 `force_destroy`. All three are correct for staging and wrong for anything holding data
 someone would miss.
+
+A fourth setting is there for a reason worth knowing, because it is the direct cost of the
+non-superuser database role: `google_sql_database.map` carries
+`deletion_policy = "ABANDON"`. The Admin API's database-delete runs as `cloudsqlsuperuser`,
+and `make gcp-db-init` hands the database to the platform's own role, so the API cannot drop
+it — `must be owner of database map`, and the destroy stops there with the instance still
+running. Handing ownership back first is not an option: the instance is private, so only a
+Pod in the cluster can reach it, and the destroy removes the cluster first. `ABANDON` drops
+the database from Terraform's state without an API call and lets the instance take it. If
+you copy this Terraform and drop that line, the first teardown after a `gcp-db-init` will
+strand a Cloud SQL instance.
 
 **Then check for orphaned disks. `terraform destroy` does not reclaim them.**
 
