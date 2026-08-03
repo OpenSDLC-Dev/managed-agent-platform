@@ -249,14 +249,26 @@ The manual escape does not open it either. `gcloud services vpc-peerings delete`
 Google's own project still holds the connection, and nothing on the consumer side can
 reach it.
 
-One thing was deliberately *not* tried. Force-deleting the consumer-side peering
-(`gcloud compute networks peerings delete`) would unblock the destroy, but it leaves the
-producer holding an allocation nobody can see, and a later `gcp-env-apply` re-creating the
-connection into that asymmetric state is an unknown. For a residue that costs nothing,
-waiting beat inventing state — filed as
-[#270](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/270), which also
-records that `main.tf` sends the reader to the deploy guide for a manual command the guide
-does not contain.
+**Four hours was never going to be enough, and the review pass is what established that.**
+Google documents the interval — *"if you delete a Cloud SQL instance, you receive a success
+response, but the service waits for four days before deleting the service producer
+resources"*
+([private services access](https://cloud.google.com/vpc/docs/configure-private-services-access#delete-private-connection)).
+So this is not GCP being slow, it is GCP being documented: no number of retries inside one
+working session can succeed, and the run's four hours of them were spent against a wall
+with a four-day clock on it. The first draft of this record called the timing mysterious
+and told operators a next-day re-run would "usually" finish it — a frequency claim built on
+zero observed successes, caught by both reviewers, and replaced with the figure above.
+
+One thing was deliberately *not* tried, and the same document explains why it should not
+be. Force-deleting the consumer-side peering (`gcloud compute networks peerings delete`)
+looks like the way out, but Google's guidance is *"Don't attempt to delete a private
+connection by deleting its associated VPC Network Peering connection directly"* — creating
+a private connection afterwards can then fail, recoverable only by re-creating it with the
+same allocated range names. For a residue that costs nothing, waiting beat inventing state.
+Filed as [#270](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/270), whose
+remaining half is that `main.tf` still frames that manual command as the escape "if a retry
+is not enough" without saying it is subject to the same four days.
 
 What that leaves behind is worth stating precisely rather than rounding to "clean": eleven
 resources — the VPC, the reserved peering range, the service-networking connection and

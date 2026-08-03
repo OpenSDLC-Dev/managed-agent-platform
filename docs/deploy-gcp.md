@@ -424,24 +424,33 @@ fails with `Producer services (e.g. CloudSQL, Cloud Memstore, etc.) are still us
 connection` — with the instance already gone from `gcloud sql instances list`. Re-run
 `make gcp-env-destroy`.
 
-**But do not sit and wait for it, because it may not come.** The mode-2 acceptance teardown
-retried 25 times over about four hours — five-minute intervals, then ten — and the
-peering was still `ACTIVE / Connected` at the end. The manual escape does not open it:
-`gcloud services vpc-peerings delete` fails with
+**But do not sit and wait for it, because "asynchronously" here means days.** Google
+documents the interval: *"if you delete a Cloud SQL instance, you receive a success
+response, but the service waits for four days before deleting the service producer
+resources"*
+([private services access](https://cloud.google.com/vpc/docs/configure-private-services-access#delete-private-connection)).
+So the destroy cannot succeed until those four days are up, however often you re-run it.
+The mode-2 acceptance teardown retried 25 times over about four hours — five-minute
+intervals, then ten — and the peering was still `ACTIVE / Connected` at the end, which is
+the documented behaviour rather than a surprise. The manual `gcloud services vpc-peerings
+delete` is subject to the same wait: it fails with
 `FLOW_SN_DC_RESOURCE_PREVENTING_DELETE_CONNECTION`, meaning a resource inside Google's own
-producer project still holds the connection, where you cannot reach it.
+producer project still holds the connection.
 
 **Which is fine, and this is the part to internalise.** What that failure strands is the
 VPC, the reserved peering range, the connection itself and the API enablements — **none of
 them billable**. The run that hits this has already deleted the cluster, the instance, the
-bucket and the registry, so the cost is settled and the remainder is bookkeeping. Leaving
-it is a legitimate end state; re-running `make gcp-env-destroy` the next day will usually
-finish it. This is GCP's timing rather than a fault in the configuration.
+bucket and the registry, so the cost is settled and the remainder is bookkeeping. Stopping
+here is a legitimate end state: re-run `make gcp-env-destroy` once the four days are up,
+or leave it, since a later `make gcp-env-apply` adopts the same resources anyway.
 
-Force-deleting the consumer-side peering (`gcloud compute networks peerings delete`) does
-unblock the destroy, and this repo does **not** recommend it: it leaves the producer side
-holding an allocation you cannot see, and what a later `make gcp-env-apply` does when it
-re-creates the connection into that state has not been established.
+**Do not reach for the consumer-side peering delete** (`gcloud compute networks peerings
+delete servicenetworking-googleapis-com`). It is the obvious-looking way out and Google
+warns against it in the same document — *"Don't attempt to delete a private connection by
+deleting its associated VPC Network Peering connection directly"* — because creating a
+private connection afterwards can then fail, and recovering means re-creating it with the
+same allocated range names. This teardown did not try it, so there is no local evidence
+either way; the documented warning is reason enough.
 
 **Then check for orphaned disks. `terraform destroy` does not reclaim them.**
 

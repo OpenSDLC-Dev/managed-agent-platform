@@ -15,6 +15,22 @@ copy of an entry here.
 
 ### Added
 
+- **The deploy guide now says how long a stuck teardown actually stays stuck: four days, by
+  Google's own documentation** ([docs/deploy-gcp.md](./docs/deploy-gcp.md), #20). The
+  mode-2 acceptance teardown ended with the VPC peering still `ACTIVE / Connected` after 25
+  destroy attempts across about four hours, and the guide had no better advice than "expect
+  more than one run". It does now, because the interval is documented rather than
+  mysterious: *"if you delete a Cloud SQL instance, you receive a success response, but the
+  service waits for four days before deleting the service producer resources"*. So no
+  amount of retrying inside a working session can succeed, `gcloud services vpc-peerings
+  delete` is subject to the same wait (`FLOW_SN_DC_RESOURCE_PREVENTING_DELETE_CONNECTION`),
+  and stopping with the non-billable residue in place is a legitimate end state. The guide
+  also now names the consumer-side peering delete only to warn against it, quoting Google's
+  own "Don't attempt to delete a private connection by deleting its associated VPC Network
+  Peering connection directly" and the recovery it costs. The matching acceptance record in
+  [docs/HISTORY.md](./docs/HISTORY.md) is corrected in the same change; what remains is
+  filed as #270.
+
 - **Mode 2 on GKE — Cloud SQL, Cloud Storage and Cloud KMS — is accepted end to end, and
   plan 20 is archived** ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md)
   slice 5b, #20). The platform ran on GKE with **no bundled services at all**, every
