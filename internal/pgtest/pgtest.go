@@ -30,9 +30,36 @@ var (
 	dbCounter atomic.Int64
 )
 
+// readyTimeout bounds one container's readiness wait. Longer would not help:
+// the flake this guards against (#265) is a published port that stays
+// connection-refused forever — observed unhealed at both a 120s and a 300s
+// ceiling on a crowded Docker daemon — which more waiting on the same
+// container never fixes, where Main's retry with a fresh container (and thus
+// a fresh port mapping) does.
+const readyTimeout = 150 * time.Second
+
 // Main wraps testing.M: it starts the shared container, runs the suite, and
 // tears the container down. Use from TestMain: os.Exit(pgtest.Main(m)).
+// The start is attempted twice, with a fresh container in between (#265; see
+// readyTimeout).
 func Main(m *testing.M) int {
+	containerID, err := startReady()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pgtest: %v; retrying with a fresh container\n", err)
+		if containerID, err = startReady(); err != nil {
+			fmt.Fprintf(os.Stderr, "pgtest: %v\n", err)
+			return 1
+		}
+	}
+	defer removeContainer(containerID)
+	return m.Run()
+}
+
+// startReady runs one Postgres container, waits for its published port to
+// accept a connection, and sets adminDSN. On failure the container is removed
+// and the error carries its state and last log lines — the only forensics a
+// dead start leaves.
+func startReady() (string, error) {
 	out, err := exec.Command("docker", "run", "--rm", "-d",
 		"-e", "POSTGRES_PASSWORD=test",
 		"-p", "127.0.0.1:0:5432", pgImage).Output()
@@ -41,31 +68,43 @@ func Main(m *testing.M) int {
 		if errors.As(err, &exitErr) {
 			err = fmt.Errorf("%w: %s", err, exitErr.Stderr)
 		}
-		fmt.Fprintf(os.Stderr, "contract tests require Docker for Postgres: %v\n", err)
-		return 1
+		return "", fmt.Errorf("contract tests require Docker for Postgres: %w", err)
 	}
 	containerID := strings.TrimSpace(string(out))
 	if containerID == "" {
-		fmt.Fprintln(os.Stderr, "docker run printed no container ID")
-		return 1
+		return "", errors.New("docker run printed no container ID")
 	}
-	// -v reaps the anonymous volume the Postgres image declares (VOLUME
-	// /var/lib/postgresql/data). The --rm above does not cover it: auto-remove
-	// only fires when the container exits on its own, not when this force-removes
-	// it mid-run, so without -v every test binary leaks one volume per run.
-	defer func() { _ = exec.Command("docker", "rm", "-f", "-v", containerID).Run() }()
-
 	port, err := hostPort(containerID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "resolve postgres port: %v\n", err)
-		return 1
+		removeContainer(containerID)
+		return "", fmt.Errorf("resolve postgres port: %w", err)
 	}
-	adminDSN = fmt.Sprintf("postgres://postgres:test@127.0.0.1:%s/postgres", port)
-	if err := waitReady(adminDSN, 120*time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "postgres never became ready: %v\n", err)
-		return 1
+	dsn := fmt.Sprintf("postgres://postgres:test@127.0.0.1:%s/postgres", port)
+	if err := waitReady(dsn, readyTimeout); err != nil {
+		diag := containerDiag(containerID)
+		removeContainer(containerID)
+		return "", fmt.Errorf("postgres never became ready: %v (%s)", err, diag)
 	}
-	return m.Run()
+	adminDSN = dsn
+	return containerID, nil
+}
+
+// removeContainer force-removes with -v: the Postgres image declares VOLUME
+// /var/lib/postgresql/data, and --rm's auto-remove only fires when the
+// container exits on its own — without -v every test binary leaks one
+// anonymous volume per run.
+func removeContainer(containerID string) {
+	_ = exec.Command("docker", "rm", "-f", "-v", containerID).Run()
+}
+
+// containerDiag captures the container's state and last log lines for the
+// failure message, distinguishing a crashed container from a live one behind
+// a dead port mapping.
+func containerDiag(containerID string) string {
+	state, _ := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", containerID).Output()
+	logs, _ := exec.Command("docker", "logs", "--tail", "3", containerID).CombinedOutput()
+	return fmt.Sprintf("container state %s; last log: %s",
+		strings.TrimSpace(string(state)), strings.TrimSpace(string(logs)))
 }
 
 func hostPort(containerID string) (string, error) {
@@ -84,7 +123,10 @@ func hostPort(containerID string) (string, error) {
 func waitReady(dsn string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// 5s per attempt: under the same load a dial+auth round trip can
+		// legitimately outlast 2s, and a too-short attempt keeps cancelling
+		// a connection that would have completed.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		conn, err := pgx.Connect(ctx, dsn)
 		if err == nil {
 			_ = conn.Close(ctx)

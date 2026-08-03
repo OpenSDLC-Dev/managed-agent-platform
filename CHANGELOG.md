@@ -15,6 +15,23 @@ copy of an entry here.
 
 ### Fixed
 
+- **The per-test-binary Docker fixtures retry a dead container start instead of flaking**
+  ([internal/pgtest](./internal/pgtest/pgtest.go),
+  [internal/secrets/secretstest](./internal/secrets/secretstest/secretstest.go),
+  [internal/blob/blobtest](./internal/blob/blobtest/blobtest.go), #265). On a crowded
+  Docker daemon a fixture's published port can come up dead — connection-refused for the
+  whole readiness budget while sibling fixtures in the same run work. Diagnosing this on
+  2026-08-04 showed waiting longer never heals it: pgtest's Postgres stayed refused to a
+  120-second ceiling and, with the budget raised as an experiment, to a 300-second one
+  (the store suite failing at 123s and then 302s on consecutive single-gate runs), and
+  the OpenBao fixture had flaked the same way under a concurrent gate. So each fixture's
+  `Main` now bounds one start at 150 seconds and, on failure, removes the container and
+  tries once more with a fresh one — a fresh port mapping is what actually recovers — and
+  the failure message carries the dead container's state and last log lines, forensics
+  the force-remove used to destroy. The per-probe timeouts in pgtest and secretstest also
+  rise from 2 to 5 seconds so a loaded dial+auth round trip is not cancelled
+  mid-handshake. CI is unaffected (one gate per runner, starts well under the budget).
+
 - **`environment/main.tf`'s peering header no longer sells the manual
   `gcloud services vpc-peerings delete` as the way out of a stuck teardown**
   ([deploy/gcp/environment/main.tf](./deploy/gcp/environment/main.tf), #270). The comment
