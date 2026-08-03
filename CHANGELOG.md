@@ -139,6 +139,13 @@ copy of an entry here.
   the pin follows the context *entry*, so an entry edited in place is still covered only by
   the endpoint comparison.
 
+  Correcting the KMS wording in the deploy guide then left the repo contradicting itself, so
+  the same claim is corrected where it also leads a paragraph — `deploy/gcp/README.md`,
+  `docs/ARCHITECTURE.md` and `foundation/main.tf`. A key ring still cannot be deleted; a key
+  can, but only by destroying and deleting every version, which runs through the data loss
+  rather than around it, so none of the operational guidance changes. The same sentence in
+  CHANGELOG entries and in plan 20 is left alone: those are records of what was known then.
+
 - **`terraform destroy` reliability and CIDR preconditions.** `deletion_policy = "ABANDON"`
   on the service-networking connection is *removed*, not added: it does not delete the
   peering, only drops it from state, so Google then refuses to delete the VPC that peering

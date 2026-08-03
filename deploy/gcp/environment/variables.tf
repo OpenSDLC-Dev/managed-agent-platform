@@ -283,8 +283,9 @@ variable "private_service_access_prefix_length" {
   # for private services access. Lower bound: this range is ALLOCATED, not
   # chosen — google_compute_global_address gets a prefix length and no address,
   # so Google picks the block. Ask for a /8 and the only RFC1918 candidate is
-  # 10.0.0.0/8, which contains every default in this file; whichever of the two
-  # is created second then fails, and the survivor makes the retry fail too.
+  # 10.0.0.0/8, which contains three of this file's four network defaults (the
+  # master range is 172.16/12); whichever of the two is created second then
+  # fails, and the survivor makes the retry fail too.
   # Nine is the first prefix length that cannot swallow 10/8 whole. The overlap
   # precondition in main.tf cannot help here: an allocated range is unknown at
   # plan time, and referencing it would turn that plan-time check into an

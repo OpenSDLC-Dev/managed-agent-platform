@@ -46,9 +46,11 @@
 -- inverts the containment this whole file exists to establish.
 --
 -- pg_catalog first, so the built-ins cannot be shadowed. pg_temp named
--- EXPLICITLY and LAST: left unnamed it is searched FIRST, and it is writable.
--- It has to be on the path at all because the assertion block reads its
--- parameters out of a temp table.
+-- EXPLICITLY and LAST, because left unnamed it is searched FIRST and it is
+-- writable. Naming it is not what makes the temp table below reachable —
+-- PostgreSQL finds the session temp schema whether or not it is on the path,
+-- so omitting it entirely would also work. Last is simply the safer of the two
+-- placements, and the only one that says so out loud.
 --
 -- The %I/%L quoting below defends against hostile NAMES. It does nothing about
 -- a hostile function resolution, which is why both are needed.

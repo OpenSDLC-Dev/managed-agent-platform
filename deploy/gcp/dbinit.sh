@@ -160,9 +160,10 @@ fi
 # "already gone" identically, and then reporting the Secret as removed while it
 # survives in the cluster it was actually written to.
 #
-# A function that shadows the command, rather than `--context` repeated at
-# fourteen call sites: one place to get right, and adding a call site later
-# cannot forget it. `command kubectl` is what stops it recursing.
+# A function that shadows the command, rather than `--context` repeated at every
+# call site: one place to get right, and adding a call site later cannot forget
+# it. (`config current-context` just below is the one call that must NOT carry
+# it — it is what discovers the value.) `command kubectl` is what stops it recursing.
 #
 # The residual, stated because it is not closed: this pins the context ENTRY, so
 # an entry edited in place — or a cluster torn down and rebuilt under the same

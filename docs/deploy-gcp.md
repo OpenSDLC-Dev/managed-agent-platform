@@ -114,9 +114,10 @@ new value.
 One consequence of the administrator not being a real superuser is worth knowing before you
 read the SQL and wonder about an omission. PostgreSQL lets only a `SUPERUSER` change the
 `SUPERUSER`, `REPLICATION` and `BYPASSRLS` attributes — **even to turn them off** — and
-the administrator is not one. So the corrective `ALTER ROLE` names
-`NOCREATEDB NOCREATEROLE` and stops there: all three of those are asserted but not repaired,
-because this session genuinely cannot revoke them. A drift in them fails the step with a message rather than being silently
+the administrator is not one. So of the attributes it could revoke the corrective
+`ALTER ROLE` names only `NOCREATEDB NOCREATEROLE` (alongside the `LOGIN INHERIT` it
+restores and the password it sets), and none of those three: they are asserted but not
+repaired, because this session genuinely cannot revoke them. A drift in them fails the step with a message rather than being silently
 fixed. For the same reason the file grants the platform role to the administrator before
 transferring database ownership — `ALTER DATABASE ... OWNER TO` requires the caller to be
 able to `SET ROLE` to the new owner, and in PostgreSQL 16 the membership `CREATE ROLE`

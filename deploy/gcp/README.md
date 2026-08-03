@@ -24,8 +24,8 @@ identically?"**
 
 Three things make the split necessary rather than tidy:
 
-- **KMS key rings and crypto keys cannot be deleted — and destroying the *resource* is
-  worse than leaving it.** The provider's default `deletion_policy` is `DELETE`, which
+- **A KMS key ring can never be deleted, a crypto key only by destroying and deleting
+  every version of it — and destroying the *resource* is worse than leaving it.** The provider's default `deletion_policy` is `DELETE`, which
   schedules every `CryptoKeyVersion` for destruction: the name stays taken, so a
   single-configuration setup still collides at the next apply, and the key is now unusable.
   The vault ciphertext in Postgres is decryptable by that key and nothing else, so that is
@@ -276,7 +276,7 @@ shell builtin: passing it as an argument would put it in `ps` output and shell h
 
 ## Handover to Helm
 
-The acceptance runs in two phases the chart's own render-time exclusivity dictates
+The acceptance runs in two phases (mode 1 has been run; mode 2 has not) the chart's own render-time exclusivity dictates
 (plan 20, Decision 4). **Mode-1** is bundled Postgres/MinIO/OpenBao with inline values —
 it proves the images, the Kubernetes sandbox path, the gate and the end-to-end flows with
 the fewest variables. **Mode-2** is Cloud SQL + GCS + KMS behind a pre-created Secret: the

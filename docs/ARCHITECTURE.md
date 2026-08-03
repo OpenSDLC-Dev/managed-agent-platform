@@ -625,7 +625,8 @@ developer tooling for GCP deployment only, never a dependency of the platform, i
 or `make verify`. **Two configurations, not one**, split by "can a rebuild recreate this
 identically?" rather than by cost: `foundation/` (KMS key ring and crypto key, the three
 service accounts, the Secret Manager secret *containers*) is created once and never
-destroyed, because KMS key rings and crypto keys cannot be deleted at all and the vault
+destroyed, because a KMS key ring can never be deleted (and a crypto key only by
+destroying every version of it, which is the data loss itself) and the vault
 ciphertext in Postgres is decryptable by that key and nothing else, and because deleting a
 service account deletes its HMAC keys — an identity in the disposable half would strand the
 once-readable HMAC secret in Secret Manager, valid-looking and dead. `environment/` (GKE

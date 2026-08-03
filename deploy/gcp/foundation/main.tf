@@ -4,8 +4,10 @@
 # cheap" but "can a rebuild recreate this identically?" (plan 20, Decision 9).
 # Everything here answers no:
 #
-#   - KMS key rings and crypto keys cannot be deleted from a project. Destroying
-#     the Terraform resource does NOT leave a working key behind: the provider's
+#   - A KMS key ring can never be deleted from a project, and a crypto key only
+#     by destroying and deleting every version of it — which is the data loss,
+#     not a way around it. Destroying the Terraform resource does NOT leave a
+#     working key behind: the provider's
 #     default deletion_policy is DELETE, which schedules every CryptoKeyVersion
 #     for destruction and renders the key unusable while the name stays taken.
 #     The vault ciphertext in Postgres is decryptable by that key and nothing
