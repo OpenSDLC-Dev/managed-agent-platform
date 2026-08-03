@@ -309,10 +309,17 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'FAILED: group role % does not exist', a;
     END IF;
-    IF g.rolsuper OR g.rolcreatedb OR g.rolcreaterole OR g.rolbypassrls OR g.rolcanlogin THEN
+    -- rolreplication is in this list for the same reason it is asserted on the
+    -- platform role itself: the criterion here is "the group holds no privilege
+    -- attribute at all", not the narrower "no attribute reachable through SET
+    -- ROLE" — rolcanlogin is checked too, and LOGIN is not SET-ROLE-reachable
+    -- either. Leaving REPLICATION out was an asymmetry rather than a decision:
+    -- a group with rolreplication=t passed this check while the summary below
+    -- still printed the platform row's replication=f, so the record read clean.
+    IF g.rolsuper OR g.rolcreatedb OR g.rolcreaterole OR g.rolbypassrls OR g.rolreplication OR g.rolcanlogin THEN
         RAISE EXCEPTION
-            'FAILED: group role % is privileged (superuser=% createdb=% createrole=% bypassrls=% login=%) and % can SET ROLE to it',
-            a, g.rolsuper, g.rolcreatedb, g.rolcreaterole, g.rolbypassrls, g.rolcanlogin, u;
+            'FAILED: group role % is privileged (superuser=% createdb=% createrole=% bypassrls=% replication=% login=%) and % can SET ROLE to it',
+            a, g.rolsuper, g.rolcreatedb, g.rolcreaterole, g.rolbypassrls, g.rolreplication, g.rolcanlogin, u;
     END IF;
 
     -- OWNERSHIP: the platform database, and no other.
@@ -364,8 +371,9 @@ BEGIN
     -- the verdict from being able to disagree, and keeps the file runnable
     -- against stock PostgreSQL so it can be tested without a Cloud SQL bill.
     RAISE NOTICE
-        'dbinit: role=% superuser=% createdb=% createrole=% bypassrls=% in_cloudsqlsuperuser=% owns=% encrypted=%',
+        'dbinit: role=% superuser=% createdb=% createrole=% bypassrls=% replication=% in_cloudsqlsuperuser=% owns=% encrypted=%',
         u, r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolbypassrls,
+        r.rolreplication,
         (to_regrole('cloudsqlsuperuser') IS NOT NULL
          AND pg_has_role(u, 'cloudsqlsuperuser', 'member')),
         coalesce((SELECT string_agg(db.datname, ',')

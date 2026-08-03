@@ -33,6 +33,271 @@ recorded nowhere else.
 
 ---
 
+## GCP deployment plan (20) — archived 2026-08-03, all five slices delivered (#20)
+
+docs/plan/20_gcp-deployment.md is archived complete. What it set out to deliver — a
+supported, documented, acceptance-proven path to run the platform on GKE with
+Google-managed backing services — exists in `deploy/gcp/` (a `foundation/` applied once
+and never destroyed, an `environment/` created and destroyed freely), in the chart's
+Cloud-native seams, and in [docs/deploy-gcp.md](./deploy-gcp.md). The plan itself landed
+approved in PR #243. Slice 1: GCS delete convergence in `internal/blob/s3`, in two PRs —
+deleting an already-deleted object converges (PR #245), then a bare 404 stops reading as a
+missing object (#244, PR #252). Slice 2: sandbox containment and
+placement, in three PRs — the runtime's seccomp filter (#246), an opt-in ephemeral-storage
+cap (#247), and pinning sandbox pods to a node pool of their own (#248). Slice 3:
+`internal/secrets/gcpkms`, the Cloud KMS credential cipher, with its own live tier and its
+ceiling made honest (PR #249). Slice 4a: the staging Terraform (PR #250), with the
+Cloud Build API moved into `foundation/` when the documented order proved unrunnable
+without it (PR #253); slice 4b: the **mode-1** acceptance on GKE (PR #256, record below).
+Slice 5a: the mode-2 configuration —
+private nodes, Cloud NAT, private-IP Cloud SQL, the Docker Hub mirror, and a platform
+database role outside `cloudsqlsuperuser` — plus the deploy guide (PR #259). Slice 5b: the
+**mode-2** acceptance run, its three findings, and this archiving (the record immediately
+below).
+
+The plan states its own limits and they survive it: this delivery is production in
+*shape*, not a readiness verdict. The three prerequisites it names — a production caller of
+`Sandbox.Destroy` ([#64](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/64)),
+TLS in front of the control plane, and host-level isolation for model-directed commands —
+are unmet by design, each for a reason written down rather than deferred silently. The
+follow-on work it scoped rather than built is filed:
+[#236](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/236) (Vertex AI
+provider), [#237](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/237) (the
+standalone-gate plan that would unblock gVisor), and
+[#238](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/238) (warm-pool
+sandboxes).
+
+## GCP mode-2 acceptance — Cloud SQL + GCS + Cloud KMS on GKE, real `ant` CLI (run 2026-08-03) — ✅ passed
+
+The production-shaped half of plan 20, run end to end against the live project
+`opensdlc-managed-agents`: the platform on GKE with **no bundled services at all**, every
+credential in a pre-created Secret, and each backing service reached with this deployment's
+own credential rather than the operator's — three different kinds of credential, itemised
+below, because flattening them into "its service account" would not be true of Cloud SQL.
+Nothing was exposed — the whole battery ran over `kubectl port-forward` (Decision 8).
+
+**The build-up, and what it incidentally re-proved.** `environment/` had been destroyed
+after the mode-1 run, so this run began by rebuilding it on the surviving `foundation/` —
+which is the Decision-9 teardown proof executed a second time, in mode 2:
+`terraform apply` created all **34** resources with no KMS name collision (the key ring and
+crypto key are only *read* here); `make gcp-bootstrap` reconciled the surviving Secret
+Manager secrets against freshly created infrastructure — the surviving database password
+authenticated against the **new** Cloud SQL instance, and the stored GCS HMAC pair against
+the **new** bucket, both by authenticated call rather than by inspection; and a vault
+credential created *after* the rebuild round-tripped through the gate (below). The four
+images were one Cloud Build (3m07s); `controlplane`, `brain` and `executor` are three tags
+on a single digest (`sha256:d083eb16422c…`), so they cannot drift, and `gate` is the fourth.
+
+**The database role is not a Cloud SQL superuser — asserted against the real thing.**
+`make gcp-db-init` passed on its first run against a live Cloud SQL instance, which is the
+first execution of slice 5a's hardening outside its unit suite:
+
+```
+NOTICE:  dbinit: role=map superuser=f createdb=f createrole=f bypassrls=f
+         in_cloudsqlsuperuser=f owns=map encrypted=t
+ok: map is a non-superuser, outside cloudsqlsuperuser, owning only map
+```
+
+The assertion slice 5a added last — that the role's membership set is *exactly* itself, its
+group role and `pg_database_owner` — was the one flagged as most likely to false-fail on a
+real instance. It did not: Cloud SQL's `CREATE ROLE … LOGIN IN ROLE` grants membership in
+one direction only, and the `GRANT map TO CURRENT_USER` the file needs for the ownership
+transfer runs the other way, so the set closes cleanly.
+
+**Acceptance, all through the real `ant` CLI 1.21.0.**
+
+- *Sessions and the async loop.* Wire-correct prefixes throughout (`agent_`, `env_`,
+  `sesn_`, `sevt_`, `vlt_`, `vcrd_`, `sesrsc_`, `file_`, `skill_`). A bash turn closed the
+  loop — `agent.tool_use` → executor → `agent.tool_result` → `agent.message` →
+  `status_idle end_turn` — and the tool's output was `map-sesn-292hrehmcbdr7t74w1f2r6dp`,
+  the sandbox pod's own hostname, so it ran in the per-session pod rather than the executor.
+- *Sandbox placement, bounds, and the mirror.* The pod landed on a sandbox-pool node with
+  `map.opensdlc.dev/sandbox` in both its nodeSelector and its toleration,
+  `allowPrivilegeEscalation: false`, and `NET_RAW`/`SETUID`/`SETGID` dropped. Its image was
+  `…/map-dockerhub/library/debian:stable-slim` — slice 5a's Docker Hub mirror serving the
+  sandbox path, which mode 1 never exercised because its third-party images were the
+  bundled services instead.
+- *`file-answer`.* A file uploaded through the Files API landed in GCS
+  (`gs://…-map-blob/files/file_ysnjte6v8wwj5mq6zqvr1y09`), mounted as a session resource,
+  and the model read the mount and returned `marlin-000a256b` — a token generated for this
+  run that appears in no prompt.
+- *`skill-answer`.* A skill uploaded as a zip, injected as Level-1 metadata and
+  materialized: the model read `SKILL.md`, then `answer.txt`, and returned
+  `kestrel-a8dce216` exactly.
+- *HITL.* An `always_ask` toolset suspended the first tool call —
+  `stop_reason: {"type":"requires_action","event_ids":[…]}` — and a `user.tool_confirmation`
+  with `result: allow` released it into `agent.tool_result` → `agent.message` → `end_turn`.
+- *The egress gate, with a vault, on Cloud KMS.* For a `limited`, vault-attached session the
+  executor attached the gate as a **native Kubernetes sidecar** (an `initContainers` entry
+  with `restartPolicy: Always`) holding `NET_ADMIN`, beside a sandbox container that drops
+  `NET_RAW`/`SETUID`/`SETGID`. Three things were then shown separately:
+  - The sandbox held only the placeholder: `printenv M2_TOKEN` returned
+    `vltph_0875d38c504402092c65b2a398b38113`.
+  - The origin received the real secret. A plain-HTTP request through the gate to an
+    allowed host echoed back an `Authorization` value whose SHA-256 was
+    `dc897c7e6d532655da9e5c75d4ef278b51d157fd404fa5e9c8dd210e3a793de1` — byte-identical to
+    the stored secret's hash. Only the hash was ever printed. Since the ciphertext lives in
+    Cloud SQL and the key in Cloud KMS, this single equality proves the whole mode-2
+    credential path: store → KMS decrypt → substitute at the gate.
+  - Both fail-closed layers hold. A disallowed host was refused by the gate
+    (`403 host not permitted by the environment's networking policy`), and a connection
+    that bypassed the proxy entirely — straight to a public address from inside the
+    sandbox — **timed out**, because the gate's rules live in the pod's network namespace.
+    The mode-1 record proved the policy; this adds the structure underneath it.
+
+**Every backing service was reached with this deployment's own credential rather than the
+operator's — three different kinds of credential, and the distinction matters.**
+
+- *Cloud KMS: Workload Identity, no key material anywhere.* Cloud Audit Logs cannot show
+  this — KMS crypto operations are data-access logs and are off by default — so it was
+  established directly: a pod running under the chart's controlplane ServiceAccount asked
+  the GKE metadata server who it was and got `map-controlplane@…iam.gserviceaccount.com`;
+  the same probe under the executor's ServiceAccount got `map-executor@…`. Neither is the
+  node service account, which is what the `iam.gke.io/gcp-service-account` annotations
+  exist to produce, and the node account holds no role on the key.
+- *GCS: the `map-storage` service account's HMAC pair* — a static credential belonging to
+  that account, not Workload Identity. Its only roles are `roles/storage.objectAdmin` and
+  `roles/storage.legacyBucketReader` **on the one bucket**, and the second is not
+  decoration: `s3.New` calls `BucketExists` before returning a store, which needs
+  `storage.buckets.get`, which `objectAdmin` alone does not grant. All three processes
+  logged `object storage configured` at startup, so that call succeeded — which is
+  Decision 11's privilege set proving itself sufficient as well as minimal.
+- *Cloud SQL: **no Google identity at all**.* This run took the direct private-IP path the
+  guide documents — `sslmode=require` from inside the VPC — so the credential is the
+  platform's own non-superuser **database** role and its password. The Cloud SQL Auth Proxy
+  path, which is the one that would involve `roles/cloudsql.client` and a per-component
+  Google identity, was not exercised; the guide already says the chart templates no sidecar
+  for it.
+
+**Traces reach Cloud Trace, and the pagination trap reproduced.** 82 traces over the run,
+including 11 `model_turn`, 4 `google.cloud.kms.v1.KeyManagementService/Encrypt` — the KMS
+calls traced, which mode 1 had nothing to show — 2 `egress_request` from the gate, 9
+`GET /internal/v1/gate/config`, and the HTTP server spans for every management route
+exercised. The first page came back with 22 traces and a `nextPageToken`; following it
+produced 60 more. The mode-1 record's warning about an empty or short first page now has a
+second data point.
+
+**Four findings, all fed back as fixes in the slice-5b PR — and the first one is a real
+defect in the delivered teardown path.**
+
+0. ***`make gcp-env-destroy` could not complete on any environment that had
+   `make gcp-db-init` run against it.*** The destroy removed 21 resources and then stopped:
+
+   ```
+   Error: failed to delete database "map". Detail: pq: must be owner of database map.
+   (Please use psql client to delete database that is not owned by "cloudsqlsuperuser")
+   ```
+
+   The cause is slice 5a's own design meeting the Admin API. `dbinit.sql` deliberately
+   transfers the platform database to the platform's own role — that is the containment the
+   whole slice exists to establish — and the Admin API's database-delete runs as
+   `cloudsqlsuperuser`, which is not a member of that role and therefore cannot drop what it
+   owns. Slice 4b's teardown proof passed because mode 1 never runs `gcp-db-init` at all, so
+   no destroy had ever met this.
+
+   The obvious remedy — hand ownership back before destroying — is not merely awkward, it is
+   **impossible**: the instance has no public address, so only a Pod in the cluster can run
+   SQL against it, and Terraform destroys the cluster *before* it reaches Cloud SQL. By the
+   time the delete is attempted there is nothing left that could have prepared for it. The
+   fix is therefore `deletion_policy = "ABANDON"` on `google_sql_database.map`, which drops
+   the resource from state without calling the API and lets the instance destroyed in the
+   same run take the database with it — the lifetime that was always true. This run's own
+   teardown was completed by removing the resource from state by hand and re-running the
+   destroy, which is exactly the manual step the fix removes.
+
+1. *The dbinit record omitted `REPLICATION`.* Slice 5a added the assertion
+   (`dbinit.sql`) and a row for it in the deploy guide's asserted-properties table, but not
+   the corresponding field in the summary `RAISE NOTICE` — so the property was enforced and
+   the record that evidences it was silent. Found by reading the live output against the
+   table. The NOTICE now carries `replication=%`, and `dbinit_test.py` asserts it. (The
+   suite ends this PR at **83** checks rather than 80, because the review that followed
+   found the same omission one role along — see the hardening note below.)
+2. *The guide's collector paragraph was under-specified, in two sequential ways.* The
+   platform builds `otlptracegrpc`, `otlpmetricgrpc` **and** `otlploggrpc` against the one
+   `OTEL_EXPORTER_OTLP_ENDPOINT`, so a collector declaring only a `traces` pipeline made
+   every process print `Unimplemented … LogsService`; declaring `logs` and `metrics`
+   pipelines took that to zero on all three. Fixing it then exposed the second trap: the
+   `googlecloud` exporter drops the logs signal with `no log name provided` until
+   `log.default_log_name` is set. Both are now in the guide, together with the honest
+   limit — after the fix the platform emitted no further log records at all (the collector
+   saw zero logs-signal batches across two ten-minute windows), so **no platform log entry
+   was observed arriving in Cloud Logging**; the fix is proven only to the extent that
+   nothing is dropped any more. On GKE the containers' stdout reaches Cloud Logging through
+   the node's own agent regardless, which is why the gap is easy to miss.
+3. *The guide claimed mode 2 had never been accepted.* True when written; this run is what
+   changes it.
+
+**Teardown needed several runs, and only the first failure was a defect.** Run 1 removed 21
+resources — the cluster and both node pools, the NAT and router, the subnetwork, both
+Artifact Registry repositories, the GCS bucket, the Cloud SQL administrator and every IAM
+binding — and then stopped on finding 0 above, leaving the database, the instance the
+database blocks, and the eleven resources downstream of that instance. So all but one
+billable resource was already gone when the defect fired; what it stranded was the running
+Cloud SQL instance.
+
+Run 2, after the database was taken out of state by hand, removed that instance — one
+tracked resource, and the last billable one — and then failed on the VPC peering with
+`Producer services (e.g. CloudSQL, Cloud Memstore, etc.) are still using this connection`,
+because Cloud SQL releases the peering asynchronously and the delete landed while the
+release was still in flight. Subsequent runs kept hitting the same wall for far longer than
+the "wait a minute" the error implies: the peering was still `ACTIVE` well after the
+instance had disappeared from `gcloud sql instances list`.
+
+What that leaves behind is worth stating precisely rather than rounding to "clean": eleven
+resources — the VPC, the reserved peering range, the service-networking connection and
+eight API enablements — **none of which is billable**. Project-wide, after run 2 there was
+no cluster, no Cloud SQL instance, no Artifact Registry repository, no bucket and **zero
+Compute Engine disks**. So the cost was settled by run 2 and everything after it is
+bookkeeping. That failure is GCP's timing rather than a fault in the configuration, but it
+is reliable enough on a private-IP instance that the guide now tells operators to expect
+more than one run. `foundation/` is untouched by design.
+
+**A hazard that mode 2 structurally does not have.** The mode-1 record's
+orphaned-PersistentVolume trap **cannot fire here**: mode 2 runs all three bundled services
+off — `existingSecret` does not disable them, it makes leaving them on a render error — so
+the release renders no StatefulSet and claims no volume; the run
+finished with zero PVCs and zero PVs, and the only disks in the project were the four node
+boot disks the destroy reclaims. The OTel collector's Google service account and its two
+project role bindings were created by hand for this run and removed after it.
+
+**Review hardening, landed in the same PR — and it found a fifth defect the run did not.**
+The verifier's first pass returned **FAIL**, correctly: the commit it reviewed shipped an
+acceptance record claiming "`terraform destroy` removed all 34 resources" while the run it
+recorded had stopped at 21 on finding 0. That is the failure mode this whole file exists to
+prevent, caught in the artifact the slice delivers; the record above is the corrected
+account, and a second pass on the fixed tip returned PASS. It then caught two more accuracy
+defects the corrected text had introduced — a teardown paragraph whose run-2 attribution
+could not be squared with its own resource arithmetic (the cluster, bucket and registry went
+in run 1, not run 2), and this list's own stale "80 checks".
+
+The Codex pass (`gpt-5.6-sol`, `ultra`) returned six findings, and the one with teeth was
+**structural, not editorial**: `dbinit.sql`'s **group-role** assertion listed
+`SUPERUSER`/`CREATEDB`/`CREATEROLE`/`BYPASSRLS`/`LOGIN` but not `REPLICATION`. The platform
+role can `SET ROLE` to that group, and the file's own comment says anything the group holds
+is one `SET ROLE` away — so a group role granted `REPLICATION` passed the check while the
+summary still printed the platform row's `replication=f`, and the record read clean. The
+asymmetry was made *visible* by finding 1 above: adding `replication=` to the NOTICE put the
+two assertions side by side for the first time. `LOGIN` was already in that list and is not
+`SET ROLE`-reachable either, so the criterion was always "the group holds no privilege
+attribute", not the narrower reachability argument — `REPLICATION` was simply missing.
+Fixed, with a test case proven red against the pre-fix SQL by both the implementer and the
+verifier independently; the suite is 83 checks.
+
+Codex's other five were accuracy defects in this record, and the sharpest was real:
+*"every backing service was reached as the deploy guide's own service account"* is **false
+of Cloud SQL**, which this run reached over the direct private-IP path with no Google
+identity at all. The record now names three distinct credential kinds instead. Also fixed:
+`existingSecret` makes leaving the bundled services enabled a render error rather than
+disabling them; slice 1 landed in two PRs, not one; there is no `blob.Open`; and two forward
+references to "slice 5" outlived its delivery.
+
+**Two observations that are not defects.** Unlike mode 1, where the three platform pods
+restart two or three times on a first install while the bundled Postgres comes up, all
+three reached `Running` on the **first** attempt with zero restarts — Cloud SQL was already
+serving, so there was no DSN host to wait for. And #64 is unchanged and visible: the five
+sessions this battery created left five sandbox pods `Running` at teardown, one apiece,
+each still holding its CPU request.
+
 ## Outcomes plan (21) — archived 2026-08-03, all five slices delivered (#77, absorbing #161)
 
 docs/plan/21_outcomes.md is archived complete: the reference's define-outcomes surface — `user.define_outcome` (text and file rubrics, `initial_events` on session create), the platform-provisioned grader loop with revision feedback up to `max_iterations`, the `span.outcome_evaluation_start/_ongoing/_end` trio, the `outcome_evaluations[]` projection, and the `/mnt/session/outputs/` harvest into the Files API — runs end to end and is verified against the reference doc's own example. Slice 1: SDK bump v1.59.0→v1.61.0 with the wire-schema verification record below (PR #255). Slice 2: define_outcome acceptance + storage + rendering + `initial_events`, with interrupt settlement pulled forward so mid-outcome chaining works (PR #257). Slice 3: the grader loop, transcript-stage (PR #258). Slice 4: the `outputs_harvest` work kind, the per-path deliverables snapshot, and the grader's deliverables input (PR #260). Slice 5: the full-chain acceptance below plus docs settlement (the archiving PR). Two platform fixes were forced by the live acceptance and landed in the slice-5 PR: per-route `max_tokens` on model-provider config, and the outputs-path line in the outcome charge. Deliberate divergences and inferences are in docs/DIVERGENCES.md (the plan-21 entries all *Tracked: #77/#78*); the as-built system in docs/ARCHITECTURE.md.

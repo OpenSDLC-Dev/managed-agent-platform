@@ -276,8 +276,9 @@ shell builtin: passing it as an argument would put it in `ps` output and shell h
 
 ## Handover to Helm
 
-The acceptance runs in two phases (mode 1 has been run; mode 2 has not) the chart's own render-time exclusivity dictates
-(plan 20, Decision 4). **Mode-1** is bundled Postgres/MinIO/OpenBao with inline values —
+The acceptance ran in the two phases the chart's own render-time exclusivity dictates
+(plan 20, Decision 4); both are done, and their records are in
+[docs/HISTORY.md](../../docs/HISTORY.md). **Mode-1** is bundled Postgres/MinIO/OpenBao with inline values —
 it proves the images, the Kubernetes sandbox path, the gate and the end-to-end flows with
 the fewest variables. **Mode-2** is Cloud SQL + GCS + KMS behind a pre-created Secret: the
 production shape. This configuration creates the resources for both; mode-1 only consumes
@@ -349,8 +350,11 @@ Without the tolerations every sandbox pod stays `Pending` forever — the pool's
 other tolerator. Without the node selector sandbox pods land on the platform pool, and the
 dedicated pool buys nothing.
 
-Mode-2's inputs are emitted individually, for slice 5 to assemble into the pre-created
-Secret:
+Mode-2's inputs are emitted individually, to be assembled into the pre-created Secret that
+the chart's `existingSecret` value names — its full key list is in
+[docs/deploy-gcp.md](../../docs/deploy-gcp.md#the-two-modes), and there is no script for it
+because a script that touched every one of these would be a credential-handling tool of its
+own. The mode-2 acceptance run built it with a single `kubectl create secret generic`:
 
 ```sh
 terraform output -raw  kms_key_name                              # gcpKMS.keyName / GCPKMS_KEY_NAME
@@ -390,7 +394,8 @@ untracked resource this split exists to avoid.
 **No secret is in either state file.** That is the point of `bootstrap.sh` and of
 `password_wo`: the database password and the GCS HMAC pair exist in Secret Manager and nowhere
 else Terraform can reach. (The model key is pasted from its own provider into the Helm values
-in mode-1; mode-2 gives it a secret of its own, in slice 5.) So a lost state file costs you bookkeeping, not
+in mode-1; in mode-2 it rides `model-providers.json` inside the pre-created Secret, so it
+never reaches a values file either.) So a lost state file costs you bookkeeping, not
 credentials.
 
 Losing `foundation/`'s state is recoverable, because every resource in it is adoptable — but

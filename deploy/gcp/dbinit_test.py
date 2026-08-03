@@ -117,9 +117,24 @@ class Postgres:
         return False
 
     def _wait_ready(self):
+        # `-h 127.0.0.1` probes the SAME transport every later connection uses,
+        # and that is the whole point. Without it this probes the unix socket,
+        # and the image's entrypoint opens that first: it runs initdb, then
+        # starts a TEMPORARY server with `listen_addresses=''` to apply the
+        # password and the init scripts, and only then restarts for real with
+        # TCP. During the temporary phase the unix socket accepts connections
+        # while 127.0.0.1:5432 refuses them -- so this returned, _enable_tls
+        # ran `psql -h 127.0.0.1` straight into `Connection refused`, and the
+        # suite died in setup with 60-odd checks already green.
+        #
+        # Observed rather than reasoned: polling both probes every 50ms inside
+        # the container caught the window on poll 7 of 11 (`unix=0 tcp=2`),
+        # with TCP first accepting at poll 11. It is roughly one tenth of a
+        # startup wide, which is why it took until CI run 30781422066 to fire.
         for _ in range(120):
             if run("docker", "exec", self.name,
-                   "pg_isready", "-U", "postgres").returncode == 0:
+                   "pg_isready", "-h", "127.0.0.1",
+                   "-U", "postgres").returncode == 0:
                 return
             time.sleep(0.5)
         raise RuntimeError("postgres never became ready")
@@ -324,6 +339,12 @@ def main():
         check("records that the session was encrypted", "encrypted=t" in log, log)
         check("records that it is outside cloudsqlsuperuser",
               "in_cloudsqlsuperuser=f" in log, log)
+        # REPLICATION is asserted like the other attributes, so it belongs in
+        # the record for the same reason they do: the deploy guide's table lists
+        # it as an asserted property, and the mode-2 acceptance run quotes this
+        # line as the evidence for that table. It was asserted but unrecorded
+        # until the run printed the line and the row had no counterpart.
+        check("records that it has no REPLICATION", "replication=f" in log, log)
         check("the platform role can authenticate",
               pg.psql_as(DB_USER, "firstpassword", "SELECT 1;").returncode == 0)
 
@@ -484,6 +505,21 @@ def main():
         check("fails", r.returncode != 0, r.stdout)
         check("reports bypassrls on the group role",
               "bypassrls=t" in (r.stderr + r.stdout), r.stderr + r.stdout)
+
+    # REPLICATION is the third of the three superuser-only attributes, and it
+    # was the disjunct the group-role condition originally lacked — asserted on
+    # the platform role, unasserted on the role the platform can SET ROLE to, so
+    # a replication-capable group passed while the summary still printed the
+    # platform row's replication=f. Found by a reviewer reading the two
+    # assertions side by side after the summary gained its replication field.
+    print("the group-role assertion FIRES on REPLICATION too")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        pg.psql_admin("ALTER ROLE %s REPLICATION;" % APP_ROLE)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("reports replication on the group role",
+              "replication=t" in (r.stderr + r.stdout), r.stderr + r.stdout)
 
     print("the cloudsqlsuperuser membership assertion FIRES when it should")
     with Postgres() as pg:

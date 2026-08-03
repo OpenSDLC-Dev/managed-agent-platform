@@ -56,9 +56,10 @@ output "helm_values_mode1" {
 }
 
 # ---------------------------------------------------------------------------
-# Mode-2 inputs: Cloud SQL + GCS + KMS. Emitted now because this configuration
-# creates the resources now; consumed by slice 5, which assembles them into the
-# pre-created Secret `existingSecret` points at.
+# Mode-2 inputs: Cloud SQL + GCS + KMS. Emitted individually rather than as one
+# fragment because they are assembled by hand into the pre-created Secret
+# `existingSecret` points at — a values file cannot carry them, since in mode 2
+# the chart renders no Secret at all.
 # ---------------------------------------------------------------------------
 
 output "kms_key_name" {

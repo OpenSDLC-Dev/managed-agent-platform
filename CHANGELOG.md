@@ -15,6 +15,67 @@ copy of an entry here.
 
 ### Added
 
+- **Mode 2 on GKE — Cloud SQL, Cloud Storage and Cloud KMS — is accepted end to end, and
+  plan 20 is archived** ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md)
+  slice 5b, #20). The platform ran on GKE with **no bundled services at all**, every
+  credential in a pre-created Secret, driven by the real `ant` CLI over `kubectl
+  port-forward`: sessions and the async tool loop, sandbox placement and bounds, the
+  `file-answer` and `skill-answer` evals, human-in-the-loop approval, and a `limited`
+  vault-attached session in which the sandbox held only a `vltph_…` placeholder while the
+  origin received the real secret — one SHA-256 equality proving the whole mode-2
+  credential path, since the ciphertext lives in Cloud SQL and the key in Cloud KMS. Each
+  backing service was reached with this deployment's **own** credential rather than the
+  operator's, and with three different kinds of it: Cloud KMS through Workload Identity
+  (established by asking the GKE metadata server from inside the pods rather than inferred
+  from the annotations), GCS through the storage service account's single-bucket HMAC pair,
+  and Cloud SQL through the platform's non-superuser database role with **no Google identity
+  at all** — the direct private-IP path this repo documents. Traces reached Cloud Trace,
+  including the Cloud KMS calls. The full record,
+  including the two limits this acceptance does not claim, is in
+  [docs/HISTORY.md](./docs/HISTORY.md).
+
+  **The teardown found a real defect, and it is the one worth reading.**
+  `make gcp-env-destroy` could not complete against any environment that had
+  `make gcp-db-init` run against it: the Cloud SQL Admin API's database-delete runs as
+  `cloudsqlsuperuser`, and `gcp-db-init` deliberately hands the platform database to the
+  platform's own role, so the delete fails with `must be owner of database map` and the
+  destroy stops with the instance still running. Slice 4b's teardown proof passed only
+  because mode 1 never runs `gcp-db-init`. Handing ownership back first is impossible
+  rather than merely awkward — the instance is private, so only a Pod in the cluster can
+  reach it, and Terraform destroys the cluster first — so
+  `google_sql_database.map` now carries `deletion_policy = "ABANDON"`, which drops it from
+  state without an API call and lets the instance destroyed in the same run take it.
+
+  Three more defects the run found, fixed here. `deploy/gcp/dbinit.sql` asserted that the
+  platform role has no `REPLICATION` but left it out of the summary `NOTICE` that evidences
+  the assertion — the record now carries `replication=`, and `dbinit_test.py` asserts it.
+  `docs/deploy-gcp.md` told operators to point a collector at `otlp.endpoint` without
+  saying that the platform exports **three** signals over it, so a traces-only collector
+  makes every process log `Unimplemented … LogsService`; fixing that exposes a second trap,
+  the `googlecloud` exporter dropping logs until `log.default_log_name` is set. Both are
+  now in the guide, along with what the run could *not* establish — that any platform log
+  actually arrived in Cloud Logging. And the guide's teardown section now states that
+  mode 2 structurally cannot leak the orphaned PersistentVolumes mode 1 does, because with
+  all three bundled services off nothing renders a StatefulSet to claim one.
+
+  **A fifth defect came from the review rather than the run, and it is a real one.**
+  `dbinit.sql`'s **group-role** assertion listed `SUPERUSER`/`CREATEDB`/`CREATEROLE`/
+  `BYPASSRLS`/`LOGIN` but not `REPLICATION` — and the platform role can `SET ROLE` to that
+  group, so a group granted `REPLICATION` passed the check while the summary still printed
+  the platform row's `replication=f`. The asymmetry only became visible because the fix
+  above put the two assertions side by side. Now asserted, with a test proven red against
+  the pre-fix SQL; `make gcp-dbinit-test` is 83 checks, up from 79.
+
+  **And a sixth from CI itself: `gcp-dbinit-test` had a startup race that could fail the
+  job before it tested anything.** Its readiness probe was `pg_isready` over the *unix
+  socket*, while every connection the suite then makes is TCP to `127.0.0.1`. The
+  `postgres:16-alpine` entrypoint opens those at different times — initdb, then a temporary
+  server with `listen_addresses=''` for the init scripts, and only then a restart that
+  listens on TCP — so the probe could pass during the temporary phase and setup would run
+  straight into `Connection refused`. Polling both probes every 50ms inside the container
+  caught the window (`unix=0 tcp=2` on poll 7 of 11); the probe now uses `-h 127.0.0.1`,
+  the same transport as everything after it.
+
 - **The GCP staging environment takes its production shape: private nodes, Cloud NAT, a
   private-IP database, a Docker Hub mirror — and a platform database role that is not a
   Cloud SQL superuser** ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md)

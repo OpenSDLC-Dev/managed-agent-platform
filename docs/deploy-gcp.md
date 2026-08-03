@@ -43,10 +43,12 @@ which must carry `controlplane-api-key`, `model-providers.json`, `database-url`,
 incompatible with `postgresql.enabled`, `minio.enabled` and `openbao.enabled` — the chart
 fails the render rather than deploying two of anything.
 
-**Mode 2 has not had an acceptance run yet.** Every measured number and every run note in
-this guide comes from the mode-1 run recorded in [docs/HISTORY.md](./HISTORY.md). What is
-written about mode 2 here describes the configuration in `deploy/gcp/` and what it is
-intended to produce, not a deployment that has been stood up and exercised end to end.
+Both modes have now been stood up and exercised end to end on GKE; the two acceptance
+records are in [docs/HISTORY.md](./HISTORY.md). Where an acceptance measurement appears in
+this guide it comes from one of those runs. Not every number here is one — configured
+values, published prices and documented platform limits appear too, and none of those is
+run evidence. The sizing figures below are still the mode-1 ones: mode 2 changes what backs
+the platform, not what a sandbox pod costs to schedule.
 
 ## Building it
 
@@ -145,7 +147,9 @@ this reason.
 
 The chart templates no sidecar, so this is not a Helm value today: add the container to the
 `controlplane`, `brain` and `executor` deployments yourself. That is a chart gap, not a
-platform limitation. If you must use a shared proxy Service as an interim step, treat the
+platform limitation, and it is tracked in
+[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) along with the
+brain-identity half of it below. If you must use a shared proxy Service as an interim step, treat the
 database credential as exposed to anything that can watch pod-network traffic, and say so in
 your threat model rather than inheriting the `sslmode=disable` from this page as though it
 were still local.
@@ -165,7 +169,10 @@ for it in `foundation/` either. Under the proxy topology it therefore needs four
 has done for you: a ServiceAccount of its own, a Google service account bound to it with
 `roles/iam.workloadIdentityUser`, and `roles/cloudsql.client` on that Google account. Do not
 reuse the control plane's identity to shortcut this — it carries KMS decrypt, which the brain
-has no business holding. Under the direct path the question does not arise.
+has no business holding. Under the direct path the question does not arise, which is why the
+mode-2 acceptance run took it and
+[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) is a follow-on
+rather than a blocker.
 
 ## Exposing the control plane
 
@@ -176,8 +183,7 @@ session's prompts and outputs, and the entire SSE event stream in cleartext acro
 network the balancer sits on. This is a prerequisite for any exposed deployment, not an
 optional hardening step.
 
-The **mode-1** acceptance run behind this guide used `kubectl port-forward` and exposed
-nothing.
+Both acceptance runs behind this guide used `kubectl port-forward` and exposed nothing.
 
 When you do expose it, a GKE Gateway with a Google-managed certificate is the least
 surprising way:
@@ -240,7 +246,37 @@ authentication there is: the Gateway adds none.
 The chart has an `otlp.endpoint` and nothing to point it at; it ships no collector. Deploy
 an OpenTelemetry Collector with the `googlecloud` exporter and set `otlp.endpoint` to it.
 
-Two things about this cost real time to discover, and both are properties of GKE rather
+**Declare all three pipelines, not just traces.** `internal/telemetry/telemetry.go` builds
+an `otlptracegrpc`, an `otlpmetricgrpc` **and** an `otlploggrpc` exporter against that one
+endpoint, so a collector offering only a `traces` pipeline answers the other two with gRPC
+`Unimplemented` and every process prints
+
+```
+rpc error: code = Unimplemented desc = unknown service opentelemetry.proto.collector.logs.v1.LogsService
+```
+
+on a loop. Adding `logs` and `metrics` pipelines silences it.
+
+**Then the logs pipeline needs a log name.** The `googlecloud` exporter refuses the logs
+signal — `no log name provided` — until `log.default_log_name` is set, and drops the batch
+rather than failing loudly at startup. Traces need no equivalent setting, so this is the
+second of two traps and only becomes visible once the first is fixed:
+
+```yaml
+exporters:
+  googlecloud:
+    project: YOUR_PROJECT
+    log:
+      default_log_name: managed-agent-platform
+```
+
+Note that the platform logs sparsely — startup and errors, not a line per request — and on
+GKE the containers' stdout already reaches Cloud Logging through the node's own logging
+agent. So the OTLP logs path is a second route to the same place, and a quiet one: the
+mode-2 acceptance run saw no platform log record travel it after startup. Do not read
+silence there as breakage.
+
+Two more things cost real time to discover, and both are properties of GKE rather
 than of the platform:
 
 - **On a Workload Identity cluster, the node service account's project roles do not reach
@@ -370,6 +406,31 @@ alone. Three settings make that possible and are deliberately non-default: the c
 `force_destroy`. All three are correct for staging and wrong for anything holding data
 someone would miss.
 
+A fourth setting is there for a reason worth knowing, because it is the direct cost of the
+non-superuser database role: `google_sql_database.map` carries
+`deletion_policy = "ABANDON"`. The Admin API's database-delete runs as `cloudsqlsuperuser`,
+and `make gcp-db-init` hands the database to the platform's own role, so the API cannot drop
+it — `must be owner of database map`, and the destroy stops there with the instance still
+running. Handing ownership back first is not an option: the instance is private, so only a
+Pod in the cluster can reach it, and the destroy removes the cluster first. `ABANDON` drops
+the database from Terraform's state without an API call and lets the instance take it. If
+you copy this Terraform and drop that line, the first teardown after a `gcp-db-init` will
+strand a Cloud SQL instance.
+
+**Expect to run the destroy more than once, and not because anything is wrong.** Cloud SQL
+releases the VPC peering it uses for its private address *asynchronously*, so the
+`google_service_networking_connection` delete lands while the release is still in flight and
+fails with `Producer services (e.g. CloudSQL, Cloud Memstore, etc.) are still using this
+connection` — with the instance already gone from `gcloud sql instances list`. Re-run
+`make gcp-env-destroy`; the mode-2 acceptance teardown needed several attempts over well
+more than the "wait a minute" the error implies.
+
+**Check what is actually left before you worry about it.** What that failure strands is the
+VPC, the reserved peering range, the connection itself and the API enablements — **none of
+them billable**. The run that hits this has already deleted the cluster, the instance, the
+bucket and the registry, so the cost is settled and the remainder is bookkeeping. This is
+GCP's timing rather than a fault in the configuration.
+
 **Then check for orphaned disks. `terraform destroy` does not reclaim them.**
 
 If you ran mode 1, the chart's bundled Postgres, MinIO and OpenBao each have a
@@ -391,6 +452,17 @@ An unattached disk shows an empty `users` column.
 
 The OpenBao volume holds the vault's own state, so this is a data-remanence question as
 well as a cost one.
+
+**In mode 2 this trap cannot fire, and the reason is structural rather than lucky.** Note
+what `existingSecret` does and does not do: it does not turn the bundled services off, it
+makes leaving them **on** a render error — you set `postgresql.enabled`, `minio.enabled` and
+`openbao.enabled` to `false` yourself, and the chart refuses to deploy if you forget. With
+all three off the release renders no StatefulSet, and a release with no StatefulSet claims
+no volume: the mode-2 acceptance run
+finished with zero PersistentVolumeClaims and zero PersistentVolumes in the cluster, and
+the only disks in the project were the four node boot disks the destroy reclaims. Check
+anyway — the command above costs nothing and a mode-1 experiment in the same project would
+still leave its own — but a clean mode-2 teardown genuinely has nothing to sweep.
 
 Also worth checking, because none of it is in Terraform's state either: an active GCS HMAC
 key that outlived its bucket (`gcloud storage hmac list`), soft-deleted buckets still

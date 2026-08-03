@@ -603,6 +603,27 @@ resource "google_sql_database_instance" "map" {
 resource "google_sql_database" "map" {
   name     = var.name_prefix
   instance = google_sql_database_instance.map.name
+
+  # ABANDON, and it is a correctness fix rather than a convenience. The Admin
+  # API's database-delete runs as `cloudsqlsuperuser`, and dbinit.sql
+  # deliberately transfers this database to the platform's own role — so the
+  # delete fails with `must be owner of database map`, and the whole destroy
+  # stops there. Found by the mode-2 acceptance run's teardown, which is the
+  # first destroy this repo has ever run against an environment that had
+  # `make gcp-db-init` applied to it (mode-1's teardown never touches Cloud SQL
+  # ownership, which is why slice 4b's teardown proof passed).
+  #
+  # The obvious alternative — hand ownership back before destroying — is not
+  # merely awkward, it is impossible here: the instance has no public address,
+  # so only a Pod in the cluster can run SQL against it, and Terraform destroys
+  # the cluster BEFORE it reaches Cloud SQL. By the time this delete is
+  # attempted there is nothing left that could have prepared for it.
+  #
+  # ABANDON drops the resource from state without calling the API, and the
+  # instance destroyed in the same run takes the database with it. The lifetime
+  # this expresses — the database lives and dies with its instance — is the one
+  # that was always true.
+  deletion_policy = "ABANDON"
 }
 
 # ---------------------------------------------------------------------------
