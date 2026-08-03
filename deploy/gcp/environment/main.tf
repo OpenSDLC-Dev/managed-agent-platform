@@ -295,10 +295,14 @@ resource "google_compute_router_nat" "map" {
 # configuration that does not own its network. This one owns its network.
 #
 # So the default is kept: the provider actually deletes the connection, ordered
-# after Cloud SQL by the dependency below. If a destroy does fail here, the
-# cause is usually that the instance's addresses have not been released yet —
-# retry, and see docs/deploy-gcp.md for the manual
-# `gcloud services vpc-peerings delete` if a retry is not enough.
+# after Cloud SQL by the dependency below. Still expect a destroy to fail here:
+# Google documents a FOUR-DAY wait after a Cloud SQL instance is deleted before
+# the producer side releases its resources, and the manual
+# `gcloud services vpc-peerings delete` is subject to the same wait — no amount
+# of retrying inside one session gets past it. What that failure strands — the
+# VPC, the reserved range, the connection and the API enablements — is
+# non-billable; docs/deploy-gcp.md ("Tearing it down") has the command, the
+# error signatures, and why stopping there is a legitimate end state.
 # ---------------------------------------------------------------------------
 
 resource "google_compute_global_address" "private_service_access" {

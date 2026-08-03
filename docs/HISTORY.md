@@ -267,8 +267,9 @@ connection by deleting its associated VPC Network Peering connection directly"* 
 a private connection afterwards can then fail, recoverable only by re-creating it with the
 same allocated range names. For a residue that costs nothing, waiting beat inventing state.
 Filed as [#270](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/270), whose
-remaining half is that `main.tf` still frames that manual command as the escape "if a retry
-is not enough" without saying it is subject to the same four days.
+remaining half was that `main.tf` still framed that manual command as the escape "if a
+retry is not enough" without saying it is subject to the same four days — closed by the
+follow-up PR that reworded the comment to match the guide.
 
 What that leaves behind is worth stating precisely rather than rounding to "clean": eleven
 resources — the VPC, the reserved peering range, the service-networking connection and
