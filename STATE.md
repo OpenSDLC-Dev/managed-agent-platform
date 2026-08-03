@@ -5,8 +5,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **none** — [docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) archived
-2026-08-03, all five slices delivered. Next work comes from the
-[issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
+2026-08-03, all five slices delivered.
 
 ## Tasks
 

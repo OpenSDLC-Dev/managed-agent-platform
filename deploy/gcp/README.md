@@ -350,8 +350,8 @@ Without the tolerations every sandbox pod stays `Pending` forever — the pool's
 other tolerator. Without the node selector sandbox pods land on the platform pool, and the
 dedicated pool buys nothing.
 
-Mode-2's inputs are emitted individually, to be assembled into the pre-created Secret
-`existingSecret` names — its full key list is in
+Mode-2's inputs are emitted individually, to be assembled into the pre-created Secret that
+the chart's `existingSecret` value names — its full key list is in
 [docs/deploy-gcp.md](../../docs/deploy-gcp.md#the-two-modes), and there is no script for it
 because a script that touched every one of these would be a credential-handling tool of its
 own. The mode-2 acceptance run built it with a single `kubectl create secret generic`:
