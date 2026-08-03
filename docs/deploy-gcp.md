@@ -422,14 +422,26 @@ releases the VPC peering it uses for its private address *asynchronously*, so th
 `google_service_networking_connection` delete lands while the release is still in flight and
 fails with `Producer services (e.g. CloudSQL, Cloud Memstore, etc.) are still using this
 connection` — with the instance already gone from `gcloud sql instances list`. Re-run
-`make gcp-env-destroy`; the mode-2 acceptance teardown needed several attempts over well
-more than the "wait a minute" the error implies.
+`make gcp-env-destroy`.
 
-**Check what is actually left before you worry about it.** What that failure strands is the
+**But do not sit and wait for it, because it may not come.** The mode-2 acceptance teardown
+retried 25 times over about four hours — five-minute intervals, then ten — and the peering
+was still `ACTIVE / Connected` at the end. The manual escape does not open it either:
+`gcloud services vpc-peerings delete` fails with
+`FLOW_SN_DC_RESOURCE_PREVENTING_DELETE_CONNECTION`, meaning a resource inside Google's own
+producer project still holds the connection, where you cannot reach it.
+
+**Which is fine, and this is the part to internalise.** What that failure strands is the
 VPC, the reserved peering range, the connection itself and the API enablements — **none of
 them billable**. The run that hits this has already deleted the cluster, the instance, the
-bucket and the registry, so the cost is settled and the remainder is bookkeeping. This is
-GCP's timing rather than a fault in the configuration.
+bucket and the registry, so the cost is settled and the remainder is bookkeeping. Leaving
+it is a legitimate end state; re-running `make gcp-env-destroy` the next day will usually
+finish it. This is GCP's timing rather than a fault in the configuration.
+
+Force-deleting the consumer-side peering (`gcloud compute networks peerings delete`) does
+unblock the destroy, and this repo does **not** recommend it: it leaves the producer side
+holding an allocation you cannot see, and what a later `make gcp-env-apply` does when it
+re-creates the connection into that state has not been established.
 
 **Then check for orphaned disks. `terraform destroy` does not reclaim them.**
 

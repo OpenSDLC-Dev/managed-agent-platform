@@ -202,8 +202,9 @@ defect in the delivered teardown path.**
    fix is therefore `deletion_policy = "ABANDON"` on `google_sql_database.map`, which drops
    the resource from state without calling the API and lets the instance destroyed in the
    same run take the database with it — the lifetime that was always true. This run's own
-   teardown was completed by removing the resource from state by hand and re-running the
-   destroy, which is exactly the manual step the fix removes.
+   destroy got *past this finding* by removing the resource from state by hand and
+   re-running — exactly the manual step the fix removes. It did not finish the teardown:
+   the next wall is below, and it is a different one.
 
 1. *The dbinit record omitted `REPLICATION`.* Slice 5a added the assertion
    (`dbinit.sql`) and a row for it in the deploy guide's asserted-properties table, but not
@@ -239,9 +240,23 @@ Run 2, after the database was taken out of state by hand, removed that instance 
 tracked resource, and the last billable one — and then failed on the VPC peering with
 `Producer services (e.g. CloudSQL, Cloud Memstore, etc.) are still using this connection`,
 because Cloud SQL releases the peering asynchronously and the delete landed while the
-release was still in flight. Subsequent runs kept hitting the same wall for far longer than
-the "wait a minute" the error implies: the peering was still `ACTIVE` well after the
-instance had disappeared from `gcloud sql instances list`.
+release was still in flight. Subsequent runs kept hitting the same wall, and within this
+run it never came down: **25 further destroy attempts over about four hours** — ten at
+five-minute intervals, then fifteen at ten — all failed the same way, with the instance
+long gone from `gcloud sql instances list` and the peering still `ACTIVE / Connected`.
+The manual escape does not open it either. `gcloud services vpc-peerings delete` fails with
+`FLOW_SN_DC_RESOURCE_PREVENTING_DELETE_CONNECTION`: a producer-side resource inside
+Google's own project still holds the connection, and nothing on the consumer side can
+reach it.
+
+One thing was deliberately *not* tried. Force-deleting the consumer-side peering
+(`gcloud compute networks peerings delete`) would unblock the destroy, but it leaves the
+producer holding an allocation nobody can see, and a later `gcp-env-apply` re-creating the
+connection into that asymmetric state is an unknown. For a residue that costs nothing,
+waiting beat inventing state — filed as
+[#270](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/270), which also
+records that `main.tf` sends the reader to the deploy guide for a manual command the guide
+does not contain.
 
 What that leaves behind is worth stating precisely rather than rounding to "clean": eleven
 resources — the VPC, the reserved peering range, the service-networking connection and
@@ -250,7 +265,8 @@ no cluster, no Cloud SQL instance, no Artifact Registry repository, no bucket an
 Compute Engine disks**. So the cost was settled by run 2 and everything after it is
 bookkeeping. That failure is GCP's timing rather than a fault in the configuration, but it
 is reliable enough on a private-IP instance that the guide now tells operators to expect
-more than one run. `foundation/` is untouched by design.
+more than one run — and to accept the non-billable residue as an end state rather than
+chase it. `foundation/` is untouched by design.
 
 **A hazard that mode 2 structurally does not have.** The mode-1 record's
 orphaned-PersistentVolume trap **cannot fire here**: mode 2 runs all three bundled services
