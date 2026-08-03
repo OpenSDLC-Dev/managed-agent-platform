@@ -18,9 +18,10 @@ copy of an entry here.
 - **`environment/main.tf`'s peering header no longer sells the manual
   `gcloud services vpc-peerings delete` as the way out of a stuck teardown**
   ([deploy/gcp/environment/main.tf](./deploy/gcp/environment/main.tf), #270). The comment
-  said "retry, and see docs/deploy-gcp.md for the manual command if a retry is not
-  enough" — but the manual command is subject to the same four-day producer-side wait the
-  guide documents since #271, so it framed an escape hatch that can itself be closed. The
+  said "retry, and see docs/deploy-gcp.md for the manual `gcloud services vpc-peerings
+  delete` if a retry is not enough" — but the manual command is subject to the same
+  four-day producer-side wait the guide documents since #271, so it framed an escape
+  hatch that can itself be closed. The
   comment now states the four days, that no retrying inside one session gets past them,
   that what the failure strands is non-billable, and points at the guide's "Tearing it
   down" section — which exists and covers exactly this. docs/HISTORY.md's "remaining
