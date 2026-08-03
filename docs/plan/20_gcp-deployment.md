@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 ---
 
 # Production deployment on Google Cloud (plan 20)

@@ -15,6 +15,33 @@ copy of an entry here.
 
 ### Added
 
+- **Mode 2 on GKE — Cloud SQL, Cloud Storage and Cloud KMS — is accepted end to end, and
+  plan 20 is archived** ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md)
+  slice 5b, #20). The platform ran on GKE with **no bundled services at all**, every
+  credential in a pre-created Secret, driven by the real `ant` CLI over `kubectl
+  port-forward`: sessions and the async tool loop, sandbox placement and bounds, the
+  `file-answer` and `skill-answer` evals, human-in-the-loop approval, and a `limited`
+  vault-attached session in which the sandbox held only a `vltph_…` placeholder while the
+  origin received the real secret — one SHA-256 equality proving the whole mode-2
+  credential path, since the ciphertext lives in Cloud SQL and the key in Cloud KMS. Each
+  backing service was reached as the deploy guide's **own** service account, established by
+  asking the GKE metadata server from inside the pods rather than inferred from the
+  annotations. Traces reached Cloud Trace, including the Cloud KMS calls. The full record,
+  with the teardown proof it re-ran and the two limits it does not claim, is in
+  [docs/HISTORY.md](./docs/HISTORY.md).
+
+  Three defects the run found, fixed here. `deploy/gcp/dbinit.sql` asserted that the
+  platform role has no `REPLICATION` but left it out of the summary `NOTICE` that evidences
+  the assertion — the record now carries `replication=`, and `dbinit_test.py` asserts it.
+  `docs/deploy-gcp.md` told operators to point a collector at `otlp.endpoint` without
+  saying that the platform exports **three** signals over it, so a traces-only collector
+  makes every process log `Unimplemented … LogsService`; fixing that exposes a second trap,
+  the `googlecloud` exporter dropping logs until `log.default_log_name` is set. Both are
+  now in the guide, along with what the run could *not* establish — that any platform log
+  actually arrived in Cloud Logging. And the guide's teardown section now states that
+  mode 2 structurally cannot leak the orphaned PersistentVolumes mode 1 does, because
+  `existingSecret` leaves no StatefulSet to claim one.
+
 - **The GCP staging environment takes its production shape: private nodes, Cloud NAT, a
   private-IP database, a Docker Hub mirror — and a platform database role that is not a
   Cloud SQL superuser** ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md)

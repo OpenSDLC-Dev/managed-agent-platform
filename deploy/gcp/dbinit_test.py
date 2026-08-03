@@ -324,6 +324,12 @@ def main():
         check("records that the session was encrypted", "encrypted=t" in log, log)
         check("records that it is outside cloudsqlsuperuser",
               "in_cloudsqlsuperuser=f" in log, log)
+        # REPLICATION is asserted like the other attributes, so it belongs in
+        # the record for the same reason they do: the deploy guide's table lists
+        # it as an asserted property, and the mode-2 acceptance run quotes this
+        # line as the evidence for that table. It was asserted but unrecorded
+        # until the run printed the line and the row had no counterpart.
+        check("records that it has no REPLICATION", "replication=f" in log, log)
         check("the platform role can authenticate",
               pg.psql_as(DB_USER, "firstpassword", "SELECT 1;").returncode == 0)
 

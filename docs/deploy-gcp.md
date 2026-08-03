@@ -43,10 +43,10 @@ which must carry `controlplane-api-key`, `model-providers.json`, `database-url`,
 incompatible with `postgresql.enabled`, `minio.enabled` and `openbao.enabled` — the chart
 fails the render rather than deploying two of anything.
 
-**Mode 2 has not had an acceptance run yet.** Every measured number and every run note in
-this guide comes from the mode-1 run recorded in [docs/HISTORY.md](./HISTORY.md). What is
-written about mode 2 here describes the configuration in `deploy/gcp/` and what it is
-intended to produce, not a deployment that has been stood up and exercised end to end.
+Both modes have now been stood up and exercised end to end on GKE; the two acceptance
+records are in [docs/HISTORY.md](./HISTORY.md). Where a number appears in this guide it
+comes from one of those runs, and the sizing figures below are still the mode-1 ones —
+mode 2 changes what backs the platform, not what a sandbox pod costs to schedule.
 
 ## Building it
 
@@ -240,7 +240,37 @@ authentication there is: the Gateway adds none.
 The chart has an `otlp.endpoint` and nothing to point it at; it ships no collector. Deploy
 an OpenTelemetry Collector with the `googlecloud` exporter and set `otlp.endpoint` to it.
 
-Two things about this cost real time to discover, and both are properties of GKE rather
+**Declare all three pipelines, not just traces.** `internal/telemetry/telemetry.go` builds
+an `otlptracegrpc`, an `otlpmetricgrpc` **and** an `otlploggrpc` exporter against that one
+endpoint, so a collector offering only a `traces` pipeline answers the other two with gRPC
+`Unimplemented` and every process prints
+
+```
+rpc error: code = Unimplemented desc = unknown service opentelemetry.proto.collector.logs.v1.LogsService
+```
+
+on a loop. Adding `logs` and `metrics` pipelines silences it.
+
+**Then the logs pipeline needs a log name.** The `googlecloud` exporter refuses the logs
+signal — `no log name provided` — until `log.default_log_name` is set, and drops the batch
+rather than failing loudly at startup. Traces need no equivalent setting, so this is the
+second of two traps and only becomes visible once the first is fixed:
+
+```yaml
+exporters:
+  googlecloud:
+    project: YOUR_PROJECT
+    log:
+      default_log_name: managed-agent-platform
+```
+
+Note that the platform logs sparsely — startup and errors, not a line per request — and on
+GKE the containers' stdout already reaches Cloud Logging through the node's own logging
+agent. So the OTLP logs path is a second route to the same place, and a quiet one: the
+mode-2 acceptance run saw no platform log record travel it after startup. Do not read
+silence there as breakage.
+
+Two more things cost real time to discover, and both are properties of GKE rather
 than of the platform:
 
 - **On a Workload Identity cluster, the node service account's project roles do not reach
@@ -391,6 +421,14 @@ An unattached disk shows an empty `users` column.
 
 The OpenBao volume holds the vault's own state, so this is a data-remanence question as
 well as a cost one.
+
+**In mode 2 this trap cannot fire, and the reason is structural rather than lucky.**
+`existingSecret` turns off all three bundled services, so the release renders no
+StatefulSet, and a release with no StatefulSet claims no volume: the mode-2 acceptance run
+finished with zero PersistentVolumeClaims and zero PersistentVolumes in the cluster, and
+the only disks in the project were the four node boot disks the destroy reclaims. Check
+anyway — the command above costs nothing and a mode-1 experiment in the same project would
+still leave its own — but a clean mode-2 teardown genuinely has nothing to sweep.
 
 Also worth checking, because none of it is in Terraform's state either: an active GCS HMAC
 key that outlived its bucket (`gcloud storage hmac list`), soft-deleted buckets still

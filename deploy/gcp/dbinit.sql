@@ -364,8 +364,9 @@ BEGIN
     -- the verdict from being able to disagree, and keeps the file runnable
     -- against stock PostgreSQL so it can be tested without a Cloud SQL bill.
     RAISE NOTICE
-        'dbinit: role=% superuser=% createdb=% createrole=% bypassrls=% in_cloudsqlsuperuser=% owns=% encrypted=%',
+        'dbinit: role=% superuser=% createdb=% createrole=% bypassrls=% replication=% in_cloudsqlsuperuser=% owns=% encrypted=%',
         u, r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolbypassrls,
+        r.rolreplication,
         (to_regrole('cloudsqlsuperuser') IS NOT NULL
          AND pg_has_role(u, 'cloudsqlsuperuser', 'member')),
         coalesce((SELECT string_agg(db.datname, ',')
