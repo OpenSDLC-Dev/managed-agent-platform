@@ -158,6 +158,67 @@ copy of an entry here.
   StatefulSet PVCs are Compute Engine disks outside Terraform's state, six of which were
   left billing after the first real teardown — half of them carrying no `goog-k8s-*` labels
   at all, so a label-filtered sweep removes three of six and reports success.
+- **The define-outcomes acceptance: the doc example as a suite, and the two fixes it
+  forced** ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 5, the archiving
+  PR). The top-level **`acceptance/`** package drives the reference doc's define-outcomes
+  example — upload rubric, create session, `user.define_outcome` (file-rubric and
+  text-rubric variants), poll `outcome_evaluations` to a terminal result, list and
+  download the deliverables — through anthropic-sdk-go **v1.61.0** typed end to end
+  (`assertNoExtras` on the file, session, and outcome-evaluation resources along the
+  way). A deterministic scripted-model rehearsal joins the merge gate; the same
+  harness pointed at the compose stack and a real model is the live leg
+  (`TestLiveDefineOutcomesAcceptance`, consented by its own tier variable
+  `RUN_LIVE_ACCEPTANCE_TESTS` + `ACCEPTANCE_*` — whole sessions cost dollars, and the
+  cents-level `RUN_LIVE_MODEL_TESTS` smoke must not silently buy them; run record:
+  docs/HISTORY.md). The live run forced two platform fixes.
+  (1) **Model-provider routes gain `max_tokens`** — the default output cap for turns
+  that set none themselves (request > route > adapter default; explicit zero rejected at
+  startup): the brain never sets `Request.MaxTokens`, so the anthropic adapter's 8192
+  fallback truncated a whole-file `write` tool call mid-JSON and the turn died
+  `model_request_failed_error`. (2) **The outcome charge now names the deliverables
+  contract** — "write your deliverable files under `/mnt/session/outputs/`": the harvest
+  walks only that directory, nothing told the agent, and the first live run graded
+  *satisfied* with zero collected files; the harness now fails any satisfied outcome
+  that harvested nothing (docs/DIVERGENCES.md's outcome-charge entry records the line as
+  ours).
+- **Outcome deliverables: the outputs harvest, and a grader that reads them**
+  ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 4). The doc flow's last
+  step — the agent writes to `/mnt/session/outputs/`, the caller fetches through
+  `GET /v1/files?scope_id={session_id}` — is now real on cloud environments, and the
+  grader judges the files, not just the transcript. A cloud session's grading cycle now
+  begins with an **`outputs_harvest`** work item (internal kind, migration 0017; `Poll`
+  never serves it, so nothing appears on the worker wire): the settlement that used to
+  requeue the grading turn enqueues the harvest instead, the executor claims it in its
+  claim rotation, walks the regular files under `/mnt/session/outputs/` in the session's
+  sandbox (bash listing, NUL-separated; forged paths from the agent-writable sandbox are
+  excluded, and each path segment is held to the upload endpoint's own filename rule —
+  valid UTF-8 included, so a stray byte can never fault the publish at the text-column
+  bind and wedge the reclaim, the #135 class; a listing past the exec output cap
+  degrades to its complete-entry sorted prefix rather than faulting — the tree is
+  static during grading, so the fault would repeat on every reclaim), and publishes a
+  **per-path snapshot** into the files registry — 
+  `filename` = relative path under a new `(scope_id, filename)` unique index,
+  `scope_type:"session"`, `downloadable:true`, mime by extension — with caps of
+  50 MiB/file and 200 files / 500 MiB per session, applied greedily in lexicographic
+  order (over-cap or ineligible = absent, never an error). Bytes stage to their final
+  blob keys **before** one registry transaction (delete-all + insert-all + grading-turn
+  enqueue + item completion, under the session row lock, fenced on the outcome entry
+  still `evaluating` — an interrupt mid-harvest publishes nothing, the `settleVerdict`
+  rule), so a fault at any boundary leaves the previous snapshot intact for the reclaim;
+  replaced blobs are deleted best-effort post-commit. Reading files above `ReadFile`'s
+  4 MiB cap out of a sandbox needed a new contract method, **`Sandbox.ReadFileStream`**
+  (caller-named ceiling; docker streams the archive entry through, k8s buffers up to the
+  cap because its exec transport frames stdout with a trailing marker), contract-tested
+  on both real backends. The grader's user message gains a **`# Deliverables`** section
+  between the outcome and the transcript: every harvested file listed with mime and
+  size, text-like ones (`text/*`, `application/json`) inlined whole under a 64 KiB
+  budget, greedy in filename order; a storage-less deploy lists without inlining, and
+  **self_hosted sessions get no harvest at all** — transcript-only grading, a deliberate
+  divergence (the platform cannot reach a BYOC sandbox; docs/DIVERGENCES.md). Also in
+  this PR: the grader's explanation cap now cuts on a rune boundary instead of
+  mid-character. Verified end to end against a real Docker container: a bash tool writes
+  text + random binary deliverables, the harvest publishes both, and the blobs download
+  byte-identical (`TestHarvestRealSandbox`).
 - **The outcome grader: evaluation cycles run, verdicts settle, revisions loop**
   ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 3). The loop the docs
   describe is now real: after a tool-less agent turn settles with an active outcome, the

@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -166,6 +168,76 @@ func TestOutcomeSatisfied(t *testing.T) {
 	}
 	if !strings.Contains(string(g.Messages[0].Content), "built the model") {
 		t.Errorf("grader transcript missing the agent's work: %s", g.Messages[0].Content)
+	}
+}
+
+// TestOutcomeCloudSettlementChainsHarvest pins slice 4's settlement routing
+// (plan 21, Decision 8): on a cloud environment an end_turn settlement with an
+// active outcome commits the start event and the evaluating flip exactly as on
+// self_hosted — but instead of requeueing its own turn item it enqueues an
+// outputs_harvest work item and completes itself. The grading turn is enqueued
+// by the harvest's completion, so the grader always sees the cycle's current
+// deliverables and never runs against a stale snapshot.
+func TestOutcomeCloudSettlementChainsHarvest(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{
+		agentReply("built the model"),
+		graderReply("all criteria met", "satisfied"),
+	}, nil)
+	h.wakeOutcome(t, "Build a DCF model", 3)
+	h.runOnce(t) // the agent turn; its settlement schedules the harvest
+
+	evals := h.outcomes(t)
+	if len(evals) != 1 || evals[0].Result != domain.OutcomeResultEvaluating {
+		t.Fatalf("outcomes = %+v, want one evaluating entry", evals)
+	}
+	if got := h.eventsOfType(t, domain.EventSpanOutcomeEvalStart); len(got) != 1 {
+		t.Fatalf("start events = %d, want 1 (committed by the scheduling settlement)", len(got))
+	}
+	if n := h.liveOf(t, queue.OutputsHarvest); n != 1 {
+		t.Errorf("live outputs_harvest items = %d, want 1", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn items = %d, want 0 (the harvest chains the grading turn)", n)
+	}
+	if got := h.status(t); got != "running" {
+		t.Errorf("status = %q, want running while the cycle harvests", got)
+	}
+
+	// The brain has nothing to claim until the harvest completes: grading
+	// must not start before the deliverables snapshot lands.
+	if found, err := h.brain.RunOnce(context.Background()); err != nil || found {
+		t.Fatalf("RunOnce before harvest completion = %v, %v; want no work", found, err)
+	}
+
+	// Simulate the executor's harvest settlement: enqueue the grading turn
+	// and complete the item in one transaction, as processHarvest commits it.
+	ctx := context.Background()
+	item, err := h.queue.Claim(ctx, queue.OutputsHarvest, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim harvest item: %+v, %v", item, err)
+	}
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := h.queue.Enqueue(ctx, tx, h.envID, h.sessionID, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.queue.Complete(ctx, tx, item); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	h.drain(t)
+	evals = h.outcomes(t)
+	if len(evals) != 1 || evals[0].Result != domain.OutcomeResultSatisfied {
+		t.Fatalf("outcomes after grading = %+v, want one satisfied entry", evals)
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle after the verdict", got)
 	}
 }
 
@@ -465,5 +537,202 @@ func TestOutcomeFileRubricSnapshot(t *testing.T) {
 	g := h.provider.calls[1]
 	if !strings.Contains(g.System, "Snapshotted rubric") {
 		t.Errorf("grader system missing the snapshot bytes: %q", g.System)
+	}
+}
+
+// seedDeliverable inserts one harvested-snapshot registry row for the harness
+// session (as the executor's outputs harvest leaves them) and, when the
+// harness carries a store, its blob bytes.
+func seedDeliverable(t *testing.T, h *harness, blobs *blobtest.MemStore, name, mimeType, content string) {
+	t.Helper()
+	id := domain.NewID(domain.PrefixFile)
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1, $2, $3, $4, true, 'session', $5)`,
+		id.String(), name, mimeType, len(content), h.sessionID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if blobs != nil {
+		if err := blobs.Put(context.Background(), blob.FilesKey(id.String()),
+			strings.NewReader(content), int64(len(content)), mimeType); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// graderUserText decodes the grader call's user message down to its text.
+func graderUserText(t *testing.T, h *harness) string {
+	t.Helper()
+	if len(h.provider.calls) < 2 {
+		t.Fatalf("provider calls = %d, want the agent turn and the grader call", len(h.provider.calls))
+	}
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(h.provider.calls[1].Messages[0].Content, &blocks); err != nil || len(blocks) == 0 {
+		t.Fatalf("decode grader user content: %v", err)
+	}
+	return blocks[0].Text
+}
+
+func TestOutcomeGraderSeesDeliverables(t *testing.T) {
+	h := newHarnessWithBlobs(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("deliverables meet the rubric", "satisfied"),
+	}, nil)
+	seedDeliverable(t, h.harness, h.blobs, "report.txt", "text/plain; charset=utf-8", "quarterly npv is 42")
+	seedDeliverable(t, h.harness, h.blobs, "data.json", "application/json", `{"npv": 42}`)
+	seedDeliverable(t, h.harness, h.blobs, "model.bin", "application/octet-stream", "\x01\x02raw-weights")
+
+	h.wakeOutcome(t, "Ship the report", 3)
+	h.drain(t)
+	if evals := h.outcomes(t); evals[0].Result != domain.OutcomeResultSatisfied {
+		t.Fatalf("entry = %+v, want satisfied", evals[0])
+	}
+
+	user := graderUserText(t, h.harness)
+	di := strings.Index(user, "# Deliverables")
+	if di < 0 {
+		t.Fatalf("grader user message has no deliverables section: %q", user)
+	}
+	// Between the outcome and the transcript, so the grader reads what was
+	// delivered before how it was made.
+	if oi, ti := strings.Index(user, "# Outcome"), strings.Index(user, "# Agent transcript"); !(oi < di && di < ti) {
+		t.Errorf("section order outcome=%d deliverables=%d transcript=%d, want outcome < deliverables < transcript", oi, di, ti)
+	}
+	// Every file is listed with its mime and size; text-like ones are inlined
+	// whole, the binary one is listed only.
+	for _, want := range []string{
+		"report.txt (text/plain; charset=utf-8, 19 bytes)",
+		"data.json (application/json, 11 bytes)",
+		"model.bin (application/octet-stream, 13 bytes)",
+		"quarterly npv is 42",
+		`{"npv": 42}`,
+	} {
+		if !strings.Contains(user, want) {
+			t.Errorf("grader user message missing %q", want)
+		}
+	}
+	if strings.Contains(user, "raw-weights") {
+		t.Errorf("binary deliverable's bytes were inlined")
+	}
+}
+
+func TestOutcomeGraderDeliverablesBudgetIsGreedy(t *testing.T) {
+	h := newHarnessWithBlobs(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("within budget", "satisfied"),
+	}, nil)
+	// Greedy whole-file inlining in filename order: a (60 KiB) fits the
+	// 64 KiB budget, b (10 KiB) no longer fits, c (3 KiB) still does.
+	big := strings.Repeat("a", 60<<10) + "MARKER-A"
+	mid := strings.Repeat("b", 10<<10) + "MARKER-B"
+	small := strings.Repeat("c", 3<<10) + "MARKER-C"
+	seedDeliverable(t, h.harness, h.blobs, "a.txt", "text/plain", big)
+	seedDeliverable(t, h.harness, h.blobs, "b.txt", "text/plain", mid)
+	seedDeliverable(t, h.harness, h.blobs, "c.txt", "text/plain", small)
+
+	h.wakeOutcome(t, "Ship it", 3)
+	h.drain(t)
+
+	user := graderUserText(t, h.harness)
+	if !strings.Contains(user, "MARKER-A") || !strings.Contains(user, "MARKER-C") {
+		t.Errorf("in-budget deliverables not inlined")
+	}
+	if strings.Contains(user, "MARKER-B") {
+		t.Errorf("over-budget deliverable was inlined")
+	}
+	if !strings.Contains(user, "b.txt (text/plain, ") {
+		t.Errorf("over-budget deliverable missing from the listing")
+	}
+}
+
+func TestOutcomeGraderDeliverablesWithoutBlobStoreListsOnly(t *testing.T) {
+	// No blob store (the default harness): the registry listing still reaches
+	// the grader, contents do not.
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("judged from the listing", "satisfied"),
+	}, nil)
+	seedDeliverable(t, h, nil, "report.txt", "text/plain", "quarterly npv is 42")
+
+	h.wakeOutcome(t, "Ship the report", 3)
+	h.drain(t)
+
+	user := graderUserText(t, h)
+	if !strings.Contains(user, "report.txt (text/plain, 19 bytes)") {
+		t.Errorf("listing missing without a blob store: %q", user)
+	}
+	if strings.Contains(user, "quarterly npv is 42") {
+		t.Errorf("content inlined despite no blob store")
+	}
+}
+
+func TestOutcomeGraderNoDeliverablesNoSection(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("fine", "satisfied"),
+	}, nil)
+	h.wakeOutcome(t, "Ship it", 3)
+	h.drain(t)
+
+	if user := graderUserText(t, h); strings.Contains(user, "# Deliverables") {
+		t.Errorf("empty registry produced a deliverables section: %q", user)
+	}
+}
+
+func TestOutcomeGraderExplanationTruncatesOnRuneBoundary(t *testing.T) {
+	// 21000 bytes of 3-byte runes: the 20 KiB explanation cut lands mid-rune,
+	// and a byte-sliced tail would persist as a replacement character.
+	long := strings.Repeat("中", 7000)
+	h := newHarness(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply(long, "satisfied"),
+	}, nil)
+	h.wakeOutcome(t, "Ship it", 3)
+	h.drain(t)
+
+	e := h.outcomes(t)[0]
+	if e.Result != domain.OutcomeResultSatisfied {
+		t.Fatalf("entry = %+v, want satisfied", e)
+	}
+	if !strings.HasSuffix(e.Explanation, "[truncated]") {
+		t.Errorf("explanation not truncated (len %d)", len(e.Explanation))
+	}
+	if !utf8.ValidString(e.Explanation) {
+		t.Errorf("truncated explanation is not valid UTF-8")
+	}
+}
+
+func TestOutcomeGraderDeliverableSizeMismatchListsOnly(t *testing.T) {
+	// A blob whose length disagrees with its registry row is listed but never
+	// inlined: the row's size bounds the read (the rubricText posture), so a
+	// lying row can neither balloon memory nor inline a file truncated.
+	h := newHarnessWithBlobs(t, [][]provider.Chunk{
+		agentReply("work"),
+		graderReply("judged from the listing", "satisfied"),
+	}, nil)
+	id := domain.NewID(domain.PrefixFile)
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
+		 VALUES ($1, 'liar.txt', 'text/plain', 5, true, 'session', $2)`,
+		id.String(), h.sessionID.String()); err != nil {
+		t.Fatal(err)
+	}
+	longer := "0123456789-far-longer-than-five-bytes"
+	if err := h.blobs.Put(context.Background(), blob.FilesKey(id.String()),
+		strings.NewReader(longer), int64(len(longer)), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wakeOutcome(t, "Ship the report", 3)
+	h.drain(t)
+
+	user := graderUserText(t, h.harness)
+	if !strings.Contains(user, "liar.txt (text/plain, 5 bytes)") {
+		t.Fatalf("mismatched deliverable not listed: %q", user)
+	}
+	if strings.Contains(user, "## liar.txt") || strings.Contains(user, longer) {
+		t.Errorf("mismatched deliverable was inlined: %q", user)
 	}
 }

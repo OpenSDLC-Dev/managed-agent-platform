@@ -252,6 +252,18 @@ type Sandbox interface {
 	Exec(ctx context.Context, req ExecRequest) (ExecResult, error)
 	// ReadFile returns a file's bytes verbatim, binary included.
 	ReadFile(ctx context.Context, path string) ([]byte, error)
+	// ReadFileStream returns a regular file's bytes as a stream together with
+	// their exact count, refusing a file larger than maxBytes with
+	// ErrFileTooLarge and answering the same path sentinels as ReadFile. The
+	// caller closes the reader.
+	//
+	// It exists for reads above the fixed ReadFile cap — the deliverables
+	// harvest moves files up to its own per-file cap out of the sandbox — so
+	// the ceiling is the caller's to name per read. The docker backend
+	// streams the bytes through; the k8s backend buffers up to maxBytes
+	// internally, because its exec transport frames stdout with a trailing
+	// marker that can only be verified once the stream has ended.
+	ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error)
 	// WriteFile writes data, creating parent directories and overwriting any
 	// existing file.
 	//

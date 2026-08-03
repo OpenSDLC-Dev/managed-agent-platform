@@ -105,6 +105,14 @@ read as "no bound". Tighten it a long way and the budget starts to cover the
 brain's own work between chunks, so a stalled database can end a turn as if the
 model had gone quiet.
 
+A route may also set `max_tokens`, the default output cap for turns that set none
+themselves. Omitted, the anthropic adapter sends its required-field fallback of
+8192 and the openai adapter leaves the field off the wire (the endpoint's default
+applies). Size it for the workload behind the route: an agent that writes whole
+files through tool calls is cut off mid-call by a cap sized for chat, and the
+turn fails with `model_request_failed_error` after retries. It must be positive —
+an explicit zero is rejected at startup rather than read as "the default".
+
 ## The sandbox and the Docker socket
 
 The executor runs each session's tools in a per-session sandbox container. Under

@@ -1051,16 +1051,33 @@ func nonce() string {
 }
 
 // ReadFile returns a file's bytes, distinguishing the reasons a read is not a
-// plain success so the toolset can hand the model a recoverable error. It runs
-// one probe-and-cat script: the exit code classifies the path, and on success
-// stdout carries the raw bytes (binary included) followed by this call's marker.
+// plain success so the toolset can hand the model a recoverable error.
 func (pd *pod) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	return pd.readFileMax(ctx, path, sandbox.MaxFileBytes)
+}
+
+// ReadFileStream matches the interface's streaming shape, but this backend
+// buffers the file first: the exec transport frames stdout with a trailing
+// marker whose presence — the proof the stream did not end early — can only
+// be checked once the whole stream has arrived. maxBytes bounds the buffer.
+func (pd *pod) ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error) {
+	data, err := pd.readFileMax(ctx, path, maxBytes)
+	if err != nil {
+		return nil, 0, err
+	}
+	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
+}
+
+// readFileMax runs one probe-and-cat script: the exit code classifies the
+// path, and on success stdout carries the raw bytes (binary included)
+// followed by this call's marker.
+func (pd *pod) readFileMax(ctx context.Context, path string, maxBytes int64) ([]byte, error) {
 	marker := nonce()
 	var out cappedBuffer
 	// Room for a file at the cap and its marker, and not one byte more, so
 	// out.truncated means exactly "the file was over the cap" — see readStdout.
-	out.limit = sandbox.MaxFileBytes + len(marker)
-	argv := []string{"/bin/bash", "-c", readScript, "map-read", path, strconv.FormatInt(sandbox.MaxFileBytes, 10), marker}
+	out.limit = int(maxBytes) + len(marker)
+	argv := []string{"/bin/bash", "-c", readScript, "map-read", path, strconv.FormatInt(maxBytes, 10), marker}
 	res, err := pd.client.exec(ctx, pd.name, containerName, argv, nil, &out, io.Discard)
 	if err != nil {
 		return nil, pd.execErr(ctx, err)

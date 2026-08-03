@@ -31,6 +31,13 @@ const (
 	// sandbox — for cloud AND self_hosted sessions alike. Poll never serves
 	// it; the official worker implements only the six sandbox tools.
 	WebExec Kind = "web_exec"
+	// OutputsHarvest is the deliverables harvest (docs/plan/21_outcomes.md,
+	// Decision 8): the cloud executor snapshots /mnt/session/outputs/ into
+	// the files registry before a grading pass. Internal-only — the brain
+	// enqueues it for cloud environments alone, and Poll never serves it (a
+	// self_hosted sandbox is unreachable from the platform; the reference
+	// worker has no file lane).
+	OutputsHarvest Kind = "outputs_harvest"
 )
 
 // ErrLeaseLost reports that the item is no longer this claimant's: its lease
@@ -126,14 +133,15 @@ func New(pool *pgxpool.Pool) *Queue { return &Queue{pool: pool} }
 // for the same session and kind exists. It reports whether a new item was
 // created; false means an existing live item already covers the work.
 func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, kind Kind) (bool, error) {
-	// Only tool executions carry a trace context — tool_exec (consumed by the
-	// cloud executor's Claim and the BYOC worker's poll) and web_exec (the
-	// executor's web driver), so their consumer spans parent on the enqueuing
-	// turn. A model_turn drives the brain, which opens its own model_request
-	// span per turn and never reads this back, so capturing it there would
-	// only persist an unread payload; leave it NULL.
+	// Only executor-consumed work carries a trace context — tool_exec
+	// (consumed by the cloud executor's Claim and the BYOC worker's poll),
+	// web_exec (the executor's web driver), and outputs_harvest (the
+	// deliverables snapshot) — so their consumer spans parent on the
+	// enqueuing turn. A model_turn drives the brain, which opens its own
+	// model_request span per turn and never reads this back, so capturing it
+	// there would only persist an unread payload; leave it NULL.
 	var traceCtx any
-	if kind == ToolExec || kind == WebExec {
+	if kind == ToolExec || kind == WebExec || kind == OutputsHarvest {
 		traceCtx = traceContextArg(ctx)
 	}
 	tag, err := db.Exec(ctx,

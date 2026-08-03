@@ -16,6 +16,9 @@ import (
 // indirection keeps secrets out of config files. `stall_timeout` is a Go
 // duration ("90s", "2m") bounding how long this endpoint may say nothing at
 // all before its turn is abandoned; absent takes DefaultStallTimeout.
+// `max_tokens` is the default output cap for turns that set none themselves;
+// absent keeps the adapter's own default (a pointer so an explicit 0 is a
+// config error, not a silent "default").
 type routeFile struct {
 	Model         string            `json:"model"`
 	Protocol      string            `json:"protocol"`
@@ -25,6 +28,7 @@ type routeFile struct {
 	APIKeyEnv     string            `json:"api_key_env"`
 	Headers       map[string]string `json:"headers"`
 	StallTimeout  string            `json:"stall_timeout"`
+	MaxTokens     *int64            `json:"max_tokens"`
 }
 
 // LoadRoutes reads a model_providers JSON file into registry routes.
@@ -82,6 +86,13 @@ func LoadRoutes(path string) ([]Route, error) {
 			}
 			stall = parsed
 		}
+		var maxTokens int64
+		if rf.MaxTokens != nil {
+			if *rf.MaxTokens <= 0 {
+				return nil, fmt.Errorf("model providers config %s, entry %d: max_tokens must be positive (omit it for the default)", path, i)
+			}
+			maxTokens = *rf.MaxTokens
+		}
 		routes = append(routes, Route{
 			Model: rf.Model,
 			Config: Config{
@@ -91,6 +102,7 @@ func LoadRoutes(path string) ([]Route, error) {
 				APIKey:       key,
 				Headers:      rf.Headers,
 				StallTimeout: stall,
+				MaxTokens:    maxTokens,
 			},
 		})
 	}

@@ -1,9 +1,13 @@
 ---
-status: in-progress
+status: archived
 issue: "#77"
 ---
 
 # Session outcomes: `user.define_outcome`, the grader loop, and `outcome_evaluations` (plan 21)
+
+> **Archived 2026-08-03 — completed.** All five slices delivered (PRs #255, #257, #258,
+> #260, and the slice-5 acceptance PR); the progress summary and the acceptance-run
+> record are docs/HISTORY.md § "Outcomes plan (21)".
 
 The outcomes surface is the reference's "give the agent a goal and a rubric, and the
 platform grades the work" loop: a client sends one `user.define_outcome` event, the agent
@@ -412,8 +416,8 @@ slice 5 adds no registry entries of its own.
 Replay <https://platform.claude.com/docs/en/managed-agents/define-outcomes> — the DCF
 Model Rubric example — against the local compose stack
 (controlplane+brain+executor+Postgres+MinIO), with the `.env` model endpoint, under the
-live-tier consent contract (`RUN_LIVE_MODEL_TESTS=1`; never in `make test`'s default
-path). **SDK versions are re-checked on execution day** — as of 2026-08-02 the latest
+live-tier consent contract (as built, its own `RUN_LIVE_ACCEPTANCE_TESTS=1` tier; never
+in `make test`'s default path). **SDK versions are re-checked on execution day** — as of 2026-08-02 the latest
 releases are Go v1.61.0 (2026-07-24), Python 0.120.2 (2026-07-28), TypeScript 0.115.0
 (2026-07-24); outcome wire types are identical across them (all landed 2026-05-06).
 

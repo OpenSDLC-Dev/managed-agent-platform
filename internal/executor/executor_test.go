@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,10 +46,33 @@ type fakeSandbox struct {
 	// hold a materializer to one batched call carrying a skill's whole tree,
 	// rather than one write per file (#206).
 	bulkSizes []int
+	// execStdout, if set, is returned verbatim as the harvest listing script's
+	// stdout — a test forging what an agent-writable sandbox could emit; and
+	// execTruncated marks that listing as overflowing the exec output cap.
+	execStdout    string
+	execTruncated bool
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	// The harvest's listing: synthesize the NUL-separated relative paths from
+	// the in-memory tree (or a forged/truncated listing when a test sets one).
+	if req.Command == harvestListScript {
+		if f.execTruncated {
+			return sandbox.ExecResult{Stdout: f.execStdout, Truncated: true}, nil
+		}
+		if f.execStdout != "" {
+			return sandbox.ExecResult{Stdout: f.execStdout}, nil
+		}
+		var out strings.Builder
+		for p := range f.files {
+			if rel, ok := strings.CutPrefix(p, outputsDir+"/"); ok {
+				out.WriteString(rel)
+				out.WriteByte(0)
+			}
+		}
+		return sandbox.ExecResult{Stdout: out.String()}, nil
+	}
 	// Reflect real file presence for the executor's mountsPresent probe
 	// (`test -e '<p1>' && test -e '<p2>' && true`), so a deleted mount actually
 	// reports absent and forces re-materialization — an always-true Exec would
@@ -78,6 +102,17 @@ func (f *fakeSandbox) ReadFile(_ context.Context, path string) ([]byte, error) {
 		return nil, sandbox.ErrFileNotExist
 	}
 	return []byte(data), nil
+}
+
+func (f *fakeSandbox) ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error) {
+	data, err := f.ReadFile(ctx, path)
+	if err != nil {
+		return nil, 0, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, 0, sandbox.ErrFileTooLarge
+	}
+	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 func (f *fakeSandbox) WriteFile(ctx context.Context, path string, data []byte) error {
 	if f.entered != nil {

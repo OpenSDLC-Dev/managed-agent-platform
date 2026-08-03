@@ -3,10 +3,13 @@ package openai_test
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/openai"
 )
 
 // requestFor drives a minimal streamed turn and returns the request body the
@@ -583,5 +586,50 @@ func TestMalformedFrameErrors(t *testing.T) {
 	}
 	if err := stream.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+// The route config's max_tokens is the default output cap for this endpoint:
+// applied when the request sets none, overridden by a request that does. With
+// neither set the field stays omitted (TestMaxTokensOmittedWhenZero).
+func TestConfigMaxTokensDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  int64
+		want float64
+	}{
+		{"request unset takes the config cap", 0, 4096},
+		{"request wins over the config cap", 512, 512},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeServer{t: t, sse: []string{
+				`{"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}`,
+				`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+			}}
+			srv := httptest.NewServer(http.HandlerFunc(f.handler))
+			t.Cleanup(srv.Close)
+			p, err := openai.New(provider.Config{
+				Protocol:  "openai",
+				Model:     "gpt-4o-mini",
+				BaseURL:   srv.URL,
+				APIKey:    testAPIKey,
+				MaxTokens: 4096,
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			stream, err := p.Generate(context.Background(), provider.Request{
+				Messages:  []provider.Message{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+				MaxTokens: tc.req,
+			})
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			_ = collect(t, stream)
+			if got := f.gotBody["max_tokens"]; got != tc.want {
+				t.Errorf("max_tokens = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

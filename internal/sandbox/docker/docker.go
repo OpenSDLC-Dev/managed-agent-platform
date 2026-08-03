@@ -848,10 +848,48 @@ func (c *container) exitCode(ctx context.Context, execID string) (int, error) {
 }
 
 func (c *container) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	stream, entry, err := c.openFile(ctx, path, sandbox.MaxFileBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	data := make([]byte, entry.size)
+	if _, err := io.ReadFull(entry.reader, data); err != nil {
+		return nil, fmt.Errorf("docker: read %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// ReadFileStream hands the archive entry's bytes through as they arrive from
+// the daemon, so a harvest-scale file never buffers here; closing the returned
+// reader closes the archive stream.
+func (c *container) ReadFileStream(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, int64, error) {
+	stream, entry, err := c.openFile(ctx, path, maxBytes)
+	if err != nil {
+		return nil, 0, err
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{entry.reader, stream}, entry.size, nil
+}
+
+// fileEntry is an opened archive entry: the tar-framed reader positioned at
+// the file's bytes, and the size its header declared.
+type fileEntry struct {
+	reader io.Reader
+	size   int64
+}
+
+// openFile fetches path from the container's archive endpoint and classifies
+// what came back, refusing anything but a regular file of at most maxBytes.
+// On success the caller owns the returned stream and must close it; every
+// failure path closes it here.
+func (c *container) openFile(ctx context.Context, path string, maxBytes int64) (io.ReadCloser, fileEntry, error) {
 	stream, err := c.api.getArchive(ctx, c.id, path)
 	if err != nil {
 		if statusIs(err, 404) && !containerGone(err) {
-			return nil, fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
+			return nil, fileEntry{}, fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
 		}
 		if !containerGone(err) {
 			// The daemon reports a path blocked by a non-directory as a plain 500
@@ -861,33 +899,32 @@ func (c *container) ReadFile(ctx context.Context, path string) ([]byte, error) {
 			// file is the normal case here — and only a read that already failed
 			// asks, so nothing is spent on the path that works.
 			if fault := c.pathFault(ctx, gopath.Dir(path)); fault != nil {
-				return nil, fmt.Errorf("%s: %w", path, fault)
+				return nil, fileEntry{}, fmt.Errorf("%s: %w", path, fault)
 			}
 		}
-		return nil, c.wrap(err)
+		return nil, fileEntry{}, c.wrap(err)
 	}
-	defer stream.Close()
 
 	archive := tar.NewReader(stream)
 	header, err := archive.Next()
 	if err != nil {
-		return nil, fmt.Errorf("docker: read %s: %w", path, err)
+		stream.Close()
+		return nil, fileEntry{}, fmt.Errorf("docker: read %s: %w", path, err)
 	}
 	switch header.Typeflag {
 	case tar.TypeDir:
-		return nil, fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
+		stream.Close()
+		return nil, fileEntry{}, fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
 	case tar.TypeReg:
 	default:
-		return nil, fmt.Errorf("%s is not a regular file: %w", path, sandbox.ErrNotRegularFile)
+		stream.Close()
+		return nil, fileEntry{}, fmt.Errorf("%s is not a regular file: %w", path, sandbox.ErrNotRegularFile)
 	}
-	if header.Size > sandbox.MaxFileBytes {
-		return nil, fmt.Errorf("%s is %d bytes: %w", path, header.Size, sandbox.ErrFileTooLarge)
+	if header.Size > maxBytes {
+		stream.Close()
+		return nil, fileEntry{}, fmt.Errorf("%s is %d bytes: %w", path, header.Size, sandbox.ErrFileTooLarge)
 	}
-	data := make([]byte, header.Size)
-	if _, err := io.ReadFull(archive, data); err != nil {
-		return nil, fmt.Errorf("docker: read %s: %w", path, err)
-	}
-	return data, nil
+	return stream, fileEntry{reader: archive, size: header.Size}, nil
 }
 
 // WriteFile lands the bytes as a one-entry tar under a temporary name in the

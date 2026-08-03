@@ -4,19 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**[docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) (in-progress)** — the session
-outcomes surface (#77, absorbing #161), started 2026-08-02.
 **[docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) (in-progress)** —
 GCP deployment; slices 1-4 and slice 5's configuration landed, its acceptance remains.
-
-## Tasks — plan 21
-
-- [x] Slice 1 — SDK bump v1.59.0→v1.61.0 + verification record (gate green on the bump)
-- [x] Slice 2 — define_outcome acceptance + storage + rendering + initial_events
-  (#257; interrupt-settlement pulled forward from slice 3 so chaining works)
-- [x] Slice 3 — brain grader loop (transcript-stage) (#258)
-- [ ] Slice 4 — outputs_harvest work kind + deliverables
-- [ ] Slice 5 — full-chain acceptance (doc example on latest SDK) + settlement
 
 ## Tasks — plan 20 (remaining)
 

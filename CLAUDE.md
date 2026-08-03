@@ -76,7 +76,7 @@ internal/
 deploy/{helm,compose,gcp}
 ```
 
-(Plus test-support: `internal/{pgtest,modeltest}`, `internal/sandbox/sandboxtest`, `internal/blob/blobtest`, `internal/provider/providertest`, `internal/secrets/secretstest`, `internal/secrets/gcpkms/gcpkmstest`, `internal/webtool/webtooltest`, and the top-level `evals/` live suite. There is no `internal/mcp` or `internal/policy`: no MCP client is built yet, and permission policy lives across `domain`/`toolset`/`brain`/`api`.) What each package's files actually do: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) → "Package reference".
+(Plus test-support: `internal/{pgtest,modeltest}`, `internal/sandbox/sandboxtest`, `internal/blob/blobtest`, `internal/provider/providertest`, `internal/secrets/secretstest`, `internal/secrets/gcpkms/gcpkmstest`, `internal/webtool/webtooltest`, and the top-level `evals/` live suite and `acceptance/` doc-example suite. There is no `internal/mcp` or `internal/policy`: no MCP client is built yet, and permission policy lives across `domain`/`toolset`/`brain`/`api`.) What each package's files actually do: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) → "Package reference".
 
 Primary deps: `github.com/anthropics/anthropic-sdk-go`, `go.opentelemetry.io/otel` (+ OTLP), `github.com/jackc/pgx`, `github.com/minio/minio-go` (S3-compatible blob storage). Neither `github.com/modelcontextprotocol/go-sdk` (no MCP client yet) nor `google.golang.org/adk/v2` is a dependency.
 
