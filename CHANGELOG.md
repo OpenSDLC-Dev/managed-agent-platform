@@ -30,6 +30,43 @@ copy of an entry here.
 
 ### Added
 
+- **The Cloud SQL Auth Proxy is a Helm value, and the brain has an identity to run one
+  under** ([deploy/helm/managed-agent-platform](./deploy/helm/managed-agent-platform),
+  [deploy/gcp](./deploy/gcp), #269). Google's documented path from GKE to a private-IP
+  Cloud SQL instance is the proxy colocated in the pod — colocated specifically so the
+  `sslmode=disable` it offers the application stays on a loopback socket — and the chart
+  templated none of it, so an operator had to hand-edit three Deployments. `cloudSQLProxy`
+  now renders it: one switch for all three, because they read a single `database-url` key
+  and a DSN cannot name a loopback socket for some pods and an address for the others. It
+  is a **native sidecar** (an `initContainer` with `restartPolicy: Always`) with a startup
+  probe on the proxy's own `/startup`, which is what makes it *listening* rather than
+  merely started before three processes that all open the database as they boot — so the
+  render fails on Kubernetes < 1.29, as `executor.gateImage` already does. Three more
+  refusals happen at render time rather than as a pod that never becomes ready: a missing
+  `instanceConnectionName`, an address supplied where a `PROJECT:REGION:INSTANCE` name
+  belongs (a legacy domain-scoped project's fourth segment still passes), and the bundled
+  Postgres left enabled alongside it. The guards live in the helper, not in `secret.yaml`
+  where the chart's other refusals are, because that file is skipped entirely under
+  `existingSecret` — which is exactly how the GCP mode this sidecar exists for is deployed.
+
+  The identity half was the part nobody could work around: the **brain** opens the database
+  like the other two and had no ServiceAccount in the chart to annotate, and no Google
+  service account in `foundation/`. It now has both — `brain.serviceAccount.annotations`
+  and a `<prefix>-brain` account with the Workload Identity binding and
+  `roles/cloudsql.client` in `environment/` — deliberately its own rather than the control
+  plane's, which carries KMS decrypt the brain has no business holding. CI keeps that
+  separation honest: the assertion that the brain holds no ServiceAccount is replaced by
+  one that it holds no KMS key name and uses the ServiceAccount named after *it*. An
+  existing deployment has to re-apply `foundation/` before `environment/` — the new
+  account is read by name through a data source, so an `environment/` plan run first fails
+  on it rather than creating it.
+
+  Off by default, and **not exercised on a live cluster**: the chart renders it, a real API
+  server accepts the manifests under `--dry-run=server`, and the Terraform passes the
+  credential-free checks — but the mode-2 acceptance run predates this and took the other
+  path the guide documents (the private IP directly, `sslmode=require`, no identity at
+  all), which still works and is still documented. Closes #269.
+
 - **The deploy guide now says how long a stuck teardown actually stays stuck: four days, by
   Google's own documentation** ([docs/deploy-gcp.md](./docs/deploy-gcp.md), #20). The
   mode-2 acceptance teardown ended with the VPC peering still `ACTIVE / Connected` after 25

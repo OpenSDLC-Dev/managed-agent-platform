@@ -145,11 +145,30 @@ network in cleartext, on the near side of the encryption. `ssl_mode = ENCRYPTED_
 not your application's connection to the proxy. Google recommends colocation for exactly
 this reason.
 
-The chart templates no sidecar, so this is not a Helm value today: add the container to the
-`controlplane`, `brain` and `executor` deployments yourself. That is a chart gap, not a
-platform limitation, and it is tracked in
-[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) along with the
-brain-identity half of it below. If you must use a shared proxy Service as an interim step, treat the
+The chart templates it, off by default. `cloudSQLProxy.enabled` adds the sidecar to all
+three deployments at once — one switch rather than three, because they read a single
+`database-url` Secret key and a DSN cannot name a loopback socket for some pods and the
+instance's address for the others:
+
+```sh
+--set cloudSQLProxy.enabled=true \
+--set "cloudSQLProxy.instanceConnectionName=$(terraform output -raw sql_instance_connection_name)"
+```
+
+and then a `database-url` of
+`postgres://USER:PASSWORD@127.0.0.1:5432/DATABASE?sslmode=disable`. **The chart cannot
+write that for you** — in mode 2 it renders no Secret at all — so pointing the sidecar at an
+instance while leaving the DSN on the instance's own address deploys a proxy nothing
+connects through. It renders as a **native sidecar** (an `initContainer` with
+`restartPolicy: Always`) with a startup probe on the proxy's own `/startup`, which is what
+makes it ready before the process that dials it: all three open the database as they start,
+so an ordinary container would let them race it. That needs Kubernetes 1.29 or newer, and
+the render fails on anything older rather than producing a pod an old kubelet silently
+mistreats. Four other refusals happen at render time too — no
+`instanceConnectionName`, an address given where a `PROJECT:REGION:INSTANCE` name belongs,
+the bundled Postgres left enabled alongside it, and (as above) an old cluster.
+
+If you must use a shared proxy Service as an interim step, treat the
 database credential as exposed to anything that can watch pod-network traffic, and say so in
 your threat model rather than inheriting the `sslmode=disable` from this page as though it
 were still local.
@@ -163,16 +182,31 @@ encrypts but does not verify the server's certificate, which is what the proxy a
 IAM-based authorization. Prefer the proxy where you can; take this path when you want mode 2
 running without per-component identity work.
 
-That distinction matters most for the **brain**, which opens the database like the other two
-but has no ServiceAccount in the chart to annotate — and there is no Google service account
-for it in `foundation/` either. Under the proxy topology it therefore needs four steps nobody
-has done for you: a ServiceAccount of its own, a Google service account bound to it with
-`roles/iam.workloadIdentityUser`, and `roles/cloudsql.client` on that Google account. Do not
-reuse the control plane's identity to shortcut this — it carries KMS decrypt, which the brain
-has no business holding. Under the direct path the question does not arise, which is why the
-mode-2 acceptance run took it and
-[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) is a follow-on
+That distinction matters most for the **brain**, which opens the database like the other two.
+It now has an identity of its own on both sides: `brain.serviceAccount.annotations` in the
+chart, a `<prefix>-brain` Google service account in `foundation/`, and — in `environment/` —
+the `roles/iam.workloadIdentityUser` binding onto that KSA plus `roles/cloudsql.client`. So
+the proxy topology is three annotations, one per component:
+
+```sh
+terraform output -json controlplane_service_account_annotation
+terraform output -json brain_service_account_annotation
+terraform output -json executor_service_account_annotation
+```
+
+The brain's account holds `roles/cloudsql.client` and nothing else, and that is the point of
+it being separate: annotating the brain onto the control plane's account would be the
+shortcut, and it would hand the brain the KMS decrypt that account carries. Under the direct
+path the question does not arise — no component uses a Google identity for the database at
+all — which is why the mode-2 acceptance run took it and
+[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) was a follow-on
 rather than a blocker.
+
+Neither half of the proxy path has been exercised on a live GKE cluster. The chart renders
+it, a real API server accepts the manifests, and the Terraform passes the credential-free
+checks — but the mode-2 acceptance run predates all of it and took the direct path, so what
+is established here is that the configuration is well-formed, not that a pod has connected
+through it.
 
 ## Exposing the control plane
 

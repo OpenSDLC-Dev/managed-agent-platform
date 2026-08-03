@@ -113,6 +113,51 @@ This is a deliberate divergence from bundling a Postgres subchart: a self-hostab
 air-gap-friendly platform should not require pulling an external chart from a repo, and
 production operators run their own database anyway.
 
+### Cloud SQL Auth Proxy (`cloudSQLProxy.enabled`)
+
+On GKE, Google's documented way to reach a **private-IP** Cloud SQL instance is the Cloud
+SQL Auth Proxy running in the same pod as the workload. Turning it on adds that container to
+the controlplane, brain and executor deployments:
+
+```bash
+--set postgresql.enabled=false \
+--set cloudSQLProxy.enabled=true \
+--set cloudSQLProxy.instanceConnectionName=my-project:us-central1:my-instance \
+--set externalDatabase.url='postgres://user:pass@127.0.0.1:5432/db?sslmode=disable'
+```
+
+Four things about it are worth knowing before you turn it on.
+
+**The DSN is yours to point at the proxy.** The chart does not rewrite it, and in the
+`existingSecret` path it never sees one — so a sidecar with a DSN still naming the
+instance's own address is a proxy nothing connects through.
+
+**`sslmode=disable` is correct here and nowhere else.** The proxy terminates the encrypted
+leg itself and hands the process a loopback socket, so the hop the DSN describes never
+leaves the pod. That is also why this is a sidecar rather than a shared proxy Deployment:
+the tidier-looking shape puts the password and every query on the pod network in cleartext,
+on the near side of the encryption, where neither the instance's `ssl_mode` setting nor
+`pg_stat_ssl` can see it.
+
+**One switch, three deployments.** All three read a single `database-url` Secret key, so a
+DSN cannot name a loopback socket for some pods and an address for the others.
+
+**Each pod needs an identity.** The proxy authenticates as the pod's Google service account,
+which needs `roles/cloudsql.client` — so all three `serviceAccount.annotations` blocks come
+into play, including `brain.serviceAccount.annotations`. Give the brain an account of its
+own rather than the control plane's, which carries KMS decrypt it has no business holding.
+[`deploy/gcp/`](../../gcp/) creates all three accounts and their Workload Identity bindings,
+and [docs/deploy-gcp.md](../../../docs/deploy-gcp.md) documents the simpler alternative:
+a Pod reaching the private IP directly with `sslmode=require`, no sidecar and no Google
+identity, trading certificate verification and IAM authorization for having nothing to set
+up.
+
+It renders as a **native sidecar** — an `initContainer` with `restartPolicy: Always` — with
+a startup probe on the proxy's own health endpoint, so the socket is listening before the
+process that dials it starts. That needs **Kubernetes >= 1.29**; older clusters fail the
+render. So do a missing `instanceConnectionName`, an address supplied where a
+`PROJECT:REGION:INSTANCE` name belongs, and the bundled Postgres left enabled alongside it.
+
 ## Credential cipher (OpenBao)
 
 `openbao.enabled=true` (default) runs a single-replica in-cluster OpenBao whose
@@ -220,17 +265,15 @@ gcloud kms keys add-iam-policy-binding credentials \
 `roles/cloudkms.cryptoKeyEncrypter` if you want the executor separated; a single
 account for both is simpler and is what the example above configures.)
 
-The brain gets neither the key name nor a ServiceAccount: it holds no cipher, so
-on KMS grounds it has no reason to hold the identity either. That is also why
-the control plane has its own ServiceAccount rather than using the namespace's
-`default` — annotating `default` would hand the same Google identity to every
-pod that falls back to it.
-
-That rationale covers KMS and stops there. It is **not** a claim that the brain
-never needs a Google identity: the brain opens the database like the other two,
-so under a Cloud SQL Auth Proxy topology it does need one, and the chart cannot
-give it one today. See "Connecting to a private-IP instance" in
-[docs/deploy-gcp.md](../../../docs/deploy-gcp.md) for both paths.
+The brain never gets the key name: it holds no cipher, so on KMS grounds it has
+no reason to hold the identity either. It does have a **ServiceAccount** of its
+own, for a reason that has nothing to do with KMS — see the Cloud SQL Auth Proxy
+below — and keeping it separate is what stops the two reasons from merging:
+annotate the brain's KSA onto the account above and the brain inherits its KMS
+decrypt. Give it the account that holds `roles/cloudsql.client` and nothing
+else. It is also why each component has a ServiceAccount rather than falling
+back to the namespace's `default` — annotating `default` would hand one Google
+identity to every pod in the namespace that also defaults.
 
 Two refusals are worth knowing before you deploy. A **CryptoKeyVersion** name
 (`.../cryptoKeys/K/cryptoKeyVersions/1`) fails the render: `Encrypt` accepts one
@@ -303,7 +346,9 @@ processes; `otlp.insecure=true` to export without TLS.
 | `externalOpenBao.address` | `""` | external OpenBao/Vault URL when `openbao.enabled=false` |
 | `localCipher.masterKey` | `""` | AES-256-GCM fallback when no OpenBao is configured |
 | `gcpKMS.keyName` | `""` | Cloud KMS CryptoKey resource name; selects the KMS cipher (exclusive with the OpenBao options and `localCipher`). Needs the Workload Identity annotations below — no key material rides the Secret |
-| `controlplane.serviceAccount.annotations` / `executor.serviceAccount.annotations` | `{}` | annotations on each component's ServiceAccount; `iam.gke.io/gcp-service-account` is how the KMS cipher authenticates |
+| `controlplane.serviceAccount.annotations` / `brain.serviceAccount.annotations` / `executor.serviceAccount.annotations` | `{}` | annotations on each component's ServiceAccount; `iam.gke.io/gcp-service-account` is how the KMS cipher authenticates — and, for the brain, which holds no cipher, how the Cloud SQL Auth Proxy does |
+| `cloudSQLProxy.enabled` / `.instanceConnectionName` | `false` / `""` (required when enabled) | run the Cloud SQL Auth Proxy as a native sidecar in all three deployments (below). The name is `PROJECT:REGION:INSTANCE`, never an address |
+| `cloudSQLProxy.image` / `.privateIP` / `.resources` | `gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.24.1` / `true` / `{}` | proxy image, whether to pass `--private-ip` (what an instance with no public address needs), and its resources |
 | `existingSecret` | `""` | reference a pre-created Secret instead of inlining |
 | `executor.sandboxImage` | `debian:stable-slim` | base image for sandbox Pods |
 | `executor.gateImage` | `""` (gate off) | per-session egress-gate sidecar image (`--target gate` build); setting it opts `limited` / vault-attached sessions into the gate — allowed_hosts enforcement plus vault-credential substitution at egress. The sidecar needs `CAP_NET_ADMIN` (no `restricted` Pod Security on the namespace) and, as a native sidecar, Kubernetes >= 1.29 (the render fails on older clusters); unset keeps the fail-closed route-flush |

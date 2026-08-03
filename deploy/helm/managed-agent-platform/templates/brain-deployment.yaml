@@ -20,7 +20,9 @@ spec:
         {{- include "map.labels" . | nindent 8 }}
         app.kubernetes.io/component: brain
     spec:
+      serviceAccountName: {{ include "map.fullname" . }}-brain
       {{- include "map.imagePullSecrets" . | nindent 6 }}
+      {{- include "map.cloudSQLProxy" . | nindent 6 }}
       containers:
         - name: brain
           image: {{ include "map.image" (dict "ctx" . "component" "brain") | quote }}

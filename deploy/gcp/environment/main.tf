@@ -191,6 +191,10 @@ data "google_service_account" "controlplane" {
   account_id = "${var.name_prefix}-controlplane"
 }
 
+data "google_service_account" "brain" {
+  account_id = "${var.name_prefix}-brain"
+}
+
 data "google_service_account" "executor" {
   account_id = "${var.name_prefix}-executor"
 }

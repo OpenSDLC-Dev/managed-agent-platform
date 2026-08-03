@@ -22,6 +22,7 @@ spec:
     spec:
       serviceAccountName: {{ include "map.fullname" . }}-controlplane
       {{- include "map.imagePullSecrets" . | nindent 6 }}
+      {{- include "map.cloudSQLProxy" . | nindent 6 }}
       containers:
         - name: controlplane
           image: {{ include "map.image" (dict "ctx" . "component" "controlplane") | quote }}

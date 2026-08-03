@@ -125,6 +125,101 @@ crash-looping.
 {{- end }}
 {{- end -}}
 
+{{/*
+The Cloud SQL Auth Proxy sidecar (#269), rendered under the podSpec of each
+process that opens the database — the controlplane, the brain and the executor.
+Emits nothing at all unless cloudSQLProxy.enabled. Call with the root context at
+the podSpec's own indentation.
+
+A NATIVE sidecar — an initContainer with `restartPolicy: Always` — which is the
+shape Google documents for GKE, and here it is load-bearing rather than modern:
+all three processes open the database as they start (store.Open migrates), so an
+ordinary container would let them race the proxy and crash-loop until it caught
+up. A native sidecar with a startupProbe starts first and is *ready* first, and
+is torn down last.
+
+Not `--auto-iam-authn`, which Google's example carries: that selects IAM database
+authentication, and the platform authenticates as an ordinary PostgreSQL role
+whose password rides the DSN — the role deploy/gcp/dbinit.sql creates, precisely
+so it is not a Cloud SQL Admin API user.
+
+The guards live here rather than in secret.yaml, where the chart's other
+mutually-exclusive-value refusals live, because that whole file is skipped when
+existingSecret is set — and existingSecret is exactly how the GCP mode this
+sidecar exists for is deployed, so a guard written there would never fire for
+the deployments that need it.
+*/}}
+{{- define "map.cloudSQLProxy" -}}
+{{- if .Values.cloudSQLProxy.enabled }}
+{{- if .Values.postgresql.enabled }}
+{{- fail "cloudSQLProxy.enabled is incompatible with postgresql.enabled: the bundled Postgres is the database in that mode, and one `database-url` cannot name both it and the proxy's loopback socket. Set postgresql.enabled=false." }}
+{{- end }}
+{{- if not .Values.cloudSQLProxy.instanceConnectionName }}
+{{- fail "cloudSQLProxy.instanceConnectionName is required when cloudSQLProxy.enabled: PROJECT:REGION:INSTANCE, from `terraform output -raw sql_instance_connection_name`." }}
+{{- end }}
+{{- /* Three colon-separated segments, and only that: a legacy domain-scoped
+       project adds a fourth (`google.com:project:region:instance`), so an exact
+       count would refuse a valid name. What this catches is the substitution
+       that actually gets made — an IP address or a bare instance name, which
+       the proxy rejects at startup, leaving a pod that never becomes ready and
+       nothing in the release to point at. */}}
+{{- if lt (len (splitList ":" .Values.cloudSQLProxy.instanceConnectionName)) 3 }}
+{{- fail (printf "cloudSQLProxy.instanceConnectionName must be an instance connection name, PROJECT:REGION:INSTANCE — not %q. The proxy is given a name, never an address." .Values.cloudSQLProxy.instanceConnectionName) }}
+{{- end }}
+{{- if semverCompare "<1.29-0" .Capabilities.KubeVersion.Version }}
+{{- fail "cloudSQLProxy.enabled needs Kubernetes >= 1.29: the proxy runs as a native sidecar (an initContainer with restartPolicy Always), which older kubelets reject" }}
+{{- end }}
+initContainers:
+  - name: cloud-sql-proxy
+    image: {{ .Values.cloudSQLProxy.image | quote }}
+    restartPolicy: Always
+    args:
+      - "--structured-logs"
+      {{- /* 127.0.0.1 is the proxy's own default address and is not restated as
+             a flag, because it is the whole safety argument for the
+             `sslmode=disable` this topology asks for: bind it anywhere else and
+             the loopback claim stops being true. */}}
+      - "--port=5432"
+      {{- if .Values.cloudSQLProxy.privateIP }}
+      - "--private-ip"
+      {{- end }}
+      {{- /* The health endpoints are what make the startupProbe below possible;
+             they must bind 0.0.0.0 because the kubelet probes the pod's address,
+             not its loopback. They serve `/startup`, `/liveness` and
+             `/readiness` and nothing else — no database traffic crosses them. */}}
+      - "--health-check"
+      - "--http-address=0.0.0.0"
+      - "--http-port=9801"
+      - {{ .Values.cloudSQLProxy.instanceConnectionName | quote }}
+    {{- /* A native sidecar without a startupProbe only promises that the
+           process was STARTED before the application container, which is not
+           the promise that matters — the listener is what the application needs.
+           With one, the kubelet holds the application back until `/startup`
+           answers 200. */}}
+    startupProbe:
+      httpGet:
+        path: /startup
+        port: 9801
+      periodSeconds: 1
+      failureThreshold: 60
+    livenessProbe:
+      httpGet:
+        path: /liveness
+        port: 9801
+      periodSeconds: 10
+      failureThreshold: 3
+    securityContext:
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+    {{- with .Values.cloudSQLProxy.resources }}
+    resources:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}
+{{- end -}}
+
 {{/* imagePullSecrets block, rendered under a podSpec. */}}
 {{- define "map.imagePullSecrets" -}}
 {{- with .Values.imagePullSecrets }}
