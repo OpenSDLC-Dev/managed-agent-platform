@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"mime"
 	"path"
 	"sort"
 	"strings"
@@ -378,11 +377,47 @@ func validHarvestSegment(seg string) bool {
 	return true
 }
 
+// harvestMimeByExt is the fixed extension → mime table harvestMime consults —
+// and the only thing it consults: mime.TypeByExtension merges the host's
+// /etc/mime.types, so the same tree would yield different registry rows on
+// different executor hosts (#264). The table pins Go's builtin set and adds
+// the common deliverable types it lacks; text types carry charset=utf-8
+// exactly as the mime package would attach it. The grader's inline rule
+// (text/*, application/json) reads these values, so an extension's entry here
+// also decides whether that deliverable's content reaches the grader.
+var harvestMimeByExt = map[string]string{
+	".avif": "image/avif",
+	".css":  "text/css; charset=utf-8",
+	".csv":  "text/csv; charset=utf-8",
+	".gif":  "image/gif",
+	".gz":   "application/gzip",
+	".htm":  "text/html; charset=utf-8",
+	".html": "text/html; charset=utf-8",
+	".jpeg": "image/jpeg",
+	".jpg":  "image/jpeg",
+	".js":   "text/javascript; charset=utf-8",
+	".json": "application/json",
+	".md":   "text/markdown; charset=utf-8",
+	".mjs":  "text/javascript; charset=utf-8",
+	".pdf":  "application/pdf",
+	".png":  "image/png",
+	".py":   "text/x-python; charset=utf-8",
+	".svg":  "image/svg+xml",
+	".tar":  "application/x-tar",
+	".txt":  "text/plain; charset=utf-8",
+	".wasm": "application/wasm",
+	".webp": "image/webp",
+	".xml":  "text/xml; charset=utf-8",
+	".yaml": "application/yaml",
+	".yml":  "application/yaml",
+	".zip":  "application/zip",
+}
+
 // harvestMime derives the registry mime type from the path's extension alone —
 // the sandbox offers no content type. Unknown extensions fall back to
 // application/octet-stream, the upload endpoint's own fallback.
 func harvestMime(p string) string {
-	if m := mime.TypeByExtension(path.Ext(p)); m != "" {
+	if m := harvestMimeByExt[strings.ToLower(path.Ext(p))]; m != "" {
 		return m
 	}
 	return "application/octet-stream"

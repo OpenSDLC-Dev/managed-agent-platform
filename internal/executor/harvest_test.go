@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"slices"
 	"strings"
 	"testing"
@@ -470,6 +471,39 @@ func TestValidHarvestPathRejectsEscapes(t *testing.T) {
 	for _, p := range reject {
 		if validHarvestPath(p) {
 			t.Errorf("validHarvestPath(%q) = true, want false", p)
+		}
+	}
+}
+
+func TestHarvestMimeIsHostIndependent(t *testing.T) {
+	// The registry mime for a given tree must not depend on which executor
+	// host harvested it (#264): harvestMime consults only its own fixed
+	// table, never the process mime registry that merges the host's
+	// /etc/mime.types. Seeding the process registry here proves the leak
+	// would be caught: the seeded extension must still fall back.
+	if err := mime.AddExtensionType(".hostonly", "application/x-host-only"); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"report.json":    "application/json",
+		"build_dcf.py":   "text/x-python; charset=utf-8",
+		"notes.md":       "text/markdown; charset=utf-8",
+		"README.TXT":     "text/plain; charset=utf-8", // extension case-folded
+		"data.csv":       "text/csv; charset=utf-8",
+		"index.html":     "text/html; charset=utf-8",
+		"chart.png":      "image/png",
+		"paper.pdf":      "application/pdf",
+		"archive.tar":    "application/x-tar",
+		"bundle.zip":     "application/zip",
+		"dump.gz":        "application/gzip",
+		"config.yaml":    "application/yaml",
+		"model":          "application/octet-stream", // no extension
+		"weird.hostonly": "application/octet-stream", // host-seeded mapping ignored
+		"unknown.xyz123": "application/octet-stream",
+	}
+	for p, want := range cases {
+		if got := harvestMime(p); got != want {
+			t.Errorf("harvestMime(%q) = %q, want %q", p, got, want)
 		}
 	}
 }
