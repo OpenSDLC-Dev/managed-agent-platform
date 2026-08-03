@@ -437,7 +437,7 @@ delete` is subject to the same wait: it fails with
 `FLOW_SN_DC_RESOURCE_PREVENTING_DELETE_CONNECTION`, meaning a resource inside Google's own
 producer project still holds the connection.
 
-**Which is fine, and this is the part to internalise.** What that failure strands is the
+**Which is fine, and this is the part worth remembering.** What that failure strands is the
 VPC, the reserved peering range, the connection itself and the API enablements — **none of
 them billable**. The run that hits this has already deleted the cluster, the instance, the
 bucket and the registry, so the cost is settled and the remainder is bookkeeping. Stopping
