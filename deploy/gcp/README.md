@@ -24,8 +24,8 @@ identically?"**
 
 Three things make the split necessary rather than tidy:
 
-- **KMS key rings and crypto keys cannot be deleted — and destroying the *resource* is
-  worse than leaving it.** The provider's default `deletion_policy` is `DELETE`, which
+- **A KMS key ring can never be deleted, a crypto key only by destroying and deleting
+  every version of it — and destroying the *resource* is worse than leaving it.** The provider's default `deletion_policy` is `DELETE`, which
   schedules every `CryptoKeyVersion` for destruction: the name stays taken, so a
   single-configuration setup still collides at the next apply, and the key is now unusable.
   The vault ciphertext in Postgres is decryptable by that key and nothing else, so that is
@@ -42,8 +42,11 @@ Three things make the split necessary rather than tidy:
   (The HMAC *key* is not a Terraform resource at all; `bootstrap.sh` creates it. GCS returns
   its secret exactly once, so a resource holding it would hold it in state.)
 - **The secrets are the reconciliation source.** A rebuilt environment is brought back into
-  agreement with them: the database password is reapplied to the new Cloud SQL instance,
-  and the HMAC pair is carried forward untouched. (Decision 6 also wants that pair *proven*
+  agreement with them, and by two different mechanisms now that there are two database
+  credentials: the **administrator's** password is reapplied to the new Cloud SQL instance by
+  the apply itself, through `password_wo`; the **platform's** is reapplied by re-running
+  `make gcp-db-init`, which is the same run that re-creates its role. The HMAC pair is
+  carried forward untouched. (Decision 6 also wants that pair *proven*
   against the new bucket by an authenticated call rather than assumed valid from the presence of
   a secret version. `bootstrap.sh` does not do that; slice 4b's acceptance battery did,
   because it needs a live bucket to authenticate against — PUT, GET and DELETE in the
@@ -137,13 +140,38 @@ else
 fi
 
 make gcp-env-apply
+
+# The cluster must be reachable before the next step, which runs inside it.
+gcloud container clusters get-credentials \
+  "$(terraform -chdir=deploy/gcp/environment output -raw cluster_name)" \
+  --zone "$(terraform -chdir=deploy/gcp/environment output -raw zone)" \
+  --project your-project
+
+# Creates the platform's database role OUTSIDE cloudsqlsuperuser, and asserts it.
+PROJECT=your-project make gcp-db-init
 ```
 
-**The order is load-bearing.** `environment/` reads the database password ephemerally at
-apply time; run it before `gcp-bootstrap` and it fails naming the secret that has no
-version. `gcp-bootstrap` is idempotent by *skipping*: a secret that already has a version is
-left exactly as it is, because that version may be the only thing that can decrypt
-something. Re-running it after an `environment/` teardown is the normal case and is a no-op.
+**The order is load-bearing.** `environment/` reads the administrator's password
+ephemerally at apply time; run it before `gcp-bootstrap` and it fails naming the secret that
+has no version. `gcp-bootstrap` is idempotent by *skipping*: a secret that already has a
+version is left exactly as it is, because that version may be the only thing that can
+decrypt something. Re-running it after an `environment/` teardown is the normal case and is
+a no-op.
+
+`gcp-db-init` comes last for a reason that is not politeness about ordering. Cloud SQL grants
+`cloudsqlsuperuser` — CREATEDB and CREATEROLE — to every built-in user created through its
+Admin API, which is the path `google_sql_user` takes. So Terraform creates exactly one such
+account, `postgres`, and the platform is not it: `deploy/gcp/dbinit.sql` creates the
+platform's own role with plain `CREATE ROLE`, which never goes through that path, and then
+asserts the result — not a superuser, not a member of `cloudsqlsuperuser`, owner of the
+platform database and of nothing else, over an encrypted session. A failed assertion fails
+the step.
+
+It runs as a Kubernetes **Job** rather than as a local `psql` because `environment/` gives
+Cloud SQL a private address only: the instance is reachable from inside the VPC and from
+nowhere else, including not from the machine running Terraform. Re-run it after every
+`environment/` rebuild, and after rotating the password — the second case is the whole
+rotation procedure.
 
 `terraform.tfvars` is gitignored. `name_prefix` and `kms_location` must match between the two
 configurations — `environment/` finds the foundation's resources by name, so a mismatch
@@ -181,14 +209,41 @@ only at the first image push, after the apply has already created a cluster and 
 uses. Run it **after** `make gcp-foundation-apply`: the foundation is what enables the Cloud
 Build API, and the lookup fails with `SERVICE_DISABLED` until it is on.
 
-**Rotating the database password**: add a version by hand, then bump `db_password_version`
-and re-apply `environment/`. Write-only arguments leave Terraform nothing to diff, so that
-counter is the only signal that it should push the new value.
+Know what that answer costs you on the modern default. It returns the Compute Engine default
+service account — which is also the identity the node pools run as, since neither pool sets
+`node_config.service_account`. So on such a project the `artifactregistry.writer` grant lands
+on every node, and a container that escapes to its node can overwrite the platform's own
+images and wait to be pulled. This is accepted for staging and stated rather than hidden;
+nothing here guards it, because a precondition demanding two distinct identities would reject
+the very flow this section documents. Past staging, pass a dedicated build service account
+and give the node pools an identity of their own.
 
-```sh
+**Rotating a database password** — and there are now two, rotated by different mechanisms.
+Getting this backwards leaves a new secret version that nothing ever applies, so the value
+in Secret Manager and the value the database will accept silently disagree until the next
+restart:
+
+| Secret | Whose password | How the rotation is applied |
+| --- | --- | --- |
+| `map-db-password` | the **platform's** role, the one in `DATABASE_URL` | add a version, then re-run `make gcp-db-init` — its `ALTER ROLE` is unconditional |
+| `map-db-admin-password` | the Cloud SQL built-in **administrator** | add a version, then bump `db_password_version` and re-apply `environment/` |
+
+The counter belongs to the administrator's password alone, because that is the only one
+Terraform writes. Write-only arguments leave Terraform nothing to diff, so it is the only
+signal that it should push the new value. Bumping it does nothing for the platform's role,
+which Terraform does not manage.
+
+Adding the version is the same for either — name the secret you mean. Both names carry the
+`NAME_PREFIX` the environment was built with, so set it once at the top of the snippet rather
+than relying on `NAME_PREFIX` being exported in whatever shell this gets pasted into:
+
+```bash
+prefix=map                          # the NAME_PREFIX this environment was built with
+secret="$prefix-db-password"        # or "$prefix-db-admin-password"
+
 pw="$(openssl rand -hex 32)"
 if [[ "$pw" =~ ^[0-9a-f]{64}$ ]]; then
-  printf '%s' "$pw" | gcloud secrets versions add map-db-password \
+  printf '%s' "$pw" | gcloud secrets versions add "$secret" \
     --project your-project --data-file=-
 else
   echo "generator failed — nothing written" >&2
@@ -196,13 +251,23 @@ fi
 unset pw
 ```
 
+Bash (or zsh), not `sh`: `[[ ... =~ ... ]]` is a bash construct and a POSIX shell such as
+`dash` rejects it. Under bash 3.2 — the one macOS ships — it works as written.
+
+A prefix that names no secret is safe — `gcloud secrets versions add` creates a version of an
+**existing** secret and errors when there is none. The unsafe case is a prefix that names a
+*different* environment's secret in the same project: that rotation succeeds, and what breaks
+is the other environment, at its next restart rather than here.
+
 (An `if`, not `... || { …; exit 1; }`: this is meant to be pasted into a shell, where `exit`
 would close the terminal and `return` is an error outside a function.)
 
 Generate and **check** before writing, exactly as `bootstrap.sh` does, rather than piping
 `openssl` straight into `gcloud`. In a pipeline a failure on the left does not stop the
 right: `gcloud` starts anyway, reads EOF, and stores an *enabled* zero-byte version. Here
-that version becomes `latest` and then rides `db_password_version` into Cloud SQL.
+that version becomes `latest` and then rides into Cloud SQL — through
+`db_password_version` for the administrator, or through the next `make gcp-db-init` for the
+platform's role.
 
 The command substitution also strips the newline `openssl` prints, which `--data-file=-`
 would otherwise store as a 65th byte — and a raw control character in `DATABASE_URL` makes
@@ -211,7 +276,7 @@ shell builtin: passing it as an argument would put it in `ps` output and shell h
 
 ## Handover to Helm
 
-The acceptance runs in two phases the chart's own render-time exclusivity dictates
+The acceptance runs in two phases (mode 1 has been run; mode 2 has not) the chart's own render-time exclusivity dictates
 (plan 20, Decision 4). **Mode-1** is bundled Postgres/MinIO/OpenBao with inline values —
 it proves the images, the Kubernetes sandbox path, the gate and the end-to-end flows with
 the fewest variables. **Mode-2** is Cloud SQL + GCS + KMS behind a pre-created Secret: the
@@ -340,9 +405,10 @@ terraform import google_kms_crypto_key.cipher              "$P/locations/$L/keyR
 terraform import google_service_account.controlplane       "$P/serviceAccounts/map-controlplane@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.executor           "$P/serviceAccounts/map-executor@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.storage            "$P/serviceAccounts/map-storage@your-project.iam.gserviceaccount.com"
-terraform import google_secret_manager_secret.db_password      "$P/secrets/map-db-password"
-terraform import google_secret_manager_secret.blob_access_key  "$P/secrets/map-blob-access-key"
-terraform import google_secret_manager_secret.blob_secret_key  "$P/secrets/map-blob-secret-key"
+terraform import google_secret_manager_secret.db_password       "$P/secrets/map-db-password"
+terraform import google_secret_manager_secret.db_admin_password "$P/secrets/map-db-admin-password"
+terraform import google_secret_manager_secret.blob_access_key   "$P/secrets/map-blob-access-key"
+terraform import google_secret_manager_secret.blob_secret_key   "$P/secrets/map-blob-secret-key"
 for api in cloudbuild cloudkms iam iamcredentials secretmanager; do
   terraform import "google_project_service.required[\"$api.googleapis.com\"]" "your-project/$api.googleapis.com"
 done
@@ -353,22 +419,30 @@ apply, instead of colliding on the name. Nothing here imports a secret *version*
 key, and nothing needs to: `bootstrap.sh` is not Terraform-managed, and re-running it after
 an import is a no-op because the versions already exist.
 
+Do not trust that list to have kept pace with the configuration — a resource added to
+`foundation/` after this was written would be missing from it, and the failure arrives as a
+name collision partway through the recovery apply. `terraform plan` after the imports is the
+authoritative check: every resource it still reports as *will be created* already exists in
+the project and is one more `terraform import` away.
+
 ## Checking it without touching GCP
 
 ```sh
-make gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-split-check-test
+make gcp-fmt gcp-validate gcp-split-check gcp-lint \
+     gcp-bootstrap-test gcp-split-check-test gcp-dbinit-test
 ```
 
-None of them needs credentials, state, or a project, and CI runs all six on every PR — so
+None of them needs credentials, state, or a project, and CI runs all seven on every PR — so
 neither the configuration nor the tooling can rot silently between the rare runs that
-actually provision anything.
+actually provision anything. `gcp-dbinit-test` is the one with a host requirement: it needs
+Docker, because it starts a real PostgreSQL.
 
 `gcp-split-check` is the structural enforcement of the two-configuration split:
 `environment/` may not *own* a resource of an unrecoverable kind, and every one
 `foundation/` declares must carry both guards it can — `prevent_destroy` and, where the kind
 has it, `deletion_policy = "PREVENT"`.
 
-The last two **run** the tooling rather than reading it, because the first four are static
+The last three **run** the tooling rather than reading it, because the first four are static
 and this is a place where static checking has already been insufficient. `gcp-lint` is
 shellcheck, and shellcheck cannot know that `gcloud secrets versions describe` rejects
 `--filter` — it exited 0 on a `bootstrap.sh` that aborted on its first call in every project,
@@ -378,3 +452,27 @@ a write that commits and *then* reports failure, a create whose response never p
 rollback whose own calls fail), and `gcp-split-check-test` plants violations in a scratch
 copy and requires each to come back red — a guard that had silently stopped reading its
 input would pass a run against the real tree, and twice did.
+
+`gcp-dbinit-test` is the third, and it exists because neither `terraform validate` nor
+shellcheck can execute SQL: without it the only thing that ever runs `dbinit.sql` is a
+billable cluster talking to a billable database, which is a slow and expensive way to find a
+typo in a `\gexec`. It starts a real PostgreSQL 16 with TLS on and runs the file the way the
+Job does — then sets up every state its assertions guard and the DDL does not repair, and
+requires the run to go red for that reason, because an assertion that cannot fail is a
+comment. That split matters: LOGIN, INHERIT, CREATEDB, CREATEROLE and database ownership are
+*corrected* by the file, so their assertions cannot fire and the repair cases cover them
+instead; SUPERUSER, BYPASSRLS and REPLICATION cannot be corrected by a Cloud SQL
+administrator at all, so those are asserted-only and each has a negative case of its own. It also runs the
+whole file under a deliberately **non-superuser** administrator, which is what Cloud SQL's
+actually is: it holds CREATEDB and CREATEROLE — the two attributes that matter here — but
+it is **not** a PostgreSQL SUPERUSER, and a local `postgres` is, so a local `postgres`
+bypasses the very checks a Cloud SQL run has to satisfy.
+
+Writing it paid for itself four times over. Two ordinary defects: an unguarded `pg_has_role`
+that raised on any PostgreSQL without a `cloudsqlsuperuser` role, and a `\getenv` that turned
+a missing password into a syntax error rather than the intended complaint. And two that would
+have failed **only** on the real instance — `ALTER ROLE ... NOSUPERUSER` is refused outright
+(PostgreSQL lets only a superuser change SUPERUSER, REPLICATION and BYPASSRLS, even to turn
+them off), and `ALTER DATABASE ... OWNER TO` failed with `must be able to SET ROLE` because
+the membership PostgreSQL 16's `CREATE ROLE` implicitly grants its creator does not carry the
+SET option.

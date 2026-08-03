@@ -41,6 +41,8 @@ Two security invariants, adopted from the reference design:
 
 Self-hosting means you own the infrastructure these run on. The **[self-hosted shared-responsibility model](./docs/self-hosted-security.md)** draws the line: what the platform enforces in code (credential isolation, scoped auth, fail-closed egress, and the sandbox's own cgroup limits and capability drops — on by default) versus what you configure (the sandbox image, egress policy for non-`limited` environments, a hardened container runtime, environment-key rotation).
 
+For Google Cloud specifically, **[docs/deploy-gcp.md](./docs/deploy-gcp.md)** is the deployment guide — GKE with Cloud SQL, Cloud Storage and Cloud KMS, the settings that are required rather than recommended (`podPidsLimit`, TLS in front of the control plane), sandbox-pool sizing from measured numbers, the gVisor boundary, and the teardown step `terraform destroy` does not do. The Terraform it describes is [deploy/gcp/](./deploy/gcp/).
+
 ## Roadmap
 
 v1 delivered the core loop: `create agent → create environment → create session → send a message → the model calls a tool → an executor runs it in a sandbox → results stream back over SSE → a human approves a gated tool → the session goes idle`.

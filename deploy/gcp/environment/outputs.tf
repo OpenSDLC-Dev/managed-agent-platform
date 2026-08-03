@@ -97,6 +97,64 @@ output "sql_database" {
 }
 
 output "sql_user" {
-  value       = google_sql_user.map.name
-  description = "Database user. Its password is the foundation's Secret Manager secret and is never an output here."
+  value       = var.name_prefix
+  description = <<-EOT
+    The role the PLATFORM authenticates as — the one that appears in
+    DATABASE_URL. Its password is the foundation's map-db-password secret and is
+    never an output here.
+
+    It is var.name_prefix rather than a reference to a resource because no
+    resource creates it: deploy/gcp/dbinit.sh does, from SQL, which is what
+    keeps it out of cloudsqlsuperuser. The two agree by construction — dbinit.sh
+    reads this same output.
+  EOT
+}
+
+output "sql_admin_user" {
+  value       = google_sql_user.admin.name
+  description = "The Cloud SQL built-in administrator. Holds cloudsqlsuperuser, is used by dbinit.sh for exactly one session, and is never given to the platform."
+}
+
+output "sql_app_role" {
+  value       = local.db_app_role
+  description = "The custom database role the platform's role is created under. Existence alone suppresses nothing: this is the role to NAME in --database-roles if a user is ever created through the Cloud SQL Admin API later, and naming it at creation is what suppresses that user's cloudsqlsuperuser grant."
+}
+
+output "sql_private_ip" {
+  value       = google_sql_database_instance.map.private_ip_address
+  description = "The instance's address on the VPC. Reachable from inside the VPC and from nowhere else — not from the machine running Terraform. Useful for diagnosis, and also a supported DSN target: a Pod reaches it directly with sslmode=require, which is what make gcp-db-init does. The Cloud SQL Auth Proxy is the better shape where you can run it, and takes sql_instance_connection_name rather than an address."
+}
+
+output "network" {
+  value       = google_compute_network.map.name
+  description = "The VPC this environment created. Named because a second environment in the same project must not reuse it — the peering range is reserved per network."
+}
+
+output "docker_hub_mirror" {
+  # A comprehension over the count'd resource: zero elements when the mirror is
+  # off, one when it is on, and join makes that "" or the prefix. It states the
+  # arity directly instead of deriving the empty case from a caught error, which
+  # is what the previous `try(...[0]..., "")` did — that worked (an out-of-range
+  # index is a dynamic error, which try does catch) but reads as "if anything
+  # goes wrong, say nothing".
+  #
+  # NOT coalesce(one(...), ""), which is the obvious-looking form and is broken:
+  # Terraform's coalesce rejects the empty string along with null, so
+  # `coalesce(one([]), "")` fails with "no non-null, non-empty-string arguments"
+  # — at output time, on the very apply that switches the mirror off. Verified
+  # in terraform console; `terraform validate` does not catch it.
+  value = join("", [
+    for r in google_artifact_registry_repository.docker_hub :
+    "${r.location}-docker.pkg.dev/${var.project_id}/${r.repository_id}"
+  ])
+  description = <<-EOT
+    Prefix that mirrors Docker Hub, or empty when var.docker_hub_mirror is false.
+
+    Docker Hub's own naming is what makes the rewrite non-obvious: an official
+    image published as `postgres:16-alpine` is really `library/postgres`, and the
+    mirror is addressed with that full path. So the chart's postgres image
+    becomes PREFIX/library/postgres:16-alpine, while minio/minio and
+    openbao/openbao — which already name an organisation — become
+    PREFIX/minio/minio and PREFIX/openbao/openbao.
+  EOT
 }

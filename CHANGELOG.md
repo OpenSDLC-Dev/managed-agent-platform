@@ -15,6 +15,176 @@ copy of an entry here.
 
 ### Added
 
+- **The GCP staging environment takes its production shape: private nodes, Cloud NAT, a
+  private-IP database, a Docker Hub mirror — and a platform database role that is not a
+  Cloud SQL superuser** ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md)
+  slice 5, configuration half). `environment/` now builds its own VPC rather than borrowing
+  the project default (an auto-mode network has no secondary ranges, so it cannot host a
+  VPC-native cluster), with Private Google Access for registry pulls, Cloud NAT for
+  everything else, and a reserved peering range that Cloud SQL's private address comes out
+  of. The nodes have no external addresses; the Kubernetes API endpoint stays public and
+  narrowable through `master_authorized_cidrs`, which is the one place this configuration
+  knowingly stops short — a private endpoint needs a bastion before anything can be
+  deployed at all, and the deploy guide states the production position instead.
+
+  The database change is the substantial one. Cloud SQL grants `cloudsqlsuperuser` —
+  CREATEDB and CREATEROLE — to every built-in user created through its Admin API, which is
+  the path `google_sql_user` takes, so the platform's own credential was a superuser by
+  construction. Google documents one way out: name a custom database role at creation and
+  the grant is suppressed. That role must already exist, and creating a PostgreSQL role
+  takes a SQL session against an instance that does not exist yet — a circle that cannot be
+  closed inside one apply. So Terraform now creates exactly one built-in user, the
+  administrator `postgres`, and the new `deploy/gcp/dbinit.sql` creates the platform's role
+  with plain `CREATE ROLE`, which never goes through that path at all. It then **asserts**
+  the outcome rather than the reasoning: not a superuser, no CREATEDB, no CREATEROLE, no
+  BYPASSRLS, `pg_has_role(user, 'cloudsqlsuperuser', 'member')` false, owner of the platform
+  database and of no other, over a session `pg_stat_ssl` confirms is encrypted. The role
+  attributes alone would not settle it — they are attributes, and say nothing about
+  membership.
+
+  It runs as a Kubernetes Job (`make gcp-db-init`), because a private-IP instance is
+  reachable from the VPC and from nowhere else, including not from the machine running
+  Terraform. The same run is also the rotation procedure: the ALTERs are unconditional, so
+  re-running after `bootstrap.sh` rotates the secret pushes the new password.
+
+  `make gcp-dbinit-test` is new and runs in CI. `terraform validate` cannot execute SQL and
+  shellcheck cannot execute psql, so without it the only thing that ever ran this file was a
+  billable cluster talking to a billable database. It starts a real PostgreSQL 16 with TLS
+  on, exercises idempotency and rotation, and requires the run to go red once for each state
+  its assertions guard and the DDL does not repair — including SUPERUSER and BYPASSRLS,
+  which a Cloud SQL administrator cannot revoke and the file therefore asserts without
+  correcting. It found four defects in the file it was written for. Two were ordinary: an unguarded
+  `pg_has_role` that raised on any PostgreSQL lacking a `cloudsqlsuperuser` role — failing
+  every run at the last statement, after every assertion had passed — and a `\getenv` that
+  turned a missing password into a syntax error instead of the complaint written for that
+  case.
+
+  The other two would have failed only on the real instance, and were found by running the
+  file under a deliberately **non-superuser** administrator, which is what Cloud SQL's
+  actually is: it holds CREATEDB and CREATEROLE — the attributes that matter here — but is
+  **not** a PostgreSQL SUPERUSER, while a local `postgres` is and therefore bypasses the
+  checks in question. Under those real
+  privileges, `ALTER ROLE ... NOSUPERUSER` is refused outright — PostgreSQL lets only a
+  superuser change `SUPERUSER`, `REPLICATION` and `BYPASSRLS`, *even to turn them off* — so
+  the corrective statement now names only what it can actually revoke and the other three
+  stay asserted-but-not-repaired. And `ALTER DATABASE ... OWNER TO` failed with `must be able
+  to SET ROLE`, because in PostgreSQL 16 the membership `CREATE ROLE` implicitly grants its
+  creator does not carry the SET option; the file now grants the role to the administrator
+  first. Both would have surfaced as a failed acceptance run against billable
+  infrastructure.
+
+  Review hardening on top of that, each with a test that goes red without the fix: the
+  corrective `ALTER ROLE` restores `LOGIN` and `INHERIT`, and the assertions now check them
+  — a role stripped of LOGIN satisfied every other assertion while the platform failed to
+  authenticate; the **group** role is narrowed and asserted too, because membership carries
+  the SET option by default, so a pre-existing privileged group role handed the platform
+  CREATEDB one `SET ROLE` away while every assertion about the platform's own attributes
+  stayed false; and `dbinit.sh` now refuses to run unless `kubectl`'s current context is the
+  cluster this Terraform built, compared by API-server endpoint rather than by context name
+  — otherwise a stale context meant writing both of one project's database passwords into
+  another project's cluster, and only then failing to reach a private IP.
+
+  That endpoint guard then shipped with a defect of its own, caught by verification: it read
+  the endpoints with `mapfile`, which is bash 4, and **macOS's `/bin/bash` is 3.2.57** and
+  has been for years. `make gcp-db-init` is run by an operator on a laptop, so the guard would have died
+  on the machine it was written for — and died badly, since `command not found` was swallowed
+  by a `|| true` and what surfaced under `set -u` was `cluster_endpoints: unbound variable`,
+  naming nothing about the cluster. Nothing caught it: shellcheck checks syntax and quoting,
+  not which bash a construct needs, and CI is Linux with bash 5. It is now a `while read`
+  loop, and `gcp-lint` gained a portability guard for the class — a list of bash-4
+  constructs, honest about being a list rather than an analysis, proven to go red on a
+  planted `mapfile`.
+
+  `gcp-dbinit-test` also grew three negative cases, because the phrasing "goes red for each
+  state its assertions catch" was not yet literally true: `SUPERUSER`, `BYPASSRLS` and
+  membership-in-its-own-role guard states that are reachable and that the DDL does not
+  repair, and nothing demonstrated any of the three. The docs now distinguish the
+  asserted-and-repaired attributes from the asserted-only ones instead of implying every
+  assertion gets a negative case. (No check count is written down here. The one drafted for
+  this very paragraph was stale before the branch merged — the `REPLICATION` case below
+  landed the next commit.)
+
+  Writing that down then exposed a gap in the SQL rather than in the prose. The guide named
+  `SUPERUSER`, `REPLICATION` and `BYPASSRLS` as "asserted but not repaired" — but only two of
+  the three were ever asserted; `rolreplication` appeared nowhere in `dbinit.sql`. It is a
+  real hole and not a symmetry one: a replication connection streams the WAL, which carries
+  every database on the instance, so `REPLICATION` reads straight around the ownership
+  containment the rest of the block establishes. The assertion now exists, with its own
+  red-drive case.
+
+  A further verification pass found the same class of gap one level down: the **group** role's
+  assertion is a disjunction, and only its `SUPERUSER` arm was ever demonstrated. `BYPASSRLS`
+  on the group is equally unrepairable by a Cloud SQL administrator — the corrective `ALTER`
+  names `NOLOGIN NOCREATEDB NOCREATEROLE` and none of the superuser-only three — so deleting
+  `g.rolbypassrls` from the condition left the whole suite green. It now has its own case,
+  proven by deleting that arm and watching exactly those two checks go red.
+
+  A later review round found the containment had a more general hole than any single named
+  role. The membership checks asked about `cloudsqlsuperuser` and about the platform's own
+  group, and nothing else — so a `GRANT pg_read_all_data`, to the platform role or to its
+  group, gave it SELECT on every table in every database it could connect to while every
+  attribute assertion stayed false, every ownership assertion stayed true, and the rerun
+  printed ok. The set is now closed: membership must be exactly the role itself, its group,
+  and `pg_database_owner` (which must be excluded, or owning the database false-fails every
+  clean run). Both directions have red-drive cases; the group-role one is what the per-role
+  checks were blind to.
+
+  `dbinit.sh` also pins the kubectl context. Verifying the context once and then issuing
+  fourteen further `kubectl` calls is a time-of-check/time-of-use window, not a guard: a
+  `use-context` in another terminal while the script waits on the Job sends the rest of the
+  run elsewhere — the Secret carrying both passwords is created in the wrong cluster, and the
+  cleanup deletes it from the wrong cluster too, succeeding, because `--ignore-not-found`
+  cannot tell "wrong cluster" from "already gone". A function shadowing `kubectl` pins the
+  context in one place rather than at every call site. The residual is stated where it lives:
+  the pin follows the context *entry*, so an entry edited in place is still covered only by
+  the endpoint comparison.
+
+  Correcting the KMS wording in the deploy guide then left the repo contradicting itself, so
+  the same claim is corrected where it also leads a paragraph — `deploy/gcp/README.md`,
+  `docs/ARCHITECTURE.md` and `foundation/main.tf`. A key ring still cannot be deleted; a key
+  can, but only by destroying and deleting every version, which runs through the data loss
+  rather than around it, so none of the operational guidance changes. The same sentence in
+  CHANGELOG entries and in plan 20 is left alone: those are records of what was known then.
+
+- **`terraform destroy` reliability and CIDR preconditions.** `deletion_policy = "ABANDON"`
+  on the service-networking connection is *removed*, not added: it does not delete the
+  peering, only drops it from state, so Google then refuses to delete the VPC that peering
+  still references — the destroy fails anyway, and now Terraform cannot clean it up on a
+  retry either. It is right for a configuration that does not own its network; this one
+  does. The Docker Hub mirror also gained the node-identity `artifactregistry.reader` grant
+  it was missing — a repository binding is scoped to one repository, so pulling through the
+  mirror was an `ImagePullBackOff` in any project without a broad automatic Editor grant.
+
+  The four cluster ranges are now checked against each other by a plan-time precondition.
+  Terraform has no `cidrcontains`, so containment is computed by reinterpreting one range's
+  network address under the other's prefix length; the arithmetic was verified against known
+  overlapping and disjoint pairs before being written, and each variable additionally
+  validates that it is a CIDR at all — the previous `regex("/28$")` was satisfied by
+  `not-a-cidr/28`. An overlap otherwise surfaces as GKE rejecting the cluster *after* the
+  network, subnet, router and NAT have been created.
+
+- **[docs/deploy-gcp.md](./docs/deploy-gcp.md) — the GCP deployment guide.** What the
+  Terraform builds and what it deliberately does not, the two modes, and the settings that
+  are **required** rather than recommended: `podPidsLimit` as node configuration (the Pod
+  API carries no per-pod process limit, so `Hardening.PidsLimit` is Docker-only and a fork
+  bomb in a GKE sandbox is otherwise bounded by nothing), and TLS in front of a control
+  plane that serves plain HTTP — with a Gateway + managed-certificate example and the
+  statement that exposing it without one is not an optional hardening step.
+
+  It carries the measured numbers rather than guidance: **68 sandbox pods** on two
+  `e2-standard-4` nodes before `Insufficient cpu`, CPU-bound rather than pod-cap-bound,
+  which with #64 means the pool degrades at ~68 *sessions* rather than 68 concurrent ones;
+  0.43 MiB of workspace for a session that wrote and tested a small project. It also
+  states the gVisor boundary precisely — gated sessions on gVisor are **unusable, not
+  unprotected**, because the gate fails closed and its healthcheck never passes — the
+  node-local-dns trap that makes a kube-dns `podSelector` carve-out silently not match, the
+  Workload Identity rule that node service-account roles do not reach pods, and Cloud
+  Trace's sharded first page.
+
+  And the teardown step `terraform destroy` does not do: GKE's PersistentVolumes for
+  StatefulSet PVCs are Compute Engine disks outside Terraform's state, six of which were
+  left billing after the first real teardown — half of them carrying no `goog-k8s-*` labels
+  at all, so a label-filtered sweep removes three of six and reports success.
 - **The define-outcomes acceptance: the doc example as a suite, and the two fixes it
   forced** ([docs/plan/21_outcomes.md](./docs/plan/21_outcomes.md) slice 5, the archiving
   PR). The top-level **`acceptance/`** package drives the reference doc's define-outcomes

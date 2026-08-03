@@ -625,7 +625,8 @@ developer tooling for GCP deployment only, never a dependency of the platform, i
 or `make verify`. **Two configurations, not one**, split by "can a rebuild recreate this
 identically?" rather than by cost: `foundation/` (KMS key ring and crypto key, the three
 service accounts, the Secret Manager secret *containers*) is created once and never
-destroyed, because KMS key rings and crypto keys cannot be deleted at all and the vault
+destroyed, because a KMS key ring can never be deleted (and a crypto key only by
+destroying every version of it, which is the data loss itself) and the vault
 ciphertext in Postgres is decryptable by that key and nothing else, and because deleting a
 service account deletes its HMAC keys — an identity in the disposable half would strand the
 once-readable HMAC secret in Secret Manager, valid-looking and dead. `environment/` (GKE
@@ -636,9 +637,15 @@ Pod API cannot express. No secret VALUE is in either
 configuration: Terraform holds names, IAM bindings and preconditions, `bootstrap.sh` creates
 the values — including the GCS HMAC key, whose secret GCS returns exactly once, so a
 Terraform resource holding it would hold it in state — and `environment/` reads the database
-password through an *ephemeral* resource into the write-only `password_wo`. The `make gcp-*`
+administrator's password through an *ephemeral* resource into the write-only `password_wo`.
+That administrator is the only database user Terraform creates, and deliberately not the
+platform's: Cloud SQL grants `cloudsqlsuperuser` to every built-in user made through its
+Admin API, so the platform's own role is created from SQL instead, by `deploy/gcp/dbinit.sql`
+running as a Kubernetes Job (`make gcp-db-init`) — the instance has no public address — which
+then asserts that the role is outside `cloudsqlsuperuser` and owns the platform database and
+nothing else. The `make gcp-*`
 targets wrap all of it; `gcp-fmt`, `gcp-validate`, `gcp-split-check`, `gcp-lint`,
-`gcp-bootstrap-test` and `gcp-split-check-test` need no
+`gcp-bootstrap-test`, `gcp-split-check-test` and `gcp-dbinit-test` need no
 credentials and run in CI, which enforces the split structurally: no unrecoverable
 `resource` kind in `environment/`, and in `foundation/` both guards each such resource can
 carry — `prevent_destroy`, which lives in the configuration and vanishes with the block it is
@@ -648,10 +655,14 @@ checker cannot parse (`.tf.json`, a module sourced from outside the half or comp
 time, an unterminated heredoc, unbalanced braces, a multi-line interpolation, a quoted string
 inside a `${...}` interpolation or a `%{...}` template directive) is a hard failure rather
 than a skipped file — a partial scan that prints
-`ok` is the one outcome worse than no check. The last two targets are what keep that true:
-they run the tooling against injected faults and planted violations rather than reading it,
+`ok` is the one outcome worse than no check. The last three targets are what keep that true:
+they run the tooling against injected faults, planted violations and a real PostgreSQL rather
+than reading it,
 because everything else in the group is static and a static gate has already passed a
-`bootstrap.sh` that could not complete a single run.
+`bootstrap.sh` that could not complete a single run. `gcp-dbinit-test` is the one that needs
+Docker, and it earns it — running `dbinit.sql` under a deliberately NON-superuser
+administrator, the way Cloud SQL's actually is, caught two statements that a superuser
+executes without complaint and that instance would have refused.
 
 ## Security invariants
 

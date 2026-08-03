@@ -40,6 +40,7 @@ for tool in gcloud openssl python3; do
 done
 
 db_secret="${NAME_PREFIX}-db-password"
+db_admin_secret="${NAME_PREFIX}-db-admin-password"
 access_secret="${NAME_PREFIX}-blob-access-key"
 secret_secret="${NAME_PREFIX}-blob-secret-key"
 storage_sa="${NAME_PREFIX}-storage@${PROJECT}.iam.gserviceaccount.com"
@@ -104,19 +105,29 @@ has_version() {
 }
 
 # ---------------------------------------------------------------------------
-# The database password.
+# The two database passwords.
 #
-# HEX, not raw bytes and not base64. The password is embedded verbatim in the
+# HEX, not raw bytes and not base64. A password is embedded verbatim in the
 # DATABASE_URL the platform consumes, and the chart already encodes that
 # constraint — templates/secret.yaml fails the render when postgresql.password
 # matches [@:/?#% ]. But that guard sits inside the `if not .Values.existingSecret`
-# block, so mode-2 bypasses it entirely: here, this line is the only thing
-# standing between a random password and a DSN that parses into something else.
-# Base64 would not do — it emits / and +.
+# block, so mode-2 bypasses it entirely: here, this is the only thing standing
+# between a random password and a DSN that parses into something else. Base64
+# would not do — it emits / and +.
+#
+# The same generator serves both because both land in a place with the same
+# constraint: the platform's password goes into a DSN, and the administrator's
+# is interpolated into SQL by dbinit.sh. Hex is safe in both and needs no
+# escaping in either.
 # ---------------------------------------------------------------------------
-if has_version "$db_secret"; then
-	echo "ok: $db_secret already has a version (left alone)"
-else
+ensure_password_secret() {
+	local secret="$1" what="$2" password
+
+	if has_version "$secret"; then
+		echo "ok: $secret already has a version (left alone)"
+		return
+	fi
+
 	# Generated and CHECKED before anything is written, rather than piped straight
 	# into gcloud. In a pipeline, a failure on the left does not stop the right:
 	# gcloud starts regardless, reads EOF, and can store an enabled ZERO-BYTE
@@ -132,15 +143,18 @@ else
 	#
 	# `printf` is a shell builtin, so the value still never reaches a process
 	# argument list where `ps` could read it.
-	db_password="$(openssl rand -hex 32)"
-	if [[ ! "$db_password" =~ ^[0-9a-f]{64}$ ]]; then
+	password="$(openssl rand -hex 32)"
+	if [[ ! "$password" =~ ^[0-9a-f]{64}$ ]]; then
 		echo "openssl did not produce 64 hex characters — refusing to store it" >&2
 		exit 1
 	fi
-	printf '%s' "$db_password" |
-		gcloud secrets versions add "$db_secret" --project "$PROJECT" --data-file=- >/dev/null
-	echo "created: $db_secret"
-fi
+	printf '%s' "$password" |
+		gcloud secrets versions add "$secret" --project "$PROJECT" --data-file=- >/dev/null
+	echo "created: $secret ($what)"
+}
+
+ensure_password_secret "$db_secret" "the platform's own database role"
+ensure_password_secret "$db_admin_secret" "the Cloud SQL built-in administrator"
 
 # ---------------------------------------------------------------------------
 # The GCS HMAC key.

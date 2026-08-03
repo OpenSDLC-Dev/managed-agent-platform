@@ -123,11 +123,32 @@ resource "google_storage_bucket_iam_member" "blob_bucket_reader" {
 
 data "google_project" "current" {}
 
+locals {
+  node_service_account = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+}
+
 resource "google_artifact_registry_repository_iam_member" "node_puller" {
   location   = google_artifact_registry_repository.images.location
   repository = google_artifact_registry_repository.images.name
   role       = "roles/artifactregistry.reader"
-  member     = "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+  member     = local.node_service_account
+}
+
+# The SAME grant on the Docker Hub mirror, because a repository IAM binding is
+# scoped to one repository and the mirror is a second one — a remote repository
+# cannot also be the standard repository Cloud Build pushes to.
+#
+# Without this, pointing the chart's third-party images at the mirror produces
+# ImagePullBackOff with a 403 from Artifact Registry, and only in projects that
+# have not been handed the broad automatic Editor grant — so it would work on
+# the project it was developed in and fail on a properly locked-down one.
+resource "google_artifact_registry_repository_iam_member" "node_puller_mirror" {
+  count = var.docker_hub_mirror ? 1 : 0
+
+  location   = google_artifact_registry_repository.docker_hub[0].location
+  repository = google_artifact_registry_repository.docker_hub[0].name
+  role       = "roles/artifactregistry.reader"
+  member     = local.node_service_account
 }
 
 # ---------------------------------------------------------------------------
@@ -164,10 +185,22 @@ resource "google_project_iam_member" "executor_sql_client" {
 # safe to assume — so var.cloud_build_service_account is REQUIRED. Terraform
 # prompts for it, and its description carries the command that prints it.
 #
-# Not granted to both. The compute default account already holds reader here for
-# image pulls, and widening it to writer "just in case" would grant push rights
-# to the identity every node in the cluster runs as, which is how a staging
-# shortcut becomes a production default.
+# Not granted to both candidates — and read what that does and does not buy,
+# because the honest version is uncomfortable. On a project on the MODERN
+# default, `gcloud builds get-default-service-account` returns the Compute
+# Engine default account, which is also local.node_service_account above,
+# because neither node pool sets node_config.service_account. On such a project
+# this grant hands `artifactregistry.writer` to the identity every node runs as,
+# and a container escaping to the node can then overwrite the platform's own
+# images and wait to be pulled. Declining to grant both only helps a project
+# still on the legacy `PROJECT_NUMBER@cloudbuild` default, where the two
+# identities really are different.
+#
+# Left as it is rather than guarded: a precondition asserting the two differ
+# would reject the flow this repo's own README tells the operator to follow, on
+# every modern project. Staging accepts that. Anything past staging should pass
+# a dedicated build service account here, and give the node pools an identity of
+# their own — issue territory, not a comment's to fix.
 # `gcloud builds get-default-service-account` names the one your project uses.
 # ---------------------------------------------------------------------------
 

@@ -42,15 +42,23 @@ model-providers.json
 .claude/worktrees/
 /gate
 
-# Terraform working directories and state (deploy/gcp). The provider plugins and
-# the state file are machine-local; .terraform.lock.hcl is NOT ignored — it pins
-# provider versions and belongs in the repo, exactly like go.sum.
-deploy/gcp/*/.terraform/
-deploy/gcp/*/*.tfstate
-deploy/gcp/*/*.tfstate.*
-deploy/gcp/*/*.tfvars
-deploy/gcp/*/*.tfvars.json
-deploy/gcp/*/tfplan
+# Terraform working directories, state and variable files. The provider plugins,
+# the state and the tfvars are machine-local; .terraform.lock.hcl is NOT ignored
+# — it pins provider versions and belongs in the repo, exactly like go.sum.
+#
+# Matched ANYWHERE in the tree, not only under deploy/gcp/*/. A path-scoped rule
+# is a trap here, because what it fails to match is a file that routinely holds
+# credentials in plaintext: a `terraform` command run from the repository root —
+# by a person, a reviewer, or a tool — writes ./terraform.tfstate, which the old
+# rule did not cover, and one was staged for commit before this was widened. An
+# empty state is harmless; the next one would not have been.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+tfplan
+**/tfplan
 # A generated Helm values file, in case one is written here anyway — the README
 # says to keep it outside the tree precisely because credentials get appended to it.
 deploy/gcp/**/values*.yaml
