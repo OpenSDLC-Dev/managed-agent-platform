@@ -71,9 +71,10 @@ sandboxes).
 
 The production-shaped half of plan 20, run end to end against the live project
 `opensdlc-managed-agents`: the platform on GKE with **no bundled services at all**, every
-credential in a pre-created Secret, and each backing service reached through the deploy
-guide's own identity rather than the operator's. Nothing was exposed — the whole battery
-ran over `kubectl port-forward` (Decision 8).
+credential in a pre-created Secret, and each backing service reached with this deployment's
+own credential rather than the operator's — three different kinds of credential, itemised
+below, because flattening them into "its service account" would not be true of Cloud SQL.
+Nothing was exposed — the whole battery ran over `kubectl port-forward` (Decision 8).
 
 **The build-up, and what it incidentally re-proved.** `environment/` had been destroyed
 after the mode-1 run, so this run began by rebuilding it on the surviving `foundation/` —
