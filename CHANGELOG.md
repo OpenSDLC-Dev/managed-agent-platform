@@ -22,9 +22,10 @@ copy of an entry here.
   enough" — but the manual command is subject to the same four-day producer-side wait the
   guide documents since #271, so it framed an escape hatch that can itself be closed. The
   comment now states the four days, that no retrying inside one session gets past them,
-  that the stranded remainder is non-billable, and points at the guide's "Tearing it
-  down" section — which exists and covers exactly this. Closes the last half of #270; the
-  guide half landed with #271.
+  that what the failure strands is non-billable, and points at the guide's "Tearing it
+  down" section — which exists and covers exactly this. docs/HISTORY.md's "remaining
+  half" sentence flips to the past tense in the same change. Closes the last half of
+  #270; the guide half landed with #271.
 
 ### Added
 

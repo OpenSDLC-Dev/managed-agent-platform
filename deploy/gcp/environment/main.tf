@@ -299,9 +299,10 @@ resource "google_compute_router_nat" "map" {
 # Google documents a FOUR-DAY wait after a Cloud SQL instance is deleted before
 # the producer side releases its resources, and the manual
 # `gcloud services vpc-peerings delete` is subject to the same wait — no amount
-# of retrying inside one session gets past it. Everything stranded in the
-# meantime is non-billable; docs/deploy-gcp.md ("Tearing it down") has the
-# command, the error signatures, and why waiting is the intended end state.
+# of retrying inside one session gets past it. What that failure strands — the
+# VPC, the reserved range, the connection and the API enablements — is
+# non-billable; docs/deploy-gcp.md ("Tearing it down") has the command, the
+# error signatures, and why stopping there is a legitimate end state.
 # ---------------------------------------------------------------------------
 
 resource "google_compute_global_address" "private_service_access" {
