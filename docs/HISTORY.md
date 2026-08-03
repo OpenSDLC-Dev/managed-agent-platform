@@ -214,9 +214,17 @@ defect in the delivered teardown path.**
 3. *The guide claimed mode 2 had never been accepted.* True when written; this run is what
    changes it.
 
-**Teardown, and a hazard that mode 2 structurally does not have.** `terraform destroy`
-removed all 34 resources — 21 on the first attempt, the rest after finding 0 above was
-worked around by hand; `foundation/` is untouched by design. The mode-1 record's
+**Teardown took three runs, and only the first failure was a defect.** Run 1 removed 21
+resources and stopped on finding 0 above. Run 2, after the database was taken out of state
+by hand, removed the rest of the billable infrastructure — the Cloud SQL instance included —
+and then failed on the VPC peering with `Producer services (e.g. CloudSQL, Cloud Memstore,
+etc.) are still using this connection`, because Cloud SQL releases the peering
+asynchronously and the delete landed while the release was in flight. Run 3, a few minutes
+later, completed. That second failure is GCP's timing rather than a fault in the
+configuration, but it is reliable enough on a private-IP instance that the guide now tells
+operators to expect two runs. `foundation/` is untouched by design.
+
+**A hazard that mode 2 structurally does not have.** The mode-1 record's
 orphaned-PersistentVolume trap **cannot fire here**: `existingSecret` disables all three
 bundled services, so the release renders no StatefulSet and claims no volume — the run
 finished with zero PVCs and zero PVs, and the only disks in the project were the four node

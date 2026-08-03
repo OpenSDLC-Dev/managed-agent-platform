@@ -410,6 +410,14 @@ the database from Terraform's state without an API call and lets the instance ta
 you copy this Terraform and drop that line, the first teardown after a `gcp-db-init` will
 strand a Cloud SQL instance.
 
+**Expect to run the destroy twice, and not because anything is wrong.** Cloud SQL releases
+the VPC peering it uses for its private address *asynchronously*, so the
+`google_service_networking_connection` delete lands while the release is still in flight and
+fails with `Producer services (e.g. CloudSQL, Cloud Memstore, etc.) are still using this
+connection` — with the instance already gone. Re-running `make gcp-env-destroy` a few
+minutes later completes it. This is GCP's timing rather than a fault in the configuration,
+but it is guaranteed enough on a private-IP instance to plan for.
+
 **Then check for orphaned disks. `terraform destroy` does not reclaim them.**
 
 If you ran mode 1, the chart's bundled Postgres, MinIO and OpenBao each have a
