@@ -425,8 +425,8 @@ connection` — with the instance already gone from `gcloud sql instances list`.
 `make gcp-env-destroy`.
 
 **But do not sit and wait for it, because it may not come.** The mode-2 acceptance teardown
-retried 25 times over about four hours — five-minute intervals, then ten — and the peering
-was still `ACTIVE / Connected` at the end. The manual escape does not open it either:
+retried 25 times over about four hours — five-minute intervals, then ten — and the
+peering was still `ACTIVE / Connected` at the end. The manual escape does not open it:
 `gcloud services vpc-peerings delete` fails with
 `FLOW_SN_DC_RESOURCE_PREVENTING_DELETE_CONNECTION`, meaning a resource inside Google's own
 producer project still holds the connection, where you cannot reach it.
