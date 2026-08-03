@@ -117,9 +117,24 @@ class Postgres:
         return False
 
     def _wait_ready(self):
+        # `-h 127.0.0.1` probes the SAME transport every later connection uses,
+        # and that is the whole point. Without it this probes the unix socket,
+        # and the image's entrypoint opens that first: it runs initdb, then
+        # starts a TEMPORARY server with `listen_addresses=''` to apply the
+        # password and the init scripts, and only then restarts for real with
+        # TCP. During the temporary phase the unix socket accepts connections
+        # while 127.0.0.1:5432 refuses them -- so this returned, _enable_tls
+        # ran `psql -h 127.0.0.1` straight into `Connection refused`, and the
+        # suite died in setup with 60-odd checks already green.
+        #
+        # Observed rather than reasoned: polling both probes every 50ms inside
+        # the container caught the window on poll 7 of 11 (`unix=0 tcp=2`),
+        # with TCP first accepting at poll 11. It is roughly one tenth of a
+        # startup wide, which is why it took until CI run 30781422066 to fire.
         for _ in range(120):
             if run("docker", "exec", self.name,
-                   "pg_isready", "-U", "postgres").returncode == 0:
+                   "pg_isready", "-h", "127.0.0.1",
+                   "-U", "postgres").returncode == 0:
                 return
             time.sleep(0.5)
         raise RuntimeError("postgres never became ready")

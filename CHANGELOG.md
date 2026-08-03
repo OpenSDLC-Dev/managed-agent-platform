@@ -66,6 +66,16 @@ copy of an entry here.
   above put the two assertions side by side. Now asserted, with a test proven red against
   the pre-fix SQL; `make gcp-dbinit-test` is 83 checks, up from 79.
 
+  **And a sixth from CI itself: `gcp-dbinit-test` had a startup race that could fail the
+  job before it tested anything.** Its readiness probe was `pg_isready` over the *unix
+  socket*, while every connection the suite then makes is TCP to `127.0.0.1`. The
+  `postgres:16-alpine` entrypoint opens those at different times — initdb, then a temporary
+  server with `listen_addresses=''` for the init scripts, and only then a restart that
+  listens on TCP — so the probe could pass during the temporary phase and setup would run
+  straight into `Connection refused`. Polling both probes every 50ms inside the container
+  caught the window (`unix=0 tcp=2` on poll 7 of 11); the probe now uses `-h 127.0.0.1`,
+  the same transport as everything after it.
+
 - **The GCP staging environment takes its production shape: private nodes, Cloud NAT, a
   private-IP database, a Docker Hub mirror — and a platform database role that is not a
   Cloud SQL superuser** ([docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md)
