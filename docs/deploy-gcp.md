@@ -145,7 +145,9 @@ this reason.
 
 The chart templates no sidecar, so this is not a Helm value today: add the container to the
 `controlplane`, `brain` and `executor` deployments yourself. That is a chart gap, not a
-platform limitation. If you must use a shared proxy Service as an interim step, treat the
+platform limitation, and it is tracked in
+[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) along with the
+brain-identity half of it below. If you must use a shared proxy Service as an interim step, treat the
 database credential as exposed to anything that can watch pod-network traffic, and say so in
 your threat model rather than inheriting the `sslmode=disable` from this page as though it
 were still local.
@@ -165,7 +167,10 @@ for it in `foundation/` either. Under the proxy topology it therefore needs four
 has done for you: a ServiceAccount of its own, a Google service account bound to it with
 `roles/iam.workloadIdentityUser`, and `roles/cloudsql.client` on that Google account. Do not
 reuse the control plane's identity to shortcut this — it carries KMS decrypt, which the brain
-has no business holding. Under the direct path the question does not arise.
+has no business holding. Under the direct path the question does not arise, which is why the
+mode-2 acceptance run took it and
+[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) is a follow-on
+rather than a blocker.
 
 ## Exposing the control plane
 
