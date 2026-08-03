@@ -47,9 +47,8 @@ Both modes have now been stood up and exercised end to end on GKE; the two accep
 records are in [docs/HISTORY.md](./HISTORY.md). Where an acceptance measurement appears in
 this guide it comes from one of those runs. Not every number here is one — configured
 values, published prices and documented platform limits appear too, and none of those is
-run evidence. The sizing figures below are
-still the mode-1 ones: mode 2 changes what backs the platform, not what a sandbox pod costs
-to schedule.
+run evidence. The sizing figures below are still the mode-1 ones: mode 2 changes what backs
+the platform, not what a sandbox pod costs to schedule.
 
 ## Building it
 
