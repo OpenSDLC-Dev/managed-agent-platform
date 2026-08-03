@@ -119,6 +119,26 @@ copy of an entry here.
   `g.rolbypassrls` from the condition left the whole suite green. It now has its own case,
   proven by deleting that arm and watching exactly those two checks go red.
 
+  A later review round found the containment had a more general hole than any single named
+  role. The membership checks asked about `cloudsqlsuperuser` and about the platform's own
+  group, and nothing else — so a `GRANT pg_read_all_data`, to the platform role or to its
+  group, gave it SELECT on every table in every database it could connect to while every
+  attribute assertion stayed false, every ownership assertion stayed true, and the rerun
+  printed ok. The set is now closed: membership must be exactly the role itself, its group,
+  and `pg_database_owner` (which must be excluded, or owning the database false-fails every
+  clean run). Both directions have red-drive cases; the group-role one is what the per-role
+  checks were blind to.
+
+  `dbinit.sh` also pins the kubectl context. Verifying the context once and then issuing
+  fourteen further `kubectl` calls is a time-of-check/time-of-use window, not a guard: a
+  `use-context` in another terminal while the script waits on the Job sends the rest of the
+  run elsewhere — the Secret carrying both passwords is created in the wrong cluster, and the
+  cleanup deletes it from the wrong cluster too, succeeding, because `--ignore-not-found`
+  cannot tell "wrong cluster" from "already gone". A function shadowing `kubectl` pins the
+  context in one place rather than at every call site. The residual is stated where it lives:
+  the pin follows the context *entry*, so an entry edited in place is still covered only by
+  the endpoint comparison.
+
 - **`terraform destroy` reliability and CIDR preconditions.** `deletion_policy = "ABANDON"`
   on the service-networking connection is *removed*, not added: it does not delete the
   peering, only drops it from state, so Google then refuses to delete the VPC that peering

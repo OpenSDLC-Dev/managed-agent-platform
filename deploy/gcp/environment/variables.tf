@@ -277,18 +277,26 @@ variable "private_service_access_prefix_length" {
   default     = 16
 
   # Checked at plan time, because the alternative is discovering it at apply
-  # time — after the network, subnet, router and NAT already exist. Google
-  # documents /24 as the smallest reserved range it will accept for private
-  # services access; the lower bound is this configuration's own, since a range
-  # wider than /8 would swallow address space no staging environment needs.
+  # time — after the network, subnet, router and NAT already exist.
+  #
+  # Upper bound: Google documents /24 as the smallest reserved range it accepts
+  # for private services access. Lower bound: this range is ALLOCATED, not
+  # chosen — google_compute_global_address gets a prefix length and no address,
+  # so Google picks the block. Ask for a /8 and the only RFC1918 candidate is
+  # 10.0.0.0/8, which contains every default in this file; whichever of the two
+  # is created second then fails, and the survivor makes the retry fail too.
+  # Nine is the first prefix length that cannot swallow 10/8 whole. The overlap
+  # precondition in main.tf cannot help here: an allocated range is unknown at
+  # plan time, and referencing it would turn that plan-time check into an
+  # apply-time one.
   # The floor() half is not pedantry: Terraform's `number` is not an integer
   # type, so 16.5 satisfies the bounds on either side of it and then reaches the
   # API as a prefix length that cannot exist.
   validation {
-    condition = (var.private_service_access_prefix_length >= 8
+    condition = (var.private_service_access_prefix_length >= 9
       && var.private_service_access_prefix_length <= 24
     && var.private_service_access_prefix_length == floor(var.private_service_access_prefix_length))
-    error_message = "private_service_access_prefix_length must be a whole number between 8 and 24 — Google accepts no range smaller than a /24 for private services access."
+    error_message = "private_service_access_prefix_length must be a whole number between 9 and 24 — Google accepts no range smaller than a /24, and a /8 allocation would collide with the 10.0.0.0/8 defaults this file ships."
   }
 }
 

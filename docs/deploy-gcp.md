@@ -43,6 +43,11 @@ which must carry `controlplane-api-key`, `model-providers.json`, `database-url`,
 incompatible with `postgresql.enabled`, `minio.enabled` and `openbao.enabled` — the chart
 fails the render rather than deploying two of anything.
 
+**Mode 2 has not had an acceptance run yet.** Every measured number and every run note in
+this guide comes from the mode-1 run recorded in [docs/HISTORY.md](./HISTORY.md). What is
+written about mode 2 here describes the configuration in `deploy/gcp/` and what it is
+intended to produce, not a deployment that has been stood up and exercised end to end.
+
 ## Building it
 
 The run order is in [`deploy/gcp/README.md`](../deploy/gcp/README.md#running-it) and is
@@ -139,10 +144,27 @@ this reason.
 
 The chart templates no sidecar, so this is not a Helm value today: add the container to the
 `controlplane`, `brain` and `executor` deployments yourself. That is a chart gap, not a
-platform limitation — the same gap that leaves `brain` without a ServiceAccount to annotate.
-If you must use a shared proxy Service as an interim step, treat the database credential as
-exposed to anything that can watch pod-network traffic, and say so in your threat model
-rather than inheriting the `sslmode=disable` from this page as though it were still local.
+platform limitation. If you must use a shared proxy Service as an interim step, treat the
+database credential as exposed to anything that can watch pod-network traffic, and say so in
+your threat model rather than inheriting the `sslmode=disable` from this page as though it
+were still local.
+
+**There is a second, simpler path, and it is the one this repo already exercises.** A Pod in
+this cluster can reach the private-IP instance *directly* — `make gcp-db-init` does exactly
+that, with `PGSSLMODE=require`, no sidecar and no Google identity at all. So a `database-url`
+of `postgres://USER:PW@$(terraform output -raw sql_private_ip):5432/DB?sslmode=require` works
+for all three components with no IAM whatsoever. The trade is real and worth naming: `require`
+encrypts but does not verify the server's certificate, which is what the proxy adds along with
+IAM-based authorization. Prefer the proxy where you can; take this path when you want mode 2
+running without per-component identity work.
+
+That distinction matters most for the **brain**, which opens the database like the other two
+but has no ServiceAccount in the chart to annotate — and there is no Google service account
+for it in `foundation/` either. Under the proxy topology it therefore needs four steps nobody
+has done for you: a ServiceAccount of its own, a Google service account bound to it with
+`roles/iam.workloadIdentityUser`, and `roles/cloudsql.client` on that Google account. Do not
+reuse the control plane's identity to shortcut this — it carries KMS decrypt, which the brain
+has no business holding. Under the direct path the question does not arise.
 
 ## Exposing the control plane
 
@@ -153,7 +175,8 @@ session's prompts and outputs, and the entire SSE event stream in cleartext acro
 network the balancer sits on. This is a prerequisite for any exposed deployment, not an
 optional hardening step.
 
-The acceptance runs behind this guide used `kubectl port-forward` and exposed nothing.
+The **mode-1** acceptance run behind this guide used `kubectl port-forward` and exposed
+nothing.
 
 When you do expose it, a GKE Gateway with a Google-managed certificate is the least
 surprising way:
@@ -197,10 +220,19 @@ spec:
 ```
 
 Terminating TLS at the Gateway leaves the hop from the Gateway to the pod in cleartext
-inside the VPC. If that is not acceptable, the alternatives are Identity-Aware Proxy in
-front of the Gateway, or not exposing the service at all and reaching it over a VPN or
-`kubectl port-forward`. Authentication is still the platform's own `x-api-key` in every
-case — the Gateway does not add any.
+inside the VPC. Encrypting *that hop* is a `BackendTLSPolicy` and an HTTPS backend, which
+`controlplane` cannot serve — it is a plain `http.Server` with no TLS config — so the
+honest options today are to accept the in-VPC cleartext or to not expose the service at
+all, reaching it over a VPN or `kubectl port-forward`.
+
+Identity-Aware Proxy is **not** an answer to that hop, and is listed here only because it
+is the obvious thing to reach for: IAP is an access-control policy on the Gateway's
+backend service, so it changes who may send a request, not how the request travels. Adding
+it does put a second authentication layer in front of the platform's own `x-api-key` — and
+note that it consumes the `Authorization` header, which `internal/api/envauth.go` uses for
+worker authentication, so a BYOC worker behind IAP needs its credential moved to
+`Proxy-Authorization`. With a bare Gateway and no IAP, `x-api-key` is the only
+authentication there is: the Gateway adds none.
 
 ## Observability
 
@@ -317,9 +349,11 @@ Two credential lifecycles are not covered by a database backup, and they fail di
   looks like a working credential.
 - **The Cloud KMS key. This one is a data-loss hazard, not a rotation chore.** Vault
   credential ciphertext in Postgres is decryptable by that key version and by nothing else.
-  A key ring and a key can never be deleted in GCP, but a key *version* can be destroyed —
-  and destroying the version that encrypted live ciphertext makes it permanently
-  unreadable. A database backup does not help, because the backup contains the same
+  A key ring can never be deleted in GCP; a key can be, but only after every one of its
+  versions is destroyed and deleted, so that route runs *through* the data loss rather
+  than around it. The everyday hazard is smaller and closer: a key *version* can be
+  destroyed on its own, and destroying the version that encrypted live ciphertext makes
+  it permanently unreadable. A database backup does not help, because the backup contains the same
   ciphertext. Treat the key version as part of the backup set, and do not destroy one to
   save the ~$0.06/month an enabled version costs.
 
@@ -363,7 +397,9 @@ inside their retention window (they bill until they hard-delete, and they self-c
 Secret Manager versions for infrastructure that no longer exists.
 
 What is retained by design: the foundation's service accounts, its Secret Manager secrets,
-and its KMS key ring and key. The key ring and key can never be deleted; one enabled key
+and its KMS key ring and key. A key ring can never be deleted at all; a key can only be
+deleted once every version of it is destroyed and deleted, which is the data loss rather
+than an escape from it — and the name stays retired afterwards either way. One enabled key
 version costs about $0.06/month, and that is the standing cost of being able to rebuild
 `environment/` safely.
 

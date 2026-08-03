@@ -210,9 +210,10 @@ DECLARE
     u    text := (SELECT v FROM _dbinit_names WHERE k = 'db_user');
     a    text := (SELECT v FROM _dbinit_names WHERE k = 'app_role');
     d    text := (SELECT v FROM _dbinit_names WHERE k = 'db_name');
-    r    record;
-    g    record;
-    owns text;
+    r     record;
+    g     record;
+    owns  text;
+    extra text;
 BEGIN
     SELECT * INTO r FROM pg_roles WHERE rolname = u;
     IF NOT FOUND THEN
@@ -270,6 +271,25 @@ BEGIN
 
     IF NOT pg_has_role(u, a, 'member') THEN
         RAISE EXCEPTION 'FAILED: % is not a member of its own role %', u, a;
+    END IF;
+
+    -- The membership set is EXACTLY {itself, its group, pg_database_owner}, and
+    -- this is the general form of the cloudsqlsuperuser check above rather than
+    -- a second copy of it. That check names one role; this one closes the set,
+    -- because cloudsqlsuperuser is not the only membership that would undo the
+    -- containment. `pg_read_all_data` is the sharp example: a single GRANT
+    -- gives SELECT on every table in every database the role can connect to,
+    -- while every attribute assertion above stays false and the ownership
+    -- assertions below stay true. A rerun would have printed ok.
+    --
+    -- pg_database_owner MUST be excluded: owning the database makes the role an
+    -- implicit member of it, so including it would fail every clean run.
+    SELECT string_agg(r2.rolname, ', ' ORDER BY r2.rolname) INTO extra
+    FROM pg_roles r2
+    WHERE r2.rolname NOT IN (u, a, 'pg_database_owner')
+      AND pg_has_role(u, r2.oid, 'MEMBER');
+    IF extra IS NOT NULL THEN
+        RAISE EXCEPTION 'FAILED: % holds membership beyond % — also a member of: %', u, a, extra;
     END IF;
 
     -- And the group role's OWN attributes, which the checks above are blind to.

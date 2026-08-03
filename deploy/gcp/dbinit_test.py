@@ -495,6 +495,33 @@ def main():
         check("names cloudsqlsuperuser",
               "cloudsqlsuperuser" in (r.stderr + r.stdout), r.stderr + r.stdout)
 
+    # A membership that is not cloudsqlsuperuser. One GRANT gives SELECT on
+    # every table in every database the role can connect to, while every
+    # attribute assertion stays false and every ownership assertion stays true
+    # -- so before the set was closed, this reran and printed ok.
+    print("an extra role membership FIRES the containment assertion")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        pg.psql_admin("GRANT pg_read_all_data TO %s;" % DB_USER)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("names the extra membership",
+              "pg_read_all_data" in (r.stderr + r.stdout), r.stderr + r.stdout)
+
+    # The same grant one level up. Membership is transitive, so granting it to
+    # the GROUP hands it to the platform just as surely -- and this is the
+    # variant the per-role checks are blind to, because the platform role's own
+    # membership list still reads {its group} and the group's ATTRIBUTES are all
+    # false. Only closing the transitive set catches it.
+    print("an extra membership on the GROUP role fires it too")
+    with Postgres() as pg:
+        check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)
+        pg.psql_admin("GRANT pg_read_all_data TO %s;" % APP_ROLE)
+        r = pg.dbinit("pw")
+        check("fails", r.returncode != 0, r.stdout)
+        check("names the extra membership",
+              "pg_read_all_data" in (r.stderr + r.stdout), r.stderr + r.stdout)
+
     print("the owns-nothing-else assertion FIRES when it should")
     with Postgres() as pg:
         check("a clean run first succeeds", pg.dbinit("pw").returncode == 0)

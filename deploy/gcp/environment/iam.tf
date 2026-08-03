@@ -185,10 +185,22 @@ resource "google_project_iam_member" "executor_sql_client" {
 # safe to assume — so var.cloud_build_service_account is REQUIRED. Terraform
 # prompts for it, and its description carries the command that prints it.
 #
-# Not granted to both. The compute default account already holds reader here for
-# image pulls, and widening it to writer "just in case" would grant push rights
-# to the identity every node in the cluster runs as, which is how a staging
-# shortcut becomes a production default.
+# Not granted to both candidates — and read what that does and does not buy,
+# because the honest version is uncomfortable. On a project on the MODERN
+# default, `gcloud builds get-default-service-account` returns the Compute
+# Engine default account, which is also local.node_service_account above,
+# because neither node pool sets node_config.service_account. On such a project
+# this grant hands `artifactregistry.writer` to the identity every node runs as,
+# and a container escaping to the node can then overwrite the platform's own
+# images and wait to be pulled. Declining to grant both only helps a project
+# still on the legacy `PROJECT_NUMBER@cloudbuild` default, where the two
+# identities really are different.
+#
+# Left as it is rather than guarded: a precondition asserting the two differ
+# would reject the flow this repo's own README tells the operator to follow, on
+# every modern project. Staging accepts that. Anything past staging should pass
+# a dedicated build service account here, and give the node pools an identity of
+# their own — issue territory, not a comment's to fix.
 # `gcloud builds get-default-service-account` names the one your project uses.
 # ---------------------------------------------------------------------------
 

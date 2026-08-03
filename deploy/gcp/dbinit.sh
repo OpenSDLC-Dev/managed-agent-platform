@@ -150,6 +150,32 @@ if [[ ${#cluster_endpoints[@]} -eq 0 ]]; then
 	exit 1
 fi
 
+# PIN THE CONTEXT BY NAME, then check the pinned one — otherwise the check below
+# is a time-of-check/time-of-use window, not a guard. Every `kubectl` invocation
+# re-reads the kubeconfig independently, and this script then waits minutes on a
+# Job. A `kubectl config use-context` in another terminal inside that window
+# sends the rest of the run to a different cluster: the Secret carrying both
+# database passwords is created there, and the cleanup deletes it from there
+# too — succeeding, because `--ignore-not-found` treats "wrong cluster" and
+# "already gone" identically, and then reporting the Secret as removed while it
+# survives in the cluster it was actually written to.
+#
+# A function that shadows the command, rather than `--context` repeated at
+# fourteen call sites: one place to get right, and adding a call site later
+# cannot forget it. `command kubectl` is what stops it recursing.
+#
+# The residual, stated because it is not closed: this pins the context ENTRY, so
+# an entry edited in place — or a cluster torn down and rebuilt under the same
+# name — still resolves elsewhere. That is what the endpoint comparison below is
+# for; the two together are the guard.
+kube_ctx="$(command kubectl config current-context 2>/dev/null)" || kube_ctx=""
+if [[ -z "$kube_ctx" ]]; then
+	echo "kubectl has no current context; nothing to verify or deploy into." >&2
+	echo "  gcloud container clusters get-credentials ${cluster_name} --zone ${cluster_zone} --project ${PROJECT}" >&2
+	exit 1
+fi
+kubectl() { command kubectl --context="$kube_ctx" "$@"; }
+
 current_server="$(kubectl config view --minify \
 	-o 'jsonpath={.clusters[0].cluster.server}' 2>/dev/null)" || current_server=""
 

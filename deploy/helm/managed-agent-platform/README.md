@@ -220,11 +220,17 @@ gcloud kms keys add-iam-policy-binding credentials \
 `roles/cloudkms.cryptoKeyEncrypter` if you want the executor separated; a single
 account for both is simpler and is what the example above configures.)
 
-The brain deliberately gets neither the key name nor a ServiceAccount: it holds
-no cipher, so it has no reason to hold the identity either. That is also why the
-control plane has its own ServiceAccount rather than using the namespace's
+The brain gets neither the key name nor a ServiceAccount: it holds no cipher, so
+on KMS grounds it has no reason to hold the identity either. That is also why
+the control plane has its own ServiceAccount rather than using the namespace's
 `default` — annotating `default` would hand the same Google identity to every
 pod that falls back to it.
+
+That rationale covers KMS and stops there. It is **not** a claim that the brain
+never needs a Google identity: the brain opens the database like the other two,
+so under a Cloud SQL Auth Proxy topology it does need one, and the chart cannot
+give it one today. See "Connecting to a private-IP instance" in
+[docs/deploy-gcp.md](../../../docs/deploy-gcp.md) for both paths.
 
 Two refusals are worth knowing before you deploy. A **CryptoKeyVersion** name
 (`.../cryptoKeys/K/cryptoKeyVersions/1`) fails the render: `Encrypt` accepts one

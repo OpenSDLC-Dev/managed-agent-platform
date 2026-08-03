@@ -209,6 +209,15 @@ only at the first image push, after the apply has already created a cluster and 
 uses. Run it **after** `make gcp-foundation-apply`: the foundation is what enables the Cloud
 Build API, and the lookup fails with `SERVICE_DISABLED` until it is on.
 
+Know what that answer costs you on the modern default. It returns the Compute Engine default
+service account — which is also the identity the node pools run as, since neither pool sets
+`node_config.service_account`. So on such a project the `artifactregistry.writer` grant lands
+on every node, and a container that escapes to its node can overwrite the platform's own
+images and wait to be pulled. This is accepted for staging and stated rather than hidden;
+nothing here guards it, because a precondition demanding two distinct identities would reject
+the very flow this section documents. Past staging, pass a dedicated build service account
+and give the node pools an identity of their own.
+
 **Rotating a database password** — and there are now two, rotated by different mechanisms.
 Getting this backwards leaves a new secret version that nothing ever applies, so the value
 in Secret Manager and the value the database will accept silently disagree until the next

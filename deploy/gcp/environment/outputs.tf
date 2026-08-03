@@ -117,12 +117,12 @@ output "sql_admin_user" {
 
 output "sql_app_role" {
   value       = local.db_app_role
-  description = "The custom database role the platform's role is created under. Its existence is what suppresses the cloudsqlsuperuser grant for anything created through the Cloud SQL Admin API later."
+  description = "The custom database role the platform's role is created under. Existence alone suppresses nothing: this is the role to NAME in --database-roles if a user is ever created through the Cloud SQL Admin API later, and naming it at creation is what suppresses that user's cloudsqlsuperuser grant."
 }
 
 output "sql_private_ip" {
   value       = google_sql_database_instance.map.private_ip_address
-  description = "The instance's address on the VPC. Reachable from inside the cluster and from nowhere else — not from the machine running Terraform. Emitted for diagnosis; the platform reaches the instance through the Cloud SQL Auth Proxy, which takes sql_instance_connection_name rather than an address."
+  description = "The instance's address on the VPC. Reachable from inside the VPC and from nowhere else — not from the machine running Terraform. Useful for diagnosis, and also a supported DSN target: a Pod reaches it directly with sslmode=require, which is what make gcp-db-init does. The Cloud SQL Auth Proxy is the better shape where you can run it, and takes sql_instance_connection_name rather than an address."
 }
 
 output "network" {
