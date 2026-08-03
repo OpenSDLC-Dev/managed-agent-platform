@@ -4,9 +4,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**none** — [docs/plan/20_gcp-deployment.md](./docs/plan/20_gcp-deployment.md) archived
-2026-08-03.
+**Issues [#241](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/241) and
+[#240](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/240)** — narrowing what
+object storage costs a deployment identity: a pre-created-bucket mode for the S3 backend,
+then a GCS-native backend that removes the HMAC key pair entirely.
 
 ## Tasks
 
-*(none in flight)*
+- [x] #241 — `BLOB_BUCKET_PRECREATED` skips `BucketExists`/`MakeBucket` and requires a
+  region (the location lookup is the other bucket-level call); chart value, render guard,
+  CI assertions
+- [ ] #240 — `internal/blob/gcs` on `cloud.google.com/go/storage` behind a backend
+  selector, passing `blobtest` unchanged
+- [ ] #240 — `deploy/gcp` drops the HMAC pair and the bucket-read grant

@@ -63,6 +63,40 @@ jobs:
           helm template t "$CHART" -f "$VALUES" \
             --set postgresql.enabled=false \
             --set externalDatabase.url='postgres://u:p@db.example:5432/x?sslmode=require' > /dev/null
+      - name: pre-created-bucket mode is off by default, complete when set, and refuses a region-less render
+        run: |
+          key() { grep "^  $1:" | awk '{print $2}' | tr -d '"' | base64 -d; }
+          # The bundled MinIO starts empty, so the platform must still create
+          # its bucket: the mode has to be off wherever it was not asked for.
+          out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/secret.yaml)"
+          [ "$(echo "$out" | key blob-bucket-precreated)" = "false" ] \
+            || { echo "default values must not opt into the pre-created-bucket mode" >&2; exit 1; }
+          ext=(--set minio.enabled=false
+               --set externalObjectStorage.endpoint=s3.example.internal:9000
+               --set externalObjectStorage.accessKey=ci --set externalObjectStorage.secretKey=ci-secret
+               --set externalObjectStorage.bucket=map-blob)
+          out="$(helm template t "$CHART" -f "$VALUES" "${ext[@]}" \
+            --set externalObjectStorage.region=us-east-1 \
+            --set externalObjectStorage.bucketPrecreated=true --show-only templates/secret.yaml)"
+          [ "$(echo "$out" | key blob-bucket-precreated)" = "true" ] \
+            || { echo "bucketPrecreated did not reach the Secret" >&2; exit 1; }
+          # ...and out of the Secret into the processes that build the store.
+          for tpl in controlplane brain executor; do
+            helm template t "$CHART" -f "$VALUES" "${ext[@]}" \
+              --set externalObjectStorage.region=us-east-1 \
+              --set externalObjectStorage.bucketPrecreated=true \
+              --show-only "templates/$tpl-deployment.yaml" | grep -q 'name: BLOB_BUCKET_PRECREATED' \
+              || { echo "$tpl never receives BLOB_BUCKET_PRECREATED" >&2; exit 1; }
+          done
+          # Without a region the client resolves the bucket's location before
+          # its first object request, which needs the very bucket privilege the
+          # mode exists to drop — so this must fail the render, not deploy.
+          err="$(helm template t "$CHART" -f "$VALUES" "${ext[@]}" \
+            --set externalObjectStorage.bucketPrecreated=true 2>&1 >/dev/null)" \
+            && { echo "bucketPrecreated without a region must fail the render" >&2; exit 1; }
+          echo "$err" | grep -q 'bucketPrecreated requires region' \
+            || { echo "the region-less render failed for the wrong reason: $err" >&2; exit 1; }
+          echo "ok: pre-created-bucket mode"
       - name: gate opt-in is off by default and complete when set
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"

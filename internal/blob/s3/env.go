@@ -26,6 +26,10 @@ func FromEnv(ctx context.Context) (blob.Store, error) {
 		Bucket:    os.Getenv("BLOB_BUCKET"),
 		Region:    os.Getenv("BLOB_REGION"),
 		TLS:       os.Getenv("BLOB_TLS") == "true",
+		// Read like BLOB_TLS, and safe to: a value this does not recognize
+		// leaves the bucket check in place, so the mistake ends in a startup
+		// error from the check rather than in a store nobody verified.
+		BucketPrecreated: os.Getenv("BLOB_BUCKET_PRECREATED") == "true",
 	})
 	if err != nil {
 		return nil, err

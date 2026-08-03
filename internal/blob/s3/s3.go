@@ -27,6 +27,29 @@ type Config struct {
 	Bucket    string
 	Region    string // optional; some S3 endpoints require it on bucket create
 	TLS       bool
+
+	// BucketPrecreated asserts that the bucket already exists, so New neither
+	// checks for it nor creates it. It is what lets a deployment identity hold
+	// object permissions only: the bucket check is a bucket-level read
+	// (storage.buckets.get on GCS, granted by roles/storage.legacyBucketReader)
+	// that a pre-provisioned deployment can only ever answer "yes", so
+	// demanding it widens the identity for nothing (#241, and
+	// docs/plan/20_gcp-deployment.md Decision 11).
+	//
+	// It requires Region, because the construction check is not the only
+	// bucket-level call: with no region configured minio-go resolves the
+	// bucket's location before the first object request and caches it
+	// (bucket-cache.go), which needs the same privilege a moment later. A mode
+	// that skipped one and kept the other would not deliver what it is for, so
+	// New rejects the pair rather than half-granting it.
+	//
+	// The check is also the one call New makes, so this is a trade: with it
+	// skipped, an unreachable endpoint, a wrong credential or a misspelled
+	// bucket surfaces on first use rather than at startup. That is the right
+	// way round for a deployment whose bucket is provisioned out of band, and
+	// the wrong one for the bundled MinIO, which starts empty — hence a
+	// per-deployment setting rather than a change of default.
+	BucketPrecreated bool
 }
 
 // Store implements blob.Store against one S3 bucket.
@@ -38,10 +61,16 @@ type Store struct {
 // New connects and ensures the bucket exists, so every later operation can
 // assume it (the bundled MinIO starts empty; creating the bucket here keeps
 // deployment free of a separate bootstrap step). Idempotent across processes:
-// two racing creators both succeed.
+// two racing creators both succeed. Config.BucketPrecreated takes the operator's
+// word for that instead, and New then issues no request at all.
 func New(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Endpoint == "" || cfg.Bucket == "" {
 		return nil, errors.New("s3: endpoint and bucket are required")
+	}
+	if cfg.BucketPrecreated && cfg.Region == "" {
+		return nil, errors.New("s3: a pre-created bucket needs an explicit region, " +
+			"or the first object request resolves the bucket's location — the " +
+			"bucket-level read the mode exists to stop needing")
 	}
 	// minio-go's own default transport, wrapped so an error response reaches
 	// the library saying what the endpoint meant (see endpointWord). It has to
@@ -61,15 +90,17 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("s3: client: %w", err)
 	}
-	exists, err := client.BucketExists(ctx, cfg.Bucket)
-	if err != nil {
-		return nil, fmt.Errorf("s3: check bucket %q: %w", cfg.Bucket, err)
-	}
-	if !exists {
-		err := client.MakeBucket(ctx, cfg.Bucket, minio.MakeBucketOptions{Region: cfg.Region})
-		// Losing the create race means another process made it: the goal state.
-		if err != nil && !alreadyOwned(err) {
-			return nil, fmt.Errorf("s3: create bucket %q: %w", cfg.Bucket, err)
+	if !cfg.BucketPrecreated {
+		exists, err := client.BucketExists(ctx, cfg.Bucket)
+		if err != nil {
+			return nil, fmt.Errorf("s3: check bucket %q: %w", cfg.Bucket, err)
+		}
+		if !exists {
+			err := client.MakeBucket(ctx, cfg.Bucket, minio.MakeBucketOptions{Region: cfg.Region})
+			// Losing the create race means another process made it: the goal state.
+			if err != nil && !alreadyOwned(err) {
+				return nil, fmt.Errorf("s3: create bucket %q: %w", cfg.Bucket, err)
+			}
 		}
 	}
 	return &Store{client: client, bucket: cfg.Bucket}, nil

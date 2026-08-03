@@ -266,6 +266,16 @@ externalObjectStorage:
   bucket: ""
   region: ""
   tls: true
+  # -- Set when the bucket is provisioned out of band (Terraform, an operator,
+  # a cloud console). The platform then neither checks for it nor creates it,
+  # so its identity needs object permissions only — no bucket-level read for a
+  # startup check that could only ever answer "yes" (#241). Requires `region`:
+  # without one the client resolves the bucket's location before its first
+  # object request, which needs that same bucket privilege, and the chart fails
+  # the render rather than deploy a half-kept promise. The other trade is that a
+  # wrong endpoint, credential or bucket name then surfaces on first use rather
+  # than at startup. Leave false for a bucket the platform should create.
+  bucketPrecreated: false
 
 # -- In-cluster OpenBao: the transit cipher for vault credential material
 # (docs/plan/12_vaults-credentials.md). Same shape and rationale as the bundled

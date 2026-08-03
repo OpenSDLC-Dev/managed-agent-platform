@@ -30,6 +30,28 @@ copy of an entry here.
 
 ### Added
 
+- **Object storage can be told its bucket already exists, so a deployment identity needs
+  object permissions only** ([internal/blob/s3](./internal/blob/s3), #241). `s3.New` called
+  `BucketExists` before any object work and created the bucket when it was missing — a
+  convenience for the bundled MinIO, which starts empty, and a bucket-level read
+  (`storage.buckets.get` on GCS, which is why the GKE deployment grants
+  `roles/storage.legacyBucketReader` on top of `objectAdmin`) that a pre-provisioned
+  deployment can only ever answer "yes". `BLOB_BUCKET_PRECREATED=true` —
+  `externalObjectStorage.bucketPrecreated` in the chart — skips both calls, and
+  construction then issues no request at all, which the suite proves against an endpoint
+  that refuses everything.
+
+  The mode **requires a region**, which is the half a skipped construction check does not
+  buy on its own: with `BLOB_REGION` empty, minio-go resolves the bucket's location before
+  the first object request and caches it — measured here as a `GET /bucket/?location=`
+  ahead of the `PUT` — and that resolution needs the same bucket privilege a moment later.
+  So `s3.New` rejects the pair and the chart fails the render rather than trade one bucket
+  call for another; with a region set, the suite pins that a put, a get and a delete send
+  exactly three object requests and nothing else. The remaining trade is deliberate and
+  is why this is a per-deployment setting rather than a new default: with no startup
+  check, a wrong endpoint, credential or bucket name surfaces on first use instead of at
+  startup. Closes plan 20's Decision 11 follow-on.
+
 - **The deploy guide now says how long a stuck teardown actually stays stuck: four days, by
   Google's own documentation** ([docs/deploy-gcp.md](./docs/deploy-gcp.md), #20). The
   mode-2 acceptance teardown ended with the VPC peering still `ACTIVE / Connected` after 25
