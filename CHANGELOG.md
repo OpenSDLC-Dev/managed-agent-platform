@@ -55,8 +55,16 @@ copy of an entry here.
   the `googlecloud` exporter dropping logs until `log.default_log_name` is set. Both are
   now in the guide, along with what the run could *not* establish — that any platform log
   actually arrived in Cloud Logging. And the guide's teardown section now states that
-  mode 2 structurally cannot leak the orphaned PersistentVolumes mode 1 does, because
-  `existingSecret` leaves no StatefulSet to claim one.
+  mode 2 structurally cannot leak the orphaned PersistentVolumes mode 1 does, because with
+  all three bundled services off nothing renders a StatefulSet to claim one.
+
+  **A fifth defect came from the review rather than the run, and it is a real one.**
+  `dbinit.sql`'s **group-role** assertion listed `SUPERUSER`/`CREATEDB`/`CREATEROLE`/
+  `BYPASSRLS`/`LOGIN` but not `REPLICATION` — and the platform role can `SET ROLE` to that
+  group, so a group granted `REPLICATION` passed the check while the summary still printed
+  the platform row's `replication=f`. The asymmetry only became visible because the fix
+  above put the two assertions side by side. Now asserted, with a test proven red against
+  the pre-fix SQL; `make gcp-dbinit-test` is 83 checks, up from 79.
 
 - **The GCP staging environment takes its production shape: private nodes, Cloud NAT, a
   private-IP database, a Docker Hub mirror — and a platform database role that is not a

@@ -209,8 +209,9 @@ defect in the delivered teardown path.**
    (`dbinit.sql`) and a row for it in the deploy guide's asserted-properties table, but not
    the corresponding field in the summary `RAISE NOTICE` — so the property was enforced and
    the record that evidences it was silent. Found by reading the live output against the
-   table. The NOTICE now carries `replication=%`, and `dbinit_test.py` asserts it (80
-   checks, up from 79).
+   table. The NOTICE now carries `replication=%`, and `dbinit_test.py` asserts it. (The
+   suite ends this PR at **83** checks rather than 80, because the review that followed
+   found the same omission one role along — see the hardening note below.)
 2. *The guide's collector paragraph was under-specified, in two sequential ways.* The
    platform builds `otlptracegrpc`, `otlpmetricgrpc` **and** `otlploggrpc` against the one
    `OTEL_EXPORTER_OTLP_ENDPOINT`, so a collector declaring only a `traces` pipeline made
@@ -227,9 +228,15 @@ defect in the delivered teardown path.**
    changes it.
 
 **Teardown needed several runs, and only the first failure was a defect.** Run 1 removed 21
-resources and stopped on finding 0 above. Run 2, after the database was taken out of state
-by hand, removed **every remaining billable resource** — the Cloud SQL instance, the
-cluster, the bucket and the registry — and then failed on the VPC peering with
+resources — the cluster and both node pools, the NAT and router, the subnetwork, both
+Artifact Registry repositories, the GCS bucket, the Cloud SQL administrator and every IAM
+binding — and then stopped on finding 0 above, leaving the database, the instance the
+database blocks, and the eleven resources downstream of that instance. So all but one
+billable resource was already gone when the defect fired; what it stranded was the running
+Cloud SQL instance.
+
+Run 2, after the database was taken out of state by hand, removed that instance — one
+tracked resource, and the last billable one — and then failed on the VPC peering with
 `Producer services (e.g. CloudSQL, Cloud Memstore, etc.) are still using this connection`,
 because Cloud SQL releases the peering asynchronously and the delete landed while the
 release was still in flight. Subsequent runs kept hitting the same wall for far longer than
@@ -252,6 +259,37 @@ the release renders no StatefulSet and claims no volume; the run
 finished with zero PVCs and zero PVs, and the only disks in the project were the four node
 boot disks the destroy reclaims. The OTel collector's Google service account and its two
 project role bindings were created by hand for this run and removed after it.
+
+**Review hardening, landed in the same PR — and it found a fifth defect the run did not.**
+The verifier's first pass returned **FAIL**, correctly: the commit it reviewed shipped an
+acceptance record claiming "`terraform destroy` removed all 34 resources" while the run it
+recorded had stopped at 21 on finding 0. That is the failure mode this whole file exists to
+prevent, caught in the artifact the slice delivers; the record above is the corrected
+account, and a second pass on the fixed tip returned PASS. It then caught two more accuracy
+defects the corrected text had introduced — a teardown paragraph whose run-2 attribution
+could not be squared with its own resource arithmetic (the cluster, bucket and registry went
+in run 1, not run 2), and this list's own stale "80 checks".
+
+The Codex pass (`gpt-5.6-sol`, `ultra`) returned six findings, and the one with teeth was
+**structural, not editorial**: `dbinit.sql`'s **group-role** assertion listed
+`SUPERUSER`/`CREATEDB`/`CREATEROLE`/`BYPASSRLS`/`LOGIN` but not `REPLICATION`. The platform
+role can `SET ROLE` to that group, and the file's own comment says anything the group holds
+is one `SET ROLE` away — so a group role granted `REPLICATION` passed the check while the
+summary still printed the platform row's `replication=f`, and the record read clean. The
+asymmetry was made *visible* by finding 1 above: adding `replication=` to the NOTICE put the
+two assertions side by side for the first time. `LOGIN` was already in that list and is not
+`SET ROLE`-reachable either, so the criterion was always "the group holds no privilege
+attribute", not the narrower reachability argument — `REPLICATION` was simply missing.
+Fixed, with a test case proven red against the pre-fix SQL by both the implementer and the
+verifier independently; the suite is 83 checks.
+
+Codex's other five were accuracy defects in this record, and the sharpest was real:
+*"every backing service was reached as the deploy guide's own service account"* is **false
+of Cloud SQL**, which this run reached over the direct private-IP path with no Google
+identity at all. The record now names three distinct credential kinds instead. Also fixed:
+`existingSecret` makes leaving the bundled services enabled a render error rather than
+disabling them; slice 1 landed in two PRs, not one; there is no `blob.Open`; and two forward
+references to "slice 5" outlived its delivery.
 
 **Two observations that are not defects.** Unlike mode 1, where the three platform pods
 restart two or three times on a first install while the bundled Postgres comes up, all
