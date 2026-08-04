@@ -167,7 +167,8 @@ operator's — three different kinds of credential, and the distinction matters.
   platform's own non-superuser **database** role and its password. The Cloud SQL Auth Proxy
   path, which is the one that would involve `roles/cloudsql.client` and a per-component
   Google identity, was not exercised; the guide already says the chart templates no sidecar
-  for it.
+  for it. (#269 templated it afterwards, and gave the brain the identity it lacked — still
+  unexercised on a live cluster, so what this record says about the run stands.)
 
 **Traces reach Cloud Trace, and the pagination trap reproduced.** 82 traces over the run,
 including 11 `model_turn`, 4 `google.cloud.kms.v1.KeyManagementService/Encrypt` — the KMS
@@ -2143,3 +2144,71 @@ teardown — together with the three Secret Manager secrets holding it and the d
 password. All four were removed. What is retained, and costs about $0.06/month, is the
 foundation's single enabled KMS key version; that is Decision 9 working as intended, not a
 leak.
+
+## Cloud SQL Auth Proxy sidecar (#269) — review-hardening record (2026-08-04)
+
+The change itself is in [CHANGELOG.md](../CHANGELOG.md); this is what the reviews changed
+about it, the mutation battery that settled it, and the one thing decided against.
+
+**The setup.** Codex on `gpt-5.6-sol` at the config's `ultra` effort, read-only, twice — the
+branch, then the fix commit. The verifier ran twice on its pinned `claude-fable-5`, the
+second dispatch after the fixes changed behaviour. The Claude-side `/code-review` is
+`disable-model-invocation`; an Opus 5 adversarial pass stood in for it, twice, labelled as a
+stand-in rather than as `/code-review`. GitHub's own Codex reviewer and CodeRabbit added two
+findings on the PR.
+
+**What the reviews were for, in one line: the guards were fine and the tests of the guards
+were not.** Nothing shipped a broken sidecar. What five of the seven findings had in common
+is that a CI assertion would have stayed green while the behaviour it named regressed —
+which is the failure mode a chart's CI is the only thing standing in front of, since nothing
+else executes a Helm template.
+
+- **A refusal asserted by exit code cannot say which guard fired.** Several inputs are
+  refused by more than one guard, so deleting the required-`instanceConnectionName` guard
+  left the step green: the shape guard refuses an empty name too. Each refusal is now
+  asserted by its **message**.
+- **The startup probe was asserted, its port was not.** Moving the probe from 9801 to 9800
+  kept CI green while shipping a pod whose probe polls a port the proxy never binds — the
+  application container then never starts, which is the exact failure the step exists to
+  prevent. The step now reads `--http-port` out of the rendered args and requires every
+  probe port to equal it. The liveness probe was unasserted altogether.
+- **The three health flags were unasserted**, so a sidecar whose probe could never succeed
+  passed.
+- **`helm template … | grep -q X && fail` passes when the render fails**, because a failed
+  render matches nothing and `errexit` is exempt on the left of `&&`. It had already been
+  fixed once in this step and reintroduced three lines later.
+- **The assertions were scoped to the `initContainers` block, not to the proxy's entry**, so
+  a second init container could supply whatever the proxy's entry had lost.
+
+**Twenty-two mutations** were run against the two steps and every one goes red, each for its
+own reason: the four guards deleted in turn; the shape guard's empty-segment test and upper
+bound dropped separately; each of the five sidecar flags dropped; either probe's port moved
+off the health server's; either probe removed; `--address` added; `restartPolicy` removed;
+the `privateIP` switch ignored; the proxy defaulted on; a **decoy init container** carrying
+what the proxy's own entry had lost; the brain's Deployment stripped of its ServiceAccount;
+and the brain pointed at the control plane's. The last two of those are why the assertions
+are anchored to the proxy's own entry rather than to the `initContainers` block, and why
+the brain's ServiceAccount is asserted by name rather than by existence.
+
+One caution the battery itself produced: a mutation that silently fails to apply reports as
+a passing assertion. Two rounds here reported green from an edit that never landed — a
+`perl` line-number substitution off by two lines, and a `zsh` loop that did not word-split
+its arguments. Both times the assertion was fine. Check the mutated file, not just the exit
+code.
+
+**Decided against: a fifth guard refusing a DSN that bypasses the proxy.** The reviewer's
+case was that this is the likeliest mistake and the chart holds the DSN in the
+`externalDatabase.url` path. The first reason given for declining — that a guard firing in
+one of the two DSN paths and blind in the other reads as a check performed — was itself
+refuted in the second review, and correctly: `secret.yaml`'s `gcpKMS.keyName` regex is
+exactly that shape and ships unchanged. The reason that holds is grammar, not reach. A DSN
+through the sidecar can legitimately say `127.0.0.1`, `localhost`, `[::1]`, or a unix socket
+path, so a host check would refuse working deployments — the same false-rejection risk that
+keeps the `instanceConnectionName` check to a shape rather than to Google's naming rules.
+That is the reasoning now in the three documents.
+
+**Not established, and said so in the change itself:** the proxy path has never carried a
+connection on a live GKE cluster. What is established is that it renders, that a real API
+server accepts the manifests, that the pinned `cloud-sql-proxy:2.24.1` accepts the exact
+argument vector the chart passes (it proceeds past flag parsing and fails only on absent
+credentials), and that the Terraform passes the credential-free checks.

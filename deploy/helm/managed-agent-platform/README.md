@@ -131,9 +131,9 @@ Four things about it are worth knowing before you turn it on.
 **The DSN is yours to point at the proxy.** The chart does not rewrite it, and under
 `existingSecret` it never sees one — so a sidecar with a DSN still naming the instance's own
 address is a proxy nothing connects through. It does not refuse that in the
-`externalDatabase.url` path either, where it *does* hold the DSN: a guard that fires for one
-of the two paths and is structurally blind in the other reads as a check that has been
-performed.
+`externalDatabase.url` path either, where it *does* hold the DSN, and the reason is not
+reach but grammar: a DSN through the sidecar can legitimately say `127.0.0.1`, `localhost`,
+`[::1]`, or a unix socket path, so a host check would refuse working deployments.
 
 **`sslmode=disable` is correct here and nowhere else.** The proxy terminates the encrypted
 leg itself and hands the process a loopback socket, so the hop the DSN describes never

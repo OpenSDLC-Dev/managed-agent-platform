@@ -166,10 +166,10 @@ and then a `database-url` of
 `postgres://USER:PASSWORD@127.0.0.1:5432/DATABASE?sslmode=disable`. **Pointing the DSN at
 the proxy is yours to do**, and it is the mistake to watch for: a sidecar with a DSN still
 naming the instance's own address is a proxy nothing connects through. In mode 2 the chart
-renders no Secret at all and never sees the DSN, so it cannot check this — and it
-deliberately does not check the one path where it *could* (`externalDatabase.url`), because
-a refusal that fires in one path and is structurally blind in the other is worse than a
-documented rule.
+renders no Secret at all and never sees the DSN, so it cannot check this — and it does not
+check the one path where it *could* (`externalDatabase.url`) because there is nothing exact
+to check against: a DSN through the sidecar can legitimately say `127.0.0.1`, `localhost`,
+`[::1]`, or a unix socket path, so a host check would refuse working deployments.
 
 It renders as a **native sidecar** (an `initContainer` with
 `restartPolicy: Always`) with a startup probe on the proxy's own `/startup`, which is what

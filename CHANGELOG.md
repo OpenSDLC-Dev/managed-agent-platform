@@ -43,9 +43,10 @@ copy of an entry here.
   merely started before three processes that all open the database as they boot — so the
   render fails on Kubernetes < 1.29, as `executor.gateImage` already does. Three more
   refusals happen at render time rather than as a pod that never becomes ready: a missing
-  `instanceConnectionName`, an address supplied where a `PROJECT:REGION:INSTANCE` name
-  belongs — an address, or a name with an empty part; a legacy domain-scoped project's
-  fourth segment still passes — and the bundled Postgres left enabled alongside it. The
+  `instanceConnectionName`, one whose shape is wrong — the check is three or four non-empty
+  colon-separated segments, so an address and an empty part are refused while a legacy
+  domain-scoped project's fourth segment passes, and what is inside a segment is the proxy's
+  to judge — and the bundled Postgres left enabled alongside it. The
   guards live in the helper, not in `secret.yaml` where the chart's other refusals are,
   because everything past that file's first three refusals is skipped under
   `existingSecret` — which is exactly how the GCP mode this sidecar exists for is deployed.
