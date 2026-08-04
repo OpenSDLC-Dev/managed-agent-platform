@@ -453,12 +453,25 @@ alone. Adding the three bindings by hand first costs one command and closes the 
 the later `apply` then finds them already present and only drops the two it should.
 
 ```sh
+# 0. Both of these are REQUIRED here, with no default. Every command below names
+#    a real account or secret by prefix, and two of them delete. A `:-map`
+#    fallback on an unset variable would silently address a different
+#    deployment's resources — granting bucket access to someone else's
+#    identities, or deleting their secrets.
+#    (No apostrophes in these messages: bash parses quotes inside ${VAR:?...}
+#    even within double quotes, so one would open a string that never closes.)
+: "${PROJECT:?set PROJECT to the project this deployment lives in}"
+: "${NAME_PREFIX:?set NAME_PREFIX to the prefix this foundation was applied with}"
+
 # 1. Grant the three workloads object access, out of band and before anything moves.
 #    Terraform will converge on exactly these in step 3.
 BUCKET="$(cd deploy/gcp/environment && terraform output -raw blob_bucket)"
 for pair in "controlplane:objectUser" "executor:objectUser" "brain:objectViewer"; do
+  SA="${NAME_PREFIX}-${pair%%:*}@$PROJECT.iam.gserviceaccount.com"
+  # Confirm the account is the one you mean before handing it the bucket.
+  gcloud iam service-accounts describe "$SA" --project "$PROJECT" >/dev/null
   gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
-    --member="serviceAccount:${NAME_PREFIX:-map}-${pair%%:*}@$PROJECT.iam.gserviceaccount.com" \
+    --member="serviceAccount:$SA" \
     --role="roles/storage.${pair##*:}" --project "$PROJECT"
 done
 
@@ -493,10 +506,10 @@ cd deploy/gcp/foundation
 terraform state rm google_service_account.storage \
                    google_secret_manager_secret.blob_access_key \
                    google_secret_manager_secret.blob_secret_key
-gcloud secrets delete "${NAME_PREFIX:-map}-blob-access-key" --project "$PROJECT"
-gcloud secrets delete "${NAME_PREFIX:-map}-blob-secret-key" --project "$PROJECT"
+gcloud secrets delete "${NAME_PREFIX}-blob-access-key" --project "$PROJECT"
+gcloud secrets delete "${NAME_PREFIX}-blob-secret-key" --project "$PROJECT"
 gcloud iam service-accounts delete \
-  "${NAME_PREFIX:-map}-storage@$PROJECT.iam.gserviceaccount.com" --project "$PROJECT"
+  "${NAME_PREFIX}-storage@$PROJECT.iam.gserviceaccount.com" --project "$PROJECT"
 
 # 6. Confirm the configuration and the world agree.
 terraform plan   # no changes

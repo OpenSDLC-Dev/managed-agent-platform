@@ -67,10 +67,14 @@ chart object-storage modes rendered with every guard fired, and a new CI helm st
 asserting the keyless mode carries no credential key and reaches all three processes. No
 `terraform apply` was run and the mode-2 acceptance was not re-run: both cost money and are
 interactive on purpose (CLAUDE.md's `gcp-*` note), so they are an operator action. The
-migration path for a deployment that predates #240 — `terraform state rm` for the three
-retired foundation resources, then the manual HMAC and secret deletion in the right order —
-is written out in docs/deploy-gcp.md rather than automated, because deleting the service
-account first would delete the HMAC key with it and strand the secret.
+migration path for a deployment that predates #240 is written out in docs/deploy-gcp.md
+rather than automated: the three bucket bindings added out of band first (no ordering of
+the two Terraform states alone is gap-free, since one apply adds the new grants and drops
+the old ones), then the deployment moved and reconciled, then the HMAC key deactivated and
+deleted, and only then `terraform state rm` and the deletion of the three retired
+foundation resources. That order is load-bearing at both ends — the key must go before the
+service account, because deleting the account takes its keys with it and strands the
+secret.
 
 ## GCP deployment plan (20) — archived 2026-08-03, all five slices delivered (#20)
 

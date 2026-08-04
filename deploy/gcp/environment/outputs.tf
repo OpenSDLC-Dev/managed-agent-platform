@@ -88,12 +88,12 @@ output "executor_service_account_annotation" {
 # and `blob-secret-key` keys the S3 path needed are not set at all.
 output "blob_backend" {
   value       = "gcs"
-  description = "BLOB_BACKEND, and the chart's gcsObjectStorage.enabled. Constant, but it is a key the hand-assembled mode-2 Secret must carry: without it the platform reads the default, s3, and looks for an endpoint that is not there."
+  description = "BLOB_BACKEND for the hand-assembled mode-2 Secret. Constant, but it is a key that Secret must carry: without it the platform reads the default, s3, and looks for an endpoint that is not there. Mode 2 sets existingSecret and leaves gcsObjectStorage.enabled false — the chart refuses the two together, because it writes no Secret in that mode and the value would select nothing. gcsObjectStorage is the mode-1 route to the same place."
 }
 
 output "blob_bucket" {
   value       = google_storage_bucket.blob.name
-  description = "BLOB_BUCKET, and the chart's gcsObjectStorage.bucket. The only object-storage value the deployment needs."
+  description = "BLOB_BUCKET for the mode-2 Secret (the chart's gcsObjectStorage.bucket in mode 1). The only object-storage value the deployment needs."
 }
 
 output "sql_instance_connection_name" {
