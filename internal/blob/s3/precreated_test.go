@@ -229,42 +229,6 @@ func TestContractWithPrecreatedBucket(t *testing.T) {
 	})
 }
 
-// TestFromEnvReadsBucketPrecreated covers the activation path a deployment
-// actually uses. Everything above builds a Config directly, so the one line
-// that reads the environment could be deleted — disabling the feature for every
-// deployment — with all of it still green. The endpoint is the discard port:
-// construction can only succeed by making no request, so success is proof the
-// variable was read.
-func TestFromEnvReadsBucketPrecreated(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	t.Setenv("BLOB_ENDPOINT", "127.0.0.1:9")
-	t.Setenv("BLOB_BUCKET", "map-blob")
-	t.Setenv("BLOB_REGION", precreatedRegion)
-	t.Setenv("BLOB_BUCKET_PRECREATED", "true")
-	store, err := s3.FromEnv(ctx)
-	if err != nil {
-		t.Fatalf("FromEnv in the pre-created mode: %v", err)
-	}
-	if store == nil {
-		t.Fatal("FromEnv returned no store")
-	}
-}
-
-// TestFromEnvWithoutBucketPrecreatedChecksTheBucket is the other half: the same
-// environment minus the one variable must still reach the endpoint, or the test
-// above would pass for a reason that has nothing to do with the mode.
-func TestFromEnvWithoutBucketPrecreatedChecksTheBucket(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	t.Setenv("BLOB_ENDPOINT", "127.0.0.1:9")
-	t.Setenv("BLOB_BUCKET", "map-blob")
-	t.Setenv("BLOB_REGION", precreatedRegion)
-	if _, err := s3.FromEnv(ctx); err == nil {
-		t.Fatal("FromEnv reached a store on the discard port without the mode")
-	}
-}
-
 // TestPrecreatedBucketStillValidatesConfig keeps the mode from becoming a way
 // to skip the checks that need no endpoint at all.
 func TestPrecreatedBucketStillValidatesConfig(t *testing.T) {

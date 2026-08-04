@@ -85,13 +85,22 @@ itself when its credentials rot is not a safety net.
 | Dependency integration | — | real Postgres, Docker, and Kubernetes (hard-fail without them) |
 | Live-model contract | `RUN_LIVE_MODEL_TESTS=1` | one real turn against your endpoint, through the adapter whose protocol it speaks (the other adapter's test skips) |
 | Live web backends | `RUN_LIVE_WEB_TESTS=1` | one real Tavily search and one real Jina Reader fetch through the web-tool adapters (`TAVILY_API_KEY` / `JINA_API_KEY`) |
+| Live Cloud Storage | `RUN_LIVE_GCS_TESTS=1` | the shared object-storage contract suite against a real GCS bucket (`GCS_BUCKET`) through the GCS-native backend, authenticating with Application Default Credentials — the only tier that exercises that client's production read transport, which the hermetic `fake-gcs-server` cannot serve |
 | Live acceptance | `RUN_LIVE_ACCEPTANCE_TESTS=1` | the reference doc's [define-outcomes example](https://platform.claude.com/docs/en/managed-agents/define-outcomes) end-to-end against an externally running stack through the typed Go SDK — configured by `ACCEPTANCE_BASE_URL` / `ACCEPTANCE_API_KEY` / `ACCEPTANCE_MODEL` from the environment only, never `.env` (its deterministic scripted-model rehearsal runs in the default tier) |
 | Live-system evals | `RUN_EVALS=1` (`make eval`) | whole sessions: API → brain → real model → sandbox → SSE, deterministically graded. [Twelve regression tasks](./docs/plan/02_evals-system.md) spanning the built-in toolset, permission allow/deny, single- and multi-turn, and skill injection; results land in `evals/artifacts/`. CI also runs this tier daily on a schedule ([`evals.yml`](./.github/workflows/evals.yml)), reading the same four variables from the `evals` deployment environment's secrets — and failing rather than skipping while they are unset |
 
 Configure the endpoint once in a gitignored repo-root `.env` — `MODEL_PROTOCOL`
 (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID`, plus
-`TAVILY_API_KEY` / `JINA_API_KEY` for the web-backend tier — and the live tiers
+`TAVILY_API_KEY` / `JINA_API_KEY` for the web-backend tier and `GCS_BUCKET` for the Cloud
+Storage tier (a bucket name, not a credential — that tier authenticates with Application
+Default Credentials) — and the live tiers
 read it (the environment wins over the file). Never commit real credentials.
+
+Those are *test* settings. What a running deployment reads is separate: `BLOB_BACKEND`
+picks the object-storage backend — unset or `s3` for any S3-compatible endpoint
+(`BLOB_ENDPOINT` and its `BLOB_*` companions), `gcs` for Google Cloud Storage natively,
+which takes `BLOB_BUCKET` alone and authenticates with Application Default Credentials, so
+there is no key to distribute.
 
 **Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres, MinIO, and OpenBao (and an optional Jaeger):
 
