@@ -18,11 +18,11 @@ identically?"**
 | | `foundation/` | `environment/` |
 | --- | --- | --- |
 | Lifecycle | created once, **never destroyed** | created and destroyed freely |
-| Holds | KMS key ring + crypto key, the four service accounts, the Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
+| Holds | KMS key ring + crypto key, the three service accounts, the Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
 | Idle cost | cents a month | a running cluster and database |
 | `terraform destroy` | not supported — `prevent_destroy` **and** `deletion_policy = "PREVENT"` | `make gcp-env-destroy` |
 
-Three things make the split necessary rather than tidy:
+Two things make the split necessary rather than tidy:
 
 - **A KMS key ring can never be deleted, a crypto key only by destroying and deleting
   every version of it — and destroying the *resource* is worse than leaving it.** The provider's default `deletion_policy` is `DELETE`, which
@@ -37,20 +37,18 @@ Three things make the split necessary rather than tidy:
   survives that. Between them they also make a rename loud: `name`, `location`, `key_ring`
   and `account_id` force replacement, so editing `name_prefix` or `kms_location` aborts the
   plan instead of quietly recreating the key.
-- **Deleting a service account deletes its HMAC keys.** An identity in the disposable half
-  would strand the once-readable HMAC secret in Secret Manager — valid-looking, and dead.
-  (The HMAC *key* is not a Terraform resource at all; `bootstrap.sh` creates it. GCS returns
-  its secret exactly once, so a resource holding it would hold it in state.)
 - **The secrets are the reconciliation source.** A rebuilt environment is brought back into
   agreement with them, and by two different mechanisms now that there are two database
   credentials: the **administrator's** password is reapplied to the new Cloud SQL instance by
   the apply itself, through `password_wo`; the **platform's** is reapplied by re-running
-  `make gcp-db-init`, which is the same run that re-creates its role. The HMAC pair is
-  carried forward untouched. (Decision 6 also wants that pair *proven*
-  against the new bucket by an authenticated call rather than assumed valid from the presence of
-  a secret version. `bootstrap.sh` does not do that; slice 4b's acceptance battery did,
-  because it needs a live bucket to authenticate against — PUT, GET and DELETE in the
-  rebuilt bucket with the surviving pair, recorded in docs/HISTORY.md.)
+  `make gcp-db-init`, which is the same run that re-creates its role.
+
+A third reason retired with #240, and it is worth recording why rather than deleting it
+silently: **deleting a service account deletes its HMAC keys**, so the identity holding the
+GCS HMAC pair could not live in the disposable half without stranding a once-readable secret
+in Secret Manager — valid-looking, and dead. Object storage is now reached by the workloads
+themselves through Workload Identity, so there is no HMAC key, no fourth identity, and
+nothing for a rebuild to carry forward. The two reasons above are untouched.
 
 **No secret value is in either configuration.** Terraform holds names, IAM bindings and
 preconditions; `bootstrap.sh` owns value creation, and `environment/` reads the database
@@ -86,7 +84,6 @@ the rebuilt stack, never with an old one surviving.
 - A GCP project with billing enabled, and `gcloud auth application-default login`.
 - Terraform ≥ 1.11 — `brew install hashicorp/tap/terraform`. It is not in Homebrew core.
   (1.11 for `password_wo`; `foundation/` alone needs only 1.5.)
-- `python3` — `bootstrap.sh` parses one JSON response with it.
 - `kubectl` and `helm` for the deploy that follows.
 
 ## Running it
@@ -102,7 +99,7 @@ make gcp-foundation-apply              # never destroyed — creates the secrets
                                        #  environment/ reads each one by name and fails
                                        #  the lookup if the apply that creates it has
                                        #  not run — #269's map-brain account, for one)
-PROJECT=your-project make gcp-bootstrap  # fills them, creates the GCS HMAC key
+PROJECT=your-project make gcp-bootstrap  # fills them
 
 # Only now: the foundation apply above is what enables the Cloud Build API, and the
 # lookup answers SERVICE_DISABLED until it is on.
@@ -184,8 +181,8 @@ need to match: no foundation resource is regional. `zone` must be inside `enviro
 `region`, which a precondition checks.)
 
 **`bootstrap.sh` is a third consumer of that prefix**, and the only one that is not read from
-a `.tfvars` file: it derives every secret id and the storage service-account email from the
-`NAME_PREFIX` environment variable, which defaults to `map`. If you set `name_prefix` in
+a `.tfvars` file: it derives every secret id from the `NAME_PREFIX` environment variable,
+which defaults to `map`. If you set `name_prefix` in
 tfvars, pass it here too —
 
 ```sh
@@ -365,8 +362,8 @@ terraform output -raw  kms_key_name                              # gcpKMS.keyNam
 terraform output -json controlplane_service_account_annotation   # controlplane.serviceAccount.annotations
 terraform output -json brain_service_account_annotation          # brain.serviceAccount.annotations
 terraform output -json executor_service_account_annotation       # executor.serviceAccount.annotations
-terraform output -raw  blob_endpoint                             # BLOB_S3_ENDPOINT
-terraform output -raw  blob_bucket                               # BLOB_S3_BUCKET
+terraform output -raw  blob_backend                              # BLOB_BACKEND
+terraform output -raw  blob_bucket                               # BLOB_BUCKET
 terraform output -raw  sql_instance_connection_name              # cloudSQLProxy.instanceConnectionName
 ```
 
@@ -404,8 +401,9 @@ circular, and the usual fix (a hand-made state bucket outside Terraform) reintro
 untracked resource this split exists to avoid.
 
 **No secret is in either state file.** That is the point of `bootstrap.sh` and of
-`password_wo`: the database password and the GCS HMAC pair exist in Secret Manager and nowhere
-else Terraform can reach. (The model key is pasted from its own provider into the Helm values
+`password_wo`: the two database passwords exist in Secret Manager and nowhere else Terraform
+can reach. Since #240 they are the only such values — object storage authenticates with
+Workload Identity and has no credential to keep anywhere. (The model key is pasted from its own provider into the Helm values
 in mode-1; in mode-2 it rides `model-providers.json` inside the pre-created Secret, so it
 never reaches a values file either.) So a lost state file costs you bookkeeping, not
 credentials.
@@ -422,20 +420,17 @@ terraform import google_kms_crypto_key.cipher              "$P/locations/$L/keyR
 terraform import google_service_account.controlplane       "$P/serviceAccounts/map-controlplane@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.brain              "$P/serviceAccounts/map-brain@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.executor           "$P/serviceAccounts/map-executor@your-project.iam.gserviceaccount.com"
-terraform import google_service_account.storage            "$P/serviceAccounts/map-storage@your-project.iam.gserviceaccount.com"
 terraform import google_secret_manager_secret.db_password       "$P/secrets/map-db-password"
 terraform import google_secret_manager_secret.db_admin_password "$P/secrets/map-db-admin-password"
-terraform import google_secret_manager_secret.blob_access_key   "$P/secrets/map-blob-access-key"
-terraform import google_secret_manager_secret.blob_secret_key   "$P/secrets/map-blob-secret-key"
 for api in cloudbuild cloudkms iam iamcredentials secretmanager; do
   terraform import "google_project_service.required[\"$api.googleapis.com\"]" "your-project/$api.googleapis.com"
 done
 ```
 
 The same commands are how a project that **already** has a key ring adopts it on the first
-apply, instead of colliding on the name. Nothing here imports a secret *version* or the HMAC
-key, and nothing needs to: `bootstrap.sh` is not Terraform-managed, and re-running it after
-an import is a no-op because the versions already exist.
+apply, instead of colliding on the name. Nothing here imports a secret *version*, and nothing
+needs to: `bootstrap.sh` is not Terraform-managed, and re-running it after an import is a
+no-op because the versions already exist.
 
 Do not trust that list to have kept pace with the configuration — a resource added to
 `foundation/` after this was written would be missing from it, and the failure arrives as a

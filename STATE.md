@@ -4,21 +4,19 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**[Plan 22](./docs/plan/22_gcs-native-blob.md) — issue
-[#240](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/240)**, the second half
-of narrowing what object storage costs a deployment identity: a GCS-native backend that
-removes the HMAC key pair entirely. Its sibling
-[#241](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/241) landed first.
+**None.** [Plan 22](./docs/plan/22_gcs-native-blob.md) is archived — its delivery record is
+in [docs/HISTORY.md](./docs/HISTORY.md), its narrative in [CHANGELOG.md](./CHANGELOG.md).
+The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
 
 ## Tasks
 
-- [x] #241 — `BLOB_BUCKET_PRECREATED` skips `BucketExists`/`MakeBucket` and requires a
-  region (a region-less client resolves the bucket's location instead); chart value,
-  render guard, CI assertions
-- [x] #240 slice 1 — `internal/blob/gcs` on `cloud.google.com/go/storage` behind the
-  `internal/blob/backend` selector, passing `blobtest` unchanged against a pinned
-  `fake-gcs-server` and, opted in, against real Cloud Storage
-  ([#276](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/276): three verifier
-  passes, all PASS-with-findings and every finding fixed; dual review; CI green)
-- [ ] #240 slice 2 — chart wiring for the keyless mode; `deploy/gcp` drops the HMAC pair
-  and the bucket-read grant, binding the ServiceAccounts #269 finished giving all three
+_None in flight._ Last completed, both closing
+[#240](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/240) and its sibling
+[#241](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/241):
+
+- [x] #241 — `BLOB_BUCKET_PRECREATED` skips `BucketExists`/`MakeBucket`
+  ([#274](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/274))
+- [x] #240 slice 1 — `internal/blob/gcs` behind the `internal/blob/backend` selector
+  ([#276](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/276))
+- [x] #240 slice 2 — the chart's keyless `gcsObjectStorage` mode; `deploy/gcp` drops the
+  HMAC pair and binds the bucket to the three workload identities

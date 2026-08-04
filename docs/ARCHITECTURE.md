@@ -641,20 +641,22 @@ loopback-bound control plane, optional Jaeger profile).
 `deploy/gcp` is Terraform for the GCP staging environment (docs/plan/20, Decision 9) —
 developer tooling for GCP deployment only, never a dependency of the platform, its build,
 or `make verify`. **Two configurations, not one**, split by "can a rebuild recreate this
-identically?" rather than by cost: `foundation/` (KMS key ring and crypto key, the four
+identically?" rather than by cost: `foundation/` (KMS key ring and crypto key, the three
 service accounts, the Secret Manager secret *containers*) is created once and never
 destroyed, because a KMS key ring can never be deleted (and a crypto key only by
 destroying every version of it, which is the data loss itself) and the vault
-ciphertext in Postgres is decryptable by that key and nothing else, and because deleting a
-service account deletes its HMAC keys — an identity in the disposable half would strand the
-once-readable HMAC secret in Secret Manager, valid-looking and dead. `environment/` (GKE
+ciphertext in Postgres is decryptable by that key and nothing else. A third reason retired
+with #240 — deleting a service account deletes its HMAC keys, so the identity holding the
+GCS HMAC pair could not live in the disposable half without stranding a once-readable
+secret — and object storage now authenticates as the workloads themselves through Workload
+Identity, with no key at all. `environment/` (GKE
 cluster and node pools, Artifact Registry, Cloud SQL, the bucket, every IAM binding) is
 created and destroyed freely, reads the foundation through `data` sources by name, and
 carries the dedicated tainted sandbox node pool whose kubelet sets the `podPidsLimit` the
 Pod API cannot express. No secret VALUE is in either
 configuration: Terraform holds names, IAM bindings and preconditions, `bootstrap.sh` creates
-the values — including the GCS HMAC key, whose secret GCS returns exactly once, so a
-Terraform resource holding it would hold it in state — and `environment/` reads the database
+the values — the two database passwords, which since #240 are the only values it creates —
+and `environment/` reads the database
 administrator's password through an *ephemeral* resource into the write-only `password_wo`.
 That administrator is the only database user Terraform creates, and deliberately not the
 platform's: Cloud SQL grants `cloudsqlsuperuser` to every built-in user made through its

@@ -33,6 +33,44 @@ recorded nowhere else.
 
 ---
 
+## GCS-native blob plan (22) — archived 2026-08-04, both slices delivered (#240)
+
+docs/plan/22_gcs-native-blob.md is archived complete. It set out to remove the GCP
+deployment's last Google-issued key material — the GCS HMAC key pair that
+`internal/blob/s3` needed to reach Cloud Storage through its S3-interop XML API — and both
+halves landed. Slice 1 (PR #276): `internal/blob/gcs` on `cloud.google.com/go/storage`,
+selected by `BLOB_BACKEND` through the sibling `internal/blob/backend` package, passing
+`blobtest.Run` unchanged against a pinned `fake-gcs-server` and, opted in with
+`RUN_LIVE_GCS_TESTS=1`, against real Cloud Storage. Slice 2 (the archiving PR): the chart's
+keyless `gcsObjectStorage` mode, `deploy/gcp` dropping the HMAC pair and re-pointing the
+bucket IAM to the three workload identities, and `bootstrap.sh` shrinking from 313 lines to
+157. The sibling issue #241 — the S3 backend's pre-created-bucket mode — landed first
+(PR #274) and narrowed the same deployment's *permissions*; this plan removed the
+*credential*.
+
+Two of the plan's decisions changed shape against measurement rather than being carried
+out as written. Decision 4's absence proof is a one-object **list** probe, because a probe
+run against real Cloud Storage found the read path returns the same bare
+`storage.ErrObjectNotExist` for a missing object and for a bucket that does not exist, with
+no `googleapi.Error` to inspect — `ErrBucketNotExist` appears only on the listing path.
+Decision 6 said "both bucket IAM grants re-point"; reading the three binaries' actual use
+turned that into three grants, not two: `roles/storage.objectUser` for the controlplane and
+executor (Get/Put/Delete) and `roles/storage.objectViewer` for the brain, which only reads.
+`objectAdmin` was rejected — the permissions it adds beyond `objectUser` are object-ACL
+ones, meaningless under the bucket's uniform bucket-level access.
+
+**What slice 2 was verified against, and what it was not.** Its gate is credential-free:
+`make gcp-fmt gcp-validate gcp-split-check gcp-lint`, the three run-rather-than-read
+tooling tests (`gcp-bootstrap-test`, `gcp-split-check-test`, `gcp-dbinit-test`), all four
+chart object-storage modes rendered with every guard fired, and a new CI helm step
+asserting the keyless mode carries no credential key and reaches all three processes. No
+`terraform apply` was run and the mode-2 acceptance was not re-run: both cost money and are
+interactive on purpose (CLAUDE.md's `gcp-*` note), so they are an operator action. The
+migration path for a deployment that predates #240 — `terraform state rm` for the three
+retired foundation resources, then the manual HMAC and secret deletion in the right order —
+is written out in docs/deploy-gcp.md rather than automated, because deleting the service
+account first would delete the HMAC key with it and strand the secret.
+
 ## GCP deployment plan (20) — archived 2026-08-03, all five slices delivered (#20)
 
 docs/plan/20_gcp-deployment.md is archived complete. What it set out to deliver — a

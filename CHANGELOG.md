@@ -13,6 +13,57 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Changed
+
+- **The GCP deployment holds no downloaded key material at all: the GCS HMAC pair is gone**
+  ([deploy/gcp](./deploy/gcp), [deploy/helm/managed-agent-platform](./deploy/helm/managed-agent-platform),
+  #240, [plan 22](./docs/plan/22_gcs-native-blob.md) slice 2 — the plan is archived with
+  this PR). Slice 1 built the backend that needs no credential; this slice moves the
+  deployment onto it and deletes what it replaced. The chart grows a third
+  object-storage mode, `gcsObjectStorage.enabled` + `.bucket`, which emits `BLOB_BACKEND`
+  and `BLOB_BUCKET` and **no credential key whatsoever** — mutually exclusive with both the
+  bundled MinIO and `externalObjectStorage`, each rejected at render with a named `fail`
+  rather than by whichever one the template happened to read last. `deploy/gcp` follows:
+  the `map-storage` service account, the two Secret Manager containers that held the key's
+  halves, and every trace of the pair in `bootstrap.sh` are removed, and the bucket is
+  bound to the identities the three workloads already run under.
+
+  **Three bucket grants, not the two the plan predicted, and read from the code rather than
+  assumed.** The controlplane and executor Put, Get and Delete objects, so each takes
+  `roles/storage.objectUser`; the brain only ever Gets, so it takes
+  `roles/storage.objectViewer`. `objectAdmin` was considered and rejected — everything it
+  adds over `objectUser` is an object-ACL permission, and the bucket runs with uniform
+  bucket-level access, where those mean nothing.
+
+  `bootstrap.sh` drops from 313 lines to 157: with no key to materialize, the whole
+  create-once-read-once dance goes, along with its rollback trap, its `python3`
+  dependency, and the two secrets it fed. Its three-outcome version probe stays — the
+  distinction between "no version" and "could not tell" is what stops a second version
+  landing on top of a live one — and now says in its own comment that the second caller it
+  was shaped for retired here. `check_split.py`'s `MIN_PROTECTED` drops 10 → 7, which is
+  what its own failure message asks an operator to do when the foundation legitimately
+  shrinks; `google_storage_hmac_key` stays in its unrecoverable-kinds table as the guard
+  that stops one reappearing in the disposable half. One of the three stated reasons the
+  foundation/environment split exists — deleting a service account deletes its HMAC keys —
+  stopped being true, so the four passages that assert it now record it as retired instead
+  of claiming it; the split still stands on the KMS key ring, which cannot be deleted at
+  all, and on secrets as the reconciliation source.
+
+  **An existing mode-2 deployment is not migrated automatically**, because it cannot safely
+  be: the three retired resources are in Terraform state, and `foundation/`'s
+  `deletion_policy = "PREVENT"` is read from state rather than configuration, so simply
+  deleting the blocks makes a later destroy fail. [docs/deploy-gcp.md](./docs/deploy-gcp.md)
+  gains a migration section with the `terraform state rm` calls and the manual deletion
+  order — HMAC key before service account, always, since deleting the account takes its
+  keys with it and strands a secret nothing can ever read again.
+
+  Verified credential-free, which is the whole gate here: `make gcp-fmt gcp-validate
+  gcp-split-check gcp-lint` plus the three run-rather-than-read tooling tests, all four
+  chart object-storage modes rendered with every mutual-exclusion guard fired, and a new CI
+  step asserting the keyless mode reaches all three processes while emitting no credential.
+  No `terraform apply` was run and the mode-2 acceptance was not re-run — both cost money
+  and are interactive by design, so they stay an operator action.
+
 ### Fixed
 
 - **A harvested deliverable's mime no longer depends on which executor host

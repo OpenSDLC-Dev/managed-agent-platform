@@ -199,10 +199,6 @@ data "google_service_account" "executor" {
   account_id = "${var.name_prefix}-executor"
 }
 
-data "google_service_account" "storage" {
-  account_id = "${var.name_prefix}-storage"
-}
-
 # ---------------------------------------------------------------------------
 # The network. Its own VPC rather than the project's default, and that is a
 # requirement rather than tidiness: the default network is auto-mode, so its

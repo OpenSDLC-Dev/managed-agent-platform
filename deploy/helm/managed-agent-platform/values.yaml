@@ -352,6 +352,26 @@ externalObjectStorage:
   # than at startup. Leave false for a bucket the platform should create.
   bucketPrecreated: false
 
+# -- Google Cloud Storage, natively (#240). The keyless object-storage mode:
+# authentication is Application Default Credentials, which on GKE is a Workload
+# Identity binding, so there is no access key, no secret key and no endpoint —
+# nothing to distribute or rotate. Mutually exclusive with the bundled MinIO and
+# with externalObjectStorage.
+#
+# The bucket must already exist. Nothing here creates it and nothing checks for
+# it, which is precisely what keeps the deployment identity's grant to object
+# permissions only: a bucket-level read would be a bucket-level privilege. A
+# wrong name surfaces on first use, named rather than swallowed.
+#
+# Bind the identity yourself: the ServiceAccount annotations under
+# controlplane/brain/executor carry the Google service account, and that account
+# needs object access on this bucket (roles/storage.objectUser for controlplane
+# and executor, roles/storage.objectViewer for the brain, which only reads).
+# deploy/gcp/environment/iam.tf does exactly that.
+gcsObjectStorage:
+  enabled: false
+  bucket: ""
+
 # -- In-cluster OpenBao: the transit cipher for vault credential material
 # (docs/plan/12_vaults-credentials.md). Same shape and rationale as the bundled
 # Postgres and MinIO — a hand-written single-node StatefulSet, deliberately not

@@ -103,6 +103,54 @@ jobs:
           echo "$err" | grep -q 'bucketPrecreated requires region' \
             || { echo "the region-less render failed for the wrong reason: $err" >&2; exit 1; }
           echo "ok: pre-created-bucket mode"
+      - name: the keyless GCS mode carries no credential and reaches all three processes
+        run: |
+          key() { grep "^  $1:" | awk '{print $2}' | tr -d '"' | base64 -d; }
+          gcs=(--set minio.enabled=false --set gcsObjectStorage.enabled=true
+               --set gcsObjectStorage.bucket=map-blob)
+          out="$(helm template t "$CHART" -f "$VALUES" "${gcs[@]}" --show-only templates/secret.yaml)"
+          [ "$(echo "$out" | key blob-backend)" = "gcs" ] \
+            || { echo "blob-backend did not reach the Secret" >&2; exit 1; }
+          [ "$(echo "$out" | key blob-bucket)" = "map-blob" ] \
+            || { echo "blob-bucket did not reach the Secret" >&2; exit 1; }
+          # The point of #240: no downloaded credential anywhere. A Secret that
+          # still carried these would keep the thing the mode exists to delete,
+          # and nothing else in the render would complain.
+          for k in blob-access-key blob-secret-key blob-endpoint; do
+            echo "$out" | grep -q "^  $k:" \
+              && { echo "the keyless GCS mode emitted $k" >&2; exit 1; }
+          done
+          # Out of the Secret and into every process that builds a store. The
+          # secretKeyRef key is asserted, not just the variable name: the
+          # reference is optional, so a key naming nothing renders exactly like a
+          # correct one and leaves BLOB_BACKEND unset — which reads as "s3", and
+          # then the platform looks for an endpoint that is not there.
+          for tpl in controlplane brain executor; do
+            out="$(helm template t "$CHART" -f "$VALUES" "${gcs[@]}" --show-only "templates/$tpl-deployment.yaml")"
+            echo "$out" | grep -A5 'name: BLOB_BACKEND' | grep -q 'key: blob-backend' \
+              || { echo "$tpl does not read BLOB_BACKEND from the blob-backend key" >&2
+                   echo "$out" | grep -A5 'name: BLOB_BACKEND' >&2; exit 1; }
+          done
+          # Default values must not select it, or every existing install moves
+          # backend on upgrade.
+          out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/secret.yaml)"
+          echo "$out" | grep -q "^  blob-backend:" \
+            && { echo "default values selected the GCS backend" >&2; exit 1; }
+          # Ambiguity fails the render rather than picking one.
+          for combo in "--set minio.enabled=false --set externalObjectStorage.endpoint=s3:9000 --set externalObjectStorage.accessKey=a --set externalObjectStorage.secretKey=b --set externalObjectStorage.bucket=c" ""; do
+            err="$(helm template t "$CHART" -f "$VALUES" --set gcsObjectStorage.enabled=true \
+              --set gcsObjectStorage.bucket=map-blob $combo 2>&1 >/dev/null)" \
+              && { echo "GCS alongside another backend must fail the render" >&2; exit 1; }
+            echo "$err" | grep -q 'mutually exclusive' \
+              || { echo "the ambiguous render failed for the wrong reason: $err" >&2; exit 1; }
+          done
+          # A bucket is the whole configuration, so its absence is a refusal.
+          err="$(helm template t "$CHART" -f "$VALUES" --set minio.enabled=false \
+            --set gcsObjectStorage.enabled=true 2>&1 >/dev/null)" \
+            && { echo "gcsObjectStorage without a bucket must fail the render" >&2; exit 1; }
+          echo "$err" | grep -q 'requires bucket' \
+            || { echo "the bucketless render failed for the wrong reason: $err" >&2; exit 1; }
+          echo "ok: keyless GCS mode"
       - name: gate opt-in is off by default and complete when set
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
