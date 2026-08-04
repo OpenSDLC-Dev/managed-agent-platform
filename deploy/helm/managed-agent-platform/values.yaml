@@ -224,8 +224,8 @@ sandboxPlacement:
 # sandbox pods run in the release namespace, where the same Secrets answer, and
 # an operator who pointed the platform at a private registry almost always
 # pulls the sandbox image from it too. An explicit [] opts sandbox pods out.
-# Pod-level, so one setting also covers a gated session's net-setup and gate
-# images.
+# Pod-level, so one setting also covers a limited session's net-setup image and
+# a gated session's gate sidecar.
 sandboxImagePullSecrets: null
 
 # -- In-cluster Postgres. For production, disable this and point externalDatabase

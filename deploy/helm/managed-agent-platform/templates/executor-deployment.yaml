@@ -87,23 +87,26 @@ spec:
                    executor accepts silently; a missing or non-string `name` is
                    refused for the same reason the selector refuses non-strings:
                    the render error names the value, where the fallout — get on
-                   a non-map, an empty entry — would not. */}}
+                   a non-map, an empty entry — would not. The default inherits,
+                   so the error names whichever list the entry came from. */}}
             {{- $sandboxPull := .Values.sandboxImagePullSecrets }}
+            {{- $pullSrc := "sandboxImagePullSecrets" }}
             {{- if kindIs "invalid" $sandboxPull }}
             {{- $sandboxPull = .Values.imagePullSecrets }}
+            {{- $pullSrc = "imagePullSecrets" }}
             {{- end }}
             {{- with $sandboxPull }}
             {{- $names := list }}
             {{- range . }}
             {{- if not (kindIs "map" .) }}
-            {{- fail (printf "sandboxImagePullSecrets: every entry must be {name: ...}, got %v" .) }}
+            {{- fail (printf "%s: every entry must be {name: ...}, got %v" $pullSrc .) }}
             {{- end }}
             {{- $name := get . "name" }}
             {{- if or (not (kindIs "string" $name)) (eq $name "") }}
-            {{- fail (printf "sandboxImagePullSecrets: every entry needs a non-empty string name, got %v" .) }}
+            {{- fail (printf "%s: every entry needs a non-empty string name, got %v" $pullSrc .) }}
             {{- end }}
             {{- if contains "," $name }}
-            {{- fail (printf "sandboxImagePullSecrets[%s]: a Secret name may not contain ',' — it separates entries in SANDBOX_K8S_IMAGE_PULL_SECRETS" $name) }}
+            {{- fail (printf "%s[%s]: a Secret name may not contain ',' — it separates entries in SANDBOX_K8S_IMAGE_PULL_SECRETS" $pullSrc $name) }}
             {{- end }}
             {{- $names = append $names $name }}
             {{- end }}

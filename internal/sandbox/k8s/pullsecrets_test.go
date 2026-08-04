@@ -50,7 +50,7 @@ func TestParseImagePullSecrets(t *testing.T) {
 	}
 }
 
-// Every one of these is a name the API server would refuse, or a value that
+// Every one of these is a name no Secret can ever carry, or a value that
 // quietly means something other than what was written. Passed through, each
 // fails every session's image pull for the life of the deployment; refused
 // here, it fails the process once, at boot, naming the variable (#65's rule).
@@ -98,11 +98,11 @@ func TestPodSpecCarriesImagePullSecrets(t *testing.T) {
 	}
 }
 
-// A gated pod adds the net-setup init container and the gate sidecar — images
-// that may live in the same private registry as the sandbox image. Pod-level
-// ImagePullSecrets covers all containers in the pod, so the gated shape must
-// carry the same references as the plain one; losing them here would strand
-// exactly the isolated sessions the gate exists for.
+// A gated pod swaps the route-flush init container for the gate sidecar — an
+// image that may live in the same private registry as the sandbox image.
+// Pod-level ImagePullSecrets covers all containers in the pod, so the gated
+// shape must carry the same references as the plain one; losing them here
+// would strand exactly the isolated sessions the gate exists for.
 func TestImagePullSecretsApplyToAGatedPodToo(t *testing.T) {
 	refs, err := parseImagePullSecrets("regcred")
 	if err != nil {

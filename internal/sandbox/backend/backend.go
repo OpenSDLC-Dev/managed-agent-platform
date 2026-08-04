@@ -43,8 +43,10 @@ type Config struct {
 	K8sNodeSelector string
 	K8sTolerations  string
 	// k8s: the Secrets sandbox pods pull images with, comma-separated — raw here
-	// and parsed by the k8s provider like placement. Docker has no analogue: the
-	// daemon's own credential store answers pulls there.
+	// and parsed by the k8s provider like placement. No Docker counterpart is
+	// wired: the engine takes per-request client auth (X-Registry-Auth), which
+	// the platform's anonymous pull does not send, so a private image there must
+	// already be on the host.
 	K8sImagePullSecrets string
 }
 

@@ -397,8 +397,8 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 			SecurityContext:              podSecurityContext(),
 			// All three nil unless configured, so an unplaced deployment produces
 			// the pod it produced before these existed. Pull secrets sit on the
-			// pod, not a container, so one knob covers the sandbox container and
-			// a gated pod's net-setup and gate images alike.
+			// pod, not a container, so one knob covers every container the pod's
+			// shape includes — sandbox, net-setup, or gate sidecar.
 			NodeSelector:     p.nodeSelector,
 			Tolerations:      p.tolerations,
 			ImagePullSecrets: p.imagePullSecrets,

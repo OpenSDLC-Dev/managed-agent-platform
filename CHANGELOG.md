@@ -24,7 +24,8 @@ copy of an entry here.
   startup as the DNS-1123 subdomains the API server requires, refusing empties and
   duplicates, naming the variable (#65's rule, the placement precedent) — and puts
   the references on every sandbox pod at the **pod** level, so one knob also covers a
-  gated session's net-setup and gate images; nil unless configured, leaving an
+  limited session's net-setup image and a gated session's gate sidecar; nil unless
+  configured, leaving an
   unconfigured deployment's pods byte-identical. Threaded through
   `backend.Config` to both `cmd/executor` and `cmd/worker`. The chart grows
   `sandboxImagePullSecrets` (same `{name: ...}` shape as `imagePullSecrets`):
