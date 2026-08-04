@@ -29,12 +29,20 @@ type Config struct {
 	TLS       bool
 
 	// BucketPrecreated asserts that the bucket already exists, so New neither
-	// checks for it nor creates it. It is what lets a deployment identity hold
-	// object permissions only: the bucket check is a bucket-level read
-	// (storage.buckets.get on GCS, granted by roles/storage.legacyBucketReader)
-	// that a pre-provisioned deployment can only ever answer "yes", so
-	// demanding it widens the identity for nothing (#241, and
-	// docs/plan/20_gcp-deployment.md Decision 11).
+	// checks for it nor creates it. The check is a bucket-level read
+	// (storage.buckets.get on GCS, granted by roles/storage.legacyBucketReader;
+	// s3:ListBucket on AWS) that a pre-provisioned deployment can only ever
+	// answer "yes", so demanding it at startup widens the identity for nothing
+	// (#241, and docs/plan/20_gcp-deployment.md Decision 11).
+	//
+	// What that buys depends on the endpoint, and on AWS it is less than it
+	// sounds. S3 answers a GET for a missing key with 403 AccessDenied rather
+	// than 404 NoSuchKey unless the caller holds s3:ListBucket on the bucket,
+	// and blob.Store's ErrNotFound rests on that 404 — so an AWS deployment
+	// keeps s3:ListBucket whatever this setting says, and what the setting drops
+	// is s3:CreateBucket. On GCS, where roles/storage.objectAdmin already makes
+	// a missing object answer 404, it drops the bucket privilege outright, which
+	// is what it was built for.
 	//
 	// It requires Region, because the construction check is not the only
 	// bucket-level call: a client with no region resolves the bucket's location
