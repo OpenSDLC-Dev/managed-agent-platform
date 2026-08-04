@@ -103,9 +103,13 @@ copy of an entry here.
   transport. Its cover is the opt-in live tier — `RUN_LIVE_GCS_TESTS=1` plus `GCS_BUCKET`,
   under `gcpkmstest`'s contract exactly (configuration may come from `.env`, consent only
   from the environment, opted-in-but-unconfigured fails rather than skips) — which runs the
-  same suite against real Cloud Storage through the production client, under a per-run key
-  prefix it deletes afterwards. It was run: all eight subtests pass, and the bucket was
-  empty again after.
+  same suite against real Cloud Storage through the production client, under a random
+  per-run key prefix it deletes afterwards, and refuses to run at all with
+  `STORAGE_EMULATOR_HOST` set, since a live tier that can silently not be live is worse
+  than none. It carries the missing-bucket assertion too, so the ambiguity the design rests
+  on is checked against Google rather than against the fake's idea of a 404. It was run:
+  both live tests pass, all eight shared subtests included, and the bucket was empty
+  afterwards.
 
 - **The Cloud SQL Auth Proxy is a Helm value, and the brain has an identity to run one
   under** ([deploy/helm/managed-agent-platform](./deploy/helm/managed-agent-platform),

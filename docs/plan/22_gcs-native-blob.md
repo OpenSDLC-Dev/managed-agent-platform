@@ -64,7 +64,7 @@ Measured, not assumed. Everything in this section was run.
   `"storage: object name is empty"` on `NewReader` and `Delete` — not the absence sentinel.
   So `blob.Store`'s "a caller bug is not a miss" rule holds without a guard of our own.
 - **`cloud.google.com/go/storage@v1.56.0` is already the module graph's floor** (pulled in
-  by `cloud.google.com/go@v0.123.0`), and pinning that version adds 11 indirect requires
+  by `cloud.google.com/go@v0.123.0`), and pinning that version adds 12 indirect requires
   while upgrading nothing. Taking the latest instead would drag `otelgrpc` and `genproto`
   forward, which this repo's telemetry rests on. Both variants build, and both cross-build
   for `linux/arm` — the `crossbuild` gate is not a blocker.
@@ -97,7 +97,8 @@ Measured, not assumed. Everything in this section was run.
    an *affirmative* answer buys absence — a probe that fails for any other reason (a
    denial, a transport error) leaves the question open, and an open question is an error
    rather than a report that data is gone. The cost is one extra request per miss and no
-   privilege at all.
+   privilege beyond the `storage.objects.list` that `objectAdmin` already carries — nothing
+   bucket-level, which is the privilege this backend exists to do without.
 5. **Contract-tested against a pinned `fake-gcs-server` container, plus an opt-in live
    tier.** The container is symmetric with `blobtest`'s pinned MinIO and keeps the shared
    suite running in CI with no credentials and no spend. The live tier

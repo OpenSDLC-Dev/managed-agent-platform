@@ -65,17 +65,30 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 }
 
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
-	// The writer commits on Close and on nothing else, so an abandoned write
-	// leaves no object. Cancelling the context is how a started one is abandoned
-	// (Writer.CloseWithError is deprecated in favour of exactly this).
+	// The writer commits on Close and on nothing else, so returning without
+	// closing is already enough to leave no object. The child context is about
+	// the other half: an abandoned writer's upload goroutine would otherwise sit
+	// on the caller's context, so cancelling releases it (Writer.CloseWithError
+	// is deprecated in favour of exactly this). Cancelling after a *successful*
+	// Close cannot undo anything — Close waits for the commit to complete.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	w := s.bucket.Object(key).NewWriter(ctx)
 	w.ContentType = contentType
 	// CopyN, not Copy: the contract is "exactly size bytes" — a reader with
 	// fewer is an error, and bytes beyond size are never read.
+	//
+	// `err != io.EOF`, deliberately not errors.Is: io.CopyN produces the BARE
+	// sentinel and only on the short-source path, while errors.Is would also
+	// swallow any error that merely wraps it — and the writer supplies exactly
+	// those. An object past the 16 MiB chunk size uploads while CopyN is still
+	// writing, so a failed chunk PUT comes back through Write as
+	// *url.Error{Err: io.EOF} (the client retries that shape by name, so it is
+	// routine, not exotic). Under errors.Is a network fault would be discarded
+	// and reported as "reader gave N bytes, want M" — blaming the caller's
+	// stream for a transport failure, with the real cause gone.
 	n, err := io.CopyN(w, r, size)
-	if err != nil && !errors.Is(err, io.EOF) {
+	if err != nil && err != io.EOF { //nolint:errorlint // see above: the bare sentinel is the point
 		return fmt.Errorf("gcs: put %s: %w", key, err)
 	}
 	if n != size {
@@ -124,6 +137,19 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 // keeps a vanished bucket an error rather than an empty store, and so must this
 // one, or a mistyped bucket name reads as "the platform has no skills" instead
 // of as the incident it is.
+//
+// One limit this does not remove, stated rather than implied: the probe decides
+// what the 404 MEANT, not whether it really came from Cloud Storage. The client
+// turns any HTTP 404 into ErrObjectNotExist without inspecting the body
+// (storage's http_client.go does it on the read path outright), so a 404
+// manufactured somewhere in the path would still read as absence once the probe
+// confirms the bucket. The S3 backend does guard that case — it requires the
+// endpoint's own <Error> document — and the difference is the endpoint, not the
+// care taken: there, the endpoint is operator-configured, so a misrouting proxy
+// is a deployment shape someone can actually have. Here the client resolves
+// Google's own endpoint over TLS and no configuration can point it elsewhere, so
+// the guard would cost a hand-rolled response path to defend against a hop that
+// this backend does not have.
 //
 // The question is settled with a one-object listing rather than a bucket read.
 // That is the whole point: listing is storage.objects.list, which

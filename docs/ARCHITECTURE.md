@@ -384,8 +384,10 @@ Postgres schema + migrations.
 The object-storage seam (docs/plan/06_skills.md): opaque bytes at string keys, behind
 the one interface every backend must satisfy. Consumers namespace by prefix: the skills
 registry (archives at `skills/{skill_id}/{version}.zip`) and the Files registry
-(`files/{file_id}`, docs/plan/08_files.md). Only controlplane and executor ever touch it —
-the BYOC worker stays wire-only and receives blob bytes through the control plane.
+(`files/{file_id}`, docs/plan/08_files.md). Controlplane, executor and brain touch it —
+the brain since plan 21, to grade file-output rubrics against the bytes rather than the
+description. The BYOC worker does not: it stays wire-only and receives blob bytes through
+the control plane.
 
 Selection lives in the sibling `internal/blob/backend` (docs/plan/22, Decision 2), not
 here, for the structural reason `internal/secrets/backend` and `internal/sandbox/backend`
@@ -584,7 +586,8 @@ storage for skill archives, selected by `BLOB_BACKEND` via `internal/blob/backen
 the platform serves with skills unavailable — + OTel;
 `-import-anthropic-skills <checkout>` flips it into the run-once operator import, which needs
 only `DATABASE_URL` + `BLOB_*` and exits instead of serving), `brain`
-(`DATABASE_URL` + `MODEL_PROVIDERS_PATH` + lease/poll tunables + OTel), `executor`
+(`DATABASE_URL` + `MODEL_PROVIDERS_PATH` + lease/poll tunables + the same optional
+`BLOB_*`, which it reads to grade file-output rubrics against the bytes + OTel), `executor`
 (`DATABASE_URL` + `EXECUTOR_IMAGE`/`EXECUTOR_WORKDIR` + `SANDBOX_BACKEND` selection —
 `docker` default, `k8s` — via `internal/sandbox/backend` + `CONTROLPLANE_URL`/`EXECUTOR_GATE_IMAGE`/
 `SANDBOX_DOCKER_GATE_NETWORK` for the egress gate + OTel), and `worker`
