@@ -107,9 +107,11 @@ copy of an entry here.
   per-run key prefix it deletes afterwards, and refuses to run at all with
   `STORAGE_EMULATOR_HOST` set, since a live tier that can silently not be live is worse
   than none. It carries the missing-bucket assertion too, so the ambiguity the design rests
-  on is checked against Google rather than against the fake's idea of a 404. It was run:
-  both live tests pass, all eight shared subtests included, and the bucket was empty
-  afterwards.
+  on is checked against Google rather than against the fake's idea of a 404 — and that
+  assertion derives its bucket name under GCS's 63-character cap, because an over-long name
+  fails client-side validation, which is an error and not `ErrNotFound`, so the test would
+  pass without the missing-bucket path ever running. It was run: both live tests pass, all
+  eight shared subtests included, and the bucket was empty afterwards.
 
 - **The Cloud SQL Auth Proxy is a Helm value, and the brain has an identity to run one
   under** ([deploy/helm/managed-agent-platform](./deploy/helm/managed-agent-platform),
