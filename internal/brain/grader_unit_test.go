@@ -116,8 +116,8 @@ func TestContentText(t *testing.T) {
 	}
 }
 
-// inlineableMime is the gate between the executor's fixed harvest table
-// (harvestMimeByExt, internal/executor/harvest.go) and the grader's eyes:
+// inlineableMime is the gate between the platform's pinned mime table
+// (internal/mimetab, the harvest's source) and the grader's eyes:
 // only registry mimes this predicate accepts are inlined into the grading
 // prompt, and nothing ties the two packages at compile time (#264). This pins
 // the contract from the consumer side — the exact values the harvest table
