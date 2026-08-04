@@ -14,8 +14,9 @@ already authenticates as the workload itself through Workload Identity, with no 
 anywhere (docs/HISTORY.md, the mode-2 acceptance run). Cloud SQL is a third case and not a
 Workload Identity one: the as-built run reaches it over private IP with the platform's own
 non-superuser database role and its password — an operator-chosen secret, not key material
-Google issued — and the Auth Proxy path that would give it a Google identity was never
-exercised. So this plan removes the one credential Workload Identity can remove today, and
+Google issued. The Auth Proxy path that would give it a Google identity became a chart
+value in #269, but the acceptance run predates that and took the direct path, which still
+works and is still documented. So this plan removes the one credential Workload Identity can remove today, and
 leaves the database password where the deployment guide already puts it.
 
 Tracking issue: [#240](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/240),
@@ -114,10 +115,13 @@ Measured, not assumed. Everything in this section was run.
    `bootstrap.sh`'s entire key-materialization dance (roughly half the script, with its
    rollback trap) go away. Both bucket IAM grants re-point to the workloads' own Google
    service accounts.
-7. **The brain gets a ServiceAccount.** It builds a blob store
-   (`cmd/brain/main.go`) but the chart gives it no ServiceAccount to bind, a gap
-   `deploy/gcp/environment/iam.tf` already records for Cloud SQL. Workload-Identity-only
-   object storage turns that gap into a missing feature, so this plan closes it.
+7. **The brain's ServiceAccount — already there, and no longer this plan's to add.** The
+   brain builds a blob store (`cmd/brain/main.go`) while the chart gave it no
+   ServiceAccount to bind, and Workload-Identity-only object storage would have turned
+   that gap into a missing feature. #269 closed it independently while this plan's slice 1
+   was in flight: `brain-deployment.yaml` now sets `serviceAccountName`. So slice 2 binds
+   the existing identity to the bucket rather than creating one — the decision stands, its
+   work does not.
 8. **One leg of the foundation/environment split retires with the credential.** "Deleting
    a service account deletes its HMAC keys" is one of three stated reasons the durable half
    exists; it stops being true. The split still stands on the KMS key ring, which cannot be
@@ -131,8 +135,9 @@ Measured, not assumed. Everything in this section was run.
    fake-gcs test support package and the live tier, the four construction call sites, and
    the `BLOB_BACKEND` documentation. `blobtest.Run` passes unchanged, bare and through the
    metrics decorator.
-2. **The deployment.** Chart wiring for a keyless object-storage mode plus the brain
-   ServiceAccount; `deploy/gcp` drops the HMAC pair, re-points IAM to Workload Identity,
-   and shrinks `bootstrap.sh`; the guides and the split rationale follow. Credential-free
+2. **The deployment.** Chart wiring for a keyless object-storage mode, binding the
+   ServiceAccounts all three processes now have; `deploy/gcp` drops the HMAC pair, re-points
+   IAM to Workload Identity, and shrinks `bootstrap.sh`; the guides and the split rationale
+   follow. Credential-free
    Terraform checks are the gate here — a real apply and a mode-2 acceptance re-run are an
    operator action, and the PR says so rather than implying otherwise.
