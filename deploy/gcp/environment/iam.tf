@@ -126,10 +126,14 @@ resource "google_kms_crypto_key_iam_member" "executor" {
 #     "read-only assembly input". A writer's role here would be privilege the
 #     code cannot use.
 #
-# objectUser rather than objectAdmin: the extra permissions objectAdmin carries
-# are the per-object IAM ones, and this bucket sets uniform_bucket_level_access,
-# which turns object ACLs off — so they could not be exercised even by a caller
-# that wanted to. objectViewer covers the read path AND storage.objects.list,
+# objectUser rather than objectAdmin. Measured rather than assumed: objectAdmin
+# adds exactly four permissions over objectUser — objects.getIamPolicy and
+# objects.setIamPolicy, which this bucket's uniform_bucket_level_access turns off
+# so no caller could exercise them, and objects.setRetention and
+# objects.overrideUnlockedRetention, which are live but govern object retention
+# the platform never sets. Neither pair is anything the code calls, so the
+# narrower role costs nothing. objectViewer covers the read path AND
+# storage.objects.list,
 # which the backend's absence probe needs to tell a missing object from a
 # missing bucket.
 #

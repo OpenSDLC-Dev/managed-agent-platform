@@ -116,20 +116,43 @@ jobs:
           # The point of #240: no downloaded credential anywhere. A Secret that
           # still carried these would keep the thing the mode exists to delete,
           # and nothing else in the render would complain.
+          #
+          # Swept over the WHOLE release rather than the Secret alone. The claim
+          # is that the mode ships no credential, and a Secret-scoped check reads
+          # as proof of that while a value written straight into a Deployment
+          # would sail past it in plaintext. So: no credential Secret key
+          # anywhere, and no BLOB_* credential env taking a literal `value:`
+          # instead of the optional secretKeyRef the helper emits.
+          all="$(helm template t "$CHART" -f "$VALUES" "${gcs[@]}")"
           for k in blob-access-key blob-secret-key blob-endpoint; do
-            echo "$out" | grep -q "^  $k:" \
+            echo "$all" | grep -q "^  $k:" \
               && { echo "the keyless GCS mode emitted $k" >&2; exit 1; }
+          done
+          for v in BLOB_ACCESS_KEY BLOB_SECRET_KEY BLOB_ENDPOINT; do
+            echo "$all" | grep -A2 "name: $v\$" | grep -qE '^ *value:' \
+              && { echo "the keyless GCS mode gave $v a literal value" >&2
+                   echo "$all" | grep -A2 "name: $v\$" >&2; exit 1; }
           done
           # Out of the Secret and into every process that builds a store. The
           # secretKeyRef key is asserted, not just the variable name: the
           # reference is optional, so a key naming nothing renders exactly like a
           # correct one and leaves BLOB_BACKEND unset — which reads as "s3", and
           # then the platform looks for an endpoint that is not there.
+          #
+          # Both variables, because in this mode they are the whole
+          # configuration and losing either is fatal rather than degrading:
+          # internal/blob/backend fails a named backend with no bucket, so all
+          # three processes CrashLoopBackOff. The names are anchored — an
+          # unanchored BLOB_BUCKET also matches BLOB_BUCKET_PRECREATED, which
+          # this mode never emits.
           for tpl in controlplane brain executor; do
             out="$(helm template t "$CHART" -f "$VALUES" "${gcs[@]}" --show-only "templates/$tpl-deployment.yaml")"
-            echo "$out" | grep -A5 'name: BLOB_BACKEND' | grep -q 'key: blob-backend' \
-              || { echo "$tpl does not read BLOB_BACKEND from the blob-backend key" >&2
-                   echo "$out" | grep -A5 'name: BLOB_BACKEND' >&2; exit 1; }
+            for pair in BLOB_BACKEND:blob-backend BLOB_BUCKET:blob-bucket; do
+              var="${pair%%:*}"; k="${pair##*:}"
+              echo "$out" | grep -A5 "name: $var\$" | grep -q "key: $k\$" \
+                || { echo "$tpl does not read $var from the $k key" >&2
+                     echo "$out" | grep -A5 "name: $var\$" >&2; exit 1; }
+            done
           done
           # Default values must not select it, or every existing install moves
           # backend on upgrade.

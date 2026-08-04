@@ -27,8 +27,10 @@ type Config struct {
 	// Bucket is the bucket's name, which must already exist: there is no
 	// create-if-missing here, and nothing asks the bucket about itself. The
 	// permission-minimal shape #241 made optional for the S3 backend is the only
-	// shape this one has, so the deployment identity holds object permissions
-	// (roles/storage.objectAdmin) and nothing bucket-level. The cost is that a
+	// shape this one has, so the deployment identity holds object permissions and
+	// nothing bucket-level — deploy/gcp grants roles/storage.objectUser to the
+	// processes that write and roles/storage.objectViewer to the one that only
+	// reads (#240 slice 2). The cost is that a
 	// misspelled bucket or a missing IAM binding surfaces on first use rather
 	// than at startup — where it is still named, not swallowed, because absence
 	// is checked rather than assumed (see the absence method).
@@ -154,9 +156,10 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 // uses, and which the live tier refuses outright for exactly that reason.)
 //
 // The question is settled with a one-object listing rather than a bucket read.
-// That is the whole point: listing is storage.objects.list, which
-// roles/storage.objectAdmin already grants, so the answer costs no bucket-level
-// privilege — and the client turns the listing's own 404 into ErrBucketNotExist,
+// That is the whole point: listing is storage.objects.list, which every role a
+// deployment would plausibly grant here already carries — objectViewer as much as
+// objectUser or objectAdmin — so the answer costs no bucket-level privilege, and
+// the read-only identity can answer it too. The client turns the listing's own 404 into ErrBucketNotExist,
 // which the read path never produces. Only an affirmative answer buys absence: a
 // probe that fails for any other reason (a denial, a transport error) is a
 // question left open, and an open question is an error rather than a report that

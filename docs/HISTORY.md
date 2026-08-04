@@ -56,8 +56,9 @@ no `googleapi.Error` to inspect — `ErrBucketNotExist` appears only on the list
 Decision 6 said "both bucket IAM grants re-point"; reading the three binaries' actual use
 turned that into three grants, not two: `roles/storage.objectUser` for the controlplane and
 executor (Get/Put/Delete) and `roles/storage.objectViewer` for the brain, which only reads.
-`objectAdmin` was rejected — the permissions it adds beyond `objectUser` are object-ACL
-ones, meaningless under the bucket's uniform bucket-level access.
+`objectAdmin` was rejected on a measured difference: it adds exactly four permissions over
+`objectUser` — two object-IAM ones the bucket's uniform bucket-level access turns off, and
+two object-retention ones that are live but govern retention the platform never sets.
 
 **What slice 2 was verified against, and what it was not.** Its gate is credential-free:
 `make gcp-fmt gcp-validate gcp-split-check gcp-lint`, the three run-rather-than-read

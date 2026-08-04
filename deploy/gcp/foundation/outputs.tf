@@ -19,7 +19,7 @@ output "controlplane_service_account" {
 
 output "brain_service_account" {
   value       = google_service_account.brain.email
-  description = "Google service account the brain pods impersonate via Workload Identity. Needed only under the Cloud SQL Auth Proxy topology, where it holds roles/cloudsql.client and nothing else."
+  description = "Google service account the brain pods impersonate via Workload Identity. Required in mode 2 since #240: it holds roles/storage.objectViewer on the blob bucket, which the brain reads for rubric snapshots and deliverables, plus roles/cloudsql.client for the Cloud SQL Auth Proxy topology."
 }
 
 output "executor_service_account" {

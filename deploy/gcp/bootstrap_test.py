@@ -225,6 +225,29 @@ def main():
               r2.payload("map-db-password") is not None and len(r2.payload("map-db-password")) == 64,
               repr(r2.payload("map-db-password")))
 
+        # The fault the fake exists for, and the one an exit code alone cannot
+        # produce: the write COMMITS server-side and only then reports failure.
+        # The danger is a rerun treating the reported failure as "nothing was
+        # written" and adding a SECOND version — the live system would keep
+        # using the first, so the password an operator reads back is not the
+        # password the platform holds. Idempotency-by-skipping is what stops it,
+        # and this is the only scenario that puts a payload in place by a route
+        # the script does not know succeeded. #240 deleted the scenarios that
+        # used to arm this fault; the password path still needs it.
+        print("a versions-add that commits and then reports failure is not rewritten")
+        r = run(tmp, "commitfail", faults=["add.map-db-password"])
+        check("the run exits nonzero", r.code != 0, r.out)
+        committed = r.payload("map-db-password")
+        check("the payload was stored anyway",
+              committed is not None and len(committed) == 64, repr(committed))
+        check("the admin secret was never reached", r.payload("map-db-admin-password") is None)
+        r2 = run(tmp, "commitfail-rerun", reuse=r.state)
+        check("the rerun exits 0", r2.code == 0, r2.out)
+        check("the rerun leaves the committed password alone",
+              r2.payload("map-db-password") == committed)
+        check("and finishes the admin secret",
+              r2.payload("map-db-admin-password") is not None)
+
         print("a warning on a SUCCESSFUL call does not read as a missing secret")
         # gcloud merges nothing, but this script merges stderr so it can classify
         # errors -- so a success-path warning lands in the same capture as the

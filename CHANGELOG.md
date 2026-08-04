@@ -23,7 +23,12 @@ copy of an entry here.
   object-storage mode, `gcsObjectStorage.enabled` + `.bucket`, which emits `BLOB_BACKEND`
   and `BLOB_BUCKET` and **no credential key whatsoever** — mutually exclusive with both the
   bundled MinIO and `externalObjectStorage`, each rejected at render with a named `fail`
-  rather than by whichever one the template happened to read last. `deploy/gcp` follows:
+  rather than by whichever one the template happened to read last, and refused outright
+  alongside `existingSecret`, where the chart writes no Secret and the value would select
+  nothing. (Precisely: no credential *value* exists in the release. The three Deployments
+  still declare `optional: true` references to the S3 keys, because the env helper is one
+  uniform block; they resolve to unset because the Secret has no such keys.) `deploy/gcp`
+  follows:
   the `map-storage` service account, the two Secret Manager containers that held the key's
   halves, and every trace of the pair in `bootstrap.sh` are removed, and the bucket is
   bound to the identities the three workloads already run under.
@@ -31,9 +36,12 @@ copy of an entry here.
   **Three bucket grants, not the two the plan predicted, and read from the code rather than
   assumed.** The controlplane and executor Put, Get and Delete objects, so each takes
   `roles/storage.objectUser`; the brain only ever Gets, so it takes
-  `roles/storage.objectViewer`. `objectAdmin` was considered and rejected — everything it
-  adds over `objectUser` is an object-ACL permission, and the bucket runs with uniform
-  bucket-level access, where those mean nothing.
+  `roles/storage.objectViewer`. `objectAdmin` was considered and rejected, on a
+  measured difference rather than a remembered one: it adds exactly four permissions over
+  `objectUser` — `objects.getIamPolicy`/`objects.setIamPolicy`, which the bucket's uniform
+  bucket-level access turns off so nothing could exercise them, and
+  `objects.setRetention`/`objects.overrideUnlockedRetention`, which are live but govern
+  object retention the platform never sets. None of the four is anything the code calls.
 
   `bootstrap.sh` drops from 313 lines to 157: with no key to materialize, the whole
   create-once-read-once dance goes, along with its rollback trap, its `python3`
@@ -49,18 +57,36 @@ copy of an entry here.
   of claiming it; the split still stands on the KMS key ring, which cannot be deleted at
   all, and on secrets as the reconciliation source.
 
-  **An existing mode-2 deployment is not migrated automatically**, because it cannot safely
-  be: the three retired resources are in Terraform state, and `foundation/`'s
+  **An existing mode-2 deployment migrates by runbook rather than automatically.** The three
+  retired resources are in Terraform state, and `foundation/`'s
   `deletion_policy = "PREVENT"` is read from state rather than configuration, so simply
-  deleting the blocks makes a later destroy fail. [docs/deploy-gcp.md](./docs/deploy-gcp.md)
-  gains a migration section with the `terraform state rm` calls and the manual deletion
-  order — HMAC key before service account, always, since deleting the account takes its
-  keys with it and strands a secret nothing can ever read again.
+  deleting the blocks makes a later apply fail — the guard working as designed.
+  [docs/deploy-gcp.md](./docs/deploy-gcp.md) gains a migration section: the three
+  `terraform state rm` addresses, the deletion order (HMAC key before service account,
+  always, since deleting the account takes its keys with it and strands a secret nothing
+  can ever read again), and — before anything moves — the three bucket bindings added out
+  of band, because `make gcp-env-apply` adds the new grants and drops the old `map-storage`
+  ones in the *same* apply, so no ordering of the two Terraform states alone is gap-free.
+  It also says to *remove* the retired `blob-*` keys from a hand-assembled Secret rather
+  than merely stop selecting them: the chart's env helper references every key optionally,
+  so one left behind is still injected into all three pods. Terraform's `removed` blocks
+  and `deletion_policy = "ABANDON"` would each automate the state half, and the runbook
+  says why neither is used — a one-time migration would leave permanent configuration in
+  `foundation/` to serve it.
+
+  The brain's Workload Identity annotation stops being optional and three passages that
+  said otherwise are corrected. It used to exist only for the Cloud SQL Auth Proxy, so the
+  direct-database path could skip it; the brain now reads the bucket, so mode 2 needs it
+  either way. Worth stating loudly because the failure is quiet: the brain's blob reads are
+  written to degrade rather than error, so a missing annotation shows up as an unreadable
+  rubric graded against the outcome description alone, not as an outage.
 
   Verified credential-free, which is the whole gate here: `make gcp-fmt gcp-validate
   gcp-split-check gcp-lint` plus the three run-rather-than-read tooling tests, all four
   chart object-storage modes rendered with every mutual-exclusion guard fired, and a new CI
-  step asserting the keyless mode reaches all three processes while emitting no credential.
+  step asserting the keyless mode reaches all three processes — both variables, not just
+  `BLOB_BACKEND` — while emitting no credential anywhere in the release, not merely in the
+  Secret.
   No `terraform apply` was run and the mode-2 acceptance was not re-run — both cost money
   and are interactive by design, so they stay an operator action.
 
