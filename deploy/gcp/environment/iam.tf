@@ -102,12 +102,17 @@ resource "google_kms_crypto_key_iam_member" "executor" {
 }
 
 # ---------------------------------------------------------------------------
-# GCS. Two roles, and the second is not belt-and-braces: s3.New calls
-# BucketExists unconditionally before any object work
-# (internal/blob/s3/s3.go), minio-go issues that as HEAD Bucket, and GCS maps it
-# to storage.buckets.get — which roles/storage.objectAdmin does NOT grant. An
-# identity holding only objectAdmin fails at construction, before it ever
-# touches an object.
+# GCS. Two roles, and the second is not belt-and-braces: s3.New checks the
+# bucket before any object work (internal/blob/s3/s3.go), minio-go issues that
+# as HEAD Bucket, and GCS maps it to storage.buckets.get — which
+# roles/storage.objectAdmin does NOT grant. An identity holding only objectAdmin
+# fails at construction, before it ever touches an object.
+#
+# That check is skippable since #241 (BLOB_BUCKET_PRECREATED), which would drop
+# this grant — but only alongside an explicit BLOB_REGION, and whether GCS's S3
+# XML API accepts an arbitrary SigV4 region scope for a bucket in var.region is
+# unmeasured. This deployment is moving off the S3 path entirely instead (#240),
+# so the grant stays until it does.
 #
 # Bound on the bucket rather than the project, so the identity can reach this
 # bucket and no other.

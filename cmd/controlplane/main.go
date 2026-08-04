@@ -13,6 +13,11 @@
 //	                      required with BLOB_ENDPOINT
 //	BLOB_REGION           optional bucket region
 //	BLOB_TLS              "true" for https to the endpoint (default plain)
+//	BLOB_BUCKET_PRECREATED  "true" when the bucket is provisioned out of band:
+//	                      startup neither checks for it nor creates it, so the
+//	                      identity needs object permissions only. Needs
+//	                      BLOB_REGION set, or the first object request resolves
+//	                      the bucket location and needs that privilege anyway
 //	SECRETS_BACKEND       secrets cipher for vault credential material
 //	                      (docs/plan/12): "openbao", "local", "gcpkms", or
 //	                      empty to deploy without one (vault credential

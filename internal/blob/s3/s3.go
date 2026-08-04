@@ -25,8 +25,52 @@ type Config struct {
 	AccessKey string
 	SecretKey string
 	Bucket    string
-	Region    string // optional; some S3 endpoints require it on bucket create
+	Region    string // some S3 endpoints require it on bucket create; required by BucketPrecreated
 	TLS       bool
+
+	// BucketPrecreated asserts that the bucket already exists, so New neither
+	// checks for it nor creates it. The check is a bucket-level read
+	// (storage.buckets.get on GCS, granted by roles/storage.legacyBucketReader;
+	// s3:ListBucket on AWS) that a pre-provisioned deployment can only ever
+	// answer "yes", so demanding it at startup widens the identity for nothing
+	// (#241, and docs/plan/20_gcp-deployment.md Decision 11).
+	//
+	// What that buys depends on the endpoint, and on AWS it is less than it
+	// sounds. S3 answers a GET for a missing key with 403 AccessDenied rather
+	// than 404 NoSuchKey unless the caller holds s3:ListBucket on the bucket,
+	// and blob.Store's ErrNotFound rests on that 404 — so an AWS deployment
+	// keeps s3:ListBucket whatever this setting says, and what the setting drops
+	// is s3:CreateBucket. On GCS, where roles/storage.objectAdmin already makes
+	// a missing object answer 404, it drops the bucket privilege outright, which
+	// is what it was built for.
+	//
+	// It requires Region, because the construction check is not the only
+	// bucket-level call: a client with no region resolves the bucket's location
+	// before the first object request and caches it (bucket-cache.go), so the
+	// mode would trade a bucket call at startup for one at first use. New
+	// rejects the pair rather than half-keeping the promise. The requirement is
+	// deliberately blunt — minio-go does derive a region from an AWS regional
+	// endpoint's own hostname, so a few endpoints would have been safe without
+	// one — because "set the region" is a rule an operator can follow and
+	// "set it unless your endpoint spells it out" is not. The region must also be the *right* one: minio-go recovers from
+	// a wrong region only while its own is empty (api.go's
+	// AuthorizationHeaderMalformed retry), so a mistyped one now fails the
+	// first object request instead of self-correcting.
+	//
+	// One endpoint is outside the promise. Against an Amazon endpoint with an
+	// S3 Express directory bucket, minio-go mints session credentials for every
+	// object request — a bucket-root GET ?session (api.go, create-session.go) —
+	// which needs s3express:CreateSession on the bucket. That call is the
+	// client's, not this package's, and it is made with or without this
+	// setting; the mode simply cannot remove it.
+	//
+	// The check is also the one call New makes, so this is a trade: with it
+	// skipped, an unreachable endpoint, a wrong credential, a wrong region or a
+	// misspelled bucket surfaces on first use rather than at startup. That is
+	// the right way round for a deployment whose bucket is provisioned out of
+	// band, and the wrong one for the bundled MinIO, which starts empty — hence
+	// a per-deployment setting rather than a change of default.
+	BucketPrecreated bool
 }
 
 // Store implements blob.Store against one S3 bucket.
@@ -38,10 +82,17 @@ type Store struct {
 // New connects and ensures the bucket exists, so every later operation can
 // assume it (the bundled MinIO starts empty; creating the bucket here keeps
 // deployment free of a separate bootstrap step). Idempotent across processes:
-// two racing creators both succeed.
+// two racing creators both succeed. Config.BucketPrecreated takes the operator's
+// word for that instead, and New then issues no request at all — see the field
+// for what that does and does not promise about the object work that follows.
 func New(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Endpoint == "" || cfg.Bucket == "" {
 		return nil, errors.New("s3: endpoint and bucket are required")
+	}
+	if cfg.BucketPrecreated && cfg.Region == "" {
+		return nil, errors.New("s3: a pre-created bucket needs an explicit region, " +
+			"or the first object request resolves the bucket's location — the " +
+			"bucket-level call the mode exists to stop making")
 	}
 	// minio-go's own default transport, wrapped so an error response reaches
 	// the library saying what the endpoint meant (see endpointWord). It has to
@@ -61,15 +112,17 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("s3: client: %w", err)
 	}
-	exists, err := client.BucketExists(ctx, cfg.Bucket)
-	if err != nil {
-		return nil, fmt.Errorf("s3: check bucket %q: %w", cfg.Bucket, err)
-	}
-	if !exists {
-		err := client.MakeBucket(ctx, cfg.Bucket, minio.MakeBucketOptions{Region: cfg.Region})
-		// Losing the create race means another process made it: the goal state.
-		if err != nil && !alreadyOwned(err) {
-			return nil, fmt.Errorf("s3: create bucket %q: %w", cfg.Bucket, err)
+	if !cfg.BucketPrecreated {
+		exists, err := client.BucketExists(ctx, cfg.Bucket)
+		if err != nil {
+			return nil, fmt.Errorf("s3: check bucket %q: %w", cfg.Bucket, err)
+		}
+		if !exists {
+			err := client.MakeBucket(ctx, cfg.Bucket, minio.MakeBucketOptions{Region: cfg.Region})
+			// Losing the create race means another process made it: the goal state.
+			if err != nil && !alreadyOwned(err) {
+				return nil, fmt.Errorf("s3: create bucket %q: %w", cfg.Bucket, err)
+			}
 		}
 	}
 	return &Store{client: client, bucket: cfg.Bucket}, nil
