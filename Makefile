@@ -95,13 +95,16 @@ verify: build crossbuild vet fmt-check test cover-gate
 #     value); the endpoint itself still comes from .env.
 #   - No -coverprofile: it would overwrite the coverage.out that cover-gate
 #     grades, and the eval packages are test-only besides.
-#   - 60m because a trial waits on a real model and real containers; the per-turn
-#     timeout inside the harness is the real guard, this is the outer backstop.
+#   - 120m because a trial waits on a real model and real containers; the
+#     per-turn timeout inside the harness is the real guard, this is the outer
+#     backstop — sized so the worst case of every task's own budget (5m per
+#     ordinary turn, more for an outcome loop) still fits without the test
+#     binary panicking mid-trial and losing the report.
 #
 # Artifacts land in evals/artifacts/ (gitignored): report.json, summary.md, and
 # one transcript per failed trial.
 eval:
-	RUN_EVALS=1 go test -count=1 -v -timeout 60m ./evals/...
+	RUN_EVALS=1 go test -count=1 -v -timeout 120m ./evals/...
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP

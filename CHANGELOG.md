@@ -89,7 +89,17 @@ copy of an entry here.
   well-formedness, projection/log agreement, and the harvest publishing the deliverable
   to the files registry. Verdict-vs-ground-truth checks are class Either: a wrong
   verdict may be grader-model drift or our assembly starving it, and the Platform
-  checks alongside pin the halves that are unambiguously ours.
+  checks alongside pin the halves that are unambiguously ours. Review hardening on
+  the same PR: a `revision-feedback-delivered` grader (a dead feedback injection
+  also ends `max_iterations_reached`, which the terminal check alone would green);
+  the harvest check is vacuous unless the outcome settled `satisfied` (a file first
+  written in the post-terminal acknowledgment turn correctly has no registry row);
+  the outcome turn's budget scales with `max_iterations` instead of a flat
+  multiplier, and `make eval`'s outer backstop rises to 120m to fit the grown
+  worst case; the report's token totals now include the grader's own spend (it
+  rides `span.outcome_evaluation_end`, which `sumTokens` never read); and the
+  transcript-only outcome graders and the `define_outcome` wire rendering gained
+  offline unit tests alongside the suite's existing ones.
 
 - **The Cloud SQL Auth Proxy is a Helm value, and the brain has an identity to run one
   under** ([deploy/helm/managed-agent-platform](./deploy/helm/managed-agent-platform),

@@ -93,6 +93,10 @@ func outcomeRevise() Task {
 			// is perfectly applicable — it just is not met yet).
 			OutcomeCycleResult(0, "needs_revision", Either),
 			OutcomeTerminalIn([]string{"satisfied", "max_iterations_reached"}, Either),
+			// The terminal check alone would green a dead feedback chain (a
+			// broken loop also ends max_iterations_reached); this is the check
+			// that the feedback actually moved the agent.
+			RevisionFeedbackDelivered(deliverable, token, Either),
 			OutcomeProjectionSettled(Platform),
 		},
 	}
@@ -143,16 +147,28 @@ func OutcomeCycleRan(class Class) Grader {
 			if len(ends) == 0 {
 				return fmt.Errorf("%d start(s) but no span.outcome_evaluation_end: a cycle began and never settled", len(starts))
 			}
+			// Empty ids red rather than match: a start that lost its id and an
+			// end that lost its reference would otherwise pair up vacuously —
+			// exactly the span-rendering regression this check exists to catch.
 			startIDs := map[string]bool{}
 			for _, s := range starts {
 				id, _ := s["id"].(string)
+				if id == "" {
+					return fmt.Errorf("a span.outcome_evaluation_start carries no id")
+				}
 				startIDs[id] = true
 			}
 			for _, e := range ends {
 				ref, _ := e["outcome_evaluation_start_id"].(string)
+				if ref == "" {
+					return fmt.Errorf("an end event carries no outcome_evaluation_start_id")
+				}
 				if !startIDs[ref] {
 					return fmt.Errorf("end event references start %q, which is not on the log", ref)
 				}
+			}
+			if _, ok := ends[0]["iteration"].(float64); !ok {
+				return fmt.Errorf("first end event carries no iteration field")
 			}
 			if it := endIteration(ends[0]); it != 0 {
 				return fmt.Errorf("first evaluation cycle is numbered iteration %d, want 0", it)
@@ -211,6 +227,13 @@ func OutcomeTerminalIn(results []string, class Class) Grader {
 // have settled satisfied — anything else is the grader failing strict. It is
 // vacuous when the deliverable is wrong or absent (the model never earned a
 // satisfied; the file grader alongside reds that half).
+//
+// It reads the live sandbox, not the harvested snapshot the grader judged, on
+// purpose: a red here is either the grader drifting OR a harvest that starved
+// it (including a file first written in the post-terminal acknowledgment turn,
+// after the last harvest) — indistinguishable from the transcript, which is
+// what Either means. Gating on the registry instead would green a broken
+// harvest.
 func GraderVerdictMatchesDeliverable(path, token string, class Class) Grader {
 	return Grader{
 		Name:  "grader-verdict-matches-deliverable",
@@ -228,6 +251,42 @@ func GraderVerdictMatchesDeliverable(path, token string, class Class) Grader {
 			if got := endResult(last); got != "satisfied" {
 				return fmt.Errorf("the deliverable carries its required token, yet the outcome settled %q (explanation: %.200s)",
 					got, endExplanation(last))
+			}
+			return nil
+		},
+	}
+}
+
+// RevisionFeedbackDelivered is the feedback-chain ground truth: after any end
+// event whose result is literally needs_revision (so a revision turn certainly
+// followed) and whose explanation names the required token, the deliverable
+// must contain that token. A dead feedback injection (the explanation never
+// re-entering the agent's conversation) ends max_iterations_reached with the
+// deliverable still tokenless — which the terminal check alone would accept.
+// Vacuous when no needs_revision explanation named the token: a grader that
+// withheld it left the agent nothing to follow, so delivery cannot be judged.
+func RevisionFeedbackDelivered(path, token string, class Class) Grader {
+	return Grader{
+		Name:  "revision-feedback-delivered",
+		Class: class,
+		Check: func(t *testing.T, tr *Trial) error {
+			tok := tr.fill(token)
+			named := false
+			for _, e := range eventsOfType(tr, "span.outcome_evaluation_end") {
+				if endResult(e) == "needs_revision" && strings.Contains(endExplanation(e), tok) {
+					named = true
+					break
+				}
+			}
+			if !named {
+				return nil
+			}
+			b, err := tr.readFile(t, tr.fill(path))
+			if err != nil {
+				return fmt.Errorf("feedback named the token %s but the deliverable is unreadable afterwards: %v", tok, err)
+			}
+			if !strings.Contains(string(b), tok) {
+				return fmt.Errorf("feedback named the token %s, a revision turn ran, and the deliverable still lacks it", tok)
 			}
 			return nil
 		},
@@ -270,13 +329,21 @@ func RubricConfidential(token string, class Class) Grader {
 // The walk, the registry write, and the GET /v1/files exposure are all
 // platform machinery (docs/DIVERGENCES.md, "The outputs harvest"): the file
 // sitting in the sandbox with no registry row is ours. Vacuous when the
-// sandbox file is absent — the model never wrote it, and the grader always
-// runs against whatever the harvest last published.
+// sandbox file is absent (the model never wrote it) — and vacuous unless the
+// outcome settled satisfied, because a harvest only runs on a settlement that
+// schedules grading: a file first written in the post-terminal acknowledgment
+// turn correctly has no row, and only a satisfied verdict proves the grader
+// saw the deliverable through the registry. The non-satisfied broken-harvest
+// case is the Either verdict grader's to surface.
 func HarvestedDeliverable(filename string, class Class) Grader {
 	return Grader{
 		Name:  "harvested-deliverable",
 		Class: class,
 		Check: func(t *testing.T, tr *Trial) error {
+			ends := eventsOfType(tr, "span.outcome_evaluation_end")
+			if len(ends) == 0 || endResult(ends[len(ends)-1]) != "satisfied" {
+				return nil
+			}
 			name := tr.fill(filename)
 			if _, err := tr.readFile(t, "/mnt/session/outputs/"+name); err != nil {
 				return nil

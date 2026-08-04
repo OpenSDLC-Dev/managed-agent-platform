@@ -47,13 +47,13 @@ jobs:
     # a nightly unattended job means the job waits for a human every night, which
     # is precisely the regression net this workflow exists to avoid needing.
     environment: evals
-    # `make eval` caps the test binary at 60m, and that is the timeout worth
+    # `make eval` caps the test binary at 120m, and that is the timeout worth
     # hitting: it panics naming the trial that hung, and every trial that had
     # already finished is on disk — the suite flushes its artifacts after each
     # trial rather than at the end, precisely because that panic never returns
-    # from m.Run. This 75m is only the outer backstop and must stay above the
-    # 60m, or the job would be killed before the publishing steps below run.
-    timeout-minutes: 75
+    # from m.Run. This 135m is only the outer backstop and must stay above the
+    # 120m, or the job would be killed before the publishing steps below run.
+    timeout-minutes: 135
     steps:
       # persist-credentials: false because nothing here pushes. The default
       # leaves GITHUB_TOKEN in a credentials file wired into the job's git

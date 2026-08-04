@@ -19,11 +19,19 @@ import (
 // exists to stop a hung run, not to measure the agent.
 const turnTimeout = 5 * time.Minute
 
-// outcomeTurnTimeout bounds a user.define_outcome → idle round trip, which is
-// a whole outcome loop rather than one turn: agent work, an outputs harvest
-// and a grader call per cycle, times the revision cycles max_iterations
-// allows. The ordinary turn budget was never sized for that.
-const outcomeTurnTimeout = 2 * turnTimeout
+// outcomeTurnBudget bounds a user.define_outcome → idle round trip, which is
+// a whole outcome loop rather than one turn: up to MaxIterations agent turns
+// with an outputs harvest and a grader call each, plus the acknowledgment
+// turn a max_iterations_reached appends — so the budget scales with the
+// cycles the outcome allows instead of pretending the loop is one turn. The
+// server defaults max_iterations to 3 when the event omits it.
+func outcomeTurnBudget(o *Outcome) time.Duration {
+	cycles := o.MaxIterations
+	if cycles == 0 {
+		cycles = 3
+	}
+	return time.Duration(cycles+1) * turnTimeout
+}
 
 // maxConfirmRounds caps how many requires_action pauses one turn may raise before
 // the harness gives up. Our permission tasks gate a single call, so one round is
@@ -88,7 +96,7 @@ type Turn struct {
 	// user.message (Message is then unused). The platform's whole outcome loop
 	// — agent work, outputs harvest, grader call, any revision cycles — runs
 	// to its terminal verdict before the session idles, so an outcome turn
-	// still produces exactly one idle; it just takes outcomeTurnTimeout to
+	// still produces exactly one idle; it just takes outcomeTurnBudget to
 	// arrive rather than turnTimeout.
 	Outcome *Outcome
 }
@@ -277,10 +285,10 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, turn Turn, tr *Tria
 	// One deadline for the whole turn, not one per await: a model that re-pauses
 	// repeatedly cannot stretch the turn to maxConfirmRounds × turnTimeout and slip
 	// past the suite timeout before the round cap fires. An outcome turn gets the
-	// loop-sized budget instead (see outcomeTurnTimeout).
+	// loop-sized budget instead (see outcomeTurnBudget).
 	budget := turnTimeout
 	if turn.Outcome != nil {
-		budget = outcomeTurnTimeout
+		budget = outcomeTurnBudget(turn.Outcome)
 	}
 	deadline := time.Now().Add(budget)
 	for {
