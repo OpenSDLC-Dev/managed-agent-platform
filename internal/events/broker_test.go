@@ -62,6 +62,36 @@ func drainWakes(sub *events.Subscription) {
 	}
 }
 
+// TestWorkChannelWakesEnvironmentKeyedSubscriber pins the broker's third
+// channel (#74): a map_work_items NOTIFY carrying an environment id wakes
+// exactly the subscribers on that key — the work API's long poll subscribes
+// with the environment id where SSE subscribes with the session id — and a
+// NOTIFY for another environment does not cross over.
+func TestWorkChannelWakesEnvironmentKeyedSubscriber(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	broker := events.NewBroker(pool)
+	envA, envB := domain.NewID("env"), domain.NewID("env")
+	subA := subscribeReady(t, broker, envA)
+	subB := subscribeReady(t, broker, envB)
+	drainWakes(subA)
+	drainWakes(subB)
+
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `SELECT pg_notify('map_work_items', $1)`,
+		`{"environment_id":"`+envA.String()+`"}`); err != nil {
+		t.Fatal(err)
+	}
+	waitWake(t, subA)
+	// Per-connection delivery is ordered, so once subA's wake (from the only
+	// NOTIFY sent) has arrived, any stray cross-environment wake for subB
+	// would already be buffered — its absence now is meaningful, not a race.
+	select {
+	case <-subB.Wake():
+		t.Error("a work NOTIFY for another environment woke this subscriber")
+	default:
+	}
+}
+
 func TestSubscribeWakesOnAppend(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)

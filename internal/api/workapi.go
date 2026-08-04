@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
@@ -23,6 +25,11 @@ const defaultReclaimMs = 5000
 // int large enough to overflow time.Duration would wrap negative — a past
 // reservation that defeats the soft handout. Clamping closes both.
 const maxReclaimMs = 600_000 // 10 minutes
+
+// maxBlockMs caps block_ms at the reference server's ceiling: the SDK's own
+// work poller documents that "the server caps this at 999" and sends exactly
+// 999 (anthropic-sdk-go lib/environments/poller.go).
+const maxBlockMs = 999
 
 // workData is a work item's payload. For every self-hosted work item it is a
 // reference to the session the worker attaches to — the tool_use events the
@@ -91,13 +98,26 @@ func toWire(w *queue.Work) workWire {
 // wire body: toWire deliberately omits it (it lives in a dedicated column, out
 // of the client-facing metadata namespace).
 //
-// block_ms is accepted but not yet honoured: this is a non-blocking poll that
-// returns immediately, and the reference client already spaces empty polls with
-// a client-side jitter sleep, so the protocol is unchanged — only chattier.
-// True long-poll (hold the request open on a work_items NOTIFY) is a later
-// enhancement.
+// block_ms (validated in blockWindow) holds an empty poll open: the handler
+// subscribes to the broker keyed by the environment id before the first poll —
+// so an enqueue committed once coverage is active can never slip between poll
+// and wait — then loops poll → wait until a work-items NOTIFY (fired by
+// queue.Enqueue), the window's deadline, or the client disconnecting ends it.
+// The deadline arm polls once more before answering null, because a wake can
+// race the timer. Availability that arrives without an enqueue (a lapsed
+// reservation or lease reclaim) has no NOTIFY and is found by the next poll —
+// the window is capped at 999ms, so that discovery is at most one window late,
+// and the reference client spaces its empty polls with a jitter sleep besides.
+// The broker's listener is only held while subscribers exist, so a lone idle
+// worker cycles the LISTEN connection once per poll — accepted: any concurrent
+// subscriber (another poll, an SSE stream) keeps it alive.
 func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 	envID, _, err := s.workScope(r) // poll has no work_id path value; ignore it
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	block, err := blockWindow(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -111,22 +131,79 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 			slog.WarnContext(r.Context(), "record worker poll", "environment", envID, "error", err)
 		}
 	}
-	item, err := s.queue.Poll(r.Context(), envID, reclaimWindow(r))
-	if err != nil {
-		writeError(w, r, err)
-		return
+	reclaim := reclaimWindow(r)
+	deadline := time.Now().Add(block)
+	var sub *events.Subscription
+	if block > 0 {
+		sub = s.broker.Subscribe(envID)
+		defer sub.Close()
+		// Wait for LISTEN coverage before the first poll, bounded by the
+		// window: a broker that cannot establish coverage degrades this to a
+		// plain timed wait instead of holding the request past its window.
+		readyCtx, cancel := context.WithDeadline(r.Context(), deadline)
+		_ = s.broker.Ready(readyCtx)
+		cancel()
 	}
-	if item == nil {
-		writeJSON(w, http.StatusOK, nil) // empty queue → 200 with a null body
-		return
+	for {
+		item, err := s.queue.Poll(r.Context(), envID, reclaim)
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		if item != nil {
+			// TraceContext holds only the W3C keys telemetry.Inject wrote
+			// (traceparent, optional tracestate); Set canonicalises them, and
+			// the worker's Header.Get canonicalises to match.
+			for k, v := range item.TraceContext {
+				w.Header().Set(k, v)
+			}
+			writeJSON(w, http.StatusOK, toWire(item))
+			return
+		}
+		remaining := time.Until(deadline)
+		if sub == nil || remaining <= 0 {
+			writeJSON(w, http.StatusOK, nil) // empty queue → 200 with a null body
+			return
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-r.Context().Done():
+			timer.Stop()
+			writeJSON(w, http.StatusOK, nil) // client gone; the write is moot
+			return
+		case <-timer.C:
+			// Deadline: loop for one final poll (a wake can race the timer),
+			// which the remaining <= 0 branch then answers.
+		case <-sub.Wake():
+			timer.Stop()
+		}
 	}
-	// TraceContext holds only the W3C keys telemetry.Inject wrote (traceparent,
-	// optional tracestate); Set canonicalises them, and the worker's Header.Get
-	// canonicalises to match.
-	for k, v := range item.TraceContext {
-		w.Header().Set(k, v)
+}
+
+// blockWindow reads block_ms — how long an empty poll is held open before
+// answering null. Absent means non-blocking (the wire default). Unlike the
+// reclaim knob this one is validated: the SDK records that the reference
+// rejects an explicit 0 (non-blocking is expressed by omission —
+// anthropic-sdk-go lib/environments/poller.go), so zero, negative, empty
+// (present-but-valueless, which is not omission), unparseable, and repeated
+// values are 400; an over-cap value is clamped to the server ceiling the same
+// source documents.
+func blockWindow(r *http.Request) (time.Duration, error) {
+	vs, ok := r.URL.Query()["block_ms"]
+	if !ok {
+		return 0, nil
 	}
-	writeJSON(w, http.StatusOK, toWire(item))
+	if len(vs) != 1 {
+		return 0, errInvalid("block_ms must be given at most once")
+	}
+	n, err := strconv.Atoi(vs[0])
+	if err != nil || n < 1 {
+		return 0, errInvalid("block_ms must be an integer between 1 and %d", maxBlockMs)
+	}
+	if n > maxBlockMs {
+		n = maxBlockMs
+	}
+	return time.Duration(n) * time.Millisecond, nil
 }
 
 // listWork lists the environment's work items (GET .../work), newest first, in

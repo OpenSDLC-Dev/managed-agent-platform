@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -153,7 +154,18 @@ func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, 
 	if err != nil {
 		return false, fmt.Errorf("queue: enqueue %s for %s: %w", kind, sessionID, err)
 	}
-	return tag.RowsAffected() == 1, nil
+	created := tag.RowsAffected() == 1
+	// A committed tool_exec item may have a worker long-polling for it: ride
+	// the work-items NOTIFY on the caller's handle — inside a transaction it
+	// is delivered on commit — so the work API's blocked poll re-polls right
+	// away (#74). Only tool_exec, the one kind Poll serves, wakes anyone;
+	// the executor- and brain-claimed kinds are pulled on their own cadence.
+	if created && kind == ToolExec {
+		if err := events.NotifyWorkEnqueued(ctx, db, envID); err != nil {
+			return false, fmt.Errorf("queue: enqueue %s for %s: notify: %w", kind, sessionID, err)
+		}
+	}
+	return created, nil
 }
 
 // traceContextArg captures the active span's W3C trace context (traceparent/

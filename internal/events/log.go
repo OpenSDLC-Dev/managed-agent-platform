@@ -16,16 +16,43 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Notification channels shared by every control-plane replica. Payloads carry
-// the session id (and for frames the frame itself); LISTEN is server-wide, so
-// one listening connection per process serves every subscriber.
+// the subscription key — the session id, or for work items the environment id
+// (and for frames the frame itself); LISTEN is server-wide, so one listening
+// connection per process serves every subscriber.
 const (
 	channelEvents = "map_session_events"
 	channelFrames = "map_session_frames"
+	channelWork   = "map_work_items"
 )
+
+// Execer is the single pgx method NotifyWorkEnqueued needs, satisfied by a
+// pool and a transaction alike, so the NOTIFY can join the caller's commit.
+type Execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// NotifyWorkEnqueued fires the work-items wake for one environment — the
+// producer half of the work API's long poll (#74), which subscribes to the
+// broker keyed by the environment id. It runs on the caller's db handle:
+// inside a transaction Postgres delivers the NOTIFY only on commit, so a
+// subscriber never wakes for a row its re-poll cannot yet see. The payload is
+// just a pointer, like the events channel's — the woken poll re-reads the
+// queue.
+func NotifyWorkEnqueued(ctx context.Context, db Execer, envID domain.ID) error {
+	payload, err := json.Marshal(struct {
+		EnvironmentID domain.ID `json:"environment_id"`
+	}{envID})
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `SELECT pg_notify($1, $2)`, channelWork, string(payload))
+	return err
+}
 
 // Sentinel errors the API layer maps onto wire error envelopes.
 var (

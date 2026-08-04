@@ -32,9 +32,10 @@ const tracerName = "github.com/OpenSDLC-Dev/managed-agent-platform/internal/work
 const noHeartbeat = "NO_HEARTBEAT"
 
 // pollBlockMs is the long-poll window the worker requests. The reference sends
-// 999 (the server's cap); our control plane's poll returns immediately (it does
-// not yet honour block_ms), so EmptyPollSleep paces empty polls client-side.
-// Sending it keeps the request wire-identical to the reference.
+// 999 (the server's cap), and our control plane holds an empty poll open up to
+// the window, ending the wait early on a work-items NOTIFY (#74);
+// EmptyPollSleep still spaces the polls after an empty answer, as the
+// reference client's own jitter sleep does.
 const pollBlockMs = 999
 
 const (
@@ -64,8 +65,10 @@ type Config struct {
 	// the executor does; the zero value hardens nothing, so a test builds a
 	// Config without acquiring a limit it did not ask for.
 	Hardening sandbox.Hardening
-	// EmptyPollSleep is the wait between empty polls (default 1s). Our poll is
-	// non-blocking, so this — not block_ms — spaces reconnections.
+	// EmptyPollSleep is the wait between empty polls (default 1s), on top of
+	// the server-side block_ms hold — kept because the reference client
+	// sleeps between empty polls the same way with block_ms set, so an idle
+	// worker's cadence stays wire-identical: one poll per block + sleep.
 	EmptyPollSleep time.Duration
 	// HeartbeatInterval, when > 0, fixes the heartbeat cadence; otherwise it is
 	// derived from each heartbeat response's ttl (ttl/2, clamped to
@@ -142,8 +145,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 		fails = 0
 		if work == nil {
-			// Our poll is non-blocking, so space empty polls client-side; the
-			// jitter spreads a fleet's reconnections rather than synchronizing them.
+			// The server already held the poll for block_ms; the jittered sleep
+			// on top matches the reference client and spreads a fleet's
+			// reconnections rather than synchronizing them.
 			if sleep(ctx, jitter(w.cfg.EmptyPollSleep)) != nil {
 				return nil
 			}

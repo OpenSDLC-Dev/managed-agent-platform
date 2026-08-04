@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 
@@ -35,7 +36,13 @@ func selfHostedWorker(t *testing.T, s *tserver, key string) (envID, sessionID st
 
 func (s *tserver) poll(t *testing.T, envID string, headers map[string]string) (*http.Response, string) {
 	t.Helper()
-	res := s.doRaw(http.MethodGet, "/v1/environments/"+envID+"/work/poll", nil, headers)
+	return s.pollQuery(t, envID, "", headers)
+}
+
+// pollQuery polls with an explicit query string (e.g. "?block_ms=999").
+func (s *tserver) pollQuery(t *testing.T, envID, query string, headers map[string]string) (*http.Response, string) {
+	t.Helper()
+	res := s.doRaw(http.MethodGet, "/v1/environments/"+envID+"/work/poll"+query, nil, headers)
 	raw, _ := io.ReadAll(res.Body)
 	res.Body.Close()
 	return res, string(raw)
@@ -352,6 +359,129 @@ func TestWorkPollClampsHugeReclaim(t *testing.T) {
 	}
 	if strings.TrimSpace(raw2) != "null" {
 		t.Fatalf("second poll re-handed-out a reserved item (reclaim overflow not clamped): %q", raw2)
+	}
+}
+
+// TestWorkPollBlockMsWakesOnMidWaitEnqueue pins the long poll (#74): a poll
+// carrying block_ms holds an empty queue's request open and returns the item
+// as soon as a mid-wait enqueue commits — well before the window lapses, which
+// is what distinguishes the NOTIFY wake from the deadline's final re-poll —
+// with the enqueue-time trace context on the response headers, exactly as an
+// immediate hit carries it.
+func TestWorkPollBlockMsWakesOnMidWaitEnqueue(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-block-wake"
+	envID, sessionID := selfHostedWorker(t, s, key)
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0xaa, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19},
+		SpanID:     trace.SpanID{0x0a, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		TraceFlags: trace.FlagsSampled,
+	})
+	enqueued := make(chan error, 1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_, err := queue.New(s.pool).Enqueue(
+			trace.ContextWithSpanContext(context.Background(), sc),
+			s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec)
+		enqueued <- err
+	}()
+
+	start := time.Now()
+	res, raw := s.pollQuery(t, envID, "?block_ms=999", map[string]string{"Authorization": "Bearer " + key})
+	elapsed := time.Since(start)
+	if err := <-enqueued; err != nil {
+		t.Fatalf("mid-wait enqueue: %v", err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("poll status = %d, want 200 (body %q)", res.StatusCode, raw)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		t.Fatalf("decode work: %v (body %q)", err, raw)
+	}
+	if id, _ := body["id"].(string); !domain.ID(id).HasPrefix("work") {
+		t.Fatalf("long poll returned %q, want the mid-wait enqueued work item", raw)
+	}
+	// A deadline return would land at ~999ms or later; the wake lands right
+	// after the ~100ms enqueue. The wide margin keeps a loaded CI honest.
+	if elapsed >= 900*time.Millisecond {
+		t.Errorf("long poll took %v, want an early NOTIFY wake well under the 999ms window", elapsed)
+	}
+	if want := fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID()); res.Header.Get("traceparent") != want {
+		t.Errorf("woken poll traceparent = %q, want %q (the wake path must emit headers like an immediate hit)",
+			res.Header.Get("traceparent"), want)
+	}
+}
+
+// TestWorkPollBlockMsExpiresToNull pins the deadline half of the long poll: an
+// idle queue's poll is held the full block_ms and then answers the same 200 +
+// null an immediate empty poll does, and an over-cap block_ms is clamped to
+// the reference server's 999ms ceiling rather than holding the request for
+// minutes.
+func TestWorkPollBlockMsExpiresToNull(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-block-idle"
+	envID, _ := selfHostedWorker(t, s, key)
+	auth := map[string]string{"Authorization": "Bearer " + key}
+
+	// maxWait pins each case against the wrong window, not just against no
+	// window: the in-range bound sits below the 999ms ceiling so a server that
+	// ignores the requested value and always waits the cap fails, and the
+	// over-cap bound catches a clamp landing seconds over the ceiling — with
+	// runner slack in the same range the wake test's <900ms bound assumes.
+	cases := map[string]struct {
+		query   string
+		minWait time.Duration
+		maxWait time.Duration
+	}{
+		"in-range window held":      {"?block_ms=300", 300 * time.Millisecond, 900 * time.Millisecond},
+		"over-cap clamped to 999ms": {"?block_ms=600000", 999 * time.Millisecond, 3 * time.Second},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			start := time.Now()
+			res, raw := s.pollQuery(t, envID, tc.query, auth)
+			elapsed := time.Since(start)
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %q)", res.StatusCode, raw)
+			}
+			if strings.TrimSpace(raw) != "null" {
+				t.Fatalf("body = %q, want null on an idle queue", raw)
+			}
+			if elapsed < tc.minWait {
+				t.Errorf("returned after %v, want the request held at least %v", elapsed, tc.minWait)
+			}
+			if elapsed > tc.maxWait {
+				t.Errorf("returned after %v — the window was not honoured/clamped (max %v)", elapsed, tc.maxWait)
+			}
+		})
+	}
+}
+
+// TestWorkPollBlockMsRejectsNonPositive pins the validation edge the SDK
+// records: non-blocking is expressed by omitting block_ms, and the reference
+// server rejects an explicit 0 (anthropic-sdk-go lib/environments/poller.go).
+// Zero, negative, present-but-empty, unparseable, and repeated values are all
+// 400 here — unlike the non-validating reclaim knob.
+func TestWorkPollBlockMsRejectsNonPositive(t *testing.T) {
+	s := newTestServer(t)
+	const key = "ek-block-bad"
+	envID, _ := selfHostedWorker(t, s, key)
+	auth := map[string]string{"Authorization": "Bearer " + key}
+
+	for _, q := range []string{
+		"?block_ms=0",
+		"?block_ms=-5",
+		"?block_ms=abc",
+		"?block_ms=", // present but empty — not omission
+		"?block_ms=300&block_ms=abc",
+		"?block_ms=abc&block_ms=300", // repeated, either order — first-value-wins would mask one
+	} {
+		res, raw := s.pollQuery(t, envID, q, auth)
+		var body map[string]any
+		_ = json.Unmarshal([]byte(raw), &body)
+		wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
 	}
 }
 

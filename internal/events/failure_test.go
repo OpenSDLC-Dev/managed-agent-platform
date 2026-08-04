@@ -114,8 +114,8 @@ func TestBrokerSurvivesGarbageNotify(t *testing.T) {
 	sub := subscribeReady(t, broker, sid)
 	drainWakes(sub)
 
-	// Hand-delivered garbage on both channels must not kill the listener.
-	for _, ch := range []string{"map_session_events", "map_session_frames"} {
+	// Hand-delivered garbage on all three channels must not kill the listener.
+	for _, ch := range []string{"map_session_events", "map_session_frames", "map_work_items"} {
 		if _, err := pool.Exec(ctx, `SELECT pg_notify($1, 'not json')`, ch); err != nil {
 			t.Fatal(err)
 		}
