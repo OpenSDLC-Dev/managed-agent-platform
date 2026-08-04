@@ -90,8 +90,11 @@ func (s *Subscription) Close() {
 	})
 }
 
-// Subscribe registers for one session's live traffic, starting the shared
-// listener if it isn't running. Callers must Close the subscription.
+// Subscribe registers for one key's live traffic — a session id for SSE
+// streams, an environment id for the work API's long poll (work-items wakes)
+// — starting the shared listener if it isn't running. The two key spaces
+// cannot collide (env_ vs sesn_ prefixes). Callers must Close the
+// subscription.
 func (b *Broker) Subscribe(sessionID domain.ID) *Subscription {
 	s := &Subscription{
 		broker:    b,
@@ -135,7 +138,7 @@ func (b *Broker) listen(ctx context.Context) {
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-		_, err = conn.Exec(ctx, "LISTEN "+channelEvents+"; LISTEN "+channelFrames)
+		_, err = conn.Exec(ctx, "LISTEN "+channelEvents+"; LISTEN "+channelFrames+"; LISTEN "+channelWork)
 		if err != nil {
 			conn.Release()
 			// Same pacing as the Acquire failure path: LISTEN can fail
@@ -196,6 +199,18 @@ func (b *Broker) wakeAll() {
 	}
 }
 
+// wakeKey delivers a coalesced wake to every subscriber on one key.
+func (b *Broker) wakeKey(id domain.ID) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for s := range b.subs[id] {
+		select {
+		case s.wake <- struct{}{}:
+		default: // already signalled; wakes coalesce
+		}
+	}
+}
+
 func (b *Broker) dispatch(channel, payload string) {
 	switch channel {
 	case channelEvents:
@@ -205,14 +220,15 @@ func (b *Broker) dispatch(channel, payload string) {
 		if json.Unmarshal([]byte(payload), &m) != nil {
 			return
 		}
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		for s := range b.subs[domain.ID(m.SessionID)] {
-			select {
-			case s.wake <- struct{}{}:
-			default: // already signalled; wakes coalesce
-			}
+		b.wakeKey(domain.ID(m.SessionID))
+	case channelWork:
+		var m struct {
+			EnvironmentID string `json:"environment_id"`
 		}
+		if json.Unmarshal([]byte(payload), &m) != nil {
+			return
+		}
+		b.wakeKey(domain.ID(m.EnvironmentID))
 	case channelFrames:
 		var m struct {
 			SessionID string          `json:"session_id"`

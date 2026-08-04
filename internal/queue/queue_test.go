@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
@@ -700,6 +701,56 @@ func TestCancelSessionTakesEveryLiveItem(t *testing.T) {
 	// Another session's work is untouched.
 	if got := liveItems(t, pool, other); got != 1 {
 		t.Errorf("other session's live items = %d, want 1", got)
+	}
+}
+
+// TestEnqueueNotifiesWorkChannelOnCommit pins the long-poll wake producer
+// (#74): a transactional tool_exec Enqueue rides the work-items NOTIFY on the
+// caller's transaction, so an environment-keyed subscriber (the work API's
+// long poll) wakes only once the item is committed — never for a row a
+// re-poll cannot yet see.
+func TestEnqueueNotifiesWorkChannelOnCommit(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	sessionID, envID := pgtest.NewSession(t, pool, "self_hosted")
+	q := queue.New(pool)
+
+	b := events.NewBroker(pool)
+	sub := b.Subscribe(envID)
+	defer sub.Close()
+	if err := b.Ready(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Coverage-start wakes everyone once; drain so the assertions below see
+	// only the enqueue's own NOTIFY (wakes coalesce in a 1-buffered channel).
+	select {
+	case <-sub.Wake():
+	default:
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	created, err := q.Enqueue(ctx, tx, envID, sessionID, queue.ToolExec)
+	if err != nil || !created {
+		t.Fatalf("enqueue in tx: created=%v err=%v", created, err)
+	}
+	// Postgres delivers NOTIFY only on commit; a wake now would mean the
+	// producer bypassed the caller's transaction.
+	select {
+	case <-sub.Wake():
+		t.Fatal("woken before the enqueue committed")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sub.Wake():
+	case <-time.After(10 * time.Second):
+		t.Fatal("no wake after the enqueue committed")
 	}
 }
 

@@ -13,6 +13,29 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Added
+
+- **`/work/poll` honours `block_ms` — a true long poll on a work-items NOTIFY**
+  ([internal/api/workapi.go](./internal/api/workapi.go),
+  [internal/queue/queue.go](./internal/queue/queue.go),
+  [internal/events](./internal/events/broker.go), #74). The poll used to return
+  immediately whatever `block_ms` said, leaving the protocol correct but chattier than
+  the reference's. Now a created `tool_exec` item rides a `map_work_items` NOTIFY on the
+  enqueuer's own handle (inside a transaction it is delivered on commit, so a woken poll
+  can always see the row), the SSE broker's listener carries the third channel keyed by
+  environment id, and `pollWork` holds an empty poll open — subscribe before the first
+  poll, then poll → wait on wake/deadline/disconnect, with one final re-poll at the
+  deadline. Window semantics follow the SDK's recorded contract: absent = non-blocking,
+  the server ceiling is 999ms (over-cap values clamp to it), and an explicit 0 — which
+  the reference rejects — is a 400, extended to negative and unparseable values. The
+  worker's `EmptyPollSleep` deliberately stays: the reference client sleeps between
+  empty polls the same way, so an idle worker's cadence remains wire-identical
+  (block + sleep). Reclaim-driven availability has no NOTIFY and is found by the next
+  poll, at most one ≤999ms window late. Tests: mid-wait enqueue wakes the poll early
+  with the trace-context headers intact, the deadline answers null after the full
+  window, over-cap clamps, invalid values 400, the NOTIFY is commit-gated, and the
+  broker's wake is environment-keyed.
+
 ### Fixed
 
 - **An uploaded file's extension-fallback mime no longer depends on the serving host**
