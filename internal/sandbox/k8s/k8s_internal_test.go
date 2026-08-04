@@ -1380,6 +1380,12 @@ func (m *mintRecorder) Revoke(_ context.Context, sid domain.ID) error {
 	return nil
 }
 
+// revokerFunc adapts a func to sandbox.GateTokenRevoker, so a test can observe
+// the cluster's state at the moment a revoke lands (the ordering guarantee).
+type revokerFunc func(context.Context, domain.ID) error
+
+func (f revokerFunc) Revoke(ctx context.Context, sid domain.ID) error { return f(ctx, sid) }
+
 func gateSpecFixture(m *mintRecorder) *sandbox.GateSpec {
 	return &sandbox.GateSpec{
 		Image:           "map-gate:test",
@@ -1573,8 +1579,21 @@ func TestProvisionGateShapeMismatchRebuilds(t *testing.T) {
 
 	// The reverse: the session no longer wants a gate — the gated pod is
 	// replaced by a plain one, with no further minting, and the dismantled
-	// gate's token is revoked exactly once (no replacement will re-mint it).
-	specUngated := sandbox.Spec{SessionID: sid, Image: "img", GateTokenRevoker: m}
+	// gate's token is revoked exactly once (no replacement will re-mint it),
+	// before the pod teardown — the ordering that lets a failed teardown
+	// retry both instead of losing the trigger.
+	revokes := 0
+	specUngated := sandbox.Spec{SessionID: sid, Image: "img",
+		GateTokenRevoker: revokerFunc(func(ctx context.Context, got domain.ID) error {
+			if got != sid {
+				t.Errorf("revoked %s, want %s", got, sid)
+			}
+			if _, gerr := p.client.cs.CoreV1().Pods("default").Get(ctx, podName(sid), metav1.GetOptions{}); gerr != nil {
+				t.Errorf("revoke arrived with the gated pod already gone (%v); it must precede the teardown", gerr)
+			}
+			revokes++
+			return nil
+		})}
 	if _, err := p.Provision(context.Background(), specUngated); err != nil {
 		t.Fatalf("provision (reshape to ungated): %v", err)
 	}
@@ -1588,8 +1607,11 @@ func TestProvisionGateShapeMismatchRebuilds(t *testing.T) {
 	if m.generated != 1 {
 		t.Errorf("ungated reshape minted (generated=%d)", m.generated)
 	}
-	if len(m.revoked) != 1 || m.revoked[0] != sid {
-		t.Errorf("ungated reshape revoked %v, want exactly [%s]", m.revoked, sid)
+	if revokes != 1 {
+		t.Errorf("ungated reshape revoked %d times, want exactly once", revokes)
+	}
+	if len(m.revoked) != 0 {
+		t.Errorf("the gated spec's revoker was called (%v); only the ungated reshape revokes", m.revoked)
 	}
 }
 

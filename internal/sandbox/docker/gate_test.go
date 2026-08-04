@@ -44,6 +44,12 @@ func (m *fakeMinter) Revoke(_ context.Context, sid domain.ID) error {
 	return nil
 }
 
+// revokerFunc adapts a func to sandbox.GateTokenRevoker, so a test can observe
+// the provider's state at the moment a revoke lands (the ordering guarantee).
+type revokerFunc func(context.Context, domain.ID) error
+
+func (f revokerFunc) Revoke(ctx context.Context, sid domain.ID) error { return f(ctx, sid) }
+
 // gatedSpec is a spec that asks for an egress gate, with a recording minter.
 func gatedSpec(m *fakeMinter) sandbox.Spec {
 	s := spec()
@@ -671,16 +677,23 @@ func TestProvisionRebuildsMispairedSandbox(t *testing.T) {
 // TestProvisionUngatedReshapeDismantlesGatePair: a session whose gate need went
 // away re-provisions ungated onto a still-gated pair — the sandbox is
 // gate-networked, so it is not adopted; the session's persisted token is revoked
-// first (no replacement gate will ever re-mint it), then the pair — sandbox and
-// gate — is removed and the sandbox rebuilt directly networked (#197).
+// first (no replacement gate will ever re-mint it, and revoke-before-teardown is
+// what lets a failed teardown retry both), then the pair — sandbox and gate — is
+// removed and the sandbox rebuilt directly networked (#197).
 func TestProvisionUngatedReshapeDismantlesGatePair(t *testing.T) {
-	m := &fakeMinter{token: "gtk_test"}
 	s := spec() // ungated: no GateSpec at all
-	s.GateTokenRevoker = m
 	gateName, sbName := "map-gate-"+string(s.SessionID), "map-"+string(s.SessionID)
 
 	var removed []string
 	sbCreates := 0
+	var removedAtRevoke []int // daemon removals already issued when each revoke landed
+	s.GateTokenRevoker = revokerFunc(func(_ context.Context, sid domain.ID) error {
+		if sid != s.SessionID {
+			t.Errorf("revoked %s, want %s", sid, s.SessionID)
+		}
+		removedAtRevoke = append(removedAtRevoke, len(removed))
+		return nil
+	})
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodDelete:
@@ -712,8 +725,10 @@ func TestProvisionUngatedReshapeDismantlesGatePair(t *testing.T) {
 	if sb.ID() != "sb1" {
 		t.Errorf("sandbox id = %q, want the rebuilt sb1", sb.ID())
 	}
-	if !slices.Equal(m.revoked, []domain.ID{s.SessionID}) {
-		t.Errorf("revoked = %v, want exactly [%s]", m.revoked, s.SessionID)
+	// Exactly one revoke, and it landed before any removal — the ordering that
+	// lets a teardown failure retry both instead of losing the trigger.
+	if !slices.Equal(removedAtRevoke, []int{0}) {
+		t.Errorf("revokes landed after %v removals, want exactly one revoke before any", removedAtRevoke)
 	}
 	for _, name := range []string{"sbOld", gateName} {
 		if !slices.Contains(removed, name) {
@@ -722,9 +737,6 @@ func TestProvisionUngatedReshapeDismantlesGatePair(t *testing.T) {
 	}
 	if sbCreates != 1 {
 		t.Errorf("sandbox created %d times, want 1 (rebuilt directly networked)", sbCreates)
-	}
-	if m.generated != 0 || len(m.persisted) != 0 {
-		t.Errorf("ungated reshape touched the mint seam: generated=%d persisted=%v", m.generated, m.persisted)
 	}
 }
 

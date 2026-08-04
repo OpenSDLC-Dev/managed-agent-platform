@@ -62,9 +62,11 @@ copy of an entry here.
   container before rebuilding directly networked. A gate orphaned with no re-provision
   ever arriving remains the standalone teardown reaper's job (#64). Tests: a
   revoked token stops authenticating and a second revoke is a clean no-op; each
-  backend's reshape test asserts exactly one revoke on the ungated direction and none
-  on the gated one; the Docker dismantle test asserts sandbox and gate are both
-  removed and the mint seam untouched.
+  backend's reshape test asserts exactly one revoke on the ungated direction — landing
+  before the teardown (the k8s revoke still sees the gated pod, the docker revoke sees
+  zero removals issued), the ordering that lets a failed teardown retry both — and
+  none on the gated one; the Docker dismantle test asserts sandbox and gate are both
+  removed.
 
 - **An uploaded file's extension-fallback mime no longer depends on the serving host**
   ([internal/mimetab](./internal/mimetab/mimetab.go),
