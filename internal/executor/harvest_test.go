@@ -90,6 +90,7 @@ func (h *harness) blobBytes(t *testing.T, fileID string) string {
 func TestHarvestPublishesSnapshotAndChainsGrading(t *testing.T) {
 	sb := &fakeSandbox{files: map[string]string{
 		outputsDir + "/report.json":      `{"npv": 42}`,
+		outputsDir + "/build_dcf.py":     "print()",
 		outputsDir + "/data/model":       "\x00\x01binary",
 		"/mnt/session/workspace/scratch": "not an output",
 	}}
@@ -100,18 +101,26 @@ func TestHarvestPublishesSnapshotAndChainsGrading(t *testing.T) {
 	h.stepOnce(t)
 
 	rows := h.fileRows(t)
-	if len(rows) != 2 {
-		t.Fatalf("files rows = %d, want 2: %+v", len(rows), rows)
+	if len(rows) != 3 {
+		t.Fatalf("files rows = %d, want 3: %+v", len(rows), rows)
 	}
-	// Lexicographic by path: data/model before report.json.
-	if rows[0].filename != "data/model" || rows[1].filename != "report.json" {
-		t.Fatalf("filenames = %q, %q; want data/model, report.json", rows[0].filename, rows[1].filename)
+	// Lexicographic by path: build_dcf.py, data/model, report.json.
+	if rows[0].filename != "build_dcf.py" || rows[1].filename != "data/model" || rows[2].filename != "report.json" {
+		t.Fatalf("filenames = %q, %q, %q; want build_dcf.py, data/model, report.json",
+			rows[0].filename, rows[1].filename, rows[2].filename)
 	}
-	if rows[0].mime != "application/octet-stream" {
-		t.Errorf("extensionless mime = %q, want application/octet-stream", rows[0].mime)
+	// The exact pinned-table value (the #264 symptom file): .py is absent from
+	// Go's builtin table and hosts that do know it say text/x-python without
+	// the charset, so this row proves the harvest wiring still consults
+	// mimetab, not the process mime registry.
+	if rows[0].mime != "text/x-python; charset=utf-8" {
+		t.Errorf("build_dcf.py mime = %q, want text/x-python; charset=utf-8", rows[0].mime)
 	}
-	if !strings.HasPrefix(rows[1].mime, "application/json") {
-		t.Errorf("report.json mime = %q, want application/json", rows[1].mime)
+	if rows[1].mime != "application/octet-stream" {
+		t.Errorf("extensionless mime = %q, want application/octet-stream", rows[1].mime)
+	}
+	if !strings.HasPrefix(rows[2].mime, "application/json") {
+		t.Errorf("report.json mime = %q, want application/json", rows[2].mime)
 	}
 	for _, r := range rows {
 		if !r.downloadable {
