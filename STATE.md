@@ -4,20 +4,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**#269** — the chart's Cloud SQL Auth Proxy sidecar and the brain's Google identity.
-Plan-less (issue-driven); triaged as single-PR work.
+**none** — #269 (the chart's Cloud SQL Auth Proxy sidecar and the brain's Google identity)
+finished 2026-08-04. Configuration only: the proxy path is unrun on a live GKE cluster.
 
 ## Tasks
 
-- [x] `brain.serviceAccount.annotations` + ServiceAccount template, bound by the Deployment
-- [x] `cloudSQLProxy` — off-by-default native sidecar in all three deployments, four
-      render-time guards
-- [x] `foundation/` `map-brain` account; `environment/` Workload Identity binding +
-      `roles/cloudsql.client` for all three
-- [x] Docs: deploy-gcp.md's two chart gaps retired, chart + `deploy/gcp` READMEs, CI
-      assertions (the brain's ServiceAccount invariant restated, not dropped)
-
-Evidence: `make gcp-fmt gcp-validate gcp-split-check gcp-lint` green (10 protected
-resources); the helm job's steps run locally; the rendered manifests accepted by a real API
-server under `kubectl apply --dry-run=server`. **Not** exercised on a live GKE cluster — the
-proxy path itself is unrun.
+*(none in flight)*

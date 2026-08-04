@@ -372,9 +372,30 @@ jobs:
             # turn is only reachable because of the three health flags, so
             # asserting the probe without them would certify a sidecar whose
             # startup can never succeed and whose pod therefore never starts its
-            # application container at all.
-            echo "$sidecar" | grep -q 'path: /startup' \
-              || { echo "$t: the sidecar has no startupProbe" >&2; exit 1; }
+            # application container at all. Both probes are asserted: a liveness
+            # probe pointed at nothing has the kubelet restart a healthy proxy
+            # on a loop.
+            for path in /startup /liveness; do
+              echo "$sidecar" | grep -q "path: $path" \
+                || { echo "$t: the sidecar has no probe on $path" >&2; exit 1; }
+            done
+            # ...and the probes must agree with the health server on a PORT.
+            # Asserting the flag and the probe path separately still passes a
+            # probe polling a port the proxy never binds, which is the same
+            # never-starts-the-application failure with a different cause — so
+            # the agreement is what gets asserted, not the two halves.
+            httpPort="$(echo "$sidecar" | sed -n 's/.*"--http-port=\([0-9][0-9]*\)".*/\1/p')"
+            [ -n "$httpPort" ] \
+              || { echo "$t: no --http-port in the sidecar args" >&2; exit 1; }
+            mismatched="$(echo "$sidecar" | awk -v p="$httpPort" '$1 == "port:" && $2 != p { print $2 }')"
+            [ -z "$mismatched" ] \
+              || { echo "$t: a probe polls port $mismatched, the health server binds $httpPort" >&2; exit 1; }
+            # The whole `sslmode=disable` safety argument is that the socket is
+            # on loopback, which holds because the proxy defaults to 127.0.0.1
+            # and the chart passes no --address. An --address flag would move it
+            # onto the pod network without changing anything else visible here.
+            echo "$sidecar" | grep -q '"--address' \
+              && { echo "$t: an --address flag would take the socket off loopback" >&2; exit 1; }
             for want in '"--health-check"' '"--http-address=0.0.0.0"' '"--http-port=9801"' \
                         '"--private-ip"' '"--port=5432"' '"--structured-logs"' \
                         '"proj:us-central1:inst"'; do

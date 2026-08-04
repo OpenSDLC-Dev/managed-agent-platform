@@ -56,7 +56,8 @@ The run order is in [`deploy/gcp/README.md`](../deploy/gcp/README.md#running-it)
 load-bearing; this is only the shape of it:
 
 ```sh
-make gcp-foundation-apply    # once, ever — durable identities, KMS, empty secrets
+make gcp-foundation-apply    # never destroyed — durable identities, KMS, empty secrets
+                             # (re-apply it whenever foundation/ gains a resource)
 make gcp-bootstrap           # fills the secrets, creates the GCS HMAC key
 make gcp-env-apply           # network, cluster, Cloud SQL, bucket, registry
 make gcp-db-init             # the platform's database role — see below
@@ -64,9 +65,9 @@ gcloud builds submit ...     # the component images
 helm install ...             # the platform
 ```
 
-`foundation/` is never destroyed; `environment/` is created and destroyed freely. "Once,
-ever" above is about the destroy, not the apply: the configuration is idempotent, and
-re-applying it is how anything is ever *added* to it. That matters for an existing
+`foundation/` is never destroyed; `environment/` is created and destroyed freely. Never
+destroyed is not the same as applied once: the configuration is idempotent, and re-applying
+it is how anything is ever *added* to it. That matters for an existing
 deployment upgrading past
 [#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269), which adds the
 brain's Google service account — `environment/` reads it by name through a data source, so
@@ -175,10 +176,15 @@ It renders as a **native sidecar** (an `initContainer` with
 makes it ready before the process that dials it: all three open the database as they start,
 so an ordinary container would let them race it. Four things fail the render rather than
 deploying a pod that never becomes ready: a cluster older than Kubernetes 1.29 (which
-predates native sidecars), a missing `instanceConnectionName`, one whose shape is not
-`PROJECT:REGION:INSTANCE` — an address such as `10.1.2.3` or `db.internal:5432`, or a name
-with an empty part — and the bundled Postgres left enabled alongside it. The shape check
-stops there: a well-formed name that names nothing is the proxy's to reject at startup.
+predates native sidecars), a missing `instanceConnectionName`, one whose *shape* is wrong,
+and the bundled Postgres left enabled alongside it.
+
+The shape check is exactly this: **three or four non-empty colon-separated segments** —
+`PROJECT:REGION:INSTANCE`, or `DOMAIN:PROJECT:REGION:INSTANCE` for a legacy domain-scoped
+project. That refuses an address such as `10.1.2.3` or `db.internal:5432`, and a name with
+an empty part. It does not look inside the segments, so a well-formed name that names
+nothing renders and the proxy rejects it at startup — deliberately, because encoding
+Google's own naming rules here would refuse a valid name the day Google widens one.
 
 If you must use a shared proxy Service as an interim step, treat the
 database credential as exposed to anything that can watch pod-network traffic, and say so in

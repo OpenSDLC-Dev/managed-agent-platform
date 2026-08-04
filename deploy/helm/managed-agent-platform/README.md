@@ -158,12 +158,15 @@ up.
 It renders as a **native sidecar** — an `initContainer` with `restartPolicy: Always` — with
 a startup probe on the proxy's own health endpoint, so the socket is listening before the
 process that dials it starts. That needs **Kubernetes >= 1.29**; older clusters fail the
-render. So do a missing `instanceConnectionName`, one whose shape is not
-`PROJECT:REGION:INSTANCE` (an address such as `10.1.2.3` or `db.internal:5432`, or a name
-with an empty part), and the bundled Postgres left enabled alongside it. The shape check is
-a shape check: a well-formed name that names nothing is rejected by the proxy at startup,
-not here, because encoding Google's own naming rules in a template would refuse a valid name
-the day Google widens one.
+render. So do a missing `instanceConnectionName`, one of the wrong shape, and the bundled
+Postgres left enabled alongside it.
+
+The shape check is exactly this: **three or four non-empty colon-separated segments** —
+`PROJECT:REGION:INSTANCE`, or `DOMAIN:PROJECT:REGION:INSTANCE` for a legacy domain-scoped
+project. It refuses an address such as `10.1.2.3` or `db.internal:5432`, and a name with an
+empty part; it does not look inside the segments. A well-formed name that names nothing
+therefore renders, and the proxy rejects it at startup — deliberately, because encoding
+Google's own naming rules in a template would refuse a valid name the day Google widens one.
 
 ## Credential cipher (OpenBao)
 
