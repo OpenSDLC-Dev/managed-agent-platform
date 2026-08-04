@@ -184,15 +184,16 @@ func (s *server) pollWork(w http.ResponseWriter, r *http.Request) {
 // answering null. Absent means non-blocking (the wire default). Unlike the
 // reclaim knob this one is validated: the SDK records that the reference
 // rejects an explicit 0 (non-blocking is expressed by omission —
-// anthropic-sdk-go lib/environments/poller.go), so zero, negative, and
-// unparseable values are 400; an over-cap value is clamped to the server
-// ceiling the same source documents.
+// anthropic-sdk-go lib/environments/poller.go), so zero, negative, empty
+// (present-but-valueless, which is not omission), and unparseable values are
+// 400; an over-cap value is clamped to the server ceiling the same source
+// documents.
 func blockWindow(r *http.Request) (time.Duration, error) {
-	v := r.URL.Query().Get("block_ms")
-	if v == "" {
+	vs, ok := r.URL.Query()["block_ms"]
+	if !ok {
 		return 0, nil
 	}
-	n, err := strconv.Atoi(v)
+	n, err := strconv.Atoi(vs[0])
 	if err != nil || n < 1 {
 		return 0, errInvalid("block_ms must be an integer between 1 and %d", maxBlockMs)
 	}

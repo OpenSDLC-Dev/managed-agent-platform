@@ -718,8 +718,10 @@ func TestEnqueueNotifiesWorkChannelOnCommit(t *testing.T) {
 	b := events.NewBroker(pool)
 	sub := b.Subscribe(envID)
 	defer sub.Close()
-	if err := b.Ready(ctx); err != nil {
-		t.Fatal(err)
+	readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := b.Ready(readyCtx); err != nil {
+		t.Fatalf("broker never became ready: %v", err)
 	}
 	// Coverage-start wakes everyone once; drain so the assertions below see
 	// only the enqueue's own NOTIFY (wakes coalesce in a 1-buffered channel).

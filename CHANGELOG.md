@@ -27,7 +27,8 @@ copy of an entry here.
   poll, then poll → wait on wake/deadline/disconnect, with one final re-poll at the
   deadline. Window semantics follow the SDK's recorded contract: absent = non-blocking,
   the server ceiling is 999ms (over-cap values clamp to it), and an explicit 0 — which
-  the reference rejects — is a 400, extended to negative and unparseable values. The
+  the reference rejects — is a 400, extended to negative, present-but-empty, and
+  unparseable values. The
   worker's `EmptyPollSleep` deliberately stays: the reference client sleeps between
   empty polls the same way, so an idle worker's cadence remains wire-identical
   (block + sleep). Reclaim-driven availability has no NOTIFY and is found by the next
