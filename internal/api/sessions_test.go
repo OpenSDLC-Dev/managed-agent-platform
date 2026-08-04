@@ -60,6 +60,56 @@ func TestSessionVaultAttachment(t *testing.T) {
 	createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID, "vault_ids": []any{vaultA}})
 }
 
+// The SDK documents session metadata with the same sentence as agents and
+// vaults — 16 pairs, 64-char keys, 512-char values (betasession.go) — so
+// sessions run the same shared check, counted in runes like the others (#289).
+func TestSessionMetadataCaps(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	base := func(md map[string]any) map[string]any {
+		return map[string]any{"agent": agentID, "environment_id": envID, "metadata": md}
+	}
+	wantRejected := func(md map[string]any, frag string) {
+		t.Helper()
+		status, res := s.do(http.MethodPost, "/v1/sessions", base(md))
+		wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		inner, _ := res["error"].(map[string]any)
+		if msg, _ := inner["message"].(string); !strings.Contains(msg, frag) {
+			t.Errorf("error message %q does not mention %q", msg, frag)
+		}
+	}
+
+	over := map[string]any{}
+	for i := 0; i < 17; i++ {
+		over[fmt.Sprintf("k%02d", i)] = "v"
+	}
+	wantRejected(over, "16")
+	wantRejected(map[string]any{strings.Repeat("键", 65): "v"}, "64")
+	wantRejected(map[string]any{"k": strings.Repeat("值", 513)}, "512")
+
+	// The documented boundary is accepted, counted in runes: 16 pairs, one
+	// carrying a 64-rune CJK key and a 512-rune CJK value.
+	atCap := map[string]any{strings.Repeat("键", 64): strings.Repeat("值", 512)}
+	for i := 0; i < 15; i++ {
+		atCap[fmt.Sprintf("k%02d", i)] = "v"
+	}
+	sid := createSession(t, s, base(atCap))["id"].(string)
+
+	// Update binds the resulting stored bag, exactly as agents and vaults: a
+	// 17th key rejects, an upsert and a delete-one-add-one stay within it.
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
+		map[string]any{"metadata": map[string]any{"k16": "v"}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
+		map[string]any{"metadata": map[string]any{"k00": "changed"}}); status != http.StatusOK {
+		t.Fatalf("upsert within cap: status %d (body %v)", status, res)
+	}
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
+		map[string]any{"metadata": map[string]any{"k01": nil, "k16": "v"}}); status != http.StatusOK {
+		t.Fatalf("delete-and-add within cap: status %d (body %v)", status, res)
+	}
+}
+
 // fixture creates an agent and an environment and returns their ids.
 func fixture(t *testing.T, s *tserver) (agentID, envID string) {
 	t.Helper()

@@ -450,6 +450,9 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateMetadataCaps(metadata); err != nil {
+		return nil, err
+	}
 
 	// One transaction around check → resolve → insert: FOR SHARE on the
 	// environment row blocks a concurrent delete/archive from slipping in
@@ -744,6 +747,9 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	if raw, ok := obj["metadata"]; ok {
 		metadata, err = patchMetadata(metadata, raw, false)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateMetadataCaps(metadata); err != nil {
 			return nil, err
 		}
 		row.metaJSON = mustJSON(metadata)

@@ -285,10 +285,10 @@ func patchMetadata(existing map[string]string, raw json.RawMessage, emptyDeletes
 }
 
 // The metadata caps the reference documents identically for vaults (the
-// public vaults guide's limits table, plan 12 D7) and for agents (the pinned
-// SDK's create/update params, #66): at most 16 pairs, keys up to 64 chars,
-// values up to 512. Sessions carry the same documented caps unenforced
-// (#289); environments document none — both recorded in docs/DIVERGENCES.md.
+// public vaults guide's limits table, plan 12 D7), agents (the pinned SDK's
+// create/update params, #66), and sessions (#289): at most 16 pairs, keys up
+// to 64 chars, values up to 512. Environments document none — recorded in
+// docs/DIVERGENCES.md.
 const (
 	metadataMaxPairs = 16
 	metadataKeyMax   = 64
