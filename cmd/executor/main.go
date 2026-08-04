@@ -42,8 +42,8 @@
 //	                         init container (default "busybox")
 //	BLOB_ENDPOINT            S3-compatible object storage host:port; unset
 //	                         disables skills materialization
-//	BLOB_ACCESS_KEY / BLOB_SECRET_KEY / BLOB_BUCKET / BLOB_REGION / BLOB_TLS
-//	                         the rest of the storage config (as controlplane)
+//	BLOB_ACCESS_KEY / BLOB_SECRET_KEY / BLOB_BUCKET / BLOB_REGION / BLOB_TLS /
+//	BLOB_BUCKET_PRECREATED   the rest of the storage config (as controlplane)
 //	SECRETS_BACKEND          secrets cipher for vault credential material
 //	                         (docs/plan/12): "openbao", "local", "gcpkms", or
 //	                         empty to run without one; validated at startup for

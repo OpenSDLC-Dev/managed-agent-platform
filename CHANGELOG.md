@@ -30,6 +30,41 @@ copy of an entry here.
 
 ### Added
 
+- **Object storage can be told its bucket already exists, so startup stops costing a
+  bucket-level permission** ([internal/blob/s3](./internal/blob/s3), #241). `s3.New` called
+  `BucketExists` before any object work and created the bucket when it was missing — a
+  convenience for the bundled MinIO, which starts empty, and a bucket-level read
+  (`storage.buckets.get` on GCS, which is why the GKE deployment grants
+  `roles/storage.legacyBucketReader` on top of `objectAdmin`; `s3:ListBucket` on AWS) that a
+  pre-provisioned deployment can only ever answer "yes". `BLOB_BUCKET_PRECREATED=true` —
+  `externalObjectStorage.bucketPrecreated` in the chart — skips both calls, and
+  construction then issues no request at all, which the suite proves against an endpoint
+  that refuses everything.
+
+  The mode **requires a region**, which is the half a skipped construction check does not
+  buy on its own: with `BLOB_REGION` empty, minio-go resolves the bucket's location before
+  the first object request and caches it — measured here as a `GET /bucket/?location=`
+  ahead of the `PUT` — so the mode would trade a bucket call at startup for one at first
+  use. `s3.New` rejects the pair, and the chart fails the render for the Secret it manages
+  itself (with `existingSecret` the operator assembles the keys, so the Go-side guard is
+  the enforcement). With a region set, the suite pins that a put, a get and a delete send
+  exactly three object requests and nothing else.
+
+  Three limits, stated rather than implied. What the mode is worth depends on the endpoint,
+  and on **AWS** it is less than it sounds: S3 answers a GET for a missing key with 403
+  rather than 404 unless the caller holds `s3:ListBucket`, and `blob.ErrNotFound` rests on
+  that 404 — so an AWS deployment keeps `s3:ListBucket` regardless and what it drops is
+  `s3:CreateBucket`. On GCS, where `objectAdmin` already makes a missing object answer 404,
+  the bucket privilege goes entirely, which is what this was built for. The region must be
+  the **right** one: minio-go
+  self-corrects a wrong region only while its own is empty, so a mistyped one now fails
+  the first object request — and joins a wrong endpoint, credential or bucket name in the
+  deliberate trade this mode makes, which is why it is a per-deployment setting and not a
+  new default. And against an Amazon endpoint with an **S3 Express** directory bucket the
+  client mints session credentials per object request (a bucket-root `GET ?session`,
+  needing `s3express:CreateSession`); that call is minio-go's own, made with or without
+  this setting, and the mode cannot remove it. Closes plan 20's Decision 11 follow-on.
+
 - **The deploy guide now says how long a stuck teardown actually stays stuck: four days, by
   Google's own documentation** ([docs/deploy-gcp.md](./docs/deploy-gcp.md), #20). The
   mode-2 acceptance teardown ended with the VPC peering still `ACTIVE / Connected` after 25

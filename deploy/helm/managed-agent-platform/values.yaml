@@ -266,6 +266,20 @@ externalObjectStorage:
   bucket: ""
   region: ""
   tls: true
+  # -- Set when the bucket is provisioned out of band (Terraform, an operator,
+  # a cloud console). The platform then neither checks for it nor creates it,
+  # so its identity needs no bucket-level read for a startup check that could
+  # only ever answer "yes" (#241). On AWS keep `s3:ListBucket` on the bucket
+  # anyway — without it S3 answers a missing object with 403 rather than 404,
+  # which the platform needs to tell absence from a denial. Requires the
+  # correct `region`: without one the client resolves the bucket's location
+  # before its first object request — the same bucket-level call, a moment
+  # later — and the chart fails the render rather than deploy a half-kept
+  # promise; with a wrong one the client can no longer self-correct, so the
+  # first object request fails. That is the trade the mode makes: a wrong
+  # endpoint, credential, region or bucket name surfaces on first use rather
+  # than at startup. Leave false for a bucket the platform should create.
+  bucketPrecreated: false
 
 # -- In-cluster OpenBao: the transit cipher for vault credential material
 # (docs/plan/12_vaults-credentials.md). Same shape and rationale as the bundled
