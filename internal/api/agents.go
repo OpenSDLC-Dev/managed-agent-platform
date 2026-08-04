@@ -116,8 +116,14 @@ func (s *server) createAgent(r *http.Request) (any, error) {
 		return nil, err
 	}
 	spec.Normalize()
+	if err := validateAgentSpec(spec); err != nil {
+		return nil, err
+	}
 	metadata, err := parseMetadata(obj)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateMetadataCaps(metadata); err != nil {
 		return nil, err
 	}
 
@@ -311,9 +317,18 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		return nil, err
 	}
 	spec.Normalize()
+	// Validated on the merged result: the reference's update wording is "the
+	// agent's resulting tools", so an update that clears tools while keeping
+	// stored servers answers for what it leaves behind.
+	if err := validateAgentSpec(spec); err != nil {
+		return nil, err
+	}
 	if raw, ok := obj["metadata"]; ok {
 		metadata, err = patchMetadata(metadata, raw, false)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateMetadataCaps(metadata); err != nil {
 			return nil, err
 		}
 	}

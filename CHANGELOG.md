@@ -15,6 +15,26 @@ copy of an entry here.
 
 ### Added
 
+- **Agent create/update enforce the reference's documented caps — a malformed agent
+  is a 400 at create, not a stored agent whose every turn fails**
+  ([internal/api/wire.go](./internal/api/wire.go), #66). The pinned SDK documents
+  them on the create/update params: at most 128 tools and 20 MCP servers, server
+  names unique and every server referenced by an `mcp_toolset` in the agent's
+  resulting tools, and metadata at most 16 pairs with 64-char keys and 512-char
+  values (counted as Unicode code points, not bytes) — the same numbers vaults
+  already enforced, so the metadata check is now one shared
+  `validateMetadataCaps` (moved from vaults.go, messages unchanged).
+  Tool names must also be unique once the `agent_toolset` expands — resolved
+  against what the entry actually *enables*, so a custom tool may reuse a disabled
+  built-in's name — because a duplicate reaches the Messages API as a 400 on every
+  turn of the agent. Update validates the merged result (the SDK's "resulting
+  tools" / "stored bag" wording), so an update that clears `tools` while keeping
+  stored servers rejects without bumping the version. The reject messages, the
+  entry-counting of the 128 cap, and the not-rejected dangling `mcp_toolset`
+  reference are ours — recorded in
+  [docs/DIVERGENCES.md](./docs/DIVERGENCES.md); session `agent_with_overrides`
+  still applies none of these (#287).
+
 - **Sandbox pods can pull from a private registry — `SANDBOX_K8S_IMAGE_PULL_SECRETS`**
   ([internal/sandbox/k8s/pullsecrets.go](./internal/sandbox/k8s/pullsecrets.go),
   [deploy/helm](./deploy/helm/managed-agent-platform/values.yaml), #199). The K8s
