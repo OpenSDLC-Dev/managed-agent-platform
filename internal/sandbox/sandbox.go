@@ -107,6 +107,16 @@ type Spec struct {
 	// vault-attached; both backends consume it — Docker as a gate-pair the
 	// sandbox joins, K8s as a native sidecar in the sandbox's pod.
 	Gate *GateSpec
+	// GateTokenRevoker revokes the session's persisted gate token when a
+	// provision dismantles its gate without replacing it — the gated→ungated
+	// reshape, the one transition where no re-mint (whose revoke-on-re-mint
+	// covers every other path) will ever run, so the token would otherwise
+	// stay live until the session archives. It cannot live on GateSpec the way
+	// TokenMinter does: the provision that needs it is precisely the one with
+	// Gate == nil. The executor sets it on every spec (the transition is only
+	// discoverable inside the provider, which inspects the previous shape);
+	// nil skips revocation.
+	GateTokenRevoker GateTokenRevoker
 }
 
 // GateSpec configures a session's egress-gate sidecar. The provider mints the
@@ -149,6 +159,17 @@ type GateTokenMinter interface {
 	// Persist records token as sessionID's live gate token (by hash). The provider
 	// calls it only after creating the gate container with that token.
 	Persist(ctx context.Context, sessionID domain.ID, token string) error
+}
+
+// GateTokenRevoker revokes a session's live gate token — the teardown half of
+// GateTokenMinter, split into its own interface because it must be reachable
+// from an ungated Spec (Gate == nil, so there is no GateSpec to carry it).
+// Revoke is idempotent: a session with no live token is a no-op, which lets a
+// provider revoke before tearing a stale gate pair down and safely retry both
+// if the teardown fails partway. The executor's implementation backs both
+// interfaces with internal/gatetoken over the same pool.
+type GateTokenRevoker interface {
+	Revoke(ctx context.Context, sessionID domain.ID) error
 }
 
 // ValidateEnv reports whether every key in a Spec.Env map is a valid

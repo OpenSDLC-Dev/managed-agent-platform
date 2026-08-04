@@ -39,6 +39,33 @@ copy of an entry here.
 
 ### Fixed
 
+- **A dismantled egress gate's token is revoked, and an ungated re-provision no longer
+  adopts a still-gated sandbox** ([internal/gatetoken](./internal/gatetoken/gatetoken.go),
+  [internal/sandbox](./internal/sandbox/sandbox.go),
+  [internal/sandbox/docker](./internal/sandbox/docker/docker.go),
+  [internal/sandbox/k8s](./internal/sandbox/k8s/k8s.go),
+  [internal/executor](./internal/executor/executor.go), #197). Gate-token revocation
+  only ever happened as a side effect of minting a successor (`Ensure`'s
+  revoke-on-re-mint), so the one transition that dismantles a session's gate without
+  replacing it — gated→ungated, when the session's vaults detach or its networking
+  stops being `limited` — left the old token live until the session archived. Both
+  backends now revoke it at the moment they observe that transition, through a new
+  `sandbox.GateTokenRevoker` seam carried on `Spec` itself (deliberately not on
+  `GateSpec`: the provision that needs it is precisely the one with `Gate == nil`),
+  implemented by the executor over `gatetoken.Revoke` — idempotent, and ordered before
+  the teardown so a failed teardown retries both. The K8s call site is the existing
+  shape-mismatch pod replacement. The Docker provider had the deeper half of the bug:
+  `pairedWithGate` treated an ungated session as trivially paired, so a gated→ungated
+  re-provision silently adopted the still-gate-networked sandbox and never observed the
+  transition at all — it now requires an ungated session's sandbox to not be
+  gate-networked, and the mismatch path removes the sandbox *and* its named gate
+  container before rebuilding directly networked. A gate orphaned with no re-provision
+  ever arriving remains the standalone teardown reaper's job (#64). Tests: a
+  revoked token stops authenticating and a second revoke is a clean no-op; each
+  backend's reshape test asserts exactly one revoke on the ungated direction and none
+  on the gated one; the Docker dismantle test asserts sandbox and gate are both
+  removed and the mint seam untouched.
+
 - **An uploaded file's extension-fallback mime no longer depends on the serving host**
   ([internal/mimetab](./internal/mimetab/mimetab.go),
   [internal/api/filesupload.go](./internal/api/filesupload.go), #277 — the #264 fix

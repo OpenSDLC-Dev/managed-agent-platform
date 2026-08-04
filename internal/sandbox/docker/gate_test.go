@@ -17,14 +17,16 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
-// fakeMinter is a sandbox.GateTokenMinter that records its calls, so a test can
-// assert the provider mints only on create and persists exactly the token it put
-// in the gate container.
+// fakeMinter is a sandbox.GateTokenMinter (and GateTokenRevoker) that records
+// its calls, so a test can assert the provider mints only on create, persists
+// exactly the token it put in the gate container, and revokes only on the
+// gated→ungated dismantle.
 type fakeMinter struct {
 	token      string
 	generated  int
 	persisted  []string
 	persistErr error
+	revoked    []domain.ID
 }
 
 func (m *fakeMinter) Generate() string { m.generated++; return m.token }
@@ -34,6 +36,11 @@ func (m *fakeMinter) Persist(_ context.Context, _ domain.ID, token string) error
 		return m.persistErr
 	}
 	m.persisted = append(m.persisted, token)
+	return nil
+}
+
+func (m *fakeMinter) Revoke(_ context.Context, sid domain.ID) error {
+	m.revoked = append(m.revoked, sid)
 	return nil
 }
 
@@ -609,6 +616,7 @@ func TestProvisionRecreatesStoppedGate(t *testing.T) {
 func TestProvisionRebuildsMispairedSandbox(t *testing.T) {
 	m := &fakeMinter{token: "gtk_test"}
 	s := gatedSpec(m)
+	s.GateTokenRevoker = m
 	gateName, sbName := "map-gate-"+string(s.SessionID), "map-"+string(s.SessionID)
 
 	var removed []string
@@ -654,6 +662,69 @@ func TestProvisionRebuildsMispairedSandbox(t *testing.T) {
 	}
 	if m.generated != 0 {
 		t.Errorf("Generate called %d times while adopting a healthy gate, want 0", m.generated)
+	}
+	if len(m.revoked) != 0 {
+		t.Errorf("gated-direction rebuild revoked %v; the token belongs to the adopted gate", m.revoked)
+	}
+}
+
+// TestProvisionUngatedReshapeDismantlesGatePair: a session whose gate need went
+// away re-provisions ungated onto a still-gated pair — the sandbox is
+// gate-networked, so it is not adopted; the session's persisted token is revoked
+// first (no replacement gate will ever re-mint it), then the pair — sandbox and
+// gate — is removed and the sandbox rebuilt directly networked (#197).
+func TestProvisionUngatedReshapeDismantlesGatePair(t *testing.T) {
+	m := &fakeMinter{token: "gtk_test"}
+	s := spec() // ungated: no GateSpec at all
+	s.GateTokenRevoker = m
+	gateName, sbName := "map-gate-"+string(s.SessionID), "map-"+string(s.SessionID)
+
+	var removed []string
+	sbCreates := 0
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete:
+			removed = append(removed, strings.TrimPrefix(r.URL.Path, "/containers/"))
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			switch inspectRef(r.URL.Path) {
+			case sbName:
+				io.WriteString(w, sandboxJSON("sbOld", s, "container:gateOld")) // still gate-networked
+			default:
+				t.Errorf("unexpected inspect %q", inspectRef(r.URL.Path))
+			}
+		case r.URL.Path == "/containers/create":
+			if r.URL.Query().Get("name") == sbName {
+				sbCreates++
+			}
+			io.WriteString(w, `{"Id":"sb1"}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	sb, err := p.Provision(context.Background(), s)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if sb.ID() != "sb1" {
+		t.Errorf("sandbox id = %q, want the rebuilt sb1", sb.ID())
+	}
+	if !slices.Equal(m.revoked, []domain.ID{s.SessionID}) {
+		t.Errorf("revoked = %v, want exactly [%s]", m.revoked, s.SessionID)
+	}
+	for _, name := range []string{"sbOld", gateName} {
+		if !slices.Contains(removed, name) {
+			t.Errorf("%s not removed (removed=%v) — the pair must be dismantled together", name, removed)
+		}
+	}
+	if sbCreates != 1 {
+		t.Errorf("sandbox created %d times, want 1 (rebuilt directly networked)", sbCreates)
+	}
+	if m.generated != 0 || len(m.persisted) != 0 {
+		t.Errorf("ungated reshape touched the mint seam: generated=%d persisted=%v", m.generated, m.persisted)
 	}
 }
 
