@@ -39,6 +39,21 @@ copy of an entry here.
 
 ### Fixed
 
+- **A claim racing executor shutdown no longer escapes as a fatal error**
+  ([internal/executor/executor.go](./internal/executor/executor.go), #282). `Run`
+  recognised cancellation only as `errors.Is(err, context.Canceled)`, but a `Claim`
+  in flight when the context dies can surface a transport-level failure from the
+  dropped connection instead — an i/o timeout on a loaded host in #282's gate run —
+  and that error escaped `Run` where the test (and a supervisor) expect a clean nil
+  stop. `Run` now checks `ctx.Err()` after a step error, the same
+  liveness-after-failure convention `worker.Run` already follows; a genuine claim
+  failure with the context live stays fatal. Same load-induced-flake family as #265
+  (2a533ec), one layer up: the connection, not the container start. Tests: a stub
+  context whose cancellation lands exactly between the loop-top check and the error
+  inspection — the race window, made deterministic — over a closed pool (the stand-in
+  for the dropped connection) gets nil from `Run`; the same closed pool with a live
+  context still returns the claim error.
+
 - **A dismantled egress gate's token is revoked, and an ungated re-provision no longer
   adopts a still-gated sandbox** ([internal/gatetoken](./internal/gatetoken/gatetoken.go),
   [internal/sandbox](./internal/sandbox/sandbox.go),
