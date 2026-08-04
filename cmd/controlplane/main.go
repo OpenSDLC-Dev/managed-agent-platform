@@ -6,9 +6,13 @@
 //	CONTROLPLANE_API_KEY  bootstrap management API key (required); seeded
 //	                      (hashed) into api_keys at startup. Changing it and
 //	                      restarting revokes the previous bootstrap key.
-//	BLOB_ENDPOINT         S3-compatible object storage host:port for skill
-//	                      archives; empty deploys without object storage
-//	                      (the skills upload/download routes report it)
+//	BLOB_BACKEND          object storage for skill archives and files: "s3"
+//	                      (default when empty) or "gcs". Empty with no
+//	                      BLOB_ENDPOINT deploys without object storage (the
+//	                      skills upload/download routes report it); naming a
+//	                      backend and omitting its configuration is an error
+//	BLOB_ENDPOINT         S3-compatible object storage host:port, required by
+//	                      the s3 backend
 //	BLOB_ACCESS_KEY / BLOB_SECRET_KEY / BLOB_BUCKET  credentials and bucket,
 //	                      required with BLOB_ENDPOINT
 //	BLOB_REGION           optional bucket region
@@ -18,6 +22,10 @@
 //	                      identity needs object permissions only. Needs
 //	                      BLOB_REGION set, or the first object request resolves
 //	                      the bucket location and needs that privilege anyway
+//	                      (BLOB_BACKEND=gcs is that shape unconditionally, and
+//	                      takes BLOB_BUCKET alone — no credential and no
+//	                      endpoint, since it authenticates with Application
+//	                      Default Credentials)
 //	SECRETS_BACKEND       secrets cipher for vault credential material
 //	                      (docs/plan/12): "openbao", "local", "gcpkms", or
 //	                      empty to deploy without one (vault credential
@@ -60,7 +68,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
+	blobbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
@@ -131,7 +139,7 @@ func run(ctx context.Context) error {
 	// Object storage for skill archives and uploaded files is optional: without
 	// it the platform runs and the storage-backed skill/file routes report the
 	// absence.
-	blobs, err := s3.FromEnv(ctx)
+	blobs, err := blobbackend.FromEnv(ctx)
 	if err != nil {
 		return err
 	}
@@ -178,12 +186,12 @@ func run(ctx context.Context) error {
 // runImport is the run-once operator import: validate + land the named skill
 // directories from the checkout, report the summary, exit.
 func runImport(ctx context.Context, dsn string) error {
-	blobs, err := s3.FromEnv(ctx)
+	blobs, err := blobbackend.FromEnv(ctx)
 	if err != nil {
 		return err
 	}
 	if blobs == nil {
-		return errors.New("the import needs object storage: set BLOB_ENDPOINT (and its BLOB_* companions)")
+		return errors.New("the import needs object storage: configure a blob backend (BLOB_ENDPOINT and its BLOB_* companions for S3, or BLOB_BACKEND=gcs with BLOB_BUCKET)")
 	}
 	version := *importVersion
 	if version == "" {

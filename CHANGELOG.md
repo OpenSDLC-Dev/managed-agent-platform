@@ -101,6 +101,66 @@ copy of an entry here.
   transcript-only outcome graders and the `define_outcome` wire rendering gained
   offline unit tests alongside the suite's existing ones.
 
+- **A GCS-native object-storage backend, so a Google deployment needs no downloaded key
+  material** ([internal/blob/gcs](./internal/blob/gcs),
+  [internal/blob/backend](./internal/blob/backend), #240,
+  [plan 22](./docs/plan/22_gcs-native-blob.md) slice 1). `internal/blob/s3` reaches Google
+  Cloud Storage through its S3-interop XML API, which works and costs an HMAC key pair —
+  created by `deploy/gcp/bootstrap.sh`, kept in two Secret Manager containers, copied by
+  hand into the cluster, and the deployment's last Google-issued key material.
+  `BLOB_BACKEND=gcs` + `BLOB_BUCKET` selects a backend on `cloud.google.com/go/storage`
+  instead, which authenticates with Application Default Credentials — a Workload Identity
+  binding on GKE, no material anywhere. Its whole config is the bucket name: there is no
+  credential variable and no endpoint. This slice is the backend; the deployment moves to
+  it in slice 2, so nothing changes for an existing install.
+
+  **`New` makes no request at all.** The permission-minimal shape #241 made *optional* for
+  S3 is the only shape this backend has, so `roles/storage.objectAdmin` is the entire
+  grant and a wrong bucket name or a missing IAM binding surfaces on first use rather than
+  at startup.
+
+  That leaves one hard problem, measured against real Cloud Storage rather than assumed: a
+  read for a missing object and a read into a **bucket that does not exist** both come back
+  as a bare `storage.ErrObjectNotExist`, with no `googleapi.Error` to inspect. Reporting
+  both as absence would let a mistyped bucket name read as an empty store — "the platform
+  has no skills" instead of the incident it is — which is precisely what the S3 backend
+  refuses to do. So absence is settled with a **one-object listing**: it answers
+  `iterator.Done` for an existing empty bucket and `ErrBucketNotExist` for a missing one,
+  the sentinel the read path never produces, and it needs `storage.objects.list`, which
+  `objectAdmin` already grants — no bucket-level privilege, one extra request, on the miss
+  path only. Only an affirmative answer buys `ErrNotFound`; a probe that fails for any
+  other reason (a denial, a transport error) stays an error, because an open question must
+  not be reported as data that is gone.
+
+  **Selection moved into `internal/blob/backend`**, a sibling package for the structural
+  reason `internal/secrets/backend` and `internal/sandbox/backend` already record: the seam
+  package holds the interface *and* `ErrNotFound`, which every backend wraps, so it cannot
+  import them. `FromEnv` replaces the old `s3.FromEnv` at all four call sites, is the one
+  place `blob.WithMetrics` is applied, and keeps object storage optional — but only for a
+  deployment that named no backend. `BLOB_BACKEND` unset still means S3, so every existing
+  install works unchanged; an explicit `BLOB_BACKEND=s3` with no `BLOB_ENDPOINT` is now an
+  error rather than a silent "storage off", since asking for storage and getting none is
+  the failure that rule exists to prevent.
+
+  **The shared `blobtest` contract suite passes unchanged**, bare and through the metrics
+  decorator, against a pinned `fsouza/fake-gcs-server` container — `internal/blob/gcs/gcstest`,
+  blobtest's MinIO twin for a backend MinIO cannot serve. The fake needs
+  `storage.WithJSONReads()`, without which the client's reads go to the XML media host
+  derived from the bucket name and 404 against a container on an ephemeral port; that is
+  named as a gap as well as a fix, because production uses neither that option nor that
+  transport. Its cover is the opt-in live tier — `RUN_LIVE_GCS_TESTS=1` plus `GCS_BUCKET`,
+  under `gcpkmstest`'s contract exactly (configuration may come from `.env`, consent only
+  from the environment, opted-in-but-unconfigured fails rather than skips) — which runs the
+  same suite against real Cloud Storage through the production client, under a random
+  per-run key prefix it deletes afterwards, and refuses to run at all with
+  `STORAGE_EMULATOR_HOST` set, since a live tier that can silently not be live is worse
+  than none. It carries the missing-bucket assertion too, so the ambiguity the design rests
+  on is checked against Google rather than against the fake's idea of a 404 — and that
+  assertion derives its bucket name under GCS's 63-character cap, because an over-long name
+  fails client-side validation, which is an error and not `ErrNotFound`, so the test would
+  pass without the missing-bucket path ever running. It was run: both live tests pass, all
+  eight shared subtests included, and the bucket was empty afterwards.
+
 - **The Cloud SQL Auth Proxy is a Helm value, and the brain has an identity to run one
   under** ([deploy/helm/managed-agent-platform](./deploy/helm/managed-agent-platform),
   [deploy/gcp](./deploy/gcp), #269). Google's documented path from GKE to a private-IP

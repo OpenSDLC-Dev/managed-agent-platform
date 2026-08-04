@@ -8,6 +8,10 @@
 //	                      controlplane)
 //	MODEL_PROVIDERS_PATH  JSON file mapping model strings to provider
 //	                      endpoints (required) — see internal/provider
+//	BLOB_BACKEND + BLOB_*  object storage, as controlplane: "s3" (default when
+//	                      empty) or "gcs". Read to grade file-output rubrics
+//	                      against the bytes; without it they are graded from
+//	                      the description alone
 //	BRAIN_LEASE_TTL       work-item lease, Go duration (default "2m")
 //	BRAIN_POLL_INTERVAL   idle queue poll, Go duration (default "250ms")
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
@@ -23,7 +27,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
+	blobbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/anthropic"
@@ -88,7 +92,7 @@ func run(ctx context.Context) error {
 	// Read-only assembly input: the grader reads file-rubric snapshots from
 	// object storage. Optional the same way it is on the control plane — a
 	// nil store grades file rubrics from the description alone.
-	blobs, err := s3.FromEnv(ctx)
+	blobs, err := blobbackend.FromEnv(ctx)
 	if err != nil {
 		return err
 	}

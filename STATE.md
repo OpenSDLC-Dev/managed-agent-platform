@@ -4,16 +4,21 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**Issues [#241](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/241) and
-[#240](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/240)** — narrowing what
-object storage costs a deployment identity: a pre-created-bucket mode for the S3 backend,
-then a GCS-native backend that removes the HMAC key pair entirely.
+**[Plan 22](./docs/plan/22_gcs-native-blob.md) — issue
+[#240](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/240)**, the second half
+of narrowing what object storage costs a deployment identity: a GCS-native backend that
+removes the HMAC key pair entirely. Its sibling
+[#241](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/241) landed first.
 
 ## Tasks
 
 - [x] #241 — `BLOB_BUCKET_PRECREATED` skips `BucketExists`/`MakeBucket` and requires a
   region (a region-less client resolves the bucket's location instead); chart value,
   render guard, CI assertions
-- [ ] #240 — `internal/blob/gcs` on `cloud.google.com/go/storage` behind a backend
-  selector, passing `blobtest` unchanged
-- [ ] #240 — `deploy/gcp` drops the HMAC pair and the bucket-read grant
+- [x] #240 slice 1 — `internal/blob/gcs` on `cloud.google.com/go/storage` behind the
+  `internal/blob/backend` selector, passing `blobtest` unchanged against a pinned
+  `fake-gcs-server` and, opted in, against real Cloud Storage
+  ([#276](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/276): three verifier
+  passes, all PASS-with-findings and every finding fixed; dual review; CI green)
+- [ ] #240 slice 2 — chart wiring for the keyless mode; `deploy/gcp` drops the HMAC pair
+  and the bucket-read grant, binding the ServiceAccounts #269 finished giving all three
