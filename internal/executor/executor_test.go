@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -523,6 +524,48 @@ func TestRunProcessesQueuedWorkAndStopsOnCancel(t *testing.T) {
 	}
 	if got := h.liveOf(t, queue.ToolExec); got != 0 {
 		t.Errorf("tool_exec live = %d, want 0 (completed)", got)
+	}
+}
+
+// shutdownRaceCtx reproduces the #282 race deterministically: cancellation
+// lands between Run's loop-top liveness check and its inspection of the step
+// error — the window where a claim surfaces a transport-level failure instead
+// of context.Canceled. Err reports live exactly once (Run's loop-top check is
+// its first caller) and cancelled ever after; Done stays open so the claim
+// fails on the closed pool, not on the context.
+type shutdownRaceCtx struct {
+	done chan struct{}
+	errs atomic.Int32
+}
+
+func (c *shutdownRaceCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *shutdownRaceCtx) Done() <-chan struct{}       { return c.done }
+func (c *shutdownRaceCtx) Value(any) any               { return nil }
+func (c *shutdownRaceCtx) Err() error {
+	if c.errs.Add(1) == 1 {
+		return nil
+	}
+	return context.Canceled
+}
+
+func TestRunTreatsClaimErrorDuringShutdownAsCleanStop(t *testing.T) {
+	// A claim racing shutdown can fail with a transport-level error from the
+	// dying connection — not context.Canceled — and Run must still stop clean
+	// (#282). The closed pool stands in for the dropped connection.
+	h := newHarness(t, nil)
+	h.pool.Close()
+	if err := h.exec.Run(&shutdownRaceCtx{done: make(chan struct{})}); err != nil {
+		t.Errorf("Run returned %v, want nil when shutdown races the claim failure", err)
+	}
+}
+
+func TestRunReturnsClaimErrorWhileLive(t *testing.T) {
+	// The shutdown tolerance must not swallow a genuine claim failure: with the
+	// context live, a dead queue is still fatal to the loop.
+	h := newHarness(t, nil)
+	h.pool.Close()
+	if err := h.exec.Run(context.Background()); err == nil {
+		t.Error("Run returned nil, want the claim error while the context is live")
 	}
 }
 

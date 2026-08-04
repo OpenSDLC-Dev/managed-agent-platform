@@ -184,7 +184,10 @@ func (e *Executor) Run(ctx context.Context) error {
 		}
 		worked, err := e.step(ctx)
 		if err != nil {
-			if errors.Is(err, context.Canceled) {
+			// Checked against ctx, not errors.Is(err, context.Canceled): a claim
+			// racing shutdown can surface a transport-level error from the dying
+			// connection instead of the context error (#282). Mirrors worker.Run.
+			if ctx.Err() != nil {
 				return nil
 			}
 			return err
