@@ -350,63 +350,91 @@ jobs:
           # that did not get a proxy.
           for t in controlplane brain executor; do
             rendered="$(helm template t "$CHART" -f "$VALUES" "${on[@]}" --show-only "templates/$t-deployment.yaml")"
-            # A NATIVE sidecar, which is the whole ordering guarantee: an
-            # ordinary container lets the process race the proxy and crash-loop
-            # on a socket that is not listening yet. Rendered under `containers:`
-            # instead, everything below would still pass — so the assertion is
-            # that the proxy is the first entry under `initContainers:`, at the
-            # exact indentation a podSpec gives it.
-            echo "$rendered" | awk '
+            # Every assertion below reads the initContainers BLOCK, not the
+            # whole manifest, and that is the point rather than tidiness: a
+            # proxy rendered under `containers:` — losing the whole ordering
+            # guarantee, since an ordinary container lets the process race it
+            # and crash-loop on a socket that is not listening — leaves every
+            # manifest-wide grep still matching. So the block is extracted once,
+            # at the exact indentation a podSpec gives it, and everything is
+            # asserted inside it.
+            sidecar="$(echo "$rendered" | awk '
               /^      initContainers:$/ { inInit = 1; next }
-              inInit && $0 ~ /^        - name: cloud-sql-proxy$/ { found = 1 }
-              inInit && $0 ~ /^      [a-zA-Z]/ { inInit = 0 }
-              END { exit !found }' \
+              inInit && /^      [a-zA-Z]/ { inInit = 0 }
+              inInit { print }')"
+            echo "$sidecar" | grep -q '^        - name: cloud-sql-proxy$' \
               || { echo "$t: the proxy is not a native sidecar under initContainers" >&2
                    echo "$rendered" >&2; exit 1; }
-            echo "$rendered" | grep -q 'restartPolicy: Always' \
+            echo "$sidecar" | grep -q 'restartPolicy: Always' \
               || { echo "$t: the sidecar is missing restartPolicy: Always" >&2; exit 1; }
             # Without a startupProbe a native sidecar promises only that the
-            # process was started, not that it is listening.
-            echo "$rendered" | grep -q 'path: /startup' \
+            # process was started, not that it is listening — and the probe in
+            # turn is only reachable because of the three health flags, so
+            # asserting the probe without them would certify a sidecar whose
+            # startup can never succeed and whose pod therefore never starts its
+            # application container at all.
+            echo "$sidecar" | grep -q 'path: /startup' \
               || { echo "$t: the sidecar has no startupProbe" >&2; exit 1; }
-            for want in '"--private-ip"' '"--port=5432"' '"proj:us-central1:inst"'; do
-              echo "$rendered" | grep -qF "$want" \
+            for want in '"--health-check"' '"--http-address=0.0.0.0"' '"--http-port=9801"' \
+                        '"--private-ip"' '"--port=5432"' '"--structured-logs"' \
+                        '"proj:us-central1:inst"'; do
+              echo "$sidecar" | grep -qF "$want" \
                 || { echo "$t: the sidecar args are missing $want" >&2; exit 1; }
             done
           done
           # --private-ip is what an ipv4_enabled=false instance needs and is
           # wrong for one reached over its public address, so the switch has to
-          # actually remove it.
-          helm template t "$CHART" -f "$VALUES" "${on[@]}" --set cloudSQLProxy.privateIP=false \
-            --show-only templates/brain-deployment.yaml | grep -qF '"--private-ip"' \
+          # actually remove it. Captured, not piped, for the reason at the top of
+          # this step: piped, a render that failed for any other reason would
+          # match nothing and read as "removed, ok".
+          noPrivate="$(helm template t "$CHART" -f "$VALUES" "${on[@]}" \
+            --set cloudSQLProxy.privateIP=false --show-only templates/brain-deployment.yaml)"
+          echo "$noPrivate" | grep -qF '"--private-ip"' \
             && { echo "privateIP=false left --private-ip in the args" >&2; exit 1; }
-          # Four render-time refusals. Each of them is a pod that would otherwise
-          # deploy and never become ready, with nothing in the release naming why.
-          if helm template t "$CHART" -f "$VALUES" --set postgresql.enabled=false \
-               --set externalDatabase.url='postgres://u:p@127.0.0.1:5432/x' \
-               --set cloudSQLProxy.enabled=true >/dev/null 2>&1; then
-            echo "cloudSQLProxy.enabled without an instanceConnectionName rendered" >&2; exit 1
-          fi
-          if helm template t "$CHART" -f "$VALUES" --set postgresql.enabled=false \
-               --set externalDatabase.url='postgres://u:p@127.0.0.1:5432/x' \
-               --set cloudSQLProxy.enabled=true \
-               --set cloudSQLProxy.instanceConnectionName=10.1.2.3 >/dev/null 2>&1; then
-            echo "an ADDRESS was accepted where an instance connection name is required" >&2; exit 1
-          fi
+          # The four render-time refusals. Each is asserted by its own MESSAGE,
+          # not merely by a non-zero exit: several of these values would be
+          # refused by more than one guard, so an exit code cannot tell which
+          # fired — deleting the required-name guard left this step green when it
+          # only checked that the render failed, because the shape guard refuses
+          # an empty name too. Each of them is a pod that would otherwise deploy
+          # and never become ready, with nothing in the release naming why.
+          refuses() {
+            local want="$1"; shift
+            local err
+            err="$(helm template t "$CHART" -f "$VALUES" "$@" 2>&1 >/dev/null)" \
+              && { echo "rendered instead of failing: $*" >&2; exit 1; }
+            echo "$err" | grep -qF "$want" \
+              || { echo "refused for the wrong reason (wanted: $want)" >&2
+                   echo "$err" >&2; exit 1; }
+          }
+          noDB=(--set postgresql.enabled=false --set externalDatabase.url='postgres://u:p@127.0.0.1:5432/x')
+          refuses 'cloudSQLProxy.instanceConnectionName is required' \
+            "${noDB[@]}" --set cloudSQLProxy.enabled=true
+          # An address, an empty segment, and too many segments. The first is
+          # the substitution an operator actually makes — `sql_private_ip` or a
+          # host:port pasted where the connection name belongs; the rest are
+          # what a bare "at least three colon-separated parts" test accepted.
+          # This is a SHAPE check and these rows are its boundary: a
+          # well-formed-but-wrong name (`127.0.0.1:5432:x` is three non-empty
+          # parts) is the proxy's to reject at startup, and encoding Google's
+          # own rules for the three parts here would refuse a valid name the day
+          # Google widens one.
+          for bad in 10.1.2.3 127.0.0.1:5432 'a::b' 'proj:us-central1:' '2001:db8::1' 'a:b:c:d:e'; do
+            refuses 'must be an instance connection name' \
+              "${noDB[@]}" --set cloudSQLProxy.enabled=true \
+              --set "cloudSQLProxy.instanceConnectionName=$bad"
+          done
           # ...but a legacy domain-scoped project really does carry a fourth
-          # segment, so the shape check must not be an exact count.
-          helm template t "$CHART" -f "$VALUES" "${on[@]}" \
+          # segment, so the shape check must not refuse one.
+          domainScoped="$(helm template t "$CHART" -f "$VALUES" "${on[@]}" \
             --set 'cloudSQLProxy.instanceConnectionName=google.com:proj:us-central1:inst' \
-            --show-only templates/brain-deployment.yaml | grep -qF '"google.com:proj:us-central1:inst"' \
+            --show-only templates/brain-deployment.yaml)"
+          echo "$domainScoped" | grep -qF '"google.com:proj:us-central1:inst"' \
             || { echo "a domain-scoped project's connection name was refused or mangled" >&2; exit 1; }
-          if helm template t "$CHART" -f "$VALUES" --set cloudSQLProxy.enabled=true \
-               --set cloudSQLProxy.instanceConnectionName=proj:us-central1:inst >/dev/null 2>&1; then
-            echo "the proxy alongside the bundled Postgres rendered instead of failing" >&2; exit 1
-          fi
-          err="$(helm template t "$CHART" -f "$VALUES" "${on[@]}" --kube-version 1.26 2>&1 >/dev/null)" \
-            && { echo "the native sidecar must fail the render on Kubernetes < 1.29" >&2; exit 1; }
-          echo "$err" | grep -q 'cloudSQLProxy.enabled needs Kubernetes >= 1.29' \
-            || { echo "the 1.26 render failed for the wrong reason: $err" >&2; exit 1; }
+          refuses 'cloudSQLProxy.enabled is incompatible with postgresql.enabled' \
+            --set cloudSQLProxy.enabled=true --set cloudSQLProxy.instanceConnectionName=proj:us-central1:inst
+          refuses 'cloudSQLProxy.enabled needs Kubernetes >= 1.29' \
+            "${on[@]}" --kube-version 1.26
           echo "ok: Cloud SQL Auth Proxy paths"
       - name: bundled MinIO gates readiness on its object layer
         # Both assertions read rendered `path:` keys rather than grepping the

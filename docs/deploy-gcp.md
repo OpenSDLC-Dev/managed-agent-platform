@@ -64,8 +64,14 @@ gcloud builds submit ...     # the component images
 helm install ...             # the platform
 ```
 
-`foundation/` is applied once and never destroyed; `environment/` is created and destroyed
-freely. That split is what makes a rebuild safe, and the reason is not tidiness: a KMS key
+`foundation/` is never destroyed; `environment/` is created and destroyed freely. "Once,
+ever" above is about the destroy, not the apply: the configuration is idempotent, and
+re-applying it is how anything is ever *added* to it. That matters for an existing
+deployment upgrading past
+[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269), which adds the
+brain's Google service account — `environment/` reads it by name through a data source, so
+running `make gcp-env-apply` without re-applying the foundation first fails on the lookup
+rather than creating it. That split is what makes a rebuild safe, and the reason is not tidiness: a KMS key
 ring cannot be deleted in GCP at all, and destroying the key schedules every version for
 destruction while the name stays taken — so a configuration that owned it could not be
 re-applied, and the vault ciphertext encrypted under it would be gone.
@@ -156,17 +162,23 @@ instance's address for the others:
 ```
 
 and then a `database-url` of
-`postgres://USER:PASSWORD@127.0.0.1:5432/DATABASE?sslmode=disable`. **The chart cannot
-write that for you** — in mode 2 it renders no Secret at all — so pointing the sidecar at an
-instance while leaving the DSN on the instance's own address deploys a proxy nothing
-connects through. It renders as a **native sidecar** (an `initContainer` with
+`postgres://USER:PASSWORD@127.0.0.1:5432/DATABASE?sslmode=disable`. **Pointing the DSN at
+the proxy is yours to do**, and it is the mistake to watch for: a sidecar with a DSN still
+naming the instance's own address is a proxy nothing connects through. In mode 2 the chart
+renders no Secret at all and never sees the DSN, so it cannot check this — and it
+deliberately does not check the one path where it *could* (`externalDatabase.url`), because
+a refusal that fires in one path and is structurally blind in the other is worse than a
+documented rule.
+
+It renders as a **native sidecar** (an `initContainer` with
 `restartPolicy: Always`) with a startup probe on the proxy's own `/startup`, which is what
 makes it ready before the process that dials it: all three open the database as they start,
-so an ordinary container would let them race it. That needs Kubernetes 1.29 or newer, and
-the render fails on anything older rather than producing a pod an old kubelet silently
-mistreats. Four other refusals happen at render time too — no
-`instanceConnectionName`, an address given where a `PROJECT:REGION:INSTANCE` name belongs,
-the bundled Postgres left enabled alongside it, and (as above) an old cluster.
+so an ordinary container would let them race it. Four things fail the render rather than
+deploying a pod that never becomes ready: a cluster older than Kubernetes 1.29 (which
+predates native sidecars), a missing `instanceConnectionName`, one whose shape is not
+`PROJECT:REGION:INSTANCE` — an address such as `10.1.2.3` or `db.internal:5432`, or a name
+with an empty part — and the bundled Postgres left enabled alongside it. The shape check
+stops there: a well-formed name that names nothing is the proxy's to reject at startup.
 
 If you must use a shared proxy Service as an interim step, treat the
 database credential as exposed to anything that can watch pod-network traffic, and say so in

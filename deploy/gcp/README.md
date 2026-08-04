@@ -97,7 +97,11 @@ project_id = "your-project"
 EOF
 cp deploy/gcp/foundation/terraform.tfvars deploy/gcp/environment/terraform.tfvars
 
-make gcp-foundation-apply              # once, ever — creates the secrets EMPTY
+make gcp-foundation-apply              # never destroyed — creates the secrets EMPTY
+                                       # (re-apply it when foundation/ GAINS a resource:
+                                       #  environment/ reads each one by name and fails
+                                       #  the lookup if the apply that creates it has
+                                       #  not run — #269's map-brain account, for one)
 PROJECT=your-project make gcp-bootstrap  # fills them, creates the GCS HMAC key
 
 # Only now: the foundation apply above is what enables the Cloud Build API, and the

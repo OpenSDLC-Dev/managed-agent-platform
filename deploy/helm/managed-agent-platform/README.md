@@ -128,9 +128,12 @@ the controlplane, brain and executor deployments:
 
 Four things about it are worth knowing before you turn it on.
 
-**The DSN is yours to point at the proxy.** The chart does not rewrite it, and in the
-`existingSecret` path it never sees one — so a sidecar with a DSN still naming the
-instance's own address is a proxy nothing connects through.
+**The DSN is yours to point at the proxy.** The chart does not rewrite it, and under
+`existingSecret` it never sees one — so a sidecar with a DSN still naming the instance's own
+address is a proxy nothing connects through. It does not refuse that in the
+`externalDatabase.url` path either, where it *does* hold the DSN: a guard that fires for one
+of the two paths and is structurally blind in the other reads as a check that has been
+performed.
 
 **`sslmode=disable` is correct here and nowhere else.** The proxy terminates the encrypted
 leg itself and hands the process a loopback socket, so the hop the DSN describes never
@@ -155,8 +158,12 @@ up.
 It renders as a **native sidecar** — an `initContainer` with `restartPolicy: Always` — with
 a startup probe on the proxy's own health endpoint, so the socket is listening before the
 process that dials it starts. That needs **Kubernetes >= 1.29**; older clusters fail the
-render. So do a missing `instanceConnectionName`, an address supplied where a
-`PROJECT:REGION:INSTANCE` name belongs, and the bundled Postgres left enabled alongside it.
+render. So do a missing `instanceConnectionName`, one whose shape is not
+`PROJECT:REGION:INSTANCE` (an address such as `10.1.2.3` or `db.internal:5432`, or a name
+with an empty part), and the bundled Postgres left enabled alongside it. The shape check is
+a shape check: a well-formed name that names nothing is rejected by the proxy at startup,
+not here, because encoding Google's own naming rules in a template would refuse a valid name
+the day Google widens one.
 
 ## Credential cipher (OpenBao)
 

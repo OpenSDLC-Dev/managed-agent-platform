@@ -144,10 +144,11 @@ whose password rides the DSN — the role deploy/gcp/dbinit.sql creates, precise
 so it is not a Cloud SQL Admin API user.
 
 The guards live here rather than in secret.yaml, where the chart's other
-mutually-exclusive-value refusals live, because that whole file is skipped when
-existingSecret is set — and existingSecret is exactly how the GCP mode this
-sidecar exists for is deployed, so a guard written there would never fire for
-the deployments that need it.
+mutually-exclusive-value refusals live, because everything past that file's
+first three refusals sits inside its `if not .Values.existingSecret` block and
+is skipped when existingSecret is set — and existingSecret is exactly how the
+GCP mode this sidecar exists for is deployed, so a guard written in that block
+would never fire for the deployments that need it.
 */}}
 {{- define "map.cloudSQLProxy" -}}
 {{- if .Values.cloudSQLProxy.enabled }}
@@ -157,14 +158,23 @@ the deployments that need it.
 {{- if not .Values.cloudSQLProxy.instanceConnectionName }}
 {{- fail "cloudSQLProxy.instanceConnectionName is required when cloudSQLProxy.enabled: PROJECT:REGION:INSTANCE, from `terraform output -raw sql_instance_connection_name`." }}
 {{- end }}
-{{- /* Three colon-separated segments, and only that: a legacy domain-scoped
-       project adds a fourth (`google.com:project:region:instance`), so an exact
-       count would refuse a valid name. What this catches is the substitution
-       that actually gets made — an IP address or a bare instance name, which
-       the proxy rejects at startup, leaving a pod that never becomes ready and
-       nothing in the release to point at. */}}
-{{- if lt (len (splitList ":" .Values.cloudSQLProxy.instanceConnectionName)) 3 }}
-{{- fail (printf "cloudSQLProxy.instanceConnectionName must be an instance connection name, PROJECT:REGION:INSTANCE — not %q. The proxy is given a name, never an address." .Values.cloudSQLProxy.instanceConnectionName) }}
+{{- /* Three colon-separated segments, or four for a legacy domain-scoped
+       project (`google.com:project:region:instance`) — and every one of them
+       non-empty. The count alone is not enough: `a::b` and `2001:db8::1` both
+       reach three or more segments, and an address with a port
+       (`127.0.0.1:5432:x`) reaches exactly three, so a bare length test accepts
+       the very substitution the message warns against. What all of these have
+       in common is that the proxy rejects them at startup, leaving a pod that
+       never becomes ready and nothing in the release to point at.
+
+       This checks the SHAPE and stops there. Google's own rules for the three
+       parts are narrower, and encoding them here would refuse a valid name the
+       day Google widens one — the proxy is the authority on its own argument. */}}
+{{- $segments := splitList ":" .Values.cloudSQLProxy.instanceConnectionName }}
+{{- $empty := false }}
+{{- range $segments }}{{- if eq . "" }}{{- $empty = true }}{{- end }}{{- end }}
+{{- if or $empty (lt (len $segments) 3) (gt (len $segments) 4) }}
+{{- fail (printf "cloudSQLProxy.instanceConnectionName must be an instance connection name — PROJECT:REGION:INSTANCE, or DOMAIN:PROJECT:REGION:INSTANCE for a domain-scoped project, with no empty part. Not %q. The proxy is given a name, never an address." .Values.cloudSQLProxy.instanceConnectionName) }}
 {{- end }}
 {{- if semverCompare "<1.29-0" .Capabilities.KubeVersion.Version }}
 {{- fail "cloudSQLProxy.enabled needs Kubernetes >= 1.29: the proxy runs as a native sidecar (an initContainer with restartPolicy Always), which older kubelets reject" }}

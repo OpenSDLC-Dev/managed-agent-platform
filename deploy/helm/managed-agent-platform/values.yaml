@@ -254,9 +254,12 @@ externalDatabase:
 #
 #   postgres://USER:PASSWORD@127.0.0.1:5432/DATABASE?sslmode=disable
 #
-# The chart cannot rewrite the DSN for you (in the existingSecret path it never
-# sees one), so pointing this at an instance while leaving the DSN on the
-# instance's own address leaves a proxy nothing connects through.
+# The chart neither writes that DSN nor refuses a wrong one, so pointing this at
+# an instance while leaving the DSN on the instance's own address leaves a proxy
+# nothing connects through. Under existingSecret it never sees a DSN at all; it
+# declines to check the externalDatabase.url path either, because a refusal that
+# fires in one of the two paths and is structurally blind in the other reads as
+# a check that has been performed.
 #
 # `sslmode=disable` is safe there and only there: the hop it describes is a
 # loopback socket inside one pod. That is why the proxy is a sidecar rather than
