@@ -20,17 +20,18 @@ import (
 const turnTimeout = 5 * time.Minute
 
 // outcomeTurnBudget bounds a user.define_outcome → idle round trip, which is
-// a whole outcome loop rather than one turn: up to MaxIterations agent turns
-// with an outputs harvest and a grader call each, plus the acknowledgment
-// turn a max_iterations_reached appends — so the budget scales with the
-// cycles the outcome allows instead of pretending the loop is one turn. The
-// server defaults max_iterations to 3 when the event omits it.
+// a whole outcome loop rather than one turn: up to MaxIterations cycles of an
+// agent turn plus a separate grader model call (two turn-sized calls, so two
+// budgets each), plus the acknowledgment turn a max_iterations_reached
+// appends — the budget scales with the cycles the outcome allows instead of
+// pretending the loop is one turn. Non-positive MaxIterations gets the server
+// default (3), matching turnEvent, which omits the field for those values.
 func outcomeTurnBudget(o *Outcome) time.Duration {
 	cycles := o.MaxIterations
-	if cycles == 0 {
+	if cycles <= 0 {
 		cycles = 3
 	}
-	return time.Duration(cycles+1) * turnTimeout
+	return time.Duration(2*cycles+1) * turnTimeout
 }
 
 // maxConfirmRounds caps how many requires_action pauses one turn may raise before

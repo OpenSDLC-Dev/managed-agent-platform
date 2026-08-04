@@ -36,10 +36,12 @@ func outcomeSatisfy() Task {
 		Turns: []Turn{{Outcome: &Outcome{
 			Description: "Create the file " + deliverable + " containing exactly the single line " +
 				token + " and nothing else. That file is this outcome's only deliverable.",
-			// The rubric restates the description rather than referencing it, so
-			// the grader can verify from the rubric alone.
+			// The rubric restates the description rather than referencing it —
+			// including the exactly-one-line requirement, so the rubric, the
+			// description, and every code check below agree on one predicate
+			// and the grader can verify from the rubric alone.
 			RubricText: "The deliverable result-{{NONCE}}.txt must exist and its content must " +
-				"contain the exact token " + token + ". Nothing else is required.",
+				"be exactly the single line " + token + " with nothing else in the file.",
 			// Headroom for one revision if the model fumbles the first write;
 			// ground truth is judged on the terminal verdict.
 			MaxIterations: 2,
@@ -52,6 +54,7 @@ func outcomeSatisfy() Task {
 			FileLines(deliverable, []string{token}, Either),
 			HarvestedDeliverable("result-{{NONCE}}.txt", Platform),
 			GraderVerdictMatchesDeliverable(deliverable, token, Either),
+			GraderUsageAccounted(Platform),
 			OutcomeProjectionSettled(Platform),
 		},
 	}
@@ -97,6 +100,7 @@ func outcomeRevise() Task {
 			// broken loop also ends max_iterations_reached); this is the check
 			// that the feedback actually moved the agent.
 			RevisionFeedbackDelivered(deliverable, token, Either),
+			GraderUsageAccounted(Platform),
 			OutcomeProjectionSettled(Platform),
 		},
 	}
@@ -223,10 +227,11 @@ func OutcomeTerminalIn(results []string, class Class) Grader {
 }
 
 // GraderVerdictMatchesDeliverable is the should-satisfy ground truth: when
-// the deliverable objectively carries its required token, the outcome must
-// have settled satisfied — anything else is the grader failing strict. It is
-// vacuous when the deliverable is wrong or absent (the model never earned a
-// satisfied; the file grader alongside reds that half).
+// the deliverable is objectively correct — its whole content is exactly the
+// required token, the same predicate the rubric states and FileLines asserts
+// — the outcome must have settled satisfied; anything else is the grader
+// failing strict. It is vacuous when the deliverable is wrong or absent (the
+// model never earned a satisfied; the file grader alongside reds that half).
 //
 // It reads the live sandbox, not the harvested snapshot the grader judged, on
 // purpose: a red here is either the grader drifting OR a harvest that starved
@@ -240,7 +245,7 @@ func GraderVerdictMatchesDeliverable(path, token string, class Class) Grader {
 		Class: class,
 		Check: func(t *testing.T, tr *Trial) error {
 			b, err := tr.readFile(t, tr.fill(path))
-			if err != nil || !strings.Contains(string(b), tr.fill(token)) {
+			if err != nil || strings.TrimSpace(string(b)) != tr.fill(token) {
 				return nil
 			}
 			ends := eventsOfType(tr, "span.outcome_evaluation_end")
@@ -249,7 +254,7 @@ func GraderVerdictMatchesDeliverable(path, token string, class Class) Grader {
 			}
 			last := ends[len(ends)-1]
 			if got := endResult(last); got != "satisfied" {
-				return fmt.Errorf("the deliverable carries its required token, yet the outcome settled %q (explanation: %.200s)",
+				return fmt.Errorf("the deliverable is exactly its required token, yet the outcome settled %q (explanation: %.200s)",
 					got, endExplanation(last))
 			}
 			return nil
@@ -361,6 +366,28 @@ func HarvestedDeliverable(filename string, class Class) Grader {
 			}
 			return fmt.Errorf("deliverable %s exists in the sandbox outputs but the files registry has no row for it (%d rows listed)",
 				name, len(data))
+		},
+	}
+}
+
+// GraderUsageAccounted asserts every evaluation end carries a well-formed
+// usage object — the outcome-loop mirror of the core pack's usage-accounted
+// check, for the one model call that rides no span.model_request_end.
+// sumTokens reads the same key with the same accessor, so a green here means
+// the report actually counted the grader's spend rather than silently
+// skipping a malformed event. Vacuous with no ends (OutcomeCycleRan owns
+// "a cycle must run").
+func GraderUsageAccounted(class Class) Grader {
+	return Grader{
+		Name:  "grader-usage-accounted",
+		Class: class,
+		Check: func(_ *testing.T, tr *Trial) error {
+			for _, e := range eventsOfType(tr, "span.outcome_evaluation_end") {
+				if _, _, ok := usageAt(e, "usage"); !ok {
+					return fmt.Errorf("an evaluation end for iteration %d carries no usage object — the grader's spend is unaccounted", endIteration(e))
+				}
+			}
+			return nil
 		},
 	}
 }

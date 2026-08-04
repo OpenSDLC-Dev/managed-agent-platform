@@ -94,12 +94,15 @@ copy of an entry here.
   also ends `max_iterations_reached`, which the terminal check alone would green);
   the harvest check is vacuous unless the outcome settled `satisfied` (a file first
   written in the post-terminal acknowledgment turn correctly has no registry row);
-  the outcome turn's budget scales with `max_iterations` instead of a flat
-  multiplier, and `make eval`'s outer backstop rises to 120m to fit the grown
-  worst case; the report's token totals now include the grader's own spend (it
-  rides `span.outcome_evaluation_end`, which `sumTokens` never read); and the
-  transcript-only outcome graders and the `define_outcome` wire rendering gained
-  offline unit tests alongside the suite's existing ones.
+  the outcome turn's budget grants two turn-budgets per allowed cycle (an agent
+  turn and a separate grader call each) plus the acknowledgment turn, and
+  `make eval`'s outer backstop rises to 120m — the scheduled `evals.yml` job's
+  to 135m, staying above it — to fit the grown worst case; the report's token
+  totals now include the grader's own spend (it rides
+  `span.outcome_evaluation_end`, which `sumTokens` never read), with a Platform
+  grader pinning that every evaluation end carries a well-formed usage object;
+  and the transcript-only outcome graders and the `define_outcome` wire
+  rendering gained offline unit tests alongside the suite's existing ones.
 
 - **A GCS-native object-storage backend, so a Google deployment needs no downloaded key
   material** ([internal/blob/gcs](./internal/blob/gcs),

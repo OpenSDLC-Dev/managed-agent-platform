@@ -169,6 +169,27 @@ func TestHarvestedDeliverableVacuousUnlessSatisfied(t *testing.T) {
 	}
 }
 
+func TestGraderUsageAccounted(t *testing.T) {
+	g := GraderUsageAccounted(Platform)
+	if err := g.Check(t, trialWith(nil)); err != nil {
+		t.Errorf("no ends: unexpected error %v", err)
+	}
+	ok := trialWith([]map[string]any{
+		{"type": "span.outcome_evaluation_end", "iteration": float64(0), "usage": map[string]any{
+			"input_tokens": float64(1), "output_tokens": float64(1),
+		}},
+	})
+	if err := g.Check(t, ok); err != nil {
+		t.Errorf("well-formed usage: unexpected error %v", err)
+	}
+	// A missing usage object must red — sumTokens would silently skip it and
+	// the report would under-count without any grader noticing.
+	missing := trialWith([]map[string]any{evalEnd("s1", 0, "satisfied", "")})
+	if err := g.Check(t, missing); err == nil || !strings.Contains(err.Error(), "unaccounted") {
+		t.Errorf("missing usage: error %v, want the unaccounted spend named", err)
+	}
+}
+
 // sumTokens must count the grader's spend, which rides span.outcome_evaluation_end
 // under "usage" — not "model_usage", and with no span.model_request_end of its own.
 func TestSumTokensCountsGraderUsage(t *testing.T) {
