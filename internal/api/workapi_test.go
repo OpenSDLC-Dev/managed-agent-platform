@@ -425,15 +425,17 @@ func TestWorkPollBlockMsExpiresToNull(t *testing.T) {
 	envID, _ := selfHostedWorker(t, s, key)
 	auth := map[string]string{"Authorization": "Bearer " + key}
 
-	// maxWait bounds each window tightly enough that a clamp landing seconds
-	// over the 999ms ceiling fails, with ~2s of slack for a loaded runner (the
-	// wake test's <900ms bound already assumes far less).
+	// maxWait pins each case against the wrong window, not just against no
+	// window: the in-range bound sits below the 999ms ceiling so a server that
+	// ignores the requested value and always waits the cap fails, and the
+	// over-cap bound catches a clamp landing seconds over the ceiling — with
+	// runner slack in the same range the wake test's <900ms bound assumes.
 	cases := map[string]struct {
 		query   string
 		minWait time.Duration
 		maxWait time.Duration
 	}{
-		"in-range window held":      {"?block_ms=300", 300 * time.Millisecond, 3 * time.Second},
+		"in-range window held":      {"?block_ms=300", 300 * time.Millisecond, 900 * time.Millisecond},
 		"over-cap clamped to 999ms": {"?block_ms=600000", 999 * time.Millisecond, 3 * time.Second},
 	}
 	for name, tc := range cases {
@@ -460,16 +462,23 @@ func TestWorkPollBlockMsExpiresToNull(t *testing.T) {
 // TestWorkPollBlockMsRejectsNonPositive pins the validation edge the SDK
 // records: non-blocking is expressed by omitting block_ms, and the reference
 // server rejects an explicit 0 (anthropic-sdk-go lib/environments/poller.go).
-// Zero, negative, present-but-empty, and unparseable values are all 400 here
-// — unlike the non-validating reclaim knob.
+// Zero, negative, present-but-empty, unparseable, and repeated values are all
+// 400 here — unlike the non-validating reclaim knob.
 func TestWorkPollBlockMsRejectsNonPositive(t *testing.T) {
 	s := newTestServer(t)
 	const key = "ek-block-bad"
 	envID, _ := selfHostedWorker(t, s, key)
 	auth := map[string]string{"Authorization": "Bearer " + key}
 
-	for _, v := range []string{"0", "-5", "abc", ""} { // "" = ?block_ms= — present but empty, not omission
-		res, raw := s.pollQuery(t, envID, "?block_ms="+v, auth)
+	for _, q := range []string{
+		"?block_ms=0",
+		"?block_ms=-5",
+		"?block_ms=abc",
+		"?block_ms=", // present but empty — not omission
+		"?block_ms=300&block_ms=abc",
+		"?block_ms=abc&block_ms=300", // repeated, either order — first-value-wins would mask one
+	} {
+		res, raw := s.pollQuery(t, envID, q, auth)
 		var body map[string]any
 		_ = json.Unmarshal([]byte(raw), &body)
 		wantErr(t, res.StatusCode, body, http.StatusBadRequest, "invalid_request_error")
