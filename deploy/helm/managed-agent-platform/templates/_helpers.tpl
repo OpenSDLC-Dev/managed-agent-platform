@@ -94,7 +94,7 @@ them — deploys the platform without object storage, and the processes serve
 with skills (and file-rubric grading) unavailable instead of crash-looping.
 */}}
 {{- define "map.blobEnv" -}}
-{{- range $var, $key := dict "BLOB_ENDPOINT" "blob-endpoint" "BLOB_ACCESS_KEY" "blob-access-key" "BLOB_SECRET_KEY" "blob-secret-key" "BLOB_BUCKET" "blob-bucket" "BLOB_REGION" "blob-region" "BLOB_TLS" "blob-tls" "BLOB_BUCKET_PRECREATED" "blob-bucket-precreated" }}
+{{- range $var, $key := dict "BLOB_BACKEND" "blob-backend" "BLOB_ENDPOINT" "blob-endpoint" "BLOB_ACCESS_KEY" "blob-access-key" "BLOB_SECRET_KEY" "blob-secret-key" "BLOB_BUCKET" "blob-bucket" "BLOB_REGION" "blob-region" "BLOB_TLS" "blob-tls" "BLOB_BUCKET_PRECREATED" "blob-bucket-precreated" }}
 - name: {{ $var }}
   valueFrom:
     secretKeyRef:

@@ -10,8 +10,9 @@ prevent is silent and irreversible (plan 20, Decision 9):
      the resource schedules every key version for destruction, so the name stays
      taken AND the key becomes unusable, and the vault ciphertext in Postgres is
      decryptable by that key and nothing else. Deleting a service account deletes
-     its HMAC keys, stranding the once-readable GCS HMAC secret in Secret
-     Manager, valid-looking and dead.
+     its HMAC keys along with it, which would strand a once-readable secret in
+     Secret Manager, valid-looking and dead — the hazard that put the `-storage`
+     identity here before #240 retired it, and the reason the kind stays listed.
 
   2. Every resource of an unrecoverable kind in `foundation/` must carry BOTH
      guards it can: `prevent_destroy`, and — for the kinds that have it —
@@ -74,16 +75,26 @@ UNRECOVERABLE = {
     "google_kms_key_ring": False,
     "google_kms_crypto_key": True,
     "google_service_account": True,
+    # No HMAC key is declared anywhere since #240 removed the S3-interop path.
+    # The entry stays as the guard that stops one coming back into the
+    # disposable half: its secret is readable exactly once, at creation.
     "google_storage_hmac_key": True,
     "google_secret_manager_secret": True,
 }
 
 # What foundation/ is expected to protect today. A scan that finds fewer has
 # lost sight of something — the whole check passing over three resources
-# instead of ten is exactly the failure a "did I find anything at all?" guard
+# instead of seven is exactly the failure a "did I find anything at all?" guard
 # is too weak to catch. Raise it with the foundation: left behind, it keeps
 # printing ok over a scan that has quietly stopped seeing the newest resources.
-MIN_PROTECTED = 10
+#
+# Ten until #240, which retired three: the `-storage` service account that held
+# the GCS HMAC key, and the two secret containers holding the key's halves.
+# Object storage authenticates as the workloads themselves now, so there is no
+# fourth identity and no downloaded credential to protect. Lowered deliberately,
+# which is exactly what the failure message below asks for — the number is a
+# claim about the foundation, not a high-water mark.
+MIN_PROTECTED = 7
 
 ROOT = pathlib.Path(__file__).parent
 RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')

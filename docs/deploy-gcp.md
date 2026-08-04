@@ -38,8 +38,10 @@ its PersistentVolumes are the thing the teardown section warns about.
 **Mode 2** points the platform at Cloud SQL, Cloud Storage and Cloud KMS. Everything below
 assumes mode 2 unless it says otherwise. The switch is `existingSecret`: set it and the
 chart creates no Secret of its own and reads every credential from the one you pre-created,
-which must carry `controlplane-api-key`, `model-providers.json`, `database-url`, the
-`blob-*` keys, and `secrets-backend` plus `gcpkms-key-name`. `existingSecret` is
+which must carry `controlplane-api-key`, `model-providers.json`, `database-url`,
+`blob-backend` (`gcs`) plus `blob-bucket`, and `secrets-backend` plus `gcpkms-key-name`.
+Object storage needs no credential key of its own since #240: it authenticates as the
+workload through Workload Identity. `existingSecret` is
 incompatible with `postgresql.enabled`, `minio.enabled` and `openbao.enabled` — the chart
 fails the render rather than deploying two of anything.
 
@@ -58,7 +60,7 @@ load-bearing; this is only the shape of it:
 ```sh
 make gcp-foundation-apply    # never destroyed — durable identities, KMS, empty secrets
                              # (re-apply it whenever foundation/ gains a resource)
-make gcp-bootstrap           # fills the secrets, creates the GCS HMAC key
+make gcp-bootstrap           # fills the secrets
 make gcp-env-apply           # network, cluster, Cloud SQL, bucket, registry
 make gcp-db-init             # the platform's database role — see below
 gcloud builds submit ...     # the component images
@@ -197,15 +199,11 @@ that, with `PGSSLMODE=require`, no sidecar and no Google identity at all. So a `
 of `postgres://USER:PW@$(terraform output -raw sql_private_ip):5432/DB?sslmode=require` works
 for all three components with no IAM whatsoever. The trade is real and worth naming: `require`
 encrypts but does not verify the server's certificate, which is what the proxy adds along with
-IAM-based authorization. Prefer the proxy where you can; take this path when you want mode 2
-running without per-component identity work.
+IAM-based authorization. Prefer the proxy where you can; take this path when you want to skip
+the proxy's own setup. It does **not** skip per-component identity — see below.
 
-That distinction matters most for the **brain**, which opens the database like the other two.
-It now has an identity of its own on both sides: `brain.serviceAccount.annotations` in the
-chart, a `<prefix>-brain` Google service account in `foundation/`, and — in `environment/` —
-the `roles/iam.workloadIdentityUser` binding onto that KSA plus `roles/cloudsql.client`. So
-the proxy topology is three annotations, one per component — and only the proxy topology,
-which needs all three where the direct path needs none of them:
+**All three annotations are required in mode 2, whichever database path you take**, and that
+is a change #240 made:
 
 ```sh
 terraform output -json controlplane_service_account_annotation
@@ -213,13 +211,20 @@ terraform output -json brain_service_account_annotation
 terraform output -json executor_service_account_annotation
 ```
 
-The brain's account holds `roles/cloudsql.client` and nothing else, and that is the point of
-it being separate: annotating the brain onto the control plane's account would be the
-shortcut, and it would hand the brain the KMS decrypt that account carries. Under the direct
-path the question does not arise — no component uses a Google identity for the database at
-all — which is why the mode-2 acceptance run took it and
-[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) was a follow-on
-rather than a blocker.
+The controlplane and executor always needed theirs for the Cloud KMS cipher. The **brain's**
+used to be conditional — it existed for the Cloud SQL Auth Proxy, and the direct path needs
+no Google identity for the database — but object storage is now reached as the workload
+itself, and the brain reads the bucket (rubric snapshots and deliverables), so its account
+holds `roles/storage.objectViewer` there. Its own account rather than the control plane's
+remains the point: annotating the brain onto that account would be the shortcut, and it would
+hand the brain the KMS decrypt that account carries.
+
+Miss the brain's annotation and nothing fails loudly. Its blob reads are written to degrade —
+a deliverable that cannot be read is listed but not inlined, and an unreadable rubric snapshot
+grades against the outcome description alone — so the symptom is worse grading, not an
+outage. The mode-2 acceptance run predates all of this: it took the direct path and
+[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269), which gave the
+brain a ServiceAccount at all, was a follow-on rather than a blocker at the time.
 
 Neither half of the proxy path has been exercised on a live GKE cluster. The chart renders
 it, a real API server accepts the manifests, and the Terraform passes the credential-free
@@ -422,22 +427,119 @@ that enforcement is non-cooperative — and an HTTPS `CONNECT` tunnel from insid
 proxy pod on the default runtime works. That combination is the shape a future standalone
 gate would take; it is not what ships today.
 
-## Backups, and two lifecycles that lose data
+## Upgrading past #240: retiring the GCS HMAC key
+
+A deployment stood up before #240 reached Cloud Storage over its S3-interop XML API, under
+an HMAC key pair belonging to a `map-storage` service account. The platform now reaches it
+natively as the workloads themselves, so that key, that account and the two Secret Manager
+containers holding the key's halves are all dead weight — and dead weight holding a live
+credential. Nothing breaks if you leave them: the old `blob-*` keys still select the S3
+path. But the credential is the thing #240 exists to delete, so leaving it is leaving the
+problem.
+
+The order matters, because the resources are deliberately hard to remove — `prevent_destroy`
+**and** `deletion_policy = "PREVENT"`, the latter read from state, so simply pulling the
+blocks out of the configuration makes the next apply *fail* rather than destroy them. That
+is the guard working as designed; it just means removal is explicit.
+
+**The first grant has to happen outside Terraform, and that is not fussiness.** Before
+#240 the only bucket bindings in `environment/iam.tf` were the two held by `map-storage`;
+the three workload identities had none. `make gcp-env-apply` on the new configuration adds
+their three bindings and *removes* the old two in the same apply — so running it while the
+deployment is still on the S3 path breaks object storage from that moment until the chart
+is rolled, and rolling the chart first breaks it the other way, because the workloads
+cannot yet read the bucket. There is no gap-free order using the two Terraform states
+alone. Adding the three bindings by hand first costs one command and closes the window;
+the later `apply` then finds them already present and only drops the two it should.
+
+```sh
+# 0. Both of these are REQUIRED here, with no default. Every command below names
+#    a real account or secret by prefix, and two of them delete. A `:-map`
+#    fallback on an unset variable would silently address a different
+#    deployment's resources — granting bucket access to someone else's
+#    identities, or deleting their secrets.
+#    (No apostrophes in these messages: bash parses quotes inside ${VAR:?...}
+#    even within double quotes, so one would open a string that never closes.)
+: "${PROJECT:?set PROJECT to the project this deployment lives in}"
+: "${NAME_PREFIX:?set NAME_PREFIX to the prefix this foundation was applied with}"
+
+# 1. Grant the three workloads object access, out of band and before anything moves.
+#    Terraform will converge on exactly these in step 3.
+BUCKET="$(cd deploy/gcp/environment && terraform output -raw blob_bucket)"
+for pair in "controlplane:objectUser" "executor:objectUser" "brain:objectViewer"; do
+  SA="${NAME_PREFIX}-${pair%%:*}@$PROJECT.iam.gserviceaccount.com"
+  # Confirm the account is the one you mean before handing it the bucket.
+  gcloud iam service-accounts describe "$SA" --project "$PROJECT" >/dev/null
+  gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
+    --member="serviceAccount:$SA" \
+    --role="roles/storage.${pair##*:}" --project "$PROJECT"
+done
+
+# 2. Move the deployment onto the native backend, and confirm it works.
+#    The Secret loses blob-endpoint/blob-access-key/blob-secret-key/blob-region and
+#    gains blob-backend=gcs, keeping blob-bucket. Roll the three Deployments; each
+#    logs `object storage configured  backend=gcs` at startup.
+#
+#    REMOVE those keys, do not merely stop selecting them. The chart's env block
+#    references every blob-* key with `optional: true`, so a key left in the Secret
+#    is still injected into all three pods — a live HMAC pair sitting in the
+#    environment of processes that no longer use it is exactly what #240 deletes.
+#
+#    Check the brain's ServiceAccount carries its Workload Identity annotation
+#    before rolling. It reads the bucket now, and a brain that cannot degrades
+#    silently: rubric and deliverable reads fall back rather than failing.
+
+# 3. Reconcile Terraform. This is the apply that drops the two map-storage bindings.
+make gcp-env-apply
+
+# 4. Only once reads and writes are proven on the new path, deactivate and delete
+#    the key. Deactivate first — a key must be INACTIVE before GCS will delete it,
+#    and an inactive key is a reversible way to prove nothing still depends on it.
+gcloud storage hmac list --project "$PROJECT"
+gcloud storage hmac update  "$ACCESS_ID" --deactivate --project "$PROJECT"
+gcloud storage hmac delete  "$ACCESS_ID" --project "$PROJECT"
+
+# 5. Drop the three foundation resources from state, then delete the real ones.
+#    `state rm` rather than `destroy`: deletion_policy = "PREVENT" lives in state,
+#    so Terraform refuses, and that refusal is the point.
+cd deploy/gcp/foundation
+terraform state rm google_service_account.storage \
+                   google_secret_manager_secret.blob_access_key \
+                   google_secret_manager_secret.blob_secret_key
+gcloud secrets delete "${NAME_PREFIX}-blob-access-key" --project "$PROJECT"
+gcloud secrets delete "${NAME_PREFIX}-blob-secret-key" --project "$PROJECT"
+gcloud iam service-accounts delete \
+  "${NAME_PREFIX}-storage@$PROJECT.iam.gserviceaccount.com" --project "$PROJECT"
+
+# 6. Confirm the configuration and the world agree.
+terraform plan   # no changes
+```
+
+Step 4 before step 5, always: deleting the service account deletes its HMAC keys with it,
+which is fine once the key is unused and awkward if it is not — the secret GCS returned at
+creation is not recoverable, so a key you delete by accident cannot be put back.
+
+`state rm` is the path written here because it needs no version floor and no second apply,
+not because it is the only one. Terraform offers two alternatives for exactly this shape,
+and either would work: a `removed` block with `lifecycle { destroy = false }` (Terraform
+≥ 1.7) makes Terraform forget a resource without asking the provider to delete it, so
+`deletion_policy` never comes up; or setting `deletion_policy = "ABANDON"` and applying
+before deleting the blocks reaches the same place in two applies. They are not used here
+because this is a one-time migration for deployments that predate #240, and both would
+leave permanent configuration in `foundation/` to serve it.
+
+## Backups, and the lifecycle that loses data
 
 Back up **Cloud SQL**. It holds the event log, which is the single source of truth for
 every session, and it holds vault credential ciphertext. `environment/` sets no automated
 backup configuration — that is a staging choice, and it is wrong for anything you would
 miss.
 
-Two credential lifecycles are not covered by a database backup, and they fail differently:
+One credential lifecycle is not covered by a database backup, and it fails badly. (There
+were two until #240 retired the GCS HMAC key, whose secret GCS returned exactly once and
+which a deleted service account took with it. Object storage has no credential now.)
 
-- **The GCS HMAC key.** Its secret is returned by GCS exactly once, at creation, and lives
-  afterwards only in Secret Manager. Deleting the storage service account deletes its HMAC
-  keys and strands that secret — valid-looking and dead. Rotation means creating a new key,
-  writing both halves, and only then deleting the old one. `bootstrap.sh` does the create
-  half and refuses to proceed when exactly one of the pair is present, because half a pair
-  looks like a working credential.
-- **The Cloud KMS key. This one is a data-loss hazard, not a rotation chore.** Vault
+- **The Cloud KMS key. This is a data-loss hazard, not a rotation chore.** Vault
   credential ciphertext in Postgres is decryptable by that key version and by nothing else.
   A key ring can never be deleted in GCP; a key can be, but only after every one of its
   versions is destroyed and deleted, so that route runs *through* the data loss rather
@@ -538,10 +640,11 @@ the only disks in the project were the four node boot disks the destroy reclaims
 anyway — the command above costs nothing and a mode-1 experiment in the same project would
 still leave its own — but a clean mode-2 teardown genuinely has nothing to sweep.
 
-Also worth checking, because none of it is in Terraform's state either: an active GCS HMAC
-key that outlived its bucket (`gcloud storage hmac list`), soft-deleted buckets still
-inside their retention window (they bill until they hard-delete, and they self-clear), and
-Secret Manager versions for infrastructure that no longer exists.
+Also worth checking, because none of it is in Terraform's state either: soft-deleted
+buckets still inside their retention window (they bill until they hard-delete, and they
+self-clear), and Secret Manager versions for infrastructure that no longer exists. A
+deployment that predates #240 also has an HMAC key that nothing uses any more — see the
+migration note above, since `gcloud storage hmac list` is the only place it appears.
 
 What is retained by design: the foundation's service accounts, its Secret Manager secrets,
 and its KMS key ring and key. A key ring can never be deleted at all; a key can only be

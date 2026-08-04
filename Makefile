@@ -185,8 +185,9 @@ gcp-dbinit-test:
 gcp-split-check-test:
 	python3 deploy/gcp/check_split_test.py
 
-# Adds the first version of each Secret Manager secret and creates the GCS HMAC
-# key. Runs BETWEEN the two applies: the foundation creates the secrets empty,
+# Adds the first version of each Secret Manager secret — the two database
+# passwords, since #240 retired the GCS HMAC key that was the third value here.
+# Runs BETWEEN the two applies: the foundation creates the secrets empty,
 # this fills them, and environment/ reads them ephemerally. Idempotent by
 # skipping — a secret that already has a version is left alone, because that
 # version may be the only thing that can decrypt something.

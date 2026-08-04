@@ -16,20 +16,22 @@
 #     prevent_destroy: prevent_destroy is a property of the CONFIGURATION and
 #     disappears along with the block it is written in, while deletion_policy is
 #     read from STATE and so survives someone deleting the resource block.
-#   - Deleting a service account deletes its HMAC keys. An identity in the
-#     disposable half would strand the once-readable HMAC secret in Secret
-#     Manager: valid-looking, and dead.
 #   - The Secret Manager secrets, which are the reconciliation source a rebuilt
 #     environment is brought back into agreement with.
+#
+# A third reason retired with #240. Deleting a service account deletes its HMAC
+# keys, so the identity holding the GCS HMAC pair could not live in the
+# disposable half without stranding a once-readable secret — valid-looking, and
+# dead. The GCS-native backend authenticates with Workload Identity and there is
+# no HMAC key any more, so that argument is gone; the two above are not, and the
+# split stands on them.
 #
 # What is deliberately NOT here: any secret VALUE. Terraform holds names, IAM
 # bindings and preconditions only (plan 20, Decision 6). Putting a value in
 # `secret_data` writes it into state in plaintext, and `environment/` reading it
 # back would put a second copy in the state of the half that is destroyed and
 # rebuilt routinely. So this configuration creates the secret *containers* and
-# `bootstrap.sh` adds the first version of each — including the GCS HMAC key,
-# whose secret GCS returns exactly once and which therefore must not be a
-# Terraform resource either.
+# `bootstrap.sh` adds the first version of each.
 #
 # `terraform destroy` is not a supported operation here, and `make
 # gcp-env-destroy` does not touch this state.
@@ -112,14 +114,16 @@ resource "google_kms_crypto_key" "cipher" {
 }
 
 # ---------------------------------------------------------------------------
-# Identities. Four, because they need four different privilege sets — see the
-# grants in environment/iam.tf.
+# Identities. Three, one per workload process, because they need three
+# different privilege sets — see the grants in environment/iam.tf. A fourth,
+# `-storage`, held the GCS HMAC key and retired with #240: object storage is
+# now reached as the workloads themselves, through Workload Identity.
 # ---------------------------------------------------------------------------
 
 # The control plane encrypts on write and decrypts on read (mcp_oauth_validate
 # and the gate-config endpoint both call Decrypt), so it is the only identity
 # that needs the decrypt half.
-# The four identities. Each waits on the API enablement above: without that
+# The three identities. Each waits on the API enablement above: without that
 # dependency Terraform is free to create a service account concurrently with
 # enabling iam.googleapis.com, and on a project where IAM was never enabled the
 # create reaches a disabled API and the FIRST apply fails. A retry then succeeds,
@@ -176,24 +180,6 @@ resource "google_service_account" "executor" {
   }
 }
 
-# Blob storage is reached over the S3 protocol (internal/blob/s3, minio-go), so
-# it authenticates with an HMAC key rather than with Workload Identity. The key
-# belongs to this account, which is why the account cannot live in the
-# disposable half — and why the key itself is bootstrap.sh's to create, since
-# GCS returns its secret exactly once and a Terraform resource holding it would
-# hold it in state.
-resource "google_service_account" "storage" {
-  depends_on = [google_project_service.required]
-
-  account_id      = "${var.name_prefix}-storage"
-  display_name    = "managed-agent-platform blob storage (GCS HMAC)"
-  deletion_policy = "PREVENT"
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
 # ---------------------------------------------------------------------------
 # Secret Manager: the containers, with their replication. The VALUES are
 # bootstrap.sh's job — see the header, and plan 20's Decision 6.
@@ -230,36 +216,6 @@ resource "google_secret_manager_secret" "db_password" {
 # password that survived.
 resource "google_secret_manager_secret" "db_admin_password" {
   secret_id       = "${var.name_prefix}-db-admin-password"
-  deletion_policy = "PREVENT"
-
-  replication {
-    auto {}
-  }
-
-  depends_on = [google_project_service.required]
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
-resource "google_secret_manager_secret" "blob_access_key" {
-  secret_id       = "${var.name_prefix}-blob-access-key"
-  deletion_policy = "PREVENT"
-
-  replication {
-    auto {}
-  }
-
-  depends_on = [google_project_service.required]
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
-resource "google_secret_manager_secret" "blob_secret_key" {
-  secret_id       = "${var.name_prefix}-blob-secret-key"
   deletion_policy = "PREVENT"
 
   replication {

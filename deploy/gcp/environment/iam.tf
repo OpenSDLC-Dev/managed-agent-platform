@@ -102,32 +102,66 @@ resource "google_kms_crypto_key_iam_member" "executor" {
 }
 
 # ---------------------------------------------------------------------------
-# GCS. Two roles, and the second is not belt-and-braces: s3.New checks the
-# bucket before any object work (internal/blob/s3/s3.go), minio-go issues that
-# as HEAD Bucket, and GCS maps it to storage.buckets.get — which
-# roles/storage.objectAdmin does NOT grant. An identity holding only objectAdmin
-# fails at construction, before it ever touches an object.
+# GCS. One role per workload, granted to the workloads themselves — the whole
+# point of #240. The bucket used to be reached over the S3-interop XML API under
+# an HMAC key belonging to a separate `-storage` identity, which cost a
+# downloaded credential and a second grant: minio-go's pre-flight bucket check
+# is a HEAD Bucket, GCS maps it to storage.buckets.get, and objectAdmin does not
+# grant that, so roles/storage.legacyBucketReader had to ride along. The
+# GCS-native backend (internal/blob/gcs) makes no bucket call at all and
+# authenticates with Workload Identity, so both the key and the bucket-level
+# grant are gone.
 #
-# That check is skippable since #241 (BLOB_BUCKET_PRECREATED), which would drop
-# this grant — but only alongside an explicit BLOB_REGION, and whether GCS's S3
-# XML API accepts an arbitrary SigV4 region scope for a bucket in var.region is
-# unmeasured. This deployment is moving off the S3 path entirely instead (#240),
-# so the grant stays until it does.
+# The roles differ per process because their access does, and this is the one
+# place that difference can be expressed. Verified against the code rather than
+# assumed:
 #
-# Bound on the bucket rather than the project, so the identity can reach this
+#   - controlplane — objectUser. Uploads and deletes skill archives and files
+#     (internal/api/{skills,files,skillsimport}.go), and writes rubric snapshots.
+#   - executor     — objectUser. Reads skill archives and file mounts, writes
+#     harvested deliverables, and deletes them when a harvest fails
+#     (internal/executor/{skills,files,harvest}.go).
+#   - brain        — objectViewer. Get only, on both its paths
+#     (internal/brain/grader.go); its own field comment calls object storage
+#     "read-only assembly input". A writer's role here would be privilege the
+#     code cannot use.
+#
+# objectUser rather than objectAdmin. Measured rather than assumed: objectAdmin
+# adds exactly four permissions over objectUser — objects.getIamPolicy and
+# objects.setIamPolicy, which this bucket's uniform_bucket_level_access turns off
+# so no caller could exercise them, and objects.setRetention and
+# objects.overrideUnlockedRetention, which are live but govern object retention
+# the platform never sets. Neither pair is anything the code calls, so the
+# narrower role costs nothing. objectViewer covers the read path AND
+# storage.objects.list,
+# which the backend's absence probe needs to tell a missing object from a
+# missing bucket.
+#
+# Not following the chart's switch: like the Cloud SQL grants above, these are
+# unconditional. A deployment that runs the bundled MinIO instead simply never
+# uses them, and an identity whose grant appears only under one values file is
+# the kind of conditional that fails at 3am.
+#
+# Bound on the bucket rather than the project, so each identity can reach this
 # bucket and no other.
 # ---------------------------------------------------------------------------
 
-resource "google_storage_bucket_iam_member" "blob_object_admin" {
+resource "google_storage_bucket_iam_member" "blob_controlplane" {
   bucket = google_storage_bucket.blob.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${data.google_service_account.storage.email}"
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${data.google_service_account.controlplane.email}"
 }
 
-resource "google_storage_bucket_iam_member" "blob_bucket_reader" {
+resource "google_storage_bucket_iam_member" "blob_executor" {
   bucket = google_storage_bucket.blob.name
-  role   = "roles/storage.legacyBucketReader"
-  member = "serviceAccount:${data.google_service_account.storage.email}"
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${data.google_service_account.executor.email}"
+}
+
+resource "google_storage_bucket_iam_member" "blob_brain" {
+  bucket = google_storage_bucket.blob.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${data.google_service_account.brain.email}"
 }
 
 # ---------------------------------------------------------------------------

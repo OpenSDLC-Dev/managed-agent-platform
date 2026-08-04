@@ -19,17 +19,12 @@ output "controlplane_service_account" {
 
 output "brain_service_account" {
   value       = google_service_account.brain.email
-  description = "Google service account the brain pods impersonate via Workload Identity. Needed only under the Cloud SQL Auth Proxy topology, where it holds roles/cloudsql.client and nothing else."
+  description = "Google service account the brain pods impersonate via Workload Identity. Required in mode 2 since #240: it holds roles/storage.objectViewer on the blob bucket, which the brain reads for rubric snapshots and deliverables, plus roles/cloudsql.client for the Cloud SQL Auth Proxy topology."
 }
 
 output "executor_service_account" {
   value       = google_service_account.executor.email
   description = "Google service account the executor pods impersonate via Workload Identity."
-}
-
-output "storage_service_account" {
-  value       = google_service_account.storage.email
-  description = "Google service account bootstrap.sh creates the GCS HMAC key under. Reached over the S3 protocol, so it is NOT bound to any Kubernetes ServiceAccount."
 }
 
 output "db_password_secret" {
@@ -40,14 +35,4 @@ output "db_password_secret" {
 output "db_admin_password_secret" {
   value       = google_secret_manager_secret.db_admin_password.secret_id
   description = "Secret Manager secret id holding the Cloud SQL built-in `postgres` administrator's password. Used by one bootstrap connection and by break-glass access; never by the platform."
-}
-
-output "blob_access_key_secret" {
-  value       = google_secret_manager_secret.blob_access_key.secret_id
-  description = "Secret Manager secret id holding the GCS HMAC access id."
-}
-
-output "blob_secret_key_secret" {
-  value       = google_secret_manager_secret.blob_secret_key.secret_id
-  description = "Secret Manager secret id holding the GCS HMAC secret."
 }

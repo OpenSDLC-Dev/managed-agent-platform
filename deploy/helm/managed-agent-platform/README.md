@@ -20,6 +20,8 @@ production recommendation to disable them and point `externalDatabase` /
 `externalObjectStorage` / `externalOpenBao` at services with their own backup
 and upgrade lifecycle. The platform speaks plain S3 — any compatible store
 (AWS S3, Ceph RGW, …) works — and the plain Vault-compatible transit HTTP API.
+On Google Cloud there is a third object-storage option, `gcsObjectStorage`,
+which reaches Cloud Storage natively and carries no credential at all (#240).
 
 The **BYOC worker is deliberately not in this chart** — it runs on the customer's own
 compute, outside the platform cluster, and reaches the control plane only over the wire.
@@ -277,11 +279,14 @@ account for both is simpler and is what the example above configures.)
 
 The brain never gets the key name: it holds no cipher, so on KMS grounds it has
 no reason to hold the identity either. It does have a **ServiceAccount** of its
-own, for a reason that has nothing to do with KMS — see the Cloud SQL Auth Proxy
-below — and keeping it separate is what stops the two reasons from merging:
-annotate the brain's KSA onto the account above and the brain inherits its KMS
-decrypt. Give it the account that holds `roles/cloudsql.client` and nothing
-else. It is also why each component has a ServiceAccount rather than falling
+own, for reasons that have nothing to do with KMS — reading the blob bucket
+(`gcsObjectStorage`, #240) and the Cloud SQL Auth Proxy below — and keeping that
+account separate is what stops the two from merging. **Do not annotate the
+brain's KSA onto the KMS account above**: if you do, the brain inherits that
+account's KMS decrypt, which is precisely the privilege it has no use for. Point
+it at its own Google service account, the one carrying
+`roles/storage.objectViewer` on the bucket and `roles/cloudsql.client` — and no
+cipher role. It is also why each component has a ServiceAccount rather than falling
 back to the namespace's `default` — annotating `default` would hand one Google
 identity to every pod in the namespace that also defaults.
 
@@ -356,7 +361,8 @@ processes; `otlp.insecure=true` to export without TLS.
 | `externalOpenBao.address` | `""` | external OpenBao/Vault URL when `openbao.enabled=false` |
 | `localCipher.masterKey` | `""` | AES-256-GCM fallback when no OpenBao is configured |
 | `gcpKMS.keyName` | `""` | Cloud KMS CryptoKey resource name; selects the KMS cipher (exclusive with the OpenBao options and `localCipher`). Needs the Workload Identity annotations below — no key material rides the Secret |
-| `controlplane.serviceAccount.annotations` / `brain.serviceAccount.annotations` / `executor.serviceAccount.annotations` | `{}` | annotations on each component's ServiceAccount; `iam.gke.io/gcp-service-account` is how the KMS cipher authenticates — and, for the brain, which holds no cipher, how the Cloud SQL Auth Proxy does |
+| `gcsObjectStorage.enabled` / `.bucket` | `false` / `""` (required when enabled) | reach Google Cloud Storage natively (#240), exclusive with `minio.enabled` and `externalObjectStorage.endpoint`. The bucket name is the whole configuration: no endpoint, no credential — authentication is Application Default Credentials, so it needs the Workload Identity annotations below. The bucket must already exist |
+| `controlplane.serviceAccount.annotations` / `brain.serviceAccount.annotations` / `executor.serviceAccount.annotations` | `{}` | annotations on each component's ServiceAccount; `iam.gke.io/gcp-service-account` is how the Google-native backends authenticate. Which ones you need depends on the backend: `gcsObjectStorage` needs **all three**, since every process reaches object storage; `gcpKMS` needs only the controlplane and executor, the two that receive the cipher env; the brain otherwise needs one only for the Cloud SQL Auth Proxy |
 | `cloudSQLProxy.enabled` / `.instanceConnectionName` | `false` / `""` (required when enabled) | run the Cloud SQL Auth Proxy as a native sidecar in all three deployments (below). The name is `PROJECT:REGION:INSTANCE`, never an address |
 | `cloudSQLProxy.image` / `.privateIP` / `.resources` | `gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.24.1` / `true` / `{}` | proxy image, whether to pass `--private-ip` (what an instance with no public address needs), and its resources |
 | `existingSecret` | `""` | reference a pre-created Secret instead of inlining |

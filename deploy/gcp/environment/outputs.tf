@@ -74,7 +74,7 @@ output "controlplane_service_account_annotation" {
 
 output "brain_service_account_annotation" {
   value       = { "iam.gke.io/gcp-service-account" = data.google_service_account.brain.email }
-  description = "Chart: brain.serviceAccount.annotations, verbatim. Apply it only with the Cloud SQL Auth Proxy (chart: cloudSQLProxy.enabled), which is the only thing it is for: the brain holds no cipher, so this identity carries roles/cloudsql.client and nothing else, and the direct-connection path uses no Google identity for the database at all."
+  description = "Chart: brain.serviceAccount.annotations, verbatim. Required since #240: the brain reads file bytes to grade rubrics, so this identity carries roles/storage.objectViewer on the bucket — read-only, which is all its code does. It also carries roles/cloudsql.client, used only with the Cloud SQL Auth Proxy (chart: cloudSQLProxy.enabled); the direct-connection path uses no Google identity for the database at all. The brain holds no cipher, so there is no KMS grant."
 }
 
 output "executor_service_account_annotation" {
@@ -82,14 +82,18 @@ output "executor_service_account_annotation" {
   description = "Chart: executor.serviceAccount.annotations, verbatim."
 }
 
-output "blob_endpoint" {
-  value       = "storage.googleapis.com"
-  description = "BLOB_S3_ENDPOINT. GCS's S3-compatible XML API, which is what internal/blob/s3 speaks."
+# No endpoint and no credential: since #240 this deployment reaches the bucket
+# through internal/blob/gcs, which resolves Google's own endpoint and
+# authenticates with Workload Identity. The `blob-endpoint`, `blob-access-key`
+# and `blob-secret-key` keys the S3 path needed are not set at all.
+output "blob_backend" {
+  value       = "gcs"
+  description = "BLOB_BACKEND for the hand-assembled mode-2 Secret. Constant, but it is a key that Secret must carry: without it the platform reads the default, s3, and looks for an endpoint that is not there. Mode 2 sets existingSecret and leaves gcsObjectStorage.enabled false — the chart refuses the two together, because it writes no Secret in that mode and the value would select nothing. gcsObjectStorage is the mode-1 route to the same place."
 }
 
 output "blob_bucket" {
   value       = google_storage_bucket.blob.name
-  description = "BLOB_S3_BUCKET."
+  description = "BLOB_BUCKET for the mode-2 Secret (the chart's gcsObjectStorage.bucket in mode 1). The only object-storage value the deployment needs."
 }
 
 output "sql_instance_connection_name" {
