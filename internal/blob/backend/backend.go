@@ -79,6 +79,17 @@ func FromEnv(ctx context.Context) (blob.Store, error) {
 		if bucket == "" {
 			return nil, fmt.Errorf("BLOB_BACKEND=gcs needs BLOB_BUCKET")
 		}
+		// The S3-only variables are not read on this arm, and an operator who
+		// left them set is describing an endpoint the client will never use.
+		// Said out loud rather than rejected: a values file that carries both
+		// while switching between them is a reasonable thing to have, and
+		// failing it would be this selector deciding a deployment's business.
+		// Silence is the one option that is wrong.
+		if ignored := setOf("BLOB_ENDPOINT", "BLOB_ACCESS_KEY", "BLOB_SECRET_KEY", "BLOB_REGION"); len(ignored) > 0 {
+			slog.Warn("BLOB_BACKEND=gcs ignores the S3-only object storage settings; "+
+				"authentication is Application Default Credentials and the endpoint is Google's",
+				"ignored", ignored)
+		}
 		store, err := gcs.New(ctx, gcs.Config{Bucket: bucket})
 		if err != nil {
 			return nil, err
@@ -88,4 +99,16 @@ func FromEnv(ctx context.Context) (blob.Store, error) {
 	default:
 		return nil, fmt.Errorf("unknown BLOB_BACKEND %q (want s3 or gcs)", backend)
 	}
+}
+
+// setOf returns which of the named variables carry a value — the names only,
+// never the values, since two of these are credentials.
+func setOf(names ...string) []string {
+	var set []string
+	for _, name := range names {
+		if os.Getenv(name) != "" {
+			set = append(set, name)
+		}
+	}
+	return set
 }

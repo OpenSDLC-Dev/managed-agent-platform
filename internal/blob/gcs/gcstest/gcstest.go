@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -104,7 +106,12 @@ func waitReady(endpoint string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		err = client.Bucket("gcstest-probe").Create(ctx, Project, nil)
-		if err == nil {
+		if err == nil || bucketExists(err) {
+			// Serving is what "ready" means, and a 409 says the fake answered
+			// about state it already holds — which is what a create whose reply
+			// was lost leaves behind. Without this the retry would then poll a
+			// working fake until the timeout. (v1.56.0 has no ErrBucketExist, so
+			// the status code is the only signal.)
 			return nil
 		}
 		if time.Now().Add(poll).After(deadline) {
@@ -112,6 +119,13 @@ func waitReady(endpoint string, timeout time.Duration) error {
 		}
 		time.Sleep(poll)
 	}
+}
+
+// bucketExists reports whether the error is the endpoint saying the bucket is
+// already there.
+func bucketExists(err error) bool {
+	var e *googleapi.Error
+	return errors.As(err, &e) && e.Code == http.StatusConflict
 }
 
 // newClient points the Google client at the fake. Two options carry the whole

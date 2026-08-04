@@ -96,6 +96,12 @@ Storage tier (a bucket name, not a credential — that tier authenticates with A
 Default Credentials) — and the live tiers
 read it (the environment wins over the file). Never commit real credentials.
 
+Those are *test* settings. What a running deployment reads is separate: `BLOB_BACKEND`
+picks the object-storage backend — unset or `s3` for any S3-compatible endpoint
+(`BLOB_ENDPOINT` and its `BLOB_*` companions), `gcs` for Google Cloud Storage natively,
+which takes `BLOB_BUCKET` alone and authenticates with Application Default Credentials, so
+there is no key to distribute.
+
 **Run the platform locally** with the docker-compose stack — controlplane, brain, and executor against a bundled Postgres, MinIO, and OpenBao (and an optional Jaeger):
 
 ```bash

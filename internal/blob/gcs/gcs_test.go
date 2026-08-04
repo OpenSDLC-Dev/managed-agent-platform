@@ -350,6 +350,51 @@ func randomTag(t *testing.T) string {
 	return hex.EncodeToString(b[:])
 }
 
+// maxBucketName is GCS's limit for an ordinary (non-dotted) bucket name.
+const maxBucketName = 63
+
+// missingBucketName derives a name that is unique, certainly absent, and short
+// enough to be legal — truncating the configured base rather than the tag, since
+// the tag is what makes the name unlikely to belong to anyone. A trailing '-'
+// left by the truncation is trimmed: a bucket name may not end in one, and an
+// illegal name would fail validation instead of reaching the absence path.
+func missingBucketName(base, tag string) string {
+	const suffix = "-missing-"
+	if room := maxBucketName - len(suffix) - len(tag); len(base) > room {
+		base = strings.TrimRight(base[:room], "-")
+	}
+	return base + suffix + tag
+}
+
+// TestMissingBucketNameStaysLegal runs in the default tier, because the rule it
+// checks is the live tier's and the live tier is opt-in: without this, a base
+// name long enough to overflow the limit would be found only by whoever happened
+// to configure one, and would surface as a test that passes for the wrong reason
+// rather than as a failure.
+func TestMissingBucketNameStaysLegal(t *testing.T) {
+	const tag = "0123456789abcdef"
+	for name, base := range map[string]string{
+		"Short":             "map-blob",
+		"AtTheLimit":        strings.Repeat("b", maxBucketName),
+		"OverTheLimit":      strings.Repeat("b", maxBucketName*2),
+		"TruncatesToADash":  strings.Repeat("b", maxBucketName-len("-missing-")-len(tag)-1) + "-x",
+		"RealisticLongName": "opensdlc-managed-agents-map-blob-probe2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := missingBucketName(base, tag)
+			if len(got) > maxBucketName {
+				t.Errorf("%q is %d chars, over %d", got, len(got), maxBucketName)
+			}
+			if !strings.HasSuffix(got, tag) {
+				t.Errorf("%q dropped the uniqueness tag", got)
+			}
+			if strings.Contains(got, "--") {
+				t.Errorf("%q has an empty label from the truncation", got)
+			}
+		})
+	}
+}
+
 // liveClient builds the client the live tier runs against — the production one,
 // with no options, which is the point of the tier.
 //
@@ -378,8 +423,19 @@ func liveClient(t *testing.T, ctx context.Context) *storage.Client {
 // are its own; this asks real Cloud Storage, which is the only thing that keeps
 // the claim true as the client version moves. It creates nothing: the bucket name
 // is one that does not exist, and every operation on it is expected to fail.
+//
+// The name has to stay a VALID one, which is why it is bounded rather than
+// concatenated. GCS caps a bucket name at 63 characters, `GCS_BUCKET` is not
+// length-limited, and an over-long name fails client-side validation — an error,
+// and not `ErrNotFound`, so both assertions below would pass without the
+// missing-bucket path ever being exercised. That is the "green for the wrong
+// reason" this test exists to avoid, so the length is asserted too.
 func TestLiveMissingBucketIsAnErrorNotAbsence(t *testing.T) {
-	bucket := gcstest.LiveBucket(t) + "-missing-" + randomTag(t)
+	bucket := missingBucketName(gcstest.LiveBucket(t), randomTag(t))
+	if len(bucket) > maxBucketName {
+		t.Fatalf("derived bucket %q is %d chars, over GCS's %d — the test would pass on a "+
+			"validation error rather than on absence", bucket, len(bucket), maxBucketName)
+	}
 	ctx := context.Background()
 	s, err := gcs.New(ctx, gcs.Config{Bucket: bucket, Client: liveClient(t, ctx)})
 	if err != nil {
@@ -398,8 +454,15 @@ func TestLiveMissingBucketIsAnErrorNotAbsence(t *testing.T) {
 // a throwaway bucket; the live tier runs against one real bucket an operator
 // owns, so without this two runs would overwrite each other and every run would
 // leave objects behind.
+//
+// It embeds the CONCRETE *gcs.Store, not blob.Store: prefixing is only complete
+// while Put/Get/Delete are the whole interface, and embedding the interface would
+// silently promote any method added later — forwarding a raw key to the
+// operator's real bucket, unprefixed and unregistered for cleanup. With the
+// concrete type, a new interface method fails to compile here until it is
+// wrapped.
 type liveStore struct {
-	blob.Store
+	*gcs.Store
 	prefix  string
 	mu      sync.Mutex
 	written map[string]bool

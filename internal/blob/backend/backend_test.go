@@ -117,6 +117,10 @@ func TestS3WithoutBucketPrecreatedChecksTheBucket(t *testing.T) {
 	t.Setenv("BLOB_ENDPOINT", "127.0.0.1:9")
 	t.Setenv("BLOB_BUCKET", "map-blob")
 	t.Setenv("BLOB_REGION", "us-east-1")
+	// Pinned, not assumed: an ambient BLOB_BUCKET_PRECREATED=true would skip the
+	// very check this test asserts happens, and it would fail for that reason
+	// rather than for anything about the code (the rule stated at the top).
+	t.Setenv("BLOB_BUCKET_PRECREATED", "")
 	if _, err := backend.FromEnv(ctx); err == nil {
 		t.Fatal("FromEnv reached a store on the discard port without the mode")
 	}

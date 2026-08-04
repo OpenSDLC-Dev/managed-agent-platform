@@ -588,7 +588,8 @@ the platform serves with skills unavailable — + OTel;
 only `DATABASE_URL` + `BLOB_*` and exits instead of serving), `brain`
 (`DATABASE_URL` + `MODEL_PROVIDERS_PATH` + lease/poll tunables + the same optional
 `BLOB_*`, which it reads to grade file-output rubrics against the bytes + OTel), `executor`
-(`DATABASE_URL` + `EXECUTOR_IMAGE`/`EXECUTOR_WORKDIR` + `SANDBOX_BACKEND` selection —
+(`DATABASE_URL` + the same optional `BLOB_*`, without which it skips skill and file
+materialization + `EXECUTOR_IMAGE`/`EXECUTOR_WORKDIR` + `SANDBOX_BACKEND` selection —
 `docker` default, `k8s` — via `internal/sandbox/backend` + `CONTROLPLANE_URL`/`EXECUTOR_GATE_IMAGE`/
 `SANDBOX_DOCKER_GATE_NETWORK` for the egress gate + OTel), and `worker`
 (`ANTHROPIC_BASE_URL` / `ANTHROPIC_ENVIRONMENT_ID` / `ANTHROPIC_ENVIRONMENT_KEY`
