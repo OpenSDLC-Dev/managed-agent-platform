@@ -32,10 +32,11 @@ const evalImage = "python:3.12-slim"
 
 // TestMain gates before pgtest.Main, and the order is the point.
 //
-// pgtest.Main starts a Postgres container unconditionally and waits up to two
-// minutes for it — before m.Run, so before any test can skip. Calling it first
-// would make every `make verify` pay a container start for a suite that then
-// skips every test. The gate below is the same one modeltest.Endpoint applies
+// pgtest.Main starts a Postgres container unconditionally and waits up to 150
+// seconds for it — twice, on a bad day (#265) — before m.Run, so before any
+// test can skip. Calling it first would make every `make verify` pay a
+// container start for a suite that then skips every test. The gate below is
+// the same one modeltest.Endpoint applies
 // per test (any non-empty RUN_EVALS opts in), kept in agreement by asking
 // modeltest rather than re-spelling the rule here.
 //

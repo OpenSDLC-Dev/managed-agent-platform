@@ -72,7 +72,9 @@ func newStubMinIO(t *testing.T, refusals int32) *stubMinIO {
 // the gate has to keep going until an S3 request itself is answered.
 func TestWaitReadyWaitsForTheObjectLayer(t *testing.T) {
 	stub := newStubMinIO(t, 2)
-	if err := waitReady(stub.endpoint, 30*time.Second); err != nil {
+	// The stub has no container behind it; an empty ID leaves the liveness
+	// check inert (an unanswerable inspect is not a terminal state).
+	if err := waitReady(stub.endpoint, "", 30*time.Second); err != nil {
 		t.Fatalf("waitReady: %v", err)
 	}
 	if got := stub.s3Calls.Load(); got < 3 {
@@ -96,7 +98,7 @@ func TestWaitReadyFailsWhileTheObjectLayerIsDown(t *testing.T) {
 	// full poll interval before the deadline, so the request that has to carry
 	// the refusal back is not racing the context that would replace it with a
 	// bare timeout. This test exists to end a flake, not to become one.
-	err := waitReady(stub.endpoint, 600*time.Millisecond)
+	err := waitReady(stub.endpoint, "", 600*time.Millisecond)
 	if err == nil {
 		t.Fatal("waitReady passed a server whose object layer never came up")
 	}

@@ -55,11 +55,12 @@ const readyTimeout = 150 * time.Second
 
 // Main wraps testing.M: it starts the shared MinIO container, runs the suite,
 // and tears the container down. Use from TestMain: os.Exit(blobtest.Main(m)).
-// The start is attempted twice, with a fresh container in between (#265).
+// The start is attempted twice, with a fresh container in between (#265; the
+// retry's rationale is on pgtest.Main, whose rule this follows).
 func Main(m *testing.M) int {
 	containerID, err := startReady()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "blobtest: %v; retrying with a fresh container\n", err)
+		fmt.Fprintf(os.Stderr, "blobtest: %v; retrying\n", err)
 		if containerID, err = startReady(); err != nil {
 			fmt.Fprintf(os.Stderr, "blobtest: %v\n", err)
 			return 1
@@ -74,7 +75,10 @@ func Main(m *testing.M) int {
 // carries its state and last log lines — the only forensics a dead start
 // leaves.
 func startReady() (string, error) {
-	out, err := exec.Command("docker", "run", "--rm", "-d",
+	// No --rm: a container whose entrypoint crashes would be auto-removed by
+	// the daemon before containerDiag could read its state and logs — the one
+	// forensic a dead start leaves. Removal is wholly removeContainer's job.
+	out, err := exec.Command("docker", "run", "-d",
 		"-e", "MINIO_ROOT_USER="+RootUser,
 		"-e", "MINIO_ROOT_PASSWORD="+RootPassword,
 		"-p", "127.0.0.1:0:9000", Image, "server", "/data").Output()
@@ -95,7 +99,7 @@ func startReady() (string, error) {
 		return "", fmt.Errorf("resolve minio port: %w", err)
 	}
 	candidate := "127.0.0.1:" + port
-	if err := waitReady(candidate, readyTimeout); err != nil {
+	if err := waitReady(candidate, containerID, readyTimeout); err != nil {
 		diag := containerDiag(containerID)
 		removeContainer(containerID)
 		return "", fmt.Errorf("minio never became ready: %v (%s)", err, diag)
@@ -105,22 +109,40 @@ func startReady() (string, error) {
 }
 
 // removeContainer force-removes with -v to reap the anonymous volume the
-// MinIO image declares (VOLUME /data, which `server /data` writes to). --rm
-// does not cover it: auto-remove only fires when the container exits on its
-// own, not when this force-removes it mid-run, so without -v every test
-// binary leaks one volume per run (the pgtest rule).
+// MinIO image declares (VOLUME /data, which `server /data` writes to) — the
+// container runs without --rm so a crash leaves evidence for containerDiag,
+// making removal wholly this function's job (the pgtest rule, where the full
+// rationale and the timeout's reason live). A failed removal is reported
+// rather than swallowed: on the retry path it means the dead first container
+// is still on the machine.
 func removeContainer(containerID string) {
-	_ = exec.Command("docker", "rm", "-f", "-v", containerID).Run()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "docker", "rm", "-f", "-v", containerID).CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "blobtest: remove container %s: %v: %s\n",
+			containerID, err, strings.TrimSpace(string(out)))
+	}
+}
+
+// containerState asks the daemon for the container's status ("running",
+// "exited", ...), empty when the daemon cannot answer. Bounded so a wedged
+// daemon cannot hang a failure path.
+func containerState(containerID string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Status}}", containerID).Output()
+	return strings.TrimSpace(string(out))
 }
 
 // containerDiag captures the container's state and last log lines for the
 // failure message, distinguishing a crashed container from a live one behind
 // a dead port mapping.
 func containerDiag(containerID string) string {
-	state, _ := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", containerID).Output()
-	logs, _ := exec.Command("docker", "logs", "--tail", "3", containerID).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	logs, _ := exec.CommandContext(ctx, "docker", "logs", "--tail", "3", containerID).CombinedOutput()
 	return fmt.Sprintf("container state %s; last log: %s",
-		strings.TrimSpace(string(state)), strings.TrimSpace(string(logs)))
+		containerState(containerID), strings.TrimSpace(string(logs)))
 }
 
 func hostPort(containerID string) (string, error) {
@@ -148,7 +170,7 @@ func hostPort(containerID string) (string, error) {
 // So gate on the call the suite itself makes, against a bucket name no test
 // uses. The client is built the way a backend under test builds it — no region
 // configured — so the probe covers the same location lookup.
-func waitReady(endpoint string, timeout time.Duration) error {
+func waitReady(endpoint, containerID string, timeout time.Duration) error {
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds: credentials.NewStaticV4(RootUser, RootPassword, ""),
 	})
@@ -161,6 +183,9 @@ func waitReady(endpoint string, timeout time.Duration) error {
 	// rather than outliving the loop that started them.
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
+	// Coarse-cadence liveness check, as in pgtest.waitReady: an exited
+	// container can never become ready, so stop waiting on it.
+	nextLiveness := time.Now().Add(5 * time.Second)
 	for {
 		if _, err = client.BucketExists(ctx, "blobtest-probe"); err == nil {
 			return nil
@@ -172,6 +197,12 @@ func waitReady(endpoint string, timeout time.Duration) error {
 		// line that made #208 diagnosable at all.
 		if time.Now().Add(poll).After(deadline) {
 			return err
+		}
+		if time.Now().After(nextLiveness) {
+			nextLiveness = time.Now().Add(5 * time.Second)
+			if state := containerState(containerID); state == "exited" || state == "dead" {
+				return fmt.Errorf("%v (container %s before the wait expired)", err, state)
+			}
 		}
 		time.Sleep(poll)
 	}
