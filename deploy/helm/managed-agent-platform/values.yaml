@@ -223,7 +223,8 @@ sandboxPlacement:
 # the platform's own pods (#199). Left null it inherits the top-level list:
 # sandbox pods run in the release namespace, where the same Secrets answer, and
 # an operator who pointed the platform at a private registry almost always
-# pulls the sandbox image from it too. An explicit [] opts sandbox pods out.
+# pulls the sandbox image from it too. An explicit [] opts sandbox pods out;
+# anything other than null or a list refuses to render.
 # Pod-level, so one setting also covers a limited session's net-setup image and
 # a gated session's gate sidecar.
 sandboxImagePullSecrets: null

@@ -31,7 +31,8 @@ copy of an entry here.
   `sandboxImagePullSecrets` (same `{name: ...}` shape as `imagePullSecrets`):
   `null` inherits the top-level list — the sandbox pods run in the release
   namespace, where the same Secrets answer — an explicit `[]` opts out, and a name
-  that would corrupt the comma encoding fails the render. Tests: the parse contract
+  that would corrupt the comma encoding, or a non-list root that `with` would
+  silently read as the opt-out, fails the render. Tests: the parse contract
   (accept/trim, reject bad name/empty/duplicate naming the env var), podSpec carries
   the references on plain and gated pods and stays nil unconfigured, `New` refuses a
   malformed value before reaching a cluster, and the CI helm job asserts the

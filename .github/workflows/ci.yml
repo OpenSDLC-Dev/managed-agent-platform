@@ -373,6 +373,15 @@ jobs:
               echo "a sandboxImagePullSecrets entry of {$bad} rendered instead of failing" >&2; exit 1
             fi
           done
+          # A non-list root would read as the [] opt-out through `with` — a
+          # mistyped "" or {} must refuse at render, not silently drop the env.
+          for bad in '""' '{}'; do
+            printf 'sandboxImagePullSecrets: %s\n' "$bad" > /tmp/bad-pullsecrets.yaml
+            if helm template t "$CHART" -f "$VALUES" -f /tmp/bad-pullsecrets.yaml \
+                 --show-only templates/executor-deployment.yaml >/dev/null 2>&1; then
+              echo "a sandboxImagePullSecrets root of $bad rendered instead of failing" >&2; exit 1
+            fi
+          done
           echo "ok: sandbox imagePullSecrets paths"
       - name: existingSecret path renders (chart creates no Secret)
         run: |

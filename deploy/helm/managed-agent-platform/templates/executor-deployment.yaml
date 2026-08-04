@@ -88,12 +88,17 @@ spec:
                    refused for the same reason the selector refuses non-strings:
                    the render error names the value, where the fallout — get on
                    a non-map, an empty entry — would not. The default inherits,
-                   so the error names whichever list the entry came from. */}}
+                   so the error names whichever list the entry came from. A
+                   non-list root refuses too: `with` would read a mistyped ""
+                   or {} as the [] opt-out. */}}
             {{- $sandboxPull := .Values.sandboxImagePullSecrets }}
             {{- $pullSrc := "sandboxImagePullSecrets" }}
             {{- if kindIs "invalid" $sandboxPull }}
             {{- $sandboxPull = .Values.imagePullSecrets }}
             {{- $pullSrc = "imagePullSecrets" }}
+            {{- end }}
+            {{- if and (not (kindIs "invalid" $sandboxPull)) (not (kindIs "slice" $sandboxPull)) }}
+            {{- fail (printf "%s must be a list of {name: ...} entries (null inherits, [] opts out), got %s" $pullSrc (kindOf $sandboxPull)) }}
             {{- end }}
             {{- with $sandboxPull }}
             {{- $names := list }}
