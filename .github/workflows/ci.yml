@@ -95,8 +95,8 @@ jobs:
                    echo "$out" | grep -A5 'name: BLOB_BUCKET_PRECREATED' >&2; exit 1; }
           done
           # Without a region the client resolves the bucket's location before
-          # its first object request, which needs the very bucket privilege the
-          # mode exists to drop — so this must fail the render, not deploy.
+          # its first object request — the very bucket-level call the mode
+          # exists to stop making — so this must fail the render, not deploy.
           err="$(helm template t "$CHART" -f "$VALUES" "${ext[@]}" \
             --set externalObjectStorage.bucketPrecreated=true 2>&1 >/dev/null)" \
             && { echo "bucketPrecreated without a region must fail the render" >&2; exit 1; }
