@@ -13,6 +13,24 @@ copy of an entry here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An uploaded file's extension-fallback mime no longer depends on the serving host**
+  ([internal/mimetab](./internal/mimetab/mimetab.go),
+  [internal/api/filesupload.go](./internal/api/filesupload.go), #277 — the #264 fix
+  carried to the registry's other writer). `fileMimeType` still fell back to
+  `mime.TypeByExtension` when an upload part declared no (or a generic) Content-Type —
+  the same host-merged lookup #264 removed from the harvest path — so the same filename
+  could land different `files` rows depending on which path created the row and which
+  host served the upload. The pinned table #264 built now lives in a shared package,
+  `internal/mimetab` (the harvest's table moved, not forked: `internal/executor` and
+  `internal/api` both consult `mimetab.ByPath`, and the grader-coupling and
+  host-independence tests moved with it), and the upload fallback consults it in place
+  of the process mime registry. Declared-Content-Type-wins, the octet-stream fallback,
+  and every table value are unchanged; a regression test uploads a `.jsonl` file — in
+  the pinned table, absent from Go's builtin one — with no declared type and asserts
+  the row is `text/plain; charset=utf-8` on every host.
+
 ### Changed
 
 - **The GCP deployment holds no downloaded key material at all: the GCS HMAC pair is gone**

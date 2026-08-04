@@ -118,6 +118,16 @@ func TestFileMimeTypeFallback(t *testing.T) {
 	if noType["mime_type"] != "application/octet-stream" {
 		t.Errorf("unknown extension should be application/octet-stream, got %v", noType["mime_type"])
 	}
+
+	// The extension fallback must not depend on the host's mime tables (#277):
+	// .jsonl is in the platform's pinned table (internal/mimetab) but in
+	// neither Go's builtin table nor a stock /etc/mime.types, so a row for it
+	// proves the upload path consults the shared table, not the process mime
+	// registry the harvest path already abandoned (#264).
+	jsonl := s.uploadFile(t, "data.jsonl", nil, "{\"a\":1}\n")
+	if jsonl["mime_type"] != "text/plain; charset=utf-8" {
+		t.Errorf(".jsonl should map through the pinned table to text/plain; charset=utf-8, got %v", jsonl["mime_type"])
+	}
 }
 
 func TestFileUploadValidation(t *testing.T) {

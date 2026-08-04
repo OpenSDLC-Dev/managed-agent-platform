@@ -7,9 +7,10 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mimetab"
 )
 
 // maxFileBytes is the public docs' per-file cap (500 MB). A package var, not a
@@ -121,21 +122,21 @@ func validateFilename(name string) error {
 }
 
 // fileMimeType resolves the stored MIME type: the part's declared Content-Type
-// when it is specific, otherwise the filename extension, otherwise the generic
-// octet-stream. The reference's exact derivation is unrecorded — an inference
-// (docs/DIVERGENCES.md). The part Content-Type is a raw header value that can
-// carry a non-UTF-8 byte; it is used only when storable, so a malformed one
-// falls through to the extension rather than 500ing at the text-column bind
-// (the #135 class, guarded on filename above and on scope_id/cursor in files.go).
+// when it is specific, otherwise the filename extension through the pinned
+// table (internal/mimetab — never mime.TypeByExtension, whose host-merged
+// registry would let the serving host decide the stored value, #277),
+// otherwise the generic octet-stream. The reference's exact derivation is
+// unrecorded — an inference (docs/DIVERGENCES.md). The part Content-Type is a
+// raw header value that can carry a non-UTF-8 byte; it is used only when
+// storable, so a malformed one falls through to the extension rather than
+// 500ing at the text-column bind (the #135 class, guarded on filename above
+// and on scope_id/cursor in files.go).
 func fileMimeType(part *multipart.Part, filename string) string {
 	ct := part.Header.Get("Content-Type")
 	if ct != "" && ct != "application/octet-stream" && storableText(ct) {
 		return ct
 	}
-	if byExt := mime.TypeByExtension(filepath.Ext(filename)); byExt != "" {
-		return byExt
-	}
-	return "application/octet-stream"
+	return mimetab.ByPath(filename)
 }
 
 // mapFileBodyErr turns a body-read failure into the wire error: the
