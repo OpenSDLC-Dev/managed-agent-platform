@@ -40,10 +40,14 @@
 //	                         nothing. Malformed fails startup
 //	SANDBOX_K8S_NETSETUP_IMAGE   image carrying `ip` for the limited-networking
 //	                         init container (default "busybox")
-//	BLOB_ENDPOINT            S3-compatible object storage host:port; unset
-//	                         disables skills materialization
+//	BLOB_BACKEND             object storage: "s3" (default when empty) or
+//	                         "gcs"; unset with no BLOB_ENDPOINT disables
+//	                         skills materialization
+//	BLOB_ENDPOINT            S3-compatible object storage host:port, required
+//	                         by the s3 backend
 //	BLOB_ACCESS_KEY / BLOB_SECRET_KEY / BLOB_BUCKET / BLOB_REGION / BLOB_TLS /
-//	BLOB_BUCKET_PRECREATED   the rest of the storage config (as controlplane)
+//	BLOB_BUCKET_PRECREATED   the rest of the storage config (as controlplane);
+//	                         the gcs backend takes BLOB_BUCKET alone
 //	SECRETS_BACKEND          secrets cipher for vault credential material
 //	                         (docs/plan/12): "openbao", "local", "gcpkms", or
 //	                         empty to run without one; validated at startup for
@@ -75,7 +79,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
+	blobbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/executor"
@@ -190,7 +194,7 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 
-	blobs, err := s3.FromEnv(ctx)
+	blobs, err := blobbackend.FromEnv(ctx)
 	if err != nil {
 		return err
 	}
