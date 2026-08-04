@@ -686,6 +686,7 @@ func TestProvisionUngatedReshapeDismantlesGatePair(t *testing.T) {
 
 	var removed []string
 	sbCreates := 0
+	var sbBody containerConfig
 	var removedAtRevoke []int // daemon removals already issued when each revoke landed
 	s.GateTokenRevoker = revokerFunc(func(_ context.Context, sid domain.ID) error {
 		if sid != s.SessionID {
@@ -705,12 +706,15 @@ func TestProvisionUngatedReshapeDismantlesGatePair(t *testing.T) {
 			switch inspectRef(r.URL.Path) {
 			case sbName:
 				io.WriteString(w, sandboxJSON("sbOld", s, "container:gateOld")) // still gate-networked
+			case gateName:
+				io.WriteString(w, sandboxJSON("gateOld", s, "gate-net")) // the owned gate half
 			default:
 				t.Errorf("unexpected inspect %q", inspectRef(r.URL.Path))
 			}
 		case r.URL.Path == "/containers/create":
 			if r.URL.Query().Get("name") == sbName {
 				sbCreates++
+				json.NewDecoder(r.Body).Decode(&sbBody)
 			}
 			io.WriteString(w, `{"Id":"sb1"}`)
 		default:
@@ -730,13 +734,53 @@ func TestProvisionUngatedReshapeDismantlesGatePair(t *testing.T) {
 	if !slices.Equal(removedAtRevoke, []int{0}) {
 		t.Errorf("revokes landed after %v removals, want exactly one revoke before any", removedAtRevoke)
 	}
-	for _, name := range []string{"sbOld", gateName} {
-		if !slices.Contains(removed, name) {
-			t.Errorf("%s not removed (removed=%v) — the pair must be dismantled together", name, removed)
+	for _, id := range []string{"sbOld", "gateOld"} {
+		if !slices.Contains(removed, id) {
+			t.Errorf("%s not removed (removed=%v) — the pair must be dismantled together", id, removed)
 		}
 	}
 	if sbCreates != 1 {
 		t.Errorf("sandbox created %d times, want 1 (rebuilt directly networked)", sbCreates)
+	}
+	if strings.HasPrefix(sbBody.HostConfig.NetworkMode, "container:") {
+		t.Errorf("rebuilt sandbox network = %q; the replacement must not be gate-networked", sbBody.HostConfig.NetworkMode)
+	}
+}
+
+// TestProvisionUngatedReshapeRefusesForeignGateName: the deterministic gate name
+// is only a convention — when a container the platform does not own holds it,
+// the dismantle fails on the ownership check (the `ours` precedent every
+// adoption path follows) instead of force-removing someone else's container.
+func TestProvisionUngatedReshapeRefusesForeignGateName(t *testing.T) {
+	s := spec() // ungated
+	s.GateTokenRevoker = revokerFunc(func(context.Context, domain.ID) error { return nil })
+	gateName, sbName := "map-gate-"+string(s.SessionID), "map-"+string(s.SessionID)
+
+	var removed []string
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete:
+			removed = append(removed, strings.TrimPrefix(r.URL.Path, "/containers/"))
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			switch inspectRef(r.URL.Path) {
+			case sbName:
+				io.WriteString(w, sandboxJSON("sbOld", s, "container:gateOld"))
+			case gateName: // held by a container that is not this platform's
+				io.WriteString(w, `{"Id":"intruder","State":{"Running":true},"Config":{"Labels":{}}}`)
+			default:
+				t.Errorf("unexpected inspect %q", inspectRef(r.URL.Path))
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	if _, err := p.Provision(context.Background(), s); err == nil {
+		t.Fatal("provision proceeded past a foreign container holding the gate name; want an error")
+	}
+	if slices.Contains(removed, "intruder") {
+		t.Errorf("the foreign container was removed (removed=%v)", removed)
 	}
 }
 

@@ -271,13 +271,25 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 			return nil, rerr
 		}
 		if gateID == "" {
-			// The gate half of the dismantled pair, by its deterministic name;
-			// 404 means it is already gone. A gate orphaned the other way (its
-			// sandbox gone but the pair never re-provisioned ungated) is the
-			// standalone teardown reaper's to collect — same owner as the
-			// orphan-gate race noted above.
-			if rerr := removeIgnoring404(ctx, p.api, gateName(spec.SessionID)); rerr != nil {
-				return nil, rerr
+			// The gate half of the dismantled pair, found by its deterministic
+			// name; 404 means it is already gone. Inspect-then-remove, and only a
+			// gate carrying this session's ownership label (the `ours` check every
+			// adoption path makes): the name is a convention, and force-removing
+			// whatever holds it could take out a container the platform does not
+			// own. A gate orphaned the other way (its sandbox gone but the pair
+			// never re-provisioned ungated) is the standalone teardown reaper's to
+			// collect — same owner as the orphan-gate race noted above.
+			gi, gerr := p.api.inspectContainer(ctx, gateName(spec.SessionID))
+			switch {
+			case gerr == nil:
+				if oerr := ours(gi, spec.SessionID); oerr != nil {
+					return nil, oerr
+				}
+				if rerr := removeIgnoring404(ctx, p.api, gi.ID); rerr != nil {
+					return nil, rerr
+				}
+			case !statusIs(gerr, 404):
+				return nil, gerr
 			}
 		}
 	case !statusIs(ierr, 404):

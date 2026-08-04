@@ -58,7 +58,8 @@ copy of an entry here.
   `pairedWithGate` treated an ungated session as trivially paired, so a gated→ungated
   re-provision silently adopted the still-gate-networked sandbox and never observed the
   transition at all — it now requires an ungated session's sandbox to not be
-  gate-networked, and the mismatch path removes the sandbox *and* its named gate
+  gate-networked, and the mismatch path removes the sandbox *and* — after the same
+  ownership-label check every adoption path makes, never by name alone — its gate
   container before rebuilding directly networked. A gate orphaned with no re-provision
   ever arriving remains the standalone teardown reaper's job (#64). Tests: a
   revoked token stops authenticating and a second revoke is a clean no-op; each
