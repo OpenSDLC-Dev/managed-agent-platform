@@ -284,6 +284,34 @@ func patchMetadata(existing map[string]string, raw json.RawMessage, emptyDeletes
 	return out, nil
 }
 
+// The metadata caps the reference documents identically for vaults (the
+// public vaults guide's limits table, plan 12 D7) and for agents (the pinned
+// SDK's create/update params, #66): at most 16 pairs, keys up to 64 chars,
+// values up to 512. Environments and sessions enforce nothing — the
+// asymmetry is recorded in docs/DIVERGENCES.md.
+const (
+	metadataMaxPairs = 16
+	metadataKeyMax   = 64
+	metadataValueMax = 512
+)
+
+// validateMetadataCaps enforces the documented caps on a full metadata map —
+// called on create and after every patch, so an update cannot grow past them.
+func validateMetadataCaps(md map[string]string) error {
+	if len(md) > metadataMaxPairs {
+		return errInvalid("metadata cannot exceed %d pairs", metadataMaxPairs)
+	}
+	for k, v := range md {
+		if len(k) > metadataKeyMax {
+			return errInvalid("metadata keys cannot exceed %d characters", metadataKeyMax)
+		}
+		if len(v) > metadataValueMax {
+			return errInvalid("metadata values cannot exceed %d characters", metadataValueMax)
+		}
+	}
+	return nil
+}
+
 // parseModel parses the wire's string-or-object model form and validates it.
 func parseModel(raw json.RawMessage) (domain.Model, error) {
 	var m domain.Model
@@ -377,6 +405,89 @@ func parseMCPServers(raw json.RawMessage) ([]json.RawMessage, error) {
 		}
 	}
 	return items, nil
+}
+
+// The reference's documented agent caps (the pinned SDK's create/update
+// params): at most 128 tools and 20 MCP servers. Its exact reject statuses
+// and messages are unobserved, so the messages here are ours, and 128 counts
+// entries of tools[] — both recorded in docs/DIVERGENCES.md (#66).
+const (
+	maxAgentTools      = 128
+	maxAgentMCPServers = 20
+)
+
+// validateAgentSpec enforces the caps and cross-checks that need the whole
+// spec rather than one entry: the tools and mcp_servers caps, server-name
+// uniqueness, every server referenced by an mcp_toolset, and tool names
+// unique once the agent_toolset expands — a duplicate would otherwise reach
+// the Messages API, which 400s it on every turn of the agent. Runs on the
+// resulting spec — the create body, or the update merge — which is exactly
+// the reference's update wording ("the agent's resulting tools"). Entry
+// shapes were already checked one-by-one (parseTools, parseMCPServers).
+func validateAgentSpec(spec agentSpec) error {
+	if len(spec.Tools) > maxAgentTools {
+		return errInvalid("tools lists at most %d entries", maxAgentTools)
+	}
+	if len(spec.MCPServers) > maxAgentMCPServers {
+		return errInvalid("mcp_servers lists at most %d entries", maxAgentMCPServers)
+	}
+	serverNames := make([]string, 0, len(spec.MCPServers))
+	seen := map[string]bool{}
+	for _, item := range spec.MCPServers {
+		var probe struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(item, &probe); err != nil {
+			return errInvalid("mcp_servers entries must be objects")
+		}
+		if seen[probe.Name] {
+			return errInvalid("mcp_servers names must be unique: %q appears twice", probe.Name)
+		}
+		seen[probe.Name] = true
+		serverNames = append(serverNames, probe.Name)
+	}
+	toolNames := map[string]bool{}
+	referenced := map[string]bool{}
+	for _, item := range spec.Tools {
+		var probe struct {
+			Type          string `json:"type"`
+			Name          string `json:"name"`
+			MCPServerName string `json:"mcp_server_name"`
+		}
+		if err := json.Unmarshal(item, &probe); err != nil {
+			return errInvalid("tools entries must be objects")
+		}
+		names := []string{probe.Name}
+		switch probe.Type {
+		case "mcp_toolset":
+			// The server's tools materialize at run time; nothing to name here.
+			referenced[probe.MCPServerName] = true
+			continue
+		case "agent_toolset_20260401":
+			// The names the toolset actually enables, not the static list — a
+			// custom tool may shadow a built-in the config turned off.
+			policies, err := toolset.Policies(item)
+			if err != nil {
+				return errInvalid("%s", err)
+			}
+			names = names[:0]
+			for name := range policies {
+				names = append(names, name)
+			}
+		}
+		for _, name := range names {
+			if toolNames[name] {
+				return errInvalid("tool name %q appears more than once across toolsets", name)
+			}
+			toolNames[name] = true
+		}
+	}
+	for _, name := range serverNames {
+		if !referenced[name] {
+			return errInvalid("mcp_servers entry %q is not referenced by any mcp_toolset in tools", name)
+		}
+	}
+	return nil
 }
 
 // maxSkillsPerSession is the reference's published cap, counted across every

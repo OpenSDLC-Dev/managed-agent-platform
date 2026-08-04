@@ -123,7 +123,7 @@ func (s *server) createVaultCredential(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateVaultMetadata(metadata); err != nil {
+	if err := validateMetadataCaps(metadata); err != nil {
 		return nil, err
 	}
 	if s.cipher == nil {
@@ -351,7 +351,7 @@ func (s *server) updateVaultCredential(r *http.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := validateVaultMetadata(metadata); err != nil {
+		if err := validateMetadataCaps(metadata); err != nil {
 			return nil, err
 		}
 	}

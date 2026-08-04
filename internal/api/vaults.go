@@ -22,34 +22,14 @@ type vaultJSON struct {
 	ArchivedAt  *time.Time        `json:"archived_at"`
 }
 
-// The documented vault-surface limits (plan 12 D7). Unlike sibling resources,
-// the reference documents these for vaults explicitly, so they are enforced
-// here and only here (the asymmetry is recorded in docs/DIVERGENCES.md).
+// The documented vault-surface limits (plan 12 D7). The metadata caps the
+// same guide documents live in wire.go (validateMetadataCaps) now that agents
+// enforce the same documented numbers (#66); these remain vault-only.
 const (
 	vaultDisplayNameMax    = 255
-	vaultMetadataMaxPairs  = 16
-	vaultMetadataKeyMax    = 64
-	vaultMetadataValueMax  = 512
 	vaultCredentialsMax    = 20
 	credentialAllowedHosts = 16
 )
-
-// validateVaultMetadata enforces the documented caps on a full metadata map —
-// called on create and after every patch, so an update cannot grow past them.
-func validateVaultMetadata(md map[string]string) error {
-	if len(md) > vaultMetadataMaxPairs {
-		return errInvalid("metadata cannot exceed %d pairs", vaultMetadataMaxPairs)
-	}
-	for k, v := range md {
-		if len(k) > vaultMetadataKeyMax {
-			return errInvalid("metadata keys cannot exceed %d characters", vaultMetadataKeyMax)
-		}
-		if len(v) > vaultMetadataValueMax {
-			return errInvalid("metadata values cannot exceed %d characters", vaultMetadataValueMax)
-		}
-	}
-	return nil
-}
 
 func validateVaultDisplayName(name string) error {
 	if name == "" {
@@ -92,7 +72,7 @@ func (s *server) createVault(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateVaultMetadata(metadata); err != nil {
+	if err := validateMetadataCaps(metadata); err != nil {
 		return nil, err
 	}
 
@@ -196,7 +176,7 @@ func (s *server) updateVault(r *http.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := validateVaultMetadata(metadata); err != nil {
+		if err := validateMetadataCaps(metadata); err != nil {
 			return nil, err
 		}
 	}
