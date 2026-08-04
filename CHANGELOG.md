@@ -15,6 +15,29 @@ copy of an entry here.
 
 ### Fixed
 
+- **The per-test-binary Docker fixtures retry a dead container start instead of flaking**
+  ([internal/pgtest](./internal/pgtest/pgtest.go),
+  [internal/secrets/secretstest](./internal/secrets/secretstest/secretstest.go),
+  [internal/blob/blobtest](./internal/blob/blobtest/blobtest.go), #265). On a crowded
+  Docker daemon a fixture's published port can come up dead — connection-refused for the
+  whole readiness budget while sibling fixtures in the same run work. Diagnosing this on
+  2026-08-04 showed waiting longer never heals it: pgtest's Postgres stayed refused to a
+  120-second ceiling and, with the budget raised as an experiment, to a 300-second one
+  (the store suite failing at 123s and then 302s on consecutive single-gate runs), and
+  the OpenBao fixture had flaked the same way under a concurrent gate. So each fixture's
+  `Main` now bounds one readiness wait at 150 seconds and, on failure, removes the
+  container and tries once more with a fresh one — a fresh port mapping is what actually
+  recovers. Around that retry, the failure paths stop eating evidence: the containers run
+  without `--rm` (a crashed entrypoint used to be auto-reaped before its state and logs
+  could be read), the failure message carries the dead container's state and last log
+  lines, the readiness wait fast-fails as soon as the container is `exited`/`dead`
+  instead of polling a corpse for the whole budget, a failed `docker rm` is reported
+  instead of swallowed, and every forensic/cleanup `docker` call is itself bounded so a
+  wedged daemon cannot hang the run. secretstest's transit-engine mount moves inside the
+  retried region, so a mount failure retries with a fresh container like any other dead
+  start. The per-probe timeouts in pgtest and secretstest also rise from 2 to 5 seconds
+  so a loaded dial+auth round trip is not cancelled mid-handshake.
+
 - **`environment/main.tf`'s peering header no longer sells the manual
   `gcloud services vpc-peerings delete` as the way out of a stuck teardown**
   ([deploy/gcp/environment/main.tf](./deploy/gcp/environment/main.tf), #270). The comment
