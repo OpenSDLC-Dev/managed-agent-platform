@@ -42,6 +42,10 @@ type Config struct {
 	// tainted sandbox node pool needs both halves. Docker has no analogue.
 	K8sNodeSelector string
 	K8sTolerations  string
+	// k8s: the Secrets sandbox pods pull images with, comma-separated — raw here
+	// and parsed by the k8s provider like placement. Docker has no analogue: the
+	// daemon's own credential store answers pulls there.
+	K8sImagePullSecrets string
 }
 
 // New builds the named sandbox provider, or an error naming the accepted set.
@@ -51,13 +55,14 @@ func New(cfg Config) (sandbox.Provider, error) {
 		return docker.New(docker.Config{Host: cfg.DockerHost, GateNetwork: cfg.DockerGateNetwork})
 	case "k8s":
 		return k8s.New(k8s.Config{
-			Kubeconfig:    cfg.K8sKubeconfig,
-			Context:       cfg.K8sContext,
-			Namespace:     cfg.K8sNamespace,
-			NetSetupImage: cfg.K8sNetSetupImage,
-			RuntimeClass:  cfg.K8sRuntimeClass,
-			NodeSelector:  cfg.K8sNodeSelector,
-			Tolerations:   cfg.K8sTolerations,
+			Kubeconfig:       cfg.K8sKubeconfig,
+			Context:          cfg.K8sContext,
+			Namespace:        cfg.K8sNamespace,
+			NetSetupImage:    cfg.K8sNetSetupImage,
+			RuntimeClass:     cfg.K8sRuntimeClass,
+			NodeSelector:     cfg.K8sNodeSelector,
+			Tolerations:      cfg.K8sTolerations,
+			ImagePullSecrets: cfg.K8sImagePullSecrets,
 		})
 	default:
 		return nil, fmt.Errorf("sandbox backend %q is not one of docker, k8s", cfg.Backend)

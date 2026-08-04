@@ -190,7 +190,7 @@ jobs:
       - name: sandbox hardening and RuntimeClass are off by default and complete when set
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -qE 'SANDBOX_PIDS_LIMIT|SANDBOX_CPU_MILLIS|SANDBOX_MEMORY_BYTES|SANDBOX_EPHEMERAL_STORAGE_BYTES|SANDBOX_CAP_DROP|SANDBOX_READONLY_ROOTFS|SANDBOX_RUN_AS_USER|SANDBOX_K8S_RUNTIME_CLASS|SANDBOX_K8S_NODE_SELECTOR|SANDBOX_K8S_TOLERATIONS' \
+          echo "$out" | grep -qE 'SANDBOX_PIDS_LIMIT|SANDBOX_CPU_MILLIS|SANDBOX_MEMORY_BYTES|SANDBOX_EPHEMERAL_STORAGE_BYTES|SANDBOX_CAP_DROP|SANDBOX_READONLY_ROOTFS|SANDBOX_RUN_AS_USER|SANDBOX_K8S_RUNTIME_CLASS|SANDBOX_K8S_NODE_SELECTOR|SANDBOX_K8S_TOLERATIONS|SANDBOX_K8S_IMAGE_PULL_SECRETS' \
             && { echo "default values must leave the executor's own hardening defaults alone" >&2; exit 1; }
           out="$(helm template t "$CHART" -f "$VALUES" \
             --set sandboxRuntimeClass.name=gvisor \
@@ -326,6 +326,54 @@ jobs:
           helm template t "$CHART" -f "$VALUES" --set sandboxRuntimeClass.create=true >/dev/null 2>&1 \
             && { echo "create=true without a name must fail the render" >&2; exit 1; }
           echo "ok: sandbox hardening + RuntimeClass paths"
+      - name: sandbox imagePullSecrets are off by default, inherit, and opt out
+        run: |
+          # Explicit list: the chart joins the names with `,`, the separator the
+          # executor parses. The rendered literal is the same one
+          # TestParseImagePullSecrets' "two names" row feeds the real parser, so
+          # the two sides of the encoding cannot drift unnoticed.
+          cat > /tmp/pullsecrets-values.yaml <<'YAML'
+          sandboxImagePullSecrets:
+            - name: regcred
+            - name: ghcr-pull
+          YAML
+          out="$(helm template t "$CHART" -f "$VALUES" -f /tmp/pullsecrets-values.yaml \
+            --show-only templates/executor-deployment.yaml)"
+          echo "$out" | grep -A1 'name: SANDBOX_K8S_IMAGE_PULL_SECRETS' | grep -qF 'value: "regcred,ghcr-pull"' \
+            || { echo "sandboxImagePullSecrets did not render as comma-joined names" >&2
+                 echo "$out" | grep -A1 'name: SANDBOX_K8S_IMAGE_PULL_SECRETS' >&2; exit 1; }
+          # Null inherits the top-level imagePullSecrets: an operator who told
+          # the platform's pods how to reach the registry means the sandbox
+          # pods too, and they run in the release namespace where the same
+          # Secrets answer.
+          out="$(helm template t "$CHART" -f "$VALUES" --set 'imagePullSecrets[0].name=regcred' \
+            --show-only templates/executor-deployment.yaml)"
+          echo "$out" | grep -A1 'name: SANDBOX_K8S_IMAGE_PULL_SECRETS' | grep -qF 'value: "regcred"' \
+            || { echo "an unset sandboxImagePullSecrets did not inherit imagePullSecrets" >&2; exit 1; }
+          # ...and an explicit [] opts sandbox pods out without touching the
+          # platform pods' own pull secrets. A values file, not --set: `--set
+          # 'x=[]'` assigns the STRING "[]", which is exactly the unset-vs-empty
+          # distinction this path exists to honor.
+          cat > /tmp/optout-values.yaml <<'YAML'
+          imagePullSecrets:
+            - name: regcred
+          sandboxImagePullSecrets: []
+          YAML
+          out="$(helm template t "$CHART" -f "$VALUES" -f /tmp/optout-values.yaml \
+            --show-only templates/executor-deployment.yaml)"
+          echo "$out" | grep -q 'SANDBOX_K8S_IMAGE_PULL_SECRETS' \
+            && { echo "an explicit [] must render no SANDBOX_K8S_IMAGE_PULL_SECRETS" >&2; exit 1; }
+          # `,` separates entries, so a name carrying one would render as two
+          # plausible names the executor accepts silently; a nameless entry has
+          # nothing to render at all. Both refuse at render time.
+          for bad in '- name: "a,b"' '- named: regcred'; do
+            printf 'sandboxImagePullSecrets:\n  %s\n' "$bad" > /tmp/bad-pullsecrets.yaml
+            if helm template t "$CHART" -f "$VALUES" -f /tmp/bad-pullsecrets.yaml \
+                 --show-only templates/executor-deployment.yaml >/dev/null 2>&1; then
+              echo "a sandboxImagePullSecrets entry of {$bad} rendered instead of failing" >&2; exit 1
+            fi
+          done
+          echo "ok: sandbox imagePullSecrets paths"
       - name: existingSecret path renders (chart creates no Secret)
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" \

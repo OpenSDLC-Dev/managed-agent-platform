@@ -53,14 +53,20 @@ import (
 // the one place that knows their encoding is the one place that parses them
 // (placement.go) — New rejects a malformed value rather than letting it become a
 // pod that never schedules.
+//
+// ImagePullSecrets names the Secrets sandbox pods pull images with —
+// comma-separated, raw here and parsed the same way (pullsecrets.go), for the
+// same reason: which registry credential a cluster holds is a property of the
+// deployment, not of a session.
 type Config struct {
-	Kubeconfig    string
-	Context       string
-	Namespace     string
-	NetSetupImage string
-	RuntimeClass  string
-	NodeSelector  string
-	Tolerations   string
+	Kubeconfig       string
+	Context          string
+	Namespace        string
+	NetSetupImage    string
+	RuntimeClass     string
+	NodeSelector     string
+	Tolerations      string
+	ImagePullSecrets string
 }
 
 // restConfig resolves the cluster connection: in-cluster when running as a pod

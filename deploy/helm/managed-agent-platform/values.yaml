@@ -218,6 +218,16 @@ sandboxPlacement:
   #     value: "true"
   #     effect: NoSchedule
 
+# -- imagePullSecrets for the sandbox PODS the executor creates — the same
+# {name: ...} list shape as the top-level imagePullSecrets, which covers only
+# the platform's own pods (#199). Left null it inherits the top-level list:
+# sandbox pods run in the release namespace, where the same Secrets answer, and
+# an operator who pointed the platform at a private registry almost always
+# pulls the sandbox image from it too. An explicit [] opts sandbox pods out.
+# Pod-level, so one setting also covers a gated session's net-setup and gate
+# images.
+sandboxImagePullSecrets: null
+
 # -- In-cluster Postgres. For production, disable this and point externalDatabase
 # at your own managed Postgres. This is a deliberate divergence from a Postgres
 # subchart: a self-hostable, air-gap-friendly platform should not require pulling

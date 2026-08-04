@@ -33,6 +33,9 @@
 //	SANDBOX_K8S_TOLERATIONS      taints every sandbox pod tolerates, as a JSON
 //	                             array of Kubernetes Toleration objects; empty
 //	                             tolerates nothing. Malformed fails startup
+//	SANDBOX_K8S_IMAGE_PULL_SECRETS   Secrets every sandbox pod pulls images
+//	                             with, as comma-separated Secret names; empty
+//	                             adds nothing. Malformed fails startup
 //	SANDBOX_K8S_NETSETUP_IMAGE   image carrying `ip` for the limited-networking
 //	                             init container (default "busybox")
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
@@ -80,15 +83,16 @@ func run(ctx context.Context) error {
 	}
 
 	provider, err := backend.New(backend.Config{
-		Backend:          os.Getenv("SANDBOX_BACKEND"),
-		DockerHost:       os.Getenv("DOCKER_HOST"),
-		K8sKubeconfig:    os.Getenv("SANDBOX_K8S_KUBECONFIG"),
-		K8sContext:       os.Getenv("SANDBOX_K8S_CONTEXT"),
-		K8sNamespace:     os.Getenv("SANDBOX_K8S_NAMESPACE"),
-		K8sNetSetupImage: os.Getenv("SANDBOX_K8S_NETSETUP_IMAGE"),
-		K8sRuntimeClass:  os.Getenv("SANDBOX_K8S_RUNTIME_CLASS"),
-		K8sNodeSelector:  os.Getenv("SANDBOX_K8S_NODE_SELECTOR"),
-		K8sTolerations:   os.Getenv("SANDBOX_K8S_TOLERATIONS"),
+		Backend:             os.Getenv("SANDBOX_BACKEND"),
+		DockerHost:          os.Getenv("DOCKER_HOST"),
+		K8sKubeconfig:       os.Getenv("SANDBOX_K8S_KUBECONFIG"),
+		K8sContext:          os.Getenv("SANDBOX_K8S_CONTEXT"),
+		K8sNamespace:        os.Getenv("SANDBOX_K8S_NAMESPACE"),
+		K8sNetSetupImage:    os.Getenv("SANDBOX_K8S_NETSETUP_IMAGE"),
+		K8sRuntimeClass:     os.Getenv("SANDBOX_K8S_RUNTIME_CLASS"),
+		K8sNodeSelector:     os.Getenv("SANDBOX_K8S_NODE_SELECTOR"),
+		K8sTolerations:      os.Getenv("SANDBOX_K8S_TOLERATIONS"),
+		K8sImagePullSecrets: os.Getenv("SANDBOX_K8S_IMAGE_PULL_SECRETS"),
 	})
 	if err != nil {
 		return err

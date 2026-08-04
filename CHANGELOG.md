@@ -15,6 +15,28 @@ copy of an entry here.
 
 ### Added
 
+- **Sandbox pods can pull from a private registry — `SANDBOX_K8S_IMAGE_PULL_SECRETS`**
+  ([internal/sandbox/k8s/pullsecrets.go](./internal/sandbox/k8s/pullsecrets.go),
+  [deploy/helm](./deploy/helm/managed-agent-platform/values.yaml), #199). The K8s
+  provider's pods carried no `imagePullSecrets`, so a private `executor.sandboxImage`
+  failed every provision with ImagePullBackOff even though the platform's own pods
+  could pull it. The provider now takes comma-separated Secret names — validated at
+  startup as the DNS-1123 subdomains the API server requires, refusing empties and
+  duplicates, naming the variable (#65's rule, the placement precedent) — and puts
+  the references on every sandbox pod at the **pod** level, so one knob also covers a
+  gated session's net-setup and gate images; nil unless configured, leaving an
+  unconfigured deployment's pods byte-identical. Threaded through
+  `backend.Config` to both `cmd/executor` and `cmd/worker`. The chart grows
+  `sandboxImagePullSecrets` (same `{name: ...}` shape as `imagePullSecrets`):
+  `null` inherits the top-level list — the sandbox pods run in the release
+  namespace, where the same Secrets answer — an explicit `[]` opts out, and a name
+  that would corrupt the comma encoding fails the render. Tests: the parse contract
+  (accept/trim, reject bad name/empty/duplicate naming the env var), podSpec carries
+  the references on plain and gated pods and stays nil unconfigured, `New` refuses a
+  malformed value before reaching a cluster, and the CI helm job asserts the
+  default render stays clean, the encoding, the inheritance, the opt-out, and the
+  render-time refusals.
+
 - **`/work/poll` honours `block_ms` — a true long poll on a work-items NOTIFY**
   ([internal/api/workapi.go](./internal/api/workapi.go),
   [internal/queue/queue.go](./internal/queue/queue.go),
