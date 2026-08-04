@@ -769,7 +769,7 @@ new backend inherits the whole battery. The queue still has one production imple
 extraction. The merge gate is `make verify`
 (build, linux/arm cross-compile, vet, gofmt, `go test -count=1`, and **≥90% total
 statement coverage** over the logic packages of `./internal/...`). On top sits the eval
-system (`make eval`, [plan 02](./plan/02_evals-system.md)): twelve deterministic regression
+system (`make eval`, [plan 02](./plan/02_evals-system.md)): fourteen deterministic regression
 tasks driving whole sessions through the public API against a real model, graded
 code-only with per-trial nonces and Platform/Model/Either failure classing. It stays out
 of the merge gate — it spends money and minutes — but a scheduled workflow
