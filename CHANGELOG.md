@@ -21,8 +21,9 @@ copy of an entry here.
   them on the create/update params: at most 128 tools and 20 MCP servers, server
   names unique and every server referenced by an `mcp_toolset` in the agent's
   resulting tools, and metadata at most 16 pairs with 64-char keys and 512-char
-  values — the same numbers vaults already enforced, so the metadata check is now
-  one shared `validateMetadataCaps` (moved from vaults.go, messages unchanged).
+  values (counted as Unicode code points, not bytes) — the same numbers vaults
+  already enforced, so the metadata check is now one shared
+  `validateMetadataCaps` (moved from vaults.go, messages unchanged).
   Tool names must also be unique once the `agent_toolset` expands — resolved
   against what the entry actually *enables*, so a custom tool may reuse a disabled
   built-in's name — because a duplicate reaches the Messages API as a 400 on every

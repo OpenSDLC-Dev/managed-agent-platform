@@ -144,6 +144,17 @@ func TestAgentMetadataCaps(t *testing.T) {
 		atCap[fmt.Sprintf("k%02d", i)] = "v"
 	}
 	createAgent(t, s, agentBody(map[string]any{"metadata": atCap}))
+
+	// The caps are characters, not bytes (the filesupload.go rune-count
+	// precedent): a 64-rune CJK key is three times as many UTF-8 bytes and
+	// still within the documented cap, and the reject boundary is one rune
+	// past it, not one byte.
+	createAgent(t, s, agentBody(map[string]any{
+		"metadata": map[string]any{strings.Repeat("键", 64): strings.Repeat("值", 512)}}))
+	wantAgentRejected(t, s, agentBody(map[string]any{
+		"metadata": map[string]any{strings.Repeat("键", 65): "v"}}), "64")
+	wantAgentRejected(t, s, agentBody(map[string]any{
+		"metadata": map[string]any{"k": strings.Repeat("值", 513)}}), "512")
 }
 
 // The update metadata patch is bounded on the resulting stored bag, exactly as

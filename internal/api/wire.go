@@ -297,15 +297,18 @@ const (
 
 // validateMetadataCaps enforces the documented caps on a full metadata map —
 // called on create and after every patch, so an update cannot grow past them.
+// Lengths count runes, not bytes (the filesupload.go precedent for
+// character-documented limits); which unit the reference counts is
+// unobserved — recorded in docs/DIVERGENCES.md (#66).
 func validateMetadataCaps(md map[string]string) error {
 	if len(md) > metadataMaxPairs {
 		return errInvalid("metadata cannot exceed %d pairs", metadataMaxPairs)
 	}
 	for k, v := range md {
-		if len(k) > metadataKeyMax {
+		if utf8.RuneCountInString(k) > metadataKeyMax {
 			return errInvalid("metadata keys cannot exceed %d characters", metadataKeyMax)
 		}
-		if len(v) > metadataValueMax {
+		if utf8.RuneCountInString(v) > metadataValueMax {
 			return errInvalid("metadata values cannot exceed %d characters", metadataValueMax)
 		}
 	}
