@@ -94,16 +94,23 @@ func runAndGrade(t *testing.T, s *stack, task Task) {
 // sumTokens totals the trial's model spend from the transcript's
 // span.model_request_end events — the same events (and the same accessor) the
 // usage-accounted grader asserts are populated, so the report cannot show
-// plausible numbers for a run whose accounting was broken.
+// plausible numbers for a run whose accounting was broken. Grader calls are
+// the one model spend that rides no span.model_request_end: their usage is on
+// span.outcome_evaluation_end (under "usage", not "model_usage"), so outcome
+// trials count both or the report hides their most expensive calls.
 func sumTokens(tr *Trial) tokens {
 	var out tokens
-	for _, ev := range eventsOfType(tr, "span.model_request_end") {
-		in, o, ok := modelUsage(ev)
-		if !ok {
-			continue
+	add := func(typ, key string) {
+		for _, ev := range eventsOfType(tr, typ) {
+			in, o, ok := usageAt(ev, key)
+			if !ok {
+				continue
+			}
+			out.Input += int64(in)
+			out.Output += int64(o)
 		}
-		out.Input += int64(in)
-		out.Output += int64(o)
 	}
+	add("span.model_request_end", "model_usage")
+	add("span.outcome_evaluation_end", "usage")
 	return out
 }

@@ -72,6 +72,38 @@ copy of an entry here.
 
 ### Added
 
+- **The outcome grader's verdict is measured against code-checkable ground truth**
+  ([evals/outcome_test.go](./evals/outcome_test.go), #262). The grader (plan 21 slice 3)
+  is a model call whose prompt assembly and verdict protocol are ours, and nothing
+  measured it. Two RUN_EVALS tasks now do: `outcome-satisfy` posts a
+  `user.define_outcome` whose criteria are one deterministic nonce'd deliverable — the
+  trial code-checks the file, and if it is objectively correct the loop must settle
+  `satisfied` (a strict grader reds); `outcome-revise` grades against a **file rubric**
+  — grader-only by design — requiring a token the description never mentions, so
+  iteration 0 can only correctly grade `needs_revision` (a lenient grader reds), the
+  terminal must be `satisfied` (feedback loop closed) or `max_iterations_reached`, and
+  a Platform grader asserts the rubric token reaches no event before the first
+  evaluation end — the criteria stayed confidential. The harness grows a
+  `define_outcome` turn variant (the whole loop — work, harvest, grading, revisions —
+  settles inside one idle, under a loop-sized timeout) and outcome graders for cycle
+  well-formedness, projection/log agreement, and the harvest publishing the deliverable
+  to the files registry. Verdict-vs-ground-truth checks are class Either: a wrong
+  verdict may be grader-model drift or our assembly starving it, and the Platform
+  checks alongside pin the halves that are unambiguously ours. Review hardening on
+  the same PR: a `revision-feedback-delivered` grader (a dead feedback injection
+  also ends `max_iterations_reached`, which the terminal check alone would green);
+  the harvest check is vacuous unless the outcome settled `satisfied` (a file first
+  written in the post-terminal acknowledgment turn correctly has no registry row);
+  the outcome turn's budget grants two turn-budgets per allowed cycle (an agent
+  turn and a separate grader call each) plus the acknowledgment turn, and
+  `make eval`'s outer backstop rises to 120m — the scheduled `evals.yml` job's
+  to 135m, staying above it — to fit the grown worst case; the report's token
+  totals now include the grader's own spend (it rides
+  `span.outcome_evaluation_end`, which `sumTokens` never read), with a Platform
+  grader pinning that every evaluation end carries a well-formed usage object;
+  and the transcript-only outcome graders and the `define_outcome` wire
+  rendering gained offline unit tests alongside the suite's existing ones.
+
 - **A GCS-native object-storage backend, so a Google deployment needs no downloaded key
   material** ([internal/blob/gcs](./internal/blob/gcs),
   [internal/blob/backend](./internal/blob/backend), #240,

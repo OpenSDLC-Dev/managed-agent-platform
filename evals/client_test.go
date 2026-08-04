@@ -28,7 +28,7 @@ import (
 // restTimeout bounds one non-streaming REST call. A call to the in-process
 // server over a local Postgres is effectively instant, so this is not a
 // performance budget but a liveness one: without it a control plane wedged on an
-// insert would hang the trial until the 60-minute process timeout instead of
+// insert would hang the trial until the process-wide test timeout instead of
 // failing it in bounded time. The SSE stream is deliberately not bound this way
 // (a request timeout would kill the live tail mid-turn); awaitIdle's own
 // deadline bounds the wait once the stream is connected.
@@ -133,7 +133,12 @@ func (s *stack) uploadFile(t *testing.T, ff FileFixture, tr *Trial) string {
 	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	w, err := mw.CreateFormFile("file", ff.Name)
+	// Name is filled like Content: a fixture may carry the trial's nonce in its
+	// filename (the outcome rubric does), and an unfilled name would upload the
+	// literal placeholder. The diagnostics below use the same filled name, so a
+	// failure names the filename the server actually received.
+	name := tr.fill(ff.Name)
+	w, err := mw.CreateFormFile("file", name)
 	if err != nil {
 		t.Fatalf("multipart file part: %v", err)
 	}
@@ -154,16 +159,16 @@ func (s *stack) uploadFile(t *testing.T, ff FileFixture, tr *Trial) string {
 	req.Header.Set("content-type", mw.FormDataContentType())
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("upload file %s: %v", ff.Name, err)
+		t.Fatalf("upload file %s: %v", name, err)
 	}
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 	if res.StatusCode != http.StatusOK {
-		t.Fatalf("upload file %s: status %d, body %s", ff.Name, res.StatusCode, raw)
+		t.Fatalf("upload file %s: status %d, body %s", name, res.StatusCode, raw)
 	}
 	var obj map[string]any
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		t.Fatalf("upload file %s: response is not a JSON object: %s", ff.Name, raw)
+		t.Fatalf("upload file %s: response is not a JSON object: %s", name, raw)
 	}
 	return id(t, obj, "upload file")
 }

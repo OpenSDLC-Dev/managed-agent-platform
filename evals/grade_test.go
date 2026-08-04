@@ -1232,7 +1232,13 @@ func okResult(ev map[string]any) bool {
 // turn has input_tokens 0 while cache_read_input_tokens carries the real count.
 // A spend report wants the total too.
 func modelUsage(ev map[string]any) (in, out float64, ok bool) {
-	usage, ok := ev["model_usage"].(map[string]any)
+	return usageAt(ev, "model_usage")
+}
+
+// usageAt reads a usage object from ev under the given key — "model_usage" on
+// span.model_request_end, plain "usage" on span.outcome_evaluation_end.
+func usageAt(ev map[string]any, key string) (in, out float64, ok bool) {
+	usage, ok := ev[key].(map[string]any)
 	if !ok {
 		return 0, 0, false
 	}
