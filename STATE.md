@@ -18,7 +18,7 @@ removes the HMAC key pair entirely. Its sibling
 - [x] #240 slice 1 — `internal/blob/gcs` on `cloud.google.com/go/storage` behind the
   `internal/blob/backend` selector, passing `blobtest` unchanged against a pinned
   `fake-gcs-server` and, opted in, against real Cloud Storage
-  ([#276](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/276): verifier PASS
-  ×2, dual review, CI green)
+  ([#276](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/276): three verifier
+  passes, all PASS-with-findings and every finding fixed; dual review; CI green)
 - [ ] #240 slice 2 — chart wiring for the keyless mode; `deploy/gcp` drops the HMAC pair
   and the bucket-read grant, binding the ServiceAccounts #269 finished giving all three

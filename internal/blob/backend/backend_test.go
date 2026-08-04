@@ -1,7 +1,9 @@
 package backend_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +125,43 @@ func TestS3WithoutBucketPrecreatedChecksTheBucket(t *testing.T) {
 	t.Setenv("BLOB_BUCKET_PRECREATED", "")
 	if _, err := backend.FromEnv(ctx); err == nil {
 		t.Fatal("FromEnv reached a store on the discard port without the mode")
+	}
+}
+
+// TestGCSArmWarnsWithoutLeakingCredentials pins the half of the ignored-variable
+// warning that matters. Naming the variables is the point of the warning; naming
+// their VALUES would put an access key and a secret key into the log, and two of
+// the four are credentials. Nothing else asserts that: the warning fires on a
+// path no other test reaches, so adding os.Getenv(name) to the log attributes
+// would ship with every test green.
+func TestGCSArmWarnsWithoutLeakingCredentials(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var log bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&log, nil)))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	const access, secret = "AKIA-NOT-A-REAL-KEY", "s3cr3t-not-a-real-secret"
+	t.Setenv("STORAGE_EMULATOR_HOST", "127.0.0.1:9")
+	t.Setenv("BLOB_BACKEND", "gcs")
+	t.Setenv("BLOB_BUCKET", "map-blob")
+	t.Setenv("BLOB_ENDPOINT", "minio:9000")
+	t.Setenv("BLOB_ACCESS_KEY", access)
+	t.Setenv("BLOB_SECRET_KEY", secret)
+	if _, err := backend.FromEnv(ctx); err != nil {
+		t.Fatalf("FromEnv on the gcs arm: %v", err)
+	}
+	out := log.String()
+	for _, name := range []string{"BLOB_ENDPOINT", "BLOB_ACCESS_KEY", "BLOB_SECRET_KEY"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("the warning does not name %s, so an operator cannot act on it: %s", name, out)
+		}
+	}
+	for _, value := range []string{access, secret} {
+		if strings.Contains(out, value) {
+			t.Errorf("a credential value reached the log: %s", out)
+		}
 	}
 }
 
