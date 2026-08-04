@@ -168,6 +168,18 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		// for a now-gated session, or the reverse) — a pod spec is immutable, so
 		// replace it and fall through to the create below. Mirrors the Docker
 		// provider's stale-pairing rebuild.
+		if !gated {
+			// Gated→ungated: the replacement pod carries no gate, so no re-mint
+			// (whose revoke-on-re-mint covers the other direction) will ever
+			// revoke the token this pod's gate holds — revoke it here so it does
+			// not outlive its gate (#197). Revoke before the delete because it is
+			// idempotent: a delete that fails retries both on the next provision.
+			if spec.GateTokenRevoker != nil {
+				if rerr := spec.GateTokenRevoker.Revoke(ctx, spec.SessionID); rerr != nil {
+					return nil, fmt.Errorf("k8s: revoke gate token for %s: %w", name, rerr)
+				}
+			}
+		}
 		if derr := p.deleteAndWaitGone(ctx, name, existing.UID); derr != nil {
 			return nil, derr
 		}

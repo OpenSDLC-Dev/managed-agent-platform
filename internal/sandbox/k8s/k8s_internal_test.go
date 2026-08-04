@@ -1356,11 +1356,13 @@ func TestDestroySurfacesError(t *testing.T) {
 	}
 }
 
-// mintRecorder records the mint-on-create seam's calls for the gated tests.
+// mintRecorder records the mint-on-create and revoke-on-dismantle seams' calls
+// for the gated tests.
 type mintRecorder struct {
 	generated  int
 	persisted  []string // tokens handed to Persist
 	persistErr error
+	revoked    []domain.ID // sessions handed to Revoke
 }
 
 func (m *mintRecorder) Generate() string { m.generated++; return "gtk_unit_test_token" }
@@ -1372,6 +1374,17 @@ func (m *mintRecorder) Persist(_ context.Context, _ domain.ID, token string) err
 	m.persisted = append(m.persisted, token)
 	return nil
 }
+
+func (m *mintRecorder) Revoke(_ context.Context, sid domain.ID) error {
+	m.revoked = append(m.revoked, sid)
+	return nil
+}
+
+// revokerFunc adapts a func to sandbox.GateTokenRevoker, so a test can observe
+// the cluster's state at the moment a revoke lands (the ordering guarantee).
+type revokerFunc func(context.Context, domain.ID) error
+
+func (f revokerFunc) Revoke(ctx context.Context, sid domain.ID) error { return f(ctx, sid) }
 
 func gateSpecFixture(m *mintRecorder) *sandbox.GateSpec {
 	return &sandbox.GateSpec{
@@ -1538,14 +1551,15 @@ func TestProvisionGatedMintsOnlyOnCreate(t *testing.T) {
 
 // TestProvisionGateShapeMismatchRebuilds: a pre-gate pod on a now-gated
 // session is replaced by a gated pod (and the reverse), minting only for the
-// gated create.
+// gated create and revoking only for the ungated dismantle (#197).
 func TestProvisionGateShapeMismatchRebuilds(t *testing.T) {
 	m := &mintRecorder{}
 	sid := domain.ID("sesn_reshape")
 	p := fakeProvider(readyPod(sid)) // pre-gate shape, ready
 	markPodsReadyOnCreate(p)
 	spec := sandbox.Spec{SessionID: sid, Image: "img",
-		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m),
+		GateTokenRevoker: m}
 	if _, err := p.Provision(context.Background(), spec); err != nil {
 		t.Fatalf("provision (reshape to gated): %v", err)
 	}
@@ -1559,10 +1573,27 @@ func TestProvisionGateShapeMismatchRebuilds(t *testing.T) {
 	if m.generated != 1 || len(m.persisted) != 1 {
 		t.Errorf("reshape minted %d/persisted %d, want exactly one", m.generated, len(m.persisted))
 	}
+	if len(m.revoked) != 0 {
+		t.Errorf("gated reshape revoked %v; replacement is Ensure's revoke-on-re-mint, not Revoke", m.revoked)
+	}
 
 	// The reverse: the session no longer wants a gate — the gated pod is
-	// replaced by a plain one, with no further minting.
-	specUngated := sandbox.Spec{SessionID: sid, Image: "img"}
+	// replaced by a plain one, with no further minting, and the dismantled
+	// gate's token is revoked exactly once (no replacement will re-mint it),
+	// before the pod teardown — the ordering that lets a failed teardown
+	// retry both instead of losing the trigger.
+	revokes := 0
+	specUngated := sandbox.Spec{SessionID: sid, Image: "img",
+		GateTokenRevoker: revokerFunc(func(ctx context.Context, got domain.ID) error {
+			if got != sid {
+				t.Errorf("revoked %s, want %s", got, sid)
+			}
+			if _, gerr := p.client.cs.CoreV1().Pods("default").Get(ctx, podName(sid), metav1.GetOptions{}); gerr != nil {
+				t.Errorf("revoke arrived with the gated pod already gone (%v); it must precede the teardown", gerr)
+			}
+			revokes++
+			return nil
+		})}
 	if _, err := p.Provision(context.Background(), specUngated); err != nil {
 		t.Fatalf("provision (reshape to ungated): %v", err)
 	}
@@ -1575,6 +1606,12 @@ func TestProvisionGateShapeMismatchRebuilds(t *testing.T) {
 	}
 	if m.generated != 1 {
 		t.Errorf("ungated reshape minted (generated=%d)", m.generated)
+	}
+	if revokes != 1 {
+		t.Errorf("ungated reshape revoked %d times, want exactly once", revokes)
+	}
+	if len(m.revoked) != 0 {
+		t.Errorf("the gated spec's revoker was called (%v); only the ungated reshape revokes", m.revoked)
 	}
 }
 

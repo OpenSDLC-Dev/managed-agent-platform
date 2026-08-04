@@ -248,12 +248,49 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 			}
 			return p.attach(info.ID, workdir, gateID), nil
 		}
-		// Gated, but the sandbox is attached to a different (or since-removed) gate
-		// — a stale pairing (a recreated gate, or a pre-gate `bridge` sandbox from
-		// before this session was gated). Remove it and recreate it in the current
-		// gate's namespace rather than adopt a sandbox with the wrong egress path.
+		// The sandbox's egress path no longer matches the session's shape: gated
+		// but attached to a different (or since-removed) gate — a stale pairing (a
+		// recreated gate, or a pre-gate `bridge` sandbox from before this session
+		// was gated) — or ungated but still routed through a gate (the session's
+		// gate opt-in was removed). Remove it and recreate it on the current
+		// egress path rather than adopt one with the wrong pairing.
+		if gateID == "" {
+			// Gated→ungated: no replacement gate will re-mint, so revoke the
+			// session's persisted token before dismantling the pair — it must not
+			// outlive its gate (#197). Revoke comes first because it is
+			// idempotent: a teardown that fails below retries both on the next
+			// provision, whereas revoking after a completed teardown would lose
+			// the trigger (this mismatch observation) if the revoke itself failed.
+			if spec.GateTokenRevoker != nil {
+				if rerr := spec.GateTokenRevoker.Revoke(ctx, spec.SessionID); rerr != nil {
+					return nil, fmt.Errorf("docker: revoke gate token for session %s: %w", spec.SessionID, rerr)
+				}
+			}
+		}
 		if rerr := removeIgnoring404(ctx, p.api, info.ID); rerr != nil {
 			return nil, rerr
+		}
+		if gateID == "" {
+			// The gate half of the dismantled pair, found by its deterministic
+			// name; 404 means it is already gone. Inspect-then-remove, and only a
+			// gate carrying this session's ownership label (the `ours` check every
+			// adoption path makes): the name is a convention, and force-removing
+			// whatever holds it could take out a container the platform does not
+			// own. A gate orphaned the other way (its sandbox gone but the pair
+			// never re-provisioned ungated) is the standalone teardown reaper's to
+			// collect — same owner as the orphan-gate race noted above.
+			gi, gerr := p.api.inspectContainer(ctx, gateName(spec.SessionID))
+			switch {
+			case gerr == nil:
+				if oerr := ours(gi, spec.SessionID); oerr != nil {
+					return nil, oerr
+				}
+				if rerr := removeIgnoring404(ctx, p.api, gi.ID); rerr != nil {
+					return nil, rerr
+				}
+			case !statusIs(gerr, 404):
+				return nil, gerr
+			}
 		}
 	case !statusIs(ierr, 404):
 		return nil, ierr
@@ -301,12 +338,17 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 	return p.attach(id, workdir, gateID), nil
 }
 
-// pairedWithGate reports whether an existing sandbox is networked through this
-// session's current gate, so a gated session never adopts a sandbox with the
-// wrong egress path (a stale gate reference, or a pre-gate `bridge` sandbox). An
-// ungated session (gateID == "") is trivially paired.
+// pairedWithGate reports whether an existing sandbox's egress path matches the
+// session's current shape: a gated session's sandbox must be networked through
+// its current gate (never a stale gate reference or a pre-gate `bridge`
+// sandbox), and an ungated session's (gateID == "") must not be gate-networked
+// at all — a still-gated pair is dismantled and its token revoked, not adopted
+// (#197).
 func pairedWithGate(info containerInfo, gateID string) bool {
-	return gateID == "" || info.HostConfig.NetworkMode == "container:"+gateID
+	if gateID == "" {
+		return !strings.HasPrefix(info.HostConfig.NetworkMode, "container:")
+	}
+	return info.HostConfig.NetworkMode == "container:"+gateID
 }
 
 // sandboxConfig is the session container's create config. It applies

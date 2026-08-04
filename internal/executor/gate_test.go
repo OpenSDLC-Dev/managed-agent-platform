@@ -116,4 +116,9 @@ func TestUnrestrictedSessionProvisionsWithoutGate(t *testing.T) {
 	if spec := h.prov.lastSpec; spec.Gate != nil || spec.Env != nil {
 		t.Errorf("ungated session provisioned with gate=%v env=%v", spec.Gate, spec.Env)
 	}
+	// The revoker rides every spec, gated or not: the gated→ungated dismantle
+	// is observed by a provision whose own spec is the ungated one (#197).
+	if h.prov.lastSpec.GateTokenRevoker == nil {
+		t.Error("ungated spec carries no GateTokenRevoker — a dismantled gate's token could never be revoked")
+	}
 }

@@ -47,6 +47,11 @@ func hashToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// revokeSQL marks every live token for a session revoked. Ensure runs it
+// before inserting a successor; Revoke runs it alone.
+const revokeSQL = `UPDATE session_gate_tokens SET revoked_at = now()
+	 WHERE session_id = $1 AND revoked_at IS NULL`
+
 // Ensure makes token the one live gate token for sessionID: in one transaction
 // it revokes every prior unrevoked token for the session and inserts the new
 // hash. Re-minting on a replacement gate therefore invalidates the predecessor
@@ -58,10 +63,7 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, sessionID, token string) er
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx,
-		`UPDATE session_gate_tokens SET revoked_at = now()
-		 WHERE session_id = $1 AND revoked_at IS NULL`,
-		sessionID); err != nil {
+	if _, err := tx.Exec(ctx, revokeSQL, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx,
@@ -70,6 +72,16 @@ func Ensure(ctx context.Context, pool *pgxpool.Pool, sessionID, token string) er
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// Revoke marks sessionID's live gate token revoked without minting a successor
+// — the gated→ungated teardown, where a provision dismantles the session's gate
+// for good and Ensure's revoke-on-re-mint will never run (#197). Idempotent: a
+// session with no live token is a no-op, so a provider that revokes before
+// tearing the pair down can safely retry both if the teardown fails partway.
+func Revoke(ctx context.Context, pool *pgxpool.Pool, sessionID string) error {
+	_, err := pool.Exec(ctx, revokeSQL, sessionID)
+	return err
 }
 
 // Authenticate resolves a gate token to the session it is scoped to, or "" if

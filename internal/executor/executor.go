@@ -403,6 +403,10 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 		Env:        env,
 		Hardening:  e.cfg.Hardening,
 		Gate:       e.gateSpec(sess),
+		// Set unconditionally, unlike Gate: the revoker is for the provision
+		// that finds a gate it must dismantle, and that provision's own spec
+		// is the ungated one.
+		GateTokenRevoker: gateTokenMinter{pool: e.pool},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("provision sandbox: %w", err)
@@ -478,17 +482,24 @@ func (e *Executor) gateSpec(sess sessionRun) *sandbox.GateSpec {
 	}
 }
 
-// gateTokenMinter implements sandbox.GateTokenMinter over the executor's pool.
-// Generate returns a fresh in-memory token; Persist records it as the session's
-// live gate token, and the provider calls Persist only after it has won the
-// create race for the gate container — so a re-provision that adopts a running
-// gate never revokes the token that gate is authenticating with.
+// gateTokenMinter implements sandbox.GateTokenMinter and sandbox.GateTokenRevoker
+// over the executor's pool. Generate returns a fresh in-memory token; Persist
+// records it as the session's live gate token, and the provider calls Persist
+// only after it has won the create race for the gate container — so a
+// re-provision that adopts a running gate never revokes the token that gate is
+// authenticating with. Revoke is the no-successor teardown: the provider calls
+// it when it dismantles a session's gate without replacing it (gated→ungated),
+// the one path where Ensure's revoke-on-re-mint never runs.
 type gateTokenMinter struct{ pool *pgxpool.Pool }
 
 func (m gateTokenMinter) Generate() string { return gatetoken.Mint() }
 
 func (m gateTokenMinter) Persist(ctx context.Context, sessionID domain.ID, token string) error {
 	return gatetoken.Ensure(ctx, m.pool, sessionID.String(), token)
+}
+
+func (m gateTokenMinter) Revoke(ctx context.Context, sessionID domain.ID) error {
+	return gatetoken.Revoke(ctx, m.pool, sessionID.String())
 }
 
 // runTools runs each unanswered tool use in order, returning the result events

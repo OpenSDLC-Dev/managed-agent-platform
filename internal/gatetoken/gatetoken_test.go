@@ -109,6 +109,33 @@ func TestEnsureRevokesPriorToken(t *testing.T) {
 	}
 }
 
+func TestRevokeInvalidatesLiveToken(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	sess, _ := pgtest.NewSession(t, pool, "cloud")
+
+	token := gatetoken.Mint()
+	if err := gatetoken.Ensure(ctx, pool, sess.String(), token); err != nil {
+		t.Fatal(err)
+	}
+	if err := gatetoken.Revoke(ctx, pool, sess.String()); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	got, err := gatetoken.Authenticate(ctx, pool, token)
+	if err != nil {
+		t.Fatalf("Authenticate(revoked): %v", err)
+	}
+	if got != "" {
+		t.Errorf("revoked token still authenticates to %q, want empty", got)
+	}
+	// Idempotent: a session with no live token (already revoked, or never
+	// gated) is a no-op, so a provision retry after a failed teardown can
+	// safely revoke again.
+	if err := gatetoken.Revoke(ctx, pool, sess.String()); err != nil {
+		t.Errorf("second Revoke: %v", err)
+	}
+}
+
 func TestEnsureNonexistentSessionErrors(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	// A gate token can only be minted for a real session (the FK); a bad session
