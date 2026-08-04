@@ -133,7 +133,10 @@ func (s *stack) uploadFile(t *testing.T, ff FileFixture, tr *Trial) string {
 	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	w, err := mw.CreateFormFile("file", ff.Name)
+	// Name is filled like Content: a fixture may carry the trial's nonce in its
+	// filename (the outcome rubric does), and an unfilled name would upload the
+	// literal placeholder.
+	w, err := mw.CreateFormFile("file", tr.fill(ff.Name))
 	if err != nil {
 		t.Fatalf("multipart file part: %v", err)
 	}

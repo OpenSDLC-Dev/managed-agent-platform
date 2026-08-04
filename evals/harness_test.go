@@ -19,6 +19,12 @@ import (
 // exists to stop a hung run, not to measure the agent.
 const turnTimeout = 5 * time.Minute
 
+// outcomeTurnTimeout bounds a user.define_outcome → idle round trip, which is
+// a whole outcome loop rather than one turn: agent work, an outputs harvest
+// and a grader call per cycle, times the revision cycles max_iterations
+// allows. The ordinary turn budget was never sized for that.
+const outcomeTurnTimeout = 2 * turnTimeout
+
 // maxConfirmRounds caps how many requires_action pauses one turn may raise before
 // the harness gives up. Our permission tasks gate a single call, so one round is
 // the norm and a partial re-idle adds a few more at most; a turn that keeps
@@ -78,6 +84,32 @@ type Turn struct {
 	// OnAsk answers a confirmation pause. Nil means the turn expects none; a
 	// gated turn supplies whether to allow or deny each gated tool call.
 	OnAsk *Ask
+	// Outcome, when set, makes this turn a user.define_outcome instead of a
+	// user.message (Message is then unused). The platform's whole outcome loop
+	// — agent work, outputs harvest, grader call, any revision cycles — runs
+	// to its terminal verdict before the session idles, so an outcome turn
+	// still produces exactly one idle; it just takes outcomeTurnTimeout to
+	// arrive rather than turnTimeout.
+	Outcome *Outcome
+}
+
+// Outcome is one user.define_outcome. Exactly one of RubricText and
+// RubricFile is set.
+type Outcome struct {
+	Description string
+	// MaxIterations caps the evaluation cycles (the server defaults it to 3
+	// when zero). The revise task sets 2: one graded miss, one graded fix.
+	MaxIterations int
+	// RubricText rides the event inline as {type:"text"} — the platform
+	// renders it into the agent's conversation along with the description.
+	RubricText string
+	// RubricFile is uploaded to /v1/files and referenced as {type:"file",
+	// file_id}. It is deliberately never added as a session resource: a file
+	// rubric is visible to the grader alone (the conversation gets the
+	// description only — docs/DIVERGENCES.md "user.define_outcome
+	// acceptance"), which is what lets a task hold ground truth the agent
+	// cannot see. MountPath is unused.
+	RubricFile *FileFixture
 }
 
 // Ask is how a turn answers a requires_action pause. DenyMessage (with
@@ -198,7 +230,7 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 
 	start := time.Now()
 	for i, turn := range task.Turns {
-		s.sendEvents(t, tr.SessionID, userMessage(tr.fill(turn.Message)))
+		s.sendEvents(t, tr.SessionID, s.turnEvent(t, turn, tr))
 		idle := s.driveToIdle(t, stream, turn, tr, i, len(task.Turns))
 		tr.Idles = append(tr.Idles, idle)
 		// An unresolved pause (driveToIdle returning a requires_action idle) leaves
@@ -244,8 +276,13 @@ func (s *stack) driveToIdle(t *testing.T, stream *sseStream, turn Turn, tr *Tria
 	rounds := 0
 	// One deadline for the whole turn, not one per await: a model that re-pauses
 	// repeatedly cannot stretch the turn to maxConfirmRounds × turnTimeout and slip
-	// past the suite timeout before the round cap fires.
-	deadline := time.Now().Add(turnTimeout)
+	// past the suite timeout before the round cap fires. An outcome turn gets the
+	// loop-sized budget instead (see outcomeTurnTimeout).
+	budget := turnTimeout
+	if turn.Outcome != nil {
+		budget = outcomeTurnTimeout
+	}
+	deadline := time.Now().Add(budget)
 	for {
 		idle, err := stream.awaitIdle(time.Until(deadline))
 		if err != nil {
