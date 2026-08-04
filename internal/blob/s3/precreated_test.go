@@ -17,9 +17,12 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/s3"
 )
 
-// precreatedRegion is what these tests configure. Any value would do for the
-// stub, and MinIO accepts this one; what matters is that a region is set at
-// all, which is what keeps minio-go from resolving the bucket's location.
+// precreatedRegion is what these tests configure. What they exercise is that a
+// region is set at all, which is what keeps minio-go from resolving the bucket's
+// location; the stub authenticates nothing and MinIO accepts this one, so
+// neither can show what a *wrong* region costs a real endpoint — that failure
+// belongs to the first object request, and is documented on the Config field
+// rather than pinned here.
 const precreatedRegion = "us-east-1"
 
 // rawClient is the endpoint's own wire rather than the backend's API — used to
@@ -39,6 +42,8 @@ func rawClient(t *testing.T, tgt blobtest.Target) *minio.Client {
 // recordingEndpoint answers every request with answer and reports the requests
 // it saw, so a test can assert what the store asked the endpoint for — the only
 // way to prove a permission is not needed is to prove the call is not made.
+// Deliberately not absence_test.go's stubStore, which answers the bucket check
+// and keeps it out of the record: here that call is the thing under test.
 func recordingEndpoint(t *testing.T, answer http.HandlerFunc) (endpoint string, seen func() []string) {
 	t.Helper()
 	var mu sync.Mutex
@@ -97,7 +102,7 @@ func TestPrecreatedBucketIssuesNoBucketRequest(t *testing.T) {
 // the same promise, and the half a skipped construction check does not buy on
 // its own: with no region configured minio-go resolves the bucket's location
 // before the first object request (bucket-cache.go), which is a bucket-level
-// read of exactly the kind this mode exists to stop needing
+// call of exactly the kind this mode exists to stop making
 // (docs/plan/20_gcp-deployment.md Decision 11 measured it as the second of the
 // two bucket calls). Requiring a region is what makes "object permissions only"
 // true rather than nearly true, and this pins that no bucket-level request
@@ -222,6 +227,42 @@ func TestContractWithPrecreatedBucket(t *testing.T) {
 		}
 		return s
 	})
+}
+
+// TestFromEnvReadsBucketPrecreated covers the activation path a deployment
+// actually uses. Everything above builds a Config directly, so the one line
+// that reads the environment could be deleted — disabling the feature for every
+// deployment — with all of it still green. The endpoint is the discard port:
+// construction can only succeed by making no request, so success is proof the
+// variable was read.
+func TestFromEnvReadsBucketPrecreated(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	t.Setenv("BLOB_ENDPOINT", "127.0.0.1:9")
+	t.Setenv("BLOB_BUCKET", "map-blob")
+	t.Setenv("BLOB_REGION", precreatedRegion)
+	t.Setenv("BLOB_BUCKET_PRECREATED", "true")
+	store, err := s3.FromEnv(ctx)
+	if err != nil {
+		t.Fatalf("FromEnv in the pre-created mode: %v", err)
+	}
+	if store == nil {
+		t.Fatal("FromEnv returned no store")
+	}
+}
+
+// TestFromEnvWithoutBucketPrecreatedChecksTheBucket is the other half: the same
+// environment minus the one variable must still reach the endpoint, or the test
+// above would pass for a reason that has nothing to do with the mode.
+func TestFromEnvWithoutBucketPrecreatedChecksTheBucket(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	t.Setenv("BLOB_ENDPOINT", "127.0.0.1:9")
+	t.Setenv("BLOB_BUCKET", "map-blob")
+	t.Setenv("BLOB_REGION", precreatedRegion)
+	if _, err := s3.FromEnv(ctx); err == nil {
+		t.Fatal("FromEnv reached a store on the discard port without the mode")
+	}
 }
 
 // TestPrecreatedBucketStillValidatesConfig keeps the mode from becoming a way

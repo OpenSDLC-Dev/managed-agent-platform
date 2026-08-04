@@ -25,7 +25,7 @@ type Config struct {
 	AccessKey string
 	SecretKey string
 	Bucket    string
-	Region    string // optional; some S3 endpoints require it on bucket create
+	Region    string // some S3 endpoints require it on bucket create; required by BucketPrecreated
 	TLS       bool
 
 	// BucketPrecreated asserts that the bucket already exists, so New neither
@@ -37,18 +37,31 @@ type Config struct {
 	// docs/plan/20_gcp-deployment.md Decision 11).
 	//
 	// It requires Region, because the construction check is not the only
-	// bucket-level call: with no region configured minio-go resolves the
-	// bucket's location before the first object request and caches it
-	// (bucket-cache.go), which needs the same privilege a moment later. A mode
-	// that skipped one and kept the other would not deliver what it is for, so
-	// New rejects the pair rather than half-granting it.
+	// bucket-level call: a client with no region resolves the bucket's location
+	// before the first object request and caches it (bucket-cache.go), so the
+	// mode would trade a bucket call at startup for one at first use. New
+	// rejects the pair rather than half-keeping the promise. The requirement is
+	// deliberately blunt — minio-go does derive a region from an AWS regional
+	// endpoint's own hostname, so a few endpoints would have been safe without
+	// one — because "set the region" is a rule an operator can follow and
+	// "set it unless your endpoint spells it out" is not. The region must also be the *right* one: minio-go recovers from
+	// a wrong region only while its own is empty (api.go's
+	// AuthorizationHeaderMalformed retry), so a mistyped one now fails the
+	// first object request instead of self-correcting.
+	//
+	// One endpoint is outside the promise. Against an Amazon endpoint with an
+	// S3 Express directory bucket, minio-go mints session credentials for every
+	// object request — a bucket-root GET ?session (api.go, create-session.go) —
+	// which needs s3express:CreateSession on the bucket. That call is the
+	// client's, not this package's, and it is made with or without this
+	// setting; the mode simply cannot remove it.
 	//
 	// The check is also the one call New makes, so this is a trade: with it
-	// skipped, an unreachable endpoint, a wrong credential or a misspelled
-	// bucket surfaces on first use rather than at startup. That is the right
-	// way round for a deployment whose bucket is provisioned out of band, and
-	// the wrong one for the bundled MinIO, which starts empty — hence a
-	// per-deployment setting rather than a change of default.
+	// skipped, an unreachable endpoint, a wrong credential, a wrong region or a
+	// misspelled bucket surfaces on first use rather than at startup. That is
+	// the right way round for a deployment whose bucket is provisioned out of
+	// band, and the wrong one for the bundled MinIO, which starts empty — hence
+	// a per-deployment setting rather than a change of default.
 	BucketPrecreated bool
 }
 
@@ -62,7 +75,8 @@ type Store struct {
 // assume it (the bundled MinIO starts empty; creating the bucket here keeps
 // deployment free of a separate bootstrap step). Idempotent across processes:
 // two racing creators both succeed. Config.BucketPrecreated takes the operator's
-// word for that instead, and New then issues no request at all.
+// word for that instead, and New then issues no request at all — see the field
+// for what that does and does not promise about the object work that follows.
 func New(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Endpoint == "" || cfg.Bucket == "" {
 		return nil, errors.New("s3: endpoint and bucket are required")
@@ -70,7 +84,7 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.BucketPrecreated && cfg.Region == "" {
 		return nil, errors.New("s3: a pre-created bucket needs an explicit region, " +
 			"or the first object request resolves the bucket's location — the " +
-			"bucket-level read the mode exists to stop needing")
+			"bucket-level call the mode exists to stop making")
 	}
 	// minio-go's own default transport, wrapped so an error response reaches
 	// the library saying what the endpoint meant (see endpointWord). It has to

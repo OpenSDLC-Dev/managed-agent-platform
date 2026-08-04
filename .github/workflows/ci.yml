@@ -81,12 +81,18 @@ jobs:
           [ "$(echo "$out" | key blob-bucket-precreated)" = "true" ] \
             || { echo "bucketPrecreated did not reach the Secret" >&2; exit 1; }
           # ...and out of the Secret into the processes that build the store.
+          # The secretKeyRef key is asserted, not just the variable name: the
+          # reference is optional, so a key that names nothing renders exactly
+          # like a correct one and leaves the variable unset — the mode silently
+          # off for the deployment shape it exists to serve.
           for tpl in controlplane brain executor; do
-            helm template t "$CHART" -f "$VALUES" "${ext[@]}" \
+            out="$(helm template t "$CHART" -f "$VALUES" "${ext[@]}" \
               --set externalObjectStorage.region=us-east-1 \
               --set externalObjectStorage.bucketPrecreated=true \
-              --show-only "templates/$tpl-deployment.yaml" | grep -q 'name: BLOB_BUCKET_PRECREATED' \
-              || { echo "$tpl never receives BLOB_BUCKET_PRECREATED" >&2; exit 1; }
+              --show-only "templates/$tpl-deployment.yaml")"
+            echo "$out" | grep -A5 'name: BLOB_BUCKET_PRECREATED' | grep -q 'key: blob-bucket-precreated' \
+              || { echo "$tpl does not read BLOB_BUCKET_PRECREATED from the blob-bucket-precreated key" >&2
+                   echo "$out" | grep -A5 'name: BLOB_BUCKET_PRECREATED' >&2; exit 1; }
           done
           # Without a region the client resolves the bucket's location before
           # its first object request, which needs the very bucket privilege the

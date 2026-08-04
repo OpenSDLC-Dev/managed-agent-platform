@@ -12,8 +12,8 @@ then a GCS-native backend that removes the HMAC key pair entirely.
 ## Tasks
 
 - [x] #241 — `BLOB_BUCKET_PRECREATED` skips `BucketExists`/`MakeBucket` and requires a
-  region (the location lookup is the other bucket-level call); chart value, render guard,
-  CI assertions
+  region (a region-less client resolves the bucket's location instead); chart value,
+  render guard, CI assertions
 - [ ] #240 — `internal/blob/gcs` on `cloud.google.com/go/storage` behind a backend
   selector, passing `blobtest` unchanged
 - [ ] #240 — `deploy/gcp` drops the HMAC pair and the bucket-read grant

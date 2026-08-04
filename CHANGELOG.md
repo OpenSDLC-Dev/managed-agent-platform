@@ -44,13 +44,20 @@ copy of an entry here.
   The mode **requires a region**, which is the half a skipped construction check does not
   buy on its own: with `BLOB_REGION` empty, minio-go resolves the bucket's location before
   the first object request and caches it — measured here as a `GET /bucket/?location=`
-  ahead of the `PUT` — and that resolution needs the same bucket privilege a moment later.
-  So `s3.New` rejects the pair and the chart fails the render rather than trade one bucket
-  call for another; with a region set, the suite pins that a put, a get and a delete send
-  exactly three object requests and nothing else. The remaining trade is deliberate and
-  is why this is a per-deployment setting rather than a new default: with no startup
-  check, a wrong endpoint, credential or bucket name surfaces on first use instead of at
-  startup. Closes plan 20's Decision 11 follow-on.
+  ahead of the `PUT` — so the mode would trade a bucket call at startup for one at first
+  use. `s3.New` rejects the pair, and the chart fails the render for the Secret it manages
+  itself (with `existingSecret` the operator assembles the keys, so the Go-side guard is
+  the enforcement). With a region set, the suite pins that a put, a get and a delete send
+  exactly three object requests and nothing else.
+
+  Two limits, stated rather than implied. The region must be the **right** one: minio-go
+  self-corrects a wrong region only while its own is empty, so a mistyped one now fails
+  the first object request — and joins a wrong endpoint, credential or bucket name in the
+  deliberate trade this mode makes, which is why it is a per-deployment setting and not a
+  new default. And against an Amazon endpoint with an **S3 Express** directory bucket the
+  client mints session credentials per object request (a bucket-root `GET ?session`,
+  needing `s3express:CreateSession`); that call is minio-go's own, made with or without
+  this setting, and the mode cannot remove it. Closes plan 20's Decision 11 follow-on.
 
 - **The deploy guide now says how long a stuck teardown actually stays stuck: four days, by
   Google's own documentation** ([docs/deploy-gcp.md](./docs/deploy-gcp.md), #20). The
