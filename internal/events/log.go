@@ -44,8 +44,13 @@ type Execer interface {
 // just a pointer, like the events channel's — the woken poll re-reads the
 // queue.
 func NotifyWorkEnqueued(ctx context.Context, db Execer, envID domain.ID) error {
-	_, err := db.Exec(ctx, `SELECT pg_notify($1, $2)`,
-		channelWork, `{"environment_id":"`+envID.String()+`"}`)
+	payload, err := json.Marshal(struct {
+		EnvironmentID domain.ID `json:"environment_id"`
+	}{envID})
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `SELECT pg_notify($1, $2)`, channelWork, string(payload))
 	return err
 }
 
