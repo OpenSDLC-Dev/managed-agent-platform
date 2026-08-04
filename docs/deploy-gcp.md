@@ -56,7 +56,8 @@ The run order is in [`deploy/gcp/README.md`](../deploy/gcp/README.md#running-it)
 load-bearing; this is only the shape of it:
 
 ```sh
-make gcp-foundation-apply    # once, ever — durable identities, KMS, empty secrets
+make gcp-foundation-apply    # never destroyed — durable identities, KMS, empty secrets
+                             # (re-apply it whenever foundation/ gains a resource)
 make gcp-bootstrap           # fills the secrets, creates the GCS HMAC key
 make gcp-env-apply           # network, cluster, Cloud SQL, bucket, registry
 make gcp-db-init             # the platform's database role — see below
@@ -64,8 +65,14 @@ gcloud builds submit ...     # the component images
 helm install ...             # the platform
 ```
 
-`foundation/` is applied once and never destroyed; `environment/` is created and destroyed
-freely. That split is what makes a rebuild safe, and the reason is not tidiness: a KMS key
+`foundation/` is never destroyed; `environment/` is created and destroyed freely. Never
+destroyed is not the same as applied once: the configuration is idempotent, and re-applying
+it is how anything is ever *added* to it. That matters for an existing
+deployment upgrading past
+[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269), which adds the
+brain's Google service account — `environment/` reads it by name through a data source, so
+running `make gcp-env-apply` without re-applying the foundation first fails on the lookup
+rather than creating it. That split is what makes a rebuild safe, and the reason is not tidiness: a KMS key
 ring cannot be deleted in GCP at all, and destroying the key schedules every version for
 destruction while the name stays taken — so a configuration that owned it could not be
 re-applied, and the vault ciphertext encrypted under it would be gone.
@@ -145,11 +152,41 @@ network in cleartext, on the near side of the encryption. `ssl_mode = ENCRYPTED_
 not your application's connection to the proxy. Google recommends colocation for exactly
 this reason.
 
-The chart templates no sidecar, so this is not a Helm value today: add the container to the
-`controlplane`, `brain` and `executor` deployments yourself. That is a chart gap, not a
-platform limitation, and it is tracked in
-[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) along with the
-brain-identity half of it below. If you must use a shared proxy Service as an interim step, treat the
+The chart templates it, off by default. `cloudSQLProxy.enabled` adds the sidecar to all
+three deployments at once — one switch rather than three, because they read a single
+`database-url` Secret key and a DSN cannot name a loopback socket for some pods and the
+instance's address for the others:
+
+```sh
+--set cloudSQLProxy.enabled=true \
+--set "cloudSQLProxy.instanceConnectionName=$(terraform output -raw sql_instance_connection_name)"
+```
+
+and then a `database-url` of
+`postgres://USER:PASSWORD@127.0.0.1:5432/DATABASE?sslmode=disable`. **Pointing the DSN at
+the proxy is yours to do**, and it is the mistake to watch for: a sidecar with a DSN still
+naming the instance's own address is a proxy nothing connects through. In mode 2 the chart
+renders no Secret at all and never sees the DSN, so it cannot check this — and it does not
+check the one path where it *could* (`externalDatabase.url`) because there is nothing exact
+to check against: a DSN through the sidecar can legitimately say `127.0.0.1`, `localhost`,
+`[::1]`, or a unix socket path, so a host check would refuse working deployments.
+
+It renders as a **native sidecar** (an `initContainer` with
+`restartPolicy: Always`) with a startup probe on the proxy's own `/startup`, which is what
+makes it ready before the process that dials it: all three open the database as they start,
+so an ordinary container would let them race it. Four things fail the render rather than
+deploying a pod that never becomes ready: a cluster older than Kubernetes 1.29 (which
+predates native sidecars), a missing `instanceConnectionName`, one whose *shape* is wrong,
+and the bundled Postgres left enabled alongside it.
+
+The shape check is exactly this: **three or four non-empty colon-separated segments** —
+`PROJECT:REGION:INSTANCE`, or `DOMAIN:PROJECT:REGION:INSTANCE` for a legacy domain-scoped
+project. That refuses an address such as `10.1.2.3` or `db.internal:5432`, and a name with
+an empty part. It does not look inside the segments, so a well-formed name that names
+nothing renders and the proxy rejects it at startup — deliberately, because encoding
+Google's own naming rules here would refuse a valid name the day Google widens one.
+
+If you must use a shared proxy Service as an interim step, treat the
 database credential as exposed to anything that can watch pod-network traffic, and say so in
 your threat model rather than inheriting the `sslmode=disable` from this page as though it
 were still local.
@@ -163,16 +200,32 @@ encrypts but does not verify the server's certificate, which is what the proxy a
 IAM-based authorization. Prefer the proxy where you can; take this path when you want mode 2
 running without per-component identity work.
 
-That distinction matters most for the **brain**, which opens the database like the other two
-but has no ServiceAccount in the chart to annotate — and there is no Google service account
-for it in `foundation/` either. Under the proxy topology it therefore needs four steps nobody
-has done for you: a ServiceAccount of its own, a Google service account bound to it with
-`roles/iam.workloadIdentityUser`, and `roles/cloudsql.client` on that Google account. Do not
-reuse the control plane's identity to shortcut this — it carries KMS decrypt, which the brain
-has no business holding. Under the direct path the question does not arise, which is why the
-mode-2 acceptance run took it and
-[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) is a follow-on
+That distinction matters most for the **brain**, which opens the database like the other two.
+It now has an identity of its own on both sides: `brain.serviceAccount.annotations` in the
+chart, a `<prefix>-brain` Google service account in `foundation/`, and — in `environment/` —
+the `roles/iam.workloadIdentityUser` binding onto that KSA plus `roles/cloudsql.client`. So
+the proxy topology is three annotations, one per component — and only the proxy topology,
+which needs all three where the direct path needs none of them:
+
+```sh
+terraform output -json controlplane_service_account_annotation
+terraform output -json brain_service_account_annotation
+terraform output -json executor_service_account_annotation
+```
+
+The brain's account holds `roles/cloudsql.client` and nothing else, and that is the point of
+it being separate: annotating the brain onto the control plane's account would be the
+shortcut, and it would hand the brain the KMS decrypt that account carries. Under the direct
+path the question does not arise — no component uses a Google identity for the database at
+all — which is why the mode-2 acceptance run took it and
+[#269](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/269) was a follow-on
 rather than a blocker.
+
+Neither half of the proxy path has been exercised on a live GKE cluster. The chart renders
+it, a real API server accepts the manifests, and the Terraform passes the credential-free
+checks — but the mode-2 acceptance run predates all of it and took the direct path, so what
+is established here is that the configuration is well-formed, not that a pod has connected
+through it.
 
 ## Exposing the control plane
 

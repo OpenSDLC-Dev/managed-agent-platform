@@ -5,9 +5,9 @@
 # ---------------------------------------------------------------------------
 # Workload Identity. Two halves, and the annotation alone is not enough: the
 # Kubernetes ServiceAccount must be annotated (chart:
-# controlplane.serviceAccount.annotations / executor.serviceAccount.annotations)
-# AND the Google service account must permit that KSA to impersonate it. This is
-# the second half.
+# controlplane.serviceAccount.annotations / brain.serviceAccount.annotations /
+# executor.serviceAccount.annotations) AND the Google service account must
+# permit that KSA to impersonate it. This is the second half.
 #
 # The member string names one exact KSA in one exact namespace. It is bound by
 # name rather than by any label or suffix match deliberately — a suffix filter
@@ -39,10 +39,11 @@ locals {
   )
 
   controlplane_ksa = "${local.fullname}-controlplane"
+  brain_ksa        = "${local.fullname}-brain"
   executor_ksa     = "${local.fullname}-executor"
 }
 
-# Both bindings depend on the CLUSTER, and the dependency has to be written out:
+# All three bindings depend on the CLUSTER, and the dependency has to be written out:
 # the member string names the identity pool `PROJECT.svc.id.goog`, which is not a
 # project-level fact but is created by the first cluster configured with
 # `workload_identity_config`. Terraform sees no reference from these resources to
@@ -55,6 +56,14 @@ resource "google_service_account_iam_member" "controlplane_workload_identity" {
   service_account_id = data.google_service_account.controlplane.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${local.controlplane_ksa}]"
+
+  depends_on = [google_container_cluster.map]
+}
+
+resource "google_service_account_iam_member" "brain_workload_identity" {
+  service_account_id = data.google_service_account.brain.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${local.brain_ksa}]"
 
   depends_on = [google_container_cluster.map]
 }
@@ -160,15 +169,34 @@ resource "google_artifact_registry_repository_iam_member" "node_puller_mirror" {
 # Cloud SQL. Mode-1 runs on the chart's bundled Postgres and does not touch
 # this; mode-2 reaches the instance through the Cloud SQL Auth Proxy, which
 # authenticates as the pod's Google identity and needs roles/cloudsql.client.
-# Granted to the two identities the chart can annotate — the brain also opens
-# the database, but the chart gives it no ServiceAccount to bind, which is a
-# chart gap rather than something this configuration can fix.
+#
+# All three processes open the database, so all three get it. The grant is
+# unconditional rather than following the chart's cloudSQLProxy switch, because
+# this configuration cannot see how the chart is installed and an IAM role
+# nobody exercises costs nothing: under the direct-connection path
+# (sslmode=require against the private IP) none of the three uses its Google
+# identity for the database at all.
+#
+# Project-scoped, and it is worth knowing that this reaches every Cloud SQL
+# instance in the project rather than only the one below: a Cloud SQL instance
+# carries no IAM policy of its own, so the binding has nowhere narrower to go.
+# Google's documented way to narrow it is an IAM Condition on this binding
+# matching the instance's resource name. Not done here, because this project
+# holds exactly one Cloud SQL instance and the condition would narrow the
+# binding to the only instance it can already reach — but that is the lever, and
+# a project that grows a second database is the moment to reach for it.
 # ---------------------------------------------------------------------------
 
 resource "google_project_iam_member" "controlplane_sql_client" {
   project = var.project_id
   role    = "roles/cloudsql.client"
   member  = "serviceAccount:${data.google_service_account.controlplane.email}"
+}
+
+resource "google_project_iam_member" "brain_sql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${data.google_service_account.brain.email}"
 }
 
 resource "google_project_iam_member" "executor_sql_client" {

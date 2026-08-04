@@ -17,6 +17,11 @@ output "controlplane_service_account" {
   description = "Google service account the controlplane pods impersonate via Workload Identity."
 }
 
+output "brain_service_account" {
+  value       = google_service_account.brain.email
+  description = "Google service account the brain pods impersonate via Workload Identity. Needed only under the Cloud SQL Auth Proxy topology, where it holds roles/cloudsql.client and nothing else."
+}
+
 output "executor_service_account" {
   value       = google_service_account.executor.email
   description = "Google service account the executor pods impersonate via Workload Identity."

@@ -80,9 +80,10 @@ UNRECOVERABLE = {
 
 # What foundation/ is expected to protect today. A scan that finds fewer has
 # lost sight of something — the whole check passing over three resources
-# instead of eight is exactly the failure a "did I find anything at all?" guard
-# is too weak to catch.
-MIN_PROTECTED = 8
+# instead of ten is exactly the failure a "did I find anything at all?" guard
+# is too weak to catch. Raise it with the foundation: left behind, it keeps
+# printing ok over a scan that has quietly stopped seeing the newest resources.
+MIN_PROTECTED = 10
 
 ROOT = pathlib.Path(__file__).parent
 RESOURCE = re.compile(r'^\s*resource\s+"([^"]+)"\s+"([^"]+)"')

@@ -53,6 +53,45 @@ copy of an entry here.
 
 ### Added
 
+- **The Cloud SQL Auth Proxy is a Helm value, and the brain has an identity to run one
+  under** ([deploy/helm/managed-agent-platform](./deploy/helm/managed-agent-platform),
+  [deploy/gcp](./deploy/gcp), #269). Google's documented path from GKE to a private-IP
+  Cloud SQL instance is the proxy colocated in the pod — colocated specifically so the
+  `sslmode=disable` it offers the application stays on a loopback socket — and the chart
+  templated none of it, so an operator had to hand-edit three Deployments. `cloudSQLProxy`
+  now renders it: one switch for all three, because they read a single `database-url` key
+  and a DSN cannot name a loopback socket for some pods and an address for the others. It
+  is a **native sidecar** (an `initContainer` with `restartPolicy: Always`) with a startup
+  probe on the proxy's own `/startup`, which is what makes it *listening* rather than
+  merely started before three processes that all open the database as they boot — so the
+  render fails on Kubernetes < 1.29, as `executor.gateImage` already does. Three more
+  refusals happen at render time rather than as a pod that never becomes ready: a missing
+  `instanceConnectionName`, one whose shape is wrong — the check is three or four non-empty
+  colon-separated segments, so an address and an empty part are refused while a legacy
+  domain-scoped project's fourth segment passes, and what is inside a segment is the proxy's
+  to judge — and the bundled Postgres left enabled alongside it. The
+  guards live in the helper, not in `secret.yaml` where the chart's other refusals are,
+  because everything past that file's first three refusals is skipped under
+  `existingSecret` — which is exactly how the GCP mode this sidecar exists for is deployed.
+
+  The identity half was the part nobody could work around: the **brain** opens the database
+  like the other two and had no ServiceAccount in the chart to annotate, and no Google
+  service account in `foundation/`. It now has both — `brain.serviceAccount.annotations`
+  and a `<prefix>-brain` account with the Workload Identity binding and
+  `roles/cloudsql.client` in `environment/` — deliberately its own rather than the control
+  plane's, which carries KMS decrypt the brain has no business holding. CI keeps that
+  separation honest: the assertion that the brain holds no ServiceAccount is replaced by
+  one that it holds no KMS key name and uses the ServiceAccount named after *it*. An
+  existing deployment has to re-apply `foundation/` before `environment/` — the new
+  account is read by name through a data source, so an `environment/` plan run first fails
+  on it rather than creating it.
+
+  Off by default, and **not exercised on a live cluster**: the chart renders it, a real API
+  server accepts the manifests under `--dry-run=server`, and the Terraform passes the
+  credential-free checks — but the mode-2 acceptance run predates this and took the other
+  path the guide documents (the private IP directly, `sslmode=require`, no identity at
+  all), which still works and is still documented. Closes #269.
+
 - **Object storage can be told its bucket already exists, so startup stops costing a
   bucket-level permission** ([internal/blob/s3](./internal/blob/s3), #241). `s3.New` called
   `BucketExists` before any object work and created the bucket when it was missing — a

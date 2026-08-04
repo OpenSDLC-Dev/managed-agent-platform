@@ -49,6 +49,17 @@ controlplane:
 
 brain:
   replicas: 1
+  # -- Annotations for this component's Kubernetes ServiceAccount — the same
+  # GKE Workload Identity hook the other two carry
+  # (`iam.gke.io/gcp-service-account: NAME@PROJECT.iam.gserviceaccount.com`),
+  # for a different reason, and that difference is why the brain has an identity
+  # of its own rather than borrowing one. The brain holds no cipher, so it needs
+  # nothing from KMS. It does open the database, so under the Cloud SQL Auth
+  # Proxy topology (cloudSQLProxy below) it needs a Google service account
+  # holding roles/cloudsql.client — and annotating it onto the control plane's
+  # would hand the brain the KMS decrypt that account carries (#269).
+  serviceAccount:
+    annotations: {}
   leaseTTL: ""       # e.g. "2m"; empty uses the binary default
   pollInterval: ""   # e.g. "250ms"; empty uses the binary default
   resources: {}
@@ -231,6 +242,66 @@ postgresql:
 # existingSecret below instead.
 externalDatabase:
   url: ""
+
+# -- Cloud SQL Auth Proxy as a sidecar in the controlplane, brain and executor
+# pods: Google's documented way for a GKE workload to reach a private-IP Cloud
+# SQL instance. Off by default — it is GCP-only, and mode 2 also runs without it
+# (docs/deploy-gcp.md, "Connecting to a private-IP instance", #269).
+#
+# The proxy terminates the encrypted leg itself and offers the process a plain
+# loopback socket, so the DSN — whether it comes from externalDatabase.url or
+# from the pre-created Secret existingSecret names — must point at that socket:
+#
+#   postgres://USER:PASSWORD@127.0.0.1:5432/DATABASE?sslmode=disable
+#
+# The chart does not compose that DSN for you and does not refuse a wrong one,
+# so pointing this at an instance while leaving the DSN on the instance's own
+# address leaves a proxy nothing connects through. The reason it is not checked
+# is not that it cannot be: it is that "does this DSN reach the proxy" has no
+# closed grammar to test against. A DSN through the sidecar can legitimately say
+# 127.0.0.1, localhost, [::1], or a unix socket path, so a host check would
+# refuse working deployments — the same false-rejection this file declines to
+# risk on instanceConnectionName below.
+#
+# `sslmode=disable` is safe there and only there: the hop it describes is a
+# loopback socket inside one pod. That is why the proxy is a sidecar rather than
+# a shared Deployment and Service — the tidier-looking shape puts the password,
+# every query and every result on the pod network in cleartext, on the near side
+# of the encryption, where neither the instance's `ssl_mode = ENCRYPTED_ONLY`
+# nor `pg_stat_ssl` can see it.
+#
+# One switch for all three processes rather than one each, because they read a
+# single `database-url` Secret key: a DSN cannot name a loopback socket for some
+# pods and the instance's address for the others.
+#
+# The IAM half is not expressible here. Each pod's ServiceAccount must be
+# annotated onto a Google service account holding `roles/cloudsql.client` — see
+# the three serviceAccount.annotations blocks, and deploy/gcp/, which creates
+# those accounts and their Workload Identity bindings.
+cloudSQLProxy:
+  enabled: false
+  image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.24.1
+  # -- PROJECT:REGION:INSTANCE — the instance's connection name, NOT an address
+  # (`terraform output -raw sql_instance_connection_name`). REQUIRED when
+  # enabled; the render fails without it rather than starting a proxy that has
+  # no instance to reach.
+  #
+  # What the render checks is the SHAPE and only the shape: three or four
+  # non-empty colon-separated segments (four for a legacy domain-scoped
+  # project, DOMAIN:PROJECT:REGION:INSTANCE). So an address and an empty
+  # segment are refused, and a well-formed name that names nothing is not —
+  # that one the proxy refuses at startup, which is the right place for it:
+  # encoding Google's own naming rules here would refuse a valid name the day
+  # Google widens one.
+  instanceConnectionName: ""
+  # -- Pass `--private-ip`, which is what an instance with `ipv4_enabled = false`
+  # requires — the shape deploy/gcp/ builds. Turn it off for an instance reached
+  # over its public address.
+  privateIP: true
+  # -- Resources for the proxy container. Google's guidance is that its memory
+  # scales with the number of active connections and its CPU with the volume of
+  # IO, so there is no default worth hard-coding here.
+  resources: {}
 
 # -- In-cluster MinIO: S3-compatible object storage for skill archives
 # (docs/plan/06_skills.md). Same shape and rationale as the bundled Postgres —

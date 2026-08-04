@@ -615,7 +615,9 @@ hand-written templates, not subcharts, per the air-gap rule — with
 `externalDatabase` / `externalObjectStorage` / `externalOpenBao` for BYO, a
 `localCipher` fallback, OTLP values, and `executor.gateImage` as the egress-gate
 opt-in — set, it adds `EXECUTOR_GATE_IMAGE` and a `CONTROLPLANE_URL` derived
-from the controlplane Service to the executor);
+from the controlplane Service to the executor; each component has its own
+annotatable ServiceAccount, and `cloudSQLProxy.enabled` adds the Cloud SQL Auth
+Proxy as a native sidecar to all three deployments at once, off by default);
 `deploy/compose/docker-compose.yml` is the local stack (one multi-stage image for all
 four binaries, bundled Postgres + MinIO + OpenBao with its init one-shot,
 loopback-bound control plane, optional Jaeger profile).
@@ -623,7 +625,7 @@ loopback-bound control plane, optional Jaeger profile).
 `deploy/gcp` is Terraform for the GCP staging environment (docs/plan/20, Decision 9) —
 developer tooling for GCP deployment only, never a dependency of the platform, its build,
 or `make verify`. **Two configurations, not one**, split by "can a rebuild recreate this
-identically?" rather than by cost: `foundation/` (KMS key ring and crypto key, the three
+identically?" rather than by cost: `foundation/` (KMS key ring and crypto key, the four
 service accounts, the Secret Manager secret *containers*) is created once and never
 destroyed, because a KMS key ring can never be deleted (and a crypto key only by
 destroying every version of it, which is the data loss itself) and the vault

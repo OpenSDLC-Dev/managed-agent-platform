@@ -18,7 +18,7 @@ identically?"**
 | | `foundation/` | `environment/` |
 | --- | --- | --- |
 | Lifecycle | created once, **never destroyed** | created and destroyed freely |
-| Holds | KMS key ring + crypto key, the three service accounts, the Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
+| Holds | KMS key ring + crypto key, the four service accounts, the Secret Manager secret *containers* | GKE cluster and node pools, Artifact Registry, Cloud SQL, the GCS bucket, all IAM bindings |
 | Idle cost | cents a month | a running cluster and database |
 | `terraform destroy` | not supported — `prevent_destroy` **and** `deletion_policy = "PREVENT"` | `make gcp-env-destroy` |
 
@@ -97,7 +97,11 @@ project_id = "your-project"
 EOF
 cp deploy/gcp/foundation/terraform.tfvars deploy/gcp/environment/terraform.tfvars
 
-make gcp-foundation-apply              # once, ever — creates the secrets EMPTY
+make gcp-foundation-apply              # never destroyed — creates the secrets EMPTY
+                                       # (re-apply it when foundation/ GAINS a resource:
+                                       #  environment/ reads each one by name and fails
+                                       #  the lookup if the apply that creates it has
+                                       #  not run — #269's map-brain account, for one)
 PROJECT=your-project make gcp-bootstrap  # fills them, creates the GCS HMAC key
 
 # Only now: the foundation apply above is what enables the Cloud Build API, and the
@@ -359,11 +363,19 @@ own. The mode-2 acceptance run built it with a single `kubectl create secret gen
 ```sh
 terraform output -raw  kms_key_name                              # gcpKMS.keyName / GCPKMS_KEY_NAME
 terraform output -json controlplane_service_account_annotation   # controlplane.serviceAccount.annotations
+terraform output -json brain_service_account_annotation          # brain.serviceAccount.annotations
 terraform output -json executor_service_account_annotation       # executor.serviceAccount.annotations
 terraform output -raw  blob_endpoint                             # BLOB_S3_ENDPOINT
 terraform output -raw  blob_bucket                               # BLOB_S3_BUCKET
-terraform output -raw  sql_instance_connection_name              # Cloud SQL Auth Proxy argument
+terraform output -raw  sql_instance_connection_name              # cloudSQLProxy.instanceConnectionName
 ```
+
+The brain's annotation is the one that is only sometimes needed: it exists for the Cloud SQL
+Auth Proxy (chart: `cloudSQLProxy.enabled`). **Apply it only with the proxy** — under the
+direct-connection path no component uses a Google identity for the database, so annotating
+the brain there hands a pod an identity its workload never calls. The blast radius if you do
+is small (the account holds `roles/cloudsql.client` and nothing else), which is a reason not
+to panic about it, not a reason to apply it.
 
 Workload Identity needs both halves and this configuration only applies one of them: the
 IAM binding permitting a Kubernetes ServiceAccount to impersonate the Google service
@@ -408,6 +420,7 @@ P=projects/your-project; L=us-central1; R=map-keyring
 terraform import google_kms_key_ring.map                   "$P/locations/$L/keyRings/$R"
 terraform import google_kms_crypto_key.cipher              "$P/locations/$L/keyRings/$R/cryptoKeys/map-credentials"
 terraform import google_service_account.controlplane       "$P/serviceAccounts/map-controlplane@your-project.iam.gserviceaccount.com"
+terraform import google_service_account.brain              "$P/serviceAccounts/map-brain@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.executor           "$P/serviceAccounts/map-executor@your-project.iam.gserviceaccount.com"
 terraform import google_service_account.storage            "$P/serviceAccounts/map-storage@your-project.iam.gserviceaccount.com"
 terraform import google_secret_manager_secret.db_password       "$P/secrets/map-db-password"

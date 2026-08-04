@@ -72,6 +72,11 @@ output "controlplane_service_account_annotation" {
   description = "Chart: controlplane.serviceAccount.annotations, verbatim. The IAM half of the Workload Identity pair is already applied by this configuration."
 }
 
+output "brain_service_account_annotation" {
+  value       = { "iam.gke.io/gcp-service-account" = data.google_service_account.brain.email }
+  description = "Chart: brain.serviceAccount.annotations, verbatim. Apply it only with the Cloud SQL Auth Proxy (chart: cloudSQLProxy.enabled), which is the only thing it is for: the brain holds no cipher, so this identity carries roles/cloudsql.client and nothing else, and the direct-connection path uses no Google identity for the database at all."
+}
+
 output "executor_service_account_annotation" {
   value       = { "iam.gke.io/gcp-service-account" = data.google_service_account.executor.email }
   description = "Chart: executor.serviceAccount.annotations, verbatim."

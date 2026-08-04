@@ -112,14 +112,14 @@ resource "google_kms_crypto_key" "cipher" {
 }
 
 # ---------------------------------------------------------------------------
-# Identities. Three, because they need three different privilege sets — see the
+# Identities. Four, because they need four different privilege sets — see the
 # grants in environment/iam.tf.
 # ---------------------------------------------------------------------------
 
 # The control plane encrypts on write and decrypts on read (mcp_oauth_validate
 # and the gate-config endpoint both call Decrypt), so it is the only identity
 # that needs the decrypt half.
-# The three identities. Each waits on the API enablement above: without that
+# The four identities. Each waits on the API enablement above: without that
 # dependency Terraform is free to create a service account concurrently with
 # enabling iam.googleapis.com, and on a project where IAM was never enabled the
 # create reaches a disabled API and the FIRST apply fails. A retry then succeeds,
@@ -130,6 +130,29 @@ resource "google_service_account" "controlplane" {
 
   account_id      = "${var.name_prefix}-controlplane"
   display_name    = "managed-agent-platform control plane"
+  deletion_policy = "PREVENT"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# The brain is the identity that exists for ONE reason and would be wrong to
+# fold into another: it holds no cipher and calls KMS never, but it opens the
+# database like the other two, so under the Cloud SQL Auth Proxy topology it
+# needs roles/cloudsql.client and nothing else (#269). Annotating the brain's
+# Kubernetes ServiceAccount onto the control plane's account would be the
+# shortcut, and it would hand the brain that account's KMS decrypt.
+#
+# Nothing needs it under the direct-connection path — a Pod reaching the
+# instance's private IP with sslmode=require authenticates with the role
+# password and holds no Google identity at all — so this account can sit unused,
+# which is what an identity in the never-destroyed half is free to do.
+resource "google_service_account" "brain" {
+  depends_on = [google_project_service.required]
+
+  account_id      = "${var.name_prefix}-brain"
+  display_name    = "managed-agent-platform brain"
   deletion_policy = "PREVENT"
 
   lifecycle {
