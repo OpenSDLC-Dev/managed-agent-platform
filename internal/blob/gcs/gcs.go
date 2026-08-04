@@ -145,11 +145,13 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 // manufactured somewhere in the path would still read as absence once the probe
 // confirms the bucket. The S3 backend does guard that case — it requires the
 // endpoint's own <Error> document — and the difference is the endpoint, not the
-// care taken: there, the endpoint is operator-configured, so a misrouting proxy
-// is a deployment shape someone can actually have. Here the client resolves
-// Google's own endpoint over TLS and no configuration can point it elsewhere, so
-// the guard would cost a hand-rolled response path to defend against a hop that
-// this backend does not have.
+// care taken: there it is operator-configured, so a misrouting proxy is a
+// deployment shape someone can actually have. This Config has no endpoint field
+// and no credential, so a deployment has nothing to point elsewhere, and the
+// guard would cost a hand-rolled response path against a hop it cannot introduce.
+// (Not an absolute: the client honours STORAGE_EMULATOR_HOST, so an environment
+// variable can still redirect it — which is a test seam this package's own suite
+// uses, and which the live tier refuses outright for exactly that reason.)
 //
 // The question is settled with a one-object listing rather than a bucket read.
 // That is the whole point: listing is storage.objects.list, which

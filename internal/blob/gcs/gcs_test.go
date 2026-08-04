@@ -110,6 +110,65 @@ func TestPutShortReaderErrors(t *testing.T) {
 	}
 }
 
+// TestPutTransportFailureIsNotReportedAsAShortReader is the regression guard for
+// the one comparison in Put that cannot be got right by inspection. io.CopyN
+// yields the BARE io.EOF, and only when the source ran dry — but the writer
+// yields errors that WRAP it: past the 16 MiB chunk size the upload runs while
+// CopyN is still writing, so a chunk PUT that dies mid-flight surfaces through
+// Write as *url.Error{Err: io.EOF}. Under errors.Is that network failure was
+// swallowed and reported as "reader gave N bytes, want M" — the caller's stream
+// blamed for the network's fault, with the real error gone. Nothing else in this
+// package stages a chunked upload, so without this test the comparison could be
+// reverted and every other test would stay green.
+//
+// The endpoint accepts the resumable session, then drains the chunk and drops the
+// connection — which is what produces the wrapped EOF.
+func TestPutTransportFailureIsNotReportedAsAShortReader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Routed on the path, not the method: the chunk upload is a POST too, so
+		// keying on the method would answer it with a fresh session instead of
+		// dropping it, and the test would pass for the wrong reason.
+		if !strings.Contains(r.URL.Path, "/upload/session") {
+			// Hand back an upload session pointing at ourselves.
+			w.Header().Set("Location", "http://"+r.Host+"/upload/session")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// The chunk: read what the client is sending, then kill the connection
+		// under it rather than answering. That is what reaches Put as
+		// *url.Error{Err: io.EOF} — the shape the comparison has to survive.
+		_, _ = io.Copy(io.Discard, r.Body)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	client, err := storage.NewClient(ctx, option.WithEndpoint(srv.URL+"/storage/v1/"),
+		option.WithoutAuthentication())
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	defer client.Close()
+	s, err := gcs.New(ctx, gcs.Config{Bucket: "b", Client: client})
+	if err != nil {
+		t.Fatalf("gcs.New: %v", err)
+	}
+	// Past the 16 MiB default chunk size, so the upload starts before the copy
+	// finishes and the failure reaches Put through Write.
+	const size = 17 << 20
+	err = s.Put(ctx, "big", strings.NewReader(strings.Repeat("x", size)), size, "")
+	if err == nil {
+		t.Fatal("put against an endpoint that drops the connection succeeded")
+	}
+	if strings.Contains(err.Error(), "reader gave") {
+		t.Errorf("transport failure reported as a short reader: %v", err)
+	}
+}
+
 func TestPutIgnoresBytesBeyondSize(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
@@ -183,15 +242,20 @@ func TestMissingBucketIsAnErrorNotAbsence(t *testing.T) {
 
 // TestDeniedProbeIsAnErrorNotAbsence is the other half of the absence rule, and
 // the half the fake cannot stage: only an AFFIRMATIVE listing may buy absence.
-// TestMissingBucketIsAnErrorNotAbsence exercises the probe with the one error a
-// permissive implementation would propagate anyway (a 404 the client types as
-// ErrBucketNotExist), so on its own it leaves "an open question is an error"
-// unasserted — rewrite absence to `return blob.ErrNotFound` on any probe failure
-// and that test still passes. This stages the case that separates them: the read
-// answers 404 (absence, as far as the client can tell) while the LIST is refused
-// 403, which is what a deployment holding object permissions but no list
-// permission looks like. Reporting ErrNotFound there would tell the caller the
-// data is gone on the strength of a question nobody answered.
+// TestMissingBucketIsAnErrorNotAbsence exercises the probe with the one error the
+// rule's most likely wrong implementation propagates anyway — the 404 the client
+// types as ErrBucketNotExist — so it alone does not pin "an open question is an
+// error". Make absence special-case that sentinel and swallow everything else
+// (the shape someone writes when they set out to catch a mistyped bucket and stop
+// there) and MissingBucket stays green while this one goes red. This stages the
+// case that separates them: the read answers 404 (absence, as far as the client
+// can tell) while the LIST is refused 403, which is what a deployment holding
+// object permissions but no list permission looks like. Reporting ErrNotFound
+// there would tell the caller the data is gone on the strength of a question
+// nobody answered.
+//
+// (Deleting the probe outright is caught by both tests, which is why the narrower
+// mutant above is the one that matters.)
 func TestDeniedProbeIsAnErrorNotAbsence(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The listing is a GET on the bucket's object collection; the read is a
