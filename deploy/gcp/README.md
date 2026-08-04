@@ -371,9 +371,11 @@ terraform output -raw  sql_instance_connection_name              # cloudSQLProxy
 ```
 
 The brain's annotation is the one that is only sometimes needed: it exists for the Cloud SQL
-Auth Proxy (chart: `cloudSQLProxy.enabled`), and the direct-connection path uses no Google
-identity for the database at all. Applying it either way is harmless — the account it names
-holds `roles/cloudsql.client` and nothing else.
+Auth Proxy (chart: `cloudSQLProxy.enabled`). **Apply it only with the proxy** — under the
+direct-connection path no component uses a Google identity for the database, so annotating
+the brain there hands a pod an identity its workload never calls. The blast radius if you do
+is small (the account holds `roles/cloudsql.client` and nothing else), which is a reason not
+to panic about it, not a reason to apply it.
 
 Workload Identity needs both halves and this configuration only applies one of them: the
 IAM binding permitting a Kubernetes ServiceAccount to impersonate the Google service

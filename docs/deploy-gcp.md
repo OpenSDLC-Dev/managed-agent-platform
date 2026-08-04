@@ -204,7 +204,8 @@ That distinction matters most for the **brain**, which opens the database like t
 It now has an identity of its own on both sides: `brain.serviceAccount.annotations` in the
 chart, a `<prefix>-brain` Google service account in `foundation/`, and — in `environment/` —
 the `roles/iam.workloadIdentityUser` binding onto that KSA plus `roles/cloudsql.client`. So
-the proxy topology is three annotations, one per component:
+the proxy topology is three annotations, one per component — and only the proxy topology,
+which needs all three where the direct path needs none of them:
 
 ```sh
 terraform output -json controlplane_service_account_annotation
