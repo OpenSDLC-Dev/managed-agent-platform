@@ -27,8 +27,9 @@ copy of an entry here.
   extension table: a pinned copy of Go 1.26's builtin table (so a toolchain upgrade
   cannot change registry rows either) plus a bounded set of textual deliverable
   types it lacks (`.py` `.md` `.yaml`/`.yml` `.tsv` `.log` `.sql` `.toml` `.ini`
-  `.jsonl` `.rst` `.tex`, and `.tar`), the additions deliberately `text/*` so the
-  grader's inline rule accepts them — with `application/octet-stream` still the
+  `.jsonl` `.rst` `.tex`), those deliberately `text/*` so the grader's inline rule
+  accepts them, and one binary addition (`.tar`, `application/x-tar`, alongside
+  the builtin `.gz`/`.zip`) — with `application/octet-stream` still the
   unknown-extension fallback on every host. A test seeds the process mime registry
   and proves the seeded mapping cannot leak into a verdict, and pins the
   grader-intended entries to the inline rule's accepted side.

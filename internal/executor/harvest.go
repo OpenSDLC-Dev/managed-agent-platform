@@ -385,8 +385,9 @@ func validHarvestSegment(seg string) bool {
 // toolchain upgrade cannot change registry rows either) plus a bounded set of
 // textual deliverable types that table lacks. The grader's inline rule
 // (text/*, application/json — inlineableMime, internal/brain/grader.go) reads
-// these values, so the additions carry text/* deliberately: an entry's value
-// decides whether that deliverable's content reaches the grader. Unlisted
+// these values, so the textual additions carry text/* deliberately (.tar, the
+// one binary addition, keeps application/x-tar): an entry's value decides
+// whether that deliverable's content reaches the grader. Unlisted
 // extensions fall back to application/octet-stream on every host; extend the
 // table when a real deliverable class needs it.
 var harvestMimeByExt = map[string]string{
