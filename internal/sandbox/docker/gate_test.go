@@ -714,7 +714,9 @@ func TestProvisionUngatedReshapeDismantlesGatePair(t *testing.T) {
 		case r.URL.Path == "/containers/create":
 			if r.URL.Query().Get("name") == sbName {
 				sbCreates++
-				json.NewDecoder(r.Body).Decode(&sbBody)
+				if err := json.NewDecoder(r.Body).Decode(&sbBody); err != nil {
+					t.Errorf("decode rebuilt sandbox create payload: %v", err)
+				}
 			}
 			io.WriteString(w, `{"Id":"sb1"}`)
 		default:
