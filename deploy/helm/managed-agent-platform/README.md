@@ -279,11 +279,14 @@ account for both is simpler and is what the example above configures.)
 
 The brain never gets the key name: it holds no cipher, so on KMS grounds it has
 no reason to hold the identity either. It does have a **ServiceAccount** of its
-own, for a reason that has nothing to do with KMS — see the Cloud SQL Auth Proxy
-below — and keeping it separate is what stops the two reasons from merging:
-annotate the brain's KSA onto the account above and the brain inherits its KMS
-decrypt. Give it the account that holds `roles/cloudsql.client` and nothing
-else. It is also why each component has a ServiceAccount rather than falling
+own, for reasons that have nothing to do with KMS — reading the blob bucket
+(`gcsObjectStorage`, #240) and the Cloud SQL Auth Proxy below — and keeping that
+account separate is what stops the two from merging. **Do not annotate the
+brain's KSA onto the KMS account above**: if you do, the brain inherits that
+account's KMS decrypt, which is precisely the privilege it has no use for. Point
+it at its own Google service account, the one carrying
+`roles/storage.objectViewer` on the bucket and `roles/cloudsql.client` — and no
+cipher role. It is also why each component has a ServiceAccount rather than falling
 back to the namespace's `default` — annotating `default` would hand one Google
 identity to every pod in the namespace that also defaults.
 
