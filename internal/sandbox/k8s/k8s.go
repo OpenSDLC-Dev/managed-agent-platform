@@ -65,27 +65,32 @@ const defaultNetSetupImage = "busybox"
 
 // Provider provisions per-session pods.
 type Provider struct {
-	client        *client
-	netSetupImage string
-	runtimeClass  string
-	nodeSelector  map[string]string
-	tolerations   []corev1.Toleration
+	client           *client
+	netSetupImage    string
+	runtimeClass     string
+	nodeSelector     map[string]string
+	tolerations      []corev1.Toleration
+	imagePullSecrets []corev1.LocalObjectReference
 	// pidsWarnOnce keeps warnUnenforceablePidsLimit to one line per provider
 	// rather than one per provisioned pod.
 	pidsWarnOnce sync.Once
 }
 
 func New(cfg Config) (*Provider, error) {
-	// Placement is parsed before the cluster is reached, deliberately: a
-	// malformed value is wrong whether or not the cluster answers, and putting
-	// the parse first means the executor's startup fails on the value itself
-	// rather than on whatever the connection attempt happened to say
-	// (placement.go).
+	// Placement and pull secrets are parsed before the cluster is reached,
+	// deliberately: a malformed value is wrong whether or not the cluster
+	// answers, and putting the parse first means the executor's startup fails
+	// on the value itself rather than on whatever the connection attempt
+	// happened to say (placement.go, pullsecrets.go).
 	sel, err := parseNodeSelector(cfg.NodeSelector)
 	if err != nil {
 		return nil, err
 	}
 	tol, err := parseTolerations(cfg.Tolerations)
+	if err != nil {
+		return nil, err
+	}
+	pull, err := parseImagePullSecrets(cfg.ImagePullSecrets)
 	if err != nil {
 		return nil, err
 	}
@@ -98,11 +103,12 @@ func New(cfg Config) (*Provider, error) {
 		img = defaultNetSetupImage
 	}
 	return &Provider{
-		client:        cl,
-		netSetupImage: img,
-		runtimeClass:  cfg.RuntimeClass,
-		nodeSelector:  sel,
-		tolerations:   tol,
+		client:           cl,
+		netSetupImage:    img,
+		runtimeClass:     cfg.RuntimeClass,
+		nodeSelector:     sel,
+		tolerations:      tol,
+		imagePullSecrets: pull,
 	}, nil
 }
 
@@ -389,10 +395,13 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 			AutomountServiceAccountToken: &noAutomount,
 			RuntimeClassName:             runtimeClassName(p.runtimeClass),
 			SecurityContext:              podSecurityContext(),
-			// Both nil unless configured, so an unplaced deployment produces the
-			// pod it produced before these existed.
-			NodeSelector: p.nodeSelector,
-			Tolerations:  p.tolerations,
+			// All three nil unless configured, so an unplaced deployment produces
+			// the pod it produced before these existed. Pull secrets sit on the
+			// pod, not a container, so one knob covers every container the pod's
+			// shape includes — sandbox, net-setup, or gate sidecar.
+			NodeSelector:     p.nodeSelector,
+			Tolerations:      p.tolerations,
+			ImagePullSecrets: p.imagePullSecrets,
 			Containers: []corev1.Container{{
 				Name:            containerName,
 				Image:           spec.Image,
