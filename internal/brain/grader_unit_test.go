@@ -115,3 +115,45 @@ func TestContentText(t *testing.T) {
 		})
 	}
 }
+
+// inlineableMime is the gate between the executor's fixed harvest table
+// (harvestMimeByExt, internal/executor/harvest.go) and the grader's eyes:
+// only registry mimes this predicate accepts are inlined into the grading
+// prompt, and nothing ties the two packages at compile time (#264). This pins
+// the contract from the consumer side — the exact values the harvest table
+// publishes for textual deliverables must stay accepted, and its binary
+// values must stay rejected — so a predicate change that would silently
+// un-inline harvested deliverables fails here.
+func TestInlineableMimePinsHarvestTableContract(t *testing.T) {
+	accept := []string{
+		"application/json",
+		"text/calendar; charset=utf-8",
+		"text/csv; charset=utf-8",
+		"text/markdown; charset=utf-8",
+		"text/plain; charset=utf-8",
+		"text/tab-separated-values; charset=utf-8",
+		"text/vtt; charset=utf-8",
+		"text/x-python; charset=utf-8",
+		"text/x-rst; charset=utf-8",
+		"text/x-sql; charset=utf-8",
+		"text/x-tex; charset=utf-8",
+		"text/x-toml; charset=utf-8",
+		"text/yaml; charset=utf-8",
+	}
+	for _, m := range accept {
+		if !inlineableMime(m) {
+			t.Errorf("inlineableMime(%q) = false, want true", m)
+		}
+	}
+	reject := []string{
+		"application/octet-stream", // the unknown-extension fallback
+		"application/x-tar",
+		"application/yaml", // the pre-#264 .yaml value — stays dark
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	}
+	for _, m := range reject {
+		if inlineableMime(m) {
+			t.Errorf("inlineableMime(%q) = true, want false", m)
+		}
+	}
+}
