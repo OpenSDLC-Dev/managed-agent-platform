@@ -416,8 +416,11 @@ backends **refuse** to adopt a sandbox whose fixed-at-create value no longer
 matches the request (`ErrSpecMismatch`, #29 docker / #296 k8s), because
 silently keeping, say, an open-egress container under a session that now asks
 for `limited` would be a containment lie. The refusal deletes nothing — the
-stale sandbox stays, and every subsequent tool call for that session fails
-until it is removed by hand (`docker rm` / `kubectl delete pod`). The
+stale sandbox stays, and every tool call for that session fails for as long
+as the request keeps carrying the new value: the check is per-request, so
+rolling the setting back makes the sandbox adoptable again with its state
+intact, and otherwise it must be removed by hand (`docker rm` /
+`kubectl delete pod`). The
 platform's automatic teardowns target broken sandboxes — a wedged gated pod,
 a gate-shape change — never a healthy one that merely mismatches, so nothing
 will clear a refused sandbox for you. So for these three
