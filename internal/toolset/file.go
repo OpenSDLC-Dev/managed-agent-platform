@@ -135,6 +135,9 @@ func fileFault(verb, display string, err error) (Result, error) {
 		return failf("%s: %s is not a regular file", verb, display)
 	case errors.Is(err, sandbox.ErrNotDirectory):
 		return failf("%s %s: not a directory", verb, display)
+	case errors.Is(err, sandbox.ErrNotReplaceable):
+		return failf("%s: %s cannot be replaced by an atomic write (a device node, or a file bind-mounted into the sandbox). Use bash redirection to write through it.",
+			verb, display)
 	case errors.Is(err, sandbox.ErrFileTooLarge):
 		return failf("%s: %s exceeds the %d-byte limit. Use bash (head/tail/sed) to work on a slice.",
 			verb, display, sandbox.MaxFileBytes)

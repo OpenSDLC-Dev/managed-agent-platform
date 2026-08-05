@@ -32,6 +32,11 @@ const (
 	// number is reserved here with the rest so no backend's private codes collide
 	// with it.
 	ExitBulkExtract = 18
+	// ExitPathNotReplaceable: the target of a write cannot be renamed onto — a
+	// device node, or a mount point (a file bind-mounted into the sandbox). The
+	// path family continues at 19 because 17 and 18 already belong to the bulk
+	// namespace above.
+	ExitPathNotReplaceable = 19
 )
 
 // TempPrefix names the file a write lands under before it is renamed into place.
@@ -127,6 +132,36 @@ __map_preserve_mode() {
   __m=$(stat -c %a "$1" 2>/dev/null) || return 0
   case "$__m" in *[!0-7]*|'') return 0 ;; esac
   chmod "$__m" "$2" 2>/dev/null || return 0
+}
+`
+
+// UnreplaceableShell defines __map_unreplaceable, which both backends embed in
+// their write paths. It returns 0 when the target is one a rename cannot
+// replace: a device node — where the `mv` would not fail but *supplant* the
+// node with a regular file, quietly ending /dev/null's life as a sink — or a
+// mount point, where rename(2) refuses with EBUSY (a file bind-mounted into
+// the sandbox: /etc/hosts, /etc/resolv.conf). A symlink is neither even when
+// it points at one: what a rename replaces is the link itself, which is the
+// documented supplant behavior, so it is answered first (#205).
+//
+// The mount-point half reads /proc/self/mountinfo (field 5 is the mount point)
+// with `read`, a builtin, keeping the agent's PATH out of the answer as
+// __map_path_fault does. Mountinfo escapes a mount point's spaces as \040, so
+// a path carrying one is not matched — the probe then finds nothing, the `mv`
+// fails on its own, and the write reports the unclassified error it reported
+// before this existed: the probe can miss into the old behavior, but cannot
+// call a replaceable target unreplaceable. A sandbox without a readable
+// mountinfo misses the same way.
+const UnreplaceableShell = `
+__map_unreplaceable() {
+  if [ -h "$1" ]; then return 1; fi
+  if [ -b "$1" ] || [ -c "$1" ]; then return 0; fi
+  if [ -e "$1" ] && [ -r /proc/self/mountinfo ]; then
+    while read -r __a __b __c __d __mp __rest; do
+      if [ "$__mp" = "$1" ]; then return 0; fi
+    done < /proc/self/mountinfo
+  fi
+  return 1
 }
 `
 

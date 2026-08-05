@@ -67,6 +67,17 @@ var (
 	// asked for, not the sandbox failing, so a tool surfaces it to the model
 	// rather than to the executor.
 	ErrNotRegularFile = errors.New("sandbox: not a regular file")
+	// ErrNotReplaceable reports a write onto a target that cannot be renamed
+	// onto: a device node, or a file bind-mounted into the sandbox (/etc/hosts).
+	// The write path is atomic by rename, and there the rename either fails —
+	// rename(2) refuses a mount point with EBUSY — or, worse, succeeds and
+	// *supplants* the node with a regular file instead of writing through it.
+	// Both backends refuse instead and say why. Like ErrIsDirectory it
+	// describes the target the caller asked for — the model can write through
+	// such a target with bash redirection — so a tool hands it over as a tool
+	// result rather than letting it reach the executor as a sandbox fault and
+	// be retried until the lease runs out (#205).
+	ErrNotReplaceable = errors.New("sandbox: target cannot be replaced")
 	// ErrFileTooLarge reports a read of a file above MaxFileBytes.
 	ErrFileTooLarge = errors.New("sandbox: file too large")
 )
@@ -303,8 +314,11 @@ type Sandbox interface {
 	// fails part way through leaves the target holding what it held before — or
 	// nothing, where there was nothing — never a truncated file. The path itself
 	// is answered rather than the sandbox blamed: a path blocked by a
-	// non-directory is ErrNotDirectory, and a target that is a directory is
-	// ErrIsDirectory (the directory is left intact, never replaced).
+	// non-directory is ErrNotDirectory, a target that is a directory is
+	// ErrIsDirectory (the directory is left intact, never replaced), and a
+	// target a rename cannot replace — a device node, or a file bind-mounted
+	// into the sandbox — is ErrNotReplaceable (the node or mount is left what
+	// it was, neither supplanted nor written through; #205).
 	//
 	// Being a rename, it replaces the *name*, and four consequences follow that a
 	// write-through would not have had:
@@ -321,8 +335,8 @@ type Sandbox interface {
 	//     rather than by the image (a tar header on docker; on k8s a `umask 022`
 	//     the write script sets — #212 — and a `chmod 0644` beside it, because a
 	//     parent directory's default POSIX ACL decides those bits over the umask,
-	//     #213), and a symlink, FIFO or device node lands 0644 too — what the
-	//     rename replaces is the name, and a link's own mode is 0777.
+	//     #213), and a symlink or FIFO lands 0644 too — what the rename
+	//     replaces is the name, and a link's own mode is 0777.
 	//     One case still differs between the backends: docker's temporary
 	//     file is extracted by the daemon, so an image whose default user is not
 	//     root cannot chmod it and the write lands 0644 where k8s preserves the
@@ -330,12 +344,13 @@ type Sandbox interface {
 	//     steps — a harness-design observation, not a wire behavior of the
 	//     managed-agents reference; the SDK's host-side agenttoolset writes a fixed
 	//     0644 instead.)
-	//   - A file bind-mounted into the sandbox cannot be renamed onto at all, so a
-	//     write to one now fails on both backends where the k8s backend used to
-	//     succeed. Device nodes are the one target the two still answer
-	//     differently (k8s replaces the node; docker cannot land its temporary file
-	//     under a mounted /dev), and neither failure is one of these sentinels
-	//     yet — both are #205.
+	//   - A file bind-mounted into the sandbox cannot be renamed onto at all, and
+	//     a device node could only be *supplanted*, never written through — so
+	//     both are refused with ErrNotReplaceable before the move, identically on
+	//     both backends, by the shared __map_unreplaceable probe (#205). A write
+	//     to a bind-mounted file fails where the pre-#71 k8s backend used to
+	//     write through it; the model is told why, and bash redirection still
+	//     reaches it.
 	WriteFile(ctx context.Context, path string, data []byte) error
 	// WriteFileStream writes exactly size bytes read from src to path, creating
 	// parent directories and overwriting any existing file, atomically and with

@@ -159,6 +159,7 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 		{"directory", sandbox.ErrIsDirectory, "not a regular file"},
 		{"non-regular", sandbox.ErrNotRegularFile, "not a regular file"},
 		{"not a directory", sandbox.ErrNotDirectory, "not a directory"},
+		{"not replaceable", sandbox.ErrNotReplaceable, "cannot be replaced"},
 		{"too large", sandbox.ErrFileTooLarge, "limit"},
 	}
 	for _, tc := range cases {

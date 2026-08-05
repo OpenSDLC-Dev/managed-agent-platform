@@ -124,6 +124,40 @@ copy of an entry here.
 
 ### Fixed
 
+- **A write onto a target a rename cannot replace is a classified refusal on
+  both backends, not an unclassified fault**
+  ([internal/sandbox/filefault.go](./internal/sandbox/filefault.go),
+  [internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
+  [internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go),
+  [internal/toolset/file.go](./internal/toolset/file.go), #205). The atomic
+  write lands bytes under a temporary name and renames them into place (#71),
+  and some targets cannot be renamed onto: a file bind-mounted into the
+  sandbox (`/etc/hosts`) fails the `mv` with EBUSY, and a device node is
+  worse — the k8s `mv` *succeeded* and supplanted `/dev/null` with a regular
+  file, while docker failed unclassified because the daemon extracts the
+  temporary file into the image's `/dev` on the overlay, invisible under the
+  tmpfs mounted over it. Either way an unclassified error reached the
+  executor, which stopped the tool set and abandoned the work item to lease
+  reclaim — the same doomed call retried until the lease ran out. Both write
+  scripts now ask a shared `__map_unreplaceable` probe (a device-node test
+  plus a `/proc/self/mountinfo` mount-point walk, shell builtins only)
+  *before* the move and exit a new shared code (19,
+  `sandbox.ExitPathNotReplaceable` — 17/18 belong to the bulk namespace),
+  which both backends map to a new `sandbox.ErrNotReplaceable` sentinel and
+  the file tools hand to the model as an actionable result: the target cannot
+  be replaced, bash redirection writes through it. A symlink stays
+  replaceable even when it points at a device (the rename replaces the link —
+  the documented supplant behavior), and the probe misses into the old
+  unclassified error rather than ever misclassifying (a mount point whose
+  path carries a space, a sandbox without readable mountinfo). The two
+  backends now agree on both targets, pinned by two new contract rows
+  (`WriteOntoBindMountedTarget`, `WriteOntoDeviceNode` — target intact, node
+  still a device, no temporary-file residue) that failed red on both backends
+  before the classification landed; bulk writes (`WriteFiles`) keep today's
+  behavior — no built-in tool routes a bind-mounted or device target through
+  them. The docs/DIVERGENCES.md atomicity entry's standing residual closes
+  with this.
+
 - **The issue-triage bash guard no longer denies every command on hosts where
   `python3` is the Microsoft Store stub**
   ([.claude/hooks/issue-triage-bash-guard.sh](./.claude/hooks/issue-triage-bash-guard.sh),
