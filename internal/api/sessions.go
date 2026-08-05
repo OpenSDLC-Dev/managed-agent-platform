@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -146,6 +147,15 @@ type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// overrideSystemMaxRunes is the documented ceiling on an agent_with_overrides
+// replacement system prompt — "Up to 100,000 characters" (betasession.go). The
+// bound is specific to the session override params; agents' own create/update
+// system documents none. Counted in runes like every character-documented
+// limit (the filesupload.go precedent, shared with #66/#289's metadata caps);
+// the reference's counting unit and reject shape are unobserved —
+// docs/DIVERGENCES.md (#291).
+const overrideSystemMaxRunes = 100_000
+
 // resolveAgent resolves the create-time agent union (plain id string,
 // {type:"agent"}, or {type:"agent_with_overrides"}) into the immutable
 // snapshot the session will carry.
@@ -250,6 +260,12 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 			spec.System = "" // null clears the agent's system prompt
 		} else if err := json.Unmarshal(raw, &spec.System); err != nil {
 			return snap, errInvalid("agent override system must be a string")
+		} else if utf8.RuneCountInString(spec.System) > overrideSystemMaxRunes {
+			// The SDK bounds the replacement prompt — "Up to 100,000
+			// characters" (betasession.go) — on this override only; the
+			// stored agent's own system documents no ceiling, so the check
+			// binds what the override supplies, never the preserved value.
+			return snap, errInvalid("agent override system cannot exceed %d characters", overrideSystemMaxRunes)
 		}
 	}
 	if raw, ok := overrides["tools"]; ok {

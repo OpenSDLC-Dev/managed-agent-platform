@@ -15,6 +15,21 @@ copy of an entry here.
 
 ### Added
 
+- **A session override's replacement system prompt answers to the SDK's
+  documented 100,000-character ceiling**
+  ([internal/api/sessions.go](./internal/api/sessions.go), #291). The pinned SDK
+  bounds an `agent_with_overrides` replacement `system` at 100,000 characters —
+  a bound documented on the session override params only; agents' own
+  create/update `system` has no documented ceiling — but nothing enforced it:
+  an arbitrarily large replacement prompt was stored and could fail at the
+  provider on every turn. `resolveAgent` now rejects an over-cap override with
+  a 400 naming the limit, counted in runes like every character-documented
+  limit. The check binds only what the override supplies: an over-cap *stored*
+  system still resolves via a plain reference or an omitted override field, and
+  `system:null` (clear) is never counted. The reject shape and counting unit
+  are ours — recorded in docs/DIVERGENCES.md (INFERRED). Surfaced by the #290
+  review pass.
+
 - **A session's resolved agent answers to the whole-spec agent caps**
   ([internal/api/sessions.go](./internal/api/sessions.go), #287). The #66
   validations ran on agent create/update only, so a session's
