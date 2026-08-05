@@ -15,6 +15,29 @@ copy of an entry here.
 
 ### Added
 
+- **Plan 24 drafted — sandbox teardown: the reaper, and the workspace that
+  survives it — and its first slice: a running session refuses archive and
+  delete** ([docs/plan/24_sandbox-teardown.md](./docs/plan/24_sandbox-teardown.md);
+  #64, and the workspace-continuity half of #28). The plan builds the missing
+  destruction lifecycle: a reaper goroutine in the executor (the only process
+  holding both the sandbox provider and the pool) as the single owner —
+  sandboxes are invisible on the wire, so eventual teardown is
+  wire-indistinguishable from immediate — with `Owned`/`Reap` joining
+  `sandbox.Provider`, reap criteria derived from the session's database
+  lifecycle only (deleted / archived / terminated now; idle-past-TTL with a
+  blob checkpoint/restore of the agent's durable state later), a per-session
+  advisory lock linearizing reap against provision, and `user.interrupt`
+  deliberately not a reap trigger. Slice 1 is the structural precondition the
+  reference documents: archiving or deleting a `running` session now answers
+  400 `invalid_request_error` (`requireNotRunning`, checked under the session
+  row lock in the same transaction as the mutation, so a confirmation flipping
+  the session to running cannot slip between check and commit) — the refusal's
+  status and wording are ours, recorded INFERRED in docs/DIVERGENCES.md. No
+  gate-token change rides along: `gatetoken.Authenticate` already fails closed
+  on archived sessions. Tests: `TestRunningSessionArchiveAndDeleteRejected`
+  (red before the guard, green after — both mutations refused while running,
+  neither mutating the row, both succeeding once idle).
+
 - **Plan 23 drafted: a write the sandbox cannot land becomes the model's error,
   not the platform's fault**
   ([docs/plan/23_classified-unwritable-write.md](./docs/plan/23_classified-unwritable-write.md),

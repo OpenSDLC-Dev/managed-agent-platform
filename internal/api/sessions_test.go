@@ -702,3 +702,46 @@ func TestSessionArchiveAndDelete(t *testing.T) {
 	status, body = s.do(http.MethodDelete, "/v1/sessions/sesn_missing", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 }
+
+// Plan 24 slice 1: the reference documents that a running session cannot be
+// archived or deleted (an interrupt must land first). The reject status and
+// message are ours — INFERRED in docs/DIVERGENCES.md.
+func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	id := sess["id"].(string)
+
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'running' WHERE id = $1`, id); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+
+	status, body := s.do(http.MethodPost, "/v1/sessions/"+id+"/archive", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	status, body = s.do(http.MethodDelete, "/v1/sessions/"+id, nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
+	// Neither refusal mutated the session: still listed, still unarchived.
+	status, got := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get after refusals: %d %v", status, got)
+	}
+	if got["archived_at"] != nil {
+		t.Errorf("archived_at after refused archive = %v, want null", got["archived_at"])
+	}
+
+	// Once the session settles (the interrupt path's end state), both succeed.
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'idle' WHERE id = $1`, id); err != nil {
+		t.Fatalf("set idle: %v", err)
+	}
+	status, body = s.do(http.MethodPost, "/v1/sessions/"+id+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive after idle: %d %v", status, body)
+	}
+	status, body = s.do(http.MethodDelete, "/v1/sessions/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("delete after idle: %d %v", status, body)
+	}
+}
