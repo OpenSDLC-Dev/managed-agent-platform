@@ -45,7 +45,7 @@ self-hosted deployment point. Three findings decide this plan's shape:
    table's ENOENT and ENOTDIR strings verbatim. Its directory-target row says
    `is not a regular file` rather than the table's EISDIR `is a directory` — deliberately,
    and unchanged by this plan: that is the reference's own wording too, from its read-path
-   validation (`fs.go`: `read %s: %s is not a regular file`), and our row covers
+   validation (`fs.go`: `read: %s is not a regular file`), and our row covers
    not-a-regular-file cases beyond directories.
 3. **The wire carries no structured file-fault codes.** A tool failure is text plus
    `is_error` — so wire compatibility constrains the *message wording*, not a code
