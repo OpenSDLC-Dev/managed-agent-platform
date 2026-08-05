@@ -159,7 +159,10 @@ copy of an entry here.
   credential that made it removes it. Red observed first: the real-image row
   measured the residue (`.map-write-` count 1 in `/etc`, want 0), the
   fake-daemon row wanted a `User "0"` shed exec that did not exist, and the
-  raw-route sequence re-pin wanted the shed after the probe. ([internal/sandbox/sandbox.go](./internal/sandbox/sandbox.go),
+  raw-route sequence re-pin wanted the shed after the probe.
+
+- **A write the sandbox cannot land is the model's error, not the platform's
+  fault** ([internal/sandbox/sandbox.go](./internal/sandbox/sandbox.go),
   [internal/sandbox/filefault.go](./internal/sandbox/filefault.go),
   [internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go),
   [internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
