@@ -401,15 +401,31 @@ workdir.
 
 Containment is bound when a sandbox is **created**, exactly as `Env` and the
 networking mode are. `Provision` is idempotent: it adopts a session's existing
-container or pod rather than replacing it, so a session that was already running
-when you rolled the executor keeps the containment it was created with until its
-sandbox is destroyed. New sessions get the new settings immediately. This is
-deliberate — replacing a live session's sandbox to apply a setting would discard
-the workdir, its uploaded file resources and the persistent shell's state
-mid-task, which is a worse outcome than an already-running session finishing
-under the containment it started with. If you need a configuration change to
-reach every session at once, drain the running ones (stop them, or let them
-finish) before or after the roll.
+container or pod rather than replacing it — but what adoption does with a
+changed setting depends on which setting changed. Hardening and `Env` are
+**silently kept**: a session that was already running when you rolled the
+executor keeps the containment and environment it was created with until its
+sandbox is destroyed, and new sessions get the new settings immediately. This
+is deliberate — replacing a live session's sandbox to apply a setting would
+discard the workdir, its uploaded file resources and the persistent shell's
+state mid-task, which is a worse outcome than an already-running session
+finishing under the containment it started with.
+
+The networking mode, the sandbox image, and the workdir are different: both
+backends **refuse** to adopt a sandbox whose fixed-at-create value no longer
+matches the request (`ErrSpecMismatch`, #29 docker / #296 k8s), because
+silently keeping, say, an open-egress container under a session that now asks
+for `limited` would be a containment lie. The refusal deletes nothing — the
+stale sandbox stays, and every subsequent tool call for that session fails
+until it is removed by hand (`docker rm` / `kubectl delete pod`). The
+platform's automatic teardowns target broken sandboxes — a wedged gated pod,
+a gate-shape change — never a healthy one that merely mismatches, so nothing
+will clear a refused sandbox for you. So for these three
+settings, drain the running sessions **before** the roll — a gate-less
+networking flip or an executor image/workdir roll turns every still-running
+session's next tool call into an error, not a quiet downgrade. For a
+configuration change in the silently-kept group, draining before or after the
+roll both work.
 
 ### 5. Egress restriction
 

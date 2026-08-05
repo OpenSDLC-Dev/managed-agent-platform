@@ -157,9 +157,6 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 			return nil, aerr
 		}
 		if hasGateSidecar(existing) == gated {
-			if aerr := adoptable(existing, spec, workdir); aerr != nil {
-				return nil, aerr
-			}
 			if err := p.waitReady(ctx, name, gated); err != nil {
 				if gated {
 					// A gated pod that never turns ready may be wedged for good: an
@@ -175,6 +172,16 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 					p.reclaimUnready(name, existing.UID, gated)
 				}
 				return nil, err
+			}
+			// After the readiness wait, deliberately: a spec check ahead of it
+			// would return before the gated reclaim above could remove a pod
+			// that is wedged *and* mismatched — permanently, since a mismatch
+			// deletes nothing and the platform has no other automatic teardown
+			// — un-doing the #198 recovery. Nothing runs in the pod either
+			// way: waitReady only observes, and a refusal still lands before
+			// the pod is handed to a tool run (#296).
+			if aerr := adoptable(existing, spec, workdir); aerr != nil {
+				return nil, aerr
 			}
 			return p.attach(name, workdir), nil
 		}
@@ -309,6 +316,10 @@ func adoptable(pod *corev1.Pod, spec sandbox.Spec, workdir string) error {
 		return fmt.Errorf("k8s: pod %s carries no %s container: %w", pod.Name, containerName, sandbox.ErrSpecMismatch)
 	}
 	if sb.Image != spec.Image {
+		// Verbatim: the API server stores the image string exactly as created.
+		// A mutating admission webhook that rewrites image references would
+		// make every adoption mismatch here; the platform does not
+		// special-case that — configure the post-rewrite reference.
 		return fmt.Errorf("k8s: pod %s was created from image %q where session %s asked for %q: %w",
 			pod.Name, sb.Image, spec.SessionID, spec.Image, sandbox.ErrSpecMismatch)
 	}

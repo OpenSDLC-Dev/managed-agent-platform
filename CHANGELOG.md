@@ -142,14 +142,24 @@ copy of an entry here.
   closed with the same `sandbox.ErrSpecMismatch` sentinel and deletes nothing,
   the same contract as Docker's — including the same recovery: the session
   keeps failing provision until the stale pod is removed by hand, with the
-  product-level alternative tracked in #297. Reachability matches the Docker
+  product-level alternative tracked in #297 (the rollout consequence —
+  drain *before* changing networking/image/workdir — is now spelled out in
+  docs/self-hosted-security.md, which previously described these settings as
+  silently kept). On the existing-pod path the check runs *after* the
+  readiness wait, so the #198 wedged-gated-pod reclaim stays reachable — a pod
+  that is wedged *and* mismatched is reclaimed, not stranded behind a refusal
+  that deletes nothing. Reachability matches the Docker
   half: a gate-less deployment's unrestricted→limited flip reaches this path
   today; a gated one is absorbed by the `hasGateSidecar` replace. Tests:
   fake-clientset rows for each mismatch (with a reactor proving no delete
-  touches the pod) and the matching-limited adoption, built from `podSpec`'s
-  own output so the fixtures cannot drift from real creates, plus a live
-  kind-cluster test proving the refusal and that the refused pod stays
-  adoptable under its original spec.
+  touches the pod), the matching-limited adoption, the gated mismatch, and the
+  wedged-plus-mismatched reclaim, built from `podSpec`'s
+  own output so the fixtures cannot drift from real creates; a live
+  kind-cluster test proving the refusal deletes nothing (by pod UID — the
+  derived name would survive a recreate) and that the refused pod stays
+  adoptable under its original spec; and a new shared contract-suite row
+  (`SpecMismatchRefusesAdoption`) pinning the refuse-then-readopt behavior on
+  every backend.
 
 - **Docker sandbox adoption validates the container's fixed-at-create spec, not
   just its ownership label**

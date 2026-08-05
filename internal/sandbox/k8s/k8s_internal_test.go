@@ -178,7 +178,7 @@ func TestProvisionAdoptsAMatchingLimitedPod(t *testing.T) {
 
 // The same check guards the gated adopt path: a gated pod whose gate shape
 // matches is still refused when its image was fixed at create from a different
-// spec — before anything is waited on, minted, or deleted.
+// spec — before anything is minted or deleted.
 func TestProvisionRefusesAMismatchedGatedPod(t *testing.T) {
 	m := &mintRecorder{}
 	sid := domain.ID("sesn_gatedmis")
@@ -186,6 +186,10 @@ func TestProvisionRefusesAMismatchedGatedPod(t *testing.T) {
 		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
 	p := fakeProvider()
 	pod := readyFromSpec(p, sandbox.DefaultWorkdir, created)
+	// Gate sidecar ready too: the spec check runs only after the readiness
+	// wait (so the #198 wedged-pod reclaim stays reachable), and a gated pod
+	// is not ready without its gate.
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}}
 	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -201,6 +205,39 @@ func TestProvisionRefusesAMismatchedGatedPod(t *testing.T) {
 	}
 	if m.generated != 0 || len(m.persisted) != 0 {
 		t.Errorf("the refusal touched the mint seam: generated=%d persisted=%v", m.generated, m.persisted)
+	}
+}
+
+// A pod that is both wedged (its gate never turns ready) and spec-mismatched
+// must still be reclaimed: the readiness wait and its #198 reclaim run before
+// the spec check, deliberately — refusing first would strand a dead pod
+// forever, since a mismatch deletes nothing and the platform has no other
+// automatic teardown.
+func TestProvisionGatedAdoptWedgedMismatchStillReclaims(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_wedgedmis")
+	p := fakeProvider()
+	created := sandbox.Spec{SessionID: sid, Image: "img:1",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+	wedged := p.podSpec(podName(sid), sandbox.DefaultWorkdir, created, "gtk_never_persisted")
+	wedged.UID = "uid-wedgedmis"
+	wedged.Status = corev1.PodStatus{
+		Phase:                 corev1.PodRunning,
+		ContainerStatuses:     []corev1.ContainerStatus{{Name: containerName, Ready: true}},
+		InitContainerStatuses: []corev1.ContainerStatus{{Name: gateContainerName, Ready: false}},
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), wedged, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	requested := created
+	requested.Image = "img:2"
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	if _, err := p.Provision(ctx, requested); err == nil {
+		t.Fatal("adopting a never-ready mismatched pod: want an error")
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("wedged mismatched pod was not reclaimed (get err = %v); no retry could ever recover the session", err)
 	}
 }
 

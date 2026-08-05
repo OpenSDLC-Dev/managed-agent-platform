@@ -68,11 +68,32 @@ func liveSandbox(t *testing.T) sandbox.Sandbox {
 	return sb
 }
 
+// podUID asks the cluster — not the provider — for the pod's immutable UID.
+// Sandbox IDs here are derived names, identical across a delete-and-recreate,
+// so only the UID can prove the refusal deleted nothing.
+func podUID(t *testing.T, name string) string {
+	t.Helper()
+	args := []string{"get", "pod", name, "-o", "jsonpath={.metadata.uid}"}
+	if ns := os.Getenv("MAP_K8S_NAMESPACE"); ns != "" {
+		args = append(args, "-n", ns)
+	}
+	if kctx := os.Getenv("MAP_K8S_CONTEXT"); kctx != "" {
+		args = append(args, "--context", kctx)
+	}
+	out, err := exec.Command("kubectl", args...).Output()
+	if err != nil {
+		t.Fatalf("kubectl get pod %s: %v", name, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // A session's pod created unrestricted must not be adopted by a limited
 // request for the same session: the netsetup init container that enforces
 // `limited` is fixed at pod create, so adopting would keep open egress. The
-// refusal deletes nothing — the original spec still owns its pod. The docker
-// backend's adopt_test.go proves the same rule against a live daemon (#296).
+// refusal deletes nothing — proven by the pod's UID, since the derived name
+// would survive a delete-and-recreate — and the original spec still owns its
+// pod. The docker backend's adopt_test.go proves the same rule against a live
+// daemon (#296).
 func TestK8sAdoptionRefusesAMismatchedPod(t *testing.T) {
 	provider, err := k8s.New(k8s.Config{
 		Context:   os.Getenv("MAP_K8S_CONTEXT"),
@@ -97,18 +118,22 @@ func TestK8sAdoptionRefusesAMismatchedPod(t *testing.T) {
 		}
 	})
 
+	uid := podUID(t, first.ID())
+
 	limited := spec
 	limited.Networking = domain.Networking{Type: domain.NetLimited}
 	if _, err := provider.Provision(ctx, limited); !errors.Is(err, sandbox.ErrSpecMismatch) {
 		t.Fatalf("limited provision over an unrestricted pod: err = %v, want sandbox.ErrSpecMismatch", err)
 	}
+	if got := podUID(t, first.ID()); got != uid {
+		t.Errorf("after the refusal, pod uid = %q, want %q (untouched)", got, uid)
+	}
 
-	again, err := provider.Provision(ctx, spec)
-	if err != nil {
+	if _, err := provider.Provision(ctx, spec); err != nil {
 		t.Fatalf("re-provision (unrestricted) after the refusal: %v", err)
 	}
-	if again.ID() != first.ID() {
-		t.Errorf("re-provision id = %q, want %q (the refusal must leave the pod adoptable)", again.ID(), first.ID())
+	if got := podUID(t, first.ID()); got != uid {
+		t.Errorf("re-provision replaced the pod: uid = %q, want the adopted %q", got, uid)
 	}
 }
 
