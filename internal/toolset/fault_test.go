@@ -161,6 +161,14 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 		{"not a directory", sandbox.ErrNotDirectory, "not a directory"},
 		{"not replaceable", sandbox.ErrNotReplaceable, "cannot be replaced"},
 		{"too large", sandbox.ErrFileTooLarge, "limit"},
+		// The unwritable-target refusal carries the sandbox's own strerror
+		// text, normalized the way the reference's fsErrorMessage table is:
+		// its one mapped case takes the reference's casing, everything else
+		// passes through, and a bare sentinel falls back to its own words
+		// (plan 23, #306).
+		{"not writable", &sandbox.PathNotWritableError{Path: "a.txt", Reason: "Read-only file system"}, "Read-only file system"},
+		{"not writable normalized", &sandbox.PathNotWritableError{Path: "a.txt", Reason: "Permission denied"}, "permission denied"},
+		{"not writable bare", sandbox.ErrNotWritable, "cannot be written"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

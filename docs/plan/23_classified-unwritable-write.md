@@ -1,7 +1,11 @@
 ---
-status: draft
+status: archived
 issue: "#306"
 ---
+
+> Archived: **completed** — delivered in the single PR that closes #306, as the Delivery
+> section planned (started and finished in one PR, so no committed `in-progress` state
+> existed; the delivery record is docs/HISTORY.md, the narrative CHANGELOG.md).
 
 # A write the sandbox cannot land is the model's error, not the platform's fault (plan 23)
 

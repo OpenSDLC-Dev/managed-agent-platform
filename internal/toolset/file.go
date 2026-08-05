@@ -138,10 +138,28 @@ func fileFault(verb, display string, err error) (Result, error) {
 	case errors.Is(err, sandbox.ErrNotReplaceable):
 		return failf("%s: %s cannot be replaced by an atomic write (a device node, or a file bind-mounted into the sandbox). Use bash redirection to write through it.",
 			verb, display)
+	case errors.Is(err, sandbox.ErrNotWritable):
+		return failf("%s %s: %s", verb, display, notWritableReason(err))
 	case errors.Is(err, sandbox.ErrFileTooLarge):
 		return failf("%s: %s exceeds the %d-byte limit. Use bash (head/tail/sed) to work on a slice.",
 			verb, display, sandbox.MaxFileBytes)
 	default:
 		return Result{}, err
 	}
+}
+
+// notWritableReason is the wording of an ErrNotWritable result: the sandbox's
+// own strerror text, normalized the way the reference toolset's fsErrorMessage
+// table is — its one mapped case takes the reference's casing, anything else
+// passes through as raw text does there, and a refusal that carried no reason
+// falls back to the sentinel's own words (plan 23, #306).
+func notWritableReason(err error) string {
+	var pnw *sandbox.PathNotWritableError
+	if !errors.As(err, &pnw) || pnw.Reason == "" {
+		return "cannot be written"
+	}
+	if strings.EqualFold(pnw.Reason, "permission denied") {
+		return "permission denied"
+	}
+	return pnw.Reason
 }

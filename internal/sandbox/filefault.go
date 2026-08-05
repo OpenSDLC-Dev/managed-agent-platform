@@ -37,6 +37,11 @@ const (
 	// path family continues at 19 because 17 and 18 already belong to the bulk
 	// namespace above.
 	ExitPathNotReplaceable = 19
+	// ExitPathNotWritable: the temporary file a write lands under cannot be
+	// created, or a missing parent cannot be made. The exit rides with the
+	// shell's own strerror text on stdout — the reason a PathNotWritableError
+	// carries (plan 23, #306).
+	ExitPathNotWritable = 20
 )
 
 // TempPrefix names the file a write lands under before it is renamed into place.

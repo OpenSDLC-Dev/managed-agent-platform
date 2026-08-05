@@ -1051,6 +1051,9 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 		if cErr := c.unreplaceable(ctx, path); cErr != nil {
 			return cErr
 		}
+		if cErr := c.notWritable(ctx, path); cErr != nil {
+			return cErr
+		}
 		return err
 	}
 	return c.rename(ctx, tmp, path)
@@ -1083,6 +1086,9 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 		// would cost a failed 500 MB mount 500 MB of the sandbox's disk.
 		c.discard(ctx, tmp)
 		if cErr := c.unreplaceable(ctx, path); cErr != nil {
+			return cErr
+		}
+		if cErr := c.notWritable(ctx, path); cErr != nil {
 			return cErr
 		}
 		return err
@@ -1266,6 +1272,26 @@ func (c *container) unreplaceable(ctx context.Context, path string) error {
 	return nil
 }
 
+// notWritable asks the sandbox whether the target's directory can take a
+// create at all, answering ErrNotWritable — with the shell's own strerror text
+// as the reason — when it cannot, and nil when it can (the caller keeps the
+// daemon's own error) or when the probe could not run, for pathFault's reason.
+// It is the classify-on-refusal twin of the k8s write script's exit 20 (plan
+// 23, #306): the daemon refuses the archive PUT before any script can say why,
+// so a refused write onto a replaceable target attempts the same create the
+// extraction would need in an exec of its own — with the agent's credentials,
+// in the target's own directory, under a temporary name it removes on success.
+func (c *container) notWritable(ctx context.Context, path string) error {
+	probe := gopath.Join(gopath.Dir(path), sandbox.TempName())
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: fmt.Sprintf(
+		"export LC_ALL=C\nmsg=$({ : > %[1]s; } 2>&1) || { printf '%%s' \"${msg##*: }\"; exit %[2]d; }\nrm -f %[1]s\nexit 0",
+		shellQuote(probe), sandbox.ExitPathNotWritable)})
+	if err != nil || res.ExitCode != sandbox.ExitPathNotWritable {
+		return nil
+	}
+	return &sandbox.PathNotWritableError{Path: path, Reason: strings.TrimSpace(res.Stdout)}
+}
+
 // discard removes a temporary file a failed write left behind. Its own failure is
 // not worth reporting over the write's: the caller already has the error that
 // matters, and a sandbox that cannot delete the file is about to be thrown away.
@@ -1278,7 +1304,7 @@ func (c *container) discard(ctx context.Context, tmp string) {
 // whether that is why (both backends embed it, so both answer alike).
 func (c *container) mkdirAll(ctx context.Context, dir string) error {
 	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.PathFaultShell +
-		fmt.Sprintf("mkdir -p %[1]s || { __map_path_fault %[1]s; exit 1; }", shellQuote(dir))})
+		fmt.Sprintf("export LC_ALL=C\nmkdir -p %[1]s || { __map_path_fault %[1]s; exit 1; }", shellQuote(dir))})
 	if err != nil {
 		return err
 	}
@@ -1288,8 +1314,27 @@ func (c *container) mkdirAll(ctx context.Context, dir string) error {
 	case sandbox.ExitPathNotDirectory:
 		return fmt.Errorf("%s: %w", dir, sandbox.ErrNotDirectory)
 	default:
+		// mkdir failed for a reason that is not a blocking file — a read-only
+		// root, a root-owned parent, a full disk. Its own stderr names why,
+		// and the strerror tail is the reason the classified refusal carries,
+		// as the k8s write script's mkdir branch carries its own (plan 23,
+		// #306); a mkdir that said nothing keeps the raw error.
+		if reason := strerrorTail(res.Stderr); reason != "" {
+			return &sandbox.PathNotWritableError{Path: dir, Reason: reason}
+		}
 		return fmt.Errorf("docker: mkdir -p %s: exit %d: %s", dir, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
+}
+
+// strerrorTail extracts the shell's strerror text — what follows the last
+// ": " of stderr's first line — mirroring the write script's "${msg##*: }".
+// Empty when there is no such tail to take.
+func strerrorTail(stderr string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(stderr), "\n")
+	if i := strings.LastIndex(line, ": "); i >= 0 {
+		return strings.TrimSpace(line[i+2:])
+	}
+	return ""
 }
 
 // Destroy removes the sandbox and, when it is half of a pair, its egress gate.

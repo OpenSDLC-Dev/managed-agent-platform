@@ -1243,7 +1243,11 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 	dir := gopath.Dir(path)
 	tmp := gopath.Join(dir, sandbox.TempName())
 	argv := []string{"/bin/bash", "-c", writeScript, "map-write", path, dir, strconv.FormatInt(size, 10), tmp}
-	res, err := pd.client.exec(ctx, pd.name, containerName, argv, src, io.Discard, io.Discard)
+	// The script's stdout is the classified refusal's reason (exit 20 rides
+	// with the shell's own strerror text, plan 23); capped because the sandbox
+	// writes it.
+	out := &cappedBuffer{limit: 4096}
+	res, err := pd.client.exec(ctx, pd.name, containerName, argv, src, out, io.Discard)
 	if err != nil {
 		return pd.execErr(ctx, err)
 	}
@@ -1264,6 +1268,8 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 		return fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
 	case sandbox.ExitPathNotReplaceable:
 		return fmt.Errorf("%s: %w", path, sandbox.ErrNotReplaceable)
+	case sandbox.ExitPathNotWritable:
+		return &sandbox.PathNotWritableError{Path: path, Reason: string(bytes.TrimSpace(out.buf.Bytes()))}
 	default:
 		// The write failed in the pod for a reason that is the sandbox's, not the
 		// path's — a read-only mount, a full disk. A clean exec that exited
@@ -1549,7 +1555,14 @@ printf %s "$3"
 // carried past the drain — asked first because its answer describes the
 // path that made mkdir fail, and a drain's worth of sandbox activity later
 // that moment has passed (the freshness the unreplaceable probe's late ask
-// exists to keep). The `-eq` length check and everything after it need no
+// exists to keep). What the `mkdir` and `: >` failures exit is classified
+// (plan 23, #306): a create the parent refuses is the model's error, as the
+// reference toolset answers every write failure, so both branches capture
+// the shell's own message, keep its strerror tail, and exit 20 with the
+// reason on stdout — under a forced LC_ALL=C, so a localized image cannot
+// drift the wording — a path fault still wins the mkdir branch at 15, and
+// the `tee` branch stays the raw exit 1 it was, being a failure of the
+// transfer rather than of the target. The `-eq` length check and everything after it need no
 // drain: a `tee` that exits 0 has copied stdin to EOF — its POSIX
 // contract, resting on the same PATH trust as the drains' own `cat`. (A
 // note that sat here once measured a 64 MiB `: >` failure returning in
@@ -1648,11 +1661,12 @@ printf %s "$3"
 // __map_preserve_mode is: the bytes are one `mv` from being landed, so a `chmod`
 // that cannot run costs the mode rather than the write.
 const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + sandbox.UnreplaceableShell + `
-mkdir -p "$2" || { ( __map_path_fault "$2" ); pf=$?; cat >/dev/null; [ "$pf" -eq 0 ] && pf=1; exit "$pf"; }
+export LC_ALL=C
+msg=$(mkdir -p "$2" 2>&1) || { ( __map_path_fault "$2" ); pf=$?; cat >/dev/null; [ "$pf" -eq 0 ] && { printf '%s' "${msg##*: }"; exit 20; }; exit "$pf"; }
 if [ -d "$1" ]; then cat >/dev/null; exit 16; fi
 if __map_unreplaceable "$1"; then cat >/dev/null; exit 19; fi
 umask 022
-: > "$4" || { cat >/dev/null; exit 1; }
+msg=$({ : > "$4"; } 2>&1) || { cat >/dev/null; printf '%s' "${msg##*: }"; exit 20; }
 chmod 0644 "$4" 2>/dev/null
 set -o pipefail
 sz=$(tee "$4" | wc -c) || { rm -f "$4"; cat >/dev/null; exit 1; }
