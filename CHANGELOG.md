@@ -124,6 +124,27 @@ copy of an entry here.
 
 ### Fixed
 
+- **The NUL-sanitization test's preview drain is bounded by a sentinel frame,
+  not a coalesced wake** ([internal/brain/nul_test.go](./internal/brain/nul_test.go),
+  #294). One CI run drained zero preview frames from a turn that demonstrably
+  settled. The old drain's premise — "the settle commit's NOTIFY follows every
+  preview frame, so a single Wake bounds the drain" — misread the wake
+  contract: wakes are coalesced re-read signals, and the listener buffers a
+  coverage-healing wake the moment LISTEN activates — long before any turn
+  activity — so the drain's single `Wake()` consumed that token and its
+  non-blocking frame drain raced the dispatcher — losing under CI load. The
+  ordering guarantee is real but lives on the frames lane: the one listening
+  connection delivers notifications in commit order, so a sentinel frame
+  published after `runOnce` returns autocommits after the settle and arrives
+  after every frame the turn broadcast. The drain now reads the frames lane
+  blockingly until the sentinel — which also lets the all-NUL control prove
+  an empty set deterministically instead of by timing. The broker is
+  untouched: its wake contract is documented, its own tests flush pre-buffered
+  wakes (`drainWakes`) before asserting, and production consumers use wakes
+  correctly (re-read after every wake). Evidence: a mechanism probe over the
+  old drain observes a wake with zero commits since Subscribe, and the fixed
+  test holds green under `-race` with full-core CPU load.
+
 - **Kubernetes pod adoption validates the pod's fixed-at-create spec, not just
   its ownership label and gate shape**
   ([internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go), #296 — the k8s
