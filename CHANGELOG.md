@@ -23,8 +23,9 @@ copy of an entry here.
   create/update `system` has no documented ceiling — but nothing enforced it:
   an arbitrarily large replacement prompt was stored and could fail at the
   provider on every turn. `resolveAgent` now rejects an over-cap override with
-  a 400 naming the limit, counted in runes like every character-documented
-  limit. The check binds only what the override supplies: an over-cap *stored*
+  a 400 naming the limit, counted in runes (the filesupload.go precedent for
+  character-documented limits, shared with the #66/#289 metadata caps). The
+  check binds only what the override supplies: an over-cap *stored*
   system still resolves via a plain reference or an omitted override field, and
   `system:null` (clear) is never counted. The reject shape and counting unit
   are ours — recorded in docs/DIVERGENCES.md (INFERRED). Surfaced by the #290

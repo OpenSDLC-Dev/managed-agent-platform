@@ -225,8 +225,8 @@ func TestSessionMetadataCaps(t *testing.T) {
 
 // The SDK bounds an agent_with_overrides replacement system prompt at 100,000
 // characters (betasession.go) — a bound specific to the session override; the
-// stored agent's own system documents none. Counted in runes like every
-// character-documented limit (#291).
+// stored agent's own system documents none. Counted in runes, the
+// filesupload.go precedent for character-documented limits (#291).
 func TestSessionOverrideSystemCap(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)

@@ -150,9 +150,9 @@ type querier interface {
 // overrideSystemMaxRunes is the documented ceiling on an agent_with_overrides
 // replacement system prompt — "Up to 100,000 characters" (betasession.go). The
 // bound is specific to the session override params; agents' own create/update
-// system documents none. Counted in runes like every character-documented
-// limit (the filesupload.go precedent, shared with #66/#289's metadata caps);
-// the reference's counting unit and reject shape are unobserved —
+// system documents none. Counted in runes (the filesupload.go precedent for
+// character-documented limits, shared with #66/#289's metadata caps); the
+// reference's counting unit and reject shape are unobserved —
 // docs/DIVERGENCES.md (#291).
 const overrideSystemMaxRunes = 100_000
 
