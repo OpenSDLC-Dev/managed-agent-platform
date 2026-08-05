@@ -898,7 +898,10 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 // entry the daemon extracted before the failure, it is landed under a name nothing
 // will ever claim — and a real daemon does not produce this failure on demand, so
 // it is staged here rather than left to the live suite (which can only reach the
-// streaming half of it, through a short src).
+// streaming half of it, through a short src). The removal is followed by the
+// unreplaceable probe — a refused put is the only signal a read-only rootfs
+// gives, so every failed put asks (#303) — and a target the probe answers
+// replaceable keeps the daemon's own error, as here.
 func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
 	var commands []string
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
@@ -921,12 +924,18 @@ func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
 		}
 	})
 	c := p.attach("abc", "/workspace", "")
-	if err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x")); err == nil {
-		t.Fatal("write returned nil, want the daemon's failure")
+	err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x"))
+	if err == nil || !strings.Contains(err.Error(), "daemon gave up mid-transfer") {
+		t.Fatalf("err = %v, want the daemon's failure", err)
 	}
-	last := commands[len(commands)-1]
-	if !strings.HasPrefix(last, "rm -f '/workspace/"+sandbox.TempPrefix) {
-		t.Errorf("last exec = %q, want the temporary file removed", last)
+	if len(commands) < 2 {
+		t.Fatalf("execs = %q, want the removal then the classification probe", commands)
+	}
+	if removal := commands[len(commands)-2]; !strings.HasPrefix(removal, "rm -f '/workspace/"+sandbox.TempPrefix) {
+		t.Errorf("second-to-last exec = %q, want the temporary file removed", removal)
+	}
+	if last := commands[len(commands)-1]; !strings.Contains(last, "__map_unreplaceable '/workspace/f.txt'") {
+		t.Errorf("last exec = %q, want the refused put classified", last)
 	}
 }
 

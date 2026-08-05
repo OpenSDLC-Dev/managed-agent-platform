@@ -906,6 +906,14 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if err := sb.WriteFileStream(ctx, "/dev/null", strings.NewReader("x"), 1); !errors.Is(err, sandbox.ErrNotReplaceable) {
 			t.Errorf("stream write onto a device node: err = %v, want ErrNotReplaceable", err)
 		}
+		// A quarter-megabyte body, because the refusal must consume what it
+		// refuses: the k8s probe fires before anything reads stdin, and an exit
+		// that leaves stdin unread deadlocks the exec stream's flow control once
+		// the body outgrows its in-flight window — this cell hangs forever where
+		// the one-byte ones above still return (#303).
+		if err := sb.WriteFile(ctx, "/dev/null", bytes.Repeat([]byte("y"), 256<<10)); !errors.Is(err, sandbox.ErrNotReplaceable) {
+			t.Errorf("large write onto a device node: err = %v, want ErrNotReplaceable", err)
+		}
 		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "[ -c /dev/null ] && echo char || echo supplanted"})
 		if err != nil {
 			t.Fatalf("ask what /dev/null is now: %v", err)
@@ -922,6 +930,56 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 		if got := strings.TrimSpace(res.Stdout); got != "0" {
 			t.Errorf("%s files left beside the refused target = %s, want 0", sandbox.TempPrefix, got)
+		}
+	})
+
+	// The classification must not depend on the target's parent being writable.
+	// Under a read-only root the write fails before the rename script can ask
+	// anything — docker's daemon refuses the archive PUT outright, k8s's tee
+	// cannot create the temporary — and both used to surface the raw refusal:
+	// the unclassified fault the executor retries until the lease runs out. So
+	// docker asks the probe in its own exec when the PUT is refused, and k8s
+	// asks it before creating the temporary file (#303).
+	t.Run("WriteOntoUnreplaceableTargetUnderReadOnlyRoot", func(t *testing.T) {
+		sb := provisionHardened(t, sandbox.Hardening{ReadOnlyRootfs: true})
+		ctx := context.Background()
+		if err := sb.WriteFile(ctx, "/etc/hosts", []byte("clobber\n")); !errors.Is(err, sandbox.ErrNotReplaceable) {
+			t.Errorf("write onto a bind-mounted file under a read-only root: err = %v, want ErrNotReplaceable", err)
+		}
+		// Streamed and large: the WriteOntoDeviceNode row pins the drain on a
+		// writable root, this one pins it where the refusal actually fires early.
+		big := bytes.Repeat([]byte("y"), 256<<10)
+		if err := sb.WriteFileStream(ctx, "/etc/hosts", bytes.NewReader(big), int64(len(big))); !errors.Is(err, sandbox.ErrNotReplaceable) {
+			t.Errorf("stream write onto a bind-mounted file under a read-only root: err = %v, want ErrNotReplaceable", err)
+		}
+		if err := sb.WriteFile(ctx, "/dev/null", []byte("x")); !errors.Is(err, sandbox.ErrNotReplaceable) {
+			t.Errorf("write onto a device node under a read-only root: err = %v, want ErrNotReplaceable", err)
+		}
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "[ -c /dev/null ] && echo char || echo supplanted"})
+		if err != nil {
+			t.Fatalf("ask what /dev/null is now: %v", err)
+		}
+		if got := strings.TrimSpace(res.Stdout); got != "char" {
+			t.Errorf("/dev/null is %q after the refused writes, want the character device intact", got)
+		}
+	})
+
+	// The other route to the same unreachable classification: a uid that cannot
+	// create the temporary file next to the target, because /etc and /dev are
+	// root-owned. k8s used to surface the raw creation failure where docker's
+	// daemon-side temporary (extracted as root) still classified; asking the
+	// probe before the temporary keeps the backends identical (#303). RunAsUser
+	// travels with ReadOnlyRootfs for the reason HardeningRunsAsTheConfiguredUser
+	// states: the entrypoint's `mkdir -p <workdir>` runs as this uid.
+	t.Run("WriteOntoUnreplaceableTargetAsNonRoot", func(t *testing.T) {
+		uid := int64(65534)
+		sb := provisionHardened(t, sandbox.Hardening{RunAsUser: &uid, ReadOnlyRootfs: true})
+		ctx := context.Background()
+		if err := sb.WriteFile(ctx, "/etc/hosts", []byte("clobber\n")); !errors.Is(err, sandbox.ErrNotReplaceable) {
+			t.Errorf("write onto a bind-mounted file as non-root: err = %v, want ErrNotReplaceable", err)
+		}
+		if err := sb.WriteFile(ctx, "/dev/null", []byte("x")); !errors.Is(err, sandbox.ErrNotReplaceable) {
+			t.Errorf("write onto a device node as non-root: err = %v, want ErrNotReplaceable", err)
 		}
 	})
 
