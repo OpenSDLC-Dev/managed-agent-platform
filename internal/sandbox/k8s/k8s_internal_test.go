@@ -2043,3 +2043,110 @@ func TestWriteScriptSpellsTheUnreplaceableExit(t *testing.T) {
 		t.Fatalf("the early ask must sit ahead of tee and the late ask between tee and the rename (early %d, tee %d, late %d, mv %d) — the reorder is what keeps the refusal both reachable under a read-only root and fresh at the move", ei, ti, li, mi)
 	}
 }
+
+// Every exit the write script can take with the body still unread must drain
+// it first: an undrained early exit only races its code home for bodies small
+// enough to already be in flight, and beyond the exec stream's flow-control
+// window the call deadlocks until the pod dies (#303 drained the refusal
+// branches; #304 is the failure branches doing the same). Unlike the refusal
+// branches, all three failure branches can be staged from the host's bash, so
+// the drain is pinned by behavior rather than by literal: the script reads
+// from a pipe whose producer is the verdict. `head -c 1M /dev/zero` blocks
+// once the pipe buffer fills, so a script that exits with the body unread
+// kills the producer with SIGPIPE (exit 141), where a script that drained
+// lets it finish (exit 0).
+func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
+	// drainRun mirrors TestWriteScriptVerifiesDeliveredLength's runScript, but
+	// feeds the script through the pipe and reports both ends: the script's
+	// exit code and the producer's.
+	drainRun := func(t *testing.T, env []string, path, tmp string) (script, producer int) {
+		t.Helper()
+		f := gopath.Join(t.TempDir(), "writescript.sh")
+		if err := os.WriteFile(f, []byte(writeScript), 0o755); err != nil {
+			t.Fatalf("stage the script: %v", err)
+		}
+		cmd := exec.Command("/bin/bash", "-c",
+			`head -c 1048576 /dev/zero | /bin/bash "$1" "$2" "$3" "$4" "$5"; echo "${PIPESTATUS[0]} ${PIPESTATUS[1]}"`,
+			"map-drain", f, path, gopath.Dir(path), "1048576", tmp)
+		cmd.Env = env
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("run writeScript through the pipe: %v", err)
+		}
+		fields := strings.Fields(strings.TrimSpace(string(out)))
+		if len(fields) != 2 {
+			t.Fatalf("PIPESTATUS report = %q, want two fields", out)
+		}
+		producer, err = strconv.Atoi(fields[0])
+		if err != nil {
+			t.Fatalf("producer exit %q: %v", fields[0], err)
+		}
+		script, err = strconv.Atoi(fields[1])
+		if err != nil {
+			t.Fatalf("script exit %q: %v", fields[1], err)
+		}
+		return script, producer
+	}
+	gone := func(t *testing.T, p string) {
+		t.Helper()
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived (%v), want it removed", p, err)
+		}
+	}
+
+	// The `mkdir -p` failure: a regular file blocking the parent path fails it
+	// with ENOTDIR for root and non-root alike, and __map_path_fault classifies.
+	t.Run("PathBlockedByAFile", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(dir+"/plain", []byte("in the way"), 0o644); err != nil {
+			t.Fatalf("stage the blocker: %v", err)
+		}
+		path := dir + "/plain/deeper/child"
+		script, producer := drainRun(t, nil, path, gopath.Join(gopath.Dir(path), sandbox.TempName()))
+		if script != sandbox.ExitPathNotDirectory {
+			t.Errorf("script exit %d, want %d (ExitPathNotDirectory)", script, sandbox.ExitPathNotDirectory)
+		}
+		if producer != 0 {
+			t.Errorf("producer exit %d, want 0 — the classification exited with the body unread", producer)
+		}
+	})
+
+	// The `: >` failure: a temporary whose name an existing directory already
+	// holds cannot be created, for root and non-root alike (EISDIR), which is
+	// the same branch an unwritable or full parent takes.
+	t.Run("TemporaryCannotBeCreated", func(t *testing.T) {
+		dir := t.TempDir()
+		tmp := gopath.Join(dir, sandbox.TempName())
+		if err := os.Mkdir(tmp, 0o755); err != nil {
+			t.Fatalf("stage the squatting directory: %v", err)
+		}
+		script, producer := drainRun(t, nil, dir+"/target", tmp)
+		if script != 1 {
+			t.Errorf("script exit %d, want 1", script)
+		}
+		if producer != 0 {
+			t.Errorf("producer exit %d, want 0 — the failed create exited with the body unread", producer)
+		}
+	})
+
+	// The mid-stream `tee` failure: a shimmed tee that dies after consuming a
+	// slice of the body, as a real one does when the filesystem fills under it.
+	// The branch must shed the temporary and then drain what tee left.
+	t.Run("TeeDiesMidStream", func(t *testing.T) {
+		bin := t.TempDir()
+		if err := os.WriteFile(bin+"/tee", []byte("#!/bin/sh\nhead -c 1024 >/dev/null\nexit 1\n"), 0o755); err != nil {
+			t.Fatalf("stage the tee shim: %v", err)
+		}
+		env := append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		dir := t.TempDir()
+		tmp := gopath.Join(dir, sandbox.TempName())
+		script, producer := drainRun(t, env, dir+"/target", tmp)
+		if script != 1 {
+			t.Errorf("script exit %d, want 1", script)
+		}
+		if producer != 0 {
+			t.Errorf("producer exit %d, want 0 — the failed stream exited with its remainder unread", producer)
+		}
+		gone(t, tmp)
+	})
+}

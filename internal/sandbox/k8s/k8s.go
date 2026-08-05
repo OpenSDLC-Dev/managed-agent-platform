@@ -1539,13 +1539,22 @@ printf %s "$3"
 // twelve large-body undrained exits, one returned in ~240ms and eleven hung. The
 // drain costs the refused body's transfer, which is exactly what the old order
 // paid through `tee`; a refusal that arrives late beats one that never does.
-// The `mkdir`, `: >`, and mid-stream `tee` failure branches still exit
-// undrained — their small-body behavior is what it always was, and the
-// large-body hang they carry predates this change and is tracked as its own
-// defect (#304) rather than widened into it. (A note that sat here once
-// measured a 64 MiB `: >` failure returning in ~25ms with no hang; rerun
-// under a read-only root it deadlocked three of three — that sample was the
-// race won once, not the hazard absent, and #304 carries the fuller tally.)
+// The `mkdir`, `: >`, and mid-stream `tee` failure branches drain the same
+// way (#304): each can fire with the body still unread — the first two
+// before a byte is consumed, the third when `tee` dies part way and stops
+// reading — so each consumes the remainder before its exit, the `tee`
+// branch shedding its residue first so a teardown mid-drain cannot leave
+// it. The `mkdir` branch classifies before it drains: __map_path_fault
+// exits from inside itself, so it runs in a subshell and its verdict is
+// carried past the drain — asked first because its answer describes the
+// path that made mkdir fail, and a drain's worth of sandbox activity later
+// that moment has passed (the freshness the unreplaceable probe's late ask
+// exists to keep). The `-eq` length check and everything after it need no
+// drain: a `tee` that exits 0 has copied stdin to EOF — its POSIX
+// contract, resting on the same PATH trust as the drains' own `cat`. (A
+// note that sat here once measured a 64 MiB `: >` failure returning in
+// ~25ms with no hang; rerun under a read-only root it deadlocked three of
+// three — that sample was the race won once, not the hazard absent.)
 //
 // A `mkdir -p` that fails asks the shared path-fault shell whether a
 // non-directory is why, so a blocked path is the model's to fix (15,
@@ -1639,14 +1648,14 @@ printf %s "$3"
 // __map_preserve_mode is: the bytes are one `mv` from being landed, so a `chmod`
 // that cannot run costs the mode rather than the write.
 const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + sandbox.UnreplaceableShell + `
-mkdir -p "$2" || { __map_path_fault "$2"; exit 1; }
+mkdir -p "$2" || { ( __map_path_fault "$2" ); pf=$?; cat >/dev/null; [ "$pf" -eq 0 ] && pf=1; exit "$pf"; }
 if [ -d "$1" ]; then cat >/dev/null; exit 16; fi
 if __map_unreplaceable "$1"; then cat >/dev/null; exit 19; fi
 umask 022
-: > "$4" || exit 1
+: > "$4" || { cat >/dev/null; exit 1; }
 chmod 0644 "$4" 2>/dev/null
 set -o pipefail
-sz=$(tee "$4" | wc -c) || { rm -f "$4"; exit 1; }
+sz=$(tee "$4" | wc -c) || { rm -f "$4"; cat >/dev/null; exit 1; }
 [ "$sz" -eq "$3" ] || { rm -f "$4"; exit 14; }
 if __map_unreplaceable "$1"; then rm -f "$4"; exit 19; fi
 __map_preserve_mode "$1" "$4"

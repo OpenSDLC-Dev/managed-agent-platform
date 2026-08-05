@@ -124,6 +124,42 @@ copy of an entry here.
 
 ### Fixed
 
+- **Every exit the k8s write script can take with the body unread now drains
+  it first, so a failed large write returns instead of deadlocking**
+  ([internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go),
+  [internal/sandbox/k8s/k8s_internal_test.go](./internal/sandbox/k8s/k8s_internal_test.go),
+  [internal/sandbox/sandboxtest/contract.go](./internal/sandbox/sandboxtest/contract.go);
+  issue #304, the follow-on #303 filed rather than widened in). Three failure
+  branches exited with stdin unread: a `mkdir -p` the path refuses, a
+  temporary file that cannot be created (a read-only root outside the
+  writable mounts, a root-owned parent, ENOSPC), and a `tee` dying part way.
+  A small body races the exit code home; past the exec stream's flow-control
+  window the stdin copy holds the framer lock the teardown needs, and the
+  call hangs until the pod dies — #304's measurement was a 64 MiB streamed
+  write onto a read-only root deadlocking three of three on the `: >`
+  branch. Each branch now drains (`cat >/dev/null`) before its exit, the
+  `tee` branch shedding its temporary first so a teardown mid-drain cannot
+  leave it, and the `mkdir` branch classifying first — `__map_path_fault`
+  runs in a subshell so its verdict is carried past the drain rather than
+  exiting ahead of it — because the classification describes the path that
+  made `mkdir` fail, and a drain's worth of sandbox activity later that
+  moment has passed (the same freshness the #305 review demanded of the
+  unreplaceable probe; raised for this branch by the #307 review pass). Unlike #303's refusal branches, all three can be staged from the
+  host's bash, so the drains are pinned by behavior rather than by literal:
+  a new script test feeds the body through a pipe whose producer is the
+  verdict — `head -c 1M` finishes when the script drains and dies of
+  SIGPIPE when it does not (red-proven: producer exit 141 on all three
+  branches against the undrained script) — with the `mkdir` branch staged
+  by a file blocking the path, the `: >` branch by a directory squatting
+  the temporary's name, and the `tee` branch by a PATH shim dying
+  mid-stream. Two quarter-megabyte cells pin the real transport, hanging
+  rather than passing on regression: `WriteUnderNonDirectory` streams large
+  onto a blocked path (still `ErrNotDirectory`, now returned rather than
+  hung) and the read-only-root hardening row streams large onto `/etc` (an
+  error, not a hang — the raw refusal's *classification* is now its own
+  tracked defect, #306, deliberately out of this drain pass as it was out
+  of #303's). docker is untouched: its script reads no streamed stdin.
+
 - **The unreplaceable-target refusal no longer depends on the write being able
   to start** ([internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
   [internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go), #303). The #205
