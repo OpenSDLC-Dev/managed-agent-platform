@@ -265,6 +265,11 @@ func TestSessionOverrideSystemCap(t *testing.T) {
 		"agent":          map[string]any{"type": "agent_with_overrides", "id": big},
 		"environment_id": envID,
 	})
+	// system:null (clear) is never counted, even over an over-cap stored system.
+	createSession(t, s, map[string]any{
+		"agent":          map[string]any{"type": "agent_with_overrides", "id": big, "system": nil},
+		"environment_id": envID,
+	})
 }
 
 // fixture creates an agent and an environment and returns their ids.
