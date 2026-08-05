@@ -913,6 +913,16 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		if got := strings.TrimSpace(res.Stdout); got != "char" {
 			t.Errorf("/dev/null is %q after the refused writes, want the character device intact", got)
 		}
+		// This sees what the sandbox can see: the k8s tee'd temporary, which the
+		// refusal must shed. Docker's daemon-side copy lands on the overlay under
+		// the tmpfs at /dev, invisible to any in-container observer either way.
+		res, err = sb.Exec(ctx, sandbox.ExecRequest{Command: "ls /dev/" + sandbox.TempPrefix + "* 2>/dev/null | wc -l"})
+		if err != nil {
+			t.Fatalf("count write residue: %v", err)
+		}
+		if got := strings.TrimSpace(res.Stdout); got != "0" {
+			t.Errorf("%s files left beside the refused target = %s, want 0", sandbox.TempPrefix, got)
+		}
 	})
 
 	// What the rename does to a symlink, which is the one non-regular target both
