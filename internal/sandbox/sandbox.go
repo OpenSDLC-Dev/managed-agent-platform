@@ -48,7 +48,8 @@ var (
 	// settings are fixed at create (networking, image, workdir), so the sandbox
 	// cannot be adopted; the provision fails closed rather than silently serving
 	// the wrong containment, and removes nothing — replacement is an explicit
-	// lifecycle the platform does not have (#29).
+	// lifecycle the platform does not have (#29). Today only the Docker backend
+	// produces it; the k8s backend's twin check is #296.
 	ErrSpecMismatch = errors.New("sandbox: existing sandbox does not match the requested spec")
 	// ErrFileNotExist reports a read of a path that does not exist.
 	ErrFileNotExist = errors.New("sandbox: no such file")
@@ -90,7 +91,10 @@ type Spec struct {
 	//
 	// Env is bound when the sandbox is first created. Provision is idempotent
 	// and adopts a session's existing sandbox without re-applying a changed Env
-	// — the same "fixed at create" property Networking already has. A caller
+	// — fixed at create, as Networking is, though the two now part ways on a
+	// mismatch: a changed Networking is refused at adoption on the Docker
+	// backend (ErrSpecMismatch, #29; the k8s twin is #296) where a changed Env
+	// is silently kept. A caller
 	// that re-provisions a session must therefore keep its Env stable; the
 	// egress gate relies on this by minting stable per-session placeholders and
 	// resolving their live values at egress rather than re-injecting them.

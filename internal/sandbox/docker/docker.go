@@ -524,7 +524,11 @@ func ours(info containerInfo, sessionID domain.ID) error {
 // nothing: the platform has no replacement lifecycle for a live session's
 // sandbox, and deleting on a caller-supplied spec would hand a caller's bug the
 // container's filesystem (#29). A gated container's network mode is not
-// re-checked here — pairedWithGate has already pinned it to container:<gateID>.
+// re-checked here — pairedWithGate has already pinned it to container:<gateID> —
+// and Spec.Env and Spec.Hardening, equally fixed at create, are deliberately
+// not compared: a changed Env silently keeps the created value by contract
+// (sandboxtest's SpecEnvBoundAtProvision — the gate's placeholder stability
+// rides on it), and hardening follows the same adopt-as-created rule.
 func adoptable(info containerInfo, spec sandbox.Spec, workdir, gateID string) error {
 	if gateID == "" {
 		if want := networkMode(spec.Networking); info.HostConfig.NetworkMode != want {

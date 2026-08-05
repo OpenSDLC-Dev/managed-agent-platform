@@ -46,7 +46,11 @@ func TestAdoptionValidatesTheEffectiveNetworkMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision (unrestricted): %v", err)
 	}
-	t.Cleanup(func() { first.Destroy(context.Background()) })
+	t.Cleanup(func() {
+		if err := first.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy (unrestricted): %v", err)
+		}
+	})
 	if mode := effectiveNetworkMode(t, first.ID()); mode != "bridge" {
 		t.Fatalf("unrestricted container mode = %q, want bridge", mode)
 	}
@@ -69,7 +73,11 @@ func TestAdoptionValidatesTheEffectiveNetworkMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision (limited): %v", err)
 	}
-	t.Cleanup(func() { l1.Destroy(context.Background()) })
+	t.Cleanup(func() {
+		if err := l1.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy (limited): %v", err)
+		}
+	})
 	l2, err := provider.Provision(ctx, fresh)
 	if err != nil {
 		t.Fatalf("re-provision (limited): %v", err)
