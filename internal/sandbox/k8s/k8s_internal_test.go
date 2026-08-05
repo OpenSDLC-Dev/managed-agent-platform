@@ -176,6 +176,34 @@ func TestProvisionAdoptsAMatchingLimitedPod(t *testing.T) {
 	}
 }
 
+// The same check guards the gated adopt path: a gated pod whose gate shape
+// matches is still refused when its image was fixed at create from a different
+// spec — before anything is waited on, minted, or deleted.
+func TestProvisionRefusesAMismatchedGatedPod(t *testing.T) {
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_gatedmis")
+	created := sandbox.Spec{SessionID: sid, Image: "img:1",
+		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m)}
+	p := fakeProvider()
+	pod := readyFromSpec(p, sandbox.DefaultWorkdir, created)
+	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cs := p.client.cs.(*fake.Clientset)
+	cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		t.Error("a mismatch has no authority to delete the existing pod")
+		return true, nil, errors.New("refused")
+	})
+	requested := created
+	requested.Image = "img:2"
+	if _, err := p.Provision(context.Background(), requested); !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Errorf("gated provision over a mismatched pod: err = %v, want sandbox.ErrSpecMismatch", err)
+	}
+	if m.generated != 0 || len(m.persisted) != 0 {
+		t.Errorf("the refusal touched the mint seam: generated=%d persisted=%v", m.generated, m.persisted)
+	}
+}
+
 // The create-race loser applies the same validation to the winner's pod it
 // adopts: a winner created from a different spec is refused, not served — and
 // not deleted.
