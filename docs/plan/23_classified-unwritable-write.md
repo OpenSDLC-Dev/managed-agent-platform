@@ -37,8 +37,12 @@ self-hosted deployment point. Three findings decide this plan's shape:
    `not a directory`, EISDIR → `is a directory` — and everything else falls through to
    the raw error text (EROFS → `... read-only file system`, ENOSPC → `... no space left
    on device`). Its comment states the purpose: consistent, language-independent wording
-   across host runtimes. Our `internal/toolset/file.go` `fileFault` already mirrors this
-   table's wording for the sentinels it classifies.
+   across host runtimes. Our `internal/toolset/file.go` `fileFault` already carries the
+   table's ENOENT and ENOTDIR strings verbatim. Its directory-target row says
+   `is not a regular file` rather than the table's EISDIR `is a directory` — deliberately,
+   and unchanged by this plan: that is the reference's own wording too, from its read-path
+   validation (`fs.go`: `read %s: %s is not a regular file`), and our row covers
+   not-a-regular-file cases beyond directories.
 3. **The wire carries no structured file-fault codes.** A tool failure is text plus
    `is_error` — so wire compatibility constrains the *message wording*, not a code
    taxonomy, and the raw-passthrough messages embed random temporary names, so exact-text
@@ -50,7 +54,8 @@ self-hosted deployment point. Three findings decide this plan's shape:
 **One new sentinel, reason text carried from the sandbox's own shell.** The reference
 classifies by errno of the failed create; our scripts' equivalent of errno is bash's
 `strerror` text on the failed redirect (`Permission denied`, `Read-only file system`,
-`No space left on device` — stable under the C locale the sandbox images run). The
+`No space left on device` — forced rather than assumed: the classification commands set
+`LC_ALL=C`, so a localized image cannot drift the wording). The
 refusal carries that text out, and the toolset normalizes it the way `fsErrorMessage`
 does, so the model sees reference wording from both backends.
 
@@ -119,6 +124,15 @@ The reference-implementation findings become repo documentation, in two steps:
 Bulk writes (workdir-only by design), the read path (unaffected by parent writability),
 wire-level error codes (none exist to be compatible with), and retry semantics for
 transient ENOSPC (the reason text reports it; the model decides).
+
+Two docker write-path residuals stay raw on purpose. A daemon refusal after the archive
+landed — the in-container `mv` failing — is reachable only from configurations the
+provisioner refuses (the temp lands next to the target, so a target the probe could
+create next to is one the rename can land on); and an ENOSPC that strikes mid-extraction
+can pass the probe (a zero-byte create needs no blocks) and keeps the daemon's error —
+which is right by the same line #304 drew for k8s's `tee` branch: a transfer that failed
+partway is a failure of the transfer, not of the target, and classifying it as
+"unwritable" would tell the model the path is bad when the bytes were.
 
 ## Delivery
 
