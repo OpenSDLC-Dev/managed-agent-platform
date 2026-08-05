@@ -79,9 +79,10 @@ var (
 	// be retried until the lease runs out (#205).
 	ErrNotReplaceable = errors.New("sandbox: target cannot be replaced")
 	// ErrNotWritable reports a write refused because the temporary file cannot
-	// be created — or a missing parent cannot be made — next to the target: a
-	// read-only root outside the writable mounts, a root-owned parent under a
-	// non-root uid, a full disk. Like ErrIsDirectory it describes the path the
+	// be created — or a missing parent cannot be made, or the rename refused
+	// where the temporary was the daemon's to create and the move the sandbox
+	// user's to make — next to the target: a read-only root outside the
+	// writable mounts, a root-owned parent under a non-root uid, a full disk. Like ErrIsDirectory it describes the path the
 	// caller asked for, so a tool hands it to the model — which is exactly how
 	// the reference toolset answers every write failure (plan 23) — rather
 	// than letting it reach the executor as a sandbox fault and be retried
