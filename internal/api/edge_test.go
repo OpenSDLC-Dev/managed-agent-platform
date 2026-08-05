@@ -492,6 +492,9 @@ func TestNullFieldLeniency(t *testing.T) {
 			"type": "agent_with_overrides", "id": agent["id"],
 			"skills":      []any{map[string]any{"type": "anthropic", "skill_id": "xlsx"}},
 			"mcp_servers": []any{map[string]any{"type": "url", "name": "d", "url": "https://x"}},
+			// The override spec must satisfy validateAgentSpec (#287): the
+			// server needs a referencing mcp_toolset.
+			"tools": []any{map[string]any{"type": "mcp_toolset", "mcp_server_name": "d"}},
 		},
 		"environment_id": env["id"],
 		"title":          nil, "metadata": nil, "resources": nil, "vault_ids": nil,

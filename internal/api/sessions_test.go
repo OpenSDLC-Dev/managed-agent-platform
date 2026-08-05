@@ -60,6 +60,99 @@ func TestSessionVaultAttachment(t *testing.T) {
 	createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID, "vault_ids": []any{vaultA}})
 }
 
+// A session's resolved agent answers to the same whole-spec caps as a stored
+// agent (#66): an agent_with_overrides that swaps in an over-cap or
+// inconsistent tools/mcp_servers set must reject at create, not become a
+// session whose every turn the provider refuses (#287).
+func TestSessionOverridesValidateAgentSpec(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	withOverrides := func(extra map[string]any) map[string]any {
+		agent := map[string]any{"type": "agent_with_overrides", "id": agentID}
+		for k, v := range extra {
+			agent[k] = v
+		}
+		return map[string]any{"agent": agent, "environment_id": envID}
+	}
+	wantRejected := func(body map[string]any, frag string) {
+		t.Helper()
+		status, res := s.do(http.MethodPost, "/v1/sessions", body)
+		wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		inner, _ := res["error"].(map[string]any)
+		if msg, _ := inner["message"].(string); !strings.Contains(msg, frag) {
+			t.Errorf("error message %q does not mention %q", msg, frag)
+		}
+	}
+
+	tools := make([]any, 0, 129)
+	for i := 0; i < 129; i++ {
+		tools = append(tools, customTool(fmt.Sprintf("t%03d", i)))
+	}
+	wantRejected(withOverrides(map[string]any{"tools": tools}), "128")
+	createSession(t, s, withOverrides(map[string]any{"tools": tools[:128]}))
+
+	servers := make([]any, 0, 21)
+	toolsets := make([]any, 0, 21)
+	for i := 0; i < 21; i++ {
+		name := fmt.Sprintf("srv%02d", i)
+		servers = append(servers, mcpServer(name))
+		toolsets = append(toolsets, mcpToolset(name))
+	}
+	wantRejected(withOverrides(map[string]any{
+		"mcp_servers": servers, "tools": toolsets}), "20")
+	wantRejected(withOverrides(map[string]any{
+		"mcp_servers": []any{mcpServer("srv"), mcpServer("srv")},
+		"tools":       []any{mcpToolset("srv")}}), "srv")
+	wantRejected(withOverrides(map[string]any{
+		"mcp_servers": []any{mcpServer("srv")}}), "srv")
+	wantRejected(withOverrides(map[string]any{
+		"tools": []any{customTool("dup"), customTool("dup")}}), "dup")
+}
+
+// Session update validates the resulting resolved agent, exactly as agent
+// update validates the merged spec: a patch that strands a stored mcp_server
+// or grows tools past the cap rejects, one that keeps the spec consistent
+// lands (#287).
+func TestSessionUpdateValidatesResultingAgent(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sid := createSession(t, s, map[string]any{
+		"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
+			"mcp_servers": []any{mcpServer("srv")},
+			"tools":       []any{mcpToolset("srv")}},
+		"environment_id": envID,
+	})["id"].(string)
+
+	// Clearing tools alone strands the stored server.
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
+		map[string]any{"agent": map[string]any{"tools": []any{}}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	tools := make([]any, 0, 129)
+	for i := 0; i < 129; i++ {
+		tools = append(tools, customTool(fmt.Sprintf("t%03d", i)))
+	}
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"tools": tools, "mcp_servers": []any{}}})
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+
+	// The rejected updates left the stored snapshot intact.
+	status, got := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get after rejected updates: %d", status)
+	}
+	agent, _ := got["agent"].(map[string]any)
+	if n := len(agent["mcp_servers"].([]any)); n != 1 {
+		t.Errorf("mcp_servers after rejected updates = %d entries, want 1", n)
+	}
+
+	// Clearing both halves together leaves nothing stranded.
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"tools": []any{}, "mcp_servers": []any{}}}); status != http.StatusOK {
+		t.Fatalf("clearing both: status %d (body %v)", status, res)
+	}
+}
+
 // The SDK documents session metadata with the same sentence as agents and
 // vaults — 16 pairs, 64-char keys, 512-char values (betasession.go) — so
 // sessions run the same shared check, counted in runes like the others (#289).
@@ -357,7 +450,12 @@ func TestSessionUpdate(t *testing.T) {
 	})
 	id := created["id"].(string)
 
-	tools := []any{map[string]any{"type": "agent_toolset_20260401"}}
+	// The patched pair must satisfy validateAgentSpec (#287): the server needs
+	// a referencing mcp_toolset in the resulting tools.
+	tools := []any{
+		map[string]any{"type": "agent_toolset_20260401"},
+		map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"},
+	}
 	mcp := []any{map[string]any{"type": "url", "name": "docs", "url": "https://mcp.example.com"}}
 	status, updated := s.do(http.MethodPost, "/v1/sessions/"+id, map[string]any{
 		"title":    "titled",
