@@ -2,6 +2,7 @@ package docker_test
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -104,5 +105,47 @@ func TestBulkWriteOnANonRootImage(t *testing.T) {
 	}
 	if got := strings.TrimSpace(res.Stdout); got != "0" {
 		t.Errorf("%s files left in the workdir = %s, want 0", sandbox.TempPrefix, got)
+	}
+}
+
+// A write into a parent the daemon can extract into but the sandbox user cannot
+// write is the model's error, not the platform's fault (plan 23, #306). The PUT
+// lands the temporary file because the daemon extracts as root; the `mv`,
+// running as the image's user, is what gets refused — so the classification
+// must happen at the rename, where the k8s backend (whose temporary file is
+// created by the sandbox user) classifies the same sandbox at the create. A
+// docker-backend row for TestBulkWriteOnANonRootImage's reason.
+func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
+	image := "map-nonroot-test:latest"
+	build := exec.Command("docker", "build", "-q", "-t", image, "-")
+	build.Stdin = strings.NewReader(nonRootDockerfile)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the non-root image: %v\n%s", err, out)
+	}
+
+	p, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	ctx := context.Background()
+	sb, err := p.Provision(ctx, sandbox.Spec{
+		SessionID: domain.NewID("sesn"), Image: image, Workdir: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sb.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy: %v", err)
+		}
+	})
+
+	err = sb.WriteFile(ctx, "/etc/map-306-rootparent.txt", []byte("x"))
+	if !errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v, want ErrNotWritable", err)
+	}
+	var pnw *sandbox.PathNotWritableError
+	if !errors.As(err, &pnw) || pnw.Reason != "Permission denied" {
+		t.Fatalf("err = %v, want the refused move's reason", err)
 	}
 }

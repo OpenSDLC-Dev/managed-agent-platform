@@ -1028,6 +1028,120 @@ func TestWriteFileStreamClassifiesAnUnmakeableParent(t *testing.T) {
 	}
 }
 
+// The daemon extracts the archive as root, so a root-owned parent under a
+// non-root sandbox user takes the PUT — the refusal only surfaces in the rename
+// exec, which runs as that user. The same writability question a refused PUT
+// asks is asked there too, so the write is the model's error on this route as
+// well (plan 23, #306), never the raw exit the executor would abandon the work
+// item over.
+func TestWriteFileClassifiesARootOwnedParentAtRename(t *testing.T) {
+	// The rename and the probe are recognized by their commands rather than
+	// their positions, as the PUT-refusal tests recognize theirs.
+	kinds := map[string]string{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			switch cmd := body.Cmd[len(body.Cmd)-2]; {
+			case strings.Contains(cmd, "mv -f"):
+				kinds[id] = "rename"
+			case strings.Contains(cmd, ": > '/etc/"+sandbox.TempPrefix):
+				kinds[id] = "probe"
+			}
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+			switch kinds[execID()] {
+			case "rename":
+				w.Write(frame(streamStderr, "mv: cannot move '/etc/.map-write-x' to '/etc/f.txt': Permission denied"))
+			case "probe":
+				w.Write(frame(streamStdout, "Permission denied"))
+			}
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			switch kinds[execID()] {
+			case "rename":
+				io.WriteString(w, `{"Running":false,"ExitCode":1}`)
+			case "probe":
+				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, sandbox.ExitPathNotWritable)
+			default:
+				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
+	if !errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v, want ErrNotWritable", err)
+	}
+	var pnw *sandbox.PathNotWritableError
+	if !errors.As(err, &pnw) || pnw.Reason != "Permission denied" {
+		t.Fatalf("err = %v, want the probe's reason carried", err)
+	}
+}
+
+// A failed move over a parent that can take a create keeps the raw error: the
+// failure was the transfer's, not the target's, and calling the path unwritable
+// would tell the model the path is bad when it is not.
+func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
+	var commands []string
+	renames := map[string]bool{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			cmd := body.Cmd[len(body.Cmd)-2]
+			commands = append(commands, cmd)
+			renames[id] = strings.Contains(cmd, "mv -f")
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			if renames[execID()] {
+				io.WriteString(w, `{"Running":false,"ExitCode":1}`)
+			} else {
+				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x"))
+	if errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v; a writable target must keep the raw error", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "exit 1") {
+		t.Fatalf("err = %v, want the move's own failure", err)
+	}
+	if last := commands[len(commands)-1]; !strings.Contains(last, ": > '/workspace/"+sandbox.TempPrefix) {
+		t.Errorf("last exec = %q, want the writability probe asked after the failed move", last)
+	}
+}
+
 // A path that still 404s after its parents exist is a bad path, not a missing
 // sandbox: reporting ErrNotFound would send the executor after the wrong fault.
 func TestWriteFileKeepsPathFailuresDistinctFromAMissingSandbox(t *testing.T) {

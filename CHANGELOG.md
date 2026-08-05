@@ -163,14 +163,20 @@ copy of an entry here.
   still wins at 15; the mid-stream `tee` failure stays a raw exit 1, a
   failure of the transfer rather than the target); docker attempts the same
   create in a classify-on-refusal probe exec when the daemon refuses the
-  PUT on a replaceable target, and takes `mkdir`'s own stderr tail in
-  `mkdirAll` — no daemon-text parsing anywhere, and both backends' reasons
-  come from the same shell's strerror, which is what keeps #205's
-  identical-answers invariant. The toolset words the result the way the
-  reference's `fsErrorMessage` table does: `permission denied` takes the
-  reference's casing, everything else passes through raw. Red observed
-  first on every new test: the host-bash exit-20 + reason rows, docker's
-  probe classification and `mkdirAll` strerror tests, the toolset table
+  PUT on a replaceable target, takes `mkdir`'s own stderr tail in
+  `mkdirAll`, and asks the same probe after a failed rename — the daemon
+  extracts as root, so a root-owned parent under a non-root uid takes the
+  PUT and refuses only the move, and a probe that succeeds keeps the raw
+  error there, a failure of the transfer rather than the target — no
+  daemon-text parsing anywhere, and both backends' reasons come from the
+  same shell's strerror, which is what keeps #205's identical-answers
+  invariant. The toolset words the result the way the reference's
+  `fsErrorMessage` table does: `permission denied` takes the reference's
+  casing, everything else passes through raw. Red observed first on every
+  new test: the host-bash exit-20 + reason rows, docker's probe
+  classification, `mkdirAll` strerror, and rename-refusal tests (the last
+  measured against a real non-root image, whose raw `mv … Permission
+  denied` was exactly the abandoned-to-reclaim error), the toolset table
   rows, and the read-only-root contract cells tightened from `err != nil`
   to `ErrNotWritable` (buffered, quarter-megabyte streamed, and a
   new-parent cell — green on both real backends in seconds). docs:

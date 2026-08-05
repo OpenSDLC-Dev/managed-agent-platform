@@ -1231,6 +1231,16 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 	case sandbox.ExitPathNotReplaceable:
 		return fmt.Errorf("%s: %w", path, sandbox.ErrNotReplaceable)
 	default:
+		// The daemon extracts the archive as root, so a parent the sandbox
+		// user cannot write takes the PUT and refuses the write only here, at
+		// the move, which runs as that user (measured on non-root images:
+		// TestWriteIntoARootOwnedParentOnANonRootImage). The same writability
+		// question a refused PUT asks is asked again — and a parent that can
+		// take a create keeps the raw error: that failure was the transfer's,
+		// not the target's (plan 23, #306).
+		if cErr := c.notWritable(ctx, path); cErr != nil {
+			return cErr
+		}
 		return fmt.Errorf("docker: write %s: exit %d: %s", path, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 }
@@ -1281,6 +1291,8 @@ func (c *container) unreplaceable(ctx context.Context, path string) error {
 // so a refused write onto a replaceable target attempts the same create the
 // extraction would need in an exec of its own — with the agent's credentials,
 // in the target's own directory, under a temporary name it removes on success.
+// A failed rename asks it too: the daemon extracts as root, so a parent the
+// sandbox user cannot write takes the PUT and refuses only the move.
 func (c *container) notWritable(ctx context.Context, path string) error {
 	probe := gopath.Join(gopath.Dir(path), sandbox.TempName())
 	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: fmt.Sprintf(
