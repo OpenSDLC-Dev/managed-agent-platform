@@ -138,7 +138,10 @@ copy of an entry here.
   works does it fall back to a POSIX `sed` extraction that fails closed on
   any value it cannot decode faithfully (a backslash in the raw match — an
   escape it would have to interpret, or a truncated match at an escaped
-  quote — denies with a rephrase-without-quotes message). The allowlist,
+  quote — denies with a rephrase-without-quotes message) or attribute
+  unambiguously (anything but exactly one `"command"` key in the payload
+  denies — the greedy match would otherwise judge the last key while the
+  harness executes `tool_input.command`). The allowlist,
   metacharacter screen, and flag denials are untouched and stay fail-closed;
   real-python hosts keep identical exit codes on every row, and the stub-host
   change is that a broken interpreter no longer masquerades as policy.

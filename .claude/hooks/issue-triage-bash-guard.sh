@@ -30,6 +30,17 @@ if [ -n "$py" ]; then
     exit 2
   }
 else
+  # The extraction must be unambiguous as well as faithful: sed's greedy
+  # match selects the LAST "command" key, and the harness executes
+  # tool_input.command — so a payload carrying anything but exactly one
+  # bare "command" needle is denied rather than judged by the wrong key.
+  # (Unreachable today — string values escape their quotes, and the Bash
+  # tool_input has a single command key — but payload shapes drift.)
+  needles=$(printf '%s' "$payload" | awk -F'"command"' '{ c += NF - 1 } END { print c + 0 }')
+  if [ "$needles" != 1 ]; then
+    echo "issue-triage guard: no working python on PATH and the payload does not carry exactly one \"command\" key, so the command cannot be attributed faithfully" >&2
+    exit 2
+  fi
   cmd=$(printf '%s' "$payload" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
   case "$cmd" in
     *\\*)
