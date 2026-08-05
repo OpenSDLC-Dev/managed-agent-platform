@@ -15,6 +15,21 @@ copy of an entry here.
 
 ### Added
 
+- **A session's resolved agent answers to the whole-spec agent caps**
+  ([internal/api/sessions.go](./internal/api/sessions.go), #287). The #66
+  validations ran on agent create/update only, so a session's
+  `agent_with_overrides` could assemble exactly the specs agent create refuses —
+  129 tools, a duplicate or unreferenced MCP server, a colliding tool name — and
+  every turn of that session failed at the provider instead of the create being
+  a 400. `resolveAgent` now runs `wire.go`'s `validateAgentSpec` on the merged
+  resolved spec — on every resolve, so a plain reference to a stored spec that
+  predates #66's enforcement and violates a cap also 400s at create — and
+  session update validates the patch's merged result the way agent update does:
+  a patch that strands a stored `mcp_server` or grows past a cap rejects, and a
+  rejected update leaves the stored snapshot intact. Whether
+  the reference rejects the same set on the session surface is unobserved —
+  recorded with the #66 INFERRED entry in docs/DIVERGENCES.md.
+
 - **Session create/update enforce the SDK's documented metadata caps**
   ([internal/api/sessions.go](./internal/api/sessions.go), #289). The pinned SDK
   bounds session metadata with the same sentence it uses for agents — at most
@@ -43,7 +58,7 @@ copy of an entry here.
   entry-counting of the 128 cap, and the not-rejected dangling `mcp_toolset`
   reference are ours — recorded in
   [docs/DIVERGENCES.md](./docs/DIVERGENCES.md); session `agent_with_overrides`
-  still applies none of these (#287).
+  applied none of these until #287 closed the gap (entry above).
 
 - **Sandbox pods can pull from a private registry — `SANDBOX_K8S_IMAGE_PULL_SECRETS`**
   ([internal/sandbox/k8s/pullsecrets.go](./internal/sandbox/k8s/pullsecrets.go),

@@ -274,6 +274,14 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		spec.Skills = items
 	}
 	spec.Normalize()
+	// The resolved spec answers to the same whole-spec caps as a stored agent
+	// (#66): an agent_with_overrides must not smuggle in a tools/mcp_servers
+	// set that agent create would reject (#287). Runs on every resolve, not
+	// just overrides — a pre-#66 stored spec that violates a cap fails here
+	// too, at create rather than on every turn.
+	if err := validateAgentSpec(spec); err != nil {
+		return snap, err
+	}
 
 	return sessionAgentJSON{
 		Type: "agent", ID: domain.ID(agentID), Version: version, Name: name,
@@ -780,6 +788,11 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 			default:
 				return nil, errInvalid("only agent.tools and agent.mcp_servers can be updated on a session")
 			}
+		}
+		// Validate the merged result, exactly as agent update does: a patch
+		// that strands a stored mcp_server or grows past a cap rejects (#287).
+		if err := validateAgentSpec(agent.AgentSpec); err != nil {
+			return nil, err
 		}
 		row.agentJSON, err = json.Marshal(agent)
 		if err != nil {
