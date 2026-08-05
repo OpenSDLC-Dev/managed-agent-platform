@@ -1092,6 +1092,76 @@ func TestWriteFileClassifiesARootOwnedParentAtRename(t *testing.T) {
 	}
 }
 
+// The temporary a refused rename leaves behind was landed by the daemon's
+// root-credentialed extraction, so a parent the sandbox user cannot write holds
+// a file only the same credential can remove. The shed therefore runs as
+// User "0" — a fixed `rm -f` of the platform's own TempPrefix name, and nothing
+// else — while every other exec keeps the container's own user (#310).
+func TestARefusedRenameShedsItsTempWithTheDaemonsCredential(t *testing.T) {
+	type execSeen struct{ cmd, user string }
+	var seen []execSeen
+	kinds := map[string]string{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			cmd := body.Cmd[len(body.Cmd)-2]
+			seen = append(seen, execSeen{cmd: cmd, user: body.User})
+			switch {
+			case strings.Contains(cmd, "mv -f"):
+				kinds[id] = "rename"
+			case strings.Contains(cmd, ": > '/etc/"+sandbox.TempPrefix):
+				kinds[id] = "probe"
+			}
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+			switch kinds[execID()] {
+			case "rename":
+				w.Write(frame(streamStderr, "mv: cannot move '/etc/.map-write-x' to '/etc/f.txt': Permission denied"))
+			case "probe":
+				w.Write(frame(streamStdout, "Permission denied"))
+			}
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			switch kinds[execID()] {
+			case "rename":
+				io.WriteString(w, `{"Running":false,"ExitCode":1}`)
+			case "probe":
+				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, sandbox.ExitPathNotWritable)
+			default:
+				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
+	if !errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v, want ErrNotWritable", err)
+	}
+	last := seen[len(seen)-1]
+	if last.user != "0" || !strings.Contains(last.cmd, "rm -f '/etc/"+sandbox.TempPrefix) {
+		t.Fatalf("last exec = %+v, want the daemon-credentialed shed of the platform's temporary", last)
+	}
+	for _, e := range seen[:len(seen)-1] {
+		if e.user != "" {
+			t.Errorf("exec %q carries user %q, want the container's own", e.cmd, e.user)
+		}
+	}
+}
+
 // A failed move over a parent that can take a create keeps the raw error: the
 // failure was the transfer's, not the target's, and calling the path unwritable
 // would tell the model the path is bad when it is not.
@@ -1137,8 +1207,16 @@ func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exit 1") {
 		t.Fatalf("err = %v, want the move's own failure", err)
 	}
-	if last := commands[len(commands)-1]; !strings.Contains(last, ": > '/workspace/"+sandbox.TempPrefix) {
-		t.Errorf("last exec = %q, want the writability probe asked after the failed move", last)
+	if len(commands) < 2 {
+		t.Fatalf("execs = %q, want the probe then the shed after the failed move", commands)
+	}
+	if probe := commands[len(commands)-2]; !strings.Contains(probe, ": > '/workspace/"+sandbox.TempPrefix) {
+		t.Errorf("second-to-last exec = %q, want the writability probe asked after the failed move", probe)
+	}
+	// The shed runs on the raw route too — idempotent where the script's own
+	// rm already worked (#310).
+	if last := commands[len(commands)-1]; !strings.Contains(last, "rm -f '/workspace/"+sandbox.TempPrefix) {
+		t.Errorf("last exec = %q, want the daemon-credentialed shed", last)
 	}
 }
 

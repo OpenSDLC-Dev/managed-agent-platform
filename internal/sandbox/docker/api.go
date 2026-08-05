@@ -327,7 +327,12 @@ type execConfig struct {
 	AttachStdout bool     `json:"AttachStdout"`
 	AttachStderr bool     `json:"AttachStderr"`
 	Cmd          []string `json:"Cmd"`
-	WorkingDir   string   `json:"WorkingDir"`
+	// User runs the exec as someone other than the container's own user.
+	// Empty — the default, and every exec's but one — keeps the container's;
+	// only the root-credentialed shed of a refused rename's temporary sets it
+	// (#310).
+	User       string `json:"User,omitempty"`
+	WorkingDir string `json:"WorkingDir"`
 }
 
 func (c *apiClient) execCreate(ctx context.Context, id string, cfg execConfig) (string, error) {

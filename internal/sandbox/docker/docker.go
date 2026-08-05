@@ -1223,13 +1223,15 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		c.discard(ctx, tmp)
 		return err
 	}
-	switch res.ExitCode {
-	case 0:
+	if res.ExitCode == 0 {
 		return nil
+	}
+	var ferr error
+	switch res.ExitCode {
 	case sandbox.ExitPathIsDirectory:
-		return fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
+		ferr = fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
 	case sandbox.ExitPathNotReplaceable:
-		return fmt.Errorf("%s: %w", path, sandbox.ErrNotReplaceable)
+		ferr = fmt.Errorf("%s: %w", path, sandbox.ErrNotReplaceable)
 	default:
 		// The daemon extracts the archive as root, so a parent the sandbox
 		// user cannot write takes the PUT and refuses the write only here, at
@@ -1239,10 +1241,18 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		// take a create keeps the raw error: that failure was the transfer's,
 		// not the target's (plan 23, #306).
 		if cErr := c.notWritable(ctx, path); cErr != nil {
-			return cErr
+			ferr = cErr
+		} else {
+			ferr = fmt.Errorf("docker: write %s: exit %d: %s", path, res.ExitCode, strings.TrimSpace(res.Stderr))
 		}
-		return fmt.Errorf("docker: write %s: exit %d: %s", path, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
+	// Every failure branch above had the script `rm -f` the temporary with the
+	// sandbox user's credentials — which is not the credential that landed it,
+	// so a parent the sandbox user cannot write keeps the refused payload
+	// forever. Shed it with the credential that put it there (#310); idempotent
+	// where the script's own rm already worked.
+	c.discardAsRoot(ctx, tmp)
+	return ferr
 }
 
 // pathFault asks the sandbox whether a non-directory is what blocked path,
@@ -1309,6 +1319,39 @@ func (c *container) notWritable(ctx context.Context, path string) error {
 // matters, and a sandbox that cannot delete the file is about to be thrown away.
 func (c *container) discard(ctx context.Context, tmp string) {
 	_, _ = c.Exec(ctx, sandbox.ExecRequest{Command: "rm -f " + shellQuote(tmp)})
+}
+
+// discardAsRoot sheds a temporary file the sandbox user's own `rm -f` could
+// not: a refused rename's temporary was landed by the daemon's root-credentialed
+// extraction, so a parent the sandbox user cannot write would hold the refused
+// payload forever (#310, measured on non-root images). The shed carries the
+// credential that landed it — an exec as User "0" — bounded the way the mode
+// preservation is: the command is fixed, an `rm -f` of the platform's own
+// shellQuoted TempPrefix name, so the credential removes exactly what the
+// daemon put there. An ancestor the agent redirected resolves to at most a
+// same-named platform temporary — the basename is this write's own random
+// TempName, not the agent's to choose — and an rm of a symlink unlinks the
+// link. Best-effort for discard's reason: the caller already has the error
+// that matters, and a daemon that refuses the root exec leaves only the
+// residue this was already leaving.
+func (c *container) discardAsRoot(ctx context.Context, tmp string) {
+	execID, err := c.api.execCreate(ctx, c.id, execConfig{
+		AttachStdout: true,
+		AttachStderr: true,
+		User:         "0",
+		Cmd: []string{"/bin/bash", "-c", execWrapper,
+			"map-exec", "rm -f " + shellQuote(tmp), "0"},
+		WorkingDir: c.workdir,
+	})
+	if err != nil {
+		return
+	}
+	stream, err := c.api.execStart(ctx, execID)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, stream)
+	_ = stream.Close()
 }
 
 // mkdirAll makes the directory a write needs, and is where a path blocked by a

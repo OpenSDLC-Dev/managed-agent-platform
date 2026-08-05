@@ -148,4 +148,18 @@ func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 	if !errors.As(err, &pnw) || pnw.Reason != "Permission denied" {
 		t.Fatalf("err = %v, want the refused move's reason", err)
 	}
+
+	// And the refused write left nothing behind. The temporary landed through
+	// the daemon's root-credentialed extraction, so the sandbox user's own
+	// `rm -f` could not shed it — the shed has to carry the same credential
+	// that landed it (#310).
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{
+		Command: "ls -A /etc | grep -c '^" + sandbox.TempPrefix + "' || true",
+	})
+	if err != nil {
+		t.Fatalf("list /etc: %v", err)
+	}
+	if got := strings.TrimSpace(res.Stdout); got != "0" {
+		t.Errorf("%s files left in /etc = %s, want 0 (#310)", sandbox.TempPrefix, got)
+	}
 }

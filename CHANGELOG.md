@@ -141,8 +141,25 @@ copy of an entry here.
 
 ### Fixed
 
-- **A write the sandbox cannot land is the model's error, not the platform's
-  fault** ([internal/sandbox/sandbox.go](./internal/sandbox/sandbox.go),
+- **A refused rename's temporary is shed with the credential that landed it**
+  ([internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
+  [internal/sandbox/docker/api.go](./internal/sandbox/docker/api.go); #310, the
+  verifier's finding on #306's PR). The docker daemon extracts a write's
+  archive as root, so when the rename is what fails — a root-owned parent
+  under a non-root uid, the route #306 classifies — the script's own `rm -f`
+  runs as a user who cannot unlink from that directory, and the refused
+  payload stayed behind as a root-owned `.map-write-*` file, one per refused
+  write (measured on a real non-root image). Every rename-failure exit now
+  ends with a best-effort root-credentialed shed: an exec as `User: "0"`
+  whose command is fixed — `rm -f` of the platform's own shellQuoted
+  TempPrefix name, this write's random one, so the credential removes exactly
+  what the daemon put there — idempotent where the script's rm already
+  worked, silent like `discard` for the same reason. The k8s backend needs
+  nothing: its temporary is created by the sandbox user, so the same
+  credential that made it removes it. Red observed first: the real-image row
+  measured the residue (`.map-write-` count 1 in `/etc`, want 0), the
+  fake-daemon row wanted a `User "0"` shed exec that did not exist, and the
+  raw-route sequence re-pin wanted the shed after the probe. ([internal/sandbox/sandbox.go](./internal/sandbox/sandbox.go),
   [internal/sandbox/filefault.go](./internal/sandbox/filefault.go),
   [internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go),
   [internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
