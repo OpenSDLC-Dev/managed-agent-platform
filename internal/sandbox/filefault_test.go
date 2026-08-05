@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -157,5 +158,60 @@ func TestTempName(t *testing.T) {
 			t.Fatalf("%q was minted twice", n)
 		}
 		seen[n] = true
+	}
+}
+
+// unreplaceable runs the shared write-target probe against one path and returns
+// what the guarded exit turned its answer into: ExitPathNotReplaceable when the
+// probe said the target cannot be renamed onto, 0 when it said it can.
+func unreplaceable(t *testing.T, path string) int {
+	t.Helper()
+	cmd := exec.Command("/bin/bash", "-c",
+		sandbox.UnreplaceableShell+"\nif __map_unreplaceable \"$1\"; then exit "+strconv.Itoa(sandbox.ExitPathNotReplaceable)+"; fi\nexit 0",
+		"map-unrep", path)
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("run the unreplaceable shell: %v", err)
+		}
+		return ee.ExitCode()
+	}
+	return 0
+}
+
+// The probe decides which write targets are refused before the rename runs, so
+// its contract is pinned against a real shell like __map_path_fault's is. The
+// two positive cases are a device node and a mount point; everything a rename
+// can legitimately replace — a regular file, a missing path, and above all a
+// symlink, even one pointing at a device — must stay negative, because what a
+// rename replaces is the name, and refusing a symlink would regress the
+// documented supplant behavior (#205).
+func TestUnreplaceableShell(t *testing.T) {
+	if _, err := os.Stat("/proc/self/mountinfo"); err != nil {
+		t.Skip("no /proc/self/mountinfo on this host")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/plain", []byte("x"), 0o644); err != nil {
+		t.Fatalf("stage a regular file: %v", err)
+	}
+	if err := os.Symlink("/dev/null", dir+"/tonull"); err != nil {
+		t.Fatalf("stage a symlink to a device: %v", err)
+	}
+	cases := []struct {
+		name, path string
+		want       int
+	}{
+		{"device node", "/dev/null", sandbox.ExitPathNotReplaceable},
+		{"mount point", "/proc", sandbox.ExitPathNotReplaceable},
+		{"regular file", dir + "/plain", 0},
+		{"missing path", dir + "/absent", 0},
+		{"symlink to a device", dir + "/tonull", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if code := unreplaceable(t, tc.path); code != tc.want {
+				t.Errorf("exit %d for %s, want %d", code, tc.path, tc.want)
+			}
+		})
 	}
 }

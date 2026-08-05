@@ -1262,6 +1262,8 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 		return fmt.Errorf("%s: %w", dir, sandbox.ErrNotDirectory)
 	case sandbox.ExitPathIsDirectory:
 		return fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
+	case sandbox.ExitPathNotReplaceable:
+		return fmt.Errorf("%s: %w", path, sandbox.ErrNotReplaceable)
 	default:
 		// The write failed in the pod for a reason that is the sandbox's, not the
 		// path's — a read-only mount, a full disk. A clean exec that exited
@@ -1411,10 +1413,11 @@ __map_bulk_discard "$1" "$2"
 // shellQuote makes a path a single, literal shell word.
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-// This backend's own script exit codes. 15 and 16 are missing from the run
-// because they are not this backend's to assign: they are the codes the shared
-// path-fault shell both backends embed uses (sandbox.ExitPathNotDirectory and
-// sandbox.ExitPathIsDirectory), and the scripts below spell them as literals.
+// This backend's own script exit codes. 15, 16 and 19 are missing from the run
+// because they are not this backend's to assign: they are shared write-path codes
+// both backends embed (sandbox.ExitPathNotDirectory, sandbox.ExitPathIsDirectory
+// and sandbox.ExitPathNotReplaceable), and the scripts below spell them as
+// literals.
 const (
 	readNotExist   = 10
 	readIsDir      = 11
@@ -1494,13 +1497,15 @@ printf %s "$3"
 // reason. Being a rename, it replaces the name at $1 rather than writing through
 // it, so a symlink there is supplanted by a regular file; that is what the docker
 // daemon's extraction has always done, and the two backends now agree on it. A
-// device node is supplanted too, but only where the temporary file can land beside
-// it: under a mounted /dev the docker backend cannot put one there and fails, which
-// is the one target the two still answer differently (#205).
+// device node used to be supplanted the same way — /dev/null quietly stopped
+// being a sink — which is why __map_unreplaceable is asked *before* the move: a
+// device node, or a bind-mounted file the move could only fail against (EBUSY),
+// exits 19 (sandbox.ExitPathNotReplaceable) with the target left what it was,
+// and the two backends now answer it identically too (#205).
 //
-// The rename is also what decides the one target that must be refused: `mv -f file
-// dir` moves the file *into* the directory, so a target that is a directory exits
-// 16 (sandbox.ExitPathIsDirectory) and the directory is left whole. It is asked
+// The rename is also what decides the other target that must be refused: `mv -f
+// file dir` moves the file *into* the directory, so a target that is a directory
+// exits 16 (sandbox.ExitPathIsDirectory) and the directory is left whole. It is asked
 // twice, because one test before the move is a claim about a moment that has
 // passed: something in the sandbox can make the target a directory in between, and
 // then the move lands the file *inside* it and exits 0, which would report a
@@ -1610,7 +1615,7 @@ printf %s "$3"
 // its own `chmod`. Its failure is silent for the same reason every step in
 // __map_preserve_mode is: the bytes are one `mv` from being landed, so a `chmod`
 // that cannot run costs the mode rather than the write.
-const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + `
+const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + sandbox.UnreplaceableShell + `
 mkdir -p "$2" || { __map_path_fault "$2"; exit 1; }
 umask 022
 : > "$4" || exit 1
@@ -1619,6 +1624,7 @@ set -o pipefail
 sz=$(tee "$4" | wc -c) || { rm -f "$4"; exit 1; }
 [ "$sz" -eq "$3" ] || { rm -f "$4"; exit 14; }
 if [ -d "$1" ]; then rm -f "$4"; exit 16; fi
+if __map_unreplaceable "$1"; then rm -f "$4"; exit 19; fi
 __map_preserve_mode "$1" "$4"
 mv -f "$4" "$1" || { rm -f "$4"; exit 1; }
 if [ -d "$1" ]; then rm -f "$1/${4##*/}"; exit 16; fi

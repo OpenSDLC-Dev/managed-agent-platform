@@ -1176,18 +1176,25 @@ func (c *container) discardBulk(ctx context.Context, b *sandbox.BulkWrite) {
 }
 
 // rename puts a landed temporary file at its target — the step that makes a write
-// atomic — after refusing the one target a rename would quietly do the wrong thing
+// atomic — after refusing the targets a rename would quietly do the wrong thing
 // with. `mv -f file dir` moves the file *into* the directory, so a target that is
 // one is answered with the sentinel a read of a directory gets, and the temporary
 // file is removed rather than left behind. The daemon's own extraction, given the
-// same target, deletes the directory and puts the file where it was (#71).
+// same target, deletes the directory and puts the file where it was (#71). A
+// target the shared __map_unreplaceable recognizes — a device node, a bind-mounted
+// file — is refused the same way (#205): the `mv` there would fail against a mount
+// point anyway (EBUSY), and for a device under a mounted /dev it never had a file
+// to move — the daemon extracts the temporary file into the image's /dev on the
+// overlay, where the tmpfs mounted over it keeps the container from ever seeing it,
+// so the `mv` failed with "cannot stat" and the write read as the sandbox breaking.
 //
 // The move is also where the target's permission bits would otherwise be lost, so
 // the shared __map_preserve_mode carries them onto the temporary file first — the
 // k8s backend's write script calls the same function at the same point (#204).
 func (c *container) rename(ctx context.Context, tmp, path string) error {
-	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.PreserveModeShell + fmt.Sprintf(
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.PreserveModeShell + sandbox.UnreplaceableShell + fmt.Sprintf(
 		"if [ -d %[2]s ]; then rm -f %[1]s; exit %[3]d; fi\n"+
+			"if __map_unreplaceable %[2]s; then rm -f %[1]s; exit %[5]d; fi\n"+
 			"__map_preserve_mode %[2]s %[1]s\n"+
 			"mv -f %[1]s %[2]s || { rm -f %[1]s; exit 1; }\n"+
 			// Asked again, because the first answer describes a moment that has
@@ -1195,7 +1202,8 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 			// between, and then the move puts the file *inside* it and exits 0 —
 			// a reported success that wrote nothing where the caller asked.
 			"if [ -d %[2]s ]; then rm -f %[2]s/%[4]s; exit %[3]d; fi",
-		shellQuote(tmp), shellQuote(path), sandbox.ExitPathIsDirectory, gopath.Base(tmp))})
+		shellQuote(tmp), shellQuote(path), sandbox.ExitPathIsDirectory, gopath.Base(tmp),
+		sandbox.ExitPathNotReplaceable)})
 	if err != nil {
 		// The bytes are landed and unnamed, and this exec is how they were to be
 		// named; shed them rather than leave the sandbox carrying a payload nothing
@@ -1208,6 +1216,8 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		return nil
 	case sandbox.ExitPathIsDirectory:
 		return fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
+	case sandbox.ExitPathNotReplaceable:
+		return fmt.Errorf("%s: %w", path, sandbox.ErrNotReplaceable)
 	default:
 		return fmt.Errorf("docker: write %s: exit %d: %s", path, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}

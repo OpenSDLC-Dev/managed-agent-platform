@@ -2011,3 +2011,18 @@ func TestBulkScriptsClassifyAnArchiveThatDidNotArrive(t *testing.T) {
 			got, sandbox.ExitBulkExtract, sandbox.ExitBulkIncomplete)
 	}
 }
+
+// The write script spells the unreplaceable refusal as a literal, and no
+// unprivileged host test can make the real script take that branch — the
+// temporary file lands in the target's own directory, and a device node's or
+// mount point's parent is not writable without root. So the literal is pinned
+// to its constant by text instead: renumbering ExitPathNotReplaceable fails
+// here rather than in a live session. The probe's own answers are pinned
+// against a real shell in the shared package's TestUnreplaceableShell.
+func TestWriteScriptSpellsTheUnreplaceableExit(t *testing.T) {
+	want := `if __map_unreplaceable "$1"; then rm -f "$4"; exit ` +
+		strconv.Itoa(sandbox.ExitPathNotReplaceable) + `; fi`
+	if !strings.Contains(writeScript, want) {
+		t.Fatalf("writeScript does not spell the unreplaceable refusal as %q — the literal drifted from sandbox.ExitPathNotReplaceable", want)
+	}
+}

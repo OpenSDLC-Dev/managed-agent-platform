@@ -859,6 +859,72 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// A file bind-mounted into the sandbox cannot be renamed onto — rename(2)
+	// refuses a mount point with EBUSY — so the atomic write genuinely cannot be
+	// made there. Every sandbox this suite runs has such a file at /etc/hosts
+	// (the docker daemon and the kubelet both manage it), which makes it the one
+	// target both backends can be asked about identically. The answer must be
+	// ErrNotReplaceable, a tool result the model can act on with bash redirection
+	// — not an unclassified fault the executor retries until the lease runs out
+	// (issue #205).
+	t.Run("WriteOntoBindMountedTarget", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		before, err := sb.ReadFile(ctx, "/etc/hosts")
+		if err != nil {
+			t.Fatalf("read the bind-mounted target: %v", err)
+		}
+		if err := sb.WriteFile(ctx, "/etc/hosts", []byte("clobber\n")); !errors.Is(err, sandbox.ErrNotReplaceable) {
+			t.Errorf("write onto a bind-mounted file: err = %v, want ErrNotReplaceable", err)
+		}
+		if err := sb.WriteFileStream(ctx, "/etc/hosts", strings.NewReader("clobber\n"), 8); !errors.Is(err, sandbox.ErrNotReplaceable) {
+			t.Errorf("stream write onto a bind-mounted file: err = %v, want ErrNotReplaceable", err)
+		}
+		if got, err := sb.ReadFile(ctx, "/etc/hosts"); err != nil || string(got) != string(before) {
+			t.Errorf("the bind-mounted target changed (err %v); want it holding what it held", err)
+		}
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "ls /etc/" + sandbox.TempPrefix + "* 2>/dev/null | wc -l"})
+		if err != nil {
+			t.Fatalf("count write residue: %v", err)
+		}
+		if got := strings.TrimSpace(res.Stdout); got != "0" {
+			t.Errorf("%s files left beside the refused target = %s, want 0", sandbox.TempPrefix, got)
+		}
+	})
+
+	// A device node is the other target a rename cannot honestly serve, and the
+	// one where the two backends used to part ways: k8s's `mv` succeeded and
+	// *supplanted* the node — /dev/null quietly stopped being a sink — while
+	// docker failed unclassified. Both must refuse with ErrNotReplaceable and
+	// leave the node what it was (issue #205).
+	t.Run("WriteOntoDeviceNode", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		if err := sb.WriteFile(ctx, "/dev/null", []byte("x")); !errors.Is(err, sandbox.ErrNotReplaceable) {
+			t.Errorf("write onto a device node: err = %v, want ErrNotReplaceable", err)
+		}
+		if err := sb.WriteFileStream(ctx, "/dev/null", strings.NewReader("x"), 1); !errors.Is(err, sandbox.ErrNotReplaceable) {
+			t.Errorf("stream write onto a device node: err = %v, want ErrNotReplaceable", err)
+		}
+		res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "[ -c /dev/null ] && echo char || echo supplanted"})
+		if err != nil {
+			t.Fatalf("ask what /dev/null is now: %v", err)
+		}
+		if got := strings.TrimSpace(res.Stdout); got != "char" {
+			t.Errorf("/dev/null is %q after the refused writes, want the character device intact", got)
+		}
+		// This sees what the sandbox can see: the k8s tee'd temporary, which the
+		// refusal must shed. Docker's daemon-side copy lands on the overlay under
+		// the tmpfs at /dev, invisible to any in-container observer either way.
+		res, err = sb.Exec(ctx, sandbox.ExecRequest{Command: "ls /dev/" + sandbox.TempPrefix + "* 2>/dev/null | wc -l"})
+		if err != nil {
+			t.Fatalf("count write residue: %v", err)
+		}
+		if got := strings.TrimSpace(res.Stdout); got != "0" {
+			t.Errorf("%s files left beside the refused target = %s, want 0", sandbox.TempPrefix, got)
+		}
+	})
+
 	// What the rename does to a symlink, which is the one non-regular target both
 	// backends can reach identically: it replaces the *name*, so the link is
 	// supplanted by a regular file and whatever it pointed at is left alone —
