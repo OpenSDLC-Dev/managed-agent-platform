@@ -15,6 +15,23 @@ copy of an entry here.
 
 ### Added
 
+- **Plan 23 drafted: a write the sandbox cannot land becomes the model's error,
+  not the platform's fault**
+  ([docs/plan/23_classified-unwritable-write.md](./docs/plan/23_classified-unwritable-write.md),
+  [docs/REFERENCE_PROJECTS.md](./docs/REFERENCE_PROJECTS.md); #306). The plan
+  records what the reference implementation does — the SDK's
+  `tools/agenttoolset` (the toolset the real `ant` worker runs) answers every
+  write failure to the *model* as an `is_error` tool_result, worded by
+  `fsErrorMessage`'s four-entry normalization table with raw-text passthrough,
+  and puts no error-code taxonomy on the wire — and designs the convergence:
+  a new internal `ErrNotWritable` sentinel (exit 20), both backends deriving
+  the reason from the sandbox's own bash `strerror` text (k8s in-script,
+  docker via a classify-on-refusal probe — no daemon-text parsing), and a
+  `fileFault` row that normalizes wording the way the reference does.
+  REFERENCE_PROJECTS.md now names `tools/agenttoolset` as the
+  behavior-and-wording authority for `agent_toolset_20260401` tools. Status
+  `draft`; implementation is a follow-on PR that flips it `in-progress`.
+
 - **A session override's replacement system prompt answers to the SDK's
   documented 100,000-character ceiling**
   ([internal/api/sessions.go](./internal/api/sessions.go), #291). The pinned SDK
