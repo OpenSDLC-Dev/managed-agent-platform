@@ -42,10 +42,16 @@ func spec() sandbox.Spec {
 }
 
 // inspectJSON is what the daemon says about a container this platform created
-// for s: the ownership label is what Provision checks before adopting it.
+// for s: the ownership label is what Provision checks before adopting it, and
+// the fixed-at-create configuration (network mode, image, workdir) is what the
+// adoption's spec check compares (#29).
 func inspectJSON(id string, s sandbox.Spec, running bool) string {
-	return fmt.Sprintf(`{"Id":%q,"State":{"Running":%t},"Config":{"Labels":{%q:%q}}}`,
-		id, running, sessionLabel, string(s.SessionID))
+	workdir := s.Workdir
+	if workdir == "" {
+		workdir = sandbox.DefaultWorkdir
+	}
+	return fmt.Sprintf(`{"Id":%q,"State":{"Running":%t},"Config":{"Labels":{%q:%q},"Image":%q,"WorkingDir":%q},"HostConfig":{"NetworkMode":%q}}`,
+		id, running, sessionLabel, string(s.SessionID), s.Image, workdir, networkMode(s.Networking))
 }
 
 // fakeExec describes an exec the way a real daemon runs one: the exec's process
@@ -261,6 +267,62 @@ func TestProvisionRefusesAContainerItDoesNotOwn(t *testing.T) {
 	}
 }
 
+// The ownership label says the platform created the container for this session;
+// it does not say the container was created from the spec this call asks for.
+// Networking, image and workdir are fixed at create, so an owned container that
+// mismatches any of them is refused — sandbox.ErrSpecMismatch, before it is
+// started and with nothing run in it — rather than silently adopted with the
+// wrong containment, and it is not removed: replacement is an explicit
+// lifecycle the platform does not have (#29). The handler serves only the
+// inspect, so any start, create, remove, or exec would fail the test.
+func TestProvisionRefusesAdoptingAMismatchedContainer(t *testing.T) {
+	for name, change := range map[string]func(*sandbox.Spec){
+		"network mode": func(s *sandbox.Spec) { s.Networking = domain.Networking{Type: domain.NetLimited} },
+		"image":        func(s *sandbox.Spec) { s.Image = "img:2" },
+		"workdir":      func(s *sandbox.Spec) { s.Workdir = "/elsewhere" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			created := spec() // what the existing container was built from
+			requested := created
+			change(&requested)
+			p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/json"):
+					io.WriteString(w, inspectJSON("abc", created, false))
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+			})
+			if _, err := p.Provision(context.Background(), requested); !errors.Is(err, sandbox.ErrSpecMismatch) {
+				t.Fatalf("err = %v, want sandbox.ErrSpecMismatch", err)
+			}
+		})
+	}
+}
+
+// The mismatch check must not refuse the container that does match: a limited
+// session's own `none` container is adopted, exactly as a default session's
+// `bridge` one is (#29).
+func TestProvisionAdoptsAMatchingLimitedContainer(t *testing.T) {
+	s := spec()
+	s.Networking = domain.Networking{Type: domain.NetLimited}
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			io.WriteString(w, inspectJSON("abc", s, true))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	sb, err := p.Provision(context.Background(), s)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if sb.ID() != "abc" {
+		t.Errorf("id = %q", sb.ID())
+	}
+}
+
 // The create race has its own adoption path, and the winner is only presumed to
 // be a peer executor. Check the label there too.
 func TestProvisionRefusesToAdoptAnUnownedRaceWinner(t *testing.T) {
@@ -383,6 +445,38 @@ func TestProvisionAdoptsRaceWinner(t *testing.T) {
 	}
 	if sb.ID() != "winner" {
 		t.Errorf("id = %q, want the winner's container", sb.ID())
+	}
+}
+
+// The create-race loser applies the same fixed-at-create validation as the
+// ordinary adoption path: a winner built from a different spec is refused, not
+// adopted (#29).
+func TestProvisionRefusesAMismatchedRaceWinner(t *testing.T) {
+	created := spec()
+	requested := created
+	requested.Image = "img:2"
+	var inspects int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			inspects++
+			if inspects == 1 {
+				w.WriteHeader(http.StatusNotFound)
+				io.WriteString(w, `{"message":"No such container"}`)
+				return
+			}
+			io.WriteString(w, inspectJSON("winner", created, true))
+		case r.URL.Path == "/containers/create":
+			w.WriteHeader(http.StatusConflict)
+			io.WriteString(w, `{"message":"Conflict. The container name is already in use"}`)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			t.Error("a mismatched race winner was started")
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	if _, err := p.Provision(context.Background(), requested); !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Errorf("err = %v, want sandbox.ErrSpecMismatch", err)
 	}
 }
 

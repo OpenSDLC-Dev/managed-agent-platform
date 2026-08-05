@@ -240,7 +240,12 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 			return nil, oerr
 		}
 		if pairedWithGate(info, gateID) {
-			// Adopt: ungated, or already paired with this session's current gate.
+			// Adopt: ungated, or already paired with this session's current gate —
+			// but only a container created from the spec this call is asking for,
+			// checked before it is started or anything runs in it.
+			if aerr := adoptable(info, spec, workdir, gateID); aerr != nil {
+				return nil, aerr
+			}
 			if !info.State.Running {
 				if serr := p.api.startContainer(ctx, info.ID); serr != nil {
 					return nil, serr
@@ -319,6 +324,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 			// adoption above removes and rebuilds the stale winner.
 			return nil, fmt.Errorf("docker: raced sandbox %s for session %s is not paired with gate %s",
 				winner.ID, spec.SessionID, gateID)
+		}
+		if aerr := adoptable(winner, spec, workdir, gateID); aerr != nil {
+			return nil, aerr
 		}
 		id, cerr = winner.ID, nil
 	}
@@ -490,7 +498,9 @@ func withProxyEnv(env map[string]string) map[string]string {
 // Adopting it would hand the agent's commands to a filesystem, an image, and —
 // because a container's network mode is fixed when it is created — an egress
 // policy that are not the ones this session asked for; a `limited` session must
-// never inherit a `bridge` container's route out. This is not a trust boundary
+// never inherit a `bridge` container's route out. The label answers only who
+// created the container; whether its fixed-at-create config matches this call's
+// spec is `adoptable`'s check (#29). This is not a trust boundary
 // against a hostile daemon co-tenant: the label is world-readable and
 // world-writable, and anyone with access to the daemon can forge it — but that
 // actor already controls every sandbox on the host. It defends against the
@@ -499,6 +509,40 @@ func ours(info containerInfo, sessionID domain.ID) error {
 	if info.Config.Labels[sessionLabel] != string(sessionID) {
 		return fmt.Errorf("docker: container %s is not this platform's sandbox for session %s",
 			info.ID, sessionID)
+	}
+	return nil
+}
+
+// adoptable refuses an owned container whose fixed-at-create configuration is
+// not what this call's spec asks for. `ours` answers "was this container
+// created for this session?"; this answers "was it created from the spec being
+// requested?" — a limited request must never ride a `bridge` container's route
+// out, and a different image or workdir is a different sandbox, not this one
+// found again. Both adoption paths (the existing container and the lost create
+// race) make the same check, before the container is started or anything runs
+// in it. A mismatch fails closed with sandbox.ErrSpecMismatch and removes
+// nothing: the platform has no replacement lifecycle for a live session's
+// sandbox, and deleting on a caller-supplied spec would hand a caller's bug the
+// container's filesystem (#29). A gated container's network mode is not
+// re-checked here — pairedWithGate has already pinned it to container:<gateID> —
+// and Spec.Env and Spec.Hardening, equally fixed at create, are deliberately
+// not compared: a changed Env silently keeps the created value by contract
+// (sandboxtest's SpecEnvBoundAtProvision — the gate's placeholder stability
+// rides on it), and hardening follows the same adopt-as-created rule.
+func adoptable(info containerInfo, spec sandbox.Spec, workdir, gateID string) error {
+	if gateID == "" {
+		if want := networkMode(spec.Networking); info.HostConfig.NetworkMode != want {
+			return fmt.Errorf("docker: container %s has network mode %q where session %s asked for %q: %w",
+				info.ID, info.HostConfig.NetworkMode, spec.SessionID, want, sandbox.ErrSpecMismatch)
+		}
+	}
+	if info.Config.Image != spec.Image {
+		return fmt.Errorf("docker: container %s was created from image %q where session %s asked for %q: %w",
+			info.ID, info.Config.Image, spec.SessionID, spec.Image, sandbox.ErrSpecMismatch)
+	}
+	if info.Config.WorkingDir != workdir {
+		return fmt.Errorf("docker: container %s was created with workdir %q where session %s asked for %q: %w",
+			info.ID, info.Config.WorkingDir, spec.SessionID, workdir, sandbox.ErrSpecMismatch)
 	}
 	return nil
 }
