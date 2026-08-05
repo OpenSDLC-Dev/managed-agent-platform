@@ -124,6 +124,31 @@ copy of an entry here.
 
 ### Fixed
 
+- **Docker sandbox adoption validates the container's fixed-at-create spec, not
+  just its ownership label**
+  ([internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
+  [internal/sandbox/sandbox.go](./internal/sandbox/sandbox.go), #29). Both
+  adoption paths — the existing-container path and the create-race loser —
+  checked only that the session's ownership label (and, since #197, the gate
+  pairing) matched, so a session re-provisioned under a changed spec silently
+  reused the old container: a `limited` request adopted an `unrestricted`
+  session's `bridge` container and kept its open egress, and a changed image or
+  workdir was equally invisible. A shared `adoptable` check now compares the
+  container's fixed-at-create configuration — the effective ungated
+  `HostConfig.NetworkMode` (gated mode is already pinned by `pairedWithGate`),
+  image, and workdir — against the normalized requested spec on both paths,
+  before the container is started or anything runs in it. A mismatch fails
+  closed with the new `sandbox.ErrSpecMismatch` sentinel and deletes nothing:
+  replacement is an explicit lifecycle the platform does not have, per the
+  issue. Not reachable through the normal live-session lifecycle today (the
+  control plane keeps a session's networking fixed) — this is the precondition
+  #29 tracked for any future path that can re-provision a session under a
+  changed spec. The k8s provider's twin gap is #296. Tests: fake-daemon rows for
+  each mismatch (structurally proving no start/remove/exec touches the
+  container) and the matching-`none` adoption, plus a real-daemon test reading
+  the effective `HostConfig.NetworkMode` off `docker inspect` for both the
+  refusal and the matching-adoption legs.
+
 - **A claim racing executor shutdown no longer escapes as a fatal error**
   ([internal/executor/executor.go](./internal/executor/executor.go), #282). `Run`
   recognised cancellation only as `errors.Is(err, context.Canceled)`, but a `Claim`

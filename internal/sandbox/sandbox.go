@@ -43,6 +43,13 @@ var (
 	// ErrNotFound reports that the sandbox is gone (destroyed, or reaped by
 	// the host). The caller's tool call fails; the session does not.
 	ErrNotFound = errors.New("sandbox: no such sandbox")
+	// ErrSpecMismatch reports a session's existing sandbox that was created from
+	// a different spec than the one this provision asks for. The mismatched
+	// settings are fixed at create (networking, image, workdir), so the sandbox
+	// cannot be adopted; the provision fails closed rather than silently serving
+	// the wrong containment, and removes nothing — replacement is an explicit
+	// lifecycle the platform does not have (#29).
+	ErrSpecMismatch = errors.New("sandbox: existing sandbox does not match the requested spec")
 	// ErrFileNotExist reports a read of a path that does not exist.
 	ErrFileNotExist = errors.New("sandbox: no such file")
 	// ErrIsDirectory reports a file read of a directory, or a write onto one.

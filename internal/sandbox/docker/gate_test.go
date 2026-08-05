@@ -69,10 +69,16 @@ func healthJSON(id, health string, s sandbox.Spec, running bool) string {
 
 // sandboxJSON is an owned, running sandbox container inspect body carrying a
 // given NetworkMode — how adoption tells a sandbox paired with the current gate
-// (container:<gateID>) from a stale or ungated one.
+// (container:<gateID>) from a stale or ungated one — and s's own image and
+// workdir, so a container modelled as created from s passes adoption's
+// fixed-at-create spec check (#29).
 func sandboxJSON(id string, s sandbox.Spec, networkMode string) string {
-	return fmt.Sprintf(`{"Id":%q,"State":{"Running":true},"Config":{"Labels":{%q:%q}},"HostConfig":{"NetworkMode":%q}}`,
-		id, sessionLabel, string(s.SessionID), networkMode)
+	workdir := s.Workdir
+	if workdir == "" {
+		workdir = sandbox.DefaultWorkdir
+	}
+	return fmt.Sprintf(`{"Id":%q,"State":{"Running":true},"Config":{"Labels":{%q:%q},"Image":%q,"WorkingDir":%q},"HostConfig":{"NetworkMode":%q}}`,
+		id, sessionLabel, string(s.SessionID), s.Image, workdir, networkMode)
 }
 
 func boolStr(b bool) string {

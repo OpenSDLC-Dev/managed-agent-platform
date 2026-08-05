@@ -154,7 +154,13 @@ type containerInfo struct {
 		} `json:"Health"`
 	} `json:"State"`
 	Config struct {
-		Labels map[string]string `json:"Labels"`
+		// Image and WorkingDir are fixed at create, exactly as NetworkMode is;
+		// adoption compares them against the requested spec (`adoptable`, #29) —
+		// an owned container is not necessarily one created from the spec this
+		// call is asking for.
+		Image      string            `json:"Image"`
+		WorkingDir string            `json:"WorkingDir"`
+		Labels     map[string]string `json:"Labels"`
 	} `json:"Config"`
 	// HostConfig.NetworkMode is the container's fixed-at-create networking. A
 	// gated sandbox must be `container:<gateID>`; adoption checks it so a sandbox
