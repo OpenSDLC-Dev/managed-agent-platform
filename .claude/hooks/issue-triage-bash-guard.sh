@@ -36,7 +36,10 @@ else
   # bare "command" needle is denied rather than judged by the wrong key.
   # (Unreachable today — string values escape their quotes, and the Bash
   # tool_input has a single command key — but payload shapes drift.)
-  needles=$(printf '%s' "$payload" | awk -F'"command"' '{ c += NF - 1 } END { print c + 0 }')
+  # The NF pattern guard matters: awk sets NF=0 on a blank record, so an
+  # unguarded `c += NF - 1` would subtract one per blank line and let a
+  # two-key payload with a blank line count as one.
+  needles=$(printf '%s' "$payload" | awk -F'"command"' 'NF { c += NF - 1 } END { print c + 0 }')
   if [ "$needles" != 1 ]; then
     echo "issue-triage guard: no working python on PATH and the payload does not carry exactly one \"command\" key, so the command cannot be attributed faithfully" >&2
     exit 2

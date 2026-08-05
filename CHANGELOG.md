@@ -145,10 +145,12 @@ copy of an entry here.
   metacharacter screen, and flag denials are untouched and stay fail-closed;
   real-python hosts keep identical exit codes on every row, and the stub-host
   change is that a broken interpreter no longer masquerades as policy.
-  Verified by a 15-row exit-code matrix on the stub host (allow rows now 0,
-  deny rows still 2 — except the one fallback row, a truncated payload whose
+  Verified by a 19-row exit-code matrix on the stub host (allow rows now 0
+  — pretty-printed payloads included; deny rows still 2, among them a
+  second `"command"` key, a blank-line variant of it, and a zero-key
+  payload — except the one fallback row, a truncated payload whose
   extractable command is clean and allow-listed, which passes the screens;
-  unreachable from the harness, which emits only valid JSON), a 15-row
+  unreachable from the harness, which emits only valid JSON), a 19-row
   old-vs-new exit-code diff under a real python3 (identical on every row,
   malformed JSON included), and a live triage dispatch through the fixed
   hook whose transcript shows zero guard denials.
