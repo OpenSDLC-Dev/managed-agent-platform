@@ -276,7 +276,9 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 	spec.Normalize()
 	// The resolved spec answers to the same whole-spec caps as a stored agent
 	// (#66): an agent_with_overrides must not smuggle in a tools/mcp_servers
-	// set that agent create would reject (#287).
+	// set that agent create would reject (#287). Runs on every resolve, not
+	// just overrides — a pre-#66 stored spec that violates a cap fails here
+	// too, at create rather than on every turn.
 	if err := validateAgentSpec(spec); err != nil {
 		return snap, err
 	}

@@ -22,9 +22,11 @@ copy of an entry here.
   129 tools, a duplicate or unreferenced MCP server, a colliding tool name — and
   every turn of that session failed at the provider instead of the create being
   a 400. `resolveAgent` now runs `wire.go`'s `validateAgentSpec` on the merged
-  resolved spec, and session update validates the patch's merged result the way
-  agent update does: a patch that strands a stored `mcp_server` or grows past a
-  cap rejects, and a rejected update leaves the stored snapshot intact. Whether
+  resolved spec — on every resolve, so a plain reference to a stored spec that
+  predates #66's enforcement and violates a cap also 400s at create — and
+  session update validates the patch's merged result the way agent update does:
+  a patch that strands a stored `mcp_server` or grows past a cap rejects, and a
+  rejected update leaves the stored snapshot intact. Whether
   the reference rejects the same set on the session surface is unobserved —
   recorded with the #66 INFERRED entry in docs/DIVERGENCES.md.
 
