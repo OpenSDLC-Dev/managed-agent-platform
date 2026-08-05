@@ -1,6 +1,8 @@
 package api_test
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -107,6 +109,22 @@ func TestSessionOverridesValidateAgentSpec(t *testing.T) {
 		"mcp_servers": []any{mcpServer("srv")}}), "srv")
 	wantRejected(withOverrides(map[string]any{
 		"tools": []any{customTool("dup"), customTool("dup")}}), "dup")
+
+	// The check runs on every resolve, not only when overrides are present: a
+	// stored spec that predates #66's enforcement can violate the caps, and a
+	// plain reference to it fails at session create, not on every turn.
+	pre := createAgent(t, s, map[string]any{
+		"name": "pre-66", "model": "claude-opus-4-8", "system": "base system"})["id"].(string)
+	planted, err := json.Marshal([]any{mcpServer("srv")})
+	if err != nil {
+		t.Fatalf("marshal servers: %v", err)
+	}
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE agents SET spec = jsonb_set(spec, '{mcp_servers}', $1::jsonb) WHERE id = $2`,
+		string(planted), pre); err != nil {
+		t.Fatalf("plant pre-validation spec: %v", err)
+	}
+	wantRejected(map[string]any{"agent": pre, "environment_id": envID}, "srv")
 }
 
 // Session update validates the resulting resolved agent, exactly as agent
@@ -116,12 +134,13 @@ func TestSessionOverridesValidateAgentSpec(t *testing.T) {
 func TestSessionUpdateValidatesResultingAgent(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	sid := createSession(t, s, map[string]any{
+	created := createSession(t, s, map[string]any{
 		"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
 			"mcp_servers": []any{mcpServer("srv")},
 			"tools":       []any{mcpToolset("srv")}},
 		"environment_id": envID,
-	})["id"].(string)
+	})
+	sid := created["id"].(string)
 
 	// Clearing tools alone strands the stored server.
 	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
@@ -136,14 +155,15 @@ func TestSessionUpdateValidatesResultingAgent(t *testing.T) {
 		"agent": map[string]any{"tools": tools, "mcp_servers": []any{}}})
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 
-	// The rejected updates left the stored snapshot intact.
+	// The rejected updates left the stored snapshot intact — compared whole,
+	// so a partial write (tools cleared, server kept) cannot pass.
 	status, got := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
 	if status != http.StatusOK {
 		t.Fatalf("get after rejected updates: %d", status)
 	}
-	agent, _ := got["agent"].(map[string]any)
-	if n := len(agent["mcp_servers"].([]any)); n != 1 {
-		t.Errorf("mcp_servers after rejected updates = %d entries, want 1", n)
+	if !reflect.DeepEqual(got["agent"], created["agent"]) {
+		t.Errorf("agent snapshot changed across rejected updates:\n got  %v\nwant %v",
+			got["agent"], created["agent"])
 	}
 
 	// Clearing both halves together leaves nothing stranded.

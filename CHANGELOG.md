@@ -58,7 +58,7 @@ copy of an entry here.
   entry-counting of the 128 cap, and the not-rejected dangling `mcp_toolset`
   reference are ours — recorded in
   [docs/DIVERGENCES.md](./docs/DIVERGENCES.md); session `agent_with_overrides`
-  still applies none of these (#287).
+  applied none of these until #287 closed the gap (entry above).
 
 - **Sandbox pods can pull from a private registry — `SANDBOX_K8S_IMAGE_PULL_SECRETS`**
   ([internal/sandbox/k8s/pullsecrets.go](./internal/sandbox/k8s/pullsecrets.go),
