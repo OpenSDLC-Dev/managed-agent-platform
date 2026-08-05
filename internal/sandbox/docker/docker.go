@@ -1219,8 +1219,13 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 	if err != nil {
 		// The bytes are landed and unnamed, and this exec is how they were to be
 		// named; shed them rather than leave the sandbox carrying a payload nothing
-		// will ever claim.
+		// will ever claim. Both credentials, each best-effort: this exec just
+		// failed, so neither is trusted alone — the user's rm covers a writable
+		// parent when the failure was transient, the root one covers the parent
+		// the user cannot write (#310), and a daemon whose exec API is down
+		// fails them both into the residue they were already leaving.
 		c.discard(ctx, tmp)
+		c.discardAsRoot(ctx, tmp)
 		return err
 	}
 	if res.ExitCode == 0 {
@@ -1331,16 +1336,22 @@ func (c *container) discard(ctx context.Context, tmp string) {
 // daemon put there. An ancestor the agent redirected resolves to at most a
 // same-named platform temporary — the basename is this write's own random
 // TempName, not the agent's to choose — and an rm of a symlink unlinks the
-// link. Best-effort for discard's reason: the caller already has the error
-// that matters, and a daemon that refuses the root exec leaves only the
-// residue this was already leaving.
+// link. The binary is pinned to /bin/rm where every other exec resolves
+// through the agent's PATH: this is the one exec whose credential a planted
+// binary would escalate, so nothing in it may be the sandbox filesystem's to
+// choose beyond the fixed paths the image contract already fixes (/bin/bash
+// is the contract's; /bin/rm rides the same POSIX-userland clause, and an
+// image without it degrades to the residue this was already leaving).
+// Best-effort for discard's reason: the caller already has the error that
+// matters, and a daemon that refuses the root exec leaves only the residue
+// this was already leaving.
 func (c *container) discardAsRoot(ctx context.Context, tmp string) {
 	execID, err := c.api.execCreate(ctx, c.id, execConfig{
 		AttachStdout: true,
 		AttachStderr: true,
 		User:         "0",
 		Cmd: []string{"/bin/bash", "-c", execWrapper,
-			"map-exec", "rm -f " + shellQuote(tmp), "0"},
+			"map-exec", "/bin/rm -f " + shellQuote(tmp), "0"},
 		WorkingDir: c.workdir,
 	})
 	if err != nil {

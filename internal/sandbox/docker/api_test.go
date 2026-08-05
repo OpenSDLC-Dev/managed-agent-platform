@@ -1152,13 +1152,72 @@ func TestARefusedRenameShedsItsTempWithTheDaemonsCredential(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotWritable", err)
 	}
 	last := seen[len(seen)-1]
-	if last.user != "0" || !strings.Contains(last.cmd, "rm -f '/etc/"+sandbox.TempPrefix) {
-		t.Fatalf("last exec = %+v, want the daemon-credentialed shed of the platform's temporary", last)
+	if last.user != "0" || !strings.Contains(last.cmd, "/bin/rm -f '/etc/"+sandbox.TempPrefix) {
+		t.Fatalf("last exec = %+v, want the daemon-credentialed shed of the platform's temporary, its rm pinned to /bin/rm", last)
 	}
 	for _, e := range seen[:len(seen)-1] {
 		if e.user != "" {
 			t.Errorf("exec %q carries user %q, want the container's own", e.cmd, e.user)
 		}
+	}
+}
+
+// A rename exec that could not run at all — not a reported failure exit, the
+// exec itself dying — sheds with both credentials, each best-effort: the exec
+// just failed, so neither is trusted alone. The user's rm covers a writable
+// parent when the failure was transient; the root one covers the parent the
+// user cannot write (#310).
+func TestARenameExecFailureShedsWithBothCredentials(t *testing.T) {
+	type execSeen struct{ cmd, user string }
+	var seen []execSeen
+	renames := map[string]bool{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			cmd := body.Cmd[len(body.Cmd)-2]
+			seen = append(seen, execSeen{cmd: cmd, user: body.User})
+			renames[id] = strings.Contains(cmd, "mv -f")
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			if renames[execID()] {
+				w.WriteHeader(http.StatusInternalServerError)
+				io.WriteString(w, `{"message":"exec start went away"}`)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
+	if err == nil || !strings.Contains(err.Error(), "exec start went away") {
+		t.Fatalf("err = %v, want the exec's own failure", err)
+	}
+	if len(seen) < 3 {
+		t.Fatalf("execs = %+v, want the rename then both sheds", seen)
+	}
+	userShed := seen[len(seen)-2]
+	if userShed.user != "" || !strings.Contains(userShed.cmd, "rm -f '/etc/"+sandbox.TempPrefix) {
+		t.Errorf("second-to-last exec = %+v, want the sandbox user's shed", userShed)
+	}
+	rootShed := seen[len(seen)-1]
+	if rootShed.user != "0" || !strings.Contains(rootShed.cmd, "/bin/rm -f '/etc/"+sandbox.TempPrefix) {
+		t.Errorf("last exec = %+v, want the root-credentialed shed", rootShed)
 	}
 }
 
@@ -1215,8 +1274,8 @@ func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
 	}
 	// The shed runs on the raw route too — idempotent where the script's own
 	// rm already worked (#310).
-	if last := commands[len(commands)-1]; !strings.Contains(last, "rm -f '/workspace/"+sandbox.TempPrefix) {
-		t.Errorf("last exec = %q, want the daemon-credentialed shed", last)
+	if last := commands[len(commands)-1]; !strings.Contains(last, "/bin/rm -f '/workspace/"+sandbox.TempPrefix) {
+		t.Errorf("last exec = %q, want the daemon-credentialed shed, its rm pinned to /bin/rm", last)
 	}
 }
 
@@ -1280,8 +1339,9 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 
 // The rename is one exec, and when that exec cannot run at all the bytes are
 // landed under a name nothing will claim. The removal is attempted on the way out
-// — here it fails too, since this daemon refuses every exec, which is exactly why
-// the attempt is what gets asserted rather than its outcome.
+// with both credentials (#310) — here every attempt fails too, since this daemon
+// refuses every exec, which is exactly why the attempts are what get asserted
+// rather than their outcomes.
 func TestWriteFileShedsItsTempWhenTheRenameCannotRun(t *testing.T) {
 	var execs int
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1299,8 +1359,8 @@ func TestWriteFileShedsItsTempWhenTheRenameCannotRun(t *testing.T) {
 	if err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x")); err == nil {
 		t.Fatal("write returned nil, want the failed rename")
 	}
-	if execs != 2 {
-		t.Errorf("%d exec attempts, want 2 — the rename, then the removal of what it could not name", execs)
+	if execs != 3 {
+		t.Errorf("%d exec attempts, want 3 — the rename, then the removal of what it could not name, with each credential", execs)
 	}
 }
 

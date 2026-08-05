@@ -149,12 +149,16 @@ copy of an entry here.
   under a non-root uid, the route #306 classifies — the script's own `rm -f`
   runs as a user who cannot unlink from that directory, and the refused
   payload stayed behind as a root-owned `.map-write-*` file, one per refused
-  write (measured on a real non-root image). Every rename-failure exit now
-  ends with a best-effort root-credentialed shed: an exec as `User: "0"`
-  whose command is fixed — `rm -f` of the platform's own shellQuoted
-  TempPrefix name, this write's random one, so the credential removes exactly
-  what the daemon put there — idempotent where the script's rm already
-  worked, silent like `discard` for the same reason. The k8s backend needs
+  write (measured on a real non-root image). Every failure exit of the
+  rename script now ends with a best-effort root-credentialed shed, and the
+  exec-could-not-run route sheds with both credentials, each best-effort
+  (the exec just failed, so neither is trusted alone): an exec as
+  `User: "0"` whose command is fixed — `/bin/rm`, absolute so the agent's
+  PATH resolves nothing at that credential, `-f` of the platform's own
+  shellQuoted TempPrefix name, this write's random one, so the credential
+  removes exactly what the daemon put there — idempotent where the script's
+  rm already worked, silent like `discard` for the same reason.
+  docs/self-hosted-security.md's non-root section names the exception. The k8s backend needs
   nothing: its temporary is created by the sandbox user, so the same
   credential that made it removes it. Red observed first: the real-image row
   measured the residue (`.map-write-` count 1 in `/etc`, want 0), the

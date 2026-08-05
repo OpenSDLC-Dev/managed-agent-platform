@@ -213,6 +213,13 @@ Kubernetes' `securityContext.runAsUser`). It is numeric because that is all both
 backends can express — a Kubernetes securityContext takes no user name.
 `debian:stable-slim` defaults to root; a hardened image does not have to.
 
+One narrow exception on Docker: when a write's rename fails, the platform issues
+a single uid-0 exec in the sandbox container to remove the temporary file the
+daemon's root-credentialed extraction landed (which your sandbox uid cannot
+unlink from a directory it cannot write — #310). Its command is fixed —
+`/bin/rm`, absolute so the sandbox's PATH chooses nothing, of the platform's own
+random temporary name — and it runs nothing else, ever.
+
 The catch is the **workdir**. The container's entrypoint runs `mkdir -p
 <workdir>` as whatever user the container runs as, and a uid the image did not
 plan for usually cannot create a directory at the root of the filesystem — so the
