@@ -168,6 +168,9 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 		// (plan 23, #306).
 		{"not writable", &sandbox.PathNotWritableError{Path: "a.txt", Reason: "Read-only file system"}, "Read-only file system"},
 		{"not writable normalized", &sandbox.PathNotWritableError{Path: "a.txt", Reason: "Permission denied"}, "permission denied"},
+		// EPERM's spelling normalizes too: the reference's table matches
+		// fs.ErrPermission, which Go answers for EACCES and EPERM alike.
+		{"not writable eperm", &sandbox.PathNotWritableError{Path: "a.txt", Reason: "Operation not permitted"}, "permission denied"},
 		{"not writable bare", sandbox.ErrNotWritable, "cannot be written"},
 	}
 	for _, tc := range cases {

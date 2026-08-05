@@ -171,8 +171,10 @@ copy of an entry here.
   daemon-text parsing anywhere, and both backends' reasons come from the
   same shell's strerror, which is what keeps #205's identical-answers
   invariant. The toolset words the result the way the reference's
-  `fsErrorMessage` table does: `permission denied` takes the reference's
-  casing, everything else passes through raw. Red observed first on every
+  `fsErrorMessage` table does: both permission spellings (EACCES's
+  `Permission denied`, EPERM's `Operation not permitted` — the table
+  matches `fs.ErrPermission`, which Go answers for both errnos) take the
+  reference's `permission denied`, everything else passes through raw. Red observed first on every
   new test: the host-bash exit-20 + reason rows, docker's probe
   classification, `mkdirAll` strerror, and rename-refusal tests (the last
   measured against a real non-root image, whose raw `mv … Permission
