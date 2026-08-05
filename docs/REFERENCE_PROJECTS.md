@@ -18,7 +18,13 @@ For wire-schema questions, resolve in this order — never guess a wire shape:
 2. **`anthropic-sdk-go`** — the typed wire schema for everything managed-agents:
    `betasessionevent.go` (full event taxonomy, both directions), `betaagent.go` /
    `betaenvironment.go` / `betasession.go` (resources), `betaenvironmentwork.go` (work
-   API). Also this repo's primary dependency.
+   API). Also `tools/agenttoolset` — the reference host-side toolset the `ant` worker
+   runs (`pkg/cmd/worker.go` hands it to the SDK's `EnvironmentWorker`), which makes it
+   the behavior-and-wording authority for `agent_toolset_20260401` tools: every tool
+   failure there is a model-visible `is_error` tool_result (never an infrastructure
+   fault), worded by `fsErrorMessage`'s four-entry normalization table with raw-text
+   passthrough — the basis of [plan 23](./plan/23_classified-unwritable-write.md). Also
+   this repo's primary dependency.
 3. **`anthropic-cli`** — the real `ant` CLI source; client-side behavior (polling,
    SSE/stream handling, defaults, headers): `pkg/cmd/beta*.go`, `pkg/cmd/worker.go`.
 4. **Recording a real `ant` CLI stream** — for behavior the types can't capture
