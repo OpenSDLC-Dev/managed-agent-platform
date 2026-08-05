@@ -970,7 +970,13 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 	// daemon-side temporary (extracted as root) still classified; asking the
 	// probe before the temporary keeps the backends identical (#303). RunAsUser
 	// travels with ReadOnlyRootfs for the reason HardeningRunsAsTheConfiguredUser
-	// states: the entrypoint's `mkdir -p <workdir>` runs as this uid.
+	// states — the entrypoint's `mkdir -p <workdir>` runs as this uid — and that
+	// pairing is also this row's honest bound: with the read-only root along,
+	// the refusal fires for both reasons at once, so the row cannot isolate the
+	// uid mechanism. What it pins is the shipped posture — the probe, its
+	// mountinfo read, and docker's classify-on-refusal exec running end-to-end
+	// as uid 65534, where a probe that ever came to need root would fail here
+	// and nowhere else.
 	t.Run("WriteOntoUnreplaceableTargetAsNonRoot", func(t *testing.T) {
 		uid := int64(65534)
 		sb := provisionHardened(t, sandbox.Hardening{RunAsUser: &uid, ReadOnlyRootfs: true})
