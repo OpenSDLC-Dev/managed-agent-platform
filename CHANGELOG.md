@@ -139,7 +139,12 @@ copy of an entry here.
   write onto a read-only root deadlocking three of three on the `: >`
   branch. Each branch now drains (`cat >/dev/null`) before its exit, the
   `tee` branch shedding its temporary first so a teardown mid-drain cannot
-  leave it. Unlike #303's refusal branches, all three can be staged from the
+  leave it, and the `mkdir` branch classifying first — `__map_path_fault`
+  runs in a subshell so its verdict is carried past the drain rather than
+  exiting ahead of it — because the classification describes the path that
+  made `mkdir` fail, and a drain's worth of sandbox activity later that
+  moment has passed (the same freshness the #305 review demanded of the
+  unreplaceable probe; raised for this branch by the #307 review pass). Unlike #303's refusal branches, all three can be staged from the
   host's bash, so the drains are pinned by behavior rather than by literal:
   a new script test feeds the body through a pipe whose producer is the
   verdict — `head -c 1M` finishes when the script drains and dies of
