@@ -247,9 +247,14 @@ func TestNULOnlyThinkingDeltaRecordsNoFirstToken(t *testing.T) {
 
 // The preview lane must strip too: sanitization sits ahead of the delta
 // broadcast, so a live SSE subscriber and the stored event read the same
-// text. The all-NUL control proves no preview opens at all; the settle
-// commit's NOTIFY follows every preview frame on the one listening
-// connection, so a single Wake bounds the drain.
+// text. The all-NUL control proves no preview opens at all. The drain is
+// bounded by a sentinel frame, not a Wake: wakes are coalesced and the
+// listener's coverage-healing wakeAll buffers one at LISTEN time, so a
+// single Wake can be satisfied before any of the turn's notifications have
+// been dispatched (#294). The sentinel's NOTIFY autocommits after the
+// settle, and the one listening connection delivers in commit order, so
+// every frame the turn broadcast is buffered before the sentinel arrives —
+// including none, which the all-NUL control needs to be able to prove.
 func TestPreviewFramesCarryOnlySanitizedText(t *testing.T) {
 	drain := func(t *testing.T, h *harness) []map[string]any {
 		t.Helper()
@@ -262,10 +267,13 @@ func TestPreviewFramesCarryOnlySanitizedText(t *testing.T) {
 			t.Fatalf("broker never became ready: %v", err)
 		}
 		h.runOnce(t)
-		select {
-		case <-sub.Wake():
-		case <-time.After(10 * time.Second):
-			t.Fatal("no wake after the turn settled")
+		// A fresh deadline: the outer ctx has been paying for Ready and the
+		// whole turn, and the sentinel publish must not inherit that debt.
+		pubCtx, pubCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer pubCancel()
+		if err := h.log.PublishEventFrame(pubCtx, h.sessionID,
+			map[string]any{"type": "drain_sentinel"}); err != nil {
+			t.Fatalf("publish drain sentinel: %v", err)
 		}
 		var frames []map[string]any
 		for {
@@ -275,9 +283,12 @@ func TestPreviewFramesCarryOnlySanitizedText(t *testing.T) {
 				if err := json.Unmarshal(raw, &f); err != nil {
 					t.Fatalf("frame %s: %v", raw, err)
 				}
+				if f["type"] == "drain_sentinel" {
+					return frames
+				}
 				frames = append(frames, f)
-			default:
-				return frames
+			case <-time.After(10 * time.Second):
+				t.Fatal("the drain sentinel never arrived on the frames lane")
 			}
 		}
 	}
