@@ -124,6 +124,33 @@ copy of an entry here.
 
 ### Fixed
 
+- **Kubernetes pod adoption validates the pod's fixed-at-create spec, not just
+  its ownership label and gate shape**
+  ([internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go), #296 — the k8s
+  twin of #29, below). Both adoption paths — the existing-pod path and the
+  create-race loser — checked only the session's ownership label (`ours`) and
+  the gated-vs-ungated shape (`hasGateSidecar`), so a session re-provisioned
+  under a changed spec silently adopted the old pod: an ungated `limited`
+  request adopted an `unrestricted` session's pod — which lacks the netsetup
+  init container that enforces `limited`, so the session kept open egress — and
+  a changed image or workdir was equally invisible. A pod spec is immutable, so
+  none of it could be reconciled by adopting. The k8s `adoptable` now compares
+  the pod's fixed-at-create shape — netsetup init-container presence for the
+  ungated case (the gated egress path is already pinned by the sidecar), the
+  sandbox container's image, and its workdir — against the normalized requested
+  spec on both paths, before the pod is handed to a tool run. A mismatch fails
+  closed with the same `sandbox.ErrSpecMismatch` sentinel and deletes nothing,
+  the same contract as Docker's — including the same recovery: the session
+  keeps failing provision until the stale pod is removed by hand, with the
+  product-level alternative tracked in #297. Reachability matches the Docker
+  half: a gate-less deployment's unrestricted→limited flip reaches this path
+  today; a gated one is absorbed by the `hasGateSidecar` replace. Tests:
+  fake-clientset rows for each mismatch (with a reactor proving no delete
+  touches the pod) and the matching-limited adoption, built from `podSpec`'s
+  own output so the fixtures cannot drift from real creates, plus a live
+  kind-cluster test proving the refusal and that the refused pod stays
+  adoptable under its original spec.
+
 - **Docker sandbox adoption validates the container's fixed-at-create spec, not
   just its ownership label**
   ([internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
@@ -150,7 +177,7 @@ copy of an entry here.
   `bridge` egress — now it fails closed. (A *gated* deployment absorbs the same
   flip via the #197 `pairedWithGate` remove-and-rebuild reshape.) Whether the
   control plane should instead refuse the patch while sessions are live is
-  #297. The k8s provider's twin gap is #296. Tests: fake-daemon rows for
+  #297. The k8s provider's twin gap was #296, fixed above. Tests: fake-daemon rows for
   each mismatch (structurally proving no start/remove/exec touches the
   container) and the matching-`none` adoption, plus a real-daemon test reading
   the effective `HostConfig.NetworkMode` off `docker inspect` for both the

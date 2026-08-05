@@ -39,17 +39,12 @@ func fakeProvider(objs ...runtime.Object) *Provider {
 	}
 }
 
+// readyPod is the plain fixture: the ready pod a create from the tests' usual
+// spec (image "img", default workdir, unrestricted) would have left behind —
+// faithful via readyFromSpec, so adoption's spec check sees a real shape.
 func readyPod(sid domain.ID) *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: podName(sid), Namespace: "default",
-			Labels: map[string]string{sessionLabel: string(sid)},
-		},
-		Status: corev1.PodStatus{
-			Phase:             corev1.PodRunning,
-			ContainerStatuses: []corev1.ContainerStatus{{Name: containerName, Ready: true}},
-		},
-	}
+	return readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir,
+		sandbox.Spec{SessionID: sid, Image: "img"})
 }
 
 func TestPodNameSanitizesSessionID(t *testing.T) {
@@ -99,6 +94,119 @@ func TestProvisionRejectsForeignPod(t *testing.T) {
 	p := fakeProvider(foreign)
 	if _, err := p.Provision(context.Background(), sandbox.Spec{SessionID: sid, Image: "img"}); err == nil {
 		t.Error("provision adopting a foreign pod: want an error")
+	}
+}
+
+// readyFromSpec builds exactly the pod podSpec would create for the spec —
+// marked running and ready — so what the adoption tests stage in the tracker
+// is what a real create would have left in the cluster.
+func readyFromSpec(p *Provider, workdir string, spec sandbox.Spec) *corev1.Pod {
+	pod := p.podSpec(podName(spec.SessionID), workdir, spec, "")
+	pod.Namespace = "default"
+	pod.UID = types.UID("uid-" + pod.Name)
+	pod.Status = corev1.PodStatus{
+		Phase:             corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{{Name: containerName, Ready: true}},
+	}
+	return pod
+}
+
+// A pod that carries this session's label but was created from a different
+// spec must not be adopted: its networking shape, image, and workdir are fixed
+// at create, so adopting it would silently serve the wrong containment. The
+// mismatch fails closed with sandbox.ErrSpecMismatch and deletes nothing
+// (#296, the k8s twin of #29).
+func TestProvisionRefusesAdoptingAMismatchedPod(t *testing.T) {
+	sid := domain.ID("sesn_mismatch")
+	created := sandbox.Spec{SessionID: sid, Image: "img:1",
+		Networking: domain.Networking{Type: domain.NetUnrestricted}}
+	for name, requested := range map[string]sandbox.Spec{
+		"networking": {SessionID: sid, Image: "img:1",
+			Networking: domain.Networking{Type: domain.NetLimited}},
+		"image": {SessionID: sid, Image: "img:2",
+			Networking: domain.Networking{Type: domain.NetUnrestricted}},
+		"workdir": {SessionID: sid, Image: "img:1",
+			Networking: domain.Networking{Type: domain.NetUnrestricted}, Workdir: "/elsewhere"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := fakeProvider()
+			pod := readyFromSpec(p, sandbox.DefaultWorkdir, created)
+			if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			cs := p.client.cs.(*fake.Clientset)
+			cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				t.Error("a mismatch has no authority to delete the existing pod")
+				return true, nil, errors.New("refused")
+			})
+			if _, err := p.Provision(context.Background(), requested); !errors.Is(err, sandbox.ErrSpecMismatch) {
+				t.Errorf("provision over a mismatched pod: err = %v, want sandbox.ErrSpecMismatch", err)
+			}
+		})
+	}
+}
+
+// The check must not refuse what it should adopt: a limited session's own pod
+// — netsetup init container and all — is still adopted, with no create and no
+// delete.
+func TestProvisionAdoptsAMatchingLimitedPod(t *testing.T) {
+	sid := domain.ID("sesn_limadopt")
+	spec := sandbox.Spec{SessionID: sid, Image: "img",
+		Networking: domain.Networking{Type: domain.NetLimited}}
+	p := fakeProvider()
+	pod := readyFromSpec(p, sandbox.DefaultWorkdir, spec)
+	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cs := p.client.cs.(*fake.Clientset)
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		t.Error("adopting a matching pod must not create")
+		return true, nil, errors.New("refused")
+	})
+	cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		t.Error("adopting a matching pod must not delete")
+		return true, nil, errors.New("refused")
+	})
+	sb, err := p.Provision(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("provision (adopt matching limited): %v", err)
+	}
+	if sb.ID() != podName(sid) {
+		t.Errorf("adopted sandbox id = %q, want %q", sb.ID(), podName(sid))
+	}
+}
+
+// The create-race loser applies the same validation to the winner's pod it
+// adopts: a winner created from a different spec is refused, not served — and
+// not deleted.
+func TestProvisionRefusesAMismatchedRaceWinner(t *testing.T) {
+	sid := domain.ID("sesn_racemis")
+	winnerSpec := sandbox.Spec{SessionID: sid, Image: "img:1",
+		Networking: domain.Networking{Type: domain.NetUnrestricted}}
+	requested := sandbox.Spec{SessionID: sid, Image: "img:2",
+		Networking: domain.Networking{Type: domain.NetUnrestricted}}
+	p := fakeProvider()
+	winner := readyFromSpec(p, sandbox.DefaultWorkdir, winnerSpec)
+	if _, err := p.client.cs.CoreV1().Pods("default").Create(context.Background(), winner, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cs := p.client.cs.(*fake.Clientset)
+	first := true
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if first {
+			first = false
+			return true, nil, apierrors.NewNotFound(corev1.Resource("pods"), podName(sid))
+		}
+		return false, nil, nil
+	})
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("pods"), podName(sid))
+	})
+	if _, err := p.Provision(context.Background(), requested); !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Errorf("losing the race to a mismatched winner: err = %v, want sandbox.ErrSpecMismatch", err)
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); err != nil {
+		t.Errorf("mismatch race loser deleted the winner's pod: %v", err)
 	}
 }
 

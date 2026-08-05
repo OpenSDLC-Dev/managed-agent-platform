@@ -68,6 +68,50 @@ func liveSandbox(t *testing.T) sandbox.Sandbox {
 	return sb
 }
 
+// A session's pod created unrestricted must not be adopted by a limited
+// request for the same session: the netsetup init container that enforces
+// `limited` is fixed at pod create, so adopting would keep open egress. The
+// refusal deletes nothing — the original spec still owns its pod. The docker
+// backend's adopt_test.go proves the same rule against a live daemon (#296).
+func TestK8sAdoptionRefusesAMismatchedPod(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{
+		Context:   os.Getenv("MAP_K8S_CONTEXT"),
+		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
+	})
+	if err != nil {
+		t.Fatalf("this test requires a Kubernetes cluster: %v", err)
+	}
+	ctx := context.Background()
+	spec := sandbox.Spec{
+		SessionID:  domain.NewID("sesn"),
+		Image:      testImage,
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+	}
+	first, err := provider.Provision(ctx, spec)
+	if err != nil {
+		t.Fatalf("provision (unrestricted): %v", err)
+	}
+	t.Cleanup(func() {
+		if err := first.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy: %v", err)
+		}
+	})
+
+	limited := spec
+	limited.Networking = domain.Networking{Type: domain.NetLimited}
+	if _, err := provider.Provision(ctx, limited); !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Fatalf("limited provision over an unrestricted pod: err = %v, want sandbox.ErrSpecMismatch", err)
+	}
+
+	again, err := provider.Provision(ctx, spec)
+	if err != nil {
+		t.Fatalf("re-provision (unrestricted) after the refusal: %v", err)
+	}
+	if again.ID() != first.ID() {
+		t.Errorf("re-provision id = %q, want %q (the refusal must leave the pod adoptable)", again.ID(), first.ID())
+	}
+}
+
 // A symlink is not a regular file. Following it would let a short link past the
 // size gate to a target of any size, so ReadFile rejects it — as the docker
 // backend rejects a non-regular archive entry.
