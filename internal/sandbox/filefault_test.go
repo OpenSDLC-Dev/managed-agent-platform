@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -166,7 +167,7 @@ func TestTempName(t *testing.T) {
 func unreplaceable(t *testing.T, path string) int {
 	t.Helper()
 	cmd := exec.Command("/bin/bash", "-c",
-		sandbox.UnreplaceableShell+"\nif __map_unreplaceable \"$1\"; then exit 19; fi\nexit 0",
+		sandbox.UnreplaceableShell+"\nif __map_unreplaceable \"$1\"; then exit "+strconv.Itoa(sandbox.ExitPathNotReplaceable)+"; fi\nexit 0",
 		"map-unrep", path)
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
@@ -200,8 +201,8 @@ func TestUnreplaceableShell(t *testing.T) {
 		name, path string
 		want       int
 	}{
-		{"device node", "/dev/null", 19},
-		{"mount point", "/proc", 19},
+		{"device node", "/dev/null", sandbox.ExitPathNotReplaceable},
+		{"mount point", "/proc", sandbox.ExitPathNotReplaceable},
 		{"regular file", dir + "/plain", 0},
 		{"missing path", dir + "/absent", 0},
 		{"symlink to a device", dir + "/tonull", 0},

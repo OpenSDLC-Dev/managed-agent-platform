@@ -363,8 +363,11 @@ type Sandbox interface {
 	// WriteFiles writes a whole set of files, each exactly as WriteFile writes
 	// one — creating parent directories, overwriting, landing under a temporary
 	// name in the target's own directory and renaming into place, carrying an
-	// existing target's mode over, and answering the same path sentinels. An
-	// empty batch writes nothing. A member's Path must be absolute and clean; a
+	// existing target's mode over, and answering the same path sentinels — save
+	// ErrNotReplaceable, which only the single writes answer: the bulk path
+	// carries no unreplaceable probe, deliberately, because its one caller
+	// (skill materialization) writes under the workdir, where a bind-mounted or
+	// device target does not arise (#205). An empty batch writes nothing. A member's Path must be absolute and clean; a
 	// batch naming the same target twice lands them in order, so the last wins.
 	//
 	// What it buys is round trips: the whole batch travels as an archive and costs

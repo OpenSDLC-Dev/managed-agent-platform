@@ -152,7 +152,9 @@ copy of an entry here.
   path carries a space, a sandbox without readable mountinfo). The two
   backends now agree on both targets, pinned by two new contract rows
   (`WriteOntoBindMountedTarget`, `WriteOntoDeviceNode` — target intact, node
-  still a device, no temporary-file residue) that failed red on both backends
+  still a device, no temporary-file residue the sandbox can see; docker's
+  daemon-side copy for a device target lands on the overlay under the tmpfs,
+  invisible either way) that failed red on both backends
   before the classification landed; bulk writes (`WriteFiles`) keep today's
   behavior — no built-in tool routes a bind-mounted or device target through
   them. The docs/DIVERGENCES.md atomicity entry's standing residual closes
