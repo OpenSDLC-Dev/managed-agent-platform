@@ -1498,10 +1498,21 @@ printf %s "$3"
 // it, so a symlink there is supplanted by a regular file; that is what the docker
 // daemon's extraction has always done, and the two backends now agree on it. A
 // device node used to be supplanted the same way — /dev/null quietly stopped
-// being a sink — which is why __map_unreplaceable is asked *before* the move: a
-// device node, or a bind-mounted file the move could only fail against (EBUSY),
+// being a sink — which is why __map_unreplaceable refuses the write: a device
+// node, or a bind-mounted file the move could only fail against (EBUSY),
 // exits 19 (sandbox.ExitPathNotReplaceable) with the target left what it was,
-// and the two backends now answer it identically too (#205).
+// and the two backends now answer it identically too (#205). Like the
+// directory test below, it is asked twice, and the two asks answer different
+// questions. The first sits ahead of the temporary file rather than just
+// ahead of the move because under a read-only root the temporary cannot be
+// created at all — the classification must not depend on the target's parent
+// being writable (#303). The second, after the body has landed and just
+// before the rename, is the freshness the first cannot give: its answer
+// describes a moment the whole transfer has since passed, and a node planted
+// at the target mid-stream would otherwise be supplanted exactly as
+// /dev/null once was. It needs no drain — `tee` has consumed the body by
+// then — and it sits where docker's rename asks, so the late ask is also
+// what keeps the two backends' answers the same age.
 //
 // The rename is also what decides the other target that must be refused: `mv -f
 // file dir` moves the file *into* the directory, so a target that is a directory
@@ -1513,16 +1524,28 @@ printf %s "$3"
 // removes what went in, and refuses the same way. The first test is what keeps the
 // common case from ever moving anything at all.
 //
-// The pre-move test sits after the length check rather than before it so stdin is
-// drained first — a script that exited without reading it would leave client-go's
-// stdin copy to fail into runtime.HandleError, and the exit code is the only thing
-// that reaches the caller from here. (The `mkdir` branch above still exits without
-// draining; that is measured to work — the exit code arrives and the copy's failure
-// is logged — but it is not what this ordering rests on. The `: >` beside it does
-// not merely join that class, it moves a case into it: a directory the sandbox user
-// cannot write used to fail inside `tee`, which drains the stream before reporting,
-// and now fails before a byte is read. Measured through the real backend with a
-// 64 MiB body — exit 1 arrives in ~25ms, undrained, with no hang and no residue.)
+// The two refusals used to sit after the length check, so `tee` had always
+// consumed the body before they could fire — but a read-only root refuses the
+// temporary file's creation before any post-tee check can run, so keeping the
+// classification reachable means asking before anything is created or written
+// (#303). Sitting ahead of `tee`, they must now do its draining themselves: the
+// `cat >/dev/null` before each exit consumes the body, because an exit that
+// leaves stdin unread only races the exit code home for bodies small enough to
+// already be in flight. Once the body outgrows the exec stream's flow-control
+// window, client-go's stdin copy blocks holding the connection's framer lock,
+// the stream teardown needs that same lock, and the call hangs until the pod is
+// destroyed instead of returning the refusal — measured against the real
+// backend: an 8-byte refusal returns undrained, a 256 KiB one deadlocks; across
+// twelve large-body undrained exits, one returned in ~240ms and eleven hung. The
+// drain costs the refused body's transfer, which is exactly what the old order
+// paid through `tee`; a refusal that arrives late beats one that never does.
+// The `mkdir`, `: >`, and mid-stream `tee` failure branches still exit
+// undrained — their small-body behavior is what it always was, and the
+// large-body hang they carry predates this change and is tracked as its own
+// defect (#304) rather than widened into it. (A note that sat here once
+// measured a 64 MiB `: >` failure returning in ~25ms with no hang; rerun
+// under a read-only root it deadlocked three of three — that sample was the
+// race won once, not the hazard absent, and #304 carries the fuller tally.)
 //
 // A `mkdir -p` that fails asks the shared path-fault shell whether a
 // non-directory is why, so a blocked path is the model's to fix (15,
@@ -1617,13 +1640,14 @@ printf %s "$3"
 // that cannot run costs the mode rather than the write.
 const writeScript = sandbox.PathFaultShell + sandbox.PreserveModeShell + sandbox.UnreplaceableShell + `
 mkdir -p "$2" || { __map_path_fault "$2"; exit 1; }
+if [ -d "$1" ]; then cat >/dev/null; exit 16; fi
+if __map_unreplaceable "$1"; then cat >/dev/null; exit 19; fi
 umask 022
 : > "$4" || exit 1
 chmod 0644 "$4" 2>/dev/null
 set -o pipefail
 sz=$(tee "$4" | wc -c) || { rm -f "$4"; exit 1; }
 [ "$sz" -eq "$3" ] || { rm -f "$4"; exit 14; }
-if [ -d "$1" ]; then rm -f "$4"; exit 16; fi
 if __map_unreplaceable "$1"; then rm -f "$4"; exit 19; fi
 __map_preserve_mode "$1" "$4"
 mv -f "$4" "$1" || { rm -f "$4"; exit 1; }

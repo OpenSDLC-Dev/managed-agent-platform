@@ -1048,6 +1048,9 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 		// Whatever of the entry landed is nobody's file; the stream path sheds its
 		// residue the same way.
 		c.discard(ctx, tmp)
+		if cErr := c.unreplaceable(ctx, path); cErr != nil {
+			return cErr
+		}
 		return err
 	}
 	return c.rename(ctx, tmp, path)
@@ -1079,6 +1082,9 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 		// However much of the payload landed, it is nobody's file. Leaving it
 		// would cost a failed 500 MB mount 500 MB of the sandbox's disk.
 		c.discard(ctx, tmp)
+		if cErr := c.unreplaceable(ctx, path); cErr != nil {
+			return cErr
+		}
 		return err
 	}
 	return c.rename(ctx, tmp, path)
@@ -1232,6 +1238,30 @@ func (c *container) pathFault(ctx context.Context, path string) error {
 		fmt.Sprintf("__map_path_fault %s\nexit 0", shellQuote(path))})
 	if err == nil && res.ExitCode == sandbox.ExitPathNotDirectory {
 		return sandbox.ErrNotDirectory
+	}
+	return nil
+}
+
+// unreplaceable asks the sandbox whether the target is one a rename could never
+// serve — a directory, a device node, a bind-mounted file — returning the
+// matching sentinel and nil otherwise. The rename script asks the same questions
+// itself, but a daemon that refuses the archive PUT outright (a read-only
+// rootfs refuses every PUT) fails before that script can run, so a refused
+// write asks them in an exec of their own — the classification must not depend
+// on the PUT landing (#303). Nil is also what a probe that could not run itself
+// returns, for pathFault's reason.
+func (c *container) unreplaceable(ctx context.Context, path string) error {
+	res, err := c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.UnreplaceableShell + fmt.Sprintf(
+		"if [ -d %[1]s ]; then exit %[2]d; fi\nif __map_unreplaceable %[1]s; then exit %[3]d; fi\nexit 0",
+		shellQuote(path), sandbox.ExitPathIsDirectory, sandbox.ExitPathNotReplaceable)})
+	if err != nil {
+		return nil
+	}
+	switch res.ExitCode {
+	case sandbox.ExitPathIsDirectory:
+		return fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
+	case sandbox.ExitPathNotReplaceable:
+		return fmt.Errorf("%s: %w", path, sandbox.ErrNotReplaceable)
 	}
 	return nil
 }

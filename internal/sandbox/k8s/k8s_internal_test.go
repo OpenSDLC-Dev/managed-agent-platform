@@ -2019,10 +2019,27 @@ func TestBulkScriptsClassifyAnArchiveThatDidNotArrive(t *testing.T) {
 // to its constant by text instead: renumbering ExitPathNotReplaceable fails
 // here rather than in a live session. The probe's own answers are pinned
 // against a real shell in the shared package's TestUnreplaceableShell.
+//
+// The probe is asked twice — ahead of the temporary file (drained, so a
+// refused body cannot deadlock the exec stream, #303) and again after the
+// body has landed, ahead of the rename (the freshness a pre-transfer answer
+// cannot give — no drain, `tee` has consumed the body by then). The order is
+// pinned along with the spellings: a race between the two asks is not
+// something a contract row can stage deterministically, so this text is the
+// guard against either ask quietly moving or vanishing.
 func TestWriteScriptSpellsTheUnreplaceableExit(t *testing.T) {
-	want := `if __map_unreplaceable "$1"; then rm -f "$4"; exit ` +
+	early := `if __map_unreplaceable "$1"; then cat >/dev/null; exit ` +
 		strconv.Itoa(sandbox.ExitPathNotReplaceable) + `; fi`
-	if !strings.Contains(writeScript, want) {
-		t.Fatalf("writeScript does not spell the unreplaceable refusal as %q — the literal drifted from sandbox.ExitPathNotReplaceable", want)
+	late := `if __map_unreplaceable "$1"; then rm -f "$4"; exit ` +
+		strconv.Itoa(sandbox.ExitPathNotReplaceable) + `; fi`
+	ei := strings.Index(writeScript, early)
+	li := strings.Index(writeScript, late)
+	if ei < 0 || li < 0 {
+		t.Fatalf("writeScript must spell both unreplaceable refusals — early (drained) %q at %d, late (pre-rename) %q at %d — a missing one drifted from sandbox.ExitPathNotReplaceable or lost its ask", early, ei, late, li)
+	}
+	ti := strings.Index(writeScript, `tee "$4"`)
+	mi := strings.Index(writeScript, `mv -f "$4"`)
+	if !(ei < ti && ti < li && li < mi) {
+		t.Fatalf("the early ask must sit ahead of tee and the late ask between tee and the rename (early %d, tee %d, late %d, mv %d) — the reorder is what keeps the refusal both reachable under a read-only root and fresh at the move", ei, ti, li, mi)
 	}
 }

@@ -124,6 +124,56 @@ copy of an entry here.
 
 ### Fixed
 
+- **The unreplaceable-target refusal no longer depends on the write being able
+  to start** ([internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
+  [internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go), #303). The #205
+  probe lived inside the rename scripts, so it only ran when the write got far
+  enough to run them — and the very hardening that makes unreplaceable targets
+  common keeps it from getting there. Under a read-only root filesystem
+  (`Hardening.ReadOnlyRootfs`, the recommended posture), docker's daemon
+  refuses the archive PUT outright before any script (`http 400: container
+  rootfs is marked read-only`), and k8s's `tee` cannot create the temporary
+  file next to a target on the read-only root: writing onto `/etc/hosts` (its
+  bind mount's parent sits on the read-only root) surfaced the raw refusal on
+  both backends — the unclassified fault the executor abandons to lease
+  reclaim and the same doomed call retries until the lease runs out, exactly
+  what #205 closed for the writable-root case. The k8s write script now asks
+  the directory check and the `__map_unreplaceable` probe before creating the
+  temporary file rather than only just before the move, and each refusal
+  drains the body (`cat >/dev/null`) before its exit: sitting ahead of `tee`,
+  the refusals must do its consuming themselves, because an exit that leaves a
+  larger-than-flow-control-window body unread deadlocks the exec stream
+  instead of returning — measured, and the same pre-existing hazard on the
+  script's other early exits is now #304. The unreplaceable probe is asked
+  *again* after the body lands, just before the move — the pre-move position
+  it held before this change, and the one docker's rename has always asked
+  from — so the early ask buys reachability without trading away freshness: a
+  target that becomes a device node while a large body streams is still
+  refused, not supplanted (no drain needed there; `tee` has consumed the body
+  by then). docker, whose script the daemon never ran, asks the same questions
+  in an exec of its own when the PUT fails, classifying the refusal after the
+  fact. The same reorder is what fixes
+  k8s's half of the non-root corner (a root-owned `/etc` or `/dev` refuses
+  the temporary's creation to the sandbox uid); docker's half needed no code —
+  its temporary is the daemon's, created as root, so an unwritable parent
+  never blocked it. Two new contract rows
+  (`WriteOntoUnreplaceableTargetUnderReadOnlyRoot`,
+  `WriteOntoUnreplaceableTargetAsNonRoot`) pin both hardened postures on both
+  backends — buffered, streamed, and quarter-megabyte bodies, the node still a
+  device after; the non-root row runs the classification end-to-end as uid
+  65534, though with the read-only root necessarily along (`RunAsUser` travels
+  with `ReadOnlyRootfs` so the entrypoint can make the workdir) the refusal
+  fires for both reasons at once, so it pins the posture rather than isolating
+  the uid mechanism — and the writable-root device-node row gains a large-body
+  cell that hangs rather than passes if a refusal ever stops draining; the
+  k8s script-pin test asserts both asks and their order around `tee`, the
+  race between them being nothing a contract row can stage deterministically.
+  Found by the #302 review pass (a CodeRabbit finding, verified real and
+  deferred to its own issue rather than widened in-PR); the independent
+  verifier's large-body measurement is what put the drains in, and the #305
+  review pass (a Codex bot finding, independently converged on by the Claude
+  review) is what put the pre-move ask back.
+
 - **A write onto a target a rename cannot replace is a classified refusal on
   both backends, not an unclassified fault**
   ([internal/sandbox/filefault.go](./internal/sandbox/filefault.go),
