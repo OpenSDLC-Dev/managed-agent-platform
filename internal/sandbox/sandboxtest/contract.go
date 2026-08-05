@@ -269,6 +269,40 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// The rest of a spec that is fixed at create — the image among it — is not
+	// silently kept the way Env is: re-provisioning the same session under a
+	// changed image is refused with ErrSpecMismatch, and the refusal deletes
+	// nothing — the original spec still adopts its sandbox (#29 docker,
+	// #296 k8s). The refusal happens before anything is created or pulled, so
+	// the mismatching image reference never needs to exist.
+	t.Run("SpecMismatchRefusesAdoption", func(t *testing.T) {
+		h := newHarness(t)
+		ctx := context.Background()
+		sid := domain.NewID("sesn")
+		spec := sandbox.Spec{SessionID: sid, Image: h.Image, Workdir: workdir, Networking: unrestricted}
+		sb1, err := h.Provider.Provision(ctx, spec)
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := sb1.Destroy(context.Background()); err != nil {
+				t.Errorf("destroy: %v", err)
+			}
+		})
+		changed := spec
+		changed.Image = spec.Image + "-mismatch"
+		if _, err := h.Provider.Provision(ctx, changed); !errors.Is(err, sandbox.ErrSpecMismatch) {
+			t.Fatalf("re-provision under a changed image: err = %v, want sandbox.ErrSpecMismatch", err)
+		}
+		sb2, err := h.Provider.Provision(ctx, spec)
+		if err != nil {
+			t.Fatalf("re-provision under the original spec after the refusal: %v", err)
+		}
+		if sb2.ID() != sb1.ID() {
+			t.Errorf("the refusal broke adoption: id %q, want %q", sb2.ID(), sb1.ID())
+		}
+	})
+
 	// A hung command must not hang the executor, and it must not poison the
 	// sandbox: the next tool call still works. Nothing the sandbox does to
 	// enforce the deadline may show up as output the command appears to have

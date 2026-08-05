@@ -37,6 +37,11 @@ const sessionLabel = "dev.opensdlc.managed-agent-platform.session-id"
 // containerName is the sandbox container in every sandbox pod.
 const containerName = "sandbox"
 
+// netSetupContainerName is the limited-networking init container in an ungated
+// limited pod. Its presence is fixed at pod create, so it is also how adoption
+// reads an existing pod's networking shape (adoptable, #296).
+const netSetupContainerName = "netsetup"
+
 // gateContainerName is the egress-gate sidecar in a gated pod (plan 12 slice
 // 4d) — a native sidecar: an init container with restartPolicy Always, so the
 // kubelet starts it (and waits out its startup probe — the admission signal,
@@ -168,6 +173,16 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 				}
 				return nil, err
 			}
+			// After the readiness wait, deliberately: a spec check ahead of it
+			// would return before the gated reclaim above could remove a pod
+			// that is wedged *and* mismatched — permanently, since a mismatch
+			// deletes nothing and the platform has no other automatic teardown
+			// — un-doing the #198 recovery. Nothing runs in the pod either
+			// way: waitReady only observes, and a refusal still lands before
+			// the pod is handed to a tool run (#296).
+			if aerr := adoptable(existing, spec, workdir); aerr != nil {
+				return nil, aerr
+			}
 			return p.attach(name, workdir), nil
 		}
 		// The pod's gate shape no longer matches the session's (a pre-gate pod
@@ -214,6 +229,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 			// next attempt replace it rather than serve a mismatched sandbox.
 			return nil, fmt.Errorf("k8s: pod %s raced into a mismatched gate shape", name)
 		}
+		if aerr := adoptable(existing, spec, workdir); aerr != nil {
+			return nil, aerr
+		}
 		// The loser's generated token is discarded unpersisted; the winner's stays.
 	} else if createErr != nil {
 		return nil, fmt.Errorf("k8s: create pod %s: %w", name, createErr)
@@ -251,6 +269,65 @@ func hasGateSidecar(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// hasNetSetup reports whether the pod carries the limited-networking init
+// container — the fixed-at-create mark of an ungated limited pod.
+func hasNetSetup(pod *corev1.Pod) bool {
+	for _, c := range pod.Spec.InitContainers {
+		if c.Name == netSetupContainerName {
+			return true
+		}
+	}
+	return false
+}
+
+// adoptable answers the question ours does not: was this pod created from the
+// spec being requested? A pod spec is immutable, so a mismatch cannot be
+// reconciled by adopting — the pod would keep the containment it was created
+// with, not the one this call asks for. Checked on both adoption paths before
+// the pod is handed to a tool run; a mismatch fails closed with
+// sandbox.ErrSpecMismatch and removes nothing, exactly as the docker backend's
+// adoptable does (#296, the k8s twin of #29): the platform has no replacement
+// lifecycle for a live session's sandbox, and deleting on a caller-supplied
+// spec would hand a caller's bug the pod's filesystem. A gated pod's
+// networking is not re-checked here — hasGateSidecar has already matched the
+// gate shape, and the sidecar pins the egress path — and Spec.Env and
+// Spec.Hardening, equally fixed at create, are deliberately not compared
+// either, matching docker (sandboxtest's SpecEnvBoundAtProvision pins the Env
+// half).
+func adoptable(pod *corev1.Pod, spec sandbox.Spec, workdir string) error {
+	if spec.Gate == nil {
+		// An ungated pod's networking was fixed at create by whether the
+		// netsetup init container flushed its routes: present means limited,
+		// absent means unrestricted.
+		if want, got := spec.Networking.Type == domain.NetLimited, hasNetSetup(pod); got != want {
+			return fmt.Errorf("k8s: pod %s has limited networking %v where session %s asked for %v: %w",
+				pod.Name, got, spec.SessionID, want, sandbox.ErrSpecMismatch)
+		}
+	}
+	var sb *corev1.Container
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == containerName {
+			sb = &pod.Spec.Containers[i]
+		}
+	}
+	if sb == nil {
+		return fmt.Errorf("k8s: pod %s carries no %s container: %w", pod.Name, containerName, sandbox.ErrSpecMismatch)
+	}
+	if sb.Image != spec.Image {
+		// Verbatim: the API server stores the image string exactly as created.
+		// A mutating admission webhook that rewrites image references would
+		// make every adoption mismatch here; the platform does not
+		// special-case that — configure the post-rewrite reference.
+		return fmt.Errorf("k8s: pod %s was created from image %q where session %s asked for %q: %w",
+			pod.Name, sb.Image, spec.SessionID, spec.Image, sandbox.ErrSpecMismatch)
+	}
+	if sb.WorkingDir != workdir {
+		return fmt.Errorf("k8s: pod %s was created with workdir %q where session %s asked for %q: %w",
+			pod.Name, sb.WorkingDir, spec.SessionID, workdir, sandbox.ErrSpecMismatch)
+	}
+	return nil
 }
 
 // deleteAndWaitGone removes a pod (UID-guarded, no grace) and waits for the
@@ -360,7 +437,8 @@ func podReady(pod *corev1.Pod, gated bool) bool {
 // commands to a filesystem and an egress policy that are not this session's. As
 // with the docker backend the label is not a trust boundary (anyone with API
 // access can forge it), only a guard against the realistic single-tenant
-// accident.
+// accident. The label answers only who created the pod; whether its
+// fixed-at-create config matches this call's spec is adoptable's check (#296).
 func ours(pod *corev1.Pod, sessionID domain.ID) error {
 	if pod.Labels[sessionLabel] != string(sessionID) {
 		return fmt.Errorf("k8s: pod %s is not this platform's sandbox for session %s", pod.Name, sessionID)
@@ -752,7 +830,7 @@ if [ "$routes" != "0" ]; then
 fi
 `
 	return corev1.Container{
-		Name:            "netsetup",
+		Name:            netSetupContainerName,
 		Image:           p.netSetupImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{"sh", "-c", cutEgress},
