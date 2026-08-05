@@ -223,6 +223,55 @@ func TestSessionMetadataCaps(t *testing.T) {
 	}
 }
 
+// The SDK bounds an agent_with_overrides replacement system prompt at 100,000
+// characters (betasession.go) — a bound specific to the session override; the
+// stored agent's own system documents none. Counted in runes, the
+// filesupload.go precedent for character-documented limits (#291).
+func TestSessionOverrideSystemCap(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	withSystem := func(sys string) map[string]any {
+		return map[string]any{
+			"agent":          map[string]any{"type": "agent_with_overrides", "id": agentID, "system": sys},
+			"environment_id": envID,
+		}
+	}
+	wantRejected := func(sys string) {
+		t.Helper()
+		status, res := s.do(http.MethodPost, "/v1/sessions", withSystem(sys))
+		wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		inner, _ := res["error"].(map[string]any)
+		if msg, _ := inner["message"].(string); !strings.Contains(msg, "100000") {
+			t.Errorf("error message %q does not name the limit", msg)
+		}
+	}
+
+	// The documented boundary is accepted; one rune past it rejects.
+	createSession(t, s, withSystem(strings.Repeat("a", 100_000)))
+	wantRejected(strings.Repeat("a", 100_001))
+
+	// 100,000 CJK runes are 300,000 bytes — counted as runes, accepted; one
+	// more rune rejects.
+	createSession(t, s, withSystem(strings.Repeat("界", 100_000)))
+	wantRejected(strings.Repeat("界", 100_001))
+
+	// The bound binds the override only: the stored agent's own system has no
+	// documented ceiling, so an over-cap stored system still resolves — via a
+	// plain reference and via an override that omits system (omit preserves).
+	big := createAgent(t, s, map[string]any{"name": "big-sys",
+		"model": "claude-opus-4-8", "system": strings.Repeat("b", 100_001)})["id"].(string)
+	createSession(t, s, map[string]any{"agent": big, "environment_id": envID})
+	createSession(t, s, map[string]any{
+		"agent":          map[string]any{"type": "agent_with_overrides", "id": big},
+		"environment_id": envID,
+	})
+	// system:null (clear) is never counted, even over an over-cap stored system.
+	createSession(t, s, map[string]any{
+		"agent":          map[string]any{"type": "agent_with_overrides", "id": big, "system": nil},
+		"environment_id": envID,
+	})
+}
+
 // fixture creates an agent and an environment and returns their ids.
 func fixture(t *testing.T, s *tserver) (agentID, envID string) {
 	t.Helper()
