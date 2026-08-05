@@ -15,6 +15,16 @@ copy of an entry here.
 
 ### Added
 
+- **Session create/update enforce the SDK's documented metadata caps**
+  ([internal/api/sessions.go](./internal/api/sessions.go), #289). The pinned SDK
+  bounds session metadata with the same sentence it uses for agents — at most
+  16 pairs, keys up to 64 chars, values up to 512 (betasession.go) — but
+  sessions enforced nothing: an over-cap bag was stored and echoed. Both call
+  sites now run `wire.go`'s shared `validateMetadataCaps` (rune-counted, same
+  messages as agents and vaults): create validates the parsed bag, update the
+  post-patch stored bag, closing the gap #66 recorded. Environments stay
+  unbounded — nothing documents caps for them (docs/DIVERGENCES.md).
+
 - **Agent create/update enforce the reference's documented caps — a malformed agent
   is a 400 at create, not a stored agent whose every turn fails**
   ([internal/api/wire.go](./internal/api/wire.go), #66). The pinned SDK documents
