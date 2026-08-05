@@ -124,6 +124,32 @@ copy of an entry here.
 
 ### Fixed
 
+- **The issue-triage bash guard no longer denies every command on hosts where
+  `python3` is the Microsoft Store stub**
+  ([.claude/hooks/issue-triage-bash-guard.sh](./.claude/hooks/issue-triage-bash-guard.sh),
+  #295). The guard's parse step piped the PreToolUse payload to `python3 -c`
+  with `|| exit 2`, so a host whose `python3` is the WindowsApps alias stub —
+  which exits without reading stdin — denied **every** Bash call the triage
+  subagent made, allow-listed or not, before the allowlist ever ran; triage
+  silently degraded to a no-evidence `needs_plan` default that looked like a
+  policy denial, not an environment fault. The parse now probes `python3`,
+  then `python`, with a known-good document, so with a working interpreter a
+  malformed payload still hard-denies exactly as before; only when neither
+  works does it fall back to a POSIX `sed` extraction that fails closed on
+  any value it cannot decode faithfully (a backslash in the raw match — an
+  escape it would have to interpret, or a truncated match at an escaped
+  quote — denies with a rephrase-without-quotes message). The allowlist,
+  metacharacter screen, and flag denials are untouched and stay fail-closed;
+  real-python hosts keep identical exit codes on every row, and the stub-host
+  change is that a broken interpreter no longer masquerades as policy.
+  Verified by a 15-row exit-code matrix on the stub host (allow rows now 0,
+  deny rows still 2 — except the one fallback row, a truncated payload whose
+  extractable command is clean and allow-listed, which passes the screens;
+  unreachable from the harness, which emits only valid JSON), a 15-row
+  old-vs-new exit-code diff under a real python3 (identical on every row,
+  malformed JSON included), and a live triage dispatch through the fixed
+  hook whose transcript shows zero guard denials.
+
 - **The NUL-sanitization test's preview drain is bounded by a sentinel frame,
   not a coalesced wake** ([internal/brain/nul_test.go](./internal/brain/nul_test.go),
   #294). One CI run drained zero preview frames from a turn that demonstrably
