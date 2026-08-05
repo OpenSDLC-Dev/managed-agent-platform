@@ -267,7 +267,11 @@ func TestPreviewFramesCarryOnlySanitizedText(t *testing.T) {
 			t.Fatalf("broker never became ready: %v", err)
 		}
 		h.runOnce(t)
-		if err := events.NewLog(h.pool).PublishEventFrame(ctx, h.sessionID,
+		// A fresh deadline: the outer ctx has been paying for Ready and the
+		// whole turn, and the sentinel publish must not inherit that debt.
+		pubCtx, pubCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer pubCancel()
+		if err := h.log.PublishEventFrame(pubCtx, h.sessionID,
 			map[string]any{"type": "drain_sentinel"}); err != nil {
 			t.Fatalf("publish drain sentinel: %v", err)
 		}
