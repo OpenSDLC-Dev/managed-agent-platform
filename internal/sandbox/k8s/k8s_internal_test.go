@@ -2057,17 +2057,19 @@ func TestWriteScriptSpellsTheUnreplaceableExit(t *testing.T) {
 // lets it finish (exit 0).
 func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
 	// drainRun mirrors TestWriteScriptVerifiesDeliveredLength's runScript, but
-	// feeds the script through the pipe and reports both ends: the script's
-	// exit code and the producer's.
-	drainRun := func(t *testing.T, env []string, path, tmp string) (script, producer int) {
+	// feeds the script through the pipe and reports both ends — the script's
+	// exit code and the producer's — plus whatever the script printed, which
+	// is how a classified refusal carries its reason out (plan 23).
+	drainRun := func(t *testing.T, env []string, path, tmp string) (script, producer int, reason string) {
 		t.Helper()
 		f := gopath.Join(t.TempDir(), "writescript.sh")
 		if err := os.WriteFile(f, []byte(writeScript), 0o755); err != nil {
 			t.Fatalf("stage the script: %v", err)
 		}
+		outFile := gopath.Join(t.TempDir(), "stdout")
 		cmd := exec.Command("/bin/bash", "-c",
-			`head -c 1048576 /dev/zero | /bin/bash "$1" "$2" "$3" "$4" "$5"; echo "${PIPESTATUS[0]} ${PIPESTATUS[1]}"`,
-			"map-drain", f, path, gopath.Dir(path), "1048576", tmp)
+			`head -c 1048576 /dev/zero | /bin/bash "$1" "$2" "$3" "$4" "$5" > "$6"; echo "${PIPESTATUS[0]} ${PIPESTATUS[1]}"`,
+			"map-drain", f, path, gopath.Dir(path), "1048576", tmp, outFile)
 		cmd.Env = env
 		out, err := cmd.Output()
 		if err != nil {
@@ -2085,7 +2087,11 @@ func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("script exit %q: %v", fields[1], err)
 		}
-		return script, producer
+		ob, err := os.ReadFile(outFile)
+		if err != nil {
+			t.Fatalf("read the script's stdout: %v", err)
+		}
+		return script, producer, string(ob)
 	}
 	gone := func(t *testing.T, p string) {
 		t.Helper()
@@ -2102,7 +2108,7 @@ func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
 			t.Fatalf("stage the blocker: %v", err)
 		}
 		path := dir + "/plain/deeper/child"
-		script, producer := drainRun(t, nil, path, gopath.Join(gopath.Dir(path), sandbox.TempName()))
+		script, producer, _ := drainRun(t, nil, path, gopath.Join(gopath.Dir(path), sandbox.TempName()))
 		if script != sandbox.ExitPathNotDirectory {
 			t.Errorf("script exit %d, want %d (ExitPathNotDirectory)", script, sandbox.ExitPathNotDirectory)
 		}
@@ -2113,19 +2119,25 @@ func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
 
 	// The `: >` failure: a temporary whose name an existing directory already
 	// holds cannot be created, for root and non-root alike (EISDIR), which is
-	// the same branch an unwritable or full parent takes.
+	// the same branch an unwritable or full parent takes. The refusal is
+	// classified (plan 23): exit 20, with the shell's own strerror text as
+	// the reason on stdout — the sandbox's equivalent of the errno the
+	// reference toolset maps.
 	t.Run("TemporaryCannotBeCreated", func(t *testing.T) {
 		dir := t.TempDir()
 		tmp := gopath.Join(dir, sandbox.TempName())
 		if err := os.Mkdir(tmp, 0o755); err != nil {
 			t.Fatalf("stage the squatting directory: %v", err)
 		}
-		script, producer := drainRun(t, nil, dir+"/target", tmp)
-		if script != 1 {
-			t.Errorf("script exit %d, want 1", script)
+		script, producer, reason := drainRun(t, nil, dir+"/target", tmp)
+		if script != sandbox.ExitPathNotWritable {
+			t.Errorf("script exit %d, want %d (ExitPathNotWritable)", script, sandbox.ExitPathNotWritable)
 		}
 		if producer != 0 {
 			t.Errorf("producer exit %d, want 0 — the failed create exited with the body unread", producer)
+		}
+		if reason != "Is a directory" {
+			t.Errorf("reason = %q, want the shell's own %q", reason, "Is a directory")
 		}
 	})
 
@@ -2140,7 +2152,7 @@ func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
 		env := append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 		dir := t.TempDir()
 		tmp := gopath.Join(dir, sandbox.TempName())
-		script, producer := drainRun(t, env, dir+"/target", tmp)
+		script, producer, _ := drainRun(t, env, dir+"/target", tmp)
 		if script != 1 {
 			t.Errorf("script exit %d, want 1", script)
 		}

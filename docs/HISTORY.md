@@ -33,6 +33,33 @@ recorded nowhere else.
 
 ---
 
+## Classified unwritable writes (plan 23) — archived 2026-08-05, delivered in one PR (#306)
+
+Drafted, verified against the reference checkouts, and delivered the same day. The plan's
+research record (the SDK's `tools/agenttoolset` answering every write failure to the model
+as an `is_error` tool_result, worded by `fsErrorMessage`'s four-entry table with raw
+passthrough, no wire error-code taxonomy) was verified claim-by-claim by the independent
+verifier at the pinned SDK version before the plan landed (PR #308), and the
+implementation followed as designed: `ErrNotWritable`/exit 20 with the reason taken from
+the sandbox's own bash strerror on both backends, `PathNotWritableError` carrying it to a
+`fileFault` row that normalizes wording the reference's way. TDD red observed on all new
+tests before the code (host-bash exit-20 + reason, docker probe classification,
+mkdirAll's strerror tail, the toolset table rows, the tightened read-only-root contract
+cells). The one design deviation from the plan's sketch: the sentinel and typed error
+landed beside their siblings in `sandbox.go` rather than `filefault.go`, and docker's
+`mkdirAll` classifies from its exec's captured stderr rather than a second probe — same
+mechanism, one exec fewer. The tee mid-stream failure deliberately stays a raw exit 1: a
+failure of the transfer, not of the target. Review extended the scope past the plan's
+sketch on one docker route: the plan scoped the post-PUT `mv` failure out as reachable
+only from configurations the provisioner refuses, and both reviewers disproved that —
+the daemon extracts the archive as root, so a root-owned parent under a non-root uid
+takes the PUT and refuses only the move, a provisionable posture. The delivered code
+asks the same writability probe after a failed rename (a probe that succeeds keeps the
+raw error: the transfer's failure, not the target's), measured red-first against a real
+non-root image.
+
+---
+
 ## GCS-native blob plan (22) — archived 2026-08-04, both slices delivered (#240)
 
 docs/plan/22_gcs-native-blob.md is archived complete. It set out to remove the GCP

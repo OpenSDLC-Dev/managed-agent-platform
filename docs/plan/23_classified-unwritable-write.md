@@ -1,7 +1,11 @@
 ---
-status: draft
+status: archived
 issue: "#306"
 ---
+
+> Archived: **completed** — delivered in the single PR that closes #306, as the Delivery
+> section planned (started and finished in one PR, so no committed `in-progress` state
+> existed; the delivery record is docs/HISTORY.md, the narrative CHANGELOG.md).
 
 # A write the sandbox cannot land is the model's error, not the platform's fault (plan 23)
 
@@ -41,7 +45,7 @@ self-hosted deployment point. Three findings decide this plan's shape:
    table's ENOENT and ENOTDIR strings verbatim. Its directory-target row says
    `is not a regular file` rather than the table's EISDIR `is a directory` — deliberately,
    and unchanged by this plan: that is the reference's own wording too, from its read-path
-   validation (`fs.go`: `read %s: %s is not a regular file`), and our row covers
+   validation (`fs.go`: `read: %s is not a regular file`), and our row covers
    not-a-regular-file cases beyond directories.
 3. **The wire carries no structured file-fault codes.** A tool failure is text plus
    `is_error` — so wire compatibility constrains the *message wording*, not a code
@@ -125,14 +129,20 @@ Bulk writes (workdir-only by design), the read path (unaffected by parent writab
 wire-level error codes (none exist to be compatible with), and retry semantics for
 transient ENOSPC (the reason text reports it; the model decides).
 
-Two docker write-path residuals stay raw on purpose. A daemon refusal after the archive
-landed — the in-container `mv` failing — is reachable only from configurations the
-provisioner refuses (the temp lands next to the target, so a target the probe could
-create next to is one the rename can land on); and an ENOSPC that strikes mid-extraction
-can pass the probe (a zero-byte create needs no blocks) and keeps the daemon's error —
-which is right by the same line #304 drew for k8s's `tee` branch: a transfer that failed
-partway is a failure of the transfer, not of the target, and classifying it as
-"unwritable" would tell the model the path is bad when the bytes were.
+One docker write-path residual stays raw on purpose: an ENOSPC that strikes
+mid-extraction can pass the probe (a zero-byte create needs no blocks) and keeps the
+daemon's error — right by the same line #304 drew for k8s's `tee` branch: a transfer
+that failed partway is a failure of the transfer, not of the target, and classifying it
+as "unwritable" would tell the model the path is bad when the bytes were.
+
+A first revision of this section also scoped out the in-container `mv` failing after the
+archive landed, reasoning it reachable only from configurations the provisioner refuses.
+Review disproved that: the daemon extracts the archive as root, so a root-owned parent
+under a non-root uid takes the PUT and refuses only the move — a provisionable posture
+(`Hardening.Validate` refuses nothing but the gate's own uid). The delivered code asks
+the same writability probe after a failed rename, keeping the raw error only when the
+probe succeeds — the transfer's failure, not the target's (the delivery record:
+docs/HISTORY.md's plan-23 summary).
 
 ## Delivery
 

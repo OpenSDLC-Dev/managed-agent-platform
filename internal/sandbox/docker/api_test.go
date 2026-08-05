@@ -928,14 +928,217 @@ func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "daemon gave up mid-transfer") {
 		t.Fatalf("err = %v, want the daemon's failure", err)
 	}
-	if len(commands) < 2 {
-		t.Fatalf("execs = %q, want the removal then the classification probe", commands)
+	if len(commands) < 3 {
+		t.Fatalf("execs = %q, want the removal then the two classification probes", commands)
 	}
-	if removal := commands[len(commands)-2]; !strings.HasPrefix(removal, "rm -f '/workspace/"+sandbox.TempPrefix) {
-		t.Errorf("second-to-last exec = %q, want the temporary file removed", removal)
+	if removal := commands[len(commands)-3]; !strings.HasPrefix(removal, "rm -f '/workspace/"+sandbox.TempPrefix) {
+		t.Errorf("third-to-last exec = %q, want the temporary file removed", removal)
 	}
-	if last := commands[len(commands)-1]; !strings.Contains(last, "__map_unreplaceable '/workspace/f.txt'") {
-		t.Errorf("last exec = %q, want the refused put classified", last)
+	if probe := commands[len(commands)-2]; !strings.Contains(probe, "__map_unreplaceable '/workspace/f.txt'") {
+		t.Errorf("second-to-last exec = %q, want the refused put asked about the target", probe)
+	}
+	// A replaceable target gets the second question — can the parent take a
+	// create at all — and a parent that can (this fake's execs all exit 0)
+	// keeps the daemon's own error (plan 23, #306).
+	if last := commands[len(commands)-1]; !strings.Contains(last, ": > '/workspace/"+sandbox.TempPrefix) {
+		t.Errorf("last exec = %q, want the writability probe", last)
+	}
+}
+
+// A PUT the daemon refuses on a replaceable target whose parent then refuses
+// the probe's create is the model's error: ErrNotWritable, carrying the
+// sandbox's own strerror text as the reason (plan 23, #306) — never the raw
+// daemon message the executor would abandon the work item over.
+func TestWriteFileClassifiesAnUnwritableParentWhenThePutFails(t *testing.T) {
+	// The probe is recognized by its command rather than its position, so the
+	// mkdir-and-retry execs ahead of it cannot renumber it out from under the
+	// fake. Its create is refused, and the reason travels on stdout the way
+	// the write script's own refusal does.
+	probes := map[string]bool{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `{"message":"container rootfs is marked read-only"}`)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			probes[id] = strings.Contains(body.Cmd[len(body.Cmd)-2], ": > '/workspace/"+sandbox.TempPrefix)
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+			if probes[execID()] {
+				w.Write(frame(streamStdout, "Read-only file system"))
+			}
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			if probes[execID()] {
+				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, sandbox.ExitPathNotWritable)
+			} else {
+				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x"))
+	if !errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v, want ErrNotWritable", err)
+	}
+	var pnw *sandbox.PathNotWritableError
+	if !errors.As(err, &pnw) || pnw.Reason != "Read-only file system" {
+		t.Fatalf("err = %v, want the probe's reason carried", err)
+	}
+}
+
+// A parent mkdirAll cannot make for a reason that is not a blocking file is the
+// same refusal one probe earlier: the mkdir's own stderr names why, and the
+// classification keeps the model's error out of the executor's fault path
+// (plan 23, #306).
+func TestWriteFileStreamClassifiesAnUnmakeableParent(t *testing.T) {
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			io.WriteString(w, `{"Id":"e1"}`)
+		case r.URL.Path == "/exec/e1/start":
+			w.WriteHeader(http.StatusOK)
+			w.Write(frame(streamStderr, "mkdir: cannot create directory '/newtop': Read-only file system"))
+		case r.URL.Path == "/exec/e1/json":
+			io.WriteString(w, `{"Running":false,"ExitCode":1}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFileStream(context.Background(), "/newtop/f.txt", strings.NewReader("x"), 1)
+	if !errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v, want ErrNotWritable", err)
+	}
+	var pnw *sandbox.PathNotWritableError
+	if !errors.As(err, &pnw) || pnw.Reason != "Read-only file system" {
+		t.Fatalf("err = %v, want the mkdir's reason carried", err)
+	}
+}
+
+// The daemon extracts the archive as root, so a root-owned parent under a
+// non-root sandbox user takes the PUT — the refusal only surfaces in the rename
+// exec, which runs as that user. The same writability question a refused PUT
+// asks is asked there too, so the write is the model's error on this route as
+// well (plan 23, #306), never the raw exit the executor would abandon the work
+// item over.
+func TestWriteFileClassifiesARootOwnedParentAtRename(t *testing.T) {
+	// The rename and the probe are recognized by their commands rather than
+	// their positions, as the PUT-refusal tests recognize theirs.
+	kinds := map[string]string{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			switch cmd := body.Cmd[len(body.Cmd)-2]; {
+			case strings.Contains(cmd, "mv -f"):
+				kinds[id] = "rename"
+			case strings.Contains(cmd, ": > '/etc/"+sandbox.TempPrefix):
+				kinds[id] = "probe"
+			}
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+			switch kinds[execID()] {
+			case "rename":
+				w.Write(frame(streamStderr, "mv: cannot move '/etc/.map-write-x' to '/etc/f.txt': Permission denied"))
+			case "probe":
+				w.Write(frame(streamStdout, "Permission denied"))
+			}
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			switch kinds[execID()] {
+			case "rename":
+				io.WriteString(w, `{"Running":false,"ExitCode":1}`)
+			case "probe":
+				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, sandbox.ExitPathNotWritable)
+			default:
+				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
+	if !errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v, want ErrNotWritable", err)
+	}
+	var pnw *sandbox.PathNotWritableError
+	if !errors.As(err, &pnw) || pnw.Reason != "Permission denied" {
+		t.Fatalf("err = %v, want the probe's reason carried", err)
+	}
+}
+
+// A failed move over a parent that can take a create keeps the raw error: the
+// failure was the transfer's, not the target's, and calling the path unwritable
+// would tell the model the path is bad when it is not.
+func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
+	var commands []string
+	renames := map[string]bool{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			cmd := body.Cmd[len(body.Cmd)-2]
+			commands = append(commands, cmd)
+			renames[id] = strings.Contains(cmd, "mv -f")
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			if renames[execID()] {
+				io.WriteString(w, `{"Running":false,"ExitCode":1}`)
+			} else {
+				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFile(context.Background(), "/workspace/f.txt", []byte("x"))
+	if errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v; a writable target must keep the raw error", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "exit 1") {
+		t.Fatalf("err = %v, want the move's own failure", err)
+	}
+	if last := commands[len(commands)-1]; !strings.Contains(last, ": > '/workspace/"+sandbox.TempPrefix) {
+		t.Errorf("last exec = %q, want the writability probe asked after the failed move", last)
 	}
 }
 

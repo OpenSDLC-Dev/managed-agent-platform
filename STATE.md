@@ -4,8 +4,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** [Plan 22](./docs/plan/22_gcs-native-blob.md) is archived — its delivery record is
-in [docs/HISTORY.md](./docs/HISTORY.md), its narrative in [CHANGELOG.md](./CHANGELOG.md).
+**None.** [Plan 23](./docs/plan/23_classified-unwritable-write.md) is archived — its
+delivery record is in [docs/HISTORY.md](./docs/HISTORY.md), its narrative in
+[CHANGELOG.md](./CHANGELOG.md).
 The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
 
 ## Tasks

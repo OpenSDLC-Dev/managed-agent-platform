@@ -1551,12 +1551,24 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		// docker's daemon rejects the archive PUT and k8s cannot create the
 		// temporary file, whose failure branch must drain the body it cannot
 		// land or the exec stream deadlocks instead of answering (#304 — its
-		// 64 MiB form deadlocked three of three before the drain). The error's
-		// classification is its own open defect (#306), so this cell pins only
-		// that the call comes back. Hangs rather than passes on regression.
+		// 64 MiB form deadlocked three of three before the drain). The refusal
+		// is classified: the model's error, not the platform's fault, exactly
+		// as the reference toolset answers every write failure (plan 23,
+		// #306). Large first, so a drain that stops draining hangs here
+		// rather than passes.
 		big := bytes.Repeat([]byte("y"), 256<<10)
-		if err := sb.WriteFileStream(ctx, "/etc/map-304-blocked", bytes.NewReader(big), int64(len(big))); err == nil {
-			t.Error("a quarter-megabyte streamed write onto the read-only root: want an error, got success")
+		if err := sb.WriteFileStream(ctx, "/etc/map-304-blocked", bytes.NewReader(big), int64(len(big))); !errors.Is(err, sandbox.ErrNotWritable) {
+			t.Errorf("a quarter-megabyte streamed write onto the read-only root: err = %v, want ErrNotWritable", err)
+		}
+		if err := sb.WriteFile(ctx, "/etc/map-306-blocked", []byte("x")); !errors.Is(err, sandbox.ErrNotWritable) {
+			t.Errorf("a buffered write onto the read-only root: err = %v, want ErrNotWritable", err)
+		}
+		// The other route to the same refusal: the parent itself cannot be
+		// made — mkdir of a new top-level directory fails on the read-only
+		// root before any temporary is attempted (docker classifies in
+		// mkdirAll, k8s in the write script's mkdir branch).
+		if err := sb.WriteFile(ctx, "/map-306-newtop/probe.txt", []byte("x")); !errors.Is(err, sandbox.ErrNotWritable) {
+			t.Errorf("a write under an unmakeable parent on the read-only root: err = %v, want ErrNotWritable", err)
 		}
 	})
 

@@ -141,6 +141,52 @@ copy of an entry here.
 
 ### Fixed
 
+- **A write the sandbox cannot land is the model's error, not the platform's
+  fault** ([internal/sandbox/sandbox.go](./internal/sandbox/sandbox.go),
+  [internal/sandbox/filefault.go](./internal/sandbox/filefault.go),
+  [internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go),
+  [internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
+  [internal/toolset/file.go](./internal/toolset/file.go); #306,
+  [plan 23](./docs/plan/23_classified-unwritable-write.md), archived in this
+  PR). A replaceable target whose temporary file could not be created — a
+  read-only root outside the writable mounts, a root-owned parent under a
+  non-root uid, a full disk — or whose missing parent could not be made,
+  failed raw: k8s's `exit 1`, docker's daemon `http 400`, both abandoned by
+  the executor to lease reclaim and retried until the lease ran out. The
+  reference's own toolset answers **every** write failure to the model
+  (`tools/agenttoolset`: each failure path returns through `errorf`,
+  surfaced as an `is_error` tool_result; no error-code taxonomy on the
+  wire), so both backends now classify: `ErrNotWritable` (exit 20), carried
+  as `PathNotWritableError` with the sandbox's own bash strerror text as
+  the reason — k8s's write script captures the failed create's or `mkdir`'s
+  message in-script and exits 20 with the reason on stdout (a path fault
+  still wins at 15; the mid-stream `tee` failure stays a raw exit 1, a
+  failure of the transfer rather than the target); docker attempts the same
+  create in a classify-on-refusal probe exec when the daemon refuses the
+  PUT on a replaceable target, takes `mkdir`'s own stderr tail in
+  `mkdirAll`, and asks the same probe after a failed rename — the daemon
+  extracts as root, so a root-owned parent under a non-root uid takes the
+  PUT and refuses only the move, and a probe that succeeds keeps the raw
+  error there, a failure of the transfer rather than the target — no
+  daemon-text parsing anywhere, and both backends' reasons come from the
+  same shell's strerror, which is what keeps #205's identical-answers
+  invariant. The toolset words the result the way the reference's
+  `fsErrorMessage` table does: both permission spellings (EACCES's
+  `Permission denied`, EPERM's `Operation not permitted` — the table
+  matches `fs.ErrPermission`, which Go answers for both errnos) take the
+  reference's `permission denied`, everything else passes through raw. Red observed first on every
+  new test: the host-bash exit-20 + reason rows, docker's probe
+  classification, `mkdirAll` strerror, and rename-refusal tests (the last
+  measured against a real non-root image, whose raw `mv … Permission
+  denied` was exactly the abandoned-to-reclaim error), the toolset table
+  rows, and the read-only-root contract cells tightened from `err != nil`
+  to `ErrNotWritable` (buffered, quarter-megabyte streamed, and a
+  new-parent cell — green on both real backends in seconds). docs:
+  DIVERGENCES' #205 convergence entry gains the `Closed (#306)` record,
+  ARCHITECTURE's sandbox.go/toolset/contract rows name the sentinel and
+  its wording provenance, and plan 23 archives with its summary in
+  HISTORY.md.
+
 - **Every exit the k8s write script can take with the body unread now drains
   it first, so a failed large write returns instead of deadlocking**
   ([internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go),

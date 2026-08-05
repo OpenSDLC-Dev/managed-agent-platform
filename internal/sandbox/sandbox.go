@@ -78,9 +78,38 @@ var (
 	// result rather than letting it reach the executor as a sandbox fault and
 	// be retried until the lease runs out (#205).
 	ErrNotReplaceable = errors.New("sandbox: target cannot be replaced")
+	// ErrNotWritable reports a write refused because the temporary file cannot
+	// be created — or a missing parent cannot be made, or the rename refused
+	// where the temporary was the daemon's to create and the move the sandbox
+	// user's to make — next to the target: a read-only root outside the
+	// writable mounts, a root-owned parent under a non-root uid, a full disk. Like ErrIsDirectory it describes the path the
+	// caller asked for, so a tool hands it to the model — which is exactly how
+	// the reference toolset answers every write failure (plan 23) — rather
+	// than letting it reach the executor as a sandbox fault and be retried
+	// until the lease runs out (#306). It usually travels inside a
+	// PathNotWritableError carrying the sandbox's own strerror text as the
+	// reason.
+	ErrNotWritable = errors.New("sandbox: target cannot be written")
 	// ErrFileTooLarge reports a read of a file above MaxFileBytes.
 	ErrFileTooLarge = errors.New("sandbox: file too large")
 )
+
+// PathNotWritableError is ErrNotWritable with the sandbox's own words for why —
+// the last strerror field of the shell's message ("Read-only file system",
+// "Permission denied", "No space left on device"), which is the sandbox-side
+// equivalent of the errno the reference toolset's fsErrorMessage maps. The
+// toolset normalizes the reason the way that table does; here it travels raw.
+type PathNotWritableError struct {
+	Path   string
+	Reason string
+}
+
+func (e *PathNotWritableError) Error() string {
+	return e.Path + ": " + ErrNotWritable.Error() + ": " + e.Reason
+}
+
+// Is makes errors.Is(err, ErrNotWritable) answer for the wrapped form.
+func (e *PathNotWritableError) Is(target error) bool { return target == ErrNotWritable }
 
 // Spec is what a session's sandbox is made of. Image is a platform deployment
 // choice (the wire's environment config has no image field); Networking comes
