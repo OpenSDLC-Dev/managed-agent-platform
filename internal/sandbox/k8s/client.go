@@ -3,8 +3,8 @@
 // path (the plan's image contract) plus a userland with `setsid` (the deadline
 // wrapper backgrounds the command in its own session), `tee` and `wc` (the
 // write path counts the bytes the exec stream delivered), `cat` (every read
-// streams through one, and a write refusing an unreplaceable target drains the
-// refused body with one, #303), `mv` and `rm` (it lands
+// streams through one, and a write that refuses or fails with the body still
+// unread drains it with one, #303/#304), `mv` and `rm` (it lands
 // the bytes under a temporary name and renames them into place), `tar` (a bulk
 // write's archive is extracted inside the pod here, where the docker backend hands
 // its own to the daemon and needs nothing — so an image without one loses skill

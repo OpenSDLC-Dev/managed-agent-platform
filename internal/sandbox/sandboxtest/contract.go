@@ -831,6 +831,14 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 				t.Errorf("read %s: err = %v, want ErrNotDirectory", path, err)
 			}
 		}
+		// Streamed and large: the same classification for a quarter-megabyte
+		// body, which on k8s means the failed `mkdir` must drain what it cannot
+		// land — an exit that leaves this much unread deadlocks the exec stream
+		// instead of answering (#304). Hangs rather than passes on regression.
+		big := bytes.Repeat([]byte("y"), 256<<10)
+		if err := sb.WriteFileStream(ctx, plain+"/child", bytes.NewReader(big), int64(len(big))); !errors.Is(err, sandbox.ErrNotDirectory) {
+			t.Errorf("large stream write under a non-directory: err = %v, want ErrNotDirectory", err)
+		}
 		if got, err := sb.ReadFile(ctx, plain); err != nil || string(got) != "i am a file" {
 			t.Errorf("the file in the way holds %q, %v; want it untouched", got, err)
 		}
@@ -1537,6 +1545,18 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		// tool lands bytes in.
 		if err := sb.WriteFile(ctx, workdir+"/probe.txt", []byte("hi")); err != nil {
 			t.Errorf("WriteFile on a read-only-rootfs sandbox: %v", err)
+		}
+		// A large streamed write to a *replaceable* path the read-only root
+		// still blocks — no mount, no device, so the refusal is not #303's:
+		// docker's daemon rejects the archive PUT and k8s cannot create the
+		// temporary file, whose failure branch must drain the body it cannot
+		// land or the exec stream deadlocks instead of answering (#304 — its
+		// 64 MiB form deadlocked three of three before the drain). The error's
+		// classification is its own open defect (#306), so this cell pins only
+		// that the call comes back. Hangs rather than passes on regression.
+		big := bytes.Repeat([]byte("y"), 256<<10)
+		if err := sb.WriteFileStream(ctx, "/etc/map-304-blocked", bytes.NewReader(big), int64(len(big))); err == nil {
+			t.Error("a quarter-megabyte streamed write onto the read-only root: want an error, got success")
 		}
 	})
 
