@@ -140,10 +140,17 @@ copy of an entry here.
   before the container is started or anything runs in it. A mismatch fails
   closed with the new `sandbox.ErrSpecMismatch` sentinel and deletes nothing:
   replacement is an explicit lifecycle the platform does not have, per the
-  issue. Not reachable through the normal live-session lifecycle today (the
-  control plane keeps a session's networking fixed) — this is the precondition
-  #29 tracked for any future path that can re-provision a session under a
-  changed spec. The k8s provider's twin gap is #296. Tests: fake-daemon rows for
+  issue — so a session whose existing container mismatches keeps failing
+  provision until the stale container is removed by hand. Contrary to #29's own
+  severity framing (written pre-gate), the networking half is reachable today:
+  the control plane accepts an environment networking patch mid-session (only
+  the `kind` is immutable) and the executor reads the environment's config live
+  at each tool run, so in a gate-less Docker deployment
+  unrestricted→limited reached exactly this adoption path and silently kept
+  `bridge` egress — now it fails closed. (A *gated* deployment absorbs the same
+  flip via the #197 `pairedWithGate` remove-and-rebuild reshape.) Whether the
+  control plane should instead refuse the patch while sessions are live is
+  #297. The k8s provider's twin gap is #296. Tests: fake-daemon rows for
   each mismatch (structurally proving no start/remove/exec touches the
   container) and the matching-`none` adoption, plus a real-daemon test reading
   the effective `HostConfig.NetworkMode` off `docker inspect` for both the
