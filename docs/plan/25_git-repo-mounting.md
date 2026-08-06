@@ -96,8 +96,16 @@ it ("is not echoed in API responses").
    temporary directory, packs the working tree — `.git/` included — into a tar written to
    a local temp file (streaming needs a size up front; a repository must never buffer in
    memory), streams it into the sandbox via the existing `Sandbox.WriteFileStream` to a
-   `/tmp` staging path, and extracts with one `Exec` (`mkdir -p <mount> && tar -xf … -C
-   <mount> && rm -f …`). Consequences, and why this shape won: the token never enters the
+   `/tmp` staging path, and extracts **via stage-and-rename**: one `Exec` untars into a
+   fresh sandbox-side temporary directory and then renames it into place, so `<mount>`
+   (and its `.git`) exists only once the tree is complete — a mid-extraction failure
+   (disk full, unwritable member, kill) can never leave a partial tree for the
+   decision-5 probe to trust — and the staging tar plus any partial temporary are
+   removed on **every** exit path, success or failure (cleanup is unconditional, never
+   sequenced behind an `&&`). Paths reach that command shell-quoted with the
+   established single-quote escaping (the `test -e '<path>'` precedent): `mount_path`
+   is request-controlled text, and unquoted interpolation would be command injection
+   inside the sandbox. Consequences, and why this shape won: the token never enters the
    sandbox in any form (no env var, no credential file; go-git sends it as a per-request
    `Authorization` header — `BasicAuth{Username: "x-access-token"}` — so the on-disk clone
    and its `.git/config` carry only the clean URL); the egress gate and a `limited`
@@ -109,14 +117,24 @@ it ("is not echoed in API responses").
    shelling out to a git binary executor-side (a deployment prerequisite on every
    executor/worker image and a non-hermetic test suite, for compatibility this feature
    does not need). Temp dirs and tar files are removed in `defer` on every path.
-   Clones are **budgeted** — the executor-local spool sits outside the sandbox's own
-   CPU/storage hardening, so one unbounded repository could exhaust executor disk and
-   disrupt unrelated sessions: a per-repo deadline (`EXECUTOR_REPO_CLONE_TIMEOUT`,
-   default 5m) and a byte budget (`EXECUTOR_REPO_CLONE_MAX_BYTES`, default 1 GiB,
-   counted over tree + tar) abandon the clone, remove the spool, and surface as the
-   decision-4 reasons `timeout` / `too_large`. Repos clone sequentially with the spool
-   cleaned between, so the per-repo budget — not the repo count — bounds peak executor
-   disk.
+   Clones are **budgeted, and the byte budget is enforced as bytes land** — the
+   executor-local spool sits outside the sandbox's own CPU/storage hardening, so one
+   unbounded repository could exhaust executor disk and disrupt unrelated sessions. A
+   per-repo deadline (`EXECUTOR_REPO_CLONE_TIMEOUT`, default 5m) and a byte budget
+   (`EXECUTOR_REPO_CLONE_MAX_BYTES`, default 1 GiB, counted over tree + tar) abandon
+   the clone and surface as the decision-4 reasons `timeout` / `too_large`; the byte
+   meter wraps the storage go-git writes through and errors past the cap **during**
+   the clone — post-hoc accounting would let an adversarial repository blow far past
+   the limit before anyone looked, so m-oversize asserts the peak spool, not just the
+   final error. The spool is removed on every exit. Aggregates need no further knobs:
+   the executor's work loop is serial (one `step` at a time,
+   internal/executor/executor.go:224-229) and the spool is cleaned between sequential
+   clones, so per-process peak disk is one repo's budget; create caps a session at
+   **eight** `github_repository` resources (INFERRED, ours — files cap at 500), so a
+   session's aggregate clone time is bounded by count × deadline. Inode exhaustion by
+   a many-tiny-files repository inside the byte budget is bounded only by the deadline
+   — accepted for this slice and stated here rather than guessed at with an
+   entry-count knob.
 2. **The token is sealed beside the row, never inside the echoed array.** What
    `sessions.resources` jsonb stores is the *rendered* wire object — which is token-free
    by schema — so session GET's verbatim echo cannot leak the token *by construction*.
@@ -141,13 +159,28 @@ it ("is not echoed in API responses").
    rows die only with their session (the cascade): repo resources themselves are
    immutable post-create (decision 3). A server without a configured cipher refuses a
    repo-bearing create the way the vault endpoints refuse without one — unavailable, not
-   silently unencrypted. No handler ever logs a resource payload; slog carries ids and
-   the url, never the token.
-3. **Create-time validation, no network.** `url` must parse as
-   `https://github.com/{owner}/{repo}` with an optional `.git` suffix — anything else
-   (http, other hosts including GitHub Enterprise, extra path segments) is a 400
-   (strictness INFERRED); `authorization_token` must be non-empty (required per schema;
-   the empty string's fate is unrecorded — we 400, INFERRED); `checkout` is parsed
+   silently unencrypted. The two processes share one cipher contract: the control plane
+   already constructs its cipher for `api.NewHandler` (it encrypts vault credentials
+   today) and encrypts on create/rotate; the executor decrypts through the same
+   `SECRETS_BACKEND` configuration; and the row's `token_key_id`, stored beside the
+   ciphertext exactly as the vaults table stores its pair, is what keeps a decrypt
+   honest across backend key rotation. Unit W exercises the encrypt half and unit M
+   the decrypt half against one shared test backend. No handler ever logs a resource
+   payload; slog carries ids and the url, never the token.
+3. **Create-time validation, no network.** `url` must be the exact canonical form
+   `https://github.com/{owner}/{repo}`: scheme `https`, host `github.com` with no
+   userinfo and no port, exactly two non-empty path segments (an optional `.git` on
+   the second), no query, no fragment, no trailing slash — anything else (http, other
+   hosts including GitHub Enterprise, extra segments,
+   `https://TOKEN@github.com/o/r`, `…?token=x`) is a 400 (strictness INFERRED). The
+   url is a *rendered, logged* field, so a credential smuggled into it would break the
+   write-only-token guarantee — the grammar is what keeps the token sweep meaningful.
+   `authorization_token` must be non-empty (required per schema; the empty string's
+   fate is unrecorded — we 400, INFERRED) and at most **8 KiB** (400 above it,
+   INFERRED — real PATs are under a hundred bytes, and the cap keeps every
+   `secrets.Cipher` backend inside its plaintext ceiling: gcpkms wraps
+   `ErrPlaintextTooLarge` at 64 KiB, 8 KiB on HSM keys, so an oversized token can
+   never degrade into a backend-dependent 500); `checkout` is parsed
    strictly (unknown `type` or unknown keys 400 via the `rejectUnknownKeys` precedent;
    `branch.name` non-empty; `commit.sha` exactly 40 hex — "full commit SHA", INFERRED);
    `mount_path` rides `validateMountPath` plus per-session uniqueness across *all*
@@ -157,7 +190,17 @@ it ("is not echoed in API responses").
    `/workspace/./repo`, doubled separators, and trailing slashes are 400s, because
    raw-string uniqueness is otherwise evadable by aliases naming the same directory
    (INFERRED) — and uniqueness is judged on the cleaned form against every other
-   resource. The default is resolved and
+   resource. Nesting is directional: a file mounted **inside** a repo's tree is the
+   supported overlay (decision 5's ordering), but no resource of any type may sit at a
+   proper **ancestor** of a repo's mount path (a file there is a non-directory where
+   the clone needs a directory), and repo mounts may not nest within each other (a
+   probe-failed re-clone of the outer would clear the inner). Two reserved targets are
+   rejected outright: `/` (extraction over the rootfs breaks the sandbox image
+   contract, and a re-clone's cleared target would be the sandbox itself) and any
+   ancestor of the platform's staging path. Everything else stays legal on purpose —
+   the mount sits inside the agent's own blast radius, bash can already write
+   anywhere in the sandbox, and the reference documents `mount_path` as an arbitrary
+   container path (the landed file arm has the same latitude). The default is resolved and
    rendered at create (the files precedent, and the docs' List example shows a concrete
    path). `checkout` is stored and rendered **as given — `null` when omitted**: resolving
    "the repository's default branch" would take a GitHub call inside the create
@@ -179,9 +222,12 @@ it ("is not echoed in API responses").
    "github_repository_clone_error"`, naming `resource_id`, `url`, and a machine-readable
    `reason` ∈ `auth | not_found | network | checkout | too_large | timeout | internal` — mirroring
    `credential_host_unreachable_error` (internal/api/gateconfig.go:186), including its
-   dedupe: emitted once per resource, re-emitted only when the reason changes (the
-   `payload->'error'->>'type'` existing-event query at gateconfig.go:174 is the
-   template). go-git error text goes to logs only, and only after a credential scrub —
+   dedupe — whose identity is **(resource_id, reason)**: the existing-event query
+   filters on the payload's resource id and reason, not only `error.type`
+   (gateconfig.go:174 is the query-shape template; its session-scoped key would be
+   too coarse here — two failing repos are two events, and a reason flip re-emits).
+   No concurrent-writer race needs guarding: the work-item lease already makes the
+   materializing executor the session's single writer. go-git error text goes to logs only, and only after a credential scrub —
    auth rides a header, not the URL, so messages are token-free by construction; the
    scrub is belt and braces.
 5. **Materialization order and idempotence.** The pass slots into the established
@@ -200,8 +246,10 @@ it ("is not echoed in API responses").
    that must **not** be re-cloned; the probe reads the only authority there is, the
    tree itself. Probe passes → skip; the agent's working tree is never clobbered.
    Probe fails → the tree is gone (the agent removed it, or a reap recreated the
-   sandbox without a checkpoint) and the repo is re-cloned **fresh** into a cleared
-   target, never merged into survivors.
+   sandbox without a checkpoint) and the repo is re-cloned **fresh** — staged and
+   renamed into place after any remnant at the mount is removed, never merged into
+   survivors. The stage-and-rename shape (decision 1) is also what makes the probe
+   trustworthy: `<mount>/.git` can only ever name a completely extracted tree.
 6. **Checkpoint interplay (plan 24).** Capture covers the **configured** workdir
    (`EXECUTOR_WORKDIR`, defaulting to `sandbox.DefaultWorkdir` `/workspace` —
    cmd/executor/main.go:156, internal/sandbox/sandbox.go:29). Out of the box the wire's
@@ -316,11 +364,13 @@ meets it. Its rules, translated to this repo:
 | w-create-commit | | `checkout: {type: commit, sha}` | echoed; sha preserved verbatim |
 | w-multi | | two repos + one file mount in one create | all three rendered, types correct, paths distinct |
 | w-token-sweep | 🔍 | sweep **every** surface a token could reach: the create 201 body itself, the rotation 200 body (both token values), GET session, GET resource, LIST resources, GET events, SSE replay, and the captured `slog` output | raw bytes contain neither the key `authorization_token` nor either token value — **zero hits, any hit anywhere is FAIL** (the mutating responses are the ones a rendering defect leaks through) |
-| w-no-token | 🔍 | omit / empty-string `authorization_token` | 400 `invalid_request_error` |
-| w-bad-url | 🔍 | `http://…`, non-github host, `https://github.com/onlyowner`, extra segments, garbage | 400 each |
+| w-no-token | 🔍 | omit / empty-string `authorization_token`; a token above 8 KiB | 400 `invalid_request_error` each |
+| w-bad-url | 🔍 | `http://…`, non-github host, `https://github.com/onlyowner`, extra segments, garbage, `https://TOKEN@github.com/o/r`, `…?token=x`, `…#frag`, an explicit port | 400 each (the canonical-grammar rule) |
 | w-bad-checkout | 🔍 | `type: "tag"`, branch without `name`, sha not 40-hex, unknown keys | 400 each |
 | w-mount-collision | 🔍 | two resources (repo/repo and repo/file) sharing a `mount_path`; aliases of one path (`/workspace/repo` vs `/workspace/./repo`) | 400 each (uniqueness on the cleaned form) |
 | w-unclean-mount | 🔍 | `mount_path` `/workspace/./r`, `/workspace//r`, trailing slash | 400 each (the clean-form rule) |
+| w-nesting | 🔍 | a file at `/workspace/repo` + a repo at `/workspace/repo/src`; two nested repos; a repo at `/` | 400 each (the nesting-direction and reserved-target rules); the inverse — a file *inside* a repo path — stays accepted |
+| w-repo-cap | 🔍 | nine `github_repository` resources in one create | 400 (the eight-repo cap) |
 | w-add-post-create | 🔍 | `POST …/resources` add with a `github_repository` body | 400 (add stays file-only — wire-faithful) |
 | w-rotate | | `POST …/{rid}` `{authorization_token: new}` | 200, full rendered resource, `updated_at` bumped; storage: ciphertext changed and the new token round-trips through the cipher |
 | w-rotate-bad | 🔍 | unknown body key; empty token; a file resource's rid; unknown rid | 400 / 400 / 400 (the existing scaffold message) / 404 |
@@ -344,8 +394,10 @@ meets it. Its rules, translated to this repo:
 | m-idempotence | 🔍 | second work item; agent file created inside the checkout between runs | fixture server saw no second clone; the agent's file survives |
 | m-tamper | 🔍 | agent `rm -rf`s the checkout | next pass re-clones fresh |
 | m-error-dedupe | 🔍 | two failing passes, same reason | exactly one `session.error` event |
-| m-oversize | 🔍 | fixture repo larger than `EXECUTOR_REPO_CLONE_MAX_BYTES` | mount absent; `reason: too_large`; executor spool removed; run continues |
+| m-oversize | 🔍 | fixture repo larger than `EXECUTOR_REPO_CLONE_MAX_BYTES` | the spool's **peak** never exceeds the budget (the meter aborts mid-clone); mount absent; `reason: too_large`; spool removed; run continues |
 | m-stall | 🔍 | fixture handler stalls past `EXECUTOR_REPO_CLONE_TIMEOUT` | `reason: timeout`; spool removed; run continues |
+| m-interrupted-extract | 🔍 | force the in-sandbox extraction to fail mid-way (unwritable member / full target) | mount absent — stage-and-rename leaves no partial `.git`; staging cleaned; the next pass retries fresh |
+| m-metachar-mount | 🔍 | a mount_path containing a space and a single quote | materializes at the literal path; no command injection (the quoting rule) |
 | m-checkpoint | 🔍 | checkpoint → reap → re-provision (the plan-24 harness) | restored tree; the `.git` probe passes and the pass skips (no marker involved); agent modifications survive |
 | m-brain-block | | assemble a model request (`modeltest` fake) | system prompt carries "Mounted repositories" with url + checkout descriptor |
 | m-brain-byoc | 🔍 | a `self_hosted` session carrying a repo resource; assemble a model request | **no** "Mounted repositories" block — nothing materializes there, so nothing is asserted |
@@ -365,7 +417,11 @@ meets it. Its rules, translated to this repo:
   create → seal → claim → clone → tar → extract → brain block → model → file-tool read as
   one chain. Configuration rides `.env` under the established live-tier contract
   (`GITHUB_EVAL_REPO_URL`, `GITHUB_EVAL_REPO_TOKEN`; consent via `RUN_EVALS=1`; once
-  opted in, missing configuration fails rather than skips).
+  opted in, missing configuration fails rather than skips). The recorded transcript is
+  an artifact in a public repository: the record never quotes `.env`, and the
+  acceptance ritual greps the assembled record for the token value before it lands in
+  docs/HISTORY.md — a hit blocks the record. The w-token-sweep rule, applied to our
+  own paperwork.
 
 ## Slices
 
@@ -414,12 +470,14 @@ verdict table (philosophy above) with the mutation duty discharged.
 ## Inferences and divergences to record, by slice
 
 Slice 1 — **CONFIRMED**: the create-rejection entry carved down; add stays file-only
-(wire-faithful per the SDK's typed Add). **INFERRED**: URL strictness (github.com only,
-the exact 400s); empty-token rejection; 40-hex sha validation; `<repo-name>` derivation
-for the default mount path; the clean-form `mount_path` strictness (the repo arm only);
-the repo-delete rejection (attached-for-lifetime); checkout stored/rendered as-given
-(`null` when omitted, not resolved to the default branch at create); rotation error
-shapes beyond the scaffold; the cipher-unavailable refusal.
+(wire-faithful per the SDK's typed Add). **INFERRED**: URL strictness (the canonical
+grammar — github.com only, no userinfo/port/query/fragment, the exact 400s);
+empty-token rejection and the 8 KiB token cap; the eight-repo session cap; 40-hex sha
+validation; `<repo-name>` derivation for the default mount path; the clean-form
+`mount_path` strictness, nesting-direction rule, and reserved targets (the repo arm
+only); the repo-delete rejection (attached-for-lifetime); checkout stored/rendered
+as-given (`null` when omitted, not resolved to the default branch at create); rotation
+error shapes beyond the scaffold; the cipher-unavailable refusal.
 
 Slice 2 — **INFERRED**: clone timing (first work item, on our lazy-provision lifecycle);
 full/non-shallow clone, no submodules, no LFS; the `github_repository_clone_error`
