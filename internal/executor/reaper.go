@@ -138,19 +138,14 @@ func (e *Executor) reapSession(ctx context.Context, sid domain.ID) error {
 	if err != nil || tier == tierNone {
 		return err
 	}
-	if tier == tierDeleted {
-		if e.blobs != nil {
-			if err := e.blobs.Delete(ctx, blob.SessionCheckpointKey(sid.String())); err != nil {
-				return fmt.Errorf("delete checkpoint blob: %w", err)
-			}
-		}
-		// The marker row goes with its blob (blob first, so a failed blob
-		// delete aborts while the retry trigger — the owned sandbox — stands).
-		// A deleted session is never provisioned again, so the row until here
-		// was inert; this is its one cleanup owner.
-		if _, err := conn.Exec(ctx,
-			`DELETE FROM session_checkpoints WHERE session_id = $1`, sid.String()); err != nil {
-			return fmt.Errorf("delete checkpoint marker: %w", err)
+	// The deleted tier removes only the blob: the marker row died inside the
+	// deleting transaction itself (internal/api deleteSession) — a tombstone
+	// cannot exist without that transaction having run, and the reaper could
+	// never own the row anyway, since a session whose sandbox was already
+	// idle-reaped never reappears in Owned.
+	if tier == tierDeleted && e.blobs != nil {
+		if err := e.blobs.Delete(ctx, blob.SessionCheckpointKey(sid.String())); err != nil {
+			return fmt.Errorf("delete checkpoint blob: %w", err)
 		}
 	}
 	if tier == tierIdle {

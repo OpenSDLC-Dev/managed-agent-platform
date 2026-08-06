@@ -265,23 +265,18 @@ func TestIdleReapThenProvisionRestores(t *testing.T) {
 	}
 }
 
-// TestReapDeletedTierRemovesTheMarkerRow: the marker's one cleanup owner — the
-// deleted tier deletes the row after its blob delete succeeds.
-func TestReapDeletedTierRemovesTheMarkerRow(t *testing.T) {
+// TestReapDeletedTierAfterAnIdleReap: the idle tier's steady state feeds the
+// delete path — a checkpointed-then-deleted session's blob is removed even
+// though its sandbox is long gone, by the API delete (the marker row died in
+// the deleting transaction; the reaper never sees a sandbox-less session).
+// Here the sandbox is still owned, so the tier itself removes the blob.
+func TestReapDeletedTierAfterAnIdleReap(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	setMarker(t, h, "consumed", checkpointBlob(t, h, map[string]string{"workspace/old.txt": "x"}))
 	deleteSessionRow(t, h)
 	h.prov.owned = []domain.ID{h.sid}
 	if err := h.exec.reapPass(context.Background()); err != nil {
 		t.Fatalf("reap pass: %v", err)
-	}
-	var n int
-	if err := h.pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM session_checkpoints WHERE session_id = $1`, h.sid.String()).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Error("the deleted tier left the checkpoint marker row")
 	}
 	if hasCheckpoint(t, h) {
 		t.Error("the deleted tier left the checkpoint blob")

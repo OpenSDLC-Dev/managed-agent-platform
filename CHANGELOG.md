@@ -38,9 +38,12 @@ copy of an entry here.
   plan 24 D8 every capture failure degrades loudly to reap-without-checkpoint
   (`too_large` and `error` are separate metric outcomes; a failed capture
   writes no marker, so the next provision starts fresh) — an agent must not
-  pin its sandbox immortal by filling the disk. The deleted tier also picks
-  up its decided cleanup: the `session_checkpoints` marker row is deleted
-  right after the checkpoint blob. Plan 24 archives with this slice.
+  pin its sandbox immortal by filling the disk. The `session_checkpoints`
+  marker row's cleanup owner is the **deleting transaction itself**
+  (`deleteSession`) — the acceptance run caught the reaper being unable to
+  own it: a session whose sandbox the idle tier already reaped never
+  reappears in `Owned`, so a row left to the reaper's deleted tier would
+  linger forever. Plan 24 archives with this slice.
 
 - **The checkpoint/restore engine: an idle-reaped session will resume with its
   workspace** (plan 24 slice 4; #64, the workspace-continuity half of #28).

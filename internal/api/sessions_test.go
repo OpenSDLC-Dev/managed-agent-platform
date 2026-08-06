@@ -727,11 +727,27 @@ func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
 	if err := s.blobs.Put(ctx, key, strings.NewReader("tar"), 3, "application/gzip"); err != nil {
 		t.Fatalf("put checkpoint: %v", err)
 	}
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO session_checkpoints (session_id, blob_key, state) VALUES ($1, $2, 'ready')`,
+		id, key); err != nil {
+		t.Fatalf("seed marker: %v", err)
+	}
 	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+id, nil); status != http.StatusOK {
 		t.Fatalf("delete: %d %v", status, body)
 	}
 	if _, _, err := s.blobs.Get(ctx, key); !errors.Is(err, blob.ErrNotFound) {
 		t.Errorf("checkpoint after delete: %v, want ErrNotFound", err)
+	}
+	// The marker row dies inside the deleting transaction — the reaper can
+	// never own it, because a session whose sandbox was already idle-reaped
+	// never reappears in Owned (found by plan 24's acceptance run).
+	var markers int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM session_checkpoints WHERE session_id = $1`, id).Scan(&markers); err != nil {
+		t.Fatal(err)
+	}
+	if markers != 0 {
+		t.Error("the deleting transaction left the checkpoint marker row")
 	}
 	// The tombstone rides the deleting transaction — it is the reaper's
 	// deleted-tier evidence, and its recorded kind is what keeps the tier

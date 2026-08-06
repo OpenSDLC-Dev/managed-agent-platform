@@ -133,8 +133,10 @@ on kind, the root restriction dropped → the tamper case red. CodeRabbit's four
 doc block re-attached to its function after the hardening edit left it hanging on
 `limitedWriter`, its stale budget clause cut; the K8s export tar's stderr captured
 into the exit-code error) and one answered in place: `session_checkpoints` rows for
-deleted sessions now have a decided cleanup owner — the deleted tier deletes the row
-after its blob delete in slice 5, annotated in plan 24.
+deleted sessions were assigned a cleanup owner — first the reaper's deleted tier;
+slice 5's acceptance run then corrected that to the API's deleting transaction (a
+session whose sandbox the idle tier already reaped never reappears in `Owned`, so a
+reaper-owned row would linger forever) — see the slice-5 record.
 
 ## Sandbox teardown (plan 24, #64) — slice 3: the reaper's terminal tiers
 
