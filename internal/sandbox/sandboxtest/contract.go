@@ -1570,6 +1570,30 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// A root an agent replaced with a dangling symlink is still an entry the
+	// checkpoint must keep: the export carries the link itself, never "missing"
+	// (Docker's archive endpoint archives the link as-is; the K8s probe's `-L`
+	// arm exists precisely because `-e` follows symlinks and would drop it).
+	t.Run("ExportDanglingSymlinkRootIsTheLinkItself", func(t *testing.T) {
+		sb, h, sid := provision(t, unrestricted)
+		ctx := context.Background()
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "ln -s /nowhere /tmp/dangling"}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("create dangling symlink: %v (exit %d)", err, res.ExitCode)
+		}
+		rc, err := h.Provider.Export(ctx, sid, "/tmp/dangling")
+		if err != nil {
+			t.Fatalf("export of a dangling-symlink root: %v", err)
+		}
+		defer rc.Close()
+		hdr, err := tar.NewReader(rc).Next()
+		if err != nil {
+			t.Fatalf("read export: %v", err)
+		}
+		if hdr.Typeflag != tar.TypeSymlink || hdr.Linkname != "/nowhere" {
+			t.Errorf("member = type %d linkname %q, want the symlink to /nowhere", hdr.Typeflag, hdr.Linkname)
+		}
+	})
+
 	// Without a gate (a backend not yet gate-wired, or a deployment not opted
 	// in), `limited` networking is enforced as no egress at all: fail closed,
 	// never silently unrestricted. The routing table is the honest probe — a

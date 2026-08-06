@@ -373,7 +373,9 @@ func (e *Executor) restoreCheckpoint(ctx context.Context, q execer, sid domain.I
 // the capture walk writes (capture never writes anything else, so anything
 // else here is tampering, not data — the extraction runs `tar -C /`, and
 // without the root restriction a corrupted blob's relative `etc/profile`
-// would land on the sandbox's real /etc).
+// would land on the sandbox's real /etc). The walk confines member paths;
+// symlink linknames stay free — agents legitimately write them — so
+// link-chain traversal at extraction is the in-sandbox GNU tar's own defense.
 func validateCheckpointTar(r io.Reader, roots []string) error {
 	prefixes := make([]string, 0, len(roots))
 	for _, root := range roots {

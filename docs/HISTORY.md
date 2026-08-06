@@ -117,14 +117,17 @@ convention slice 3 recorded).
 **On the PR, the bots added a round of their own.** The Codex bot's two P2s both
 confirmed against source and fixed: the K8s probe's `[ -e ]` follows symlinks, so a
 root an agent replaced with a **dangling symlink** read as missing and capture
-silently dropped the entry — the probe gained a `-L` arm and a K8s-only live test
-(Docker is left as-is and the asymmetry documented: its archive endpoint resolves the
-terminal symlink daemon-side, so the entry is genuinely unreachable there); and
+silently dropped the entry — the probe gained a `-L` arm and the behavior became a
+shared contract row, both backends. The first fix documented Docker as resolving the
+terminal symlink daemon-side; the verifier's direct measurement on its next pass
+refuted that (`GET /containers/{id}/archive` on a dangling symlink answers 200 with
+the link member itself, running or stopped) — Docker never had the gap, and the row
+pins both. And
 restore's validation accepted any relative path, letting a corrupted blob's
 `etc/profile` land on the sandbox's real `/etc` through `tar -C /` — members are now
 confined to the three durable roots (an `outside-roots` tamper case pins it). Both
-fixes' mutants killed: the `-L` arm dropped → the dangling-symlink test red, the root
-restriction dropped → the tamper case red. CodeRabbit's four: three fixed (the
+fixes' mutants killed: the `-L` arm dropped → the dangling-symlink contract row red
+on kind, the root restriction dropped → the tamper case red. CodeRabbit's four: three fixed (the
 `markerState` helper now fails the test on a real query error instead of reading as
 "no marker" — its R7 shape, refuted as a defect, adopted as hygiene; the `rerootInto`
 doc block re-attached to its function after the hardening edit left it hanging on
