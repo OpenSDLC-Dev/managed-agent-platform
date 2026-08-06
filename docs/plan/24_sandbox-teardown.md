@@ -1,7 +1,11 @@
 ---
-status: in-progress
+status: archived
 issue: "#64"
 ---
+
+> **Archived — completed.** All five slices landed (PRs #314, #315, #317, #319, and
+> the slice-5 PR that archives this file); the acceptance runs are recorded in
+> docs/HISTORY.md, and the progress summary moved there in the archiving PR.
 
 # Sandbox teardown: the reaper, and the workspace that survives it (plan 24)
 
@@ -240,11 +244,12 @@ Everything below was read or measured in this repo, this week.
    the engine's only trigger in this slice is its test suite.
 5. **The TTL tier.** The idle criterion with its three exclusions (cloud-only, no pending
    work, no unanswered asks), `EXECUTOR_SANDBOX_IDLE_TTL`, blob-less disablement,
-   degraded no-checkpoint paths, and the acceptance run below. The deleted tier's
-   cleanup also deletes the session's `session_checkpoints` row after its blob delete
-   succeeds (the marker's cleanup owner, decided on slice 4's PR review — a deleted
-   session is never provisioned again, so the row until then is inert, not wrong).
-   Archives this plan.
+   degraded no-checkpoint paths, and the acceptance run below. The
+   `session_checkpoints` row's cleanup owner was decided on slice 4's PR review and
+   then corrected by the acceptance run: it dies in the API's **deleting transaction**
+   (not the reaper's deleted tier as first assigned — a session whose sandbox the idle
+   tier already reaped never reappears in `Owned`, so a reaper-owned row would linger
+   forever). Archives this plan.
 
 ## Acceptance (compose stack + kind cluster, recorded in docs/HISTORY.md)
 

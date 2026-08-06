@@ -62,6 +62,12 @@ func deleteSessionRowByID(t *testing.T, h *harness, sid domain.ID) {
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sid.String()); err != nil {
 		t.Fatal(err)
 	}
+	// The marker row dies in the deleting transaction too (the API's shape;
+	// the reaper can never own it — a session whose sandbox was already
+	// idle-reaped never reappears in Owned).
+	if _, err := tx.Exec(ctx, `DELETE FROM session_checkpoints WHERE session_id = $1`, sid.String()); err != nil {
+		t.Fatal(err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}

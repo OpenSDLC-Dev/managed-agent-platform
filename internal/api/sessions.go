@@ -1078,6 +1078,14 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
 		return nil, err
 	}
+	// The checkpoint marker row goes in the same transaction — it carries no
+	// FK by design, so nothing cascades it, and the reaper cannot be its
+	// owner: a session whose sandbox was already reaped (the idle tier's
+	// steady state) never appears in another Owned listing, so a row left
+	// here would linger forever. Found by plan 24's acceptance run.
+	if _, err := tx.Exec(ctx, `DELETE FROM session_checkpoints WHERE session_id = $1`, id); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}

@@ -80,6 +80,16 @@ type Config struct {
 	// budget, the TTL tier reaps without a checkpoint — an agent must not
 	// pin its sandbox immortal by filling the disk (plan 24 D8).
 	CheckpointMaxBytes int64
+	// SandboxIdleTTL arms the reaper's idle tier (plan 24 slice 5): an idle
+	// cloud session whose last activity is older than this is checkpointed and
+	// its sandbox reaped — unless it still owes work (a queued/starting/active
+	// work item) or an unanswered confirmation ask (HITL-idle is mid-turn).
+	// Zero disables the tier — deliberately, so a hand-built test Config never
+	// reaps by surprise; cmd/executor resolves the unset env to the 24h
+	// default (EXECUTOR_SANDBOX_IDLE_TTL; 0 there disables too). A blob-less
+	// executor disables the tier at startup regardless: reaping without the
+	// means to checkpoint would silently discard workspaces.
+	SandboxIdleTTL time.Duration
 	// Hardening is the containment every session's sandbox is created with —
 	// cgroup limits, capability drops, optionally a uid and a read-only root
 	// (#65). The zero value hardens nothing, which is what a test that builds a
@@ -204,6 +214,9 @@ func (e *Executor) Run(ctx context.Context) error {
 	// still in flight. The work loop keeps checking the caller's own ctx —
 	// wrapping it would put a second Err between Run and the shutdown-race
 	// semantics #282 pinned.
+	if e.cfg.SandboxIdleTTL > 0 && e.blobs == nil {
+		slog.Warn("idle-TTL sandbox reaping disabled: no object store configured to hold checkpoints")
+	}
 	reapCtx, cancel := context.WithCancel(ctx)
 	reapDone := make(chan struct{})
 	go func() { defer close(reapDone); e.reapLoop(reapCtx) }()
