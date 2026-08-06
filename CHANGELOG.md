@@ -16,8 +16,8 @@ copy of an entry here.
 ### Added
 
 - **The reaper runs: terminal sessions lose their sandboxes** (plan 24 slice 3;
-  #64). Sandbox destruction has an owner for the first time: a goroutine every
-  executor's `Run` now starts sweeps its own endpoint once per
+  #64). Sandbox destruction has an owner for the first time: every executor's
+  `Run` now starts a goroutine that sweeps its own endpoint once per
   `EXECUTOR_REAP_INTERVAL` (default 1m; compose and Helm expose the knob) —
   `Owned` for the candidates, the session's **database lifecycle** for the
   verdict, never a caller's claim — and only for **cloud** sessions: a

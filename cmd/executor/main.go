@@ -17,7 +17,9 @@
 //	EXECUTOR_POLL_INTERVAL   idle queue poll, Go duration (default "500ms")
 //	EXECUTOR_REAP_INTERVAL   sandbox reap pass interval, Go duration (default
 //	                         "1m"); each pass destroys the sandboxes of
-//	                         deleted, archived, and terminated sessions
+//	                         deleted (tombstone-evidenced), archived, and
+//	                         terminated cloud sessions — self_hosted sandboxes
+//	                         belong to the BYOC worker and are never touched
 //	CONTROLPLANE_URL         where a session's egress gate fetches its config;
 //	                         set with EXECUTOR_GATE_IMAGE to opt into the gate.
 //	                         Unset: no gate runs; a gate-wanting session (limited

@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // putCheckpoint stores a placeholder checkpoint blob for the harness session.
@@ -39,8 +40,9 @@ func hasCheckpoint(t *testing.T, h *harness) bool {
 
 // deleteSessionRow removes the harness session the way the API does: the
 // tombstone (carrying the environment kind) lands before the row goes, in one
-// transaction (the reaper's deleted tier runs on the tombstone, not on the
-// row's absence).
+// transaction — via store.SessionTombstoneInsertSQL, the same statement the
+// API's deleteSession runs, so these tests cannot drift from the shape
+// production writes.
 func deleteSessionRow(t *testing.T, h *harness) {
 	t.Helper()
 	deleteSessionRowByID(t, h, h.sid)
@@ -54,10 +56,7 @@ func deleteSessionRowByID(t *testing.T, h *harness, sid domain.ID) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO deleted_sessions (id, environment_kind)
-		 SELECT s.id, e.kind FROM sessions s JOIN environments e ON e.id = s.environment_id
-		 WHERE s.id = $1`, sid.String()); err != nil {
+	if _, err := tx.Exec(ctx, store.SessionTombstoneInsertSQL, sid.String()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sid.String()); err != nil {
@@ -98,7 +97,7 @@ func TestReapPassDeletedSessionReapsAndDeletesCheckpoint(t *testing.T) {
 	if err := h.exec.reapPass(ctx); err != nil {
 		t.Fatalf("reap pass: %v", err)
 	}
-	if !slices.Contains(h.prov.reaped, h.sid) {
+	if !slices.Contains(h.prov.reapedSnapshot(), h.sid) {
 		t.Error("deleted session's sandbox not reaped")
 	}
 	if hasCheckpoint(t, h) {
@@ -120,7 +119,7 @@ func TestReapPassSkipsForeignSandbox(t *testing.T) {
 	if err := h.exec.reapPass(context.Background()); err != nil {
 		t.Fatalf("reap pass: %v", err)
 	}
-	if len(h.prov.reaped) != 0 {
+	if len(h.prov.reapedSnapshot()) != 0 {
 		t.Fatal("a sandbox this database has never seen was reaped")
 	}
 }
@@ -193,7 +192,7 @@ func TestReapPassArchivedReapsKeepsCheckpoint(t *testing.T) {
 	if err := h.exec.reapPass(ctx); err != nil {
 		t.Fatalf("reap pass: %v", err)
 	}
-	if !slices.Contains(h.prov.reaped, h.sid) {
+	if !slices.Contains(h.prov.reapedSnapshot(), h.sid) {
 		t.Error("archived session's sandbox not reaped")
 	}
 	if !hasCheckpoint(t, h) {
@@ -209,7 +208,7 @@ func TestReapPassTerminatedReaps(t *testing.T) {
 	if err := h.exec.reapPass(context.Background()); err != nil {
 		t.Fatalf("reap pass: %v", err)
 	}
-	if !slices.Contains(h.prov.reaped, h.sid) {
+	if !slices.Contains(h.prov.reapedSnapshot(), h.sid) {
 		t.Error("terminated session's sandbox not reaped")
 	}
 }
@@ -225,7 +224,7 @@ func TestReapPassLeavesLiveSessions(t *testing.T) {
 		if err := h.exec.reapPass(context.Background()); err != nil {
 			t.Fatalf("reap pass (%s): %v", status, err)
 		}
-		if len(h.prov.reaped) != 0 {
+		if len(h.prov.reapedSnapshot()) != 0 {
 			t.Errorf("a %s session's sandbox was reaped", status)
 		}
 	}
@@ -252,7 +251,7 @@ func TestReapSkipsWhenLockHeld(t *testing.T) {
 	if err := h.exec.reapPass(ctx); err != nil {
 		t.Fatalf("reap pass under a held lock: %v", err)
 	}
-	if len(h.prov.reaped) != 0 {
+	if len(h.prov.reapedSnapshot()) != 0 {
 		t.Fatal("reaped while the session's provision lock was held")
 	}
 
@@ -262,7 +261,7 @@ func TestReapSkipsWhenLockHeld(t *testing.T) {
 	if err := h.exec.reapPass(ctx); err != nil {
 		t.Fatalf("reap pass after release: %v", err)
 	}
-	if !slices.Contains(h.prov.reaped, h.sid) {
+	if !slices.Contains(h.prov.reapedSnapshot(), h.sid) {
 		t.Error("not reaped after the lock was released")
 	}
 }
@@ -287,7 +286,7 @@ func TestReapRechecksUnderTheLock(t *testing.T) {
 	if err := h.exec.reapPass(ctx); err != nil {
 		t.Fatalf("reap pass: %v", err)
 	}
-	if len(h.prov.reaped) != 0 {
+	if len(h.prov.reapedSnapshot()) != 0 {
 		t.Fatal("reaped on the stale pre-lock classification — the criteria were not re-read under the lock")
 	}
 }
@@ -306,7 +305,7 @@ func TestReapDeletedTierBlobFailureKeepsTheSandbox(t *testing.T) {
 	if err := h.exec.reapPass(ctx); err == nil {
 		t.Fatal("reap pass = nil error with the checkpoint delete failing")
 	}
-	if len(h.prov.reaped) != 0 {
+	if len(h.prov.reapedSnapshot()) != 0 {
 		t.Fatal("sandbox reaped before its checkpoint blob was deleted — the retry trigger is gone")
 	}
 }
@@ -413,7 +412,11 @@ func TestRunWaitsForTheReaperToStop(t *testing.T) {
 
 	classified := make(chan struct{})
 	release := make(chan struct{})
-	var once sync.Once
+	var once, releaseOnce sync.Once
+	releaseReaper := func() { releaseOnce.Do(func() { close(release) }) }
+	// A t.Fatal below must still unblock the held pass, or the reaper
+	// goroutine hangs and the package timeout buries this test's failure.
+	defer releaseReaper()
 	reapHookAfterClassify = func(domain.ID) {
 		once.Do(func() { close(classified) })
 		<-release
@@ -421,6 +424,7 @@ func TestRunWaitsForTheReaperToStop(t *testing.T) {
 	defer func() { reapHookAfterClassify = nil }()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	runDone := make(chan struct{})
 	go func() { _ = h.exec.Run(ctx); close(runDone) }()
 
@@ -431,7 +435,7 @@ func TestRunWaitsForTheReaperToStop(t *testing.T) {
 		t.Fatal("Run returned while a reap pass was still in flight")
 	case <-time.After(100 * time.Millisecond):
 	}
-	close(release)
+	releaseReaper()
 	select {
 	case <-runDone:
 	case <-time.After(5 * time.Second):

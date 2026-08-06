@@ -188,7 +188,8 @@ Everything below was read or measured in this repo, this week.
    disk — logged and counted as its own metric outcome. A sandbox that cannot be read
    (K8s Failed pod; any exec/archive failure) degrades the same way. A blob-less
    deployment disables the TTL tier at startup with one log line; the terminal tiers run
-   everywhere. Metrics: `sandbox.reaped` counter{reason} (*as built in slice 3:
+   in every deployment shape (*as built, for cloud sessions only — see the criteria
+   table*). Metrics: `sandbox.reaped` counter{reason} (*as built in slice 3:
    `sandbox.sessions.reaped` counter{tier}*), `sandbox.checkpoint` /
    `sandbox.restore` counters{outcome} + duration histograms, ids in logs never in labels.
 9. **The wire guards land first, as their own slice.** Archive and delete of a `running`

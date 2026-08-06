@@ -18,6 +18,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -1071,11 +1072,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// tier runs on — a missing row alone also describes a sandbox that was
 	// never this deployment's — and it records the environment kind because
 	// only a cloud session's sandbox is the platform's to destroy (plan 24).
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO deleted_sessions (id, environment_kind)
-		 SELECT s.id, e.kind FROM sessions s JOIN environments e ON e.id = s.environment_id
-		 WHERE s.id = $1
-		 ON CONFLICT (id) DO NOTHING`, id); err != nil {
+	if _, err := tx.Exec(ctx, store.SessionTombstoneInsertSQL, id); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
