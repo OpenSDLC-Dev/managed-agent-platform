@@ -734,14 +734,15 @@ func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
 		t.Errorf("checkpoint after delete: %v, want ErrNotFound", err)
 	}
 	// The tombstone rides the deleting transaction — it is the reaper's
-	// deleted-tier evidence (plan 24).
-	var dead bool
+	// deleted-tier evidence, and its recorded kind is what keeps the tier
+	// cloud-only (plan 24).
+	var deadKind string
 	if err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM deleted_sessions WHERE id = $1)`, id).Scan(&dead); err != nil {
-		t.Fatal(err)
+		`SELECT environment_kind FROM deleted_sessions WHERE id = $1`, id).Scan(&deadKind); err != nil {
+		t.Fatalf("deleted session left no tombstone: %v", err)
 	}
-	if !dead {
-		t.Error("deleted session left no tombstone")
+	if deadKind != "cloud" {
+		t.Errorf("tombstone environment_kind = %q, want cloud", deadKind)
 	}
 }
 
