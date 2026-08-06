@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	gopath "path"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -19,7 +22,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -2161,4 +2166,70 @@ func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
 		}
 		gone(t, tmp)
 	})
+}
+
+// A batch that failed *because* its caller went away is the one whose residue
+// most needs shedding — up to ten thousand members' bytes sitting in the pod
+// until it dies — so the shed runs off the caller's context, on a budget of its
+// own (#316). The docker backend's own cleanups were detached for this reason in
+// #310; this is its k8s twin, and it is a behavioural claim rather than a
+// cosmetic one: with the caller's cancellation inherited, client-go fails the
+// request before it is written and the pod is never asked to shed at all.
+//
+// The clientset fake cannot see this. An exec is not a typed call — client.exec
+// builds a SPDY executor over the REST config — so no reactor is ever consulted
+// and no fake action is recorded. What can see it is the API server the executor
+// dials, so the row stands one up and watches for the request. The upgrade it
+// refuses is immaterial: the shed ignores its own failure, and what is asserted
+// is that the pod was asked.
+func TestTheBatchesShedOutlivesTheCallerThatWentAway(t *testing.T) {
+	var mu sync.Mutex
+	var commands []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/exec") {
+			mu.Lock()
+			commands = append(commands, strings.Join(r.URL.Query()["command"], " "))
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	rc := &rest.Config{Host: srv.URL}
+	cs, err := kubernetes.NewForConfig(rc)
+	if err != nil {
+		t.Fatalf("build the clientset: %v", err)
+	}
+	pd := &pod{
+		client:  &client{cs: cs, rest: rc, namespace: "default"},
+		name:    "map-sesn-x",
+		workdir: sandbox.DefaultWorkdir,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Driven through WriteFiles rather than at discardBulk directly, because
+	// detaching the shed's context is worth nothing if the cancelled path never
+	// reaches it — and it did not: a caller that goes away mid-delivery returns
+	// from deliverBulk's error branch, which shed nothing at all.
+	if err := pd.WriteFiles(ctx, []sandbox.FileWrite{
+		{Path: sandbox.DefaultWorkdir + "/a.txt", Data: []byte("x")},
+	}); err == nil {
+		t.Fatal("WriteFiles returned nil for a caller that was already gone")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// One request, and it is the shed: the delivery's own exec never reaches the
+	// pod, its context being dead before the request is written — which is
+	// exactly what makes the shed's detachment the only reason anything arrives.
+	if len(commands) != 1 {
+		t.Fatalf("the pod was asked %d times (%q), want the shed to have run on a context the caller already canceled",
+			len(commands), commands)
+	}
+	if !strings.Contains(commands[0], "__map_bulk_discard") {
+		t.Errorf("the exec ran %q, want the batch's own shed", commands[0])
+	}
+	if !strings.Contains(commands[0], sandbox.TempPrefix) {
+		t.Errorf("the exec ran %q, want it given a batch's bookkeeping paths", commands[0])
+	}
 }

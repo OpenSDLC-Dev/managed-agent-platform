@@ -240,3 +240,71 @@ func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 		t.Errorf("%s bytes left in /etc = %s, want 0 (#310)", sandbox.TempPrefix, got)
 	}
 }
+
+// The batch's own half of the row above (#316). #310 covered the single write;
+// a bulk write lands the same way — the daemon extracts the members on the host,
+// as root — and its only shed was the sandbox user's `rm`, in the script and in
+// the discard exec alike. So a batch refused under a parent that user cannot
+// write left every member's full payload in the sandbox for its whole life, one
+// per member rather than one per write.
+//
+// The parent has to already exist for the gap to open: a batch makes its
+// missing directories inside the sandbox, so those belong to the sandbox user —
+// but `mkdir -p` leaves one that is already there exactly as it found it, and
+// `/etc` is that directory on any image. Two members, so the row also pins that
+// the emptying reaches the whole batch rather than the one the rename stopped
+// on.
+func TestBulkWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
+	image := "map-nonroot-test:latest"
+	build := exec.Command("docker", "build", "-q", "-t", image, "-")
+	build.Stdin = strings.NewReader(nonRootDockerfile)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the non-root image: %v\n%s", err, out)
+	}
+
+	p, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	ctx := context.Background()
+	sb, err := p.Provision(ctx, sandbox.Spec{
+		SessionID: domain.NewID("sesn"), Image: image, Workdir: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sb.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy: %v", err)
+		}
+	})
+
+	payload := strings.Repeat("A", 4096)
+	err = sb.WriteFiles(ctx, []sandbox.FileWrite{
+		{Path: "/etc/map-316-a.txt", Data: []byte(payload)},
+		{Path: "/etc/map-316-b.txt", Data: []byte(payload)},
+	})
+	if err == nil {
+		t.Fatal("the batch reported success writing into a parent the sandbox user cannot write")
+	}
+
+	// Neither member was written: the rename is what was refused.
+	for _, path := range []string{"/etc/map-316-a.txt", "/etc/map-316-b.txt"} {
+		if _, err := sb.ReadFile(ctx, path); !errors.Is(err, sandbox.ErrFileNotExist) {
+			t.Errorf("%s: %v, want it never to have been written", path, err)
+		}
+	}
+
+	// And what the daemon landed for them is gone. The sandbox user can neither
+	// unlink the temporaries nor read them away, so what closes this is the
+	// daemon emptying what it put there — leaving names without payloads.
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{
+		Command: "cat /etc/" + sandbox.TempPrefix + "* 2>/dev/null | wc -c",
+	})
+	if err != nil {
+		t.Fatalf("size what is left in /etc: %v", err)
+	}
+	if got := strings.TrimSpace(res.Stdout); got != "0" {
+		t.Errorf("%s bytes left in /etc = %s, want 0 (#316)", sandbox.TempPrefix, got)
+	}
+}

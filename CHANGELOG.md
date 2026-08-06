@@ -311,6 +311,90 @@ copy of an entry here.
 
 ### Fixed
 
+- **A failed bulk write's payload is taken back too — the #310 fix, extended to
+  batches, still executing nothing** (best effort, as #310's own is: the
+  emptying raises no error, and a daemon that refuses it leaves the residue
+  where the sandbox user already could not reach it)
+  ([internal/sandbox/bulkwrite.go](./internal/sandbox/bulkwrite.go),
+  [internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
+  [internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go); #316, raised by
+  the verifier and the Claude reviewer on #310's PR). #310 covered the single
+  write. A batch lands the same way — the docker daemon extracts its members on
+  the host, as root — but its only sheds were the sandbox user's `rm`, in
+  `__map_bulk_rename` and in `__map_bulk_discard` alike, so a batch refused
+  under a parent that user cannot write left **every member's full payload**
+  behind, up to 10,000 of them. Measured on a real non-root image before the
+  fix: a two-member batch into `/etc` left 8192 bytes the sandbox could neither
+  unlink nor read away
+  (`TestBulkWriteIntoARootOwnedParentOnANonRootImage`, red first).
+
+  Both sheds now **name what their own `rm` could not take** — on stdout, a
+  member by its manifest index and the two bookkeeping files as `m`/`d`, two
+  builtin tests per member and no process — and the docker backend empties
+  exactly those through the daemon in **one** archive: a refused batch leaves
+  every member at once, and ten thousand HEAD-plus-PUT round trips is not a
+  cleanup. Naming rather than emptying blindly is what keeps the pass from
+  recreating a temporary the `rm` already removed. The report steers nothing:
+  the shell counts a manifest the sandbox can rewrite, but the index is
+  resolved against the platform's own list, so what is emptied is always one of
+  the paths that batch chose — never a target, never a file the batch did not
+  put there. A *successful* batch is asked too, its last act being the `rm` of
+  the bookkeeping files the same root extraction landed in the workdir.
+
+  Two ways the sandbox could have answered for itself are closed rather than
+  assumed, both found in review. An image owns this stream before the script
+  does — `bash -c` sources `BASH_ENV`, the channel #310 measured — so a forged
+  `map-bulk-left 0` would have put an empty file back exactly where the cleanup
+  had just taken one away; only the lines after the shed's own opening marker
+  are read now, and a stream without one is not a report at all. And the
+  manifest the shed walks lives in the sandbox's workdir, delivered a round
+  trip before the exec that reads it (#206 named that window), so deleting one
+  file would have left the pass with nothing to name and stranded every
+  member — the shed now says when it lost its list, and the one branch that
+  knows the members were delivered answers by emptying the platform's own list
+  instead.
+
+  Both of those answers were themselves wrong on the first attempt, and the
+  verifier measured both against a real daemon before merge. The opening marker
+  is printed with a newline **in front of it**, because the stream arrives as
+  frames concatenated with no separator: an image whose output does not end in
+  a newline absorbed the marker into its own last partial line and left its
+  forged copy as the last valid one — the framing handing an attacker exactly
+  what it was written to take away. And the list that answers a deleted
+  manifest carries the members only: it had carried the two bookkeeping files
+  too, which that same branch removes *itself* before reporting, so the
+  fallback recreated as zero-byte files precisely what the shed had just
+  deleted. Both are pinned by rows that go red without the fix.
+
+  The branch that must *not* empty is the same one as in #310: a rename whose
+  **exec** failed may have left a `mv` in flight, so it keeps `rm` and stops
+  there, and a fake-daemon row asserts no emptying archive is sent even when
+  the shed reports the whole payload still present. The one #310 called
+  "vacuous to fix" — the reported-fault return that sheds nothing because
+  `__map_bulk_rename` has already `rm -f`'d — turns out to be where the residue
+  actually **is**: under a root-owned parent every member's `mv` is refused and
+  every `rm` with it, so that return now empties rather than re-running a
+  discard whose `rm` has already failed.
+
+  The k8s twin needed no emptying — its `tar` runs inside the pod, as the
+  sandbox user, so nothing it leaves is unremovable — but its `discardBulk`
+  now runs on a context detached from the caller's (`context.WithoutCancel`
+  plus a 10-second budget), which #310 gave the docker cleanups and left it
+  out of: a batch cancelled mid-transfer could strand up to 10,000 members'
+  bytes in the pod until it died. No clientset fake can observe that (an exec
+  is a SPDY stream over the REST config, not a typed call, so no reactor ever
+  fires), so the row stands up an API server and asserts the pod was asked at
+  all — red without the change, 0 requests against 1. Detaching alone would
+  not have covered the case it was written for, which review caught: a caller
+  that goes away mid-delivery returns from `deliverBulk`'s error branch, which
+  shed nothing at all. Both of those branches now shed.
+
+  One limit the batch has that the single write does not, stated rather than
+  closed: `reclaim` asks the daemon directly, so it still empties when the shed
+  exec could not run, while a batch's emptying is driven by that exec's report
+  and has none without it. Covering it would cost a HEAD per member — ten
+  thousand round trips for a sandbox already too broken to run `rm`.
+
 - **A refused write's payload no longer sits in the sandbox for the
   container's life — and no privileged exec was introduced to remove it**
   ([internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),

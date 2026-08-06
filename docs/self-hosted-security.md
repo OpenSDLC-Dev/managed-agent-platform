@@ -240,16 +240,37 @@ about and every other failed **single** write whose temporary the daemon landed,
 a transfer that died part way included — there the residue is a partial payload
 rather than an empty name. Where your sandbox cannot unlink, what stays behind
 afterwards is an empty file under the platform's own `.map-write-` name, until
-the container is destroyed. The **bulk** write (skill materialization) is
-deliberately not covered: its shed is your sandbox user's own `rm`. What makes
-that enough today is the *caller* — the one batch the platform writes goes under
-the workdir, which your sandbox user owns — and not the platform creating a
-batch's directories inside the container, which uses `mkdir -p` and so leaves a
-root-owned parent that already exists exactly as it found it. If you ship an
-image with a root-owned directory under the workdir, a failed batch will leave
-payload there that your sandbox user cannot unlink.
-[#316](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/316) tracks
-closing that rather than resting on the caller.
+the container is destroyed.
+
+The **bulk** write (skill materialization) is covered the same way, and used not
+to be (#316). Its shed is your sandbox user's own `rm` — in the rename script and
+in the discard pass alike — so under a parent that user cannot write a failed
+batch left *every* member's full payload, not one file but up to ten thousand.
+What held it back from being reachable was only the caller: the one batch the
+platform writes goes under the workdir, which your sandbox user owns. It was
+never the platform creating a batch's directories inside the container — that
+uses `mkdir -p`, which leaves a root-owned directory that already exists exactly
+as it found it, so an image shipping one under the workdir opened the gap. Both
+sheds now report which of the batch's own files they could not remove, and the
+daemon empties those in a single archive — one round trip for a whole batch, and
+still executing nothing. A batch that *succeeds* is asked too: its last act is to
+remove the two bookkeeping files, which the same root extraction landed in your
+workdir.
+
+The two limits below apply to it unchanged, and it has a third of its own. The
+single write's emptying asks the daemon directly about a path the platform
+generated; a batch's is steered by a report the shed computes **inside** your
+container, from a manifest that lives in your workdir. So a command in the
+sandbox can delete that manifest, and an image can print to the same stream the
+report arrives on. Neither is left to trust — a shed that lost its manifest says
+so, and the branch that knows the members were delivered empties the platform's
+own list instead; and only the lines after the shed's own opening marker are
+read, so an `ENV BASH_ENV` file that prints before the script does is not
+mistaken for it. What remains is narrower: the batch's emptying needs the shed
+exec to have *run*. A sandbox too broken to exec at all keeps a failed batch's
+payload where a single write's would still be taken back — closing that would
+cost a round trip per member, ten thousand of them, to serve a container that is
+about to be destroyed anyway.
 
 Two limits are worth knowing rather than discovering. The emptying is best
 effort: it reports nothing of its own, and a daemon that will not answer leaves
