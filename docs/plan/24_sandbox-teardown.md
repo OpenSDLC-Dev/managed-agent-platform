@@ -124,7 +124,7 @@ Everything below was read or measured in this repo, this week.
    |---|---|
    | row gone (deleted) | reap; delete the session's checkpoint blob |
    | archived or terminated | reap; keep the checkpoint blob until the row is deleted |
-   | running | never — structurally unreachable for the terminal tiers (slice 1's guards), and the advisory lock closes the race for the TTL tier |
+   | running | never — structurally unreachable for the terminal tiers (slice 1's guards); for the TTL tier the advisory lock **plus D4's under-lock recheck** close the race |
    | idle past the TTL | checkpoint, then reap |
    The TTL tier additionally requires, in the same query: the session's environment is
    `kind = 'cloud'` (a worker's sandbox carries the same label and the wire-only worker
@@ -139,7 +139,17 @@ Everything below was read or measured in this repo, this week.
    connections (its serial work loop's provision, its reaper), bounded against the pool's
    default; the reaper processes sessions serially. A crashed holder's lock releases with
    its connection — safe, because the restore-consumption marker (D6) makes the
-   half-finished state detectable rather than adoptable.
+   half-finished state detectable rather than adoptable. The pre-lock criteria query is
+   only a **candidate filter**: a classification is stale the moment it returns (a
+   `user.message` can flip the session to running, and a provision can acquire and
+   release this very lock, between classify and lock), so after acquiring a session's
+   lock the reaper re-evaluates every reap predicate in one fresh query and proceeds only
+   if the session is still eligible. The recheck is sufficient because every sandbox
+   touch is preceded by state the recheck reads: a turn flips status to `running` and a
+   tool claims a work item **before** its executor reaches the lock-taking provision
+   path — so in-flight use either blocks the reaper's acquisition or is visible to the
+   locked re-read, and work arriving after the recheck blocks on the lock and finds a
+   fresh sandbox restored from the just-written checkpoint, losing nothing.
 5. **Checkpoint scope is the agent's durable state, not one directory**: workdir +
    `/var/lib/map-shell/<session>` (bash cwd/env survive a resume) + `/mnt/session/outputs`
    (a resumed session's next grading harvest must not erase published deliverables).
@@ -217,7 +227,8 @@ Everything below was read or measured in this repo, this week.
    reap-idempotent, reap-unknown-noop, gated pair + token revoke on the backend-specific
    suites). No production caller yet — the suite is the consumer.
 3. **The reaper, terminal tiers.** Executor goroutine: `Owned` → per-session criteria
-   query → advisory lock → `Reap`, for deleted/archived/terminated sessions;
+   query → advisory lock → re-verify the criteria under the lock (D4) → `Reap`, for
+   deleted/archived/terminated sessions;
    `EXECUTOR_REAP_INTERVAL`; the deleted tier's checkpoint-blob delete;
    `deleteSession`'s best-effort blob delete; metrics; compose/helm/README wiring.
 4. **Checkpoint/restore engine.** Migration 0018 (marker table); capture (three roots,
