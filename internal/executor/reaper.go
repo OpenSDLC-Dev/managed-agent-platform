@@ -24,6 +24,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
 // MetricSessionsReaped counts reaped sessions by tier.
@@ -42,6 +43,11 @@ const (
 	// checkpoint blob stays until the row itself is deleted.
 	tierArchived   reapTier = "archived"
 	tierTerminated reapTier = "terminated"
+	// tierIdle: the session is idle past the configured TTL with no work owed
+	// and no unanswered ask — its workspace is checkpointed, then the sandbox
+	// goes (plan 24 slice 5). A later user.message provisions fresh and
+	// restores.
+	tierIdle reapTier = "idle"
 )
 
 // sessionLockKey maps a session id onto the Postgres advisory-lock keyspace.
@@ -132,9 +138,30 @@ func (e *Executor) reapSession(ctx context.Context, sid domain.ID) error {
 	if err != nil || tier == tierNone {
 		return err
 	}
-	if tier == tierDeleted && e.blobs != nil {
-		if err := e.blobs.Delete(ctx, blob.SessionCheckpointKey(sid.String())); err != nil {
-			return fmt.Errorf("delete checkpoint blob: %w", err)
+	if tier == tierDeleted {
+		if e.blobs != nil {
+			if err := e.blobs.Delete(ctx, blob.SessionCheckpointKey(sid.String())); err != nil {
+				return fmt.Errorf("delete checkpoint blob: %w", err)
+			}
+		}
+		// The marker row goes with its blob (blob first, so a failed blob
+		// delete aborts while the retry trigger — the owned sandbox — stands).
+		// A deleted session is never provisioned again, so the row until here
+		// was inert; this is its one cleanup owner.
+		if _, err := conn.Exec(ctx,
+			`DELETE FROM session_checkpoints WHERE session_id = $1`, sid.String()); err != nil {
+			return fmt.Errorf("delete checkpoint marker: %w", err)
+		}
+	}
+	if tier == tierIdle {
+		// D8: every capture failure degrades to reap-without-checkpoint, loudly
+		// — an agent must not pin its sandbox immortal by filling the disk
+		// (too_large), and a sandbox that cannot be read cannot be saved. The
+		// capture metric records the outcome; a failed capture writes no
+		// marker, so the next provision starts fresh.
+		if err := e.captureCheckpoint(ctx, sid); err != nil {
+			slog.WarnContext(ctx, "idle reap proceeds without a checkpoint",
+				"session", sid, "error", err)
 		}
 	}
 	if err := e.provider.Reap(ctx, sid); err != nil {
@@ -144,11 +171,14 @@ func (e *Executor) reapSession(ctx context.Context, sid domain.ID) error {
 	return nil
 }
 
-// rowQueryer is the one query shape classifyForReap needs, satisfied by both
-// the pool and a pinned connection — under the advisory lock the re-read must
-// ride the lock's own connection, not a second pool acquisition.
-type rowQueryer interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+// idleTTL is the idle tier's effective TTL: the configured value, or zero —
+// tier off — when no object store exists to hold the checkpoints reaping
+// would take (Run logs that disablement once at startup).
+func (e *Executor) idleTTL() time.Duration {
+	if e.blobs == nil {
+		return 0
+	}
+	return e.cfg.SandboxIdleTTL
 }
 
 // classifyForReap reads the session's terminal tier from the database — never
@@ -161,17 +191,45 @@ type rowQueryer interface {
 // row: a missing row also describes a holding that was never this
 // deployment's (a second deployment sharing the Docker daemon or K8s
 // namespace labels sandboxes with ids this database never saw), and those are
-// skipped. Archived beats terminated (the stricter lifecycle answer);
-// everything else — idle, running, rescheduling — is not this slice's to
-// touch (the idle-TTL tier is plan 24 slice 5).
-func (e *Executor) classifyForReap(ctx context.Context, q rowQueryer, sid domain.ID) (reapTier, error) {
+// skipped. Archived beats terminated (the stricter lifecycle answer). The
+// idle tier (plan 24 slice 5) takes what remains only when armed
+// (idleTTL() > 0) and every predicate holds in the same snapshot: status
+// idle, last activity older than the TTL, no queued/starting/active work
+// item (a pending harvest or tool_exec must find the tree it was enqueued
+// against), and no unanswered confirmation ask (HITL-idle is still mid-turn
+// — the approved command must run in the context the human saw; the ask read
+// is ordered before the main query, see below). `user.interrupt` does not
+// reap — an interrupted-then-abandoned session falls to the TTL like any
+// other. Running and rescheduling stay untouchable.
+func (e *Executor) classifyForReap(ctx context.Context, q events.Querier, sid domain.ID) (reapTier, error) {
+	// The idle tier's ask exclusion is read BEFORE the main criteria query,
+	// deliberately: the two reads are separate snapshots, and a confirmation
+	// batch answers the ask, enqueues the tool's work item, and flips the
+	// session running in ONE transaction. Asks-first means that transaction
+	// either lands before both reads (the main query then sees running or the
+	// live work item — ineligible) or after the ask read (the ask read still
+	// saw the unanswered ask — ineligible). Main-first would let the
+	// transaction land between the reads and both come back permissive.
+	askBlocked := false
+	if e.idleTTL() > 0 {
+		asks, err := events.UnconfirmedAskEvents(ctx, q, sid, nil)
+		if err != nil {
+			return tierNone, err
+		}
+		askBlocked = len(asks) > 0
+	}
+
 	var status, kind string
-	var archived bool
+	var archived, idlePastTTL, liveWork bool
 	err := q.QueryRow(ctx,
-		`SELECT s.status, s.archived_at IS NOT NULL, e.kind
+		`SELECT s.status, s.archived_at IS NOT NULL, e.kind,
+		        s.updated_at < now() - make_interval(secs => $2),
+		        EXISTS (SELECT 1 FROM work_items w
+		                WHERE w.session_id = s.id
+		                  AND w.state IN ('queued', 'starting', 'active'))
 		 FROM sessions s JOIN environments e ON e.id = s.environment_id
-		 WHERE s.id = $1`, sid.String()).
-		Scan(&status, &archived, &kind)
+		 WHERE s.id = $1`, sid.String(), e.idleTTL().Seconds()).
+		Scan(&status, &archived, &kind, &idlePastTTL, &liveWork)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var deadKind string
 		err := q.QueryRow(ctx,
@@ -198,6 +256,10 @@ func (e *Executor) classifyForReap(ctx context.Context, q rowQueryer, sid domain
 	}
 	if status == string(domain.SessionTerminated) {
 		return tierTerminated, nil
+	}
+	if e.idleTTL() > 0 && status == string(domain.SessionIdle) &&
+		idlePastTTL && !liveWork && !askBlocked {
+		return tierIdle, nil
 	}
 	return tierNone, nil
 }

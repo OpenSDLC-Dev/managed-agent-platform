@@ -15,6 +15,33 @@ copy of an entry here.
 
 ### Added
 
+- **The idle-TTL tier: an idle session's sandbox is checkpointed and reaped,
+  and the next message gets it back** (plan 24 slice 5 — the final slice; #64,
+  closing the workspace-continuity half of #28). The reaper gains its fourth
+  tier: an **idle cloud** session whose last activity
+  (`sessions.updated_at`) is older than the new `EXECUTOR_SANDBOX_IDLE_TTL`
+  (default 24h; `0` disables; compose and Helm expose the knob) has its
+  workspace captured through the slice-4 engine and its sandbox destroyed —
+  the TTL tier is the engine's first production trigger. Three exclusions,
+  all read in one snapshot under the session's advisory lock: a session
+  owing work (a `queued`/`starting`/`active` work item — a pending harvest
+  or tool run must find the tree it was enqueued against), a session with an
+  unanswered tool-confirmation ask (HITL-idle is still mid-turn; the ask
+  check is deliberately ordered before the main criteria query, because a
+  confirmation batch answers the ask, enqueues the tool's work and flips the
+  session running in one transaction — asks-first means that transaction can
+  never land between the two reads with both coming back permissive), and a
+  disabled tier (zero TTL, or an executor with no object store — which logs
+  the disablement once at startup rather than silently discarding
+  workspaces). `user.interrupt` still never reaps; an
+  interrupted-then-abandoned session falls to the TTL like any other. Per
+  plan 24 D8 every capture failure degrades loudly to reap-without-checkpoint
+  (`too_large` and `error` are separate metric outcomes; a failed capture
+  writes no marker, so the next provision starts fresh) — an agent must not
+  pin its sandbox immortal by filling the disk. The deleted tier also picks
+  up its decided cleanup: the `session_checkpoints` marker row is deleted
+  right after the checkpoint blob. Plan 24 archives with this slice.
+
 - **The checkpoint/restore engine: an idle-reaped session will resume with its
   workspace** (plan 24 slice 4; #64, the workspace-continuity half of #28).
   `sandbox.Provider` grows `Export(sessionID, root)` on both backends — one

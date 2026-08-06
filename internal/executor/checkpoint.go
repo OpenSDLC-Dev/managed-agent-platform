@@ -279,6 +279,12 @@ func isSentinel(rest string) bool {
 	return rest == "skills/"+skills.SentinelName || rest == filesSentinelName
 }
 
+// rowQueryer is the one query shape checkpointMarker needs, satisfied by both
+// the pool and the provision lock's pinned connection.
+type rowQueryer interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // checkpointMarker reads the session's restore marker on q (the provision
 // lock's own connection — see classifyForReap on why). No row means no
 // checkpoint was ever taken.

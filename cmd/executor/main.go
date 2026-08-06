@@ -21,6 +21,13 @@
 //	                         deleted (tombstone-evidenced), archived, and
 //	                         terminated cloud sessions — self_hosted sandboxes
 //	                         belong to the BYOC worker and are never touched
+//	EXECUTOR_SANDBOX_IDLE_TTL   idle sandbox lifetime, Go duration (default
+//	                         "24h"; "0" disables the idle tier). An idle cloud
+//	                         session older than this is checkpointed and its
+//	                         sandbox reaped — unless it still owes work or an
+//	                         unanswered confirmation ask. Requires object
+//	                         storage; a blob-less executor disables the tier
+//	                         at startup with one log line
 //	EXECUTOR_CHECKPOINT_MAX_BYTES   workspace-checkpoint size budget in bytes
 //	                         (default 2147483648, 2 GiB); over budget the TTL
 //	                         tier reaps without a checkpoint
@@ -186,6 +193,16 @@ func run(ctx context.Context) error {
 			}
 			*dst = d
 		}
+	}
+	// Unset takes the 24h default; an explicit "0" disables the idle tier
+	// (Config's zero value), matching the knob's documented semantics.
+	cfg.SandboxIdleTTL = 24 * time.Hour
+	if v := os.Getenv("EXECUTOR_SANDBOX_IDLE_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return errors.New("EXECUTOR_SANDBOX_IDLE_TTL must be a non-negative Go duration (0 disables the idle tier)")
+		}
+		cfg.SandboxIdleTTL = d
 	}
 	if v := os.Getenv("EXECUTOR_CHECKPOINT_MAX_BYTES"); v != "" {
 		// The upper bound keeps cap+1 arithmetic (restore's decompression
