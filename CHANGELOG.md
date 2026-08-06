@@ -15,6 +15,30 @@ copy of an entry here.
 
 ### Added
 
+- **The sandbox provider learns `Owned` and `Reap` on both backends — the
+  reaper's hands, with no reaper yet** (plan 24 slice 2; #64).
+  `sandbox.Provider` grows the teardown contract: `Owned(ctx)` lists the
+  distinct session ids behind every container/pod carrying the ownership label
+  on this endpoint — running or stopped, gates included, endpoint-local by
+  design so N executors shard the reap with no coordination — and
+  `Reap(ctx, sessionID)` destroys a session's whole holding from its id alone,
+  needing no live handle: on Docker it force-removes every labeled container
+  with its anonymous volumes, sandbox before its netns-owning gate; on
+  Kubernetes it selects the session's pods by label (never the derived name)
+  and waits until each is actually gone. Both revoke the session's gate token
+  first through a new provider-level `GateTokenRevoker` (`Reap` has no `Spec`
+  to carry one; a failed revoke aborts with nothing removed, so the next pass
+  retries both halves — #197's ordering), which `cmd/executor` wires from its
+  pool via `backend.Config` and the database-less BYOC worker leaves nil. The
+  Docker API client gains its one missing endpoint
+  (`GET /containers/json?all=1` + label filter) and the Helm executor Role the
+  matching `list` verb. Four new shared contract rows (owned-after-provision,
+  reap-removes-all, reap-idempotent, reap-unknown-noop) run against both real
+  backends; the gated-pair ordering, revoke-first, 404-as-removed and
+  label-not-name behaviors are pinned by backend-specific suites (scripted
+  daemon, fake clientset), each verified to fail against its target mutant. No
+  production caller yet — slice 3's reaper loop is the consumer.
+
 - **Plan 24 drafted — sandbox teardown: the reaper, and the workspace that
   survives it — and its first slice: a running session refuses archive and
   delete** ([docs/plan/24_sandbox-teardown.md](./docs/plan/24_sandbox-teardown.md);
