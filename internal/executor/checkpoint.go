@@ -142,9 +142,12 @@ func (e *Executor) captureCheckpoint(ctx context.Context, sid domain.ID) (err er
 // rerootInto copies one exported root into the combined checkpoint tar,
 // enforcing the walk contract as it goes: member paths must be clean and
 // relative with no dot-dot, member types are regular files, directories, and
-// symlinks only (anything else — devices, fifos — is dropped: an agent can
-// mkfifo in its workspace, and a checkpoint that refuses to exist over it
-// would let that pin the sandbox), the materialization sentinels are stripped
+// symlinks only (anything else — devices, fifos, and hardlinks too — is
+// dropped: an agent can mkfifo in its workspace, and a checkpoint that
+// refuses to exist over it would let that pin the sandbox; a hardlinked
+// name's content survives under the member the archiver stored the bytes on,
+// the extra name alone is lost — a conscious trade recorded before the TTL
+// tier makes capture routine), the materialization sentinels are stripped
 // so a restored workspace re-materializes skills and files instead of
 // trusting a restored, agent-writable marker, and the cumulative member bytes
 // draw down the capture budget. Export's contract puts every member under one

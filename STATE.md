@@ -24,7 +24,7 @@ resume with its workspace.
 - [x] Slice 4 — checkpoint/restore engine: `Export` on both backends (+3 contract
       rows), migration 0019 (consumption marker), capture (three roots, sentinel
       strip, validate, budget, spool), restore (marker-gated, replace-first,
-      in-sandbox extract, consumed flip). Evidence: checkpoint_test.go (8 rows) +
+      in-sandbox extract, consumed flip). Evidence: checkpoint_test.go (10 rows) +
       the metric pin + the Docker stopped-container export row.
 - [ ] Slice 5 — the idle-TTL tier with its exclusions (cloud-only, no pending work, no
       unanswered asks), blob-less disablement, acceptance runs; archives the plan.
