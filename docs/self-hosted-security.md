@@ -252,9 +252,25 @@ never the platform creating a batch's directories inside the container — that
 uses `mkdir -p`, which leaves a root-owned directory that already exists exactly
 as it found it, so an image shipping one under the workdir opened the gap. Both
 sheds now report which of the batch's own files they could not remove, and the
-daemon empties all of them in a single archive — one round trip for a whole
-batch, and still executing nothing. The same two limits below apply to it
-unchanged.
+daemon empties those in a single archive — one round trip for a whole batch, and
+still executing nothing. A batch that *succeeds* is asked too: its last act is to
+remove the two bookkeeping files, which the same root extraction landed in your
+workdir.
+
+The two limits below apply to it unchanged, and it has a third of its own. The
+single write's emptying asks the daemon directly about a path the platform
+generated; a batch's is steered by a report the shed computes **inside** your
+container, from a manifest that lives in your workdir. So a command in the
+sandbox can delete that manifest, and an image can print to the same stream the
+report arrives on. Neither is left to trust — a shed that lost its manifest says
+so, and the branch that knows the members were delivered empties the platform's
+own list instead; and only the lines after the shed's own opening marker are
+read, so an `ENV BASH_ENV` file that prints before the script does is not
+mistaken for it. What remains is narrower: the batch's emptying needs the shed
+exec to have *run*. A sandbox too broken to exec at all keeps a failed batch's
+payload where a single write's would still be taken back — closing that would
+cost a round trip per member, ten thousand of them, to serve a container that is
+about to be destroyed anyway.
 
 Two limits are worth knowing rather than discovering. The emptying is best
 effort: it reports nothing of its own, and a daemon that will not answer leaves

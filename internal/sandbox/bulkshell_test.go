@@ -388,6 +388,45 @@ func TestBulkShedsNameWhatTheyCouldNotRemove(t *testing.T) {
 	}
 }
 
+// A manifest that is not there leaves the shed with nothing to walk — and the
+// sandbox can arrange exactly that, the manifest being a file in its own workdir
+// delivered one round trip before the exec that reads it. Saying "nothing is
+// left" there would be indistinguishable from "I could not look", and every
+// root-owned member would stay for the price of deleting one file. So the pass
+// says which it is (#316).
+func TestBulkShedsSayWhenTheyLostTheirList(t *testing.T) {
+	for _, tc := range []struct{ name, shell, fn string }{
+		{"discard", sandbox.BulkDiscardShell, "__map_bulk_discard"},
+		{"rename", sandbox.BulkRenameShell, "__map_bulk_rename"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
+			if err := os.Remove(manifest); err != nil {
+				t.Fatalf("remove the manifest: %v", err)
+			}
+
+			_, stdout, _ := bulkShellOut(t, tc.shell, tc.fn, manifest, dirList)
+			if !strings.Contains(stdout, "map-bulk-left-nolist") {
+				t.Errorf("stdout = %q, want the pass to say it had no list to walk", stdout)
+			}
+			// And it names no member, because it genuinely cannot: what the
+			// platform does about that is the backend's decision, not this
+			// pass's guess.
+			if strings.Contains(stdout, "map-bulk-left 0") {
+				t.Errorf("stdout = %q, want no member named by a pass with no manifest", stdout)
+			}
+			// An empty manifest is the same position, reached differently.
+			if err := os.WriteFile(manifest, nil, 0o600); err != nil {
+				t.Fatalf("stage an empty manifest: %v", err)
+			}
+			if _, stdout, _ = bulkShellOut(t, tc.shell, tc.fn, manifest, dirList); !strings.Contains(stdout, "map-bulk-left-nolist") {
+				t.Errorf("stdout = %q, want an empty manifest to say the same", stdout)
+			}
+		})
+	}
+}
+
 // The other half: a shed whose `rm` worked names nothing at all. Every existing
 // row above leaves a writable directory behind it, so this asks the two passes
 // the same question over one.
@@ -406,7 +445,13 @@ func TestBulkShedsNameNothingTheyRemoved(t *testing.T) {
 			manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
 
 			_, stdout, _ := bulkShellOut(t, tc.shell, tc.fn, manifest, dirList)
-			if strings.Contains(stdout, "map-bulk-left") {
+			// The report ran — its opening line is there — and named nothing.
+			// Both halves matter: a pass that skipped the walk entirely would
+			// also "name nothing", and would leave a real residue unreported.
+			if !strings.Contains(stdout, "map-bulk-left-begin") {
+				t.Errorf("stdout = %q, want the shed's own opening line", stdout)
+			}
+			if strings.Contains(stdout, "map-bulk-left ") {
 				t.Errorf("stdout = %q, want nothing named: the shed removed everything itself", stdout)
 			}
 			assertNoTemps(t, dir)

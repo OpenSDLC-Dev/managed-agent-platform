@@ -1487,7 +1487,7 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 			if kinds[execID()] == "rename" {
 				// Every member's move was refused, and every `rm` after it: the
 				// whole payload is still there and the script says so.
-				w.Write(frame(streamStdout, "map-bulk-left 0\nmap-bulk-left 1\n"))
+				w.Write(frame(streamStdout, "map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n"))
 				w.Write(frame(streamStderr, "mv: cannot move: Permission denied\nmap-bulk-fail 0\n"))
 			}
 		case strings.HasSuffix(r.URL.Path, "/json"):
@@ -1543,6 +1543,243 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 	}
 }
 
+// The three branches above the rename exec — a refused bookkeeping delivery, a
+// refused prepare, a refused members delivery — shed BOTH ways, because no
+// rename script has run yet and so none can be mid-`mv`. That is `shedBulk`: the
+// sandbox user's `rm` first, then the daemon emptying what that `rm` reported it
+// could not take (#316).
+//
+// The row also pins the other half of the guard: a shed that removed everything
+// must send no emptying archive at all, or the cleanup would create the litter it
+// exists to remove — the batch's form of what #310 pinned for the single write.
+func TestABulkShedsBothWaysBeforeTheRenameCanRun(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		report   string
+		wantPuts int
+	}{
+		// The discard's `rm` was refused, so the daemon is asked to empty the
+		// two members it named. Deliveries: bookkeeping, members, emptying.
+		{"sheds what the rm could not take", "map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n", 3},
+		// The discard's `rm` worked, so there is nothing to empty and no
+		// archive may be sent.
+		{"sends nothing when the rm worked", "map-bulk-left-begin\n", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var commands []string
+			var puts [][]byte
+			kinds := map[string]string{}
+			var execN int
+			p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				execID := func() string {
+					return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+				}
+				switch {
+				case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+					body, _ := io.ReadAll(r.Body)
+					puts = append(puts, body)
+					// The members' delivery is the one that fails, so the batch
+					// never reaches its rename exec.
+					if len(puts) == 2 {
+						w.WriteHeader(http.StatusInternalServerError)
+						io.WriteString(w, `{"message":"daemon gave up mid-transfer"}`)
+						return
+					}
+					w.WriteHeader(http.StatusOK)
+				case strings.HasSuffix(r.URL.Path, "/exec"):
+					var body execConfig
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode exec create: %v", err)
+					}
+					execN++
+					id := fmt.Sprintf("e%d", execN)
+					cmd := body.Cmd[len(body.Cmd)-2]
+					commands = append(commands, cmd)
+					if strings.Contains(cmd, "__map_bulk_discard") {
+						kinds[id] = "discard"
+					}
+					fmt.Fprintf(w, `{"Id":%q}`, id)
+				case strings.HasSuffix(r.URL.Path, "/start"):
+					w.WriteHeader(http.StatusOK)
+					if kinds[execID()] == "discard" {
+						w.Write(frame(streamStdout, tc.report))
+					}
+				case strings.HasSuffix(r.URL.Path, "/json"):
+					io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+			})
+			c := p.attach("abc", "/workspace", "")
+			err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
+				{Path: "/etc/a.txt", Data: []byte("AAAA")},
+				{Path: "/etc/b.txt", Data: []byte("BBBB")},
+			})
+			if err == nil {
+				t.Fatal("the batch reported success where its members were never delivered")
+			}
+			var shed bool
+			for _, cmd := range commands {
+				shed = shed || strings.Contains(cmd, "__map_bulk_discard")
+			}
+			if !shed {
+				t.Errorf("execs = %q, want the sandbox user's own shed to have run first", commands)
+			}
+			if len(puts) != tc.wantPuts {
+				t.Fatalf("%d archives delivered, want %d", len(puts), tc.wantPuts)
+			}
+			if tc.wantPuts == 2 {
+				return // nothing was left, so nothing is emptied
+			}
+			for _, e := range tarEntries(t, puts[2]) {
+				if e.size != 0 || !strings.Contains(e.name, sandbox.TempPrefix) {
+					t.Errorf("emptying entry %s is %d bytes, want one of the batch's temporaries at 0", e.name, e.size)
+				}
+			}
+		})
+	}
+}
+
+// A batch that succeeded still ran a `rm` that can be refused: its last act is
+// to remove the manifest and the directory list, which the daemon's own root
+// extraction landed in the workdir. An image whose sandbox user cannot write
+// there keeps both, however well the members landed — so the emptying is asked
+// for on the success path too (#316).
+func TestASuccessfulBulkStillEmptiesBookkeepingItCouldNotRemove(t *testing.T) {
+	var puts [][]byte
+	kinds := map[string]string{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			puts = append(puts, body)
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			if strings.Contains(body.Cmd[len(body.Cmd)-2], "__map_bulk_rename") {
+				kinds[id] = "rename"
+			}
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+			if kinds[execID()] == "rename" {
+				// Every member landed; only the bookkeeping would not go.
+				w.Write(frame(streamStdout, "map-bulk-left-begin\nmap-bulk-left m\nmap-bulk-left d\n"))
+			}
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	if err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
+		{Path: "/workspace/a.txt", Data: []byte("AAAA")},
+	}); err != nil {
+		t.Fatalf("the batch failed where every member landed: %v", err)
+	}
+	if len(puts) != 3 {
+		t.Fatalf("%d archives delivered, want 3 — a successful batch must still empty what its own rm could not", len(puts))
+	}
+	emptying := tarEntries(t, puts[2])
+	if len(emptying) != 2 {
+		t.Fatalf("the emptying archive carries %d entries, want the manifest and the directory list", len(emptying))
+	}
+	for _, e := range emptying {
+		if e.size != 0 || !strings.Contains(e.name, sandbox.TempPrefix) {
+			t.Errorf("emptying entry %s is %d bytes, want a bookkeeping file at 0", e.name, e.size)
+		}
+	}
+}
+
+// Deleting the manifest is all it would take to defeat the emptying: the shed
+// reads it to know what to walk, it lives in the sandbox's own workdir, and the
+// docker backend delivers it a round trip before the exec that reads it (#206
+// names that window). A pass with no list removes nothing and can name nothing,
+// so the platform answers with the list it has held all along — safe only here,
+// downstream of a members delivery the daemon accepted, where everything is
+// landed and nothing was removed (#316).
+func TestABulkThatLostItsManifestEmptiesThePlatformsOwnList(t *testing.T) {
+	var puts [][]byte
+	kinds := map[string]string{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			puts = append(puts, body)
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			if strings.Contains(body.Cmd[len(body.Cmd)-2], "__map_bulk_rename") {
+				kinds[id] = "rename"
+			}
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+			if kinds[execID()] == "rename" {
+				// The manifest was deleted under it, so the pass walked
+				// nothing, removed nothing, and says exactly that.
+				w.Write(frame(streamStdout, "map-bulk-left-begin\nmap-bulk-left-nolist\n"))
+				w.Write(frame(streamStderr, "map-bulk-fail 0\n"))
+			}
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			if kinds[execID()] == "rename" {
+				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, sandbox.ExitBulkIncomplete)
+			} else {
+				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
+		{Path: "/etc/a.txt", Data: []byte("AAAA")},
+		{Path: "/etc/b.txt", Data: []byte("BBBB")},
+	})
+	if err == nil {
+		t.Fatal("the batch reported success where its manifest had been deleted")
+	}
+	if len(puts) != 3 {
+		t.Fatalf("%d archives delivered, want 3 — the emptying must not be skipped for want of a report", len(puts))
+	}
+	// Every member, plus the two bookkeeping files: the platform's whole list,
+	// because a pass that walked nothing removed nothing either.
+	emptying := tarEntries(t, puts[2])
+	if len(emptying) != 4 {
+		t.Fatalf("the emptying archive carries %d entries, want 4 (2 members + manifest + directory list)", len(emptying))
+	}
+	members := tarEntries(t, puts[1])
+	for i, e := range emptying[:len(members)] {
+		if e.name != members[i].name {
+			t.Errorf("emptying entry %d is %q, want the member's own temporary %q", i, e.name, members[i].name)
+		}
+	}
+	for _, e := range emptying {
+		if e.size != 0 {
+			t.Errorf("emptying entry %s is %d bytes, want 0", e.name, e.size)
+		}
+	}
+}
+
 // The batch's half of TestARenameExecFailureShedsOnlyWithTheSandboxUsersRm: a
 // rename exec that could not run at all may have left a `mv` in flight, so this
 // branch sheds with the sandbox user's `rm` and stops — even when the discard
@@ -1587,7 +1824,7 @@ func TestABulkRenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 			if kinds[execID()] == "discard" {
 				// The temptation: the shed says the whole payload is still
 				// there, and the daemon could take it back.
-				w.Write(frame(streamStdout, "map-bulk-left 0\nmap-bulk-left 1\n"))
+				w.Write(frame(streamStdout, "map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n"))
 			}
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			io.WriteString(w, `{"Running":false,"ExitCode":0}`)

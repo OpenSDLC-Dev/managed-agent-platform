@@ -1433,6 +1433,14 @@ func (pd *pod) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error 
 	}
 	code, stderr, err := pd.deliverBulk(ctx, b)
 	if err != nil {
+		// A delivery that could not finish is the batch's residue at its
+		// largest: the `tar` on the other end extracted whatever arrived before
+		// the stream died, and a caller that went away mid-transfer — the very
+		// case discardBulk detaches its context for — reaches WriteFiles no other
+		// way than here. Shedding is the sandbox user's own `rm`, which is safe
+		// with the script possibly still running: a `mv` whose source has been
+		// unlinked fails and leaves its target as it was (#316).
+		pd.discardBulk(ctx, b)
 		return err
 	}
 	if code == sandbox.ExitBulkExtract {
@@ -1441,6 +1449,7 @@ func (pd *pod) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error 
 			return pErr
 		}
 		if code, stderr, err = pd.deliverBulk(ctx, b); err != nil {
+			pd.discardBulk(ctx, b)
 			return err
 		}
 		if code == sandbox.ExitBulkExtract {

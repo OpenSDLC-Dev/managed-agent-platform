@@ -2205,26 +2205,31 @@ func TestTheBatchesShedOutlivesTheCallerThatWentAway(t *testing.T) {
 		name:    "map-sesn-x",
 		workdir: sandbox.DefaultWorkdir,
 	}
-	b, err := sandbox.NewBulkWrite(sandbox.DefaultWorkdir, []sandbox.FileWrite{
-		{Path: sandbox.DefaultWorkdir + "/a.txt", Data: []byte("x")},
-	})
-	if err != nil {
-		t.Fatalf("NewBulkWrite: %v", err)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	pd.discardBulk(ctx, b)
+	// Driven through WriteFiles rather than at discardBulk directly, because
+	// detaching the shed's context is worth nothing if the cancelled path never
+	// reaches it — and it did not: a caller that goes away mid-delivery returns
+	// from deliverBulk's error branch, which shed nothing at all.
+	if err := pd.WriteFiles(ctx, []sandbox.FileWrite{
+		{Path: sandbox.DefaultWorkdir + "/a.txt", Data: []byte("x")},
+	}); err == nil {
+		t.Fatal("WriteFiles returned nil for a caller that was already gone")
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
+	// One request, and it is the shed: the delivery's own exec never reaches the
+	// pod, its context being dead before the request is written — which is
+	// exactly what makes the shed's detachment the only reason anything arrives.
 	if len(commands) != 1 {
-		t.Fatalf("the pod was asked %d times, want the shed to have run on a context the caller already canceled", len(commands))
+		t.Fatalf("the pod was asked %d times (%q), want the shed to have run on a context the caller already canceled",
+			len(commands), commands)
 	}
 	if !strings.Contains(commands[0], "__map_bulk_discard") {
 		t.Errorf("the exec ran %q, want the batch's own shed", commands[0])
 	}
-	if !strings.Contains(commands[0], b.Manifest) {
-		t.Errorf("the exec ran %q, want it given this batch's manifest (%s)", commands[0], b.Manifest)
+	if !strings.Contains(commands[0], sandbox.TempPrefix) {
+		t.Errorf("the exec ran %q, want it given a batch's bookkeeping paths", commands[0])
 	}
 }

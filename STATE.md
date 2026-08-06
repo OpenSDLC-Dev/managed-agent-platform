@@ -16,9 +16,14 @@ false`. Branch `fix/316-bulk-write-root-residue`.
       before the fix, green after.
 - [x] Both bulk sheds name on stdout what their own `rm` could not take
       (`__map_bulk_left`); docker empties exactly those in one archive
-      (`reclaimBulk`), including at the reported-fault return. The rename's
+      (`reclaimBulk`), on the reported fault and on success. The rename's
       exec-error branch still sheds with `rm` alone.
+- [x] The report is framed against the image that shares the stream, and a shed
+      that lost its manifest says so rather than reporting an empty sandbox.
 - [x] k8s `discardBulk` detached from the caller's context (`WithoutCancel` + a
-      10s budget), with an API-server row — no clientset fake can see an exec.
+      10s budget) and now reached on the delivery-error branches too, with an
+      API-server row — no clientset fake can see an exec.
 - [x] Docs: ARCHITECTURE.md, self-hosted-security.md, CHANGELOG.md.
-- [ ] Verifier, dual review, PR.
+- [x] Verifier PASS (on Opus 5; the pinned Fable 5 is out of quota), dual
+      review, PR [#324](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/324).
+- [ ] Re-verify after the review round, settle threads, merge.

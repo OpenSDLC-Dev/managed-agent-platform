@@ -275,7 +275,7 @@ func TestBulkWriteLeftBehind(t *testing.T) {
 		t.Fatalf("archive carries %d members, want 2", len(tmps))
 	}
 
-	left := b.LeftBehind("map-bulk-left 0\nmap-bulk-left 1\nmap-bulk-left m\nmap-bulk-left d\n")
+	left := b.LeftBehind("map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\nmap-bulk-left m\nmap-bulk-left d\n")
 	if len(left) != 4 {
 		t.Fatalf("LeftBehind named %d paths (%v), want all four of the batch's files", len(left), left)
 	}
@@ -290,7 +290,7 @@ func TestBulkWriteLeftBehind(t *testing.T) {
 	}
 	// Order follows the report, so a batch that lost only its second member
 	// empties only that one.
-	if got := b.LeftBehind("map-bulk-left 1\n"); len(got) != 1 || got[0] != left[1] {
+	if got := b.LeftBehind("map-bulk-left-begin\nmap-bulk-left 1\n"); len(got) != 1 || got[0] != left[1] {
 		t.Errorf("LeftBehind = %v, want only member 1's temporary (%q)", got, left[1])
 	}
 
@@ -303,9 +303,47 @@ func TestBulkWriteLeftBehind(t *testing.T) {
 		"map-bulk-left M\n", "map-bulk-left /etc/passwd\n",
 		"not-the-marker map-bulk-left 0\n",
 	} {
-		if got := b.LeftBehind(stdout); len(got) != 0 {
+		if got := b.LeftBehind("map-bulk-left-begin\n" + stdout); len(got) != 0 {
 			t.Errorf("stdout %q: LeftBehind = %v, want nothing named", stdout, got)
 		}
+	}
+}
+
+// An image writes to this stream before the shed does — `bash -c` sources an
+// `ENV BASH_ENV` file first, the channel #310 measured — so a marker it forges
+// would name a member whose `rm` really did succeed, and emptying that puts an
+// empty file back exactly where the cleanup had just taken one away. Only what
+// follows the shed's own opening line is read, and a stream without one is not a
+// report at all (#316).
+func TestBulkWriteLeftBehindRefusesWhatTheImagePrinted(t *testing.T) {
+	b, err := sandbox.NewBulkWrite("/workspace", []sandbox.FileWrite{
+		{Path: "/etc/first", Data: []byte("1")},
+		{Path: "/etc/second", Data: []byte("2")},
+	})
+	if err != nil {
+		t.Fatalf("NewBulkWrite: %v", err)
+	}
+
+	// The forgery: everything an image can print runs ahead of the script, so a
+	// marker there is not the shed's answer and must not be read as one.
+	forged := "map-bulk-left 0\nmap-bulk-left 1\nmap-bulk-left m\nmap-bulk-left d\n"
+	if got := b.LeftBehind(forged + "map-bulk-left-begin\n"); len(got) != 0 {
+		t.Errorf("LeftBehind = %v, want nothing: every marker came before the shed's own report", got)
+	}
+	// A hook that forges the opening line too still only gets to go first, so
+	// the shed's own report is the one that counts — blamed's bound, restated.
+	if got := b.LeftBehind("map-bulk-left-begin\n" + forged + "map-bulk-left-begin\nmap-bulk-left 1\n"); len(got) != 1 {
+		t.Errorf("LeftBehind = %v, want only the last report's single member", got)
+	}
+	// No opening line is no report: a shed that never got that far has said
+	// nothing, and emptying on an image's say-so is worse than leaving residue.
+	if got := b.LeftBehind(forged); len(got) != 0 {
+		t.Errorf("LeftBehind = %v, want nothing named without the shed's opening line", got)
+	}
+	// And the real report still works when the image printed noise first.
+	got := b.LeftBehind("some image banner\nmap-bulk-left-begin\nmap-bulk-left 0\n")
+	if len(got) != 1 {
+		t.Fatalf("LeftBehind = %v, want the one member the shed reported", got)
 	}
 }
 
@@ -319,7 +357,7 @@ func TestBulkWriteEmptyArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBulkWrite: %v", err)
 	}
-	left := b.LeftBehind("map-bulk-left 0\nmap-bulk-left m\n")
+	left := b.LeftBehind("map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left m\n")
 
 	var buf bytes.Buffer
 	if err := b.EmptyArchive(left, &buf); err != nil {

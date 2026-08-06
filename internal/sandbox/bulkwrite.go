@@ -251,6 +251,44 @@ func (b *BulkWrite) blamed(stderr string) string {
 // but the paths this batch chose.
 const bulkLeftMarker = "map-bulk-left "
 
+// bulkLeftBeginMarker opens the report, and is what makes the markers after it
+// the *shed's* rather than the image's. An image controls this stream before the
+// script ever runs — `bash -c` sources an `ENV BASH_ENV` file first, the channel
+// #310 measured — so a forged `map-bulk-left 0` printed there would name a file
+// the shed had just removed, and emptying it would put back, as a zero-byte
+// file, exactly the litter this cleanup exists to remove. Only the lines after
+// the LAST of these count, which is the bound blamed already takes for the fail
+// marker and for the same reason: the image's turn at the stream comes first,
+// and the shed prints this immediately before its own answer. A report with no
+// opening line at all is not one — nothing is emptied, and what the sandbox user
+// could not shed stays, this being best effort throughout.
+//
+// That last case is reachable, and by the image again rather than by the batch:
+// a stream is capped and it is the *head* that is kept, so an image writing a
+// megabyte to stdout during the pass loses the opening line and the markers with
+// it. The batch's own report is ~190 KB at ten thousand members, nowhere near
+// it. Losing the whole report is the right way to lose it — a truncated one
+// would be markers with nothing to vouch for them.
+//
+// It is a distinct line rather than a prefix of bulkLeftMarker so neither can be
+// read as the other: `map-bulk-left ` ends in a space and this does not.
+const bulkLeftBeginMarker = "map-bulk-left-begin"
+
+// bulkLeftNoListMarker is the shed saying it had no list to walk, because the
+// manifest it reads was not there — which the sandbox can arrange, the manifest
+// being a file in its own workdir and the docker backend delivering it one round
+// trip before the exec that reads it (#206 names that window). Without it the
+// shed removes nothing and names nothing, and a report of "nothing is left" is
+// exactly what a report of "I could not look" would otherwise be: every member's
+// root-owned payload would stay, and deleting one file would be all it took to
+// defeat the emptying this whole pass exists to do.
+//
+// It is not a list, so it cannot be acted on alone; LostItsList is how a backend
+// asks, and only a backend that knows on its own that the members were delivered
+// may answer it by emptying all of them — see docker's rename-fault branch, the
+// one site where that is known.
+const bulkLeftNoListMarker = "map-bulk-left-nolist"
+
 // bulkLeftShell defines __map_bulk_left, which the rename and discard shells
 // both embed and call after their own `rm -f`: it names, on stdout, every file
 // of the batch's that is still there. Both sheds run as the sandbox user, and on
@@ -260,22 +298,36 @@ const bulkLeftMarker = "map-bulk-left "
 // landed it can (#316, the batch's half of #310); a backend whose delivery ran
 // as the sandbox user has nothing to read here and does not look.
 //
-// The walk is `[ -f ]` per member and nothing else, so it costs no process even
-// for the ten thousand members a skill may carry, and it reports only regular
-// files: a temporary the sandbox swapped for a directory or a symlink is that
-// sandbox's own object, in its own reach, and not this pass's to take away.
+// The walk is two builtin tests per member and nothing else, so it costs no
+// process even for the ten thousand members a skill may carry. `-f` alone would
+// not say what it looks like it says — it stats *through* a link, so a temporary
+// the sandbox swapped for a symlink to a regular file answers yes — so `! -h`
+// goes with it and the pass reports nothing but the regular files the delivery
+// itself landed. A directory or a link the sandbox put at one of these names is
+// that sandbox's own object, in its own reach, and not this pass's to take away.
+//
+// What it names is a member's *temporary* and the two bookkeeping files, which
+// is what the delivery landed and therefore all a backend can empty by index.
+// One residue is outside that set: where a target turned into a directory under
+// the `mv`, the member ends up at `$__d/${__t##*/}` and the run removes it there
+// by path. If that `rm` is refused the file stays, unnamed — the sandbox user
+// must have been able to `mv` into the directory but not unlink from it, which a
+// sticky directory holding a root-owned entry can arrange.
 //
 // __tmps is the array the caller already built from the manifest; $1 and $2 are
 // the manifest and directory list themselves.
 const bulkLeftShell = `
 __map_bulk_left() {
+  printf '` + bulkLeftBeginMarker + `\n'
+  [ "${#__tmps[@]}" -eq 0 ] && printf '` + bulkLeftNoListMarker + `\n'
   __i=0
   while [ "$__i" -lt "${#__tmps[@]}" ]; do
-    if [ -f "${__tmps[$__i]}" ]; then printf '` + bulkLeftMarker + `%d\n' "$__i"; fi
+    __l=${__tmps[$__i]}
+    if [ -f "$__l" ] && [ ! -h "$__l" ]; then printf '` + bulkLeftMarker + `%d\n' "$__i"; fi
     __i=$((__i+1))
   done
-  if [ -f "$1" ]; then printf '` + bulkLeftMarker + `m\n'; fi
-  if [ -f "$2" ]; then printf '` + bulkLeftMarker + `d\n'; fi
+  if [ -f "$1" ] && [ ! -h "$1" ]; then printf '` + bulkLeftMarker + `m\n'; fi
+  if [ -f "$2" ] && [ ! -h "$2" ]; then printf '` + bulkLeftMarker + `d\n'; fi
 }
 `
 
@@ -285,13 +337,15 @@ __map_bulk_left() {
 // that is not one of this batch's is dropped, as blamed drops one: the stream it
 // came off is shared with the image.
 //
-// The paths are always this batch's own — a member's temporary, or one of the
-// two bookkeeping files — never a target, so acting on them can neither destroy
-// what a failed write promised to leave alone nor reach outside what the batch
-// itself put in the sandbox.
+// Only what follows the last opening line is read, and nothing at all when there
+// is none — bulkLeftBeginMarker carries why. What survives that framing is still
+// only *this batch's* own paths — a member's temporary, or one of the two
+// bookkeeping files — never a target, so acting on the report can neither
+// destroy what a failed write promised to leave alone nor reach outside what the
+// batch itself put in the sandbox.
 func (b *BulkWrite) LeftBehind(stdout string) []string {
 	var left []string
-	for _, line := range strings.Split(stdout, "\n") {
+	for _, line := range report(stdout) {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, bulkLeftMarker) {
 			continue
@@ -312,13 +366,57 @@ func (b *BulkWrite) LeftBehind(stdout string) []string {
 	return left
 }
 
+// report is the shed's own lines: everything after the LAST opening marker, and
+// nothing at all when there is none. bulkLeftBeginMarker carries why the framing
+// is where the trust lives.
+func report(stdout string) []string {
+	lines := strings.Split(stdout, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == bulkLeftBeginMarker {
+			return lines[i+1:]
+		}
+	}
+	return nil
+}
+
+// LostItsList answers whether the shed could not read the manifest, and so
+// removed nothing and can name nothing — the sandbox having deleted it in the
+// window between the delivery and the exec that reads it. A caller that knows
+// the members were delivered answers this by emptying Delivered() instead, since
+// nothing was removed there is nothing to recreate. A caller that does not know
+// must not: it would put zero-byte files at the names of members that never
+// arrived.
+func (b *BulkWrite) LostItsList(stdout string) bool {
+	for _, line := range report(stdout) {
+		if strings.TrimSpace(line) == bulkLeftNoListMarker {
+			return true
+		}
+	}
+	return false
+}
+
+// Delivered names every file this batch puts in the sandbox — each member's
+// temporary and the two bookkeeping files — the platform's own list, held here
+// all along and answering the manifest the sandbox can delete.
+func (b *BulkWrite) Delivered() []string {
+	all := make([]string, 0, len(b.tmps)+2)
+	all = append(all, b.tmps...)
+	return append(all, b.Manifest, b.DirList)
+}
+
 // EmptyArchive streams a tar carrying a zero-byte entry for each of paths — the
 // batch's form of the single write's own emptying (docker's `reclaim`), and one
 // archive for the whole batch rather than one per member, because a batch that
 // failed under a root-owned parent left one file per member and ten thousand
 // round trips is not a cleanup. Extracting it puts the name back without the
-// payload; what the caller passes is what LeftBehind returned, so it never
-// recreates a file the shed already removed.
+// payload.
+//
+// What it must not do is put a name back that the shed had just taken away, and
+// nothing here can check: it writes what the caller passes. A caller passing
+// LeftBehind's answer is asking about files a `[ -f ]` found after the `rm`, so
+// an honest report recreates nothing — and a forged one, framed out by
+// bulkLeftBeginMarker, would at worst leave a zero-byte file at one of this
+// batch's own temporary names, never at a target and never outside the batch.
 func (b *BulkWrite) EmptyArchive(paths []string, w io.Writer) error {
 	tw := tar.NewWriter(w)
 	for _, path := range paths {
@@ -381,8 +479,11 @@ func (b *BulkWrite) EmptyArchive(paths []string, w io.Writer) error {
 // Everything the loop drops on the way out is a temporary file nobody will ever
 // claim: the member that failed, and every member after it, are removed rather
 // than left in the sandbox. The `rm` runs as the sandbox user, which on the
-// docker backend is not who landed them, so each failing exit says what is still
-// there (__map_bulk_left) for the backend to take back itself (#316).
+// docker backend is not who landed them, so the pass says what is still there
+// (__map_bulk_left) for the backend to take back itself (#316) — on the way out
+// of a *successful* run too, because the two bookkeeping files are removed by
+// that same `rm` and a workdir the sandbox user cannot write keeps them however
+// well the members landed.
 //
 // The manifest is a file on the agent's own filesystem, so a command running in
 // the sandbox can rewrite it between the delivery and this pass and steer where
@@ -420,10 +521,8 @@ __map_bulk_rename() {
     if [ -d "$__d" ]; then rm -f "$__d/${__t##*/}"; __code=16; __bad=$__at; continue; fi
   done
   rm -f "$1" "$2"
-  if [ "$__code" -ne 0 ]; then
-    __map_bulk_left "$1" "$2"
-    printf 'map-bulk-fail %d\n' "$__bad" >&2
-  fi
+  __map_bulk_left "$1" "$2"
+  [ "$__code" -eq 0 ] || printf 'map-bulk-fail %d\n' "$__bad" >&2
   return "$__code"
 }
 `
@@ -467,9 +566,17 @@ __map_bulk_prepare() {
 // BulkDiscardShell defines __map_bulk_discard, which both backends embed: given
 // the manifest ($1) and the directory list ($2), it sheds every member the batch
 // delivered and then the two files themselves, so a batch that ends badly leaves
-// the sandbox holding nothing of itself. A manifest that is not there took the
-// list of what to shed with it; the rest still goes. What the `rm` could not
-// take is named on stdout, for __map_bulk_left's reason.
+// the sandbox holding nothing **it can shed**. That is the whole claim on the
+// backend whose delivery ran as the sandbox user; where it ran as root — the
+// docker daemon extracts on the host — the `rm` here reaches nothing under a
+// parent that user cannot write, and what it could not take is named on stdout
+// for the backend to empty instead (__map_bulk_left, #316). A manifest that is
+// not there took the list of what to shed with it; the rest still goes, and the
+// naming pass says so rather than reporting an empty sandbox.
+//
+// The exit status is the bookkeeping `rm`'s, kept across the naming pass so it
+// still says whether the shed could do its job. Neither backend reads it today;
+// both would be reading a constant if the report were allowed to overwrite it.
 const BulkDiscardShell = bulkLeftShell + `
 __map_bulk_discard() {
   __tmps=()
@@ -478,6 +585,8 @@ __map_bulk_discard() {
     [ "${#__tmps[@]}" -eq 0 ] || rm -f "${__tmps[@]}"
   fi
   rm -f "$1" "$2"
+  __rc=$?
   __map_bulk_left "$1" "$2"
+  return "$__rc"
 }
 `
