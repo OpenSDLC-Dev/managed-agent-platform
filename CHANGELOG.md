@@ -15,9 +15,9 @@ copy of an entry here.
 
 ### Added
 
-- **Plan 25 drafted — verification hardening: checkers proven by what they
+- **Plan 26 drafted — verification hardening: checkers proven by what they
   refuse, verdicts that travel with their evidence**
-  ([docs/plan/25_verification-hardening.md](./docs/plan/25_verification-hardening.md)).
+  ([docs/plan/26_verification-hardening.md](./docs/plan/26_verification-hardening.md)).
   Out of a comparative study of Anthropic's `how-we-claude-code` workshop sample
   (a "verifiable component architecture": runtime observation at the surface,
   mandatory adversarial fixtures, a PASS/FAIL/BLOCKED/SKIP verdict taxonomy)

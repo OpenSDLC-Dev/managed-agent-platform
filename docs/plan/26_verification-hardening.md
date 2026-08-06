@@ -2,7 +2,7 @@
 status: draft
 ---
 
-# Verification hardening: checkers proven by what they refuse, verdicts that travel with their evidence (plan 25)
+# Verification hardening: checkers proven by what they refuse, verdicts that travel with their evidence (plan 26)
 
 This plan hardens the verification machinery itself — no product behavior changes. It
 comes out of a comparative study of Anthropic's `how-we-claude-code` workshop sample
