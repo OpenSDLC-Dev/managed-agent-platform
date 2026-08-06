@@ -101,14 +101,17 @@ Measured at 56f81f9, not assumed:
 
 ## Slice 1 — known-bad subjects: the contract suite and the graders must be seen to refuse
 
-**providertest.** Add a self-test in `internal/provider/providertest` that feeds `Run` a
-deliberately non-conforming backend and asserts the suite goes red. Mechanism: the
-re-exec pattern (the stdlib's helper-process idiom) — an env-gated known-bad `Backend`
-whose fake provider violates pinned invariants (a second `done` chunk, `end_turn` on a
-tool turn, zeroed usage when the upstream reported none), run by re-invoking the test
-binary and asserting a non-zero exit plus the expected failure text. Refactoring the
-suite's rows to return errors was considered and rejected: invasive, and it would change
-the suite every backend already passes.
+**providertest.** Add a self-test in `internal/provider/providertest` that feeds `Run`
+deliberately non-conforming backends and asserts the suite goes red — **one backend per
+violated invariant** (a second `done` chunk; `end_turn` on a tool turn; zeroed usage when
+the upstream reported none), each asserted to fail with that row's expected failure text.
+One violation per backend keeps the mutation criterion honest, exactly as one fault per
+fixture does for evals below: a multi-violation backend would stay red when any single
+assertion was reverted. Mechanism: the re-exec pattern (the stdlib's helper-process
+idiom) — env-gated known-bad `Backend`s run by re-invoking the test binary and asserting
+a non-zero exit plus the expected failure text. Refactoring the suite's rows to return
+errors was considered and rejected: invasive, and it would change the suite every
+backend already passes.
 
 **evals.** Add pinned known-bad whole transcript fixtures — **one per failure cause** (a
 wrong final answer; a forbidden tool call), each asserted to grade `Pass: false` with the
@@ -125,15 +128,16 @@ scope, as are `sandboxtest`/`blobtest` known-bad subjects. Whether to extend the
 to any of them is a backlog decision made in GitHub issues; this plan records no future
 work.
 
-Acceptance: reverting any one of the violated invariants' assertions in `contract.go`
-turns the self-test red; repairing any known-bad fixture's single fault turns exactly
-that fixture's test red. (The meta-tests are themselves mutation-tested — the rule they
-exist to structuralize.)
+Acceptance: reverting any one violated invariant's assertion in `contract.go` turns
+exactly that violation's self-test red; repairing any known-bad fixture's single fault
+turns exactly that fixture's test red. (The meta-tests are themselves mutation-tested —
+the rule they exist to structuralize.)
 
 ## Slice 2 — BLOCKED(environment): label the provisioning failure, keep it red
 
 Prefix environment-provisioning failure messages with the marker
-`BLOCKED(environment): `. Scope is defined by seam and found by sweep at implementation
+`BLOCKED(environment):` plus a single trailing space before the original message. Scope
+is defined by seam and found by sweep at implementation
 time, not by the ground-truth survey above: every Docker/K8s-backed shared harness
 `Main` (`pgtest`, `blobtest`, `gcstest`, `secretstest`), the pure connect/create helpers
 (`FreshDB`, `FreshBucket`), the gate fixtures, the sandbox/toolset `provision:` sites and
@@ -169,11 +173,15 @@ appears only on red runs. One sentence lands in docs/ARCHITECTURE.md's testing s
 naming the convention, so triage ("rerun or investigate?") stops depending on session
 folklore.
 
-Acceptance: with Docker stopped, every provisioning-failure site the sweep identified
-carries the marker (checked against the sweep's own list, not the survey above); a
-seeded assertion failure (scratch copy) does not. The marker-bearing paths are
-mutation-checked per slice 1's rule where a cheap seeding exists; harness stderr lines
-are verified by running the binary against a stopped daemon, not unit-tested.
+Acceptance, per backend outage rather than one Docker kill: with Docker stopped, every
+Docker-backed site the sweep identified (the four harness `Main`s, `FreshDB`,
+`FreshBucket`, the docker sandbox/toolset provision paths, the gate image build) carries
+the marker; with kubeconfig pointed at an unreachable cluster, the k8s provision and
+gate-fixture sites carry it too. Each scoped site is checked under the outage that
+starves it, against the sweep's own list — not the survey above. A seeded assertion
+failure (scratch copy) stays unmarked. The marker-bearing paths are mutation-checked per
+slice 1's rule where a cheap seeding exists; harness stderr lines are verified by
+running the binary against a stopped daemon, not unit-tested.
 
 ## Slice 3 — the verifier reports structure, and every new guard shows its red run
 
@@ -181,15 +189,34 @@ Two changes to `.claude/agents/verifier.md`, landing as one PR (behavior-steerin
 markdown: full dual-review ritual).
 
 **Structured verdict.** The report keeps its prose bullets and additionally requires one
-fenced JSON block: `rungs: [{rung: 1..5, name, verdict: PASS|FAIL|BLOCKED|SKIP,
-evidence}]`, `findings: [{n, severity: blocker|concern|note, file, line, summary}]`, and
-an overall `verdict`. Semantics: `BLOCKED` = wanted to observe, couldn't (environment,
-access) — with the reason; `SKIP` = rung not applicable to this diff — with the reason;
-neither is a pass, and any rung `FAIL`, or a `BLOCKED` on a rung the change touches,
-keeps the work not-done (unchanged from today's rule). A rung that silently didn't run
-becomes a visible missing key, not an absent paragraph — the same failure mode the
-rate-limited-CodeRabbit incident taught. CLAUDE.md step 5 gains half a line: the PR
-description embeds the JSON block verbatim.
+fenced JSON block — valid JSON, exact schema written into verifier.md by this slice's PR.
+Shape, by example:
+
+```json
+{
+  "verdict": "PASS",
+  "rungs": [
+    {"rung": 1, "name": "gate", "verdict": "PASS",
+     "evidence": "make verify green; total statement coverage: 90.49%"},
+    {"rung": 3, "name": "behavior", "verdict": "SKIP",
+     "evidence": "docs-only diff — no runtime surface exists"}
+  ],
+  "findings": [
+    {"n": 1, "severity": "concern", "file": "internal/foo/bar.go", "line": 42,
+     "summary": "one-sentence defect statement"}
+  ]
+}
+```
+
+All five rungs must appear (integer `rung` 1–5, string `name`); `verdict` values are the
+strings `PASS`/`FAIL`/`BLOCKED`/`SKIP`; `evidence` is a non-empty string; `findings` may
+be empty but the key must be present — a rung or key that silently didn't run becomes a
+visible absence, not an absent paragraph. Semantics: `BLOCKED` = wanted to observe,
+couldn't (environment, access) — with the reason; `SKIP` = rung not applicable to this
+diff — with the reason; neither is a pass, and any rung `FAIL`, or a `BLOCKED` on a rung
+the change touches, keeps the work not-done (unchanged from today's rule). This is the
+failure mode the rate-limited-CodeRabbit incident taught. CLAUDE.md step 5 gains half a
+line: the PR description embeds the JSON block verbatim.
 
 **Red-run evidence by default.** Rung 2's scratch-copy mutation proof goes from
 discretionary to default for the diff's own guards: for every test the diff adds or
@@ -210,8 +237,10 @@ broken code returns a finding saying so.
 / line: `RUN_EVALS=1 go test -count=1 -v -timeout 120m -run 'TestEvals/<task-id>$'
 ./evals/`. The command is cheap to print and honest about cost: a filtered run still
 pays the fixed setup (image pull, Postgres, stack) — the artifact says what to type, not
-that it is fast. `make eval` stays unparameterized on purpose; the `go test` line is the
-scoped path.
+that it is fast. The writer runs the task ID through `regexp.QuoteMeta` before embedding
+it in the `-run` pattern: `go test -run` matches by regular expression while `t.Run`
+registered an exact name, and the artifact must not assume task IDs stay regex-safe.
+`make eval` stays unparameterized deliberately; the `go test` line is the scoped path.
 
 **Contract suites.** `providertest`, `sandboxtest`, `blobtest` package docs gain one
 sentence promising subtest-name stability — names are part of the suite's contract, so a
@@ -242,7 +271,11 @@ the rehearsal leg gives CI failures their evidence, the live leg saves a full-st
 re-run whose whole point was being expensive.
 
 Acceptance: a seeded rehearsal failure (scratch copy) leaves a transcript whose frame
-sequence replays what the typed assertions saw; a passing run writes nothing.
+sequence replays what the typed assertions saw; a passing run writes nothing. The scrub
+is itself acceptance-tested per slice 1's rule: a seeded failure with a planted secret in
+an SSE payload, in the summary fields, and in one deliverable's bytes must produce
+artifacts that contain the redaction and not the secret, with the altered deliverable's
+original size and sha256 recorded in the summary.
 
 ## Delivery
 
