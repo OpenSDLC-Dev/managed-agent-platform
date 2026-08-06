@@ -135,24 +135,37 @@ exist to structuralize.)
 Prefix environment-provisioning failure messages with the marker
 `BLOCKED(environment): `. Scope is defined by seam and found by sweep at implementation
 time, not by the ground-truth survey above: every Docker/K8s-backed shared harness
-`Main` (`pgtest`, `blobtest`, `gcstest`, `secretstest`) and every per-test provisioning
-failure that fires **before any repo logic runs** (`FreshDB`, `FreshBucket`, sandboxtest
-`provision:`, the gate fixtures, the docker/k8s/toolset harness entry points, and
-whatever else the sweep finds). Behavior-assertion failures stay unmarked. Both remain
-red: the marker classifies the failure, it never softens it.
+`Main` (`pgtest`, `blobtest`, `gcstest`, `secretstest`), the pure connect/create helpers
+(`FreshDB`, `FreshBucket`), the gate fixtures, the sandbox/toolset `provision:` sites and
+the docker/k8s/toolset harness entry points, and whatever else the sweep finds.
+Behavior-assertion failures stay unmarked. Both remain red: the marker classifies the
+failure, it never softens it.
 
-The *before any repo logic runs* rule is load-bearing: `pgtest.NewPool`'s `open store`
-failure stays **unmarked**, because `store.Open` runs the repo's own migrations
-(`internal/store/store.go:37`) — a failure there can be a broken migration, which is
-"observed and wrong", not "couldn't observe". Where one call mixes both (a connect error
-and a migration error surface identically), the site stays unmarked: a missing marker
-costs one extra look, a wrong marker hides a bug — the same asymmetry that makes the
-runner fail when in doubt.
+The boundary rule is *marked unless the environment was already proven present on the
+same path* — deliberately not "marked only where no repo code runs", because the
+provisioning seams do not offer that luxury. Its two edges, both deliberate:
+
+- `pgtest.NewPool` stays **unmarked**. It calls `FreshDB` first, whose marked
+  connect/create failures prove Postgres reachable; its own `open store` failure
+  (`pgtest.go:209`) therefore follows a live environment and is dominated by what
+  `store.Open` actually runs — the repo's migrations (`internal/store/store.go:37`),
+  "observed and wrong", not "couldn't observe".
+- The sandbox/toolset `provision:` sites and the gate fixtures' `docker build` are
+  **marked** even though `Provider.Provision` is repo code (for the sandbox contract
+  suite, the very subject under test) and the Dockerfile is repo-owned: no earlier
+  surface proves the daemon present at these sites, environment absence is the dominant
+  historical cause there (the container-suite flake record), and the mislabel cost is
+  bounded — the run stays red either way, and the triage this marker serves keys on
+  correlation across runs: a genuine Provision or Dockerfile defect fails marked and
+  *consistently*, contention fails marked and scattered. A wrong label delays one look;
+  it ships nothing.
 
 The grep token is the full `BLOCKED(environment)` — the bare word collides with the
-egress probe's behavior token (`egress.go:125,131`). `pgtest`/`blobtest` retry once
-(#265); the interim `; retrying` line keeps its wording and gains no marker — only the
-final give-up line does. One sentence lands in docs/ARCHITECTURE.md's testing section
+egress probe's behavior token (`egress.go:125,131`). The retrying harnesses —
+`pgtest`, `blobtest`, and `secretstest` all attempt the container start twice (#265) —
+keep their interim `; retrying` line unmarked; **only the final give-up line carries the
+marker**, so a run that recovers on the second attempt never shows it and the marker
+appears only on red runs. One sentence lands in docs/ARCHITECTURE.md's testing section
 naming the convention, so triage ("rerun or investigate?") stops depending on session
 folklore.
 
@@ -216,8 +229,15 @@ frames' raw wire JSON in order, the `dcfRun` summary (session ID, outcome ID, te
 state, grader explanation), and the deliverable bytes themselves — `dcfRun.Contents`
 already holds them, they are doc-example-sized, and the rehearsal leg's in-memory blob
 store and test-scoped Postgres die with the test, so a name-and-hash record would strand
-any byte-content diagnosis. Output passes a scrub mirroring evals' policy before
-writing. Both legs inherit from the one harness change;
+any byte-content diagnosis.
+
+Layout and scrub order are part of the design, because byte-faithfulness and scrubbing
+pull against each other: each deliverable is written as **its own file with raw bytes on
+disk** — never embedded in the JSON transcript, where base64 would defeat a substring
+scrub. The same secret-substring pass evals uses runs over every artifact byte stream
+(transcript, summary, deliverable files) before write; a deliverable the scrub alters is
+by construction a redacted copy, and the summary records each original's size and
+sha256, so a redaction is visible rather than silent. Both legs inherit from the one harness change;
 the rehearsal leg gives CI failures their evidence, the live leg saves a full-stack
 re-run whose whole point was being expensive.
 
