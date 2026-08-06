@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 // putCheckpoint stores a placeholder checkpoint blob for the harness session.
@@ -35,6 +37,28 @@ func hasCheckpoint(t *testing.T, h *harness) bool {
 	return true
 }
 
+// deleteSessionRow removes the harness session the way the API does: the row
+// goes and its tombstone lands in the same transaction (the reaper's deleted
+// tier runs on the tombstone, not on the row's absence).
+func deleteSessionRow(t *testing.T, h *harness) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, h.sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO deleted_sessions (id) VALUES ($1)`, h.sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func setStatus(t *testing.T, h *harness, status string) {
 	t.Helper()
 	if _, err := h.pool.Exec(context.Background(),
@@ -52,17 +76,14 @@ func archiveSession(t *testing.T, h *harness) {
 	}
 }
 
-// TestReapPassDeletedSessionReapsAndDeletesCheckpoint: a session whose row is
-// gone is the deleted tier — its holding is reaped and its checkpoint blob
-// removed, blob first so a failed delete keeps the Owned trigger for the next
-// pass.
+// TestReapPassDeletedSessionReapsAndDeletesCheckpoint: a tombstoned session is
+// the deleted tier — its holding is reaped and its checkpoint blob removed,
+// blob first so a failed delete keeps the Owned trigger for the next pass.
 func TestReapPassDeletedSessionReapsAndDeletesCheckpoint(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	ctx := context.Background()
 	putCheckpoint(t, h)
-	if _, err := h.pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, h.sid.String()); err != nil {
-		t.Fatal(err)
-	}
+	deleteSessionRow(t, h)
 	h.prov.owned = []domain.ID{h.sid}
 
 	if err := h.exec.reapPass(ctx); err != nil {
@@ -73,6 +94,48 @@ func TestReapPassDeletedSessionReapsAndDeletesCheckpoint(t *testing.T) {
 	}
 	if hasCheckpoint(t, h) {
 		t.Error("deleted session's checkpoint blob survived")
+	}
+}
+
+// TestReapPassSkipsForeignSandbox: a holding whose session id has neither a
+// sessions row nor a tombstone was never this deployment's to destroy — a
+// second deployment sharing the Docker daemon or K8s namespace, or a contract
+// suite's fixtures on a shared dev daemon, all label sandboxes with ids this
+// database has never seen. The deleted tier runs on the tombstone's
+// affirmative evidence, not on the row's absence.
+func TestReapPassSkipsForeignSandbox(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	foreign := domain.NewID(domain.PrefixSession)
+	h.prov.owned = []domain.ID{foreign}
+
+	if err := h.exec.reapPass(context.Background()); err != nil {
+		t.Fatalf("reap pass: %v", err)
+	}
+	if len(h.prov.reaped) != 0 {
+		t.Fatal("a sandbox this database has never seen was reaped")
+	}
+}
+
+// TestReapPassContinuesPastAFailingSession: per-session failures are joined,
+// not fatal to the pass — one wedged session must not shield the rest of the
+// endpoint from teardown.
+func TestReapPassContinuesPastAFailingSession(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	archiveSession(t, h)
+	wedged := pgtest.NewSessionInEnv(t, h.pool, h.envID)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'terminated' WHERE id = $1`, wedged.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.prov.owned = []domain.ID{wedged, h.sid}
+	h.prov.reapFailFor = wedged
+
+	err := h.exec.reapPass(context.Background())
+	if err == nil {
+		t.Fatal("reap pass = nil error with one session's reap failing")
+	}
+	if !slices.Contains(h.prov.reapedSnapshot(), h.sid) {
+		t.Fatal("the failing session shielded the healthy one from teardown")
 	}
 }
 
@@ -194,9 +257,7 @@ func TestReapRechecksUnderTheLock(t *testing.T) {
 func TestReapDeletedTierBlobFailureKeepsTheSandbox(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	ctx := context.Background()
-	if _, err := h.pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, h.sid.String()); err != nil {
-		t.Fatal(err)
-	}
+	deleteSessionRow(t, h)
 	h.prov.owned = []domain.ID{h.sid}
 	h.exec.blobs = failingDeleteStore{Store: h.blobs}
 
@@ -239,8 +300,15 @@ func TestProvisionWaitsForTheSessionLock(t *testing.T) {
 
 	// Deterministic barrier: the provision must be observably waiting on the
 	// advisory lock before the release — a provision that does not take the
-	// lock answers immediately and fails the pending check below.
-	waitSQL := `SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted)`
+	// lock answers immediately and fails the pending check below. Filtered to
+	// this database and THIS session's key (pg_locks splits the 64-bit key
+	// into classid/objid), so an unrelated waiter elsewhere in the cluster
+	// cannot satisfy the barrier.
+	key := uint64(sessionLockKey(h.sid))
+	waitSQL := `SELECT EXISTS (SELECT 1 FROM pg_locks
+	  WHERE locktype = 'advisory' AND NOT granted
+	    AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+	    AND classid = $1::oid AND objid = $2::oid)`
 	for deadline := time.Now().Add(10 * time.Second); ; {
 		select {
 		case err := <-done:
@@ -248,7 +316,7 @@ func TestProvisionWaitsForTheSessionLock(t *testing.T) {
 		default:
 		}
 		var waiting bool
-		if err := h.pool.QueryRow(ctx, waitSQL).Scan(&waiting); err != nil {
+		if err := h.pool.QueryRow(ctx, waitSQL, uint32(key>>32), uint32(key)).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
 		if waiting {
@@ -289,4 +357,42 @@ func TestRunDrivesTheReaper(t *testing.T) {
 	}
 	cancel()
 	<-runDone
+}
+
+// TestRunWaitsForTheReaperToStop: Run's return means the reaper is no longer
+// running — a caller that closes the pool after Run must not race a reap pass
+// still in flight. The hook holds a pass open past the cancellation; Run may
+// return only once the pass finishes.
+func TestRunWaitsForTheReaperToStop(t *testing.T) {
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{ReapInterval: 20 * time.Millisecond})
+	h.prov = h.exec.provider.(*fakeProvider)
+	archiveSession(t, h)
+	h.prov.owned = []domain.ID{h.sid}
+
+	classified := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	reapHookAfterClassify = func(domain.ID) {
+		once.Do(func() { close(classified) })
+		<-release
+	}
+	defer func() { reapHookAfterClassify = nil }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() { _ = h.exec.Run(ctx); close(runDone) }()
+
+	<-classified // a reap pass is now held open inside reapSession
+	cancel()
+	select {
+	case <-runDone:
+		t.Fatal("Run returned while a reap pass was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the reap pass finished")
+	}
 }

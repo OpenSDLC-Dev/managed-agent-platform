@@ -6,7 +6,9 @@
 // Configuration is environment-driven:
 //
 //	DATABASE_URL             Postgres DSN (required; same database as the
-//	                         controlplane and brain)
+//	                         controlplane and brain). A pool_max_conns below 2
+//	                         is refused: the session advisory lock pins one
+//	                         connection while other queries still need the pool
 //	EXECUTOR_IMAGE           sandbox base image (default "debian:stable-slim")
 //	EXECUTOR_WORKDIR         working directory inside the sandbox (default
 //	                         "/workspace")
@@ -187,6 +189,13 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer pool.Close()
+	// The session advisory lock pins one connection while the gate-token mint
+	// (and the reaper's re-classification) still needs another — a one-
+	// connection pool would deadlock the first gated provision, so refuse it
+	// at startup instead of wedging silently.
+	if pool.Config().MaxConns < 2 {
+		return fmt.Errorf("DATABASE_URL pool_max_conns = %d: the executor needs at least 2 connections", pool.Config().MaxConns)
+	}
 
 	provider, err := backend.New(backend.Config{
 		Backend:             os.Getenv("SANDBOX_BACKEND"),

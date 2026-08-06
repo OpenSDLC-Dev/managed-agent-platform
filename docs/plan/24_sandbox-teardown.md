@@ -122,7 +122,7 @@ Everything below was read or measured in this repo, this week.
 3. **Reap criteria, from the database only.**
    | session state | action |
    |---|---|
-   | row gone (deleted) | reap; delete the session's checkpoint blob |
+   | row gone (deleted) | reap; delete the session's checkpoint blob. *As built (slice-3 review hardening): requires the `deleted_sessions` tombstone the API delete writes in its deleting transaction — a missing row alone also describes a holding that was never this deployment's (another deployment or a test suite sharing the Docker daemon/K8s namespace), and those are skipped* |
    | archived or terminated | reap; keep the checkpoint blob until the row is deleted |
    | running | never — structurally unreachable for the terminal tiers (slice 1's guards); for the TTL tier the advisory lock **plus D4's under-lock recheck** close the race |
    | idle past the TTL | checkpoint, then reap |
@@ -188,7 +188,8 @@ Everything below was read or measured in this repo, this week.
    disk — logged and counted as its own metric outcome. A sandbox that cannot be read
    (K8s Failed pod; any exec/archive failure) degrades the same way. A blob-less
    deployment disables the TTL tier at startup with one log line; the terminal tiers run
-   everywhere. Metrics: `sandbox.reaped` counter{reason}, `sandbox.checkpoint` /
+   everywhere. Metrics: `sandbox.reaped` counter{reason} (*as built in slice 3:
+   `sandbox.sessions.reaped` counter{tier}*), `sandbox.checkpoint` /
    `sandbox.restore` counters{outcome} + duration histograms, ids in logs never in labels.
 9. **The wire guards land first, as their own slice.** Archive and delete of a `running`
    session are rejected 400 `invalid_request_error` (the reference documents the refusal;

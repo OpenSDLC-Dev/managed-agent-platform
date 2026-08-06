@@ -17,9 +17,10 @@ resume with its workspace.
 - [x] Slice 2 — `Owned`/`Reap` on both backends + Docker list endpoint + Helm RBAC
       `list` + contract-suite rows. Evidence: 4 shared contract rows green on real
       Docker + kind; 5 targeted mutants each killed by a backend suite.
-- [x] Slice 3 — the reaper loop, terminal tiers (deleted/archived/terminated), advisory
-      lock, metrics, knobs. Evidence: reaper_test.go (9 rows incl. lock-held skip,
-      under-lock recheck, blob-before-reap ordering, provision blocking on the lock).
+- [x] Slice 3 — the reaper loop, terminal tiers (deleted = tombstoned, archived,
+      terminated), advisory lock, metrics, knobs. Evidence: reaper_test.go (12 rows
+      incl. foreign-sandbox skip, lock-held skip, under-lock recheck, blob-before-reap
+      ordering, provision blocking on the lock) + the metric pin.
 - [ ] Slice 4 — checkpoint/restore engine: migration (consumption marker), capture
       (three roots, sentinel strip, validate, spool), restore (in-sandbox extract).
 - [ ] Slice 5 — the idle-TTL tier with its exclusions (cloud-only, no pending work, no

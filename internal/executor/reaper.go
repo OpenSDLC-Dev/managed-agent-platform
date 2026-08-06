@@ -101,7 +101,7 @@ func (e *Executor) reapPass(ctx context.Context) error {
 // checkpoint blob first (a failed blob delete aborts while the sandbox is
 // still owned, keeping the retry trigger) → Reap.
 func (e *Executor) reapSession(ctx context.Context, sid domain.ID) error {
-	tier, err := e.classifyForReap(ctx, sid)
+	tier, err := e.classifyForReap(ctx, e.pool, sid)
 	if err != nil || tier == tierNone {
 		return err
 	}
@@ -126,7 +126,9 @@ func (e *Executor) reapSession(ctx context.Context, sid domain.ID) error {
 	}
 	defer unlockSession(conn, sid)
 
-	tier, err = e.classifyForReap(ctx, sid)
+	// Re-classify on the connection already holding the lock — a second pool
+	// acquisition here would deadlock a deliberately tiny pool.
+	tier, err = e.classifyForReap(ctx, conn, sid)
 	if err != nil || tier == tierNone {
 		return err
 	}
@@ -142,19 +144,37 @@ func (e *Executor) reapSession(ctx context.Context, sid domain.ID) error {
 	return nil
 }
 
+// rowQueryer is the one query shape classifyForReap needs, satisfied by both
+// the pool and a pinned connection — under the advisory lock the re-read must
+// ride the lock's own connection, not a second pool acquisition.
+type rowQueryer interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // classifyForReap reads the session's terminal tier from the database — never
-// from a caller's claim. A missing row is the deleted tier; archived beats
-// terminated (the stricter lifecycle answer); everything else — idle, running,
-// rescheduling — is not this slice's to touch (the idle-TTL tier is plan 24
-// slice 5).
-func (e *Executor) classifyForReap(ctx context.Context, sid domain.ID) (reapTier, error) {
+// from a caller's claim. The deleted tier requires the tombstone deleteSession
+// writes, not merely a missing row: a missing row also describes a holding
+// that was never this deployment's (a second deployment sharing the Docker
+// daemon or K8s namespace labels sandboxes with ids this database never saw),
+// and those are skipped. Archived beats terminated (the stricter lifecycle
+// answer); everything else — idle, running, rescheduling — is not this
+// slice's to touch (the idle-TTL tier is plan 24 slice 5).
+func (e *Executor) classifyForReap(ctx context.Context, q rowQueryer, sid domain.ID) (reapTier, error) {
 	var status string
 	var archived bool
-	err := e.pool.QueryRow(ctx,
+	err := q.QueryRow(ctx,
 		`SELECT status, archived_at IS NOT NULL FROM sessions WHERE id = $1`, sid.String()).
 		Scan(&status, &archived)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return tierDeleted, nil
+		var dead bool
+		if err := q.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM deleted_sessions WHERE id = $1)`, sid.String()).Scan(&dead); err != nil {
+			return tierNone, err
+		}
+		if dead {
+			return tierDeleted, nil
+		}
+		return tierNone, nil
 	}
 	if err != nil {
 		return tierNone, err
@@ -168,15 +188,18 @@ func (e *Executor) classifyForReap(ctx context.Context, sid domain.ID) (reapTier
 	return tierNone, nil
 }
 
-// unlockSession releases a session's advisory lock on its own connection,
-// detached from the caller's context — a cancelled reap must still unlock
-// (the connection going back to the pool healthy keeps the lock from leaking
-// with it).
+// unlockSession releases a session's advisory lock on its own detached
+// context — a cancelled reap must still unlock. A failed unlock must not
+// return a healthy connection to the pool still holding the lock (session
+// advisory locks survive a pool release), so the connection is closed
+// instead: the server frees every lock a closing connection holds.
 func unlockSession(conn *pgxpool.Conn, sid domain.ID) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 5*time.Second)
 	defer cancel()
 	if _, err := conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, sessionLockKey(sid)); err != nil {
-		slog.Warn("advisory unlock failed; the connection's release frees the lock", "session", sid, "error", err)
+		_ = conn.Conn().Close(ctx)
+		slog.Warn("advisory unlock failed; closing the connection so the server frees the lock",
+			"session", sid, "error", err)
 	}
 }
 

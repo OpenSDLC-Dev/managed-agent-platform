@@ -1069,6 +1069,13 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
 		return nil, err
 	}
+	// The tombstone rides the deleting transaction: it is the affirmative
+	// evidence the reaper's deleted tier runs on — a missing row alone also
+	// describes a sandbox that was never this deployment's (plan 24).
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO deleted_sessions (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, id); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -1086,9 +1093,13 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// only remover: a session that still owns a sandbox is the reaper's
 	// deleted tier, which deletes this same key before it reaps (plan 24) —
 	// this covers the session whose sandbox is already gone, which no reap
-	// pass will ever visit again.
+	// pass will ever visit again. Detached from the request context: the
+	// commit already happened, and a client hanging up must not skip the one
+	// delete this path exists for.
 	if s.blobs != nil {
-		if err := s.blobs.Delete(ctx, blob.SessionCheckpointKey(id)); err != nil {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := s.blobs.Delete(dctx, blob.SessionCheckpointKey(id)); err != nil {
 			slog.WarnContext(ctx, "session checkpoint blob not deleted", "session", id, "error", err)
 		}
 	}

@@ -175,10 +175,12 @@ type fakeProvider struct {
 	entered chan struct{}
 	gate    chan struct{}
 	// owned/reaped drive and record the reaper (reaper_test.go); mu guards
-	// them because Run's reap loop is a separate goroutine.
-	mu     sync.Mutex
-	owned  []domain.ID
-	reaped []domain.ID
+	// them because Run's reap loop is a separate goroutine. reapFailFor makes
+	// one session's Reap fail, for the error-isolation row.
+	mu          sync.Mutex
+	owned       []domain.ID
+	reaped      []domain.ID
+	reapFailFor domain.ID
 }
 
 func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -212,6 +214,9 @@ func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) {
 func (p *fakeProvider) Reap(_ context.Context, sid domain.ID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if sid == p.reapFailFor && sid != "" {
+		return errors.New("daemon unreachable")
+	}
 	p.reaped = append(p.reaped, sid)
 	return nil
 }

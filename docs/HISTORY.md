@@ -33,6 +33,61 @@ recorded nowhere else.
 
 ---
 
+## Sandbox teardown (plan 24, #64) — slice 3: the reaper's terminal tiers
+
+**Review hardening, landed in the same PR.** The verifier returned PASS WITH FINDINGS
+(gate green at 90.44% coverage, all five slice mutants independently reproduced in a
+scratch copy, a live probe on the real binary — deleted/archived containers removed
+within one 2s interval, the idle one untouched, terminated removed after the flip); its
+two concerns (the `EXECUTOR_REAP_INTERVAL` knob missing from cmd/executor's env block
+and the compose README table) were fixed before review. The dual review then reshaped
+the slice's deleted tier:
+
+- **The deleted tier now requires a tombstone** (Claude review, confirmed twice, the
+  round's headline). As landed, `classifyForReap` mapped `ErrNoRows` to the deleted
+  tier — but a missing row also describes a holding that was never this deployment's:
+  the repo's own dev loop (a compose stack's executor and `make test`'s Docker contract
+  suite share the host daemon) would have had the compose reaper force-removing the
+  suite's fixtures within a minute, and two deployments sharing a daemon or K8s
+  namespace would destroy each other's live sandboxes. Migration 0018 adds
+  `deleted_sessions`; `deleteSession` writes the tombstone in its deleting transaction;
+  the reaper skips any owned id with neither row nor tombstone
+  (`TestReapPassSkipsForeignSandbox`, red before the fix).
+- **Codex's P1 — a session revived between the under-lock re-read and `Reap` — was
+  refuted with evidence**: no revival writer exists. Archived sessions are read-only
+  (`internal/api/events.go:78` refuses every event batch under the session row lock,
+  and no unarchive path exists anywhere); `terminated` is set by nothing today and both
+  wake paths exclude it (events.go:204-212 — user.message requires idle, interrupt
+  requires idle/running); a deleted row never returns. The terminal tiers are
+  absorbing states, so the under-lock answer cannot rot.
+- Codex's remaining findings, all acted on: the under-lock re-classification now rides
+  the lock's own connection and cmd/executor refuses `pool_max_conns < 2` (nested pool
+  acquisition under the pinned lock connection could self-deadlock a deliberately tiny
+  pool); a failed `pg_advisory_unlock` now closes the connection instead of releasing
+  it healthy — the old log line claimed a pool release frees the lock, which is false
+  for pgx v5 (session advisory locks survive `Release`); `Run` now joins the reaper
+  goroutine before returning (`TestRunWaitsForTheReaperToStop`, red before the fix);
+  the `pg_locks` test barrier filters by database and this session's classid/objid;
+  and the two unpinned contracts got tests — `TestReapPassContinuesPastAFailingSession`
+  (errors.Join isolation) and `TestDeleteSessionSurvivesCheckpointDeleteFailure`.
+- From the Claude review's confirmed list: the post-commit checkpoint-blob delete in
+  `deleteSession` detached from the request context (a client hangup must not skip the
+  one delete the path exists for); the reap metric pinned through a ManualReader
+  (`TestReapMetric` — archived and terminated differ only in the label); plan 24's D8
+  metric sketch and reap-criteria table annotated with the as-built names.
+
+Hardening mutants killed post-commit: tombstone check dropped → foreign-skip test red
+(its pre-fix red), join dropped → `TestRunWaitsForTheReaperToStop` red (pre-fix red),
+plus fresh runs for the never-red tests recorded in the PR. Not constructible: a
+discriminating test for the unlock-failure connection-close — every SQL-reachable
+unlock failure (aborted transaction, dead backend, cancelled context) already destroys
+the connection on release, freeing the lock; the guard covers the residual class
+(e.g. a pooling proxy) no real-Postgres test can simulate. The cmd startup floor is
+main-glue, outside the tested surface by convention. Refuted-and-unchanged, with the
+verify agents' own evidence: Run-return-before-reap-exit harms (the pool blocks on
+`Close` until conns release), the provision-side re-read (a stale sandbox adoption is
+the pre-slice status quo and slice 4's restore recuts it under the same hold).
+
 ## Sandbox teardown (plan 24, #64) — slice 2: `Owned`/`Reap` on both backends
 
 **Review hardening, landed in the same PR.** The verifier PASSed twice — the slice, then

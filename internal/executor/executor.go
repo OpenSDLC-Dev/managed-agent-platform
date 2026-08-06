@@ -188,12 +188,15 @@ func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.P
 // lease lapses.
 func (e *Executor) Run(ctx context.Context) error {
 	// The reaper rides Run's lifetime: the derived cancel stops it when Run
-	// returns for any reason, not only a cancelled caller. The work loop keeps
-	// checking the caller's own ctx — wrapping it would put a second Err
-	// between Run and the shutdown-race semantics #282 pinned.
+	// returns for any reason, not only a cancelled caller, and Run waits for
+	// it — a caller that closes the pool after Run must not race a reap pass
+	// still in flight. The work loop keeps checking the caller's own ctx —
+	// wrapping it would put a second Err between Run and the shutdown-race
+	// semantics #282 pinned.
 	reapCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go e.reapLoop(reapCtx)
+	reapDone := make(chan struct{})
+	go func() { defer close(reapDone); e.reapLoop(reapCtx) }()
+	defer func() { cancel(); <-reapDone }()
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
