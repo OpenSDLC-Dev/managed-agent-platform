@@ -152,32 +152,46 @@ type rowQueryer interface {
 }
 
 // classifyForReap reads the session's terminal tier from the database — never
-// from a caller's claim. The deleted tier requires the tombstone deleteSession
-// writes, not merely a missing row: a missing row also describes a holding
-// that was never this deployment's (a second deployment sharing the Docker
-// daemon or K8s namespace labels sandboxes with ids this database never saw),
-// and those are skipped. Archived beats terminated (the stricter lifecycle
-// answer); everything else — idle, running, rescheduling — is not this
-// slice's to touch (the idle-TTL tier is plan 24 slice 5).
+// from a caller's claim — and answers tierNone for anything that is not a
+// **cloud** session: a self_hosted session's sandbox carries the same
+// ownership label but belongs to the customer's BYOC worker, which never
+// takes the advisory lock, so on a shared daemon it is not the platform's to
+// destroy in any tier. The deleted tier requires the tombstone deleteSession
+// writes (which records the kind, the row being gone), not merely a missing
+// row: a missing row also describes a holding that was never this
+// deployment's (a second deployment sharing the Docker daemon or K8s
+// namespace labels sandboxes with ids this database never saw), and those are
+// skipped. Archived beats terminated (the stricter lifecycle answer);
+// everything else — idle, running, rescheduling — is not this slice's to
+// touch (the idle-TTL tier is plan 24 slice 5).
 func (e *Executor) classifyForReap(ctx context.Context, q rowQueryer, sid domain.ID) (reapTier, error) {
-	var status string
+	var status, kind string
 	var archived bool
 	err := q.QueryRow(ctx,
-		`SELECT status, archived_at IS NOT NULL FROM sessions WHERE id = $1`, sid.String()).
-		Scan(&status, &archived)
+		`SELECT s.status, s.archived_at IS NOT NULL, e.kind
+		 FROM sessions s JOIN environments e ON e.id = s.environment_id
+		 WHERE s.id = $1`, sid.String()).
+		Scan(&status, &archived, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var dead bool
-		if err := q.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM deleted_sessions WHERE id = $1)`, sid.String()).Scan(&dead); err != nil {
+		var deadKind string
+		err := q.QueryRow(ctx,
+			`SELECT environment_kind FROM deleted_sessions WHERE id = $1`, sid.String()).Scan(&deadKind)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return tierNone, nil
+		}
+		if err != nil {
 			return tierNone, err
 		}
-		if dead {
+		if deadKind == string(domain.EnvCloud) {
 			return tierDeleted, nil
 		}
 		return tierNone, nil
 	}
 	if err != nil {
 		return tierNone, err
+	}
+	if kind != string(domain.EnvCloud) {
+		return tierNone, nil
 	}
 	if archived {
 		return tierArchived, nil

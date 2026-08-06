@@ -37,10 +37,16 @@ func hasCheckpoint(t *testing.T, h *harness) bool {
 	return true
 }
 
-// deleteSessionRow removes the harness session the way the API does: the row
-// goes and its tombstone lands in the same transaction (the reaper's deleted
-// tier runs on the tombstone, not on the row's absence).
+// deleteSessionRow removes the harness session the way the API does: the
+// tombstone (carrying the environment kind) lands before the row goes, in one
+// transaction (the reaper's deleted tier runs on the tombstone, not on the
+// row's absence).
 func deleteSessionRow(t *testing.T, h *harness) {
+	t.Helper()
+	deleteSessionRowByID(t, h, h.sid)
+}
+
+func deleteSessionRowByID(t *testing.T, h *harness, sid domain.ID) {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := h.pool.Begin(ctx)
@@ -48,10 +54,13 @@ func deleteSessionRow(t *testing.T, h *harness) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, h.sid.String()); err != nil {
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO deleted_sessions (id, environment_kind)
+		 SELECT s.id, e.kind FROM sessions s JOIN environments e ON e.id = s.environment_id
+		 WHERE s.id = $1`, sid.String()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO deleted_sessions (id) VALUES ($1)`, h.sid.String()); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sid.String()); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -136,6 +145,39 @@ func TestReapPassContinuesPastAFailingSession(t *testing.T) {
 	}
 	if !slices.Contains(h.prov.reapedSnapshot(), h.sid) {
 		t.Fatal("the failing session shielded the healthy one from teardown")
+	}
+}
+
+// TestReapPassLeavesSelfHostedSessions: a self_hosted session's sandbox
+// belongs to the customer's BYOC worker, which shares the ownership label but
+// never takes the advisory lock — on a shared daemon the platform reaper must
+// leave it alone in every tier, terminal or not (the plan's cloud-only rule).
+func TestReapPassLeavesSelfHostedSessions(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	ctx := context.Background()
+	sid, _ := pgtest.NewSession(t, h.pool, "self_hosted")
+
+	// Archived tier: terminal, but not the platform's asset.
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE sessions SET archived_at = now() WHERE id = $1`, sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.prov.owned = []domain.ID{sid}
+	if err := h.exec.reapPass(ctx); err != nil {
+		t.Fatalf("reap pass (archived): %v", err)
+	}
+	if len(h.prov.reapedSnapshot()) != 0 {
+		t.Fatal("an archived self_hosted session's sandbox was reaped")
+	}
+
+	// Deleted tier: the tombstone records the environment kind, and a
+	// self_hosted tombstone still does not make the sandbox the platform's.
+	deleteSessionRowByID(t, h, sid)
+	if err := h.exec.reapPass(ctx); err != nil {
+		t.Fatalf("reap pass (deleted): %v", err)
+	}
+	if len(h.prov.reapedSnapshot()) != 0 {
+		t.Fatal("a deleted self_hosted session's sandbox was reaped")
 	}
 }
 

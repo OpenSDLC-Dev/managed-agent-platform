@@ -76,6 +76,16 @@ the slice's deleted tier:
   (`TestReapMetric` — archived and terminated differ only in the label); plan 24's D8
   metric sketch and reap-criteria table annotated with the as-built names.
 
+**On the PR, the Codex bot added one more confirmed P2**: the tiers never checked the
+environment kind, so on a shared daemon the platform reaper would destroy an archived
+**self_hosted** session's sandbox — the customer's BYOC worker's asset, which never
+takes the advisory lock (the plan wrote the `kind = 'cloud'` exclusion for the TTL
+tier only). Fixed by making every tier cloud-only: `classifyForReap` joins
+`environments.kind`, and the tombstone records the kind (the row being gone by the
+time the reaper asks) — migration 0018 amended in-branch before merge.
+`TestReapPassLeavesSelfHostedSessions` covers both arms; the discriminating mutants
+(each kind check dropped) were killed post-commit.
+
 Hardening mutants killed post-commit: tombstone check dropped → foreign-skip test red
 (its pre-fix red), join dropped → `TestRunWaitsForTheReaperToStop` red (pre-fix red),
 plus fresh runs for the never-red tests recorded in the PR. Not constructible: a

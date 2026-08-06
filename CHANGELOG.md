@@ -20,7 +20,11 @@ copy of an entry here.
   executor's `Run` now starts sweeps its own endpoint once per
   `EXECUTOR_REAP_INTERVAL` (default 1m; compose and Helm expose the knob) —
   `Owned` for the candidates, the session's **database lifecycle** for the
-  verdict, never a caller's claim: a deleted session — its row gone **and its
+  verdict, never a caller's claim — and only for **cloud** sessions: a
+  self_hosted session's sandbox carries the same ownership label but belongs
+  to the customer's BYOC worker, so on a shared daemon it is skipped in every
+  tier (the tombstone records the environment kind because the row is gone by
+  the time the reaper asks). A deleted cloud session — its row gone **and its
   tombstone present in the new `deleted_sessions` table**, written by the
   delete in the same transaction — is reaped and its workspace-checkpoint blob
   deleted (blob first, so a failed delete keeps the retry trigger); a holding

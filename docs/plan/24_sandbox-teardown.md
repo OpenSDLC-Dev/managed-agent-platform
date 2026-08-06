@@ -122,7 +122,7 @@ Everything below was read or measured in this repo, this week.
 3. **Reap criteria, from the database only.**
    | session state | action |
    |---|---|
-   | row gone (deleted) | reap; delete the session's checkpoint blob. *As built (slice-3 review hardening): requires the `deleted_sessions` tombstone the API delete writes in its deleting transaction — a missing row alone also describes a holding that was never this deployment's (another deployment or a test suite sharing the Docker daemon/K8s namespace), and those are skipped* |
+   | row gone (deleted) | reap; delete the session's checkpoint blob. *As built (slice-3 review hardening): requires the `deleted_sessions` tombstone (id + environment kind) the API delete writes in its deleting transaction — a missing row alone also describes a holding that was never this deployment's (another deployment or a test suite sharing the Docker daemon/K8s namespace), and those are skipped. All tiers are cloud-only as built: the TTL row's `kind = 'cloud'` exclusion applies to the terminal tiers too, a shared daemon making a self_hosted session's sandbox reachable but not the platform's* |
    | archived or terminated | reap; keep the checkpoint blob until the row is deleted |
    | running | never — structurally unreachable for the terminal tiers (slice 1's guards); for the TTL tier the advisory lock **plus D4's under-lock recheck** close the race |
    | idle past the TTL | checkpoint, then reap |
