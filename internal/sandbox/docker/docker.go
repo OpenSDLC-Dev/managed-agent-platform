@@ -1488,7 +1488,9 @@ func (c *container) discard(ctx context.Context, tmp string) {
 // `docker exec -u 0` starts with `AT_SECURE=0`), and `/etc/ld.so.preload`,
 // which no environment setting can close. The same four are named in
 // docs/ARCHITECTURE.md and docs/self-hosted-security.md, and recorded with
-// their evidence in docs/HISTORY.md; keep them in step. Emptying that list is not a bound; not running anything is.
+// their evidence in docs/HISTORY.md; keep them in step. Emptying that list is
+// not a bound; not running anything is.
+//
 // Best effort for discard's reason: the caller already has the
 // error that matters, and a daemon that refuses this leaves only the residue it
 // was already leaving.

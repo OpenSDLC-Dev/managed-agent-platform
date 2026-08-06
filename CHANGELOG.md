@@ -240,12 +240,14 @@ copy of an entry here.
   `TestTheRootShedRunsNoAgentCodeOnANonRootImage` covers the shell-hook
   channel behind it. The evidence, the four channels (over the premise they
   all sit on) and the rejected design are recorded in
-  [docs/HISTORY.md](./docs/HISTORY.md). The k8s backend needs
-  nothing: its temporary is created by the sandbox user, so the same
-  credential that made it removes it. The docker **bulk** write is knowingly
-  left out — its parents are made inside the container as the sandbox user, so
-  its own `rm` suffices — and #316 tracks closing that gap rather than relying
-  on the constraint. Red observed first on every row: the real-image residue
+  [docs/HISTORY.md](./docs/HISTORY.md). The k8s backend needs nothing *here*:
+  its temporary is created by the sandbox user, so the same credential that
+  made it removes it. The docker **bulk** write is knowingly left out — its
+  shed is the sandbox user's `rm`, and what makes that enough is the caller
+  (the one batch the platform writes goes under the workdir), not the
+  directories it creates, since `mkdir -p` leaves a root-owned parent that
+  already exists exactly as it found it — and #316 tracks closing that rather
+  than resting on the caller. Red observed first on every row: the real-image residue
   (the refused payload's bytes in `/etc`, want 0), the fake-daemon emptying
   archive that did not exist, the raw route's re-pin — where the script's own
   rm worked, no emptying archive may be sent, or the cleanup would make the
