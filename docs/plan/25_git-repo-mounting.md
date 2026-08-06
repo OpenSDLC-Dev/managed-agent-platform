@@ -246,7 +246,8 @@ it ("is not echoed in API responses").
     and urls in span attributes and structured logs, never metric labels — and never the
     token anywhere). Executor: a `repos_materialize` span (`repos.referenced`,
     `repos.materialized`, `repos.unchanged`, `repos.failed`), `repos.materialized`
-    counter (`outcome` ∈ ok\|auth\|not_found\|network\|checkout\|internal\|unchanged),
+    counter (`outcome` ∈ ok\|auth\|not_found\|network\|checkout\|too_large\|timeout\|internal\|unchanged
+    — one label per decision-4 reason, plus ok/unchanged),
     `repos.materialize.duration` and `repos.materialize.bytes` histograms; `slog` on
     every link (session id, resource id, url, reason). Brain: `repos.injected` /
     `repos.block_chars` span attributes on the model_request span, `repos.resolve.misses`
