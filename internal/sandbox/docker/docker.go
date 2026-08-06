@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"math"
 	gopath "path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,12 +127,20 @@ type Config struct {
 	// the world only through the gate's proxy. Empty defaults to "bridge". Unused
 	// for sessions with no Spec.Gate (unrestricted, no vault credentials).
 	GateNetwork string
+	// GateTokenRevoker, when non-nil, is called by Reap before it removes a
+	// session's containers, so a gate token never outlives its gate (#197). It
+	// lives on the provider — not on a Spec — because Reap has no Spec: the
+	// reaper works from a session id alone. The executor supplies the same
+	// pool-backed implementation it puts on every Spec; the BYOC worker, which
+	// has no database, leaves it nil and Reap skips revocation.
+	GateTokenRevoker sandbox.GateTokenRevoker
 }
 
 // Provider provisions per-session containers.
 type Provider struct {
 	api         *apiClient
 	gateNetwork string
+	revoker     sandbox.GateTokenRevoker
 	// cpus caches the daemon's CPU count, read on the first provision that needs
 	// it (New deliberately contacts no daemon) and 0 until then. See daemonCPUs.
 	cpus atomic.Int64
@@ -173,7 +182,62 @@ func New(cfg Config) (*Provider, error) {
 	if gateNetwork == "" {
 		gateNetwork = "bridge"
 	}
-	return &Provider{api: api, gateNetwork: gateNetwork}, nil
+	return &Provider{api: api, gateNetwork: gateNetwork, revoker: cfg.GateTokenRevoker}, nil
+}
+
+// Owned lists the distinct session ids of every container — running or stopped,
+// sandboxes and gates alike — carrying this daemon's ownership label.
+func (p *Provider) Owned(ctx context.Context) ([]domain.ID, error) {
+	list, err := p.api.listContainers(ctx, sessionLabel)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[domain.ID]struct{}, len(list))
+	var out []domain.ID
+	for _, c := range list {
+		id := domain.ID(c.Labels[sessionLabel])
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// Reap destroys everything this daemon owns for the session: the sandbox
+// container, its gate when the session is gated, and their anonymous volumes
+// (removeContainer passes v=1). The gate token is revoked first when the
+// provider has a revoker (#197 — and revoke-before-teardown keeps a partial
+// failure retryable: a re-run re-revokes a no-op and finishes the removals).
+// The sandbox goes before the gate, as Destroy orders it — the sandbox lives in
+// the gate's network namespace — and every removal is attempted even when an
+// earlier one fails, so one stuck container never strands the rest. A session
+// owning nothing is a no-op.
+func (p *Provider) Reap(ctx context.Context, sessionID domain.ID) error {
+	if p.revoker != nil {
+		if err := p.revoker.Revoke(ctx, sessionID); err != nil {
+			return fmt.Errorf("docker: revoke gate token for session %s: %w", sessionID, err)
+		}
+	}
+	list, err := p.api.listContainers(ctx, sessionLabel+"="+string(sessionID))
+	if err != nil {
+		return err
+	}
+	gate := "/" + gateName(sessionID)
+	var errs error
+	for pass := 0; pass < 2; pass++ {
+		for _, c := range list {
+			if (pass == 1) != slices.Contains(c.Names, gate) {
+				continue
+			}
+			errs = errors.Join(errs, removeIgnoring404(ctx, p.api, c.ID))
+		}
+	}
+	return errs
 }
 
 func containerName(sessionID domain.ID) string { return "map-" + string(sessionID) }

@@ -1441,6 +1441,61 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	// The reaper contract (plan 24): Owned answers "whose sandboxes does this
+	// endpoint hold", Reap destroys a session's holdings without a live handle.
+	// The endpoint is shared with parallel tests, so Owned rows assert
+	// membership only, never the whole set.
+	t.Run("OwnedListsProvisionedSession", func(t *testing.T) {
+		_, h, sid := provision(t, unrestricted)
+		owned, err := h.Provider.Owned(context.Background())
+		if err != nil {
+			t.Fatalf("owned: %v", err)
+		}
+		if !containsID(owned, sid) {
+			t.Errorf("owned does not list the provisioned session %s", sid)
+		}
+	})
+
+	t.Run("ReapRemovesProvisionedSandbox", func(t *testing.T) {
+		sb, h, sid := provision(t, unrestricted)
+		ctx := context.Background()
+		if err := h.Provider.Reap(ctx, sid); err != nil {
+			t.Fatalf("reap: %v", err)
+		}
+		// The handle predates the reap; the sandbox behind it must be gone by
+		// the time Reap returns — the reaper's caller uses that to reason
+		// "reaped means no longer running", so a graceful, still-terminating
+		// backend must wait, not just request deletion.
+		if _, err := sb.Exec(ctx, sandbox.ExecRequest{Command: `echo hi`}); !errors.Is(err, sandbox.ErrNotFound) {
+			t.Errorf("exec after reap: %v, want ErrNotFound", err)
+		}
+		owned, err := h.Provider.Owned(ctx)
+		if err != nil {
+			t.Fatalf("owned: %v", err)
+		}
+		if containsID(owned, sid) {
+			t.Errorf("owned still lists %s after reap", sid)
+		}
+	})
+
+	t.Run("ReapIsIdempotent", func(t *testing.T) {
+		_, h, sid := provision(t, unrestricted)
+		ctx := context.Background()
+		if err := h.Provider.Reap(ctx, sid); err != nil {
+			t.Fatalf("first reap: %v", err)
+		}
+		if err := h.Provider.Reap(ctx, sid); err != nil {
+			t.Errorf("second reap: %v, want nil", err)
+		}
+	})
+
+	t.Run("ReapUnknownSessionIsNoop", func(t *testing.T) {
+		h := newHarness(t)
+		if err := h.Provider.Reap(context.Background(), domain.NewID("sesn")); err != nil {
+			t.Errorf("reap of a never-provisioned session: %v, want nil", err)
+		}
+	})
+
 	// Without a gate (a backend not yet gate-wired, or a deployment not opted
 	// in), `limited` networking is enforced as no egress at all: fail closed,
 	// never silently unrestricted. The routing table is the honest probe — a
@@ -1600,6 +1655,15 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 
 // catInSandbox reads a small file through Exec and trims it. The hardening rows
 // use it for the kernel's own cgroup reports, which is what a tool would see.
+func containsID(ids []domain.ID, want domain.ID) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
+}
+
 func catInSandbox(t *testing.T, sb sandbox.Sandbox, path string) string {
 	t.Helper()
 	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "cat " + path})

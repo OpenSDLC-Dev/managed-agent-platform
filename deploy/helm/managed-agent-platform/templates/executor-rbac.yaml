@@ -31,11 +31,13 @@ metadata:
     {{- include "map.labels" . | nindent 4 }}
     app.kubernetes.io/component: executor
 rules:
-  # The provider polls pod readiness with repeated Get (not List/Watch), so the
-  # verbs are exactly create / get / delete on pods and create on pods/exec.
+  # The provider polls pod readiness with repeated Get (not Watch), and the
+  # reaper's Owned/Reap enumerate owned pods by label selector (plan 24), so the
+  # verbs are exactly create / get / list / delete on pods and create on
+  # pods/exec.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["create", "get", "delete"]
+    verbs: ["create", "get", "list", "delete"]
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]

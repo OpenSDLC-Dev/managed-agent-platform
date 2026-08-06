@@ -142,6 +142,10 @@ func (p *fakeProvider) Provision(_ context.Context, spec sandbox.Spec) (sandbox.
 	return p.sb, nil
 }
 
+func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) { return nil, nil }
+
+func (p *fakeProvider) Reap(context.Context, domain.ID) error { return nil }
+
 type harness struct {
 	pool      *pgxpool.Pool
 	log       *events.Log

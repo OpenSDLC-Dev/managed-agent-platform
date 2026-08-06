@@ -441,4 +441,17 @@ type Provider interface {
 	// running. Concurrent executors provisioning the same session converge on
 	// one sandbox rather than racing to create two.
 	Provision(ctx context.Context, spec Spec) (Sandbox, error)
+	// Owned lists the distinct session ids of every sandbox asset — sandbox
+	// containers/pods and gate containers, running or stopped — this endpoint
+	// currently holds, read from the ownership label. Endpoint-local by
+	// design: each executor sees only its own daemon or namespace, which is
+	// what shards the reaper across executors with no coordination (plan 24).
+	Owned(ctx context.Context) ([]domain.ID, error)
+	// Reap destroys everything the endpoint owns for the session — sandbox,
+	// gate, anonymous volumes — revoking the session's gate token first when
+	// the provider was built with a revoker (#197: a token must not outlive
+	// its gate). It needs no live handle, waits until the assets are actually
+	// gone (a reaped session is *not running*, not merely terminating), and
+	// is idempotent: reaping a session that owns nothing is a no-op.
+	Reap(ctx context.Context, sessionID domain.ID) error
 }

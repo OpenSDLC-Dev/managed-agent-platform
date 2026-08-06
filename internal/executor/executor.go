@@ -505,6 +505,15 @@ func (m gateTokenMinter) Revoke(ctx context.Context, sessionID domain.ID) error 
 	return gatetoken.Revoke(ctx, m.pool, sessionID.String())
 }
 
+// GateTokenRevoker is the pool-backed sandbox.GateTokenRevoker — the same
+// implementation the executor injects into every Spec — exported for the
+// provider construction in cmd glue, where the sandbox backend is built with a
+// revoker so Reap can revoke a session's gate token before removing its
+// containers (plan 24).
+func GateTokenRevoker(pool *pgxpool.Pool) sandbox.GateTokenRevoker {
+	return gateTokenMinter{pool: pool}
+}
+
 // runTools runs each unanswered tool use in order, returning the result events
 // to append and the first backend fault encountered (nil if all ran). A tool
 // that fails at the tool level (missing file, nonzero exit) still yields a
