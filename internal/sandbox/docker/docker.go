@@ -1219,11 +1219,11 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 	if err != nil {
 		// The bytes are landed and unnamed, and this exec is how they were to be
 		// named; shed them rather than leave the sandbox carrying a payload nothing
-		// will ever claim. Both ways, each best-effort: this exec just failed, so
-		// the sandbox user's `rm` is not trusted alone — where the parent refuses
-		// it, the daemon still empties what it landed (#310).
+		// will ever claim. `discard` tries the sandbox user's own `rm` first and
+		// has the daemon empty whatever that could not take back — which is the
+		// case here whenever this exec failed because the API is down, not just
+		// when the parent refuses the user (#310).
 		c.discard(ctx, tmp)
-		c.reclaim(ctx, tmp)
 		return err
 	}
 	if res.ExitCode == 0 {
@@ -1320,8 +1320,14 @@ func (c *container) notWritable(ctx context.Context, path string) error {
 // discard removes a temporary file a failed write left behind. Its own failure is
 // not worth reporting over the write's: the caller already has the error that
 // matters, and a sandbox that cannot delete the file is about to be thrown away.
+//
+// Every temporary on this backend was landed by the daemon's own extraction, so
+// the sandbox user's `rm` is not always the credential that can take it back —
+// a parent that user cannot write keeps whatever landed, however much of a
+// payload that is. So the daemon is asked for what the user could not do (#310).
 func (c *container) discard(ctx context.Context, tmp string) {
 	_, _ = c.Exec(ctx, sandbox.ExecRequest{Command: "rm -f " + shellQuote(tmp)})
+	c.reclaim(ctx, tmp)
 }
 
 // reclaim empties a temporary the sandbox user's own `rm -f` could not remove:

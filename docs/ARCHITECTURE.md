@@ -736,6 +736,17 @@ executes without complaint and that instance would have refused.
   cgroup limits and capability drops (`sandbox.Hardening`, defaults on), which is also
   the only containment for a process that escaped the exec deadline's process-group
   kill by calling `setsid`.
+- **The platform runs nothing in a sandbox as anyone but the sandbox's own user.** No
+  privileged exec, on either backend — the operator's `SANDBOX_RUN_AS_USER` (or the
+  image's own user) is who every command runs as, cleanup included. One place had to be
+  designed around it: docker's daemon lands a write's temporary as root, so a refused
+  write leaves one where the sandbox uid cannot unlink, and the obvious `exec -u 0`
+  cleanup was measured to be unboundable — `docker exec -u 0` starts with `AT_SECURE=0`
+  and runs the image's own binary and libraries, so an image's `BASH_ENV`, `LD_PRELOAD`
+  or `LD_DEBUG_OUTPUT`, or an `/etc/ld.so.preload` no environment setting closes, all
+  reach it. The daemon empties what it landed instead, executing nothing (#310). A
+  real-image row (`TestTheRootShedRunsNoAgentCodeOnANonRootImage`) pins the invariant;
+  what an operator must configure around it is docs/self-hosted-security.md.
 - **A skill archive is verified before it is extracted.** The registry records the
   archive's sha256 at upload (Postgres) while the bytes live in object storage; both
   materialization halves check the object they read back against that digest before

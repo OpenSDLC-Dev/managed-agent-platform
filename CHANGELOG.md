@@ -153,7 +153,11 @@ copy of an entry here.
   write (measured on a real non-root image). **The daemon takes back what it
   landed**: after a HEAD that says something is still there, the same archive
   endpoint extracts a zero-byte entry of the same name over it. The payload
-  is gone; where the sandbox cannot unlink, an empty name remains.
+  is gone; where the sandbox cannot unlink, an empty name remains. It rides
+  `discard` rather than one route, because every temporary on this backend is
+  the daemon's to begin with — so a put that dies mid-transfer, whose residue
+  is a *partial payload* rather than an empty name, is covered by the same
+  rule (a verifier finding on the first exec-free iteration).
 
   The route not taken is the point. The obvious fix — an exec as `User: "0"`
   running `rm -f` — was written, measured, and abandoned: `docker exec -u 0`

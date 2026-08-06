@@ -901,12 +901,28 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 // streaming half of it, through a short src). The removal is followed by the
 // unreplaceable probe — a refused put is the only signal a read-only rootfs
 // gives, so every failed put asks (#303) — and a target the probe answers
-// replaceable keeps the daemon's own error, as here.
+// replaceable keeps the daemon's own error, as here. A put that died mid-transfer
+// is the case where the residue is a *partial payload* rather than an empty name,
+// and the daemon extracted it as root — so the sandbox user's `rm` is followed by
+// the daemon emptying whatever it could not take back (#310).
 func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
 	var commands []string
+	var reclaimed []byte
+	headed := false
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			// The partial entry is still there: this parent refused the user's rm.
+			headed = true
+			w.WriteHeader(http.StatusOK)
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			// Only the put that follows the HEAD is the emptying one; the write's
+			// own put — and its retry after the mkdir — is what fails here.
+			if headed {
+				reclaimed, _ = io.ReadAll(r.Body)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(w, `{"message":"daemon gave up mid-transfer"}`)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
@@ -943,6 +959,12 @@ func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
 	if last := commands[len(commands)-1]; !strings.Contains(last, ": > '/workspace/"+sandbox.TempPrefix) {
 		t.Errorf("last exec = %q, want the writability probe", last)
 	}
+	if reclaimed == nil {
+		t.Fatal("the daemon was never handed the emptying archive for what its own put landed")
+	}
+	if name, size := tarEntry(t, reclaimed); !strings.HasPrefix(name, sandbox.TempPrefix) || size != 0 {
+		t.Errorf("the emptying archive carries %q of %d bytes, want the temporary's own name at 0", name, size)
+	}
 }
 
 // A PUT the daemon refuses on a replaceable target whose parent then refuses
@@ -961,6 +983,11 @@ func TestWriteFileClassifiesAnUnwritableParentWhenThePutFails(t *testing.T) {
 			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
 		}
 		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			// A read-only root refuses every put outright, so nothing landed
+			// and there is nothing for the daemon to empty.
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"message":"Could not find the file"}`)
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
 			w.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(w, `{"message":"container rootfs is marked read-only"}`)
@@ -1096,11 +1123,6 @@ func TestWriteFileClassifiesARootOwnedParentAtRename(t *testing.T) {
 	}
 }
 
-// The temporary a refused rename leaves behind was landed by the daemon's
-// root-credentialed extraction, so a parent the sandbox user cannot write holds
-// a file only the same credential can remove. The shed therefore runs as
-// User "0" — a fixed `rm -f` of the platform's own TempPrefix name, and nothing
-// else — while every other exec keeps the container's own user (#310).
 // tarEntry reads the single member of a tar body: its name and its size, which
 // is what the reclaim's assertion is about (#310).
 func tarEntry(t *testing.T, body []byte) (string, int64) {

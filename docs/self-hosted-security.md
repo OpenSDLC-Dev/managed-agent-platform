@@ -227,9 +227,11 @@ file, the loader honouring `ENV LD_PRELOAD`, `ENV LD_DEBUG_OUTPUT` writing
 root-owned files at a path the image names, and `/etc/ld.so.preload`, which no
 environment setting can neutralize. So the daemon takes back what it landed
 instead: the same archive endpoint that extracted the temporary extracts an
-empty file over it, executing nothing. The refused payload is gone; where your
-sandbox cannot unlink, an empty file under the platform's own `.map-write-`
-name remains until the container is destroyed.
+empty file over it, executing nothing. That covers every failed write whose
+temporary the daemon landed, a transfer that died part way included — there the
+residue is a partial payload rather than an empty name. The refused payload is
+gone; where your sandbox cannot unlink, an empty file under the platform's own
+`.map-write-` name remains until the container is destroyed.
 
 The catch is the **workdir**. The container's entrypoint runs `mkdir -p
 <workdir>` as whatever user the container runs as, and a uid the image did not
