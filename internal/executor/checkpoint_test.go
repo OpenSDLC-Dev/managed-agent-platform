@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
@@ -88,8 +90,11 @@ func markerState(t *testing.T, h *harness) (state, key string) {
 	err := h.pool.QueryRow(context.Background(),
 		`SELECT state, blob_key FROM session_checkpoints WHERE session_id = $1`, h.sid.String()).
 		Scan(&state, &key)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ""
+	}
+	if err != nil {
+		t.Fatalf("read checkpoint marker: %v", err)
 	}
 	return state, key
 }
@@ -636,6 +641,9 @@ func TestRestoreRejectsATamperedBlob(t *testing.T) {
 	for name, files := range map[string]map[string]string{
 		"escape":   {"../etc/passwd": "evil"},
 		"absolute": {"/etc/passwd": "evil"},
+		// Relative but outside every durable root: extraction runs `tar -C /`,
+		// so without the root restriction this would land on the real /etc.
+		"outside-roots": {"etc/profile": "evil"},
 	} {
 		sb := &fakeSandbox{}
 		h := newHarness(t, sb)

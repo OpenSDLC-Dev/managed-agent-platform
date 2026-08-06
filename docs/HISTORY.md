@@ -114,6 +114,25 @@ images make the permission scenario moot — the contract suite covers the missi
 answer), and the cmd startup guards (main glue, outside the tested surface by the
 convention slice 3 recorded).
 
+**On the PR, the bots added a round of their own.** The Codex bot's two P2s both
+confirmed against source and fixed: the K8s probe's `[ -e ]` follows symlinks, so a
+root an agent replaced with a **dangling symlink** read as missing and capture
+silently dropped the entry — the probe gained a `-L` arm and a K8s-only live test
+(Docker is left as-is and the asymmetry documented: its archive endpoint resolves the
+terminal symlink daemon-side, so the entry is genuinely unreachable there); and
+restore's validation accepted any relative path, letting a corrupted blob's
+`etc/profile` land on the sandbox's real `/etc` through `tar -C /` — members are now
+confined to the three durable roots (an `outside-roots` tamper case pins it). Both
+fixes' mutants killed: the `-L` arm dropped → the dangling-symlink test red, the root
+restriction dropped → the tamper case red. CodeRabbit's four: three fixed (the
+`markerState` helper now fails the test on a real query error instead of reading as
+"no marker" — its R7 shape, refuted as a defect, adopted as hygiene; the `rerootInto`
+doc block re-attached to its function after the hardening edit left it hanging on
+`limitedWriter`, its stale budget clause cut; the K8s export tar's stderr captured
+into the exit-code error) and one answered in place: `session_checkpoints` rows for
+deleted sessions now have a decided cleanup owner — the deleted tier deletes the row
+after its blob delete in slice 5, annotated in plan 24.
+
 ## Sandbox teardown (plan 24, #64) — slice 3: the reaper's terminal tiers
 
 **Review hardening, landed in the same PR.** The verifier returned PASS WITH FINDINGS

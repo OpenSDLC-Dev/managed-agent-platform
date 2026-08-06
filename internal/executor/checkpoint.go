@@ -180,20 +180,6 @@ func (e *Executor) captureCheckpoint(ctx context.Context, sid domain.ID) (err er
 	return err
 }
 
-// rerootInto copies one exported root into the combined checkpoint tar,
-// enforcing the walk contract as it goes: member paths must be clean and
-// relative with no dot-dot, member types are regular files, directories, and
-// symlinks only (anything else — devices, fifos, and hardlinks too — is
-// dropped: an agent can mkfifo in its workspace, and a checkpoint that
-// refuses to exist over it would let that pin the sandbox; a hardlinked
-// name's content survives under the member the archiver stored the bytes on,
-// the extra name alone is lost — a conscious trade recorded before the TTL
-// tier makes capture routine), the materialization sentinels are stripped
-// so a restored workspace re-materializes skills and files instead of
-// trusting a restored, agent-writable marker, and the cumulative member bytes
-// draw down the capture budget. Export's contract puts every member under one
-// top-level directory named after the root's base name; this strips that
-// prefix and re-roots the member at the root's real path.
 // limitedWriter meters the capture's framed tar stream and refuses the byte
 // that would exceed the budget — the write path's half of the one-measure
 // rule captureCheckpoint documents.
@@ -211,6 +197,19 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// rerootInto copies one exported root into the combined checkpoint tar,
+// enforcing the walk contract as it goes: member paths must be clean and
+// relative with no dot-dot, member types are regular files, directories, and
+// symlinks only (anything else — devices, fifos, and hardlinks too — is
+// dropped: an agent can mkfifo in its workspace, and a checkpoint that
+// refuses to exist over it would let that pin the sandbox; a hardlinked
+// name's content survives under the member the archiver stored the bytes on,
+// the extra name alone is lost — a conscious trade recorded before the TTL
+// tier makes capture routine), and the materialization sentinels are stripped
+// so a restored workspace re-materializes skills and files instead of
+// trusting a restored, agent-writable marker. Export's contract puts every
+// member under one top-level directory named after the root's base name; this
+// strips that prefix and re-roots the member at the root's real path.
 func rerootInto(tw *tar.Writer, rc io.Reader, root string, stripSentinels bool) error {
 	prefix := strings.TrimPrefix(gopath.Clean(root), "/")
 	base := gopath.Base(prefix)
@@ -341,7 +340,7 @@ func (e *Executor) restoreCheckpoint(ctx context.Context, q execer, sid domain.I
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	if err := validateCheckpointTar(spool); err != nil {
+	if err := validateCheckpointTar(spool, e.checkpointRoots(sid)); err != nil {
 		return fmt.Errorf("invalid checkpoint: %w", err)
 	}
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
@@ -369,10 +368,17 @@ func (e *Executor) restoreCheckpoint(ctx context.Context, q execer, sid domain.I
 }
 
 // validateCheckpointTar re-walks a spooled checkpoint before anything ships
-// into the sandbox: clean relative dot-dot-free paths, and only regular
-// files, directories, and symlinks (capture never writes anything else, so
-// anything else here is tampering, not data).
-func validateCheckpointTar(r io.Reader) error {
+// into the sandbox: clean relative dot-dot-free paths, only regular files,
+// directories, and symlinks, and every member under one of the durable roots
+// the capture walk writes (capture never writes anything else, so anything
+// else here is tampering, not data — the extraction runs `tar -C /`, and
+// without the root restriction a corrupted blob's relative `etc/profile`
+// would land on the sandbox's real /etc).
+func validateCheckpointTar(r io.Reader, roots []string) error {
+	prefixes := make([]string, 0, len(roots))
+	for _, root := range roots {
+		prefixes = append(prefixes, strings.TrimPrefix(gopath.Clean(root), "/"))
+	}
 	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
@@ -390,6 +396,16 @@ func validateCheckpointTar(r io.Reader) error {
 		case tar.TypeReg, tar.TypeDir, tar.TypeSymlink:
 		default:
 			return fmt.Errorf("member %q has forbidden type %d", hdr.Name, hdr.Typeflag)
+		}
+		under := false
+		for _, p := range prefixes {
+			if name == p || strings.HasPrefix(name, p+"/") {
+				under = true
+				break
+			}
+		}
+		if !under {
+			return fmt.Errorf("member %q is outside every checkpoint root", hdr.Name)
 		}
 	}
 }

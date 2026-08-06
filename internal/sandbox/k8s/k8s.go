@@ -409,9 +409,11 @@ func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string)
 	// only when the deepest existing ancestor is searchable — an ancestor
 	// that denies search makes the question unanswerable and the capture
 	// fails loudly instead (a root whose whole ancestor chain is absent, the
-	// shell root before any bash call, is an ordinary miss).
+	// shell root before any bash call, is an ordinary miss). `-e` follows
+	// symlinks, so the `-L` arm keeps a root an agent replaced with a
+	// dangling symlink: the entry exists and tar archives the link itself.
 	out, _, err := p.client.execOutput(ctx, name, containerName, []string{"sh", "-c",
-		`if [ -e "$1" ]; then echo P; exit 0; fi
+		`if [ -e "$1" ] || [ -L "$1" ]; then echo P; exit 0; fi
 p=$(dirname "$1")
 while :; do
   if [ -e "$p" ]; then
@@ -434,10 +436,12 @@ done`, "probe", root})
 	clean := gopath.Clean(root)
 	pr, pw := io.Pipe()
 	go func() {
+		errOut := &cappedBuffer{limit: 4096}
 		res, err := p.client.exec(ctx, name, containerName,
-			[]string{"tar", "-cf", "-", "-C", gopath.Dir(clean), gopath.Base(clean)}, nil, pw, io.Discard)
+			[]string{"tar", "-cf", "-", "-C", gopath.Dir(clean), gopath.Base(clean)}, nil, pw, errOut)
 		if err == nil && res.code != 0 {
-			err = fmt.Errorf("k8s: tar exited %d exporting %s from pod %s", res.code, root, name)
+			err = fmt.Errorf("k8s: tar exited %d exporting %s from pod %s: %s",
+				res.code, root, name, strings.TrimSpace(errOut.buf.String()))
 		}
 		pw.CloseWithError(err)
 	}()

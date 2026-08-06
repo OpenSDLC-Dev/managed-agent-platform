@@ -240,7 +240,11 @@ Everything below was read or measured in this repo, this week.
    the engine's only trigger in this slice is its test suite.
 5. **The TTL tier.** The idle criterion with its three exclusions (cloud-only, no pending
    work, no unanswered asks), `EXECUTOR_SANDBOX_IDLE_TTL`, blob-less disablement,
-   degraded no-checkpoint paths, and the acceptance run below. Archives this plan.
+   degraded no-checkpoint paths, and the acceptance run below. The deleted tier's
+   cleanup also deletes the session's `session_checkpoints` row after its blob delete
+   succeeds (the marker's cleanup owner, decided on slice 4's PR review — a deleted
+   session is never provisioned again, so the row until then is inert, not wrong).
+   Archives this plan.
 
 ## Acceptance (compose stack + kind cluster, recorded in docs/HISTORY.md)
 

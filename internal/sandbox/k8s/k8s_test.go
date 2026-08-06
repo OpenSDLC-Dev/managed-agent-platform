@@ -1,6 +1,7 @@
 package k8s_test
 
 import (
+	"archive/tar"
 	"context"
 	"errors"
 	"os"
@@ -66,6 +67,51 @@ func liveSandbox(t *testing.T) sandbox.Sandbox {
 	}
 	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
 	return sb
+}
+
+// TestK8sExportKeepsADanglingSymlinkRoot: the probe's `-e` follows symlinks,
+// so a root an agent replaced with a dangling symlink would read as missing
+// and capture would silently drop the entry; the `-L` arm keeps it, and the
+// export carries the link itself. K8s-specific because Docker's archive
+// endpoint resolves the terminal symlink daemon-side — there the entry is
+// genuinely unreachable and reads as absent.
+func TestK8sExportKeepsADanglingSymlinkRoot(t *testing.T) {
+	provider, err := k8s.New(k8s.Config{
+		Context:   os.Getenv("MAP_K8S_CONTEXT"),
+		Namespace: os.Getenv("MAP_K8S_NAMESPACE"),
+	})
+	if err != nil {
+		t.Fatalf("this test requires a Kubernetes cluster: %v", err)
+	}
+	ctx := context.Background()
+	sid := domain.NewID("sesn")
+	sb, err := provider.Provision(ctx, sandbox.Spec{
+		SessionID:  sid,
+		Image:      testImage,
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() { _ = sb.Destroy(context.Background()) })
+
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "ln -s /nowhere /tmp/dangling"})
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("create dangling symlink: %+v %v", res, err)
+	}
+	rc, err := provider.Export(ctx, sid, "/tmp/dangling")
+	if err != nil {
+		t.Fatalf("export of a dangling-symlink root: %v", err)
+	}
+	defer rc.Close()
+	tr := tar.NewReader(rc)
+	hdr, err := tr.Next()
+	if err != nil {
+		t.Fatalf("read export: %v", err)
+	}
+	if hdr.Typeflag != tar.TypeSymlink || hdr.Linkname != "/nowhere" {
+		t.Errorf("member = type %d linkname %q, want the symlink to /nowhere", hdr.Typeflag, hdr.Linkname)
+	}
 }
 
 // podUID asks the cluster — not the provider — for the pod's immutable UID.
