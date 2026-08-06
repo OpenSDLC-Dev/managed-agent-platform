@@ -14,9 +14,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -1065,7 +1067,23 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err := requireNotRunning(ctx, tx, id, "deleting"); err != nil {
 		return nil, err
 	}
+	// The tombstone rides the deleting transaction, written while the row can
+	// still be joined: it is the affirmative evidence the reaper's deleted
+	// tier runs on — a missing row alone also describes a sandbox that was
+	// never this deployment's — and it records the environment kind because
+	// only a cloud session's sandbox is the platform's to destroy (plan 24).
+	if _, err := tx.Exec(ctx, store.SessionTombstoneInsertSQL, id); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
+		return nil, err
+	}
+	// The checkpoint marker row goes in the same transaction — it carries no
+	// FK by design, so nothing cascades it, and the reaper cannot be its
+	// owner: a session whose sandbox was already reaped (the idle tier's
+	// steady state) never appears in another Owned listing, so a row left
+	// here would linger forever. Found by plan 24's acceptance run.
+	if _, err := tx.Exec(ctx, `DELETE FROM session_checkpoints WHERE session_id = $1`, id); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1080,5 +1098,20 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 		"type":         "session.deleted",
 		"processed_at": time.Now().UTC(),
 	})
+	// The checkpoint blob goes with the record, best-effort for the same
+	// reason as the broadcast. Best-effort is enough because this is not the
+	// only remover: a session that still owns a sandbox is the reaper's
+	// deleted tier, which deletes this same key before it reaps (plan 24) —
+	// this covers the session whose sandbox is already gone, which no reap
+	// pass will ever visit again. Detached from the request context: the
+	// commit already happened, and a client hanging up must not skip the one
+	// delete this path exists for.
+	if s.blobs != nil {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := s.blobs.Delete(dctx, blob.SessionCheckpointKey(id)); err != nil {
+			slog.WarnContext(ctx, "session checkpoint blob not deleted", "session", id, "error", err)
+		}
+	}
 	return map[string]string{"id": id, "type": "session_deleted"}, nil
 }

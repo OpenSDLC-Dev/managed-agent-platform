@@ -352,6 +352,32 @@ func TestProvisionRefusesToAdoptAnUnownedRaceWinner(t *testing.T) {
 	}
 }
 
+// The ownership guard holds on the read path too: Export serves the
+// checkpoint engine, and a name-squatting container must not leak its
+// filesystem into another session's checkpoint. The daemon answers the inspect
+// with a foreign label; any archive request after that would be the leak.
+func TestExportRefusesAContainerItDoesNotOwn(t *testing.T) {
+	var touched []string
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		touched = append(touched, r.URL.Path)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			io.WriteString(w, `{"Id":"squatter","State":{"Running":true},"Config":{"Labels":{"`+sessionLabel+`":"sesn_someone_else"}}}`)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	_, err := p.Export(context.Background(), spec().SessionID, "/workspace")
+	if err == nil || !strings.Contains(err.Error(), "not this platform's sandbox") {
+		t.Fatalf("err = %v, want the ownership refusal", err)
+	}
+	for _, path := range touched {
+		if strings.Contains(path, "/archive") {
+			t.Error("exported from a container the platform does not own")
+		}
+	}
+}
+
 // A create that 404s means the image is not on this host: pull, then retry.
 func TestProvisionPullsMissingImage(t *testing.T) {
 	var creates, pulls int

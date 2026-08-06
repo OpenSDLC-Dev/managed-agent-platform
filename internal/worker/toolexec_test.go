@@ -146,6 +146,10 @@ func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) { return nil,
 
 func (p *fakeProvider) Reap(context.Context, domain.ID) error { return nil }
 
+func (p *fakeProvider) Export(context.Context, domain.ID, string) (io.ReadCloser, error) {
+	return nil, sandbox.ErrNotFound
+}
+
 type harness struct {
 	pool      *pgxpool.Pool
 	log       *events.Log

@@ -66,6 +66,30 @@ type Config struct {
 	Workdir      string
 	LeaseTTL     time.Duration
 	PollInterval time.Duration
+	// ReapInterval paces the sandbox reaper (reaper.go): one sweep of this
+	// endpoint's owned sessions per interval (EXECUTOR_REAP_INTERVAL; 0 takes
+	// the 60s default). Teardown latency is bounded by it, and nothing else
+	// destroys sandboxes, so there is no off switch — a deployment that wants
+	// slower reaping sets it longer.
+	ReapInterval time.Duration
+	// CheckpointMaxBytes budgets a workspace checkpoint (checkpoint.go): ONE
+	// measure on both sides — the framed, uncompressed tar stream, metered as
+	// capture writes it and again as restore decompresses it — so a capture
+	// that fits is arithmetically guaranteed to restore
+	// (EXECUTOR_CHECKPOINT_MAX_BYTES; 0 takes the 2 GiB default). Over
+	// budget, the TTL tier reaps without a checkpoint — an agent must not
+	// pin its sandbox immortal by filling the disk (plan 24 D8).
+	CheckpointMaxBytes int64
+	// SandboxIdleTTL arms the reaper's idle tier (plan 24 slice 5): an idle
+	// cloud session whose last activity is older than this is checkpointed and
+	// its sandbox reaped — unless it still owes work (a queued/starting/active
+	// work item) or an unanswered confirmation ask (HITL-idle is mid-turn).
+	// Zero disables the tier — deliberately, so a hand-built test Config never
+	// reaps by surprise; cmd/executor resolves the unset env to the 24h
+	// default (EXECUTOR_SANDBOX_IDLE_TTL; 0 there disables too). A blob-less
+	// executor disables the tier at startup regardless: reaping without the
+	// means to checkpoint would silently discard workspaces.
+	SandboxIdleTTL time.Duration
 	// Hardening is the containment every session's sandbox is created with —
 	// cgroup limits, capability drops, optionally a uid and a read-only root
 	// (#65). The zero value hardens nothing, which is what a test that builds a
@@ -125,6 +149,12 @@ func (c Config) withDefaults() Config {
 	if c.PollInterval <= 0 {
 		c.PollInterval = 500 * time.Millisecond
 	}
+	if c.ReapInterval <= 0 {
+		c.ReapInterval = time.Minute
+	}
+	if c.CheckpointMaxBytes <= 0 {
+		c.CheckpointMaxBytes = 2 << 30
+	}
 	return c
 }
 
@@ -178,6 +208,19 @@ func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.P
 // keeps serving other sessions, and the faulted item is reclaimed after its
 // lease lapses.
 func (e *Executor) Run(ctx context.Context) error {
+	// The reaper rides Run's lifetime: the derived cancel stops it when Run
+	// returns for any reason, not only a cancelled caller, and Run waits for
+	// it — a caller that closes the pool after Run must not race a reap pass
+	// still in flight. The work loop keeps checking the caller's own ctx —
+	// wrapping it would put a second Err between Run and the shutdown-race
+	// semantics #282 pinned.
+	if e.cfg.SandboxIdleTTL > 0 && e.blobs == nil {
+		slog.Warn("idle-TTL sandbox reaping disabled: no object store configured to hold checkpoints")
+	}
+	reapCtx, cancel := context.WithCancel(ctx)
+	reapDone := make(chan struct{})
+	go func() { defer close(reapDone); e.reapLoop(reapCtx) }()
+	defer func() { cancel(); <-reapDone }()
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -398,6 +441,45 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 	if err != nil {
 		return nil, fmt.Errorf("resolve vault credentials: %w", err)
 	}
+	// The session advisory lock serializes the one pair that must not
+	// interleave: this provision against the reaper's checkpoint+destroy
+	// (plan 24 D4). Blocking, unlike the reaper's try-lock — work proceeds
+	// the moment a reap finishes, on a fresh sandbox. Slice 4's restore
+	// slots inside this same hold.
+	conn, err := e.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire session lock connection: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, sessionLockKey(sessionID)); err != nil {
+		return nil, fmt.Errorf("acquire session lock: %w", err)
+	}
+	defer unlockSession(conn, sessionID)
+	// Restore fires on the D6 marker, never on "the container is fresh": a
+	// ready marker means a checkpointed reap happened and nothing consumed it
+	// yet. Reap-before-provision is the half-restore replacement rule in one
+	// move — whatever container exists alongside a ready marker is either a
+	// half-restored orphan (a crash between extract and consume) or absent,
+	// and reaping first makes the following Provision the clean-create path
+	// either way. A crash-recreate without a marker restores nothing: the
+	// event log, not reap-time state, is that path's truth.
+	marker, blobKey, err := checkpointMarker(ctx, conn, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("read checkpoint marker: %w", err)
+	}
+	// A ready marker fails closed without an object store: capture can only
+	// have written it through one, so blob-less here is a misconfiguration —
+	// and provisioning fresh anyway would let the standing marker rewind the
+	// session's NEW work the moment a blob-configured executor next sees it.
+	if marker == "ready" && e.blobs == nil {
+		return nil, errors.New("session has a ready checkpoint but this executor has no object store configured")
+	}
+	restore := marker == "ready"
+	if restore {
+		if err := e.provider.Reap(ctx, sessionID); err != nil {
+			return nil, fmt.Errorf("replace pre-restore sandbox: %w", err)
+		}
+	}
 	sb, err := e.provider.Provision(ctx, sandbox.Spec{
 		SessionID:  sessionID,
 		Image:      e.cfg.Image,
@@ -413,6 +495,14 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 	})
 	if err != nil {
 		return nil, fmt.Errorf("provision sandbox: %w", err)
+	}
+	if restore {
+		// Failure surfaces rather than consuming the marker: the tool run
+		// errors, the lease reclaims it, and the next provision replaces the
+		// half-restored tree and retries — plan 24 D6's crash rule.
+		if err := e.restoreCheckpoint(ctx, conn, sessionID, blobKey, sb); err != nil {
+			return nil, fmt.Errorf("restore checkpoint: %w", err)
+		}
 	}
 	return sb, nil
 }

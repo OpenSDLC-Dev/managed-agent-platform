@@ -15,6 +15,125 @@ copy of an entry here.
 
 ### Added
 
+- **The idle-TTL tier: an idle session's sandbox is checkpointed and reaped,
+  and the next message gets it back** (plan 24 slice 5 — the final slice; #64,
+  closing the workspace-continuity half of #28). The reaper gains its fourth
+  tier: an **idle cloud** session whose last activity
+  (`sessions.updated_at`) is older than the new `EXECUTOR_SANDBOX_IDLE_TTL`
+  (default 24h; `0` disables; compose and Helm expose the knob — the Helm
+  template reads the value through `toString`, so the YAML integer `0`
+  disables the tier instead of being folded into "unset" and silently arming
+  the default) has its
+  workspace captured through the slice-4 engine and its sandbox destroyed —
+  the TTL tier is the engine's first production trigger. Three exclusions,
+  all evaluated under the session's advisory lock: a session owing work (a
+  `queued`/`starting`/`active` work item — a pending harvest or tool run
+  must find the tree it was enqueued against, read in the same snapshot as
+  the status and TTL-age predicates — or one **stopped within the executor's
+  lease TTL**: an interrupt cancels the row instantly but its physical
+  claimant only notices at the next lease renewal, so until a lease TTL has
+  passed the tool may still be running in the sandbox; normally-completed
+  items carry no `stopped_at` and no such grace), a session with an unanswered
+  tool-confirmation ask (HITL-idle is still mid-turn; the ask check is its
+  own, deliberately *earlier* read — ordered before the main criteria query,
+  because a
+  confirmation batch answers the ask, enqueues the tool's work and flips the
+  session running in one transaction — asks-first means that transaction can
+  never land between the two reads with both coming back permissive), and a
+  disabled tier (zero TTL, or an executor with no object store — which logs
+  the disablement once at startup rather than silently discarding
+  workspaces). `user.interrupt` still never reaps; an
+  interrupted-then-abandoned session falls to the TTL like any other. Only
+  the capture failures the sandbox itself causes degrade (loudly) to
+  reap-without-checkpoint — the workspace over the budget and an unreadable
+  sandbox, exactly the two plan 24 D8 sanctions (`too_large` and `error` are
+  separate metric outcomes; a failed capture writes no marker, so the next
+  provision starts fresh) — while a failure *outside* the sandbox (the
+  executor's spool disk, the object store, the marker write) **aborts the
+  reap**: the sandbox stays owned, the TTL is a floor not a deadline, and
+  the next pass retries with the workspace intact (the review caught the
+  first cut degrading on every failure, turning a transient blob-store
+  outage into permanent workspace loss). The `session_checkpoints`
+  marker row's cleanup owner is the **deleting transaction itself**
+  (`deleteSession`) — the acceptance run caught the reaper being unable to
+  own it: a session whose sandbox the idle tier already reaped never
+  reappears in `Owned`, so a row left to the reaper's deleted tier would
+  linger forever — and the capture's marker write is guarded against the
+  reverse race: it inserts under a `KEY SHARE` lock on the session row only
+  while that row still exists, so a DELETE landing mid-capture cannot have
+  its marker resurrected (the capture withdraws its just-uploaded blob and
+  the reap proceeds, deletion having wanted the data gone; a failed withdraw
+  aborts instead, leaving the sandbox owned so the next pass's deleted tier
+  retries the blob delete). Plan 24 archives with this slice.
+
+- **The checkpoint/restore engine: an idle-reaped session will resume with its
+  workspace** (plan 24 slice 4; #64, the workspace-continuity half of #28).
+  `sandbox.Provider` grows `Export(sessionID, root)` on both backends — one
+  directory root streamed out as a tar (Docker through the archive endpoint,
+  which reads a **stopped** container; K8s through an in-pod `tar` exec) —
+  and the executor gains the engine over it. Capture combines the three
+  durable roots (the workdir, the persistent shell's cwd/env state, the
+  published deliverables; `/tmp` deliberately not) into one gzipped tar in
+  object storage, stripping the workdir's materialization sentinels so a
+  restored workspace re-materializes skills and files instead of trusting an
+  agent-writable marker, validating every member (clean relative paths;
+  regular files, directories and symlinks only) and budgeting the framed tar
+  stream itself against the new `EXECUTOR_CHECKPOINT_MAX_BYTES` (default
+  2 GiB; compose and Helm expose the knob) — the same measure restore's
+  decompressed bound enforces, so an accepted capture is always restorable
+  under the same cap. Restore fires on the new `session_checkpoints`
+  marker, never on "the container is fresh" — a mid-turn container death
+  still recreates fresh on the event log's truth — and runs inside the
+  provision lock: a `ready` marker makes provision replace whatever exists
+  (the half-restore replacement rule), re-validate the downloaded tar under
+  the same budget, stream it in, extract it with one in-sandbox `tar` as the
+  sandbox user (the transfer path that preserves modes and symlinks), and
+  flip the marker `consumed` only after the extraction, so a crash mid-restore
+  is retried, never adopted. Two new instrument pairs:
+  `sandbox.checkpoint` / `sandbox.restore` counters{outcome} with duration
+  histograms. Failure modes fail closed: an executor deployed without an
+  object store refuses to provision a session holding a ready checkpoint
+  rather than silently handing the agent an empty workspace, executor startup
+  refuses a workdir that would alias the checkpoint's other roots
+  (`ValidateWorkdir`), bounds the cap at 1 PiB, and raises the connection
+  floor to 3 (provision lock + reaper lock + transient queries each pin one).
+  In this slice the engine's only trigger is its test suite — the idle-TTL
+  tier that will drive it in production is slice 5.
+
+- **The reaper runs: terminal sessions lose their sandboxes** (plan 24 slice 3;
+  #64). Sandbox destruction has an owner for the first time: every executor's
+  `Run` now starts a goroutine that sweeps its own endpoint once per
+  `EXECUTOR_REAP_INTERVAL` (default 1m; compose and Helm expose the knob) —
+  `Owned` for the candidates, the session's **database lifecycle** for the
+  verdict, never a caller's claim — and only for **cloud** sessions: a
+  self_hosted session's sandbox carries the same ownership label but belongs
+  to the customer's BYOC worker, so on a shared daemon it is skipped in every
+  tier (the tombstone records the environment kind because the row is gone by
+  the time the reaper asks). A deleted cloud session — its row gone **and its
+  tombstone present in the new `deleted_sessions` table**, written by the
+  delete in the same transaction — is reaped and its workspace-checkpoint blob
+  deleted (blob first, so a failed delete keeps the retry trigger); a holding
+  whose id this database never saw is skipped — a missing row alone also
+  describes another deployment's sandbox on a shared Docker daemon or K8s
+  namespace, or a contract suite's fixtures next to a compose stack, and none
+  of those are this reaper's to destroy; an archived or terminated session is
+  reaped with its checkpoint kept until the row goes; idle, running and
+  rescheduling sessions are untouchable (the idle-TTL tier is slice 5's).
+  Reap-versus-provision is serialized by a per-session Postgres advisory lock:
+  `provisionSandbox` holds it blocking around every provision, the reaper
+  try-locks (a provision in flight means the session is in use — skip, next
+  pass re-asks) and re-reads the criteria **under the lock, on the lock's own
+  connection**, so a session revived between classification and lock is left
+  alone and a deliberately tiny pool cannot self-deadlock (a one-connection
+  pool is refused at executor startup). `DELETE /v1/sessions/{id}` also drops
+  the checkpoint blob best-effort on a context detached from the request — the
+  reaper covers a session that still owns a sandbox, this covers one whose
+  sandbox is already gone, which no reap pass will visit again, and a client
+  hanging up must not skip it. One new metric: `sandbox.sessions.reaped`
+  counter by tier. This
+  closes #64's core: a session's containers no longer outlive it, and the
+  cumulative-sandbox ceiling stops being a function of uptime.
+
 - **The sandbox provider learns `Owned` and `Reap` on both backends — the
   reaper's hands, with no reaper yet** (plan 24 slice 2; #64).
   `sandbox.Provider` grows the teardown contract: `Owned(ctx)` lists the

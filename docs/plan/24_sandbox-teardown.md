@@ -1,7 +1,11 @@
 ---
-status: in-progress
+status: archived
 issue: "#64"
 ---
+
+> **Archived — completed.** All five slices landed (PRs #314, #315, #317, #319, and
+> the slice-5 PR that archives this file); the acceptance runs are recorded in
+> docs/HISTORY.md, and the progress summary moved there in the archiving PR.
 
 # Sandbox teardown: the reaper, and the workspace that survives it (plan 24)
 
@@ -122,7 +126,7 @@ Everything below was read or measured in this repo, this week.
 3. **Reap criteria, from the database only.**
    | session state | action |
    |---|---|
-   | row gone (deleted) | reap; delete the session's checkpoint blob |
+   | row gone (deleted) | reap; delete the session's checkpoint blob. *As built (slice-3 review hardening): requires the `deleted_sessions` tombstone (id + environment kind) the API delete writes in its deleting transaction — a missing row alone also describes a holding that was never this deployment's (another deployment or a test suite sharing the Docker daemon/K8s namespace), and those are skipped. All tiers are cloud-only as built: the TTL row's `kind = 'cloud'` exclusion applies to the terminal tiers too, a shared daemon making a self_hosted session's sandbox reachable but not the platform's* |
    | archived or terminated | reap; keep the checkpoint blob until the row is deleted |
    | running | never — structurally unreachable for the terminal tiers (slice 1's guards); for the TTL tier the advisory lock **plus D4's under-lock recheck** close the race |
    | idle past the TTL | checkpoint, then reap |
@@ -188,7 +192,9 @@ Everything below was read or measured in this repo, this week.
    disk — logged and counted as its own metric outcome. A sandbox that cannot be read
    (K8s Failed pod; any exec/archive failure) degrades the same way. A blob-less
    deployment disables the TTL tier at startup with one log line; the terminal tiers run
-   everywhere. Metrics: `sandbox.reaped` counter{reason}, `sandbox.checkpoint` /
+   in every deployment shape (*as built, for cloud sessions only — see the criteria
+   table*). Metrics: `sandbox.reaped` counter{reason} (*as built in slice 3:
+   `sandbox.sessions.reaped` counter{tier}*), `sandbox.checkpoint` /
    `sandbox.restore` counters{outcome} + duration histograms, ids in logs never in labels.
 9. **The wire guards land first, as their own slice.** Archive and delete of a `running`
    session are rejected 400 `invalid_request_error` (the reference documents the refusal;
@@ -238,7 +244,12 @@ Everything below was read or measured in this repo, this week.
    the engine's only trigger in this slice is its test suite.
 5. **The TTL tier.** The idle criterion with its three exclusions (cloud-only, no pending
    work, no unanswered asks), `EXECUTOR_SANDBOX_IDLE_TTL`, blob-less disablement,
-   degraded no-checkpoint paths, and the acceptance run below. Archives this plan.
+   degraded no-checkpoint paths, and the acceptance run below. The
+   `session_checkpoints` row's cleanup owner was decided on slice 4's PR review and
+   then corrected by the acceptance run: it dies in the API's **deleting transaction**
+   (not the reaper's deleted tier as first assigned — a session whose sandbox the idle
+   tier already reaped never reappears in `Owned`, so a reaper-owned row would linger
+   forever). Archives this plan.
 
 ## Acceptance (compose stack + kind cluster, recorded in docs/HISTORY.md)
 

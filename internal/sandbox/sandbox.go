@@ -458,4 +458,17 @@ type Provider interface {
 	// lag the force delete). Idempotent: reaping a session that owns nothing
 	// is a no-op.
 	Reap(ctx context.Context, sessionID domain.ID) error
+	// Export streams one directory root out of the session's sandbox as an
+	// uncompressed tar whose members all live under a single top-level
+	// directory named after the root's base name (Docker's archive endpoint
+	// shapes it so; the K8s backend matches it) — the checkpoint engine
+	// strips that prefix and re-roots members itself (plan 24). It needs no
+	// live handle; on Docker it works on a stopped container, on K8s the pod
+	// must be running (a sandbox that cannot be read surfaces its error, and
+	// the caller degrades to reap-without-checkpoint). A root that does not
+	// exist answers ErrFileNotExist — a session that never used a root is
+	// normal, not an error; a sandbox that does not exist answers
+	// ErrNotFound. The caller owns the stream and must close it; a transfer
+	// that dies mid-stream surfaces on Read, not here.
+	Export(ctx context.Context, sessionID domain.ID, root string) (io.ReadCloser, error)
 }

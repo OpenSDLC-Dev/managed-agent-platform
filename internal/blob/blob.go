@@ -25,6 +25,16 @@ var ErrNotFound = errors.New("blob: object not found")
 // from drifting between the writer and its readers.
 func FilesKey(id string) string { return "files/" + id }
 
+// SessionCheckpointKey is the object-storage key for a session's workspace
+// checkpoint — the `workspace/{session_id}/checkpoint.tar.gz` layout plan 24
+// fixes. It lives here for FilesKey's reason: the executor writes it (the
+// idle-TTL capture), the executor's reaper and the API's session delete both
+// remove it, and one definition keeps the writer and its removers from
+// drifting.
+func SessionCheckpointKey(sessionID string) string {
+	return "workspace/" + sessionID + "/checkpoint.tar.gz"
+}
+
 // Store is the object-storage contract. Keys are opaque non-empty strings;
 // "/" separators are conventional namespacing, not directories.
 type Store interface {

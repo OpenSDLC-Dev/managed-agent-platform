@@ -280,6 +280,37 @@ func removeWaitingGone(ctx context.Context, api *apiClient, id string) error {
 	}
 }
 
+// Export streams one root out of the session's container as the daemon's
+// archive tar — members under one top-level directory named after the root's
+// base name, the endpoint's native shape. GET /archive works on a stopped
+// container, which is exactly the checkpoint path's case: the TTL reap reads
+// a sandbox it is about to destroy (plan 24). The label is verified before
+// the read (`ours`) so a name collision from another deployment never leaks
+// its filesystem into this session's checkpoint.
+func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string) (io.ReadCloser, error) {
+	info, err := p.api.inspectContainer(ctx, containerName(sessionID))
+	if statusIs(err, 404) {
+		return nil, sandbox.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := ours(info, sessionID); err != nil {
+		return nil, err
+	}
+	rc, err := p.api.getArchive(ctx, info.ID, root)
+	if containerGone(err) {
+		return nil, sandbox.ErrNotFound
+	}
+	if statusIs(err, 404) {
+		return nil, sandbox.ErrFileNotExist
+	}
+	if err != nil {
+		return nil, err
+	}
+	return rc, nil
+}
+
 func containerName(sessionID domain.ID) string { return "map-" + string(sessionID) }
 
 // Provision returns the session's container, creating and starting it only if

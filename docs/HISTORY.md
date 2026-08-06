@@ -90,6 +90,296 @@ exactly what the pin exists to prevent.
 
 ---
 
+## Sandbox teardown (plan 24, #64) — slice 5: the idle-TTL tier, and the plan's acceptance (2026-08-06)
+
+**Acceptance record.** The plan's acceptance section ran in full against the compose
+stack (all three server images rebuilt from the branch; `EXECUTOR_REAP_INTERVAL=5s`,
+`EXECUTOR_SANDBOX_IDLE_TTL=30s`; the brain on a real Anthropic-protocol endpoint,
+model `MiniMax-M3`) and against a host executor on `SANDBOX_BACKEND=k8s` pointed at
+the kind cluster — ten rows, all green:
+
+1. **Idle TTL round trip** (the plan's headline): a session wrote
+   `/workspace/keep.txt` and `cd /tmp`, idled 30s → marker `ready`, blob recorded,
+   container gone within a reap interval; the next `user.message` restored the file
+   *and* the persistent shell's cwd (`pwd` printed `/tmp`), marker `consumed`.
+2. **Deliverable continuity**: a `user.define_outcome` session's harvested
+   `report.txt` was downloadable via `GET /v1/files/{id}/content` before the reap and
+   **still listed and downloadable after the resume and the next grading cycle**, with
+   the restored `/mnt/session/outputs` still carrying it.
+3. **Archive** removed the sandbox within reap intervals.
+4. **A gated session's archive** removed the sandbox *and* the gate container, and
+   its live `session_gate_tokens` row went revoked in the same reap.
+5. **Delete** removed the marker row and wrote the tombstone — after the run's one
+   real find, below.
+6. **Running-session guards**: archive and delete of a running session both 400.
+7. **Mid-turn kill** (`docker rm -f` during a `sleep`): the turn settled, and the
+   resume ran on a **fresh** workspace — the pre-kill file was gone, no marker
+   involved (D6: a crash-recreate never rewinds).
+8. **The #29 wedge heals**: `EXECUTOR_IMAGE` flipped to `debian:stable` and the
+   executor restarted; the old-image sandbox reaped after the TTL, and the session
+   completed on the new image with its checkpointed workspace restored.
+9. **K8s TTL round trip** on kind: pod reaped, the in-pod exec capture path produced
+   the checkpoint, the resume restored file and cwd, marker `ready` → `consumed`.
+10. **K8s archive**: the archived session's pod reaped (the slice-2 RBAC `list` verb
+    and label-selected delete, live).
+
+**The run's find** — merged unit-green, caught live: the `session_checkpoints`
+row's assigned cleanup owner (slice 4's PR review had put it in the reaper's deleted
+tier) could never fire in the tier's steady state. The delete row first FAILED: a
+session the idle tier had already reaped no longer appears in any `Owned` listing, so
+no reap pass ever visits it and the row lingers forever — the unit test had the
+sandbox still owned, hiding the gap. Fixed by moving the delete into the API's
+deleting transaction (no FK cascades it), the reaper's tier keeping only the blob
+delete; the mutation (`DELETE` swapped for `SELECT 1`) fails the API test, and the
+delete row then passed.
+
+**Review hardening, landed in the same PR.** The verifier returned PASS WITH FINDINGS
+(gate from scratch, both suggested mutants reproduced, the asks-first ordering argument
+independently judged sound against `AppendInTx`; its two note findings were wording
+fixes). The dual review (Codex `gpt-5.6-sol`, FAIL with 2 P1 + 4 P2; the Opus 5 review
+workflow, 18 agents, 10 confirmed / 3 refuted after per-finding adversarial verification)
+then converged on one headline from both sides:
+
+- **D8 implemented broader than the plan wrote it** (Codex #5, workflow P1 ×3
+  dimensions). The first cut degraded to reap-without-checkpoint on *every* capture
+  failure; the plan sanctions exactly two — over-budget and an unreadable sandbox. A
+  transient object-store 5xx, a full executor spool disk, or a failed marker write
+  therefore destroyed the workspace permanently, with one WARN line as the only trace —
+  and one store blip spanning a pass would have hit every idle-past-TTL session on the
+  endpoint. Now only sandbox-caused failures degrade (`ErrCheckpointTooLarge`, and
+  export/archive failures wrapped in a sentinel); anything outside the sandbox aborts
+  the reap so the sandbox stays owned and the next pass retries — the deleted tier's
+  own blob-delete rule. This also repairs D4's lossless-wake argument (Codex #1): a
+  `user.message` committing after the under-lock recheck now always finds either a
+  ready checkpoint to restore or a still-alive sandbox; the loss window is confined to
+  sandbox-caused capture failures (a transient export failure among them — D8
+  sanctions any exec/archive failure, so a retry that might have succeeded is
+  deliberately not attempted).
+- **An idle reap racing a concurrent DELETE resurrected the marker and blob forever**
+  (Codex #3, workflow P1). `deleteSession` takes no advisory lock, and the marker
+  table carries no FK by design, so a delete committing between the reaper's
+  re-classification and the marker upsert left an orphaned `ready` row and blob no
+  reap pass would ever revisit. The marker write now inserts only while the session
+  row exists, under `FOR KEY SHARE` — it either lands before the delete (whose
+  in-transaction sweep removes it) or waits the delete out, inserts nothing, and
+  withdraws the just-uploaded blob; a *failed* withdraw aborts the reap instead of
+  reporting the benign sentinel, so the next pass's deleted tier (the tombstone is
+  already written) retries the blob delete before reaping — the verifier's own
+  post-round finding, adopted with its test.
+- **A `stopped` work item can still have a physically executing claimant** (Codex #2).
+  An interrupt cancels the row instantly, but the executor only notices at its next
+  lease renewal — with a short operator TTL the tier could reap under a still-running
+  tool. The owed-work exclusion now also holds for an item stopped within the
+  executor's lease TTL (`stopped_at`, which normal completion never sets).
+- **Helm folded the numeric `0` — the documented disable value — into "unset"**
+  (Codex #6, workflow P2 ×4, reproduced by render on both sides): `with`-truthiness
+  omitted the env var and the binary armed its 24h default, silently enabling
+  destructive reaping the operator disabled. The template now reads the value through
+  `toString`; the five-case render matrix (unset / null / `0` / `"0"` / `"30m"`) is
+  pinned in the PR record.
+- **The workflow's test dimension confirmed the ordering gap this session then
+  watched happen**: `fakeProvider.Reap` left `Export` working, so swapping capture
+  after `Reap` — the exact mutant one workflow probe agent left on disk mid-review —
+  kept the whole package green. The fake now mirrors both real backends (a destroyed
+  sandbox answers `ErrNotFound` until re-provisioned), which makes the happy-path test
+  kill that mutant; the owed-work exclusion's per-session scoping and the asks-first
+  read order each gained their own test (a recording `Querier` pins the statement
+  order — the commit-timing race itself is not constructible, the ordering that closes
+  it is).
+
+Refuted with evidence, no change: the API's post-commit best-effort blob delete
+(pre-existing narrow window, already WARN-logged; the proposed in-transaction delete
+would strand a `ready` marker over a missing blob and wedge every future provision),
+and two claims against the delete-path tests' framing that named no reachable defect.
+
+**Plan 24 progress summary (archived).** Five slices, five PRs: #314 (wire guards:
+archive/delete of `running` 400), #315 (`Owned`/`Reap` on both backends + contract
+rows), #317 (the reaper's terminal tiers: tombstone-evidenced deleted, archived,
+terminated — cloud-only — under the per-session advisory-lock protocol), #319 (the
+checkpoint/restore engine: `Export` on both backends, the one-measure budget, the
+marker table, replace-first restore), and the archiving PR (the idle-TTL tier with
+its three exclusions, blob-less disablement, D8 degradations, and this acceptance).
+The user's four requirements all hold as built: a running session's sandbox is never
+reaped (guards + lock + under-lock recheck), idle-timeout reap checkpoints and the
+resume restores (#28's workspace-continuity half), delete reaps (interrupt
+deliberately does not — the TTL is the backstop), and the whole mechanism is
+horizontally scalable (endpoint-local `Owned`, idempotent `Reap`, no cross-replica
+coordination).
+
+## Sandbox teardown (plan 24, #64) — slice 4: the checkpoint/restore engine
+
+**Review hardening, landed in the same PR.** The verifier returned PASS WITH FINDINGS
+(gate green; its own discretionary seam probe streamed a real Docker `Export` through
+the real re-rooting walk and extracted the result into a second real container,
+byte-exact); its findings — the hardlink name-loss trade and the symlink `Linkname`
+handling undocumented — were fixed as code commentary and an ARCHITECTURE clause
+before review. The dual review (Codex `gpt-5.6-sol`, 7 findings; the Opus 5 review
+workflow, 21 raw findings adversarially verified to 11 confirmed / 10 refuted) then
+drove a hardening round whose headline both reviewers found independently, the
+workflow four times over:
+
+- **Capture and restore metered different quantities against the same cap** (Codex #1;
+  workflow C1/C4/C5/C7, three dimensions converging). Capture charged only regular
+  members' `hdr.Size`; restore bounds the whole decompressed framed tar — headers,
+  padding, the 1024-byte trailer, directories and symlinks charged nothing at capture —
+  so a cleanly-captured checkpoint could be arithmetically unrestorable forever:
+  restore fails, D6 leaves the marker `ready`, and every next provision reaps the
+  replacement sandbox and fails again. Fixed with one measure on both sides — a
+  `limitedWriter` meters the framed tar stream itself during capture.
+  `TestCaptureAndRestoreShareOneBudget` pins the arithmetic (3600 content bytes under
+  a 4096 cap must now fail at capture, where the old accounting accepted them).
+- **A K8s export could die behind a syntactically complete archive** (Codex #2; C2):
+  `tar.Reader` stops at the end-of-archive blocks and never issues the read that
+  surfaces the pipe's `CloseWithError`, so a tar that exited non-zero was captured and
+  marked ready. Capture now drains each export stream to its close. The finding's
+  probe half was real too: the single-level existence probe answered `ErrFileNotExist`
+  for a root hidden behind an unsearchable ancestor — replaced with a walking probe
+  (deepest existing ancestor: searchable means genuinely missing, an unsearchable
+  directory is an error), after the first draft of the walk was itself caught
+  misreading the shell-state root, whose parent legitimately does not exist before the
+  session's first bash run.
+- **A ready marker on a storage-less executor now fails the provision closed**
+  (Codex #3). The workflow's adversarial verify had refuted its own variant (R2) on
+  the single-executor scenario, but Codex's mixed-rollout scenario stood: a blob-less
+  executor provisioning fresh leaves the marker standing, and the next blob-configured
+  executor restores over the session's new work.
+- Codex's remaining confirmed findings: `Reap` inside restore can self-deadlock the
+  documented two-connection floor via the pool-backed gate-token revoker — the floor
+  is now 3 with the pin count named (#4); a configured workdir could alias the other
+  checkpoint roots, double-charging shared subtrees, and `/tmp` as workdir would
+  archive the restore staging file — `ValidateWorkdir` refuses overlap in either
+  direction at startup (#5); `EXECUTOR_CHECKPOINT_MAX_BYTES` at `MaxInt64` overflowed
+  restore's `cap+1` into an empty accepted spool — the cap is bounded at 1 PiB (#6).
+- Workflow C3 (a root an agent replaced with a plain file got a malformed trailing
+  slash) and C6 (the detected wire `Format` carried into the re-rooting writer) were
+  fixed — C6's mechanics verified by experiment before trusting either side: Go's
+  writer emits GNU LongLink itself, so the GNU shape never errors, but a strict-ustar
+  member whose re-rooted path exceeds every 100+155 prefix split fails exactly as
+  claimed. Both shapes are pinned (`TestCaptureCarriesAGNULongNameExport`, which also
+  proves the `@LongLink` pseudo-member never leaks into a checkpoint, and
+  `TestCaptureCarriesAUSTARDeepPathExport`, the discriminating one).
+- The confirmed test gaps each gained a test: re-capture re-arms a consumed marker
+  (C8), Docker `Export`'s ownership guard on the fake daemon — no archive request
+  escapes (C9), the `too_large` metric outcome (C10), and the absolute-path branches
+  of both walkers (C11 — restore's guard is the load-bearing one; capture's is
+  redundant with its top-level-directory check, which the mutant run demonstrated).
+
+Refuted with the verify agents' own evidence, unchanged: the missing FK/delete on
+`session_checkpoints` (R1/R9 — the delete tier's blob-then-tombstone path owns
+cleanup), the marker upsert riding the pool rather than the lock's connection (R3),
+restore-then-materialize ordering (R4 — the platform's pre-existing mount contract),
+unbounded concurrent restore spools (R5 — the executor loop is serial), the absent
+capture→restore round trip (R6 — refuted as harmless then, and this round's symmetry
+test performs it anyway), `markerState` swallowing its query error (R7), the
+stopped-container wait loop accepting any Exec error (R8, the same substance as
+Codex #7 — the compound scenario cannot occur on this code; an optional nit, left),
+and `EXECUTOR_CHECKPOINT_MAX_BYTES=0` as documented-legal (R10 — nothing documents it).
+
+Ten hardening mutants killed, each by exactly the test built for it: the budget check
+bypassed, the drain removed, fail-closed reverted to the silent skip, the `Format`
+reset removed (the GNU-shape test survives that mutant — Go's writer self-handles
+LongLink; the ustar deep-path test is the killer), the non-dir root's trailing slash
+restored, the marker upsert's `DO UPDATE` flipped to `DO NOTHING`, `ValidateWorkdir`
+gutted, `too_large` collapsed into `error`, restore's absolute-path guard dropped, and
+docker `Export`'s ownership check dropped. Not constructible: the K8s walking probe's
+unsearchable-ancestor branch (unit-unreachable without a cluster, and kind's root-user
+images make the permission scenario moot — the contract suite covers the missing-root
+answer), and the cmd startup guards (main glue, outside the tested surface by the
+convention slice 3 recorded).
+
+**On the PR, the bots added a round of their own.** The Codex bot's two P2s both
+confirmed against source and fixed: the K8s probe's `[ -e ]` follows symlinks, so a
+root an agent replaced with a **dangling symlink** read as missing and capture
+silently dropped the entry — the probe gained a `-L` arm and the behavior became a
+shared contract row, both backends. The first fix documented Docker as resolving the
+terminal symlink daemon-side; the verifier's direct measurement on its next pass
+refuted that (`GET /containers/{id}/archive` on a dangling symlink answers 200 with
+the link member itself, running or stopped) — Docker never had the gap, and the row
+pins both. And
+restore's validation accepted any relative path, letting a corrupted blob's
+`etc/profile` land on the sandbox's real `/etc` through `tar -C /` — members are now
+confined to the three durable roots (an `outside-roots` tamper case pins it). Both
+fixes' mutants killed: the `-L` arm dropped → the dangling-symlink contract row red
+on kind, the root restriction dropped → the tamper case red. CodeRabbit's four: three fixed (the
+`markerState` helper now fails the test on a real query error instead of reading as
+"no marker" — its R7 shape, refuted as a defect, adopted as hygiene; the `rerootInto`
+doc block re-attached to its function after the hardening edit left it hanging on
+`limitedWriter`, its stale budget clause cut; the K8s export tar's stderr captured
+into the exit-code error) and one answered in place: `session_checkpoints` rows for
+deleted sessions were assigned a cleanup owner — first the reaper's deleted tier;
+slice 5's acceptance run then corrected that to the API's deleting transaction (a
+session whose sandbox the idle tier already reaped never reappears in `Owned`, so a
+reaper-owned row would linger forever) — see the slice-5 record.
+
+## Sandbox teardown (plan 24, #64) — slice 3: the reaper's terminal tiers
+
+**Review hardening, landed in the same PR.** The verifier returned PASS WITH FINDINGS
+(gate green at 90.44% coverage, all five slice mutants independently reproduced in a
+scratch copy, a live probe on the real binary — deleted/archived containers removed
+within one 2s interval, the idle one untouched, terminated removed after the flip); its
+two concerns (the `EXECUTOR_REAP_INTERVAL` knob missing from cmd/executor's env block
+and the compose README table) were fixed before review. The dual review then reshaped
+the slice's deleted tier:
+
+- **The deleted tier now requires a tombstone** (Claude review, confirmed twice, the
+  round's headline). As landed, `classifyForReap` mapped `ErrNoRows` to the deleted
+  tier — but a missing row also describes a holding that was never this deployment's:
+  the repo's own dev loop (a compose stack's executor and `make test`'s Docker contract
+  suite share the host daemon) would have had the compose reaper force-removing the
+  suite's fixtures within a minute, and two deployments sharing a daemon or K8s
+  namespace would destroy each other's live sandboxes. Migration 0018 adds
+  `deleted_sessions`; `deleteSession` writes the tombstone in its deleting transaction;
+  the reaper skips any owned id with neither row nor tombstone
+  (`TestReapPassSkipsForeignSandbox`, red before the fix).
+- **Codex's P1 — a session revived between the under-lock re-read and `Reap` — was
+  refuted with evidence**: no revival writer exists. Archived sessions are read-only
+  (`internal/api/events.go:78` refuses every event batch under the session row lock,
+  and no unarchive path exists anywhere); `terminated` is set by nothing today and both
+  wake paths exclude it (events.go:204-212 — user.message requires idle, interrupt
+  requires idle/running); a deleted row never returns. The terminal tiers are
+  absorbing states, so the under-lock answer cannot rot.
+- Codex's remaining findings, all acted on: the under-lock re-classification now rides
+  the lock's own connection and cmd/executor refuses `pool_max_conns < 2` (nested pool
+  acquisition under the pinned lock connection could self-deadlock a deliberately tiny
+  pool); a failed `pg_advisory_unlock` now closes the connection instead of releasing
+  it healthy — the old log line claimed a pool release frees the lock, which is false
+  for pgx v5 (session advisory locks survive `Release`); `Run` now joins the reaper
+  goroutine before returning (`TestRunWaitsForTheReaperToStop`, red before the fix);
+  the `pg_locks` test barrier filters by database and this session's classid/objid;
+  and the two unpinned contracts got tests — `TestReapPassContinuesPastAFailingSession`
+  (errors.Join isolation) and `TestDeleteSessionSurvivesCheckpointDeleteFailure`.
+- From the Claude review's confirmed list: the post-commit checkpoint-blob delete in
+  `deleteSession` detached from the request context (a client hangup must not skip the
+  one delete the path exists for); the reap metric pinned through a ManualReader
+  (`TestReapMetric` — archived and terminated differ only in the label); plan 24's D8
+  metric sketch and reap-criteria table annotated with the as-built names.
+
+**On the PR, the Codex bot added one more confirmed P2**: the tiers never checked the
+environment kind, so on a shared daemon the platform reaper would destroy an archived
+**self_hosted** session's sandbox — the customer's BYOC worker's asset, which never
+takes the advisory lock (the plan wrote the `kind = 'cloud'` exclusion for the TTL
+tier only). Fixed by making every tier cloud-only: `classifyForReap` joins
+`environments.kind`, and the tombstone records the kind (the row being gone by the
+time the reaper asks) — migration 0018 amended in-branch before merge.
+`TestReapPassLeavesSelfHostedSessions` covers both arms; the discriminating mutants
+(each kind check dropped) were killed post-commit.
+
+Hardening mutants killed post-commit: tombstone check dropped → foreign-skip test red
+(its pre-fix red), join dropped → `TestRunWaitsForTheReaperToStop` red (pre-fix red),
+plus fresh runs for the never-red tests recorded in the PR. Not constructible: a
+discriminating test for the unlock-failure connection-close — every SQL-reachable
+unlock failure (aborted transaction, dead backend, cancelled context) already destroys
+the connection on release, freeing the lock; the guard covers the residual class
+(e.g. a pooling proxy) no real-Postgres test can simulate. The cmd startup floor is
+main-glue, outside the tested surface by convention. The detached-context blob delete
+likewise has no cancelled-request test — httptest offers no clean way to cancel the
+request context between the handler's commit and its post-commit tail; the change is
+one `context.WithoutCancel` line, verified by reading and by the failing-blob test
+covering the same tail. Refuted-and-unchanged, with the
+verify agents' own evidence: Run-return-before-reap-exit harms (the pool blocks on
+`Close` until conns release), the provision-side re-read (a stale sandbox adoption is
+the pre-slice status quo and slice 4's restore recuts it under the same hold).
+
 ## Sandbox teardown (plan 24, #64) — slice 2: `Owned`/`Reap` on both backends
 
 **Review hardening, landed in the same PR.** The verifier PASSed twice — the slice, then

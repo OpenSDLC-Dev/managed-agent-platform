@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,10 +54,21 @@ type fakeSandbox struct {
 	// execTruncated marks that listing as overflowing the exec output cap.
 	execStdout    string
 	execTruncated bool
+	// cmds records every Exec command in order; execHook, when set and
+	// answering non-nil, overrides one command's result (the restore tests
+	// fault the in-sandbox extraction).
+	cmds     []string
+	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	f.cmds = append(f.cmds, req.Command)
+	if f.execHook != nil {
+		if res := f.execHook(req); res != nil {
+			return *res, nil
+		}
+	}
 	// The harvest's listing: synthesize the NUL-separated relative paths from
 	// the in-memory tree (or a forged/truncated listing when a test sets one).
 	if req.Command == harvestListScript {
@@ -172,11 +185,35 @@ type fakeProvider struct {
 	// (a slow image pull) to observe the lease keeper renew across it.
 	entered chan struct{}
 	gate    chan struct{}
+	// owned/reaped drive and record the reaper (reaper_test.go); mu guards
+	// them because Run's reap loop is a separate goroutine. reapFailFor makes
+	// one session's Reap fail, for the error-isolation row. destroyed tracks
+	// the sandboxes currently gone — Reap adds, Provision removes — so Export
+	// after a reap fails the way both real backends do (a removed container
+	// or deleted pod answers ErrNotFound), which is what pins the tier's
+	// capture-BEFORE-destroy ordering under test.
+	mu          sync.Mutex
+	owned       []domain.ID
+	reaped      []domain.ID
+	destroyed   map[domain.ID]bool
+	reapFailFor domain.ID
+	// exports feeds Export: root path → tar bytes (checkpoint tests); calls
+	// records provision/reap ordering for the restore-replaces-first rule.
+	// exportTrailErr, when set, arrives only AFTER the tar bytes — the shape
+	// of a K8s tar that exits non-zero behind a complete-looking archive.
+	exports        map[string][]byte
+	exportErr      error
+	exportTrailErr error
+	calls          []string
 }
 
 func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
 	p.provisions++
 	p.lastSpec = spec
+	p.mu.Lock()
+	p.calls = append(p.calls, "provision")
+	delete(p.destroyed, spec.SessionID)
+	p.mu.Unlock()
 	if p.entered != nil {
 		select {
 		case p.entered <- struct{}{}:
@@ -196,9 +233,65 @@ func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbo
 	return p.sb, nil
 }
 
-func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) { return nil, nil }
+func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.owned), nil
+}
 
-func (p *fakeProvider) Reap(context.Context, domain.ID) error { return nil }
+func (p *fakeProvider) Reap(_ context.Context, sid domain.ID) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, "reap")
+	if sid == p.reapFailFor && sid != "" {
+		return errors.New("daemon unreachable")
+	}
+	p.reaped = append(p.reaped, sid)
+	if p.destroyed == nil {
+		p.destroyed = map[domain.ID]bool{}
+	}
+	p.destroyed[sid] = true
+	return nil
+}
+
+// Export answers with the canned per-root tars in exports (keyed by root
+// path), sandbox.ErrFileNotExist for a root without one — the normal shape
+// for a session that never used a root — and ErrNotFound when the provider
+// holds nothing for the session, including one whose sandbox a Reap just
+// destroyed and no Provision has replaced.
+func (p *fakeProvider) Export(_ context.Context, sid domain.ID, root string) (io.ReadCloser, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.exportErr != nil {
+		return nil, p.exportErr
+	}
+	if !slices.Contains(p.owned, sid) || p.destroyed[sid] {
+		return nil, sandbox.ErrNotFound
+	}
+	data, ok := p.exports[root]
+	if !ok {
+		return nil, sandbox.ErrFileNotExist
+	}
+	r := io.Reader(bytes.NewReader(data))
+	if p.exportTrailErr != nil {
+		r = io.MultiReader(r, errReader{p.exportTrailErr})
+	}
+	return io.NopCloser(r), nil
+}
+
+// errReader answers every Read with its error — the tail of a stream that
+// died after delivering complete-looking bytes.
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+// reapedSnapshot reads the reap record under the mutex — Run's reaper
+// goroutine appends concurrently with a polling test.
+func (p *fakeProvider) reapedSnapshot() []domain.ID {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.reaped)
+}
 
 type harness struct {
 	pool  *pgxpool.Pool
