@@ -221,6 +221,67 @@ Kubernetes' `securityContext.runAsUser`). It is numeric because that is all both
 backends can express — a Kubernetes securityContext takes no user name.
 `debian:stable-slim` defaults to root; a hardened image does not have to.
 
+**The platform runs nothing in your container as anyone but that user** — no
+privileged exec, anywhere, and one place had to be designed around to keep it
+that way. On Docker the daemon extracts a write's archive as root, so when the
+rename that would finish the write is refused, the temporary is a root-owned
+file your sandbox uid cannot unlink from a directory it cannot write (#310).
+Cleaning it up with a `docker exec -u 0` was tried and abandoned: such an exec
+starts with `AT_SECURE=0` and runs a binary and libraries your *image* supplies,
+so what it really does is decided by the image — and where an agent can write
+part of that image's filesystem, by the agent. Four channels were found and
+measured before the approach was dropped: `bash -c` sourcing an `ENV BASH_ENV`
+file, the loader honouring `ENV LD_PRELOAD`, `ENV LD_DEBUG_OUTPUT` writing
+root-owned files at a path the image names, and `/etc/ld.so.preload`, which no
+environment setting can neutralize. So the daemon takes back what it landed
+instead: the same archive endpoint that extracted the temporary extracts an
+empty file over it, executing nothing. That covers the refused write #310 is
+about and every other failed **single** write whose temporary the daemon landed,
+a transfer that died part way included — there the residue is a partial payload
+rather than an empty name. Where your sandbox cannot unlink, what stays behind
+afterwards is an empty file under the platform's own `.map-write-` name, until
+the container is destroyed.
+
+The **bulk** write (skill materialization) is covered the same way, and used not
+to be (#316). Its shed is your sandbox user's own `rm` — in the rename script and
+in the discard pass alike — so under a parent that user cannot write a failed
+batch left *every* member's full payload, not one file but up to ten thousand.
+What held it back from being reachable was only the caller: the one batch the
+platform writes goes under the workdir, which your sandbox user owns. It was
+never the platform creating a batch's directories inside the container — that
+uses `mkdir -p`, which leaves a root-owned directory that already exists exactly
+as it found it, so an image shipping one under the workdir opened the gap. Both
+sheds now report which of the batch's own files they could not remove, and the
+daemon empties those in a single archive — one round trip for a whole batch, and
+still executing nothing. A batch that *succeeds* is asked too: its last act is to
+remove the two bookkeeping files, which the same root extraction landed in your
+workdir.
+
+The two limits below apply to it unchanged, and it has a third of its own. The
+single write's emptying asks the daemon directly about a path the platform
+generated; a batch's is steered by a report the shed computes **inside** your
+container, from a manifest that lives in your workdir. So a command in the
+sandbox can delete that manifest, and an image can print to the same stream the
+report arrives on. Neither is left to trust — a shed that lost its manifest says
+so, and the branch that knows the members were delivered empties the platform's
+own list instead; and only the lines after the shed's own opening marker are
+read, so an `ENV BASH_ENV` file that prints before the script does is not
+mistaken for it. What remains is narrower: the batch's emptying needs the shed
+exec to have *run*. A sandbox too broken to exec at all keeps a failed batch's
+payload where a single write's would still be taken back — closing that would
+cost a round trip per member, ten thousand of them, to serve a container that is
+about to be destroyed anyway.
+
+Two limits are worth knowing rather than discovering. The emptying is best
+effort: it reports nothing of its own, and a daemon that will not answer leaves
+the payload where it was — the same place the sandbox user could not reach it
+either. And one branch does not ask for it at all: when the rename's *exec*
+fails outright, the script it was running may still be mid-`mv`, and emptying
+the temporary under a live `mv` would put zero bytes onto the file the caller was
+just told it had not touched. Keeping a payload the container will take away is
+the lesser harm than destroying data the write promised to leave alone, so that
+branch unlinks with your sandbox user's own `rm` and stops there.
+
 The catch is the **workdir**. The container's entrypoint runs `mkdir -p
 <workdir>` as whatever user the container runs as, and a uid the image did not
 plan for usually cannot create a directory at the root of the filesystem — so the

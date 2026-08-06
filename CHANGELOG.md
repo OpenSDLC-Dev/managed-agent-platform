@@ -35,6 +35,23 @@ copy of an entry here.
   / event-log surfaces, mandatory adversarial probes, a mutation duty on every new
   guard, and PASS/FAIL/BLOCKED/SKIP verdicts — adapted from the verifiable-react
   runtime-observation philosophy.
+- **Plan 26 drafted — verification hardening: checkers proven by what they
+  refuse, verdicts that travel with their evidence**
+  ([docs/plan/26_verification-hardening.md](./docs/plan/26_verification-hardening.md)).
+  The plan comes out of a comparative study of Anthropic's `how-we-claude-code` workshop sample
+  (a "verifiable component architecture": runtime observation at the surface,
+  mandatory adversarial fixtures, a PASS/FAIL/BLOCKED/SKIP verdict taxonomy)
+  against this repo's regime. Most workshop ideas are already here in stronger
+  form; five gaps survived the adversarial comparison, and the plan closes them
+  in five independent slices: known-bad subjects the contract suite and eval
+  graders must be seen to refuse; a `BLOCKED(environment)` marker on
+  environment-provisioning failures (labeled, still red); a structured per-rung
+  JSON verdict from the verifier plus red-run evidence required by default for
+  the diff's own new guards; failure artifacts that carry their own rerun
+  command; and an acceptance harness that dumps its buffered wire transcript on
+  failure. Equally deliberate is what it refuses to build: no self-declared
+  introspection contract, no implementer/certifier unification, no
+  BLOCKED-as-skip, no replay video, no registry over `go test`.
 - **The idle-TTL tier: an idle session's sandbox is checkpointed and reaped,
   and the next message gets it back** (plan 24 slice 5 — the final slice; #64,
   closing the workspace-continuity half of #28). The reaper gains its fourth
@@ -330,6 +347,151 @@ copy of an entry here.
   broker's wake is environment-keyed.
 
 ### Fixed
+
+- **A failed bulk write's payload is taken back too — the #310 fix, extended to
+  batches, still executing nothing** (best effort, as #310's own is: the
+  emptying raises no error, and a daemon that refuses it leaves the residue
+  where the sandbox user already could not reach it)
+  ([internal/sandbox/bulkwrite.go](./internal/sandbox/bulkwrite.go),
+  [internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
+  [internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go); #316, raised by
+  the verifier and the Claude reviewer on #310's PR). #310 covered the single
+  write. A batch lands the same way — the docker daemon extracts its members on
+  the host, as root — but its only sheds were the sandbox user's `rm`, in
+  `__map_bulk_rename` and in `__map_bulk_discard` alike, so a batch refused
+  under a parent that user cannot write left **every member's full payload**
+  behind, up to 10,000 of them. Measured on a real non-root image before the
+  fix: a two-member batch into `/etc` left 8192 bytes the sandbox could neither
+  unlink nor read away
+  (`TestBulkWriteIntoARootOwnedParentOnANonRootImage`, red first).
+
+  Both sheds now **name what their own `rm` could not take** — on stdout, a
+  member by its manifest index and the two bookkeeping files as `m`/`d`, two
+  builtin tests per member and no process — and the docker backend empties
+  exactly those through the daemon in **one** archive: a refused batch leaves
+  every member at once, and ten thousand HEAD-plus-PUT round trips is not a
+  cleanup. Naming rather than emptying blindly is what keeps the pass from
+  recreating a temporary the `rm` already removed. The report steers nothing:
+  the shell counts a manifest the sandbox can rewrite, but the index is
+  resolved against the platform's own list, so what is emptied is always one of
+  the paths that batch chose — never a target, never a file the batch did not
+  put there. A *successful* batch is asked too, its last act being the `rm` of
+  the bookkeeping files the same root extraction landed in the workdir.
+
+  Two ways the sandbox could have answered for itself are closed rather than
+  assumed, both found in review. An image owns this stream before the script
+  does — `bash -c` sources `BASH_ENV`, the channel #310 measured — so a forged
+  `map-bulk-left 0` would have put an empty file back exactly where the cleanup
+  had just taken one away; only the lines after the shed's own opening marker
+  are read now, and a stream without one is not a report at all. And the
+  manifest the shed walks lives in the sandbox's workdir, delivered a round
+  trip before the exec that reads it (#206 named that window), so deleting one
+  file would have left the pass with nothing to name and stranded every
+  member — the shed now says when it lost its list, and the one branch that
+  knows the members were delivered answers by emptying the platform's own list
+  instead.
+
+  Both of those answers were themselves wrong on the first attempt, and the
+  verifier measured both against a real daemon before merge. The opening marker
+  is printed with a newline **in front of it**, because the stream arrives as
+  frames concatenated with no separator: an image whose output does not end in
+  a newline absorbed the marker into its own last partial line and left its
+  forged copy as the last valid one — the framing handing an attacker exactly
+  what it was written to take away. And the list that answers a deleted
+  manifest carries the members only: it had carried the two bookkeeping files
+  too, which that same branch removes *itself* before reporting, so the
+  fallback recreated as zero-byte files precisely what the shed had just
+  deleted. Both are pinned by rows that go red without the fix.
+
+  The branch that must *not* empty is the same one as in #310: a rename whose
+  **exec** failed may have left a `mv` in flight, so it keeps `rm` and stops
+  there, and a fake-daemon row asserts no emptying archive is sent even when
+  the shed reports the whole payload still present. The one #310 called
+  "vacuous to fix" — the reported-fault return that sheds nothing because
+  `__map_bulk_rename` has already `rm -f`'d — turns out to be where the residue
+  actually **is**: under a root-owned parent every member's `mv` is refused and
+  every `rm` with it, so that return now empties rather than re-running a
+  discard whose `rm` has already failed.
+
+  The k8s twin needed no emptying — its `tar` runs inside the pod, as the
+  sandbox user, so nothing it leaves is unremovable — but its `discardBulk`
+  now runs on a context detached from the caller's (`context.WithoutCancel`
+  plus a 10-second budget), which #310 gave the docker cleanups and left it
+  out of: a batch cancelled mid-transfer could strand up to 10,000 members'
+  bytes in the pod until it died. No clientset fake can observe that (an exec
+  is a SPDY stream over the REST config, not a typed call, so no reactor ever
+  fires), so the row stands up an API server and asserts the pod was asked at
+  all — red without the change, 0 requests against 1. Detaching alone would
+  not have covered the case it was written for, which review caught: a caller
+  that goes away mid-delivery returns from `deliverBulk`'s error branch, which
+  shed nothing at all. Both of those branches now shed.
+
+  One limit the batch has that the single write does not, stated rather than
+  closed: `reclaim` asks the daemon directly, so it still empties when the shed
+  exec could not run, while a batch's emptying is driven by that exec's report
+  and has none without it. Covering it would cost a HEAD per member — ten
+  thousand round trips for a sandbox already too broken to run `rm`.
+
+- **A refused write's payload no longer sits in the sandbox for the
+  container's life — and no privileged exec was introduced to remove it**
+  ([internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
+  [internal/sandbox/docker/api.go](./internal/sandbox/docker/api.go); #310, the
+  verifier's finding on #306's PR). The docker daemon extracts a write's
+  archive as root, so when the rename is what fails — a root-owned parent
+  under a non-root uid, the route #306 classifies — the script's own `rm -f`
+  runs as a user who cannot unlink from that directory, and the refused
+  payload stayed behind as a root-owned `.map-write-*` file, one per refused
+  write (measured on a real non-root image). **The daemon is asked to take
+  back what it landed**: after a HEAD that says something is still there, the
+  same archive endpoint extracts a zero-byte entry of the same name over it.
+  Where that succeeds the payload is gone and only an empty name remains; it
+  reports nothing of its own, so it is best effort and a daemon that refuses
+  leaves the residue the sandbox user already could not shed. A put that dies
+  mid-transfer gets the same treatment, its residue being a *partial payload*
+  rather than an empty name (a verifier finding on the first exec-free
+  iteration).
+
+  Two boundaries came out of review. The emptying is **not** asked for on the
+  branch where the rename's exec itself failed: that error does not say the
+  script never started, so a `mv` may be in flight, and emptying the temporary
+  under it would land zero bytes on the very target the caller is being told
+  it did not touch. That branch unlinks with the sandbox user's `rm` and stops
+  — keeping a payload the container will take away beats destroying data the
+  write promised to leave alone (Codex, round 5; the fake-daemon row asserts
+  no HEAD and no archive on that route). And every cleanup on this backend
+  now runs on a context detached from the write's own (`context.WithoutCancel`
+  plus a 10-second budget) — the two single-write sheds, and the batch's
+  `discardBulk` alongside them — because a tool call that timed out
+  mid-transfer is exactly the write whose residue must still be shed:
+  inheriting its cancellation skipped the cleanup in the case that caused it,
+  and left a batch's members (up to 10,000 of them) behind for the container's
+  life. Sites that shed both ways can now hold a failed write for two budgets
+  before returning, which the code says out loud. Codex and CodeRabbit found
+  the single-write half; the verifier found that the batch had been left out
+  of it. The k8s twin keeps the caller's context for now — its temporaries are
+  the sandbox user's own, so nothing there is *unremovable*, which is what
+  #310 is about — and #316 carries the question for both backends.
+
+  The route not taken is the point: the obvious fix — an exec as `User: "0"`
+  running `rm -f` — was written, measured against four escalation channels an
+  image controls, and abandoned, so **the platform still runs nothing in a
+  sandbox as anyone but the sandbox's own user**. What pins that is structural
+  (docker's `execConfig` has no `User` field to set); the real-image row
+  `TestTheRootShedRunsNoAgentCodeOnANonRootImage` covers the shell-hook
+  channel behind it. The evidence, the four channels (over the premise they
+  all sit on) and the rejected design are recorded in
+  [docs/HISTORY.md](./docs/HISTORY.md). The k8s backend needs nothing *here*:
+  its temporary is created by the sandbox user, so the same credential that
+  made it removes it. The docker **bulk** write is knowingly left out — its
+  shed is the sandbox user's `rm`, and what makes that enough is the caller
+  (the one batch the platform writes goes under the workdir), not the
+  directories it creates, since `mkdir -p` leaves a root-owned parent that
+  already exists exactly as it found it — and #316 tracks closing that rather
+  than resting on the caller. Red observed first on every row: the real-image residue
+  (the refused payload's bytes in `/etc`, want 0), the fake-daemon emptying
+  archive that did not exist, the raw route's re-pin — where the script's own
+  rm worked, no emptying archive may be sent, or the cleanup would make the
+  litter it exists to remove — and round 5's three.
 
 - **A write the sandbox cannot land is the model's error, not the platform's
   fault** ([internal/sandbox/sandbox.go](./internal/sandbox/sandbox.go),

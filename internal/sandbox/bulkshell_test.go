@@ -40,19 +40,29 @@ import (
 // with the suite still green.
 func bulkShell(t *testing.T, shell, fn, manifest, dirList string) (int, string) {
 	t.Helper()
-	var stderr bytes.Buffer
+	code, _, stderr := bulkShellOut(t, shell, fn, manifest, dirList)
+	return code, stderr
+}
+
+// bulkShellOut is bulkShell with the pass's stdout as well — the stream the two
+// sheds name what they could not remove on, which only the rows about that
+// naming care about.
+func bulkShellOut(t *testing.T, shell, fn, manifest, dirList string) (int, string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
 	cmd := exec.Command("/bin/bash", "-c",
 		"umask 077\n"+shell+"\n"+fn+" \"$1\" \"$2\"", "map-bulk-test", manifest, dirList)
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err == nil {
-		return 0, stderr.String()
+		return 0, stdout.String(), stderr.String()
 	}
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) {
 		t.Fatalf("run %s: %v", fn, err)
 	}
-	return ee.ExitCode(), stderr.String()
+	return ee.ExitCode(), stdout.String(), stderr.String()
 }
 
 // stageBatch writes a manifest and directory list naming each member, and creates
@@ -326,6 +336,186 @@ func TestBulkDiscardShell(t *testing.T) {
 	// goes, and the pass does not fail over it.
 	if code, _ := bulkShell(t, sandbox.BulkDiscardShell, "__map_bulk_discard", manifest, dirList); code != 0 {
 		t.Errorf("discarding twice exited %d, want 0", code)
+	}
+}
+
+// The two sheds name what their own `rm` could not take, and name nothing where
+// it worked — the second half being what keeps the backend acting on the report
+// from putting back a file the shed had just removed (#316).
+//
+// A directory the shell cannot write is how a member survives its own `rm` here;
+// in the sandbox it is a parent the docker daemon extracted into as root. Same
+// refusal, reached without a container.
+func TestBulkShedsNameWhatTheyCouldNotRemove(t *testing.T) {
+	for _, tc := range []struct{ name, shell, fn string }{
+		{"discard", sandbox.BulkDiscardShell, "__map_bulk_discard"},
+		{"rename", sandbox.BulkRenameShell, "__map_bulk_rename"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip("root ignores the write bit, so this proves nothing")
+			}
+			dir := t.TempDir()
+			manifest, dirList := stageBatch(t, dir,
+				map[string]string{"a.txt": "AAA", "b.txt": "BBB"}, nil)
+			// Registered after t.TempDir's own removal, so it runs before it:
+			// RemoveAll cannot empty a directory it may not write either.
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			if err := os.Chmod(dir, 0o555); err != nil {
+				t.Fatalf("make the members' directory unwritable: %v", err)
+			}
+
+			code, stdout, stderr := bulkShellOut(t, tc.shell, tc.fn, manifest, dirList)
+			if tc.fn == "__map_bulk_rename" && code == 0 {
+				t.Fatalf("the rename reported success moving into a directory it cannot write; stderr: %s", stderr)
+			}
+			// Both members and both bookkeeping files are still there, and every
+			// one of them is named — a report that covered only the member the
+			// run stopped on would leave the rest of the payload behind.
+			for _, want := range []string{"map-bulk-left 0", "map-bulk-left 1", "map-bulk-left m", "map-bulk-left d"} {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("stdout = %q, want it to name %q", stdout, want)
+				}
+			}
+			// Nothing was written: a shed is not a write, and a refused rename
+			// leaves the target as it was — here, absent.
+			for _, name := range []string{"a.txt", "b.txt"} {
+				if _, err := os.Stat(dir + "/" + name); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("%s: %v, want the shed to have written nothing", name, err)
+				}
+			}
+		})
+	}
+}
+
+// The shed opens its report with a newline in FRONT of the marker, because the
+// stream it shares with the image is frames concatenated with no separator: an
+// image that leaves its last line unterminated would otherwise absorb the
+// opening line and leave its own forged copy as the last valid one. Asserted on
+// the shell's own bytes, since this is the shell's half of the guard.
+func TestBulkShedsOpenTheirReportOnALineOfTheirOwn(t *testing.T) {
+	for _, tc := range []struct{ name, shell, fn string }{
+		{"discard", sandbox.BulkDiscardShell, "__map_bulk_discard"},
+		{"rename", sandbox.BulkRenameShell, "__map_bulk_rename"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
+			_, stdout, _ := bulkShellOut(t, tc.shell, tc.fn, manifest, dirList)
+			if !strings.HasPrefix(stdout, "\nmap-bulk-left-begin\n") {
+				t.Errorf("stdout = %q, want the opening marker preceded by a newline so an "+
+					"unterminated image line cannot absorb it", stdout)
+			}
+		})
+	}
+}
+
+// A temporary the sandbox swapped for a symlink is not one of ours to hand the
+// daemon, and `-f` alone would not say so — it stats through the link, so a link
+// to any regular file answers yes. `! -h` is what makes the walk mean what its
+// comment says.
+func TestBulkShedsDoNotNameASymlinkedTemporary(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the write bit, so the member cannot survive its own rm")
+	}
+	dir := t.TempDir()
+	manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
+	// Replace the staged temporary with a link to a file elsewhere, then make
+	// the directory unwritable so the shed's `rm` cannot take it either way.
+	tmp := dir + "/" + sandbox.TempPrefix + "batch-0"
+	target := t.TempDir() + "/elsewhere.txt"
+	if err := os.WriteFile(target, []byte("not the batch's"), 0o644); err != nil {
+		t.Fatalf("stage the link's target: %v", err)
+	}
+	if err := os.Remove(tmp); err != nil {
+		t.Fatalf("remove the staged temporary: %v", err)
+	}
+	if err := os.Symlink(target, tmp); err != nil {
+		t.Skipf("symlinks unavailable on this host: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("make the members' directory unwritable: %v", err)
+	}
+
+	_, stdout, _ := bulkShellOut(t, sandbox.BulkDiscardShell, "__map_bulk_discard", manifest, dirList)
+	if strings.Contains(stdout, "map-bulk-left 0") {
+		t.Errorf("stdout = %q, want the symlinked member unnamed: `-f` alone stats through "+
+			"the link, and what the delivery landed was a regular file", stdout)
+	}
+	if _, err := os.Lstat(tmp); err != nil {
+		t.Errorf("the link was disturbed: %v, want the shed to have left the sandbox's own object alone", err)
+	}
+}
+
+// A manifest that is not there leaves the shed with nothing to walk — and the
+// sandbox can arrange exactly that, the manifest being a file in its own workdir
+// delivered one round trip before the exec that reads it. Saying "nothing is
+// left" there would be indistinguishable from "I could not look", and every
+// root-owned member would stay for the price of deleting one file. So the pass
+// says which it is (#316).
+func TestBulkShedsSayWhenTheyLostTheirList(t *testing.T) {
+	for _, tc := range []struct{ name, shell, fn string }{
+		{"discard", sandbox.BulkDiscardShell, "__map_bulk_discard"},
+		{"rename", sandbox.BulkRenameShell, "__map_bulk_rename"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
+			if err := os.Remove(manifest); err != nil {
+				t.Fatalf("remove the manifest: %v", err)
+			}
+
+			_, stdout, _ := bulkShellOut(t, tc.shell, tc.fn, manifest, dirList)
+			if !strings.Contains(stdout, "map-bulk-left-nolist") {
+				t.Errorf("stdout = %q, want the pass to say it had no list to walk", stdout)
+			}
+			// And it names no member, because it genuinely cannot: what the
+			// platform does about that is the backend's decision, not this
+			// pass's guess.
+			if strings.Contains(stdout, "map-bulk-left 0") {
+				t.Errorf("stdout = %q, want no member named by a pass with no manifest", stdout)
+			}
+			// An empty manifest is the same position, reached differently.
+			if err := os.WriteFile(manifest, nil, 0o600); err != nil {
+				t.Fatalf("stage an empty manifest: %v", err)
+			}
+			if _, stdout, _ = bulkShellOut(t, tc.shell, tc.fn, manifest, dirList); !strings.Contains(stdout, "map-bulk-left-nolist") {
+				t.Errorf("stdout = %q, want an empty manifest to say the same", stdout)
+			}
+		})
+	}
+}
+
+// The other half: a shed whose `rm` worked names nothing at all. Every existing
+// row above leaves a writable directory behind it, so this asks the two passes
+// the same question over one.
+func TestBulkShedsNameNothingTheyRemoved(t *testing.T) {
+	for _, tc := range []struct{ name, shell, fn string }{
+		{"discard", sandbox.BulkDiscardShell, "__map_bulk_discard"},
+		{"rename", sandbox.BulkRenameShell, "__map_bulk_rename"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// A directory target, so the rename fails too and reaches its own
+			// naming: a pass that never fails would report nothing trivially.
+			if err := os.Mkdir(dir+"/a.txt", 0o755); err != nil {
+				t.Fatalf("stage a directory target: %v", err)
+			}
+			manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
+
+			_, stdout, _ := bulkShellOut(t, tc.shell, tc.fn, manifest, dirList)
+			// The report ran — its opening line is there — and named nothing.
+			// Both halves matter: a pass that skipped the walk entirely would
+			// also "name nothing", and would leave a real residue unreported.
+			if !strings.Contains(stdout, "map-bulk-left-begin") {
+				t.Errorf("stdout = %q, want the shed's own opening line", stdout)
+			}
+			if strings.Contains(stdout, "map-bulk-left ") {
+				t.Errorf("stdout = %q, want nothing named: the shed removed everything itself", stdout)
+			}
+			assertNoTemps(t, dir)
+		})
 	}
 }
 
