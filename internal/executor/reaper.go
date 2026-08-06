@@ -149,14 +149,29 @@ func (e *Executor) reapSession(ctx context.Context, sid domain.ID) error {
 		}
 	}
 	if tier == tierIdle {
-		// D8: every capture failure degrades to reap-without-checkpoint, loudly
-		// — an agent must not pin its sandbox immortal by filling the disk
-		// (too_large), and a sandbox that cannot be read cannot be saved. The
-		// capture metric records the outcome; a failed capture writes no
-		// marker, so the next provision starts fresh.
-		if err := e.captureCheckpoint(ctx, sid); err != nil {
+		// D8, as the plan wrote it: only the two failures the agent's own
+		// sandbox causes degrade to reap-without-checkpoint, loudly — a
+		// workspace over the budget (an agent must not pin its sandbox
+		// immortal by filling the disk) and a sandbox that cannot be read.
+		// A failure outside the sandbox — the executor's spool disk, the
+		// object store, the marker write — aborts instead: the sandbox stays
+		// owned, the TTL is a floor not a deadline, and the next pass retries,
+		// exactly like the deleted tier's failed blob delete. The capture
+		// metric records the outcome; a failed capture writes no marker, so
+		// the next provision starts fresh.
+		switch err := e.captureCheckpoint(ctx, sid); {
+		case err == nil:
+		case errors.Is(err, errCaptureSessionDeleted):
+			// A concurrent DELETE won the race past the re-classification;
+			// the capture already withdrew its blob and wrote no marker.
+			// Nothing is lost by proceeding — deletion wanted the data gone.
+			slog.InfoContext(ctx, "session deleted during idle capture; reaping without a checkpoint",
+				"session", sid, "error", err)
+		case errors.Is(err, ErrCheckpointTooLarge), errors.Is(err, errCaptureDegradable):
 			slog.WarnContext(ctx, "idle reap proceeds without a checkpoint",
 				"session", sid, "error", err)
+		default:
+			return fmt.Errorf("capture checkpoint: %w", err)
 		}
 	}
 	if err := e.provider.Reap(ctx, sid); err != nil {
@@ -191,7 +206,11 @@ func (e *Executor) idleTTL() time.Duration {
 // (idleTTL() > 0) and every predicate holds in the same snapshot: status
 // idle, last activity older than the TTL, no queued/starting/active work
 // item (a pending harvest or tool_exec must find the tree it was enqueued
-// against), and no unanswered confirmation ask (HITL-idle is still mid-turn
+// against), no work item stopped within the last lease TTL (an interrupt
+// cancels the row immediately, but the physical claimant only notices at its
+// next lease renewal — until the executor's own lease TTL has passed, the
+// tool may still be running in the sandbox), and no unanswered confirmation
+// ask (HITL-idle is still mid-turn
 // — the approved command must run in the context the human saw; the ask read
 // is ordered before the main query, see below). `user.interrupt` does not
 // reap — an interrupted-then-abandoned session falls to the TTL like any
@@ -221,9 +240,11 @@ func (e *Executor) classifyForReap(ctx context.Context, q events.Querier, sid do
 		        s.updated_at < now() - make_interval(secs => $2),
 		        EXISTS (SELECT 1 FROM work_items w
 		                WHERE w.session_id = s.id
-		                  AND w.state IN ('queued', 'starting', 'active'))
+		                  AND (w.state IN ('queued', 'starting', 'active')
+		                       OR (w.state = 'stopped'
+		                           AND w.stopped_at > now() - make_interval(secs => $3))))
 		 FROM sessions s JOIN environments e ON e.id = s.environment_id
-		 WHERE s.id = $1`, sid.String(), e.idleTTL().Seconds()).
+		 WHERE s.id = $1`, sid.String(), e.idleTTL().Seconds(), e.cfg.LeaseTTL.Seconds()).
 		Scan(&status, &archived, &kind, &idlePastTTL, &liveWork)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var deadKind string

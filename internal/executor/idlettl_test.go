@@ -16,7 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 var errBoom = errors.New("daemon boom")
@@ -53,6 +58,21 @@ func seedWorkItem(t *testing.T, h *harness, id, state string) {
 		`INSERT INTO work_items (id, environment_id, session_id, kind, state)
 		 VALUES ($1, $2, $3, 'tool_exec', $4)`,
 		id, h.envID.String(), h.sid.String(), state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedStoppedClaim seeds a work item an interrupt just cancelled: state
+// stopped with stopped_at set, age old. The row is dead, but until the
+// executor's lease TTL has passed its physical claimant may still be running
+// the tool in the sandbox — it only notices the cancellation at its next
+// lease renewal.
+func seedStoppedClaim(t *testing.T, h *harness, id string, age time.Duration) {
+	t.Helper()
+	seedWorkItem(t, h, id, "stopped")
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE work_items SET stopped_at = now() - make_interval(secs => $2) WHERE id = $1`,
+		id, age.Seconds()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -124,6 +144,19 @@ func TestReapPassIdleTierLeavesIneligibleSessions(t *testing.T) {
 		}
 		if len(h.prov.reapedSnapshot()) != 1 {
 			t.Error("a stopped work item blocked the reap")
+		}
+	})
+	t.Run("freshly-stopped-claim", func(t *testing.T) {
+		// An interrupt cancels the row immediately, but the physical claimant
+		// only notices at its next lease renewal — until the executor's lease
+		// TTL has passed, the tool may still be running in the sandbox.
+		h := ttlHarness(t, &fakeSandbox{})
+		seedStoppedClaim(t, h, "work_fresh_stop", 0)
+		if err := h.exec.reapPass(context.Background()); err != nil {
+			t.Fatalf("reap pass: %v", err)
+		}
+		if len(h.prov.reapedSnapshot()) != 0 {
+			t.Error("reaped under a freshly-stopped claim whose tool may still be running")
 		}
 	})
 	t.Run("unanswered-ask", func(t *testing.T) {
@@ -283,6 +316,133 @@ func TestReapDeletedTierAfterAnIdleReap(t *testing.T) {
 	}
 	if !slices.Contains(h.prov.reapedSnapshot(), h.sid) {
 		t.Error("the deleted session's sandbox was not reaped")
+	}
+}
+
+// TestReapPassIdleReapsPastAStaleStoppedClaim: the stopped-claim exclusion is
+// a lease-length grace, not a permanent hold — once the executor's lease TTL
+// has passed, every claimant has noticed the cancellation and the reap runs.
+func TestReapPassIdleReapsPastAStaleStoppedClaim(t *testing.T) {
+	h := ttlHarness(t, &fakeSandbox{})
+	seedStoppedClaim(t, h, "work_stale_stop", 2*h.exec.cfg.LeaseTTL)
+	if err := h.exec.reapPass(context.Background()); err != nil {
+		t.Fatalf("reap pass: %v", err)
+	}
+	if len(h.prov.reapedSnapshot()) != 1 {
+		t.Error("a claim stopped a full lease ago still blocked the reap")
+	}
+}
+
+// TestReapPassIdleIgnoresOtherSessionsWork: the owed-work exclusion is scoped
+// to the candidate — another session's live work item is no reason to keep
+// this one's sandbox.
+func TestReapPassIdleIgnoresOtherSessionsWork(t *testing.T) {
+	h := ttlHarness(t, &fakeSandbox{})
+	otherSid, otherEnv := pgtest.NewSession(t, h.pool, "cloud")
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO work_items (id, environment_id, session_id, kind, state)
+		 VALUES ('work_other', $1, $2, 'tool_exec', 'active')`,
+		otherEnv.String(), otherSid.String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.exec.reapPass(context.Background()); err != nil {
+		t.Fatalf("reap pass: %v", err)
+	}
+	if !slices.Contains(h.prov.reapedSnapshot(), h.sid) {
+		t.Error("another session's live work item blocked this session's reap")
+	}
+}
+
+// failPutStore fails every upload — the shape of an object store outage.
+type failPutStore struct{ blob.Store }
+
+func (failPutStore) Put(context.Context, string, io.Reader, int64, string) error {
+	return errBoom
+}
+
+// TestIdleReapAbortsWhenTheStoreFails: a failure outside the sandbox — here
+// the object store refusing the upload — must NOT degrade to a destructive
+// reap: the pass reports the error, the sandbox stays owned, and the next
+// interval retries with the workspace intact (the deleted tier's own rule).
+func TestIdleReapAbortsWhenTheStoreFails(t *testing.T) {
+	h := ttlHarness(t, &fakeSandbox{})
+	bare := New(h.pool, h.log, h.queue, h.prov, failPutStore{h.blobs}, Config{SandboxIdleTTL: time.Hour})
+	err := bare.reapPass(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "upload checkpoint") {
+		t.Fatalf("reap pass error = %v, want the upload failure surfaced", err)
+	}
+	if len(h.prov.reapedSnapshot()) != 0 {
+		t.Error("a store outage degraded to a destructive reap")
+	}
+	if state, _ := markerState(t, h); state != "" {
+		t.Errorf("an aborted capture left marker %q", state)
+	}
+}
+
+// TestCaptureWritesNoMarkerForADeletedSession: a DELETE landing between the
+// reaper's under-lock re-classification and the marker write must not be
+// resurrected — the guarded insert sees the session row gone, withdraws the
+// just-uploaded blob, and reports the race as its own outcome.
+func TestCaptureWritesNoMarkerForADeletedSession(t *testing.T) {
+	h := ttlHarness(t, &fakeSandbox{})
+	deleteSessionRow(t, h)
+	err := h.exec.captureCheckpoint(context.Background(), h.sid)
+	if !errors.Is(err, errCaptureSessionDeleted) {
+		t.Fatalf("capture after delete = %v, want errCaptureSessionDeleted", err)
+	}
+	if state, _ := markerState(t, h); state != "" {
+		t.Errorf("a capture racing a delete left marker %q", state)
+	}
+	if hasCheckpoint(t, h) {
+		t.Error("a capture racing a delete left its blob behind")
+	}
+}
+
+// recordingQuerier records each statement's SQL in call order, delegating to
+// the pool — the seam that pins classifyForReap's read ordering.
+type recordingQuerier struct {
+	inner events.Querier
+	sqls  []string
+}
+
+func (r *recordingQuerier) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	r.sqls = append(r.sqls, sql)
+	return r.inner.QueryRow(ctx, sql, args...)
+}
+
+func (r *recordingQuerier) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	r.sqls = append(r.sqls, sql)
+	return r.inner.Query(ctx, sql, args...)
+}
+
+// TestClassifyReadsAsksBeforeMainQuery: the ask exclusion is deliberately the
+// EARLIER read — a confirmation batch answers the ask, enqueues the work item,
+// and flips the session running in one transaction, so asks-first means that
+// transaction lands either before both reads (the main query sees running or
+// the live item) or after the ask read (which still saw the ask). Main-first
+// would admit the double-permissive interleaving. The commit-timing race
+// itself is not constructible in a test; the ordering that closes it is.
+func TestClassifyReadsAsksBeforeMainQuery(t *testing.T) {
+	h := ttlHarness(t, &fakeSandbox{})
+	rq := &recordingQuerier{inner: h.pool}
+	tier, err := h.exec.classifyForReap(context.Background(), rq, h.sid)
+	if err != nil || tier != tierIdle {
+		t.Fatalf("classify = %v, %v; want tierIdle", tier, err)
+	}
+	ask, main := -1, -1
+	for i, sql := range rq.sqls {
+		if strings.Contains(sql, "evaluated_permission") {
+			ask = i
+		}
+		if strings.Contains(sql, "FROM sessions s JOIN environments") {
+			main = i
+		}
+	}
+	if ask < 0 || main < 0 {
+		t.Fatalf("expected both reads recorded, got %d statements", len(rq.sqls))
+	}
+	if ask > main {
+		t.Errorf("the ask read ran at %d, after the main query at %d", ask, main)
 	}
 }
 

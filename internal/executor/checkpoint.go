@@ -46,6 +46,21 @@ const (
 // not pin its sandbox immortal by filling the disk (plan 24 D8).
 var ErrCheckpointTooLarge = errors.New("executor: checkpoint exceeds the configured size budget")
 
+// errCaptureDegradable marks the other capture failure plan 24 D8 sanctions
+// reaping through: the sandbox itself cannot be read (a Failed pod, an
+// exec/archive failure). Everything outside the sandbox — the executor's
+// spool disk, the object store, the marker write — is deliberately NOT
+// wrapped: those failures abort the reap so the sandbox stays owned and the
+// next pass retries, exactly like the deleted tier's failed blob delete.
+var errCaptureDegradable = errors.New("sandbox unreadable")
+
+// errCaptureSessionDeleted reports that the session row vanished between the
+// reaper's under-lock re-classification and the marker write — a concurrent
+// DELETE won the race. The capture removed its own just-uploaded blob (the
+// deleting transaction already swept the marker, and a marker written now
+// would resurrect it against a dead session); the reap itself may proceed.
+var errCaptureSessionDeleted = errors.New("session deleted during capture")
+
 // restoreTarPath is where the checkpoint tar lands inside the sandbox before
 // the in-sandbox extraction; /tmp is writable in every hardening shape and is
 // deliberately not part of the checkpoint itself.
@@ -136,7 +151,7 @@ func (e *Executor) captureCheckpoint(ctx context.Context, sid domain.ID) (err er
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("export %s: %w", root, err)
+			return fmt.Errorf("%w: export %s: %w", errCaptureDegradable, root, err)
 		}
 		err = rerootInto(tw, rc, root, root == workdir)
 		if err == nil {
@@ -150,7 +165,11 @@ func (e *Executor) captureCheckpoint(ctx context.Context, sid domain.ID) (err er
 		}
 		rc.Close()
 		if err != nil {
-			return fmt.Errorf("capture %s: %w", root, err)
+			// Reroot/drain failures are the export stream's — a truncated or
+			// malformed archive, a tar that died behind a complete-looking one
+			// — so they share the export error's degradability. The budget
+			// refusal travels this path too and keeps its own sentinel.
+			return fmt.Errorf("%w: capture %s: %w", errCaptureDegradable, root, err)
 		}
 	}
 	if err := tw.Close(); err != nil {
@@ -171,13 +190,33 @@ func (e *Executor) captureCheckpoint(ctx context.Context, sid domain.ID) (err er
 	if err := e.blobs.Put(ctx, key, spool, size, "application/gzip"); err != nil {
 		return fmt.Errorf("upload checkpoint: %w", err)
 	}
-	_, err = e.pool.Exec(ctx,
+	// The marker is written only while the session row still exists, under a
+	// KEY SHARE lock on it: deleteSession's DELETE (which sweeps this marker
+	// in its own transaction, sessions row first) blocks the lock, so this
+	// statement either lands before the delete — whose later marker DELETE
+	// then sweeps it — or waits the delete out and inserts nothing. Without
+	// the guard, a delete committing between the reaper's re-classification
+	// and this write would be resurrected: the table carries no FK by design,
+	// so a plain upsert against a dead session succeeds and orphans both the
+	// row and the blob forever (no reap pass ever revisits the session).
+	tag, err := e.pool.Exec(ctx,
 		`INSERT INTO session_checkpoints (session_id, blob_key, state, taken_at)
-		 VALUES ($1, $2, 'ready', now())
+		 SELECT $1, $2, 'ready', now()
+		 WHERE EXISTS (SELECT 1 FROM sessions WHERE id = $1 FOR KEY SHARE)
 		 ON CONFLICT (session_id) DO UPDATE
 		 SET blob_key = EXCLUDED.blob_key, state = 'ready', taken_at = now()`,
 		sid.String(), key)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		if derr := e.blobs.Delete(ctx, key); derr != nil {
+			return fmt.Errorf("%w; and the orphaned blob could not be removed: %v",
+				errCaptureSessionDeleted, derr)
+		}
+		return errCaptureSessionDeleted
+	}
+	return nil
 }
 
 // limitedWriter meters the capture's framed tar stream and refuses the byte

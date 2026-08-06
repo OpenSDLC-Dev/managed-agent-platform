@@ -179,9 +179,13 @@ spec:
             - name: EXECUTOR_CHECKPOINT_MAX_BYTES
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.executor.sandboxIdleTTL }}
+            {{- /* Not `with`: template truthiness folds the numeric 0 — the
+                 documented DISABLE value — into "unset", silently arming the
+                 24h default. toString first, so 0 survives as "0". */}}
+            {{- $sandboxIdleTTL := .Values.executor.sandboxIdleTTL | toString }}
+            {{- if and (ne $sandboxIdleTTL "") (ne $sandboxIdleTTL "<nil>") }}
             - name: EXECUTOR_SANDBOX_IDLE_TTL
-              value: {{ . | quote }}
+              value: {{ $sandboxIdleTTL | quote }}
             {{- end }}
             {{- with .Values.executor.gateImage }}
             {{- if semverCompare "<1.29-0" $.Capabilities.KubeVersion.Version }}

@@ -20,13 +20,20 @@ copy of an entry here.
   closing the workspace-continuity half of #28). The reaper gains its fourth
   tier: an **idle cloud** session whose last activity
   (`sessions.updated_at`) is older than the new `EXECUTOR_SANDBOX_IDLE_TTL`
-  (default 24h; `0` disables; compose and Helm expose the knob) has its
+  (default 24h; `0` disables; compose and Helm expose the knob — the Helm
+  template reads the value through `toString`, so the YAML integer `0`
+  disables the tier instead of being folded into "unset" and silently arming
+  the default) has its
   workspace captured through the slice-4 engine and its sandbox destroyed —
   the TTL tier is the engine's first production trigger. Three exclusions,
   all evaluated under the session's advisory lock: a session owing work (a
   `queued`/`starting`/`active` work item — a pending harvest or tool run
   must find the tree it was enqueued against, read in the same snapshot as
-  the status and TTL-age predicates), a session with an unanswered
+  the status and TTL-age predicates — or one **stopped within the executor's
+  lease TTL**: an interrupt cancels the row instantly but its physical
+  claimant only notices at the next lease renewal, so until a lease TTL has
+  passed the tool may still be running in the sandbox; normally-completed
+  items carry no `stopped_at` and no such grace), a session with an unanswered
   tool-confirmation ask (HITL-idle is still mid-turn; the ask check is its
   own, deliberately *earlier* read — ordered before the main criteria query,
   because a
@@ -36,16 +43,27 @@ copy of an entry here.
   disabled tier (zero TTL, or an executor with no object store — which logs
   the disablement once at startup rather than silently discarding
   workspaces). `user.interrupt` still never reaps; an
-  interrupted-then-abandoned session falls to the TTL like any other. Per
-  plan 24 D8 every capture failure degrades loudly to reap-without-checkpoint
-  (`too_large` and `error` are separate metric outcomes; a failed capture
-  writes no marker, so the next provision starts fresh) — an agent must not
-  pin its sandbox immortal by filling the disk. The `session_checkpoints`
+  interrupted-then-abandoned session falls to the TTL like any other. Only
+  the capture failures the sandbox itself causes degrade (loudly) to
+  reap-without-checkpoint — the workspace over the budget and an unreadable
+  sandbox, exactly the two plan 24 D8 sanctions (`too_large` and `error` are
+  separate metric outcomes; a failed capture writes no marker, so the next
+  provision starts fresh) — while a failure *outside* the sandbox (the
+  executor's spool disk, the object store, the marker write) **aborts the
+  reap**: the sandbox stays owned, the TTL is a floor not a deadline, and
+  the next pass retries with the workspace intact (the review caught the
+  first cut degrading on every failure, turning a transient blob-store
+  outage into permanent workspace loss). The `session_checkpoints`
   marker row's cleanup owner is the **deleting transaction itself**
   (`deleteSession`) — the acceptance run caught the reaper being unable to
   own it: a session whose sandbox the idle tier already reaped never
   reappears in `Owned`, so a row left to the reaper's deleted tier would
-  linger forever. Plan 24 archives with this slice.
+  linger forever — and the capture's marker write is guarded against the
+  reverse race: it inserts under a `KEY SHARE` lock on the session row only
+  while that row still exists, so a DELETE landing mid-capture cannot have
+  its marker resurrected (the capture withdraws its just-uploaded blob and
+  the reap proceeds, deletion having wanted the data gone). Plan 24 archives
+  with this slice.
 
 - **The checkpoint/restore engine: an idle-reaped session will resume with its
   workspace** (plan 24 slice 4; #64, the workspace-continuity half of #28).

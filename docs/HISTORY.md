@@ -76,6 +76,60 @@ deleting transaction (no FK cascades it), the reaper's tier keeping only the blo
 delete; the mutation (`DELETE` swapped for `SELECT 1`) fails the API test, and the
 delete row then passed.
 
+**Review hardening, landed in the same PR.** The verifier returned PASS WITH FINDINGS
+(gate from scratch, both suggested mutants reproduced, the asks-first ordering argument
+independently judged sound against `AppendInTx`; its two note findings were wording
+fixes). The dual review (Codex `gpt-5.6-sol`, FAIL with 2 P1 + 4 P2; the Opus 5 review
+workflow, 18 agents, 10 confirmed / 3 refuted after per-finding adversarial verification)
+then converged on one headline from both sides:
+
+- **D8 implemented broader than the plan wrote it** (Codex #5, workflow P1 ×3
+  dimensions). The first cut degraded to reap-without-checkpoint on *every* capture
+  failure; the plan sanctions exactly two — over-budget and an unreadable sandbox. A
+  transient object-store 5xx, a full executor spool disk, or a failed marker write
+  therefore destroyed the workspace permanently, with one WARN line as the only trace —
+  and one store blip spanning a pass would have hit every idle-past-TTL session on the
+  endpoint. Now only sandbox-caused failures degrade (`ErrCheckpointTooLarge`, and
+  export/archive failures wrapped in a sentinel); anything outside the sandbox aborts
+  the reap so the sandbox stays owned and the next pass retries — the deleted tier's
+  own blob-delete rule. This also repairs D4's lossless-wake argument (Codex #1): a
+  `user.message` committing after the under-lock recheck now always finds either a
+  ready checkpoint to restore or a still-alive sandbox; the loss window is confined to
+  captures that were impossible regardless.
+- **An idle reap racing a concurrent DELETE resurrected the marker and blob forever**
+  (Codex #3, workflow P1). `deleteSession` takes no advisory lock, and the marker
+  table carries no FK by design, so a delete committing between the reaper's
+  re-classification and the marker upsert left an orphaned `ready` row and blob no
+  reap pass would ever revisit. The marker write now inserts only while the session
+  row exists, under `FOR KEY SHARE` — it either lands before the delete (whose
+  in-transaction sweep removes it) or waits the delete out, inserts nothing, and
+  withdraws the just-uploaded blob.
+- **A `stopped` work item can still have a physically executing claimant** (Codex #2).
+  An interrupt cancels the row instantly, but the executor only notices at its next
+  lease renewal — with a short operator TTL the tier could reap under a still-running
+  tool. The owed-work exclusion now also holds for an item stopped within the
+  executor's lease TTL (`stopped_at`, which normal completion never sets).
+- **Helm folded the numeric `0` — the documented disable value — into "unset"**
+  (Codex #6, workflow P2 ×4, reproduced by render on both sides): `with`-truthiness
+  omitted the env var and the binary armed its 24h default, silently enabling
+  destructive reaping the operator disabled. The template now reads the value through
+  `toString`; the five-case render matrix (unset / null / `0` / `"0"` / `"30m"`) is
+  pinned in the PR record.
+- **The workflow's test dimension confirmed the ordering gap this session then
+  watched happen**: `fakeProvider.Reap` left `Export` working, so swapping capture
+  after `Reap` — the exact mutant one workflow probe agent left on disk mid-review —
+  kept the whole package green. The fake now mirrors both real backends (a destroyed
+  sandbox answers `ErrNotFound` until re-provisioned), which makes the happy-path test
+  kill that mutant; the owed-work exclusion's per-session scoping and the asks-first
+  read order each gained their own test (a recording `Querier` pins the statement
+  order — the commit-timing race itself is not constructible, the ordering that closes
+  it is).
+
+Refuted with evidence, no change: the API's post-commit best-effort blob delete
+(pre-existing narrow window, already WARN-logged; the proposed in-transaction delete
+would strand a `ready` marker over a missing blob and wedge every future provision),
+and two claims against the delete-path tests' framing that named no reachable defect.
+
 **Plan 24 progress summary (archived).** Five slices, five PRs: #314 (wire guards:
 archive/delete of `running` 400), #315 (`Owned`/`Reap` on both backends + contract
 rows), #317 (the reaper's terminal tiers: tombstone-evidenced deleted, archived,

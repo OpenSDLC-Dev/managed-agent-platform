@@ -187,10 +187,15 @@ type fakeProvider struct {
 	gate    chan struct{}
 	// owned/reaped drive and record the reaper (reaper_test.go); mu guards
 	// them because Run's reap loop is a separate goroutine. reapFailFor makes
-	// one session's Reap fail, for the error-isolation row.
+	// one session's Reap fail, for the error-isolation row. destroyed tracks
+	// the sandboxes currently gone — Reap adds, Provision removes — so Export
+	// after a reap fails the way both real backends do (a removed container
+	// or deleted pod answers ErrNotFound), which is what pins the tier's
+	// capture-BEFORE-destroy ordering under test.
 	mu          sync.Mutex
 	owned       []domain.ID
 	reaped      []domain.ID
+	destroyed   map[domain.ID]bool
 	reapFailFor domain.ID
 	// exports feeds Export: root path → tar bytes (checkpoint tests); calls
 	// records provision/reap ordering for the restore-replaces-first rule.
@@ -207,6 +212,7 @@ func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbo
 	p.lastSpec = spec
 	p.mu.Lock()
 	p.calls = append(p.calls, "provision")
+	delete(p.destroyed, spec.SessionID)
 	p.mu.Unlock()
 	if p.entered != nil {
 		select {
@@ -241,20 +247,25 @@ func (p *fakeProvider) Reap(_ context.Context, sid domain.ID) error {
 		return errors.New("daemon unreachable")
 	}
 	p.reaped = append(p.reaped, sid)
+	if p.destroyed == nil {
+		p.destroyed = map[domain.ID]bool{}
+	}
+	p.destroyed[sid] = true
 	return nil
 }
 
 // Export answers with the canned per-root tars in exports (keyed by root
 // path), sandbox.ErrFileNotExist for a root without one — the normal shape
 // for a session that never used a root — and ErrNotFound when the provider
-// holds nothing for the session.
+// holds nothing for the session, including one whose sandbox a Reap just
+// destroyed and no Provision has replaced.
 func (p *fakeProvider) Export(_ context.Context, sid domain.ID, root string) (io.ReadCloser, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.exportErr != nil {
 		return nil, p.exportErr
 	}
-	if !slices.Contains(p.owned, sid) {
+	if !slices.Contains(p.owned, sid) || p.destroyed[sid] {
 		return nil, sandbox.ErrNotFound
 	}
 	data, ok := p.exports[root]
