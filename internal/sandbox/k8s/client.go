@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -69,6 +70,12 @@ type Config struct {
 	NodeSelector     string
 	Tolerations      string
 	ImagePullSecrets string
+	// GateTokenRevoker, when non-nil, is called by Reap before it deletes a
+	// session's pod, so a gate token never outlives its gate (#197). On the
+	// provider — not a Spec — because Reap has no Spec: the reaper works from
+	// a session id alone. The executor supplies its pool-backed
+	// implementation; the BYOC worker has no database and leaves it nil.
+	GateTokenRevoker sandbox.GateTokenRevoker
 }
 
 // restConfig resolves the cluster connection: in-cluster when running as a pod

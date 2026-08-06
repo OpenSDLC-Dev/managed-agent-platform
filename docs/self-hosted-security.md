@@ -75,8 +75,16 @@ tests and the reference design commits to.
   ServiceAccount token; the provider drives the cluster with its own credentials,
   not the pod's (`internal/sandbox/k8s/k8s.go`). The pod uses `restartPolicy:
   Never`, and the executor's own RBAC is namespaced and minimal (`create`/`get`/
-  `delete` on `pods`, `create` on `pods/exec`, nothing cluster-wide;
-  `deploy/helm/managed-agent-platform/templates/executor-rbac.yaml`). On Docker
+  `list`/`delete` on `pods` — `list` is the reaper's enumeration of owned pods
+  by label (plan 24) — and `create` on `pods/exec`, nothing cluster-wide;
+  `deploy/helm/managed-agent-platform/templates/executor-rbac.yaml`). One
+  consequence to place deliberately: the ownership label is what authorizes the
+  reap — `Reap` deletes every pod in the namespace carrying the session's
+  label, by design (a renamed or manually recreated pod is still the session's
+  to reap). Within the executor's namespace, authority to set pod labels is
+  therefore authority to have a pod deleted; the namespace is a single trust
+  domain, and a principal who may patch labels there but must not delete pods
+  is a boundary this platform does not draw. On Docker
   the sandbox runs with `HostConfig.Init: true` so orphaned tool subprocesses are
   reaped rather than piling up as zombies (`internal/sandbox/docker/docker.go`).
 

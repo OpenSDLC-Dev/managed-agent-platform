@@ -87,6 +87,62 @@ limit partway through, so rounds 3–5 ran it under an explicit `opus` override 
 from `.claude/skills/run-reviews/SKILL.md`'s pinning rule, forced by quota rather than
 chosen, and recorded here because a weaker verifier certifying this class of change is
 exactly what the pin exists to prevent.
+---
+
+## Sandbox teardown (plan 24, #64) — slice 2: `Owned`/`Reap` on both backends
+
+**Review hardening, landed in the same PR.** The verifier PASSed twice — the slice, then
+the hardening delta — independently reproducing five targeted mutants red in a scratch
+copy (the 409-wait reverted, either backend arm's revoker threading dropped, the k8s
+delete error swallowed, the gate's ownership label dropped) and running a live
+Provision→Owned→racing-`docker rm -f`→Reap→Owned probe against the real daemon. The two
+review passes (Codex `gpt-5.6-sol` plain mode; the Opus 5 review workflow, 4 finders +
+per-finding adversarial verification) converged on the same substantive finding from
+opposite directions: Docker `Reap` tolerated only the 404 a racing remover almost never
+produces, while the 409 "removal already in progress" window — measured live at ~150 ms
+per removal — surfaced the racer as an error; `removeWaitingGone` now waits that window
+out, and the correction came from the verification itself (blanket-tolerating the 409
+would break Reap's gone-when-it-returns contract). The k8s "actually gone" wording was
+cut down to what a grace-0 delete can promise — the API object, Destroy's own documented
+bound. Confirmed test gaps each gained a mutation-checked test: backend.New's revoker
+threading (proven with no daemon in the loop — the sentinel revoke error surfaces before
+any endpoint contact), k8s delete-error propagation, the gate create payload's ownership
+label (the one thing that makes an orphaned gate reapable — a probe dropping it had left
+every suite green), empty-label-value exclusion on both Owned paths, and the docker list
+error paths. Refuted with evidence rather than fixed: a claimed reap-vs-provision token
+window (slice 3's advisory lock owns it), the k8s UID-successor "false success" (a
+successor under the reaped pod's name means the reap's own target is already gone — the
+wait ended for the right reason), and the
+pool-before-provider reorder (validation ordering shifted, no correctness change). The
+K8s label-authorizes-reap consequence Codex raised is placed deliberately in
+docs/self-hosted-security.md rather than "fixed": within the executor's namespace,
+label-set authority implying delete authority is the single-trust-domain assumption the
+platform already makes, now stated where an operator reads.
+
+## Sandbox teardown (plan 24, #64) — slice 1: the running-session archive/delete guard
+
+**Review hardening, landed in the same PR.** The verifier returned PASS, independently
+reproducing the guard's red (reverting `requireNotRunning` re-failed the new test) and
+adding one docs finding, fixed (ARCHITECTURE's sessions.go row now names the refusal).
+The Claude review (Opus 5) confirmed three gaps, each closed by a mutation-checked test
+or a registry entry: the registry's "rescheduling does not refuse" claim was untested — a
+guard tightened to `!= idle` survived the suite; the rescheduling case now goes red on
+that mutant. The `FOR UPDATE` row lock was untested — stripping it left the suite green;
+`TestArchiveObservesConcurrentRunningFlip` now fails on that mutant. And the documented
+"session update must be idle" requirement is silently unenforced — registered in
+DIVERGENCES, tracked as #312. Its fourth claim — a deadlock in this diff — was refuted
+for the diff, but both reviewers independently converged on the underlying pre-existing
+inversion: `deleteSession` locks session-then-token while `gatetoken.Ensure` locks
+token-then-session (its successor insert takes the FK's `KEY SHARE`); now #313. The first
+Codex pass died in its security-scan plugin (finalization schema error, no verdict — the
+rerun was steered to plain review mode). The rerun confirmed the six attacked invariants
+otherwise clean and forced two test rewrites: the concurrent test's 300 ms sleep proved
+nothing about *where* the archive was blocked (under CI pressure the lockless mutant
+could pass by reading the post-commit row), so the commit now waits on a
+`pg_stat_activity` barrier that observes the guard's `SELECT … FOR UPDATE` in a `Lock`
+wait — the mutant now fails deterministically by barrier timeout; and the goroutine
+called `t.Fatalf` off the test goroutine through `tserver.do` (a hang, not a failure, on
+transport error) — it now speaks plain `net/http` and reports errors over the channel.
 
 ---
 

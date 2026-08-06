@@ -175,8 +175,18 @@ func run(ctx context.Context) error {
 		}
 	}
 
+	// The pool opens before the sandbox backend because the backend takes a
+	// pool-backed gate-token revoker: Reap revokes a session's token before
+	// removing its containers (plan 24).
+	pool, err := store.Open(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
 	provider, err := backend.New(backend.Config{
 		Backend:             os.Getenv("SANDBOX_BACKEND"),
+		GateTokenRevoker:    executor.GateTokenRevoker(pool),
 		DockerHost:          os.Getenv("DOCKER_HOST"),
 		DockerGateNetwork:   os.Getenv("SANDBOX_DOCKER_GATE_NETWORK"),
 		K8sKubeconfig:       os.Getenv("SANDBOX_K8S_KUBECONFIG"),
@@ -191,12 +201,6 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-
-	pool, err := store.Open(ctx, dsn)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
 
 	blobs, err := blobbackend.FromEnv(ctx)
 	if err != nil {

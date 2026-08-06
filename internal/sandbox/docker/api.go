@@ -171,6 +171,35 @@ type containerInfo struct {
 	} `json:"HostConfig"`
 }
 
+// containerSummary is one row of the daemon's container list — just enough to
+// map an owned container back to its session and to order a reap (the gate,
+// found by name, goes last).
+type containerSummary struct {
+	ID     string            `json:"Id"`
+	Names  []string          `json:"Names"`
+	Labels map[string]string `json:"Labels"`
+}
+
+// listContainers returns every container — running or stopped (all=1) —
+// matching the label filters ("key" for presence, "key=value" for equality).
+func (c *apiClient) listContainers(ctx context.Context, labelFilters ...string) ([]containerSummary, error) {
+	filters, err := json.Marshal(map[string][]string{"label": labelFilters})
+	if err != nil {
+		return nil, fmt.Errorf("docker: encode list filters: %w", err)
+	}
+	resp, err := c.request(ctx, http.MethodGet, "/containers/json",
+		url.Values{"all": {"1"}, "filters": {string(filters)}}, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out []containerSummary
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("docker: decode /containers/json reply: %w", err)
+	}
+	return out, nil
+}
+
 // hostCPUs is the daemon's CPU count. The daemon refuses a create whose
 // NanoCpus exceeds it ("range of CPUs is from 0.01 to N"), so the platform's
 // default CPU cap has to be clamped to it — otherwise a host with fewer CPUs

@@ -15,6 +15,57 @@ copy of an entry here.
 
 ### Added
 
+- **The sandbox provider learns `Owned` and `Reap` on both backends — the
+  reaper's hands, with no reaper yet** (plan 24 slice 2; #64).
+  `sandbox.Provider` grows the teardown contract: `Owned(ctx)` lists the
+  distinct session ids behind every container/pod carrying the ownership label
+  on this endpoint — running or stopped, gates included, endpoint-local by
+  design so N executors shard the reap with no coordination — and
+  `Reap(ctx, sessionID)` destroys a session's whole holding from its id alone,
+  needing no live handle: on Docker it force-removes every labeled container
+  with its anonymous volumes, sandbox before its netns-owning gate, waiting out
+  the daemon's "removal already in progress" 409 — the window a racing reaper
+  actually lands in — rather than surfacing the racer as an error; on
+  Kubernetes it selects the session's pods by label (never the derived name)
+  and waits until each pod object is gone from the API (the force-deleting
+  `Destroy`'s own bound: a partitioned node's kubelet may lag). Both revoke the
+  session's gate token
+  first through a new provider-level `GateTokenRevoker` (`Reap` has no `Spec`
+  to carry one; a failed revoke aborts with nothing removed, so the next pass
+  retries both halves — #197's ordering), which `cmd/executor` wires from its
+  pool via `backend.Config` and the database-less BYOC worker leaves nil. The
+  Docker API client gains its one missing endpoint
+  (`GET /containers/json?all=1` + label filter) and the Helm executor Role the
+  matching `list` verb. Four new shared contract rows (owned-after-provision,
+  reap-removes-all, reap-idempotent, reap-unknown-noop) run against both real
+  backends; the gated-pair ordering, revoke-first, 404-as-removed and
+  label-not-name behaviors are pinned by backend-specific suites (scripted
+  daemon, fake clientset), each verified to fail against its target mutant. No
+  production caller yet — slice 3's reaper loop is the consumer.
+
+- **Plan 24 drafted — sandbox teardown: the reaper, and the workspace that
+  survives it — and its first slice: a running session refuses archive and
+  delete** ([docs/plan/24_sandbox-teardown.md](./docs/plan/24_sandbox-teardown.md);
+  #64, and the workspace-continuity half of #28). The plan builds the missing
+  destruction lifecycle: a reaper goroutine in the executor (the only process
+  holding both the sandbox provider and the pool) as the single owner —
+  sandboxes are invisible on the wire, so eventual teardown is
+  wire-indistinguishable from immediate — with `Owned`/`Reap` joining
+  `sandbox.Provider`, reap criteria derived from the session's database
+  lifecycle only (deleted / archived / terminated now; idle-past-TTL with a
+  blob checkpoint/restore of the agent's durable state later), a per-session
+  advisory lock linearizing reap against provision, and `user.interrupt`
+  deliberately not a reap trigger. Slice 1 is the structural precondition the
+  reference documents: archiving or deleting a `running` session now answers
+  400 `invalid_request_error` (`requireNotRunning`, checked under the session
+  row lock in the same transaction as the mutation, so a confirmation flipping
+  the session to running cannot slip between check and commit) — the refusal's
+  status and wording are ours, recorded INFERRED in docs/DIVERGENCES.md. No
+  gate-token change rides along: `gatetoken.Authenticate` already fails closed
+  on archived sessions. Tests: `TestRunningSessionArchiveAndDeleteRejected`
+  (red before the guard, green after — both mutations refused while running,
+  neither mutating the row, both succeeding once idle).
+
 - **Plan 23 drafted: a write the sandbox cannot land becomes the model's error,
   not the platform's fault**
   ([docs/plan/23_classified-unwritable-write.md](./docs/plan/23_classified-unwritable-write.md),

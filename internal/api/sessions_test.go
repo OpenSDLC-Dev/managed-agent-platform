@@ -702,3 +702,158 @@ func TestSessionArchiveAndDelete(t *testing.T) {
 	status, body = s.do(http.MethodDelete, "/v1/sessions/sesn_missing", nil)
 	wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 }
+
+// Plan 24 slice 1: the reference documents that a running session cannot be
+// archived or deleted (an interrupt must land first). The reject status and
+// message are ours — INFERRED in docs/DIVERGENCES.md.
+func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	id := sess["id"].(string)
+
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'running' WHERE id = $1`, id); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+
+	status, body := s.do(http.MethodPost, "/v1/sessions/"+id+"/archive", nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	status, body = s.do(http.MethodDelete, "/v1/sessions/"+id, nil)
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+
+	// Neither refusal mutated the session: still listed, still unarchived.
+	status, got := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get after refusals: %d %v", status, got)
+	}
+	if got["archived_at"] != nil {
+		t.Errorf("archived_at after refused archive = %v, want null", got["archived_at"])
+	}
+
+	// Once the session settles (the interrupt path's end state), both succeed.
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'idle' WHERE id = $1`, id); err != nil {
+		t.Fatalf("set idle: %v", err)
+	}
+	status, body = s.do(http.MethodPost, "/v1/sessions/"+id+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive after idle: %d %v", status, body)
+	}
+	status, body = s.do(http.MethodDelete, "/v1/sessions/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("delete after idle: %d %v", status, body)
+	}
+
+	// The refusal is running-only — the registry's positive claim that
+	// rescheduling (an auto-retrying session) does not refuse is load-bearing:
+	// a guard tightened to "must be idle" would strand such a session's
+	// archive behind its transient-error loop.
+	resched := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	rid := resched["id"].(string)
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'rescheduling' WHERE id = $1`, rid); err != nil {
+		t.Fatalf("set rescheduling: %v", err)
+	}
+	status, body = s.do(http.MethodPost, "/v1/sessions/"+rid+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive while rescheduling: %d %v", status, body)
+	}
+	status, body = s.do(http.MethodDelete, "/v1/sessions/"+rid, nil)
+	if status != http.StatusOK {
+		t.Fatalf("delete while rescheduling: %d %v", status, body)
+	}
+}
+
+// The guard's row lock is what closes the check-then-act window: a flip to
+// running committed while the archive is in flight must be observed, not
+// raced past. The concurrent writer here holds the session row exclusively
+// (as a confirmation dispatch flipping the session to running would), commits
+// after the archive has reached the guard, and the archive must answer 400 —
+// without FOR UPDATE the guard's plain SELECT reads the pre-flip snapshot,
+// sails past, and the archive lands on a running session.
+func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	id := sess["id"].(string)
+	ctx := context.Background()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `UPDATE sessions SET status = 'running' WHERE id = $1`, id); err != nil {
+		t.Fatalf("flip to running: %v", err)
+	}
+
+	// The goroutine speaks plain net/http: tserver.do fatals on transport
+	// errors, and t.Fatalf must not run outside the test goroutine — an
+	// error is sent back instead, so the receives below can never hang.
+	type resp struct {
+		status int
+		body   map[string]any
+		err    error
+	}
+	ch := make(chan resp, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, s.url+"/v1/sessions/"+id+"/archive", nil)
+		if err != nil {
+			ch <- resp{err: err}
+			return
+		}
+		req.Header.Set("x-api-key", testKey)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			ch <- resp{err: err}
+			return
+		}
+		defer res.Body.Close()
+		var body map[string]any
+		if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+			ch <- resp{err: err}
+			return
+		}
+		ch <- resp{status: res.StatusCode, body: body}
+	}()
+
+	// Commit only once the guard's SELECT … FOR UPDATE is observably
+	// waiting on the held row lock. A fixed sleep would leave a scheduling
+	// window in which a lockless guard reads the post-commit row and
+	// answers 400 for the wrong reason; a guard without FOR UPDATE never
+	// waits at its SELECT, so this poll timing out is exactly how that
+	// mutant fails. (The poll's own query never matches: its
+	// wait_event_type is null, not Lock.)
+	waitSQL := `SELECT EXISTS (
+		SELECT 1 FROM pg_stat_activity
+		WHERE datname = current_database()
+		  AND wait_event_type = 'Lock'
+		  AND query LIKE '%FROM sessions%FOR UPDATE%')`
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		select {
+		case r := <-ch:
+			t.Fatalf("archive answered (%d, err %v) before the running flip committed", r.status, r.err)
+		default:
+		}
+		var waiting bool
+		if err := s.pool.QueryRow(ctx, waitSQL).Scan(&waiting); err != nil {
+			t.Fatalf("poll pg_stat_activity: %v", err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("guard never blocked on the held session row lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	r := <-ch
+	if r.err != nil {
+		t.Fatalf("archive request: %v", r.err)
+	}
+	wantErr(t, r.status, r.body, http.StatusBadRequest, "invalid_request_error")
+}
