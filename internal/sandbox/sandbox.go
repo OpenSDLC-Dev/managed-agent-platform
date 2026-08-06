@@ -198,9 +198,9 @@ type GateSpec struct {
 // call after the first) never calls either method, so it never revokes the token
 // the running gate is already authenticating with — and a create that loses the
 // race (409) discards its generated token unpersisted, leaving the winner's
-// intact. It lives on GateSpec rather than on the provider because Persist needs
-// the executor's DB pool (constructed after the provider) and both backends mint
-// identically; the executor supplies an implementation backed by
+// intact. It lives on GateSpec rather than on the provider because minting is a
+// per-provision concern both backends share, with Persist needing the executor's
+// DB pool; the executor supplies an implementation backed by
 // internal/gatetoken (a random token from Generate, its hash written by Ensure in
 // Persist, over its pool).
 type GateTokenMinter interface {
@@ -450,8 +450,12 @@ type Provider interface {
 	// Reap destroys everything the endpoint owns for the session — sandbox,
 	// gate, anonymous volumes — revoking the session's gate token first when
 	// the provider was built with a revoker (#197: a token must not outlive
-	// its gate). It needs no live handle, waits until the assets are actually
-	// gone (a reaped session is *not running*, not merely terminating), and
-	// is idempotent: reaping a session that owns nothing is a no-op.
+	// its gate). It needs no live handle, waits out asynchronous deletion so
+	// the assets are gone — at the orchestrator's level — when it returns: a
+	// terminating pod or an in-progress removal is waited on, never reported
+	// as success or as failure. The bound is the same one Destroy already
+	// has: on K8s "gone" is the API object (a partitioned node's kubelet may
+	// lag the force delete). Idempotent: reaping a session that owns nothing
+	// is a no-op.
 	Reap(ctx context.Context, sessionID domain.ID) error
 }

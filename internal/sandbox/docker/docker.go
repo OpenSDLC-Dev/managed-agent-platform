@@ -234,10 +234,50 @@ func (p *Provider) Reap(ctx context.Context, sessionID domain.ID) error {
 			if (pass == 1) != slices.Contains(c.Names, gate) {
 				continue
 			}
-			errs = errors.Join(errs, removeIgnoring404(ctx, p.api, c.ID))
+			errs = errors.Join(errs, removeWaitingGone(ctx, p.api, c.ID))
 		}
 	}
 	return errs
+}
+
+// reapRemoveTimeout bounds how long Reap waits for a removal another actor
+// already started to finish — the Docker analogue of the K8s backend's
+// reclaimTimeout-bounded wait for a pod to be gone.
+const reapRemoveTimeout = 15 * time.Second
+
+// removeWaitingGone removes a container for Reap. A 404 is success, and so —
+// after waiting it out — is the daemon's 409 "removal ... is already in
+// progress": that in-progress window, not the 404 one, is where a racing
+// reaper on another executor (or a concurrent provision unwinding the same
+// pair) actually lands, and it lasts the whole force-removal where the
+// list-to-delete gap is milliseconds. Waiting keeps Reap's promise that the
+// container is gone when it returns, where blanket-tolerating the 409 would
+// not; concurrent reapers converge instead of surfacing each other as errors.
+// Any other failure is the caller's.
+func removeWaitingGone(ctx context.Context, api *apiClient, id string) error {
+	err := api.removeContainer(ctx, id)
+	if err == nil || statusIs(err, 404) {
+		return nil
+	}
+	if !statusIs(err, 409) || !strings.Contains(err.Error(), "already in progress") {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, reapRemoveTimeout)
+	defer cancel()
+	for {
+		_, ierr := api.inspectContainer(ctx, id)
+		if statusIs(ierr, 404) {
+			return nil
+		}
+		if ierr != nil && ctx.Err() == nil {
+			return ierr
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("docker: removal of %s still in progress: %w", id, ctx.Err())
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 func containerName(sessionID domain.ID) string { return "map-" + string(sessionID) }

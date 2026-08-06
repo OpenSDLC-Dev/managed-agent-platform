@@ -361,9 +361,11 @@ func (p *Provider) Owned(ctx context.Context) ([]domain.ID, error) {
 // sidecar included — revoking the session's gate token first when the provider
 // has a revoker (#197; revoke-before-teardown keeps a partial failure
 // retryable). It selects by label rather than deriving the pod name, needs no
-// live handle, and waits for each pod to actually be gone (deleteAndWaitGone) —
-// a reaped session is *not running*, not merely terminating. A session owning
-// nothing is a no-op.
+// live handle, and waits for each pod object to be gone from the API
+// (deleteAndWaitGone) — never returning success, or failure, on a pod that is
+// merely terminating. The delete is grace-0, so "gone" carries Destroy's own
+// bound: the API object is final at once, while a partitioned node's kubelet
+// may lag stopping the containers. A session owning nothing is a no-op.
 func (p *Provider) Reap(ctx context.Context, sessionID domain.ID) error {
 	if p.revoker != nil {
 		if err := p.revoker.Revoke(ctx, sessionID); err != nil {

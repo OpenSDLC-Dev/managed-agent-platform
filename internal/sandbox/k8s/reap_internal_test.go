@@ -127,13 +127,34 @@ func TestReapSelectsByLabelNotName(t *testing.T) {
 	}
 }
 
+// TestReapSurfacesDeleteFailure: a pod the API refuses to delete surfaces as
+// Reap's error — a reap that swallows it would report a still-running sandbox
+// as reaped, and its caller would stop retrying.
+func TestReapSurfacesDeleteFailure(t *testing.T) {
+	sid := domain.NewID("sesn")
+	p := fakeProvider(ownedPod(podName(sid), sid))
+	stuck := errors.New("node partitioned")
+	p.client.cs.(*fake.Clientset).PrependReactor("delete", "pods",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, stuck
+		})
+	if err := p.Reap(context.Background(), sid); !errors.Is(err, stuck) {
+		t.Errorf("reap error = %v, want the delete failure surfaced", err)
+	}
+}
+
 // TestOwnedListsDistinctSessionsFromLabels: Owned reads the label, dedups, and
-// ignores pods without it.
+// ignores pods without it — including a pod whose label key is present with an
+// empty value, which the presence selector still returns.
 func TestOwnedListsDistinctSessionsFromLabels(t *testing.T) {
 	sidA, sidB := domain.NewID("sesn"), domain.NewID("sesn")
 	unlabeled := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "bystander", Namespace: "default"}}
+	emptyValue := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "empty-labeled", Namespace: "default",
+		Labels: map[string]string{sessionLabel: ""},
+	}}
 	p := fakeProvider(ownedPod(podName(sidA), sidA), ownedPod("second-holding", sidA),
-		ownedPod(podName(sidB), sidB), unlabeled)
+		ownedPod(podName(sidB), sidB), unlabeled, emptyValue)
 	owned, err := p.Owned(context.Background())
 	if err != nil {
 		t.Fatalf("owned: %v", err)

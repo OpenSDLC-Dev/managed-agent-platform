@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -193,7 +194,8 @@ func TestOwnedListsDistinctSessions(t *testing.T) {
 		}
 		w.Write([]byte("[" + summaryJSON("sb1", containerName(sidA), sidA) + "," +
 			summaryJSON("gate1", gateName(sidA), sidA) + "," +
-			summaryJSON("sb2", containerName(sidB), sidB) + "]"))
+			summaryJSON("sb2", containerName(sidB), sidB) + "," +
+			summaryJSON("odd1", "oddball", domain.ID("")) + "]"))
 	})
 	owned, err := p.Owned(context.Background())
 	if err != nil {
@@ -203,6 +205,80 @@ func TestOwnedListsDistinctSessions(t *testing.T) {
 	want := []domain.ID{sidA, sidB}
 	slices.Sort(want)
 	if !slices.Equal(owned, want) {
-		t.Errorf("owned = %v, want %v", owned, want)
+		t.Errorf("owned = %v, want %v — an empty label value is nobody's session", owned, want)
+	}
+}
+
+// TestOwnedSurfacesListFailure and TestReapSurfacesListFailure: a daemon that
+// cannot answer the list is an error, never an empty answer — Owned reporting
+// nothing owned would read as "all reaped", and Reap would revoke and report
+// success over containers it never saw.
+func TestOwnedSurfacesListFailure(t *testing.T) {
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"daemon on fire"}`, http.StatusInternalServerError)
+	})
+	if _, err := p.Owned(context.Background()); err == nil {
+		t.Fatal("owned = nil error on a failing list")
+	}
+}
+
+func TestReapSurfacesListFailure(t *testing.T) {
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"daemon on fire"}`, http.StatusInternalServerError)
+	})
+	if err := p.Reap(context.Background(), domain.NewID("sesn")); err == nil {
+		t.Fatal("reap = nil error on a failing list")
+	}
+}
+
+// TestReapWaitsOutInProgressRemoval: the daemon answers a DELETE for a
+// container whose removal is already underway with 409 "removal ... is already
+// in progress" — the window a racing reaper actually lands in. Reap waits for
+// the container to be gone rather than surfacing the racer as an error, and
+// rather than returning before the removal finished.
+func TestReapWaitsOutInProgressRemoval(t *testing.T) {
+	sid := domain.NewID("sesn")
+	inspects := 0
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/containers/json":
+			w.Write([]byte("[" + summaryJSON("sb1", containerName(sid), sid) + "]"))
+		case r.Method == http.MethodDelete:
+			http.Error(w, `{"message":"removal of container sb1 is already in progress"}`, http.StatusConflict)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			inspects++
+			if inspects < 3 { // still being removed
+				io.WriteString(w, `{"Id":"sb1","State":{"Running":false}}`)
+				return
+			}
+			http.Error(w, `{"message":"No such container: sb1"}`, http.StatusNotFound)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	if err := p.Reap(context.Background(), sid); err != nil {
+		t.Fatalf("reap during an in-progress removal: %v", err)
+	}
+	if inspects < 3 {
+		t.Errorf("reap returned after %d inspects; it must wait for the removal to finish", inspects)
+	}
+}
+
+// TestReapSurfacesForeignConflict: a 409 that is not the in-progress message
+// (a genuine conflict) still surfaces — only the known race is waited out.
+func TestReapSurfacesForeignConflict(t *testing.T) {
+	sid := domain.NewID("sesn")
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/containers/json":
+			w.Write([]byte("[" + summaryJSON("sb1", containerName(sid), sid) + "]"))
+		case r.Method == http.MethodDelete:
+			http.Error(w, `{"message":"conflict: unable to remove"}`, http.StatusConflict)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	if err := p.Reap(context.Background(), sid); err == nil {
+		t.Fatal("reap = nil error on a non-removal 409")
 	}
 }

@@ -23,9 +23,13 @@ copy of an entry here.
   design so N executors shard the reap with no coordination — and
   `Reap(ctx, sessionID)` destroys a session's whole holding from its id alone,
   needing no live handle: on Docker it force-removes every labeled container
-  with its anonymous volumes, sandbox before its netns-owning gate; on
+  with its anonymous volumes, sandbox before its netns-owning gate, waiting out
+  the daemon's "removal already in progress" 409 — the window a racing reaper
+  actually lands in — rather than surfacing the racer as an error; on
   Kubernetes it selects the session's pods by label (never the derived name)
-  and waits until each is actually gone. Both revoke the session's gate token
+  and waits until each pod object is gone from the API (the force-deleting
+  `Destroy`'s own bound: a partitioned node's kubelet may lag). Both revoke the
+  session's gate token
   first through a new provider-level `GateTokenRevoker` (`Reap` has no `Spec`
   to carry one; a failed revoke aborts with nothing removed, so the next pass
   retries both halves — #197's ordering), which `cmd/executor` wires from its
