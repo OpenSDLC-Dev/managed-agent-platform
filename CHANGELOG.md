@@ -25,8 +25,8 @@ copy of an entry here.
   reference mounts nothing on self_hosted environments. Three user-settled decisions
   (2026-08-06) shape the design: the clone is control-plane resource materialization
   via go-git — the token never enters the sandbox and the egress gate is never
-  involved; BYOC stays reference-faithful (no worker materialization; a follow-up
-  issue takes the symmetric extension); and a failed clone surfaces as a
+  involved; BYOC stays reference-faithful (no worker materialization; #322 takes the
+  symmetric extension); and a failed clone surfaces as a
   `github_repository_clone_error` `session.error` variant without failing the run.
   Two slices: the wire + sealed token storage (`secrets.Cipher`, migration 0020,
   token rotation goes live), then the executor clone + the brain's "Mounted

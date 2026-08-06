@@ -15,8 +15,8 @@ rejection at `:104-111`).
 Three decisions were put to the user and settled on 2026-08-06:
 
 1. **The clone runs platform-side, via go-git** — never inside the sandbox (decision 1).
-2. **BYOC stays reference-faithful: no worker materialization** — a follow-up issue tracks
-   the symmetric extension (decision 9).
+2. **BYOC stays reference-faithful: no worker materialization** — the symmetric
+   extension is tracked in #322 (decision 9).
 3. **A failed clone is surfaced, not fatal** — a `session.error` variant plus a tolerated
    absent path (decision 4).
 
@@ -109,6 +109,14 @@ it ("is not echoed in API responses").
    shelling out to a git binary executor-side (a deployment prerequisite on every
    executor/worker image and a non-hermetic test suite, for compatibility this feature
    does not need). Temp dirs and tar files are removed in `defer` on every path.
+   Clones are **budgeted** — the executor-local spool sits outside the sandbox's own
+   CPU/storage hardening, so one unbounded repository could exhaust executor disk and
+   disrupt unrelated sessions: a per-repo deadline (`EXECUTOR_REPO_CLONE_TIMEOUT`,
+   default 5m) and a byte budget (`EXECUTOR_REPO_CLONE_MAX_BYTES`, default 1 GiB,
+   counted over tree + tar) abandon the clone, remove the spool, and surface as the
+   decision-4 reasons `timeout` / `too_large`. Repos clone sequentially with the spool
+   cleaned between, so the per-repo budget — not the repo count — bounds peak executor
+   disk.
 2. **The token is sealed beside the row, never inside the echoed array.** What
    `sessions.resources` jsonb stores is the *rendered* wire object — which is token-free
    by schema — so session GET's verbatim echo cannot leak the token *by construction*.
@@ -117,12 +125,21 @@ it ("is not echoed in API responses").
    CASCADE** — the #266 lesson: no orphaned secrets when a session is deleted),
    `token_ciphertext bytea`, `token_key_id text`, timestamps — the `0011_vaults.sql`
    column naming (`secret_ciphertext`/`secret_key_id`) carried over. Sealing rides
-   `secrets.Cipher`; the executor already constructs the cipher from `SECRETS_BACKEND`
-   (cmd/executor/main.go:268 — zero new deployment plumbing). The create transaction
-   validates, renders, and inserts row(s) atomically with the session; rotation updates
-   the ciphertext and bumps the resource's `updated_at` inside the jsonb under the same
-   session `FOR UPDATE` lock the other mutations take; resource DELETE removes the
-   credential row in the same transaction. A server without a configured cipher refuses a
+   `secrets.Cipher`. Deployment plumbing already exists — compose and Helm set
+   `SECRETS_BACKEND` on the executor — but the executor's cipher is today constructed
+   for **startup validation only** and discarded before `executor.New`
+   (cmd/executor/main.go:264-277, whose comment records the prior stance: egress
+   substitution decrypts controlplane-side, "never in the executor"). Slice 2 threads
+   it into the constructor and updates that comment: decrypting the clone token
+   executor-side is a deliberate, narrow extension — the executor already sits inside
+   the trust boundary holding the database, the blob store, and the model keys — and
+   the alternative (a controlplane internal endpoint on the gate-config pattern) would
+   add a plaintext-token HTTP hop where a process-local decrypt suffices. The create
+   transaction validates, renders, and inserts row(s) atomically with the session;
+   rotation updates the ciphertext and bumps the resource's `updated_at` inside the
+   jsonb under the same session `FOR UPDATE` lock the other mutations take. Credential
+   rows die only with their session (the cascade): repo resources themselves are
+   immutable post-create (decision 3). A server without a configured cipher refuses a
    repo-bearing create the way the vault endpoints refuse without one — unavailable, not
    silently unencrypted. No handler ever logs a resource payload; slog carries ids and
    the url, never the token.
@@ -135,7 +152,12 @@ it ("is not echoed in API responses").
    `branch.name` non-empty; `commit.sha` exactly 40 hex — "full commit SHA", INFERRED);
    `mount_path` rides `validateMountPath` plus per-session uniqueness across *all*
    resources, defaulting to `/workspace/<repo-name>` where `<repo-name>` is the URL's last
-   segment with `.git` stripped (derivation INFERRED). The default is resolved and
+   segment with `.git` stripped (derivation INFERRED). The repo arm is additionally
+   stricter than the landed file arm: the path must equal its `path.Clean` form —
+   `/workspace/./repo`, doubled separators, and trailing slashes are 400s, because
+   raw-string uniqueness is otherwise evadable by aliases naming the same directory
+   (INFERRED) — and uniqueness is judged on the cleaned form against every other
+   resource. The default is resolved and
    rendered at create (the files precedent, and the docs' List example shows a concrete
    path). `checkout` is stored and rendered **as given — `null` when omitted**: resolving
    "the repository's default branch" would take a GitHub call inside the create
@@ -143,13 +165,19 @@ it ("is not echoed in API responses").
    the docs' List example shows a populated `checkout` that *may* mean the reference
    resolves it at create; the recording checklist settles it). No existence or credential
    check at create — the first materialization is the probe (files checked a row in-tx;
-   there is no in-tx equivalent for a remote repo).
+   there is no in-tx equivalent for a remote repo). Post-create immutability is
+   **total**: add stays file-only (ground truth above), and `DELETE …/{rid}` on a
+   `github_repository` resource is **rejected** — the guide's "attached for the
+   lifetime of the session" says repos cannot be unmounted, and the SDK's generic
+   Delete proves only that the route exists, so the rejection is INFERRED and on the
+   recording checklist. File resources in the same session keep their landed delete
+   semantics.
 4. **A failed clone is surfaced, never fatal** (user decision). `materializeRepos`
    tolerates per-resource failure exactly like files — the run continues, the agent sees
    an absent path, the work item completes. But unlike files it also appends a
    `session.error` event (domain/event.go:41) with `payload.error.type =
    "github_repository_clone_error"`, naming `resource_id`, `url`, and a machine-readable
-   `reason` ∈ `auth | not_found | network | checkout | internal` — mirroring
+   `reason` ∈ `auth | not_found | network | checkout | too_large | timeout | internal` — mirroring
    `credential_host_unreachable_error` (internal/api/gateconfig.go:186), including its
    dedupe: emitted once per resource, re-emitted only when the reason changes (the
    `payload->'error'->>'type'` existing-event query at gateconfig.go:174 is the
@@ -160,24 +188,35 @@ it ("is not echoed in API responses").
    sequence at internal/executor/executor.go:417-422: `provisionSandbox` →
    `materializeSkills` → **`materializeRepos`** → `materializeFiles` — repos before files
    so a file mount may deliberately overlay into a checkout (mount paths are
-   exact-match-unique, not nesting-exclusive). Sentinel idempotence mirrors files: a
-   `{workdir}/.repos_materialized` marker holding the sorted `{resource_id, url,
-   checkout, mount_path}` set, trusted only when the marker bytes match **and** every
-   mount passes a chained `test -e '<mount>/.git'` probe. A repo whose probe fails is
-   re-cloned **fresh** — that state only exists when the tree is gone (the agent removed
-   it, or a reap recreated the sandbox without a checkpoint), and a re-clone never merges
-   into survivors: the extraction target is cleared first. Rotation does **not**
-   invalidate the sentinel — a rotated token affects future clones only, the retroactive
-   twin of deletion's reference-only semantics (INFERRED).
-6. **Checkpoint interplay (plan 24) comes free.** Default mounts live under
-   `sandbox.DefaultWorkdir` (`/workspace`, internal/sandbox/sandbox.go:29), inside the
-   workspace the idle-TTL engine captures: a checkpointed reap restores the working tree
-   *and* the sentinel, the pass skips, and the agent's uncommitted work survives — the
-   same guarantee every workspace artifact gets. A reap past the checkpoint budget or a
-   crash-recreate restores nothing; no marker → fresh clone, pristine at the configured
-   checkout. A custom `mount_path` outside the workdir sits outside the capture set: the
-   post-restore probe fails and the repo re-clones fresh. All three behaviors fall out of
-   decision 5 with zero checkpoint-specific code.
+   exact-match-unique, not nesting-exclusive). Idempotence is **the probe alone — no
+   marker**, a deliberate divergence from the files sentinel: a repo materializes iff
+   `test -e '<mount>/.git'` fails. A marker earns its keep by detecting configuration
+   drift, and a repo mount has none to detect — the set is fixed at create (decision 3),
+   the checkout never changes, and rotation deliberately does not re-clone (a rotated
+   token affects future clones only, the retroactive twin of the mutation-rejection
+   semantics — INFERRED). A marker would also be actively wrong here: plan 24 strips
+   agent-writable `.materialized` sentinels from checkpoints at capture (its decision
+   5), so a restored workspace presents exactly the state — tree present, marker gone —
+   that must **not** be re-cloned; the probe reads the only authority there is, the
+   tree itself. Probe passes → skip; the agent's working tree is never clobbered.
+   Probe fails → the tree is gone (the agent removed it, or a reap recreated the
+   sandbox without a checkpoint) and the repo is re-cloned **fresh** into a cleared
+   target, never merged into survivors.
+6. **Checkpoint interplay (plan 24).** Capture covers the **configured** workdir
+   (`EXECUTOR_WORKDIR`, defaulting to `sandbox.DefaultWorkdir` `/workspace` —
+   cmd/executor/main.go:156, internal/sandbox/sandbox.go:29). Out of the box the wire's
+   default mount `/workspace/<repo-name>` sits inside it, so a checkpointed reap
+   restores the working tree, the decision-5 probe passes, and the agent's uncommitted
+   work survives — zero repo-specific checkpoint code, and no dependence on a restored
+   marker (which plan 24 would have stripped). Three edges, surfaced rather than
+   solved: a reap past the checkpoint budget or a crash-recreate restores nothing — no
+   tree, failed probe, fresh clone at the configured checkout; a mount outside the
+   configured workdir (a custom path — or the wire default itself, under a deployment
+   that moved `EXECUTOR_WORKDIR`) is outside the capture set and re-clones fresh after
+   a reap, so operators who move the workdir should mount repos inside it; and under
+   read-only-rootfs hardening such a mount may not be writable at all (`WritablePaths`,
+   internal/sandbox/hardening.go — the docs/self-hosted-security.md §4 stance), in
+   which case materialization fails and surfaces per decision 4.
 7. **go-git mechanics.** Branch checkout (or none): `Clone` with `ReferenceName:
    refs/heads/<name>` (`SingleBranch`), omitted → the remote's HEAD. Commit checkout:
    full clone, then a detached worktree checkout at the SHA. Clones are full, not shallow
@@ -187,17 +226,22 @@ it ("is not echoed in API responses").
 8. **Brain injection.** A "Mounted repositories" block appended after the "Mounted
    files" block (the slot at internal/brain/brain.go:279; internal/brain/files.go is the
    template): per repo — mount path, url, and the checkout descriptor (branch name,
-   commit SHA, or "default branch"). The brain never reads the credentials table, so the
-   block cannot leak what it never sees. Best-effort like files: a dangling entry is a
-   counted miss (`repos.resolve.misses`), never a failed turn.
+   commit SHA, or "default branch"). The block is emitted **only for `cloud`
+   environments**: on self_hosted nothing materializes repos (decision 9 — nor does the
+   reference), and asserting a mount that does not exist would be a false statement to
+   the model. `claimLiveSession` (internal/brain/brain.go) reads only the sessions row
+   today, so the slice adds the environment's kind to that read (a join on
+   `environment_id` under the same lock). The brain never reads the credentials table,
+   so the block cannot leak what it never sees. Best-effort like files: a dangling
+   entry is a counted miss (`repos.resolve.misses`), never a failed turn.
 9. **BYOC: reference-faithful no-op** (user decision). The worker's resource pass keeps
    filtering to `type == "file"`; a self_hosted session carrying a repo resource gets no
    platform materialization — which is exactly the reference's documented behavior for
    self-hosted sandboxes, so for once the two implementations agree by doing the same
    nothing. The symmetric extension (a worker `SetupRepos` plus an environment-key
    credential lane) is deliberately **not** built: it would mint a plaintext-PAT delivery
-   route whose design belongs with #165's `work.secret` credential-delivery decision. A
-   follow-up issue records it (slice 2 opens it; #55 closes).
+   route whose design belongs with #165's `work.secret` credential-delivery decision.
+   #322 tracks it; #55 closes with slice 2.
 10. **Observability** (cardinality rule as everywhere: outcome-only metric labels; ids
     and urls in span attributes and structured logs, never metric labels — and never the
     token anywhere). Executor: a `repos_materialize` span (`repos.referenced`,
@@ -213,8 +257,9 @@ it ("is not echoed in API responses").
 work — via bash in its sandbox or the GitHub MCP server, per the reference guide; the
 platform never writes to GitHub); repo caching across sessions; GitHub App/OAuth auth
 models; GitHub Enterprise hosts; submodule recursion; LFS smudge; shallow-clone tuning;
-post-create add/remove of repo resources (wire-faithful rejection stays); BYOC worker
-materialization (deferred, follow-up issue); `memory_store` resources (stay rejected);
+post-create add/remove of repo resources (the add rejection is wire-faithful, the
+delete rejection INFERRED — decision 3); BYOC worker
+materialization (deferred to #322); `memory_store` resources (stay rejected);
 webhook/event surface for clone lifecycle beyond the decision-4 error variant.
 
 ## Verification
@@ -243,7 +288,7 @@ meets it. Its rules, translated to this repo:
   mutation-test-every-new-guard rule, and the workshop's "intentional failure"). Every
   new guard is shown **red against code without the guard** before the slice is done:
   deliberately render the token → `w-token-sweep` must FAIL; drop a rejection arm → its
-  400 case must FAIL; remove the sentinel check → `m-idempotence` must FAIL; remove the
+  400 case must FAIL; remove the `.git`-probe skip → `m-idempotence` must FAIL; remove the
   dedupe → `m-error-dedupe` must FAIL. A regression test that never saw the broken code
   proves nothing.
 - **Verdicts:** PASS (drove it, every check held) / FAIL (observed and wrong) / BLOCKED
@@ -269,15 +314,16 @@ meets it. Its rules, translated to this repo:
 | w-create-full | | + `mount_path`, `checkout: branch` | echoed exactly as given |
 | w-create-commit | | `checkout: {type: commit, sha}` | echoed; sha preserved verbatim |
 | w-multi | | two repos + one file mount in one create | all three rendered, types correct, paths distinct |
-| w-token-sweep | 🔍 | after create: GET session, GET resource, LIST resources, GET events, SSE replay | raw response bodies contain neither the key `authorization_token` nor the token value — **zero hits, any hit anywhere is FAIL** |
+| w-token-sweep | 🔍 | sweep **every** surface a token could reach: the create 201 body itself, the rotation 200 body (both token values), GET session, GET resource, LIST resources, GET events, SSE replay, and the captured `slog` output | raw bytes contain neither the key `authorization_token` nor either token value — **zero hits, any hit anywhere is FAIL** (the mutating responses are the ones a rendering defect leaks through) |
 | w-no-token | 🔍 | omit / empty-string `authorization_token` | 400 `invalid_request_error` |
 | w-bad-url | 🔍 | `http://…`, non-github host, `https://github.com/onlyowner`, extra segments, garbage | 400 each |
 | w-bad-checkout | 🔍 | `type: "tag"`, branch without `name`, sha not 40-hex, unknown keys | 400 each |
-| w-mount-collision | 🔍 | two resources (repo/repo and repo/file) sharing a `mount_path` | 400 |
+| w-mount-collision | 🔍 | two resources (repo/repo and repo/file) sharing a `mount_path`; aliases of one path (`/workspace/repo` vs `/workspace/./repo`) | 400 each (uniqueness on the cleaned form) |
+| w-unclean-mount | 🔍 | `mount_path` `/workspace/./r`, `/workspace//r`, trailing slash | 400 each (the clean-form rule) |
 | w-add-post-create | 🔍 | `POST …/resources` add with a `github_repository` body | 400 (add stays file-only — wire-faithful) |
 | w-rotate | | `POST …/{rid}` `{authorization_token: new}` | 200, full rendered resource, `updated_at` bumped; storage: ciphertext changed and the new token round-trips through the cipher |
 | w-rotate-bad | 🔍 | unknown body key; empty token; a file resource's rid; unknown rid | 400 / 400 / 400 (the existing scaffold message) / 404 |
-| w-delete | | DELETE the rid | `{id, type: "session_resource_deleted"}`; storage: credential row gone |
+| w-delete-rejected | 🔍 | DELETE the repo rid; then DELETE a file rid in the same session | 400 for the repo (attached-for-lifetime, INFERRED); the file still deletes — the union dispatch discriminates |
 | w-archived-gate | 🔍 | rotation/delete on an archived session | the established archived-session error |
 | w-no-cipher | 🔍 | server with no `SECRETS_BACKEND`, repo-bearing create | refused as unavailable (the vaults precedent), never stored unencrypted |
 
@@ -297,8 +343,11 @@ meets it. Its rules, translated to this repo:
 | m-idempotence | 🔍 | second work item; agent file created inside the checkout between runs | fixture server saw no second clone; the agent's file survives |
 | m-tamper | 🔍 | agent `rm -rf`s the checkout | next pass re-clones fresh |
 | m-error-dedupe | 🔍 | two failing passes, same reason | exactly one `session.error` event |
-| m-checkpoint | 🔍 | checkpoint → reap → re-provision (the plan-24 harness) | restored tree and sentinel; the pass skips; agent modifications survive |
+| m-oversize | 🔍 | fixture repo larger than `EXECUTOR_REPO_CLONE_MAX_BYTES` | mount absent; `reason: too_large`; executor spool removed; run continues |
+| m-stall | 🔍 | fixture handler stalls past `EXECUTOR_REPO_CLONE_TIMEOUT` | `reason: timeout`; spool removed; run continues |
+| m-checkpoint | 🔍 | checkpoint → reap → re-provision (the plan-24 harness) | restored tree; the `.git` probe passes and the pass skips (no marker involved); agent modifications survive |
 | m-brain-block | | assemble a model request (`modeltest` fake) | system prompt carries "Mounted repositories" with url + checkout descriptor |
+| m-brain-byoc | 🔍 | a `self_hosted` session carrying a repo resource; assemble a model request | **no** "Mounted repositories" block — nothing materializes there, so nothing is asserted |
 | m-brain-no-token | 🔍 | sweep the entire assembled request | token value nowhere |
 | m-telemetry | | any of the above | S3: `repos_materialize` span attrs and `repos.materialized` outcomes match the case (telemetry test reader) |
 
@@ -307,7 +356,7 @@ meets it. Its rules, translated to this repo:
 - **e-wire-cli** (manual acceptance, slice 1; wire-only — no work item, so no clone and
   no network): the compose stack + the `ant` CLI built from the reference checkout —
   session create with a `--resource` `github_repository` object, resources
-  list/retrieve, update (rotation), delete; the CLI transcript swept for the token (the
+  list/retrieve, update (rotation), the delete rejection; the CLI transcript swept for the token (the
   w-token-sweep twin at the outermost consumer). Transcript recorded in docs/HISTORY.md,
   the established acceptance-record ritual.
 - **e-repo-answer** (opt-in, `RUN_EVALS=1`): a passphrase lives only in a file inside a
@@ -329,24 +378,28 @@ verdict table (philosophy above) with the mutation duty discharged.
 1. **The wire + sealed storage.** Migration `0020_session_resource_credentials.sql`
    (bump the migration-count pin in store_test.go); the `github_repository` union arm in
    `internal/api/sessionresources.go` — parse/validate per decision 3, render per the
-   read shape, seal per decision 2; rotation goes live; delete clears the credential row;
-   the add endpoint's file-only stance becomes documented wire fidelity. Implements
+   read shape, seal per decision 2; rotation goes live; the delete rejection lands
+   beside the add endpoint's file-only stance — post-create immutability becomes
+   documented wire fidelity. Implements
    **unit W** (all rows) as `pgtest` integration tests plus the **e-wire-cli**
    acceptance run (transcript → docs/HISTORY.md). Docs: CHANGELOG; DIVERGENCES — carve
    the create-rejection entry
-   (`github_repository` no longer rejected; `memory_store` still is) and add the
-   slice-1 INFERRED entries below; plan flips `in-progress`; STATE.md picks up Active
-   work + Tasks.
+   (`github_repository` no longer rejected at create; `memory_store` still is) and add
+   the slice-1 INFERRED entries below; plan flips `in-progress`; STATE.md picks up
+   Active work + Tasks.
 2. **The clone: executor materialization + brain injection + eval; archive.** The go-git
-   dependency (CLAUDE.md/AGENTS.md primary-deps line updated); `internal/executor/repos.go`
-   — `materializeRepos` per decisions 1/4/5/7 with the smart-HTTP fixture living in
-   in-package `_test.go` files (no new test-support package, keeping the coverage
-   denominator honest); the `session.error` emission + dedupe; observability per decision
-   10; the brain's "Mounted repositories" block; the `repo-answer` eval and its two
-   `.env` names (documented in CLAUDE.md's `.env` paragraph). Implements **unit M** and
-   **e-repo-answer**. Closes out: archive this plan (progress summary → docs/HISTORY.md),
-   post the completion comment on #55 and close it, open the BYOC follow-up issue
-   (decision 9).
+   dependency (CLAUDE.md/AGENTS.md primary-deps line updated); the startup cipher
+   threaded into `executor.New` and the main.go comment updated (decision 2); the clone
+   budgets (decision 1); `internal/executor/repos.go` — `materializeRepos` per decisions
+   1/4/5/7 with the smart-HTTP fixture living in in-package `_test.go` files (no new
+   test-support package, keeping the coverage denominator honest; go-git ships the
+   server-side transport, not an `http.Handler` — the fixture wraps it in a thin
+   pkt-line HTTP shim); the `session.error` emission + dedupe; observability per
+   decision 10; the brain's environment-kind-gated "Mounted repositories" block
+   (decision 8); the `repo-answer` eval and its two `.env` names (documented in
+   CLAUDE.md's `.env` paragraph). Implements **unit M** and **e-repo-answer**. Closes
+   out: archive this plan (progress summary → docs/HISTORY.md), post the completion
+   comment on #55 and close it (the BYOC deferral is already tracked in #322).
 
 ## End-to-end acceptance
 
@@ -362,16 +415,18 @@ verdict table (philosophy above) with the mutation duty discharged.
 Slice 1 — **CONFIRMED**: the create-rejection entry carved down; add stays file-only
 (wire-faithful per the SDK's typed Add). **INFERRED**: URL strictness (github.com only,
 the exact 400s); empty-token rejection; 40-hex sha validation; `<repo-name>` derivation
-for the default mount path; checkout stored/rendered as-given (`null` when omitted, not
-resolved to the default branch at create); rotation error shapes beyond the scaffold; the
-cipher-unavailable refusal.
+for the default mount path; the clean-form `mount_path` strictness (the repo arm only);
+the repo-delete rejection (attached-for-lifetime); checkout stored/rendered as-given
+(`null` when omitted, not resolved to the default branch at create); rotation error
+shapes beyond the scaffold; the cipher-unavailable refusal.
 
 Slice 2 — **INFERRED**: clone timing (first work item, on our lazy-provision lifecycle);
 full/non-shallow clone, no submodules, no LFS; the `github_repository_clone_error`
-variant, its reasons, and its dedupe (the reference surfaces clone failures in an
-unrecorded way — possibly not as an event at all); rotation's non-retroactivity;
-sentinel idempotence extended to mutable working trees (fresh re-clone on a failed
-probe); the "Mounted repositories" block format and placement (the files-block twin);
+variant, its reasons (`too_large`/`timeout` are ours — the budgets have no wire
+surface), and its dedupe (the reference surfaces clone failures in an unrecorded way —
+possibly not as an event at all); rotation's non-retroactivity; probe-only idempotence
+(no sentinel — fresh re-clone only when `<mount>/.git` is gone); the "Mounted
+repositories" block format, placement, and `cloud`-only gating (the files-block twin);
 **CONFIRMED-by-docs**: no BYOC materialization (the reference mounts nothing on
 self_hosted — our worker's skip matches it).
 
@@ -382,6 +437,8 @@ self_hosted — our worker's skip matches it).
 - Whether an empty or whitespace `authorization_token` is accepted for public repos.
 - The add endpoint's exact error for a `github_repository` body, and rotation's exact
   error shapes for non-repo resources and unknown ids.
+- `DELETE …/{rid}` on a `github_repository` resource — accepted or rejected (we reject:
+  the guide's attached-for-lifetime reading).
 - Whether rotation affects an already-provisioned sandbox (re-written credentials for
   future fetches) or only future clones.
 - Clone failure surfacing: which event (if any), its payload, and whether the session
