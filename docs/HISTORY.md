@@ -95,7 +95,9 @@ then converged on one headline from both sides:
   own blob-delete rule. This also repairs D4's lossless-wake argument (Codex #1): a
   `user.message` committing after the under-lock recheck now always finds either a
   ready checkpoint to restore or a still-alive sandbox; the loss window is confined to
-  captures that were impossible regardless.
+  sandbox-caused capture failures (a transient export failure among them — D8
+  sanctions any exec/archive failure, so a retry that might have succeeded is
+  deliberately not attempted).
 - **An idle reap racing a concurrent DELETE resurrected the marker and blob forever**
   (Codex #3, workflow P1). `deleteSession` takes no advisory lock, and the marker
   table carries no FK by design, so a delete committing between the reaper's
@@ -103,7 +105,10 @@ then converged on one headline from both sides:
   reap pass would ever revisit. The marker write now inserts only while the session
   row exists, under `FOR KEY SHARE` — it either lands before the delete (whose
   in-transaction sweep removes it) or waits the delete out, inserts nothing, and
-  withdraws the just-uploaded blob.
+  withdraws the just-uploaded blob; a *failed* withdraw aborts the reap instead of
+  reporting the benign sentinel, so the next pass's deleted tier (the tombstone is
+  already written) retries the blob delete before reaping — the verifier's own
+  post-round finding, adopted with its test.
 - **A `stopped` work item can still have a physically executing claimant** (Codex #2).
   An interrupt cancels the row instantly, but the executor only notices at its next
   lease renewal — with a short operator TTL the tier could reap under a still-running

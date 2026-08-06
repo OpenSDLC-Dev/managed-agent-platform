@@ -211,8 +211,13 @@ func (e *Executor) captureCheckpoint(ctx context.Context, sid domain.ID) (err er
 	}
 	if tag.RowsAffected() == 0 {
 		if derr := e.blobs.Delete(ctx, key); derr != nil {
-			return fmt.Errorf("%w; and the orphaned blob could not be removed: %v",
-				errCaptureSessionDeleted, derr)
+			// Deliberately NOT the sentinel: aborting keeps the sandbox
+			// owned, and the next pass classifies the tombstoned session
+			// into the deleted tier, which retries this very blob delete
+			// before reaping. The sentinel would reap now and orphan the
+			// blob forever — no marker references it, and a reaped session
+			// never reappears in Owned.
+			return fmt.Errorf("session deleted during capture; the orphaned blob could not be withdrawn: %w", derr)
 		}
 		return errCaptureSessionDeleted
 	}

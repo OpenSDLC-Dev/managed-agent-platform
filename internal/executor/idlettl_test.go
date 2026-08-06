@@ -398,6 +398,30 @@ func TestCaptureWritesNoMarkerForADeletedSession(t *testing.T) {
 	}
 }
 
+// failDeleteStore fails every Delete — the withdraw outage's shape.
+type failDeleteStore struct{ blob.Store }
+
+func (failDeleteStore) Delete(context.Context, string) error { return errBoom }
+
+// TestCaptureDeleteRaceWithFailedWithdrawAborts: when the concurrent-DELETE
+// race is detected but the blob withdraw fails, the capture must NOT report
+// the benign sentinel — aborting keeps the sandbox owned, and the next
+// pass's deleted tier (the tombstone is already written) retries the blob
+// delete before reaping. The sentinel would reap now and orphan the blob
+// forever.
+func TestCaptureDeleteRaceWithFailedWithdrawAborts(t *testing.T) {
+	h := ttlHarness(t, &fakeSandbox{})
+	bare := New(h.pool, h.log, h.queue, h.prov, failDeleteStore{h.blobs}, Config{SandboxIdleTTL: time.Hour})
+	deleteSessionRow(t, h)
+	err := bare.captureCheckpoint(context.Background(), h.sid)
+	if err == nil || errors.Is(err, errCaptureSessionDeleted) {
+		t.Fatalf("capture with a failed withdraw = %v, want a non-sentinel abort", err)
+	}
+	if state, _ := markerState(t, h); state != "" {
+		t.Errorf("a capture racing a delete left marker %q", state)
+	}
+}
+
 // recordingQuerier records each statement's SQL in call order, delegating to
 // the pool — the seam that pins classifyForReap's read ordering.
 type recordingQuerier struct {

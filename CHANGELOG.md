@@ -62,8 +62,9 @@ copy of an entry here.
   reverse race: it inserts under a `KEY SHARE` lock on the session row only
   while that row still exists, so a DELETE landing mid-capture cannot have
   its marker resurrected (the capture withdraws its just-uploaded blob and
-  the reap proceeds, deletion having wanted the data gone). Plan 24 archives
-  with this slice.
+  the reap proceeds, deletion having wanted the data gone; a failed withdraw
+  aborts instead, leaving the sandbox owned so the next pass's deleted tier
+  retries the blob delete). Plan 24 archives with this slice.
 
 - **The checkpoint/restore engine: an idle-reaped session will resume with its
   workspace** (plan 24 slice 4; #64, the workspace-continuity half of #28).
