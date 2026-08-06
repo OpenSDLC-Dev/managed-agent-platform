@@ -1219,13 +1219,11 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 	if err != nil {
 		// The bytes are landed and unnamed, and this exec is how they were to be
 		// named; shed them rather than leave the sandbox carrying a payload nothing
-		// will ever claim. Both credentials, each best-effort: this exec just
-		// failed, so neither is trusted alone — the user's rm covers a writable
-		// parent when the failure was transient, the root one covers the parent
-		// the user cannot write (#310), and a daemon whose exec API is down
-		// fails them both into the residue they were already leaving.
+		// will ever claim. Both ways, each best-effort: this exec just failed, so
+		// the sandbox user's `rm` is not trusted alone — where the parent refuses
+		// it, the daemon still empties what it landed (#310).
 		c.discard(ctx, tmp)
-		c.discardAsRoot(ctx, tmp)
+		c.reclaim(ctx, tmp)
 		return err
 	}
 	if res.ExitCode == 0 {
@@ -1254,9 +1252,9 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 	// Every failure branch above had the script `rm -f` the temporary with the
 	// sandbox user's credentials — which is not the credential that landed it,
 	// so a parent the sandbox user cannot write keeps the refused payload
-	// forever. Shed it with the credential that put it there (#310); idempotent
-	// where the script's own rm already worked.
-	c.discardAsRoot(ctx, tmp)
+	// forever. The daemon takes back what it put there (#310); a no-op where
+	// the script's own rm already worked.
+	c.reclaim(ctx, tmp)
 	return ferr
 }
 
@@ -1326,54 +1324,41 @@ func (c *container) discard(ctx context.Context, tmp string) {
 	_, _ = c.Exec(ctx, sandbox.ExecRequest{Command: "rm -f " + shellQuote(tmp)})
 }
 
-// discardAsRoot sheds a temporary file the sandbox user's own `rm -f` could
-// not: a refused rename's temporary was landed by the daemon's root-credentialed
-// extraction, so a parent the sandbox user cannot write would hold the refused
-// payload forever (#310, measured on non-root images). The shed carries the
-// credential that landed it — an exec as User "0" — and it is the platform's
-// only one, so the rule for it is that nothing the sandbox can reach may
-// decide anything it does.
+// reclaim empties a temporary the sandbox user's own `rm -f` could not remove:
+// a failed write's temporary was landed by the daemon's root-credentialed
+// extraction, so a parent that user cannot write holds the refused payload —
+// megabytes of it per refused write — for the container's whole life (#310,
+// measured on non-root images). The daemon put it there, so the daemon takes it
+// back: the same archive endpoint extracts a zero-byte entry of the same name
+// over it. HEAD first, so a temporary the script's own `rm` already removed is
+// not recreated as an empty file.
 //
-// That rule is why this is the one exec built as **argv rather than script**.
-// Every other exec here goes through execWrapper's `/bin/bash -c`, and a shell
-// obeys the environment it starts in: an image whose own `ENV BASH_ENV` names a
-// path the sandbox user can write had the agent's file sourced by this very
-// exec, as uid 0 — measured, twice per shed, once for the wrapper's shell and
-// once for the command's (TestTheRootShedRunsNoAgentCodeOnANonRootImage). No
-// shell runs here now: one absolute binary and two literal arguments the daemon
-// passes through untouched, so there is no PATH lookup to plant into, no word
-// splitting, and no startup file to source. The loader still reads the
-// environment even without a shell — `ld.so` honours LD_PRELOAD from an image's
-// ENV, measured against this same exec — so those three names are emptied for
-// it. The Env entry is per-exec: the container's own environment, which the
-// agent's tools see, is untouched.
+// It **runs nothing**, and that is the design rather than an implementation
+// detail. The obvious fix was an exec as uid 0 (`rm -f` the temporary), and it
+// was written and measured before this: it hands root to a binary the sandbox's
+// own filesystem supplies, and that credential cannot be bounded by enumerating
+// what the image might aim at it. Three channels were found in two review
+// rounds — `bash -c` sourcing an image's `$BASH_ENV` from a sandbox-writable
+// path (measured: the agent's file ran as uid 0, twice per shed), the loader
+// honouring an image's `LD_PRELOAD` with no shell involved (measured), and an
+// image that leaves `/bin/rm` or the shared libraries it links against
+// writable by the sandbox user. Emptying that list is not a bound; not running
+// anything is. Best effort for discard's reason: the caller already has the
+// error that matters, and a daemon that refuses this leaves only the residue it
+// was already leaving.
 //
-// What the credential can still reach is bounded by the argument: the basename
-// is this write's own random TempName, not the agent's to choose, so an
-// ancestor the agent redirected resolves to at most a same-named platform
-// temporary, and an `rm` of a symlink unlinks the link. `/bin/rm` and
-// `/bin/bash` are both the image contract's to provide; an image without the
-// former degrades to the residue this was already leaving, as does a daemon
-// that refuses the exec — best effort for discard's reason, the caller already
-// has the error that matters.
-func (c *container) discardAsRoot(ctx context.Context, tmp string) {
-	execID, err := c.api.execCreate(ctx, c.id, execConfig{
-		AttachStdout: true,
-		AttachStderr: true,
-		User:         "0",
-		Env:          []string{"LD_PRELOAD=", "LD_LIBRARY_PATH=", "LD_AUDIT="},
-		Cmd:          []string{"/bin/rm", "-f", tmp},
-		WorkingDir:   c.workdir,
-	})
+// What remains where the sandbox cannot unlink is an empty file under the
+// platform's own temporary name. The payload — the harm #310 names — is gone.
+func (c *container) reclaim(ctx context.Context, tmp string) {
+	there, err := c.api.pathExists(ctx, c.id, tmp)
+	if err != nil || !there {
+		return
+	}
+	empty, err := tarFile(gopath.Base(tmp), nil)
 	if err != nil {
 		return
 	}
-	stream, err := c.api.execStart(ctx, execID)
-	if err != nil {
-		return
-	}
-	_, _ = io.Copy(io.Discard, stream)
-	_ = stream.Close()
+	_ = c.api.putArchive(ctx, c.id, gopath.Dir(tmp), bytes.NewReader(empty))
 }
 
 // mkdirAll makes the directory a write needs, and is where a path blocked by a

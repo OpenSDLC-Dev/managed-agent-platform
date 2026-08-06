@@ -141,7 +141,8 @@ copy of an entry here.
 
 ### Fixed
 
-- **A refused rename's temporary is shed with the credential that landed it**
+- **A refused write's payload no longer sits in the sandbox for the
+  container's life — and no privileged exec was introduced to remove it**
   ([internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
   [internal/sandbox/docker/api.go](./internal/sandbox/docker/api.go); #310, the
   verifier's finding on #306's PR). The docker daemon extracts a write's
@@ -149,32 +150,32 @@ copy of an entry here.
   under a non-root uid, the route #306 classifies — the script's own `rm -f`
   runs as a user who cannot unlink from that directory, and the refused
   payload stayed behind as a root-owned `.map-write-*` file, one per refused
-  write (measured on a real non-root image). Every failure exit of the
-  rename script now ends with a best-effort root-credentialed shed, and the
-  exec-could-not-run route sheds with both credentials, each best-effort
-  (the exec just failed, so neither is trusted alone): an exec as
-  `User: "0"` running the platform's **only** root command — and running it
-  as **argv, not script**, which is the security-load-bearing part. Every
-  other exec here goes through `/bin/bash -c`, and a shell obeys the
-  environment it starts in: an image whose own `ENV BASH_ENV` names a
-  sandbox-writable path had the agent's file sourced by this very exec as
-  uid 0 — measured on a real image, twice per shed (the wrapper's shell and
-  the command's), and now pinned by
-  `TestTheRootShedRunsNoAgentCodeOnANonRootImage`. So the daemon receives
-  `/bin/rm -f <temp>` as three literal arguments — no PATH lookup, no word
-  splitting, no startup file — and the exec empties `LD_PRELOAD`,
-  `LD_LIBRARY_PATH` and `LD_AUDIT` for itself, because the loader reads
-  those with no shell involved (also measured, against this same exec). The
-  basename is the platform's own random TempName, so the credential removes
-  exactly what the daemon put there; idempotent where the script's rm
-  already worked, silent like `discard` for the same reason.
-  docs/self-hosted-security.md's non-root section documents the exception
-  for operators. The k8s backend needs
-  nothing: its temporary is created by the sandbox user, so the same
-  credential that made it removes it. Red observed first: the real-image row
-  measured the residue (`.map-write-` count 1 in `/etc`, want 0), the
-  fake-daemon row wanted a `User "0"` shed exec that did not exist, and the
-  raw-route sequence re-pin wanted the shed after the probe.
+  write (measured on a real non-root image). **The daemon takes back what it
+  landed**: after a HEAD that says something is still there, the same archive
+  endpoint extracts a zero-byte entry of the same name over it. The payload
+  is gone; where the sandbox cannot unlink, an empty name remains.
+
+  The route not taken is the point. The obvious fix — an exec as `User: "0"`
+  running `rm -f` — was written, measured, and abandoned: `docker exec -u 0`
+  starts with `AT_SECURE=0` and runs a binary and libraries the *image*
+  supplies, so the image decides what that credential does, and so does an
+  agent that can write part of the image's filesystem. Four channels were
+  measured against that exec before it was dropped: `bash -c` sourcing an
+  `ENV BASH_ENV` file the sandbox user had written (the agent's code ran as
+  uid 0, twice per cleanup), the loader honouring `ENV LD_PRELOAD` with no
+  shell involved, `ENV LD_DEBUG_OUTPUT` writing root-owned files at a path
+  the image names, and `/etc/ld.so.preload`, which no environment setting can
+  neutralize. Emptying that list is not a bound; not running anything is — so
+  the platform still runs nothing in a sandbox as anyone but the sandbox's
+  own user, and `TestTheRootShedRunsNoAgentCodeOnANonRootImage` (a real image
+  whose `ENV BASH_ENV` names a sandbox-writable hook) pins that invariant
+  rather than one hole in it. The k8s backend needs nothing: its temporary is
+  created by the sandbox user, so the same credential that made it removes
+  it. Red observed first on every row: the real-image residue (the refused
+  payload's bytes in `/etc`, want 0), the fake-daemon emptying archive that
+  did not exist, and the raw route's re-pin — where the script's own rm
+  worked, no emptying archive may be sent, or the cleanup would make the
+  litter it exists to remove.
 
 - **A write the sandbox cannot land is the model's error, not the platform's
   fault** ([internal/sandbox/sandbox.go](./internal/sandbox/sandbox.go),

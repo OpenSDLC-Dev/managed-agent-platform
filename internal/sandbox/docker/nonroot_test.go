@@ -118,13 +118,16 @@ ENV BASH_ENV=/workspace/hook
 USER app
 `
 
-// The root shed must run nothing the sandbox chose. `bash -c` sources $BASH_ENV
-// before it runs anything, so a shed that went through a shell executed the
-// agent's own file with the very credential the shed exists to use — measured
-// on this image, uid 0 in the hook's own record, before the shed became argv
-// rather than script. The hook still runs for the sandbox's own execs: that
-// shell is the agent's and its own uid is no escalation, so what this pins is
-// that uid 0 is never among them (#310).
+// The platform runs nothing in the sandbox as anyone but the sandbox's own
+// user, and this is the row that keeps it that way. #310's first fix cleaned up
+// with an exec as uid 0, and on this image it executed the agent's file
+// instead: `bash -c` sources $BASH_ENV before it runs anything, so the hook's
+// record came back carrying uid 0 — twice per cleanup, once for the wrapper's
+// shell and once for the command's. No exec does the cleaning now (the daemon
+// empties what it landed), so what this row pins is the invariant rather than
+// one hole in it: the hook still runs for the sandbox's own execs, because that
+// shell is the agent's and its own uid is no escalation, and uid 0 must never
+// be among them.
 func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
 	image := "map-hooked-test:latest"
 	build := exec.Command("docker", "build", "-q", "-t", image, "-")
@@ -212,17 +215,19 @@ func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 		t.Fatalf("err = %v, want the refused move's reason", err)
 	}
 
-	// And the refused write left nothing behind. The temporary landed through
-	// the daemon's root-credentialed extraction, so the sandbox user's own
-	// `rm -f` could not shed it — the shed has to carry the same credential
-	// that landed it (#310).
+	// And the refused write's payload is gone. The temporary landed through the
+	// daemon's root-credentialed extraction, so the sandbox user's own `rm -f`
+	// could not shed it and the refused bytes would sit in a directory it
+	// cannot touch for the container's whole life. The daemon takes back what
+	// it put there, by extracting nothing over it: what is left where the
+	// sandbox cannot unlink is an empty name, not a payload (#310).
 	res, err := sb.Exec(ctx, sandbox.ExecRequest{
-		Command: "ls -A /etc | grep -c '^" + sandbox.TempPrefix + "' || true",
+		Command: "cat /etc/" + sandbox.TempPrefix + "* 2>/dev/null | wc -c",
 	})
 	if err != nil {
-		t.Fatalf("list /etc: %v", err)
+		t.Fatalf("size what is left in /etc: %v", err)
 	}
 	if got := strings.TrimSpace(res.Stdout); got != "0" {
-		t.Errorf("%s files left in /etc = %s, want 0 (#310)", sandbox.TempPrefix, got)
+		t.Errorf("%s bytes left in /etc = %s, want 0 (#310)", sandbox.TempPrefix, got)
 	}
 }

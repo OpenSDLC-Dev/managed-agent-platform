@@ -213,21 +213,23 @@ Kubernetes' `securityContext.runAsUser`). It is numeric because that is all both
 backends can express — a Kubernetes securityContext takes no user name.
 `debian:stable-slim` defaults to root; a hardened image does not have to.
 
-One narrow exception on Docker: when a write's rename fails, the platform issues
-a single uid-0 exec in the sandbox container to remove the temporary file the
-daemon's root-credentialed extraction landed (which your sandbox uid cannot
-unlink from a directory it cannot write — #310). It is the platform's only root
-exec, and it runs **no shell**: the daemon receives `/bin/rm -f <the platform's
-own random temporary name>` as three literal arguments, so there is no PATH
-lookup, no word splitting, and no shell startup file. That last one is the
-reason it is argv rather than a command string: a shell obeys the environment it
-starts in, so an image declaring `ENV BASH_ENV=/some/sandbox-writable/path`
-would otherwise have had its agent-written file sourced with this credential
-(measured, and now pinned by a test). For the same reason the exec empties
-`LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT` for itself — the loader reads
-those even with no shell involved — without touching the environment your tools
-see. If your image's `ENV` names a hook like these, nothing about it reaches
-this exec; it remains yours everywhere else.
+**The platform runs nothing in your container as anyone but that user** — no
+privileged exec, anywhere, and one place had to be designed around to keep it
+that way. On Docker the daemon extracts a write's archive as root, so when the
+rename that would finish the write is refused, the temporary is a root-owned
+file your sandbox uid cannot unlink from a directory it cannot write (#310).
+Cleaning it up with a `docker exec -u 0` was tried and abandoned: such an exec
+starts with `AT_SECURE=0` and runs a binary and libraries your *image* supplies,
+so what it really does is decided by the image — and where an agent can write
+part of that image's filesystem, by the agent. Four channels were found and
+measured before the approach was dropped: `bash -c` sourcing an `ENV BASH_ENV`
+file, the loader honouring `ENV LD_PRELOAD`, `ENV LD_DEBUG_OUTPUT` writing
+root-owned files at a path the image names, and `/etc/ld.so.preload`, which no
+environment setting can neutralize. So the daemon takes back what it landed
+instead: the same archive endpoint that extracted the temporary extracts an
+empty file over it, executing nothing. The refused payload is gone; where your
+sandbox cannot unlink, an empty file under the platform's own `.map-write-`
+name remains until the container is destroyed.
 
 The catch is the **workdir**. The container's entrypoint runs `mkdir -p
 <workdir>` as whatever user the container runs as, and a uid the image did not
