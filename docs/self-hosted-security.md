@@ -216,9 +216,18 @@ backends can express — a Kubernetes securityContext takes no user name.
 One narrow exception on Docker: when a write's rename fails, the platform issues
 a single uid-0 exec in the sandbox container to remove the temporary file the
 daemon's root-credentialed extraction landed (which your sandbox uid cannot
-unlink from a directory it cannot write — #310). Its command is fixed —
-`/bin/rm`, absolute so the sandbox's PATH chooses nothing, of the platform's own
-random temporary name — and it runs nothing else, ever.
+unlink from a directory it cannot write — #310). It is the platform's only root
+exec, and it runs **no shell**: the daemon receives `/bin/rm -f <the platform's
+own random temporary name>` as three literal arguments, so there is no PATH
+lookup, no word splitting, and no shell startup file. That last one is the
+reason it is argv rather than a command string: a shell obeys the environment it
+starts in, so an image declaring `ENV BASH_ENV=/some/sandbox-writable/path`
+would otherwise have had its agent-written file sourced with this credential
+(measured, and now pinned by a test). For the same reason the exec empties
+`LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT` for itself — the loader reads
+those even with no shell involved — without touching the environment your tools
+see. If your image's `ENV` names a hook like these, nothing about it reaches
+this exec; it remains yours everywhere else.
 
 The catch is the **workdir**. The container's entrypoint runs `mkdir -p
 <workdir>` as whatever user the container runs as, and a uid the image did not

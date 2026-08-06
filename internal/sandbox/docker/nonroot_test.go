@@ -108,6 +108,69 @@ func TestBulkWriteOnANonRootImage(t *testing.T) {
 	}
 }
 
+// hookedDockerfile is the non-root image contract plus a bash startup hook the
+// image's own environment names — an operator's `ENV BASH_ENV=…` pointing at a
+// path the sandbox user can write. Unusual, but it is the sharp case for the
+// platform's one root exec, and nothing stops an operator from shipping it.
+const hookedDockerfile = `FROM debian:stable-slim
+RUN useradd -m app && mkdir -p /workspace && chown app:app /workspace
+ENV BASH_ENV=/workspace/hook
+USER app
+`
+
+// The root shed must run nothing the sandbox chose. `bash -c` sources $BASH_ENV
+// before it runs anything, so a shed that went through a shell executed the
+// agent's own file with the very credential the shed exists to use — measured
+// on this image, uid 0 in the hook's own record, before the shed became argv
+// rather than script. The hook still runs for the sandbox's own execs: that
+// shell is the agent's and its own uid is no escalation, so what this pins is
+// that uid 0 is never among them (#310).
+func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
+	image := "map-hooked-test:latest"
+	build := exec.Command("docker", "build", "-q", "-t", image, "-")
+	build.Stdin = strings.NewReader(hookedDockerfile)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the hooked image: %v\n%s", err, out)
+	}
+
+	p, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	ctx := context.Background()
+	sb, err := p.Provision(ctx, sandbox.Spec{
+		SessionID: domain.NewID("sesn"), Image: image, Workdir: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sb.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy: %v", err)
+		}
+	})
+
+	// The agent plants the hook, as itself — every shell in the container from
+	// here on records the uid that ran it.
+	if err := sb.WriteFile(ctx, "/workspace/hook", []byte("id -u >> /workspace/ran\n")); err != nil {
+		t.Fatalf("plant the hook: %v", err)
+	}
+	// A write whose rename the sandbox user is refused: the shed runs as uid 0.
+	if err := sb.WriteFile(ctx, "/etc/map-310-hooked.txt", []byte("x")); !errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v, want ErrNotWritable — the route whose shed needs the daemon's credential", err)
+	}
+
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "cat /workspace/ran 2>/dev/null || true"})
+	if err != nil {
+		t.Fatalf("read the hook's record: %v", err)
+	}
+	for _, uid := range strings.Fields(res.Stdout) {
+		if uid == "0" {
+			t.Fatalf("the hook ran as uid 0 (record: %q): the root shed must run no agent-chosen code", res.Stdout)
+		}
+	}
+}
+
 // A write into a parent the daemon can extract into but the sandbox user cannot
 // write is the model's error, not the platform's fault (plan 23, #306). The PUT
 // lands the temporary file because the daemon extracts as root; the `mv`,

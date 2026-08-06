@@ -1330,29 +1330,40 @@ func (c *container) discard(ctx context.Context, tmp string) {
 // not: a refused rename's temporary was landed by the daemon's root-credentialed
 // extraction, so a parent the sandbox user cannot write would hold the refused
 // payload forever (#310, measured on non-root images). The shed carries the
-// credential that landed it — an exec as User "0" — bounded the way the mode
-// preservation is: the command is fixed, an `rm -f` of the platform's own
-// shellQuoted TempPrefix name, so the credential removes exactly what the
-// daemon put there. An ancestor the agent redirected resolves to at most a
-// same-named platform temporary — the basename is this write's own random
-// TempName, not the agent's to choose — and an rm of a symlink unlinks the
-// link. The binary is pinned to /bin/rm where every other exec resolves
-// through the agent's PATH: this is the one exec whose credential a planted
-// binary would escalate, so nothing in it may be the sandbox filesystem's to
-// choose beyond the fixed paths the image contract already fixes (/bin/bash
-// is the contract's; /bin/rm rides the same POSIX-userland clause, and an
-// image without it degrades to the residue this was already leaving).
-// Best-effort for discard's reason: the caller already has the error that
-// matters, and a daemon that refuses the root exec leaves only the residue
-// this was already leaving.
+// credential that landed it — an exec as User "0" — and it is the platform's
+// only one, so the rule for it is that nothing the sandbox can reach may
+// decide anything it does.
+//
+// That rule is why this is the one exec built as **argv rather than script**.
+// Every other exec here goes through execWrapper's `/bin/bash -c`, and a shell
+// obeys the environment it starts in: an image whose own `ENV BASH_ENV` names a
+// path the sandbox user can write had the agent's file sourced by this very
+// exec, as uid 0 — measured, twice per shed, once for the wrapper's shell and
+// once for the command's (TestTheRootShedRunsNoAgentCodeOnANonRootImage). No
+// shell runs here now: one absolute binary and two literal arguments the daemon
+// passes through untouched, so there is no PATH lookup to plant into, no word
+// splitting, and no startup file to source. The loader still reads the
+// environment even without a shell — `ld.so` honours LD_PRELOAD from an image's
+// ENV, measured against this same exec — so those three names are emptied for
+// it. The Env entry is per-exec: the container's own environment, which the
+// agent's tools see, is untouched.
+//
+// What the credential can still reach is bounded by the argument: the basename
+// is this write's own random TempName, not the agent's to choose, so an
+// ancestor the agent redirected resolves to at most a same-named platform
+// temporary, and an `rm` of a symlink unlinks the link. `/bin/rm` and
+// `/bin/bash` are both the image contract's to provide; an image without the
+// former degrades to the residue this was already leaving, as does a daemon
+// that refuses the exec — best effort for discard's reason, the caller already
+// has the error that matters.
 func (c *container) discardAsRoot(ctx context.Context, tmp string) {
 	execID, err := c.api.execCreate(ctx, c.id, execConfig{
 		AttachStdout: true,
 		AttachStderr: true,
 		User:         "0",
-		Cmd: []string{"/bin/bash", "-c", execWrapper,
-			"map-exec", "/bin/rm -f " + shellQuote(tmp), "0"},
-		WorkingDir: c.workdir,
+		Env:          []string{"LD_PRELOAD=", "LD_LIBRARY_PATH=", "LD_AUDIT="},
+		Cmd:          []string{"/bin/rm", "-f", tmp},
+		WorkingDir:   c.workdir,
 	})
 	if err != nil {
 		return

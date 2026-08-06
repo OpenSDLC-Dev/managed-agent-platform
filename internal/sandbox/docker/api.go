@@ -331,8 +331,13 @@ type execConfig struct {
 	// Empty — the default, and every exec's but one — keeps the container's;
 	// only the root-credentialed shed of a refused rename's temporary sets it
 	// (#310).
-	User       string `json:"User,omitempty"`
-	WorkingDir string `json:"WorkingDir"`
+	User string `json:"User,omitempty"`
+	// Env replaces the container's own value for the names it carries, for this
+	// exec only (the daemon merges by name, and the exec's entry wins). Set by
+	// the same one caller, to empty the injection points an image's environment
+	// could otherwise aim at the credential it runs with.
+	Env        []string `json:"Env,omitempty"`
+	WorkingDir string   `json:"WorkingDir"`
 }
 
 func (c *apiClient) execCreate(ctx context.Context, id string, cfg execConfig) (string, error) {

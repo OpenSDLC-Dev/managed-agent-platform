@@ -1097,8 +1097,36 @@ func TestWriteFileClassifiesARootOwnedParentAtRename(t *testing.T) {
 // a file only the same credential can remove. The shed therefore runs as
 // User "0" — a fixed `rm -f` of the platform's own TempPrefix name, and nothing
 // else — while every other exec keeps the container's own user (#310).
+// rootShed reports whether an exec is the daemon-credentialed shed of a
+// temporary under dir: uid 0, argv rather than script — one absolute binary and
+// two literal arguments, so no shell of the agent's environment runs — with the
+// loader's injection points emptied for the exec (#310).
+func rootShed(e execSeen, dir string) bool {
+	return e.user == "0" &&
+		len(e.cmd) == 3 && e.cmd[0] == "/bin/rm" && e.cmd[1] == "-f" &&
+		strings.HasPrefix(e.cmd[2], dir+sandbox.TempPrefix) &&
+		strings.Contains(strings.Join(e.env, " "), "LD_PRELOAD=")
+}
+
+// execSeen is one exec as the fake daemon received it. The command is the whole
+// argv, because the shed's shape is the assertion: a wrapped exec carries its
+// command as the second-to-last element, the shed carries no wrapper at all.
+type execSeen struct {
+	cmd, env  []string
+	user      string
+	wrappedAs string
+}
+
+// sawExec records an exec create for the shed assertions.
+func sawExec(body execConfig) execSeen {
+	e := execSeen{cmd: body.Cmd, env: body.Env, user: body.User}
+	if len(body.Cmd) > 2 {
+		e.wrappedAs = body.Cmd[len(body.Cmd)-2]
+	}
+	return e
+}
+
 func TestARefusedRenameShedsItsTempWithTheDaemonsCredential(t *testing.T) {
-	type execSeen struct{ cmd, user string }
 	var seen []execSeen
 	kinds := map[string]string{}
 	var execN int
@@ -1116,12 +1144,12 @@ func TestARefusedRenameShedsItsTempWithTheDaemonsCredential(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := body.Cmd[len(body.Cmd)-2]
-			seen = append(seen, execSeen{cmd: cmd, user: body.User})
+			e := sawExec(body)
+			seen = append(seen, e)
 			switch {
-			case strings.Contains(cmd, "mv -f"):
+			case strings.Contains(e.wrappedAs, "mv -f"):
 				kinds[id] = "rename"
-			case strings.Contains(cmd, ": > '/etc/"+sandbox.TempPrefix):
+			case strings.Contains(e.wrappedAs, ": > '/etc/"+sandbox.TempPrefix):
 				kinds[id] = "probe"
 			}
 			fmt.Fprintf(w, `{"Id":%q}`, id)
@@ -1151,13 +1179,12 @@ func TestARefusedRenameShedsItsTempWithTheDaemonsCredential(t *testing.T) {
 	if !errors.Is(err, sandbox.ErrNotWritable) {
 		t.Fatalf("err = %v, want ErrNotWritable", err)
 	}
-	last := seen[len(seen)-1]
-	if last.user != "0" || !strings.Contains(last.cmd, "/bin/rm -f '/etc/"+sandbox.TempPrefix) {
-		t.Fatalf("last exec = %+v, want the daemon-credentialed shed of the platform's temporary, its rm pinned to /bin/rm", last)
+	if last := seen[len(seen)-1]; !rootShed(last, "/etc/") {
+		t.Fatalf("last exec = %+v, want the daemon-credentialed shed: uid 0, argv `/bin/rm -f <temp>`, loader hooks emptied", last)
 	}
 	for _, e := range seen[:len(seen)-1] {
-		if e.user != "" {
-			t.Errorf("exec %q carries user %q, want the container's own", e.cmd, e.user)
+		if e.user != "" || len(e.env) != 0 {
+			t.Errorf("exec %q carries user %q env %q, want the container's own", e.wrappedAs, e.user, e.env)
 		}
 	}
 }
@@ -1168,7 +1195,6 @@ func TestARefusedRenameShedsItsTempWithTheDaemonsCredential(t *testing.T) {
 // parent when the failure was transient; the root one covers the parent the
 // user cannot write (#310).
 func TestARenameExecFailureShedsWithBothCredentials(t *testing.T) {
-	type execSeen struct{ cmd, user string }
 	var seen []execSeen
 	renames := map[string]bool{}
 	var execN int
@@ -1186,9 +1212,9 @@ func TestARenameExecFailureShedsWithBothCredentials(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := body.Cmd[len(body.Cmd)-2]
-			seen = append(seen, execSeen{cmd: cmd, user: body.User})
-			renames[id] = strings.Contains(cmd, "mv -f")
+			e := sawExec(body)
+			seen = append(seen, e)
+			renames[id] = strings.Contains(e.wrappedAs, "mv -f")
 			fmt.Fprintf(w, `{"Id":%q}`, id)
 		case strings.HasSuffix(r.URL.Path, "/start"):
 			if renames[execID()] {
@@ -1212,12 +1238,11 @@ func TestARenameExecFailureShedsWithBothCredentials(t *testing.T) {
 		t.Fatalf("execs = %+v, want the rename then both sheds", seen)
 	}
 	userShed := seen[len(seen)-2]
-	if userShed.user != "" || !strings.Contains(userShed.cmd, "rm -f '/etc/"+sandbox.TempPrefix) {
+	if userShed.user != "" || !strings.Contains(userShed.wrappedAs, "rm -f '/etc/"+sandbox.TempPrefix) {
 		t.Errorf("second-to-last exec = %+v, want the sandbox user's shed", userShed)
 	}
-	rootShed := seen[len(seen)-1]
-	if rootShed.user != "0" || !strings.Contains(rootShed.cmd, "/bin/rm -f '/etc/"+sandbox.TempPrefix) {
-		t.Errorf("last exec = %+v, want the root-credentialed shed", rootShed)
+	if last := seen[len(seen)-1]; !rootShed(last, "/etc/") {
+		t.Errorf("last exec = %+v, want the root-credentialed shed", last)
 	}
 }
 
@@ -1225,7 +1250,7 @@ func TestARenameExecFailureShedsWithBothCredentials(t *testing.T) {
 // failure was the transfer's, not the target's, and calling the path unwritable
 // would tell the model the path is bad when it is not.
 func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
-	var commands []string
+	var seen []execSeen
 	renames := map[string]bool{}
 	var execN int
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1242,9 +1267,9 @@ func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
 			}
 			execN++
 			id := fmt.Sprintf("e%d", execN)
-			cmd := body.Cmd[len(body.Cmd)-2]
-			commands = append(commands, cmd)
-			renames[id] = strings.Contains(cmd, "mv -f")
+			e := sawExec(body)
+			seen = append(seen, e)
+			renames[id] = strings.Contains(e.wrappedAs, "mv -f")
 			fmt.Fprintf(w, `{"Id":%q}`, id)
 		case strings.HasSuffix(r.URL.Path, "/start"):
 			w.WriteHeader(http.StatusOK)
@@ -1266,16 +1291,16 @@ func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exit 1") {
 		t.Fatalf("err = %v, want the move's own failure", err)
 	}
-	if len(commands) < 2 {
-		t.Fatalf("execs = %q, want the probe then the shed after the failed move", commands)
+	if len(seen) < 2 {
+		t.Fatalf("execs = %+v, want the probe then the shed after the failed move", seen)
 	}
-	if probe := commands[len(commands)-2]; !strings.Contains(probe, ": > '/workspace/"+sandbox.TempPrefix) {
-		t.Errorf("second-to-last exec = %q, want the writability probe asked after the failed move", probe)
+	if probe := seen[len(seen)-2]; !strings.Contains(probe.wrappedAs, ": > '/workspace/"+sandbox.TempPrefix) {
+		t.Errorf("second-to-last exec = %+v, want the writability probe asked after the failed move", probe)
 	}
 	// The shed runs on the raw route too — idempotent where the script's own
 	// rm already worked (#310).
-	if last := commands[len(commands)-1]; !strings.Contains(last, "/bin/rm -f '/workspace/"+sandbox.TempPrefix) {
-		t.Errorf("last exec = %q, want the daemon-credentialed shed, its rm pinned to /bin/rm", last)
+	if last := seen[len(seen)-1]; !rootShed(last, "/workspace/") {
+		t.Errorf("last exec = %+v, want the daemon-credentialed shed", last)
 	}
 }
 

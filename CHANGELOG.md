@@ -153,12 +153,23 @@ copy of an entry here.
   rename script now ends with a best-effort root-credentialed shed, and the
   exec-could-not-run route sheds with both credentials, each best-effort
   (the exec just failed, so neither is trusted alone): an exec as
-  `User: "0"` whose command is fixed — `/bin/rm`, absolute so the agent's
-  PATH resolves nothing at that credential, `-f` of the platform's own
-  shellQuoted TempPrefix name, this write's random one, so the credential
-  removes exactly what the daemon put there — idempotent where the script's
-  rm already worked, silent like `discard` for the same reason.
-  docs/self-hosted-security.md's non-root section names the exception. The k8s backend needs
+  `User: "0"` running the platform's **only** root command — and running it
+  as **argv, not script**, which is the security-load-bearing part. Every
+  other exec here goes through `/bin/bash -c`, and a shell obeys the
+  environment it starts in: an image whose own `ENV BASH_ENV` names a
+  sandbox-writable path had the agent's file sourced by this very exec as
+  uid 0 — measured on a real image, twice per shed (the wrapper's shell and
+  the command's), and now pinned by
+  `TestTheRootShedRunsNoAgentCodeOnANonRootImage`. So the daemon receives
+  `/bin/rm -f <temp>` as three literal arguments — no PATH lookup, no word
+  splitting, no startup file — and the exec empties `LD_PRELOAD`,
+  `LD_LIBRARY_PATH` and `LD_AUDIT` for itself, because the loader reads
+  those with no shell involved (also measured, against this same exec). The
+  basename is the platform's own random TempName, so the credential removes
+  exactly what the daemon put there; idempotent where the script's rm
+  already worked, silent like `discard` for the same reason.
+  docs/self-hosted-security.md's non-root section documents the exception
+  for operators. The k8s backend needs
   nothing: its temporary is created by the sandbox user, so the same
   credential that made it removes it. Red observed first: the real-image row
   measured the residue (`.map-write-` count 1 in `/etc`, want 0), the
