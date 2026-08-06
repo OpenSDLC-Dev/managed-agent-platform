@@ -57,26 +57,34 @@ Measured at 56f81f9, not assumed:
   feeds a non-conforming backend to `Run` and asserts refusal. `blobtest` has
   `mem_test.go` (a **conforming** self-check) and `ready_test.go` (a fixture meta-test) —
   neither proves the suite rejects a violating store. `sandboxtest` has zero `_test.go`.
-- `evals/grade_unit_test.go` (~1220 lines) is entirely per-grader over hand-written
+- `evals/grade_unit_test.go` (1220 lines) is per-grader and per-helper over hand-written
   mini-transcripts; there is no pinned known-bad whole transcript asserted to grade as a
   failed trial through the full grader pack.
 - Environment provisioning failures carry no machine-readable marker, and the shared
   harnesses fail from `TestMain`, not `t.Fatalf`: `pgtest.Main`
-  (`internal/pgtest/pgtest.go:48-96`), `blobtest.Main`
-  (`internal/blob/blobtest/blobtest.go:60-109`), `gcstest.Main`
-  (`internal/blob/gcs/gcstest/gcstest.go:49-79`) print to stderr and return 1. Per-test
-  provisioning failures are plain `t.Fatalf` — `FreshDB`/`NewPool`
-  (`pgtest.go:193,198,209`), `FreshBucket` (`gcstest.go:165,170`), sandbox `provision:`
+  (`internal/pgtest/pgtest.go:48-59`, its `startReady` helper through `:96`),
+  `blobtest.Main` (`internal/blob/blobtest/blobtest.go:60-71`, `startReady` through
+  `:109`), `gcstest.Main` (`internal/blob/gcs/gcstest/gcstest.go:49-79`), and
+  `secretstest.Main` (`internal/secrets/secretstest/secretstest.go:47-58`, consumed by
+  `internal/secrets/openbao/openbao_test.go:20`) print to stderr and return 1. Per-test
+  provisioning failures are plain `t.Fatalf` — `FreshDB` (`pgtest.go:193,198`),
+  `FreshBucket` (`gcstest.go:165,170`), sandbox `provision:`
   (`internal/sandbox/sandboxtest/contract.go:78,103` — where a dead daemon actually
-  surfaces, since `docker.New`/`k8s.New` never ping), and the gate fixtures
-  (`sandboxtest/gatefixture.go:52,56,92,96,165,175`; `k8s_test.go:212-281`).
+  surfaces, since `docker.New`/`k8s.New` never ping), the gate fixtures
+  (`sandboxtest/gatefixture.go:52,56,92,96,131,165,175`; `k8s_test.go:212-281`), and the
+  toolset harness (`internal/toolset/toolset_test.go:29,37`). This survey is by seam and
+  is **not** claimed exhaustive by file — slice 2 defines its scope by sweep. One site
+  deliberately mixes environment and product: `pgtest.NewPool`'s `open store` failure
+  (`pgtest.go:209`) calls `store.Open`, which runs the repo's migrations
+  (`internal/store/store.go:37`) — a failure there can be a broken migration, not
+  blockage.
 - The bare word `BLOCKED` already appears in `internal/sandbox/sandboxtest/egress.go:125,131`
   as an egress-probe **behavior** token; a marker must not collide with a bare-word grep.
 - The verifier's report format is an exact prose template
   (`.claude/agents/verifier.md:32-39`); rung 2's scratch-copy mutation proof is
   discretionary — "When you doubt a specific test can fail, you may prove it"
   (`verifier.md:23`, reinforced at `:3` and `:12`). Practice is already stricter than the
-  rule (three vacuous regression tests slipped through on PR #276).
+  rule.
 - `evals` artifacts carry no rerun command: the `record` struct
   (`evals/report_test.go:41-54`) and `renderSummary`'s failure detail
   (`report_test.go:319-328`) point to the transcript only. A single task **is** already
@@ -85,8 +93,8 @@ Measured at 56f81f9, not assumed:
   already stable literals (`ExecTimeoutKillsAndSurvives`, `PutGetRoundTrip`,
   `TextTurnTerminatesWithStopAndUsage`), promised nowhere.
 - `acceptance`'s `runDCF` (`acceptance/dcf_test.go:72-238`) reports failures through
-  `t.Fatalf` only; its stream watcher already buffers every SSE frame with the raw wire
-  JSON retained (`streamWatch.frames`, `dcf_test.go:285-320`; the SDK union's
+  plain `t.Fatalf`/`t.Errorf` calls and writes no artifact on any failure path; its
+  stream watcher already buffers every SSE frame with the raw wire JSON retained (`streamWatch.frames`, `dcf_test.go:285-320`; the SDK union's
   `RawJSON()`), and `dcfRun` holds the downloaded deliverable bytes — a byte-faithful
   dump is a serialization of state already in memory. `.gitignore` has `/evals/artifacts/`
   and no acceptance sibling.
@@ -102,31 +110,44 @@ binary and asserting a non-zero exit plus the expected failure text. Refactoring
 suite's rows to return errors was considered and rejected: invasive, and it would change
 the suite every backend already passes.
 
-**evals.** Add a pinned known-bad whole transcript fixture — wrong final answer, a
-forbidden tool call — asserted to grade `Pass: false` through the full core+task grader
-pack, one level above `grade_unit_test.go`'s per-grader coverage. Grading-only, so it
-needs no recorder; if it ever touches `recordTrial`, it must use the scratch recorder
-(`evals/report_unit_test.go:12-38` documents why).
+**evals.** Add pinned known-bad whole transcript fixtures — **one per failure cause** (a
+wrong final answer; a forbidden tool call), each asserted to grade `Pass: false` with the
+expected *named* grader failure, through the full core+task grader pack — one level above
+`grade_unit_test.go`'s per-grader coverage. One fault per fixture keeps the mutation
+criterion honest: a two-fault fixture stays green when either fault alone is repaired.
+Grading-only, so it needs no recorder; if it ever touches `recordTrial`, it must use the
+scratch recorder (`evals/report_unit_test.go:12-38` documents why).
 
 Known limitation, recorded not built: a bad `Backend` *renderer* (e.g. streaming tool
 input in a single frame) would silently weaken the accumulation row — the multi-frame
-requirement at `contract.go:68-70` is enforced only by comment. Same doctrine, separate
-decision; out of scope here. `sandboxtest`/`blobtest` known-bad stores can follow this
-slice's pattern later; they are not in scope either.
+requirement at `contract.go:68-70` is enforced only by comment. Same doctrine; out of
+scope, as are `sandboxtest`/`blobtest` known-bad subjects. Whether to extend the pattern
+to any of them is a backlog decision made in GitHub issues; this plan records no future
+work.
 
 Acceptance: reverting any one of the violated invariants' assertions in `contract.go`
-turns the self-test red; deleting the known-bad transcript's failure cause turns the
-evals fixture test red. (The meta-tests are themselves mutation-tested — the rule they
+turns the self-test red; repairing any known-bad fixture's single fault turns exactly
+that fixture's test red. (The meta-tests are themselves mutation-tested — the rule they
 exist to structuralize.)
 
 ## Slice 2 — BLOCKED(environment): label the provisioning failure, keep it red
 
-Prefix every environment-provisioning failure message with the marker
-`BLOCKED(environment): ` — the shared harness stderr lines (`pgtest.Main`,
-`blobtest.Main`, `gcstest.Main`), the per-test provisioning `t.Fatalf`s (`FreshDB`,
-`NewPool`, `FreshBucket`, sandboxtest `provision:`, the gate fixtures, the
-docker/k8s harness entry points). Behavior-assertion failures stay unmarked. Both remain
+Prefix environment-provisioning failure messages with the marker
+`BLOCKED(environment): `. Scope is defined by seam and found by sweep at implementation
+time, not by the ground-truth survey above: every Docker/K8s-backed shared harness
+`Main` (`pgtest`, `blobtest`, `gcstest`, `secretstest`) and every per-test provisioning
+failure that fires **before any repo logic runs** (`FreshDB`, `FreshBucket`, sandboxtest
+`provision:`, the gate fixtures, the docker/k8s/toolset harness entry points, and
+whatever else the sweep finds). Behavior-assertion failures stay unmarked. Both remain
 red: the marker classifies the failure, it never softens it.
+
+The *before any repo logic runs* rule is load-bearing: `pgtest.NewPool`'s `open store`
+failure stays **unmarked**, because `store.Open` runs the repo's own migrations
+(`internal/store/store.go:37`) — a failure there can be a broken migration, which is
+"observed and wrong", not "couldn't observe". Where one call mixes both (a connect error
+and a migration error surface identically), the site stays unmarked: a missing marker
+costs one extra look, a wrong marker hides a bug — the same asymmetry that makes the
+runner fail when in doubt.
 
 The grep token is the full `BLOCKED(environment)` — the bare word collides with the
 egress probe's behavior token (`egress.go:125,131`). `pgtest`/`blobtest` retry once
@@ -135,7 +156,8 @@ final give-up line does. One sentence lands in docs/ARCHITECTURE.md's testing se
 naming the convention, so triage ("rerun or investigate?") stops depending on session
 folklore.
 
-Acceptance: with Docker stopped, every failing suite's output carries the marker; a
+Acceptance: with Docker stopped, every provisioning-failure site the sweep identified
+carries the marker (checked against the sweep's own list, not the survey above); a
 seeded assertion failure (scratch copy) does not. The marker-bearing paths are
 mutation-checked per slice 1's rule where a cheap seeding exists; harness stderr lines
 are verified by running the binary against a stopped daemon, not unit-tested.
@@ -161,8 +183,9 @@ discretionary to default for the diff's own guards: for every test the diff adds
 modifies that guards changed behavior, rung 2 requires evidence the test fails against
 the reverted/broken behavior in the throwaway scratch copy; a missing red run is itself
 a finding. Tests the diff does not touch stay under the existing doubt-triggered rule.
-This codifies what PR #276 taught (three vacuous regression tests) and what the
-"mutation-test every new guard" practice already does by hand.
+This codifies what PR #276's review pass caught — three new regression tests that had
+never run against the broken code (that PR's review threads are the record) — and what
+the mutation-test-every-new-guard practice already does by hand.
 
 Acceptance: a verifier dispatch on a trivial doc change returns the JSON block with rung
 verdicts including honest `SKIP`s; a dispatch on a change whose new test never saw the
@@ -190,9 +213,11 @@ that, pasted verbatim, reruns exactly the failed task.
 `runDCF` registers a `t.Cleanup` that, on `t.Failed()`, dumps to gitignored
 `acceptance/artifacts/` (a `.gitignore` sibling of `/evals/artifacts/`): the buffered SSE
 frames' raw wire JSON in order, the `dcfRun` summary (session ID, outcome ID, terminal
-state, grader explanation), and the deliverables as name + size + sha256 (not bytes —
-contents can be large and are reproducible from the session). Output passes a scrub
-mirroring evals' policy before writing. Both legs inherit from the one harness change;
+state, grader explanation), and the deliverable bytes themselves — `dcfRun.Contents`
+already holds them, they are doc-example-sized, and the rehearsal leg's in-memory blob
+store and test-scoped Postgres die with the test, so a name-and-hash record would strand
+any byte-content diagnosis. Output passes a scrub mirroring evals' policy before
+writing. Both legs inherit from the one harness change;
 the rehearsal leg gives CI failures their evidence, the live leg saves a full-stack
 re-run whose whole point was being expensive.
 
