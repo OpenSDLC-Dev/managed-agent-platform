@@ -76,6 +76,7 @@ type Provider struct {
 	nodeSelector     map[string]string
 	tolerations      []corev1.Toleration
 	imagePullSecrets []corev1.LocalObjectReference
+	revoker          sandbox.GateTokenRevoker
 	// pidsWarnOnce keeps warnUnenforceablePidsLimit to one line per provider
 	// rather than one per provisioned pod.
 	pidsWarnOnce sync.Once
@@ -114,6 +115,7 @@ func New(cfg Config) (*Provider, error) {
 		nodeSelector:     sel,
 		tolerations:      tol,
 		imagePullSecrets: pull,
+		revoker:          cfg.GateTokenRevoker,
 	}, nil
 }
 
@@ -330,6 +332,58 @@ func adoptable(pod *corev1.Pod, spec sandbox.Spec, workdir string) error {
 	return nil
 }
 
+// Owned lists the distinct session ids of every pod in this namespace carrying
+// the ownership label — the gate rides inside the sandbox pod here, so one pod
+// is a session's entire holding.
+func (p *Provider) Owned(ctx context.Context) ([]domain.ID, error) {
+	pods, err := p.client.cs.CoreV1().Pods(p.client.namespace).List(ctx,
+		metav1.ListOptions{LabelSelector: sessionLabel})
+	if err != nil {
+		return nil, fmt.Errorf("k8s: list owned pods: %w", err)
+	}
+	seen := make(map[domain.ID]struct{}, len(pods.Items))
+	var out []domain.ID
+	for i := range pods.Items {
+		id := domain.ID(pods.Items[i].Labels[sessionLabel])
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// Reap destroys everything this namespace owns for the session — its pod, gate
+// sidecar included — revoking the session's gate token first when the provider
+// has a revoker (#197; revoke-before-teardown keeps a partial failure
+// retryable). It selects by label rather than deriving the pod name, needs no
+// live handle, and waits for each pod object to be gone from the API
+// (deleteAndWaitGone) — never returning success, or failure, on a pod that is
+// merely terminating. The delete is grace-0, so "gone" carries Destroy's own
+// bound: the API object is final at once, while a partitioned node's kubelet
+// may lag stopping the containers. A session owning nothing is a no-op.
+func (p *Provider) Reap(ctx context.Context, sessionID domain.ID) error {
+	if p.revoker != nil {
+		if err := p.revoker.Revoke(ctx, sessionID); err != nil {
+			return fmt.Errorf("k8s: revoke gate token for session %s: %w", sessionID, err)
+		}
+	}
+	pods, err := p.client.cs.CoreV1().Pods(p.client.namespace).List(ctx,
+		metav1.ListOptions{LabelSelector: sessionLabel + "=" + string(sessionID)})
+	if err != nil {
+		return fmt.Errorf("k8s: list session %s pods: %w", sessionID, err)
+	}
+	var errs error
+	for i := range pods.Items {
+		errs = errors.Join(errs, p.deleteAndWaitGone(ctx, pods.Items[i].Name, pods.Items[i].UID))
+	}
+	return errs
+}
+
 // deleteAndWaitGone removes a pod (UID-guarded, no grace) and waits for the
 // name to free up, so the caller can immediately recreate it — a pod delete is
 // asynchronous and a too-early create answers 409.
@@ -341,7 +395,7 @@ func (p *Provider) deleteAndWaitGone(ctx context.Context, name string, uid types
 		Preconditions:      &metav1.Preconditions{UID: &uid},
 	})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("k8s: replace pod %s: %w", name, err)
+		return fmt.Errorf("k8s: remove pod %s: %w", name, err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, reclaimTimeout)
 	defer cancel()
@@ -351,11 +405,11 @@ func (p *Provider) deleteAndWaitGone(ctx context.Context, name string, uid types
 			return nil // gone, or the name already belongs to a successor
 		}
 		if gerr != nil {
-			return fmt.Errorf("k8s: replace pod %s: %w", name, gerr)
+			return fmt.Errorf("k8s: remove pod %s: %w", name, gerr)
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("k8s: replace pod %s: %w", name, ctx.Err())
+			return fmt.Errorf("k8s: remove pod %s: %w", name, ctx.Err())
 		case <-time.After(200 * time.Millisecond):
 		}
 	}

@@ -198,9 +198,9 @@ type GateSpec struct {
 // call after the first) never calls either method, so it never revokes the token
 // the running gate is already authenticating with — and a create that loses the
 // race (409) discards its generated token unpersisted, leaving the winner's
-// intact. It lives on GateSpec rather than on the provider because Persist needs
-// the executor's DB pool (constructed after the provider) and both backends mint
-// identically; the executor supplies an implementation backed by
+// intact. It lives on GateSpec rather than on the provider because minting is a
+// per-provision concern both backends share, with Persist needing the executor's
+// DB pool; the executor supplies an implementation backed by
 // internal/gatetoken (a random token from Generate, its hash written by Ensure in
 // Persist, over its pool).
 type GateTokenMinter interface {
@@ -441,4 +441,21 @@ type Provider interface {
 	// running. Concurrent executors provisioning the same session converge on
 	// one sandbox rather than racing to create two.
 	Provision(ctx context.Context, spec Spec) (Sandbox, error)
+	// Owned lists the distinct session ids of every sandbox asset — sandbox
+	// containers/pods and gate containers, running or stopped — this endpoint
+	// currently holds, read from the ownership label. Endpoint-local by
+	// design: each executor sees only its own daemon or namespace, which is
+	// what shards the reaper across executors with no coordination (plan 24).
+	Owned(ctx context.Context) ([]domain.ID, error)
+	// Reap destroys everything the endpoint owns for the session — sandbox,
+	// gate, anonymous volumes — revoking the session's gate token first when
+	// the provider was built with a revoker (#197: a token must not outlive
+	// its gate). It needs no live handle, waits out asynchronous deletion so
+	// the assets are gone — at the orchestrator's level — when it returns: a
+	// terminating pod or an in-progress removal is waited on, never reported
+	// as success or as failure. The bound is the same one Destroy already
+	// has: on K8s "gone" is the API object (a partitioned node's kubelet may
+	// lag the force delete). Idempotent: reaping a session that owns nothing
+	// is a no-op.
+	Reap(ctx context.Context, sessionID domain.ID) error
 }

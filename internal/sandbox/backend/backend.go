@@ -19,6 +19,12 @@ import (
 type Config struct {
 	Backend string // "docker" (default) or "k8s"
 
+	// GateTokenRevoker is handed to whichever backend is selected: Reap revokes
+	// a session's gate token before removing its containers (#197). The
+	// executor supplies a pool-backed implementation; the BYOC worker, which
+	// has no database, leaves it nil and Reap skips revocation.
+	GateTokenRevoker sandbox.GateTokenRevoker
+
 	// docker: empty Host falls back to DOCKER_HOST and then the well-known socket.
 	DockerHost string
 	// docker: the network a session's egress-gate container joins (the deploy
@@ -54,7 +60,11 @@ type Config struct {
 func New(cfg Config) (sandbox.Provider, error) {
 	switch cfg.Backend {
 	case "", "docker":
-		return docker.New(docker.Config{Host: cfg.DockerHost, GateNetwork: cfg.DockerGateNetwork})
+		return docker.New(docker.Config{
+			Host:             cfg.DockerHost,
+			GateNetwork:      cfg.DockerGateNetwork,
+			GateTokenRevoker: cfg.GateTokenRevoker,
+		})
 	case "k8s":
 		return k8s.New(k8s.Config{
 			Kubeconfig:       cfg.K8sKubeconfig,
@@ -65,6 +75,7 @@ func New(cfg Config) (sandbox.Provider, error) {
 			NodeSelector:     cfg.K8sNodeSelector,
 			Tolerations:      cfg.K8sTolerations,
 			ImagePullSecrets: cfg.K8sImagePullSecrets,
+			GateTokenRevoker: cfg.GateTokenRevoker,
 		})
 	default:
 		return nil, fmt.Errorf("sandbox backend %q is not one of docker, k8s", cfg.Backend)

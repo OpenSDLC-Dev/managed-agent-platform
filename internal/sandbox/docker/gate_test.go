@@ -152,6 +152,15 @@ func TestProvisionCreatesGatePair(t *testing.T) {
 	if !slices.Contains(gateBody.Env, "GATE_TOKEN=gtk_test") || !slices.Contains(gateBody.Env, "CONTROLPLANE_URL=http://cp") {
 		t.Errorf("gate env = %v", gateBody.Env)
 	}
+	// The ownership label on the gate is what makes an orphaned gate reapable:
+	// Owned/Reap enumerate by label, so a gate created without it would outlive
+	// every teardown pass (plan 24). Both halves must carry it.
+	if gateBody.Labels[sessionLabel] != string(s.SessionID) {
+		t.Errorf("gate labels = %v, want the session ownership label", gateBody.Labels)
+	}
+	if sbBody.Labels[sessionLabel] != string(s.SessionID) {
+		t.Errorf("sandbox labels = %v, want the session ownership label", sbBody.Labels)
+	}
 	// The gate exports its egress spans to the deployment's collector.
 	for _, want := range []string{"OTEL_EXPORTER_OTLP_ENDPOINT=otel:4317", "OTEL_EXPORTER_OTLP_INSECURE=true"} {
 		if !slices.Contains(gateBody.Env, want) {
