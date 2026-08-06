@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -25,13 +26,14 @@ import (
 // limit to -1 (all), not the managed-agents default of 20.
 const maxResourceListLimit = 1000
 
-// defaultMountRoot is the container mount location for an uploaded file resource
-// when the caller gives no mount_path: /mnt/session/uploads/<file_id>
-// (betasession.go:693-717 documents the default).
+// defaultMountRoot is the session's uploads directory — the container location
+// every file resource is mounted under, whether the caller supplies a mount_path
+// or not (an omitted one is /mnt/session/uploads/<file_id>; betasession.go:693-717
+// documents that default, and resolveMountPath the rooting of a supplied one).
 const defaultMountRoot = "/mnt/session/uploads/"
 
-// maxMountPathBytes bounds a caller-supplied mount_path so a pathological value
-// never reaches the sandbox layer or the jsonb column.
+// maxMountPathBytes bounds a resolved mount_path so a pathological value never
+// reaches the sandbox layer or the jsonb column.
 const maxMountPathBytes = 1024
 
 // fileResourceJSON is the materialized session file resource
@@ -58,9 +60,12 @@ type resourceInput struct {
 // parseResourceInputs validates the create-time resources[] union without
 // touching the database: each element must be a supported resource (only
 // type:"file" in v1; github_repository/memory_store keep the union seam open —
-// the git half of #55 lands there — but are rejected), a valid file_id, and an
-// absolute, unique, storable mount_path. Existence of the referenced file is
-// checked later, inside the create transaction (materializeResourceInputs).
+// the git half of #55 lands there — but are rejected), a valid file_id, and a
+// storable mount_path that resolves (resolveMountPath) under the uploads root
+// and is unique there — uniqueness is checked on the resolved path, so
+// "data.csv" and "/data.csv" collide the way they will in the sandbox.
+// Existence of the referenced file is checked later, inside the create
+// transaction (materializeResourceInputs).
 func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error) {
 	raw, ok := obj["resources"]
 	if !ok || isNull(raw) {
@@ -128,26 +133,70 @@ func parseFileResource(obj map[string]json.RawMessage) (resourceInput, error) {
 	}
 	if !set || null || mountPath == "" {
 		mountPath = defaultMountRoot + fileID
-	} else if err := validateMountPath(mountPath); err != nil {
-		return resourceInput{}, err
+	} else {
+		resolved, err := resolveMountPath(mountPath)
+		if err != nil {
+			return resourceInput{}, err
+		}
+		mountPath = resolved
 	}
 	return resourceInput{fileID: fileID, mountPath: mountPath}, nil
 }
 
-// validateMountPath enforces the mount-path shape: absolute, bounded, and
-// storable. An unstorable byte (U+0000, invalid UTF-8) would otherwise fail as a
-// 500 when the resources array binds into the jsonb column (see #135).
-func validateMountPath(p string) error {
-	if !strings.HasPrefix(p, "/") {
-		return errInvalid("mount_path must be an absolute path")
+// resolveMountPath maps a caller-supplied mount_path to the container path the
+// file is mounted at. Every supplied path is rooted under the session's uploads
+// directory — "a mount_path of /data.csv places the file at
+// /mnt/session/uploads/data.csv in the sandbox" (docs, managed-agents/files
+// § "File paths") — so a leading "/" is that page's documented style ("paths
+// should be absolute"), not a filesystem root: "/data.csv" and "data.csv"
+// resolve alike. An **absolute** path already under the root passes through
+// cleaned but not re-rooted, which the reference's own data-analyst cookbook
+// requires: it mounts at the full /mnt/session/uploads/<name> and then prompts
+// the agent with that same path, which a second rooting would break. That is the
+// only form the cookbook evidence covers, so a relative "mnt/session/uploads/x"
+// is rooted like any other relative path.
+//
+// The caller's path is cleaned **before** it is rooted, so two spellings of one
+// path resolve alike: "/mnt/session/uploads/a/../../../../etc/passwd" and
+// "/../../etc/passwd" both clean to "/etc/passwd" and both land at
+// "/mnt/session/uploads/etc/passwd". Rooting the raw spelling instead would let
+// a ".." eat the duplicated root and land the file at a nested path no client
+// would look at — the very failure this rooting exists to prevent. Cleaning an
+// absolute path resolves its ".." entirely (POSIX makes "/.." the root), so only
+// a relative path whose cleaned form still leads with ".." can climb out, and
+// that is rejected. That leaves one asymmetry worth naming rather than hiding:
+// "/../etc/passwd" is accepted (it *is* "/etc/passwd") while "../etc/passwd" is
+// a 400, so under the "a leading slash is style, not a root" reading above these
+// two spell one intent and get opposite answers. Both are contained; the
+// alternative — rejecting a leading ".." on the absolute form too — would mean
+// declining to clean a path POSIX already defines, so the asymmetry is accepted.
+//
+// The resolved path is what gets stored and mounted, so it — not the caller's
+// spelling — carries the bounds: it must stay under the root, be at most
+// maxMountPathBytes, and be storable text, since an unstorable byte (U+0000,
+// invalid UTF-8) would otherwise fail as a 500 when the resources array binds
+// into the jsonb column (see #135). Containment is lexical, over the stored
+// string: the uploads directory is agent-writable, so an intermediate symlink
+// the agent plants there can still point a mount's bytes elsewhere — the same
+// accepted single-tenant tampering residual the mount sentinel carries
+// (docs/DIVERGENCES.md), not something this resolver can answer.
+func resolveMountPath(p string) (string, error) {
+	root := strings.TrimSuffix(defaultMountRoot, "/")
+	resolved := path.Clean(p)
+	if resolved != root && !strings.HasPrefix(resolved, root+"/") {
+		resolved = path.Join(root, resolved)
 	}
-	if len(p) > maxMountPathBytes {
-		return errInvalid("mount_path must be at most %d bytes", maxMountPathBytes)
+	// Also catches the root itself, which names a directory, not a mount target.
+	if !strings.HasPrefix(resolved, root+"/") {
+		return "", errInvalid("mount_path must resolve to a path under %s", root)
 	}
-	if !storableText(p) {
-		return errInvalid("mount_path must be storable text")
+	if len(resolved) > maxMountPathBytes {
+		return "", errInvalid("mount_path must be at most %d bytes", maxMountPathBytes)
 	}
-	return nil
+	if !storableText(resolved) {
+		return "", errInvalid("mount_path must be storable text")
+	}
+	return resolved, nil
 }
 
 // materializeResourceInputs verifies each referenced file exists in the same
@@ -466,12 +515,18 @@ func resourceID(raw json.RawMessage) string {
 	return o.ID
 }
 
-func mountPathTaken(resources []json.RawMessage, path string) bool {
+// mountPathTaken reports whether a session already mounts something at p. The
+// stored side is cleaned before comparing: a session created before mount paths
+// were resolved (#323) can hold a non-canonical literal — "/mnt/session/uploads//x"
+// — that names the same file as a freshly resolved "/mnt/session/uploads/x", and
+// a raw string compare would admit the second and let it overwrite the first's
+// bytes at materialization. p is already canonical (resolveMountPath cleans).
+func mountPathTaken(resources []json.RawMessage, p string) bool {
 	for _, raw := range resources {
 		var o struct {
 			MountPath string `json:"mount_path"`
 		}
-		if json.Unmarshal(raw, &o) == nil && o.MountPath == path {
+		if json.Unmarshal(raw, &o) == nil && path.Clean(o.MountPath) == p {
 			return true
 		}
 	}

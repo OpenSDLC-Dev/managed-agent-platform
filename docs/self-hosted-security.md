@@ -443,8 +443,10 @@ in the code (`sandbox.WritablePaths`) precisely so neither backend can forget on
 - **`/var/lib/map-shell`**, where the persistent shell keeps each session's cwd
   and environment — without it the *first* `bash` call of every session fails,
   and fails as a backend fault rather than an answer the model can see;
-- **`/mnt`**, the parent of the default mount point for a session's file
-  resources (`/mnt/session/uploads/<file_id>`).
+- **`/mnt`**, the parent of the mount point for a session's file resources
+  (`/mnt/session/uploads/…`, and `/mnt/session/uploads/<file_id>` when the
+  caller supplies no `mount_path`) — since #323 every resolved mount path is
+  under it, not just the default-placed ones.
 
 Kubernetes mounts an `emptyDir` over each; Docker an anonymous volume, which its
 existing container removal takes away with the container.
@@ -460,11 +462,25 @@ can never receive a file — no skills, no files, no `write` tool.
 What is still yours: an **image that tolerates a read-only root elsewhere**. A
 tool that writes outside the set above — a package manager, a language runtime
 with a cache under `$HOME` — fails. That is the "where the image allows" half of
-this dimension, and only you can judge it. One platform-shaped case falls the
-same way: a session file resource given an **explicit `mount_path`** outside that
-set cannot be materialized under a read-only root (it is logged, and the session
-continues without the file), so leave `mount_path` unset or put it under the
-workdir.
+this dimension, and only you can judge it. One platform-shaped case used to fall
+the same way and now mostly does not: since #323 every `mount_path` **is resolved
+under `/mnt/session/uploads` at create/add time**, so a resource created from now
+on always names a path inside `/mnt` — inside the writable set — instead of
+wherever the caller spelled.
+
+Two limits on that, both worth knowing before you rely on it. **It is not
+retroactive:** resolution happens when the resource is created, and both
+materialization halves write the *stored* value verbatim, so a session created
+before the upgrade keeps a literal `mount_path` like `/workspace/in.txt` and
+still fails to materialize under a read-only root (logged, and the session
+continues without the file). There is deliberately no backfill — re-rooting a
+live session's mount would move a file the agent's system prompt has already been
+told about. **And containment here is lexical**, over the stored string: the
+uploads directory is agent-writable, so a symlink a tool plants inside it can
+still point a later mount's bytes elsewhere. That is the same accepted
+single-tenant tampering residual the mount sentinel carries
+([docs/DIVERGENCES.md](./DIVERGENCES.md)), not a boundary this resolution claims
+to enforce against a hostile in-sandbox actor.
 
 ### Rolling out a change to any of this
 

@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +69,94 @@ func TestKeysetClause(t *testing.T) {
 	}
 	if clause, order, reversed := keysetClause("DESC", nil, 0); clause != "" || order != "DESC" || reversed {
 		t.Errorf("nil cursor: %q %s %v", clause, order, reversed)
+	}
+}
+
+// TestResolveMountPath pins the documented rooting rule: every supplied
+// mount_path resolves under /mnt/session/uploads, whether or not it starts with
+// "/" (managed-agents/files, "File paths"), a path already under that root is
+// left alone, and one that climbs above it — or names the root itself — is
+// rejected rather than mounted outside.
+func TestResolveMountPath(t *testing.T) {
+	const root = "/mnt/session/uploads"
+	// The root's own name must be compared as a directory, not a string prefix:
+	// /mnt/session/uploadsX is a different directory and gets rooted like any
+	// other path. A weaker HasPrefix(resolved, root) would mount it outside.
+	for name, tc := range map[string]struct{ in, want string }{
+		"bare filename":         {"app.log", root + "/app.log"},
+		"documented example":    {"/data.csv", root + "/data.csv"},
+		"absolute nested":       {"/src/main.py", root + "/src/main.py"},
+		"relative nested":       {"rel/path", root + "/rel/path"},
+		"outside the root":      {"/workspace/in.txt", root + "/workspace/in.txt"},
+		"root-prefixed sibling": {"/mnt/session/uploadsX/f", root + "/mnt/session/uploadsX/f"},
+		"already rooted":        {root + "/orders.csv", root + "/orders.csv"},
+		"already rooted, dirty": {root + "//a/./b.txt", root + "/a/b.txt"},
+		// Shell metacharacters stay legal (only NUL and invalid UTF-8 are barred);
+		// the presence probe quotes them (internal/executor/files.go shellQuote).
+		"shell metacharacters": {"a b;c'd$e.txt", root + "/a b;c'd$e.txt"},
+		// An absolute path is cleaned before rooting, so its ".." resolves away
+		// entirely rather than eating a duplicated root. These three clean to
+		// /etc/passwd and must therefore land at one and the same place.
+		"absolute dotdot":        {"/../../etc/passwd", root + "/etc/passwd"},
+		"dotdot through root":    {root + "/a/../../../../etc/passwd", root + "/etc/passwd"},
+		"dotdot, single":         {"/../etc/passwd", root + "/etc/passwd"},
+		"dotdot inside the root": {root + "/../x", root + "/mnt/session/x"},
+		// The bound is on the resolved path, so this is the longest acceptable one.
+		"at the byte bound": {root + "/" + strings.Repeat("a", maxMountPathBytes-len(root)-1),
+			root + "/" + strings.Repeat("a", maxMountPathBytes-len(root)-1)},
+		// Storability is judged on the resolved path too: an unstorable byte in a
+		// segment that cleaning removes never reaches the jsonb column, so it is
+		// not a rejection. Bounding the caller's spelling instead would refuse it.
+		"unstorable byte cleaned away": {"\xff/../b.txt", root + "/b.txt"},
+	} {
+		got, err := resolveMountPath(tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: resolveMountPath(%q) = %q, %v; want %q", name, tc.in, got, err, tc.want)
+		}
+		if len(got) > maxMountPathBytes {
+			t.Errorf("%s: resolved to %d bytes, over the %d bound", name, len(got), maxMountPathBytes)
+		}
+	}
+
+	for name, in := range map[string]string{
+		"the root itself":         "/",
+		"the root, spelled":       root,
+		"dot":                     ".",
+		"relative escape":         "../etc/passwd",
+		"deep relative escape":    "a/../../../etc/passwd",
+		"one byte over the bound": root + "/" + strings.Repeat("a", maxMountPathBytes-len(root)),
+		// Under the bound as spelled, over it once rooted — the bound is on what
+		// gets stored, so this must be refused.
+		"relative, over the bound only once rooted": strings.Repeat("a", maxMountPathBytes-10),
+		"NUL byte":            "/a\x00b",
+		"invalid utf-8":       "/a\xffb",
+		"empty (never valid)": "",
+	} {
+		if got, err := resolveMountPath(in); err == nil {
+			t.Errorf("%s: resolveMountPath(%q) = %q, want an error", name, in, got)
+		}
+	}
+}
+
+// TestMountPathTakenCleansStoredPaths pins the upgrade edge: a session created
+// before #323 can hold a non-canonical literal that names the same file as a
+// freshly resolved path, and must still count as taken.
+func TestMountPathTakenCleansStoredPaths(t *testing.T) {
+	const stored = `[{"type":"file","file_id":"file_x","mount_path":"/mnt/session/uploads//report.csv"}]`
+	var resources []json.RawMessage
+	if err := json.Unmarshal([]byte(stored), &resources); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	resolved, err := resolveMountPath("/report.csv")
+	if err != nil {
+		t.Fatalf("resolveMountPath: %v", err)
+	}
+	if !mountPathTaken(resources, resolved) {
+		t.Errorf("mountPathTaken(legacy %q, %q) = false; the two name one file",
+			"/mnt/session/uploads//report.csv", resolved)
+	}
+	if mountPathTaken(resources, "/mnt/session/uploads/other.csv") {
+		t.Error("mountPathTaken matched an unrelated path")
 	}
 }
 

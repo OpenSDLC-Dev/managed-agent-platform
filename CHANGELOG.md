@@ -348,6 +348,62 @@ copy of an entry here.
 
 ### Fixed
 
+- **A `mount_path` is rooted under the session's uploads directory, the way the
+  reference documents it** ([internal/api/sessionresources.go](./internal/api/sessionresources.go);
+  #323). The public docs state the rule outright — "a `mount_path` of
+  `/data.csv` places the file at `/mnt/session/uploads/data.csv` in the
+  sandbox", and "paths **should** be absolute" is that page's style advice, not
+  a filesystem root. The platform read the leading `/` literally and required
+  it, so it was wrong in both directions at once: the relative form Anthropic's
+  own SDK example and workshop sample use (`data.csv`, `app.log`) was **rejected
+  with a 400** — the report that opened #323 — while the absolute form from the
+  docs' own worked example was accepted and mounted at the container's
+  **filesystem root**, silently putting the file somewhere no client expected
+  it. (The SDK example is not perfectly self-consistent — its prompt then names
+  `/uploads/data.csv`, a third spelling matching neither rule — so the docs, not
+  the samples, are what this change follows.) `resolveMountPath` now resolves
+  both spellings to the one documented place: `/data.csv` and `data.csv` alike
+  land at `/mnt/session/uploads/data.csv`. An already-rooted **absolute** path
+  passes through cleaned but not re-rooted — the reference's data-analyst
+  cookbook mounts at the full `/mnt/session/uploads/<name>` and prompts the
+  agent with that same path, so re-rooting it would break the reference's own
+  teaching code — and an omitted `mount_path` still defaults to
+  `/mnt/session/uploads/<file_id>`. A
+  path is cleaned **before** it is rooted, so two spellings of one path resolve
+  alike — `/../../etc/passwd` and `/mnt/session/uploads/a/../../../../etc/passwd`
+  both clean to `/etc/passwd` and both land at `/mnt/session/uploads/etc/passwd`.
+  Only a **relative** path can still climb out once cleaned (`../etc/passwd`),
+  and that, along with a path naming the root itself, is a 400. The length,
+  storable-text and per-session uniqueness checks now all apply to the
+  **resolved** path, so `/data.csv` and `data.csv` collide as one mount instead
+  of passing as two; the uniqueness check also cleans the *stored* side, so a
+  non-canonical literal written before this change (`/mnt/session/uploads//x`)
+  still counts as taken against a freshly resolved `/x` rather than letting a
+  second resource silently overwrite the first's bytes. Bounding the resolved
+  path also means a supplied path is effectively capped at 1004 bytes once
+  rooted, where 1024 used to be accepted. Both the create-time `resources[]` and
+  the `POST …/resources` add route resolve identically. **This changes where a
+  newly created mount lands:** a client that mounts at `/workspace/in.txt` now
+  gets `/mnt/session/uploads/workspace/in.txt`. That is the point — it is what
+  the reference does — and it narrows containment as a side effect: a resource
+  created from now on cannot *name* a path outside `/mnt`, the sandbox's
+  writable set. Two limits on that, stated because the previous wording of this
+  entry overclaimed them: resolution is **create/add-time only** — stored rows
+  are not backfilled (deliberately: re-rooting a live session's mount would move
+  a file the agent's system prompt has already named), so a pre-upgrade session
+  keeps its literal path and can still fail to materialize under a read-only
+  root; and containment is **lexical**, over the stored string — the uploads
+  directory is agent-writable, so a symlink planted there can still redirect a
+  mount's bytes, the same accepted single-tenant tampering residual the mount
+  sentinel carries. One unlooked-for benefit falls out of the same rooting: the
+  outputs directory the executor harvests (`/mnt/session/outputs`) is no longer
+  a nameable `mount_path`, so a caller can no longer inject a file into a
+  session's deliverables by mounting into it. The brain's "Mounted files"
+  system-prompt block renders the
+  resolved path, so the agent is always told where the file actually is. This
+  also settles an unresolved review thread from the original Files slice
+  (PR #157), which asked for `path.Clean` normalization before the uniqueness
+  comparison.
 - **A failed bulk write's payload is taken back too — the #310 fix, extended to
   batches, still executing nothing** (best effort, as #310's own is: the
   emptying raises no error, and a daemon that refuses it leaves the residue
