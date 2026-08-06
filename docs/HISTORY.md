@@ -33,6 +33,36 @@ recorded nowhere else.
 
 ---
 
+## Sandbox teardown (plan 24, #64) — slice 2: `Owned`/`Reap` on both backends
+
+**Review hardening, landed in the same PR.** The verifier PASSed twice — the slice, then
+the hardening delta — independently reproducing five targeted mutants red in a scratch
+copy (the 409-wait reverted, either backend arm's revoker threading dropped, the k8s
+delete error swallowed, the gate's ownership label dropped) and running a live
+Provision→Owned→racing-`docker rm -f`→Reap→Owned probe against the real daemon. The two
+review passes (Codex `gpt-5.6-sol` plain mode; the Opus 5 review workflow, 4 finders +
+per-finding adversarial verification) converged on the same substantive finding from
+opposite directions: Docker `Reap` tolerated only the 404 a racing remover almost never
+produces, while the 409 "removal already in progress" window — measured live at ~150 ms
+per removal — surfaced the racer as an error; `removeWaitingGone` now waits that window
+out, and the correction came from the verification itself (blanket-tolerating the 409
+would break Reap's gone-when-it-returns contract). The k8s "actually gone" wording was
+cut down to what a grace-0 delete can promise — the API object, Destroy's own documented
+bound. Confirmed test gaps each gained a mutation-checked test: backend.New's revoker
+threading (proven with no daemon in the loop — the sentinel revoke error surfaces before
+any endpoint contact), k8s delete-error propagation, the gate create payload's ownership
+label (the one thing that makes an orphaned gate reapable — a probe dropping it had left
+every suite green), empty-label-value exclusion on both Owned paths, and the docker list
+error paths. Refuted with evidence rather than fixed: a claimed reap-vs-provision token
+window (slice 3's advisory lock owns it), the k8s UID-successor "false success" (a
+successor under the reaped pod's name means the reap's own target is already gone — the
+wait ended for the right reason), and the
+pool-before-provider reorder (validation ordering shifted, no correctness change). The
+K8s label-authorizes-reap consequence Codex raised is placed deliberately in
+docs/self-hosted-security.md rather than "fixed": within the executor's namespace,
+label-set authority implying delete authority is the single-trust-domain assumption the
+platform already makes, now stated where an operator reads.
+
 ## Sandbox teardown (plan 24, #64) — slice 1: the running-session archive/delete guard
 
 **Review hardening, landed in the same PR.** The verifier returned PASS, independently
