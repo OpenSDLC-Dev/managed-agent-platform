@@ -6,9 +6,10 @@
 // Configuration is environment-driven:
 //
 //	DATABASE_URL             Postgres DSN (required; same database as the
-//	                         controlplane and brain). A pool_max_conns below 2
-//	                         is refused: the session advisory lock pins one
-//	                         connection while other queries still need the pool
+//	                         controlplane and brain). A pool_max_conns below 3
+//	                         is refused: a provision and the reaper can pin a
+//	                         session-lock connection each while their nested
+//	                         queries still need the pool
 //	EXECUTOR_IMAGE           sandbox base image (default "debian:stable-slim")
 //	EXECUTOR_WORKDIR         working directory inside the sandbox (default
 //	                         "/workspace")
@@ -20,6 +21,9 @@
 //	                         deleted (tombstone-evidenced), archived, and
 //	                         terminated cloud sessions — self_hosted sandboxes
 //	                         belong to the BYOC worker and are never touched
+//	EXECUTOR_CHECKPOINT_MAX_BYTES   workspace-checkpoint size budget in bytes
+//	                         (default 2147483648, 2 GiB); over budget the TTL
+//	                         tier reaps without a checkpoint
 //	CONTROLPLANE_URL         where a session's egress gate fetches its config;
 //	                         set with EXECUTOR_GATE_IMAGE to opt into the gate.
 //	                         Unset: no gate runs; a gate-wanting session (limited
@@ -85,6 +89,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -182,6 +187,18 @@ func run(ctx context.Context) error {
 			*dst = d
 		}
 	}
+	if v := os.Getenv("EXECUTOR_CHECKPOINT_MAX_BYTES"); v != "" {
+		// The upper bound keeps cap+1 arithmetic (restore's decompression
+		// budget) far from int64 overflow; 1 PiB is beyond any real spool.
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 || n > 1<<50 {
+			return errors.New("EXECUTOR_CHECKPOINT_MAX_BYTES must be a positive byte count of at most 1 PiB")
+		}
+		cfg.CheckpointMaxBytes = n
+	}
+	if err := executor.ValidateWorkdir(cfg.Workdir); err != nil {
+		return fmt.Errorf("EXECUTOR_WORKDIR: %w", err)
+	}
 
 	// The pool opens before the sandbox backend because the backend takes a
 	// pool-backed gate-token revoker: Reap revokes a session's token before
@@ -191,12 +208,14 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer pool.Close()
-	// The session advisory lock pins one connection while the gate-token mint
-	// (and the reaper's re-classification) still needs another — a one-
-	// connection pool would deadlock the first gated provision, so refuse it
-	// at startup instead of wedging silently.
-	if pool.Config().MaxConns < 2 {
-		return fmt.Errorf("DATABASE_URL pool_max_conns = %d: the executor needs at least 2 connections", pool.Config().MaxConns)
+	// The worst case pins two connections at once — the work loop's provision
+	// holding its session lock while the reaper holds another session's —
+	// and each side still issues transient queries (the gate-token mint and
+	// revoke, the under-lock re-reads), so a third connection must exist for
+	// those to ever proceed. Refuse less at startup instead of wedging
+	// silently under load.
+	if pool.Config().MaxConns < 3 {
+		return fmt.Errorf("DATABASE_URL pool_max_conns = %d: the executor needs at least 3 connections", pool.Config().MaxConns)
 	}
 
 	provider, err := backend.New(backend.Config{

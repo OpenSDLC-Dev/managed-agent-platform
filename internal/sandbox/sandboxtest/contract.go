@@ -7,11 +7,13 @@
 package sandboxtest
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	gopath "path"
 	"strconv"
 	"strings"
 	"testing"
@@ -1493,6 +1495,102 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		h := newHarness(t)
 		if err := h.Provider.Reap(context.Background(), domain.NewID("sesn")); err != nil {
 			t.Errorf("reap of a never-provisioned session: %v, want nil", err)
+		}
+	})
+
+	// The checkpoint-capture contract (plan 24): Export streams one root out
+	// as a tar whose members all live under a single top-level directory named
+	// after the root's base name, with symlinks carried as symlinks — the
+	// restore path exists precisely to preserve what the write-tool family
+	// flattens, so losing a link at capture would defeat it.
+	t.Run("ExportStreamsRootAsSingleTopDirTar", func(t *testing.T) {
+		sb, h, sid := provision(t, unrestricted)
+		ctx := context.Background()
+		if err := sb.WriteFile(ctx, workdir+"/keep.txt", []byte("checkpoint me")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "ln -s keep.txt " + workdir + "/keep.link"}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("symlink: %v (exit %d)", err, res.ExitCode)
+		}
+		rc, err := h.Provider.Export(ctx, sid, workdir)
+		if err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		defer rc.Close()
+		base := gopath.Base(workdir)
+		var gotFile, gotLink bool
+		tr := tar.NewReader(rc)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("read exported tar: %v", err)
+			}
+			name := gopath.Clean(hdr.Name)
+			if name != base && !strings.HasPrefix(name, base+"/") {
+				t.Fatalf("member %q escapes the single top-level directory %q", hdr.Name, base)
+			}
+			switch name {
+			case base + "/keep.txt":
+				b, err := io.ReadAll(tr)
+				if err != nil {
+					t.Fatalf("read member: %v", err)
+				}
+				if string(b) != "checkpoint me" {
+					t.Errorf("keep.txt content = %q", b)
+				}
+				gotFile = true
+			case base + "/keep.link":
+				if hdr.Typeflag != tar.TypeSymlink {
+					t.Errorf("keep.link typeflag = %v, want symlink", hdr.Typeflag)
+				} else if hdr.Linkname != "keep.txt" {
+					t.Errorf("keep.link target = %q, want keep.txt", hdr.Linkname)
+				}
+				gotLink = true
+			}
+		}
+		if !gotFile || !gotLink {
+			t.Errorf("exported tar missing members: file=%v link=%v", gotFile, gotLink)
+		}
+	})
+
+	t.Run("ExportMissingRootAnswersFileNotExist", func(t *testing.T) {
+		_, h, sid := provision(t, unrestricted)
+		if _, err := h.Provider.Export(context.Background(), sid, "/no/such/checkpoint-root"); !errors.Is(err, sandbox.ErrFileNotExist) {
+			t.Errorf("export of a missing root: %v, want ErrFileNotExist", err)
+		}
+	})
+
+	t.Run("ExportUnknownSessionAnswersNotFound", func(t *testing.T) {
+		h := newHarness(t)
+		if _, err := h.Provider.Export(context.Background(), domain.NewID("sesn"), workdir); !errors.Is(err, sandbox.ErrNotFound) {
+			t.Errorf("export for a never-provisioned session: %v, want ErrNotFound", err)
+		}
+	})
+
+	// A root an agent replaced with a dangling symlink is still an entry the
+	// checkpoint must keep: the export carries the link itself, never "missing"
+	// (Docker's archive endpoint archives the link as-is; the K8s probe's `-L`
+	// arm exists precisely because `-e` follows symlinks and would drop it).
+	t.Run("ExportDanglingSymlinkRootIsTheLinkItself", func(t *testing.T) {
+		sb, h, sid := provision(t, unrestricted)
+		ctx := context.Background()
+		if res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "ln -s /nowhere /tmp/dangling"}); err != nil || res.ExitCode != 0 {
+			t.Fatalf("create dangling symlink: %v (exit %d)", err, res.ExitCode)
+		}
+		rc, err := h.Provider.Export(ctx, sid, "/tmp/dangling")
+		if err != nil {
+			t.Fatalf("export of a dangling-symlink root: %v", err)
+		}
+		defer rc.Close()
+		hdr, err := tar.NewReader(rc).Next()
+		if err != nil {
+			t.Fatalf("read export: %v", err)
+		}
+		if hdr.Typeflag != tar.TypeSymlink || hdr.Linkname != "/nowhere" {
+			t.Errorf("member = type %d linkname %q, want the symlink to /nowhere", hdr.Typeflag, hdr.Linkname)
 		}
 	})
 

@@ -72,6 +72,14 @@ type Config struct {
 	// destroys sandboxes, so there is no off switch — a deployment that wants
 	// slower reaping sets it longer.
 	ReapInterval time.Duration
+	// CheckpointMaxBytes budgets a workspace checkpoint (checkpoint.go): ONE
+	// measure on both sides — the framed, uncompressed tar stream, metered as
+	// capture writes it and again as restore decompresses it — so a capture
+	// that fits is arithmetically guaranteed to restore
+	// (EXECUTOR_CHECKPOINT_MAX_BYTES; 0 takes the 2 GiB default). Over
+	// budget, the TTL tier reaps without a checkpoint — an agent must not
+	// pin its sandbox immortal by filling the disk (plan 24 D8).
+	CheckpointMaxBytes int64
 	// Hardening is the containment every session's sandbox is created with —
 	// cgroup limits, capability drops, optionally a uid and a read-only root
 	// (#65). The zero value hardens nothing, which is what a test that builds a
@@ -133,6 +141,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ReapInterval <= 0 {
 		c.ReapInterval = time.Minute
+	}
+	if c.CheckpointMaxBytes <= 0 {
+		c.CheckpointMaxBytes = 2 << 30
 	}
 	return c
 }
@@ -431,6 +442,31 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 		return nil, fmt.Errorf("acquire session lock: %w", err)
 	}
 	defer unlockSession(conn, sessionID)
+	// Restore fires on the D6 marker, never on "the container is fresh": a
+	// ready marker means a checkpointed reap happened and nothing consumed it
+	// yet. Reap-before-provision is the half-restore replacement rule in one
+	// move — whatever container exists alongside a ready marker is either a
+	// half-restored orphan (a crash between extract and consume) or absent,
+	// and reaping first makes the following Provision the clean-create path
+	// either way. A crash-recreate without a marker restores nothing: the
+	// event log, not reap-time state, is that path's truth.
+	marker, blobKey, err := checkpointMarker(ctx, conn, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("read checkpoint marker: %w", err)
+	}
+	// A ready marker fails closed without an object store: capture can only
+	// have written it through one, so blob-less here is a misconfiguration —
+	// and provisioning fresh anyway would let the standing marker rewind the
+	// session's NEW work the moment a blob-configured executor next sees it.
+	if marker == "ready" && e.blobs == nil {
+		return nil, errors.New("session has a ready checkpoint but this executor has no object store configured")
+	}
+	restore := marker == "ready"
+	if restore {
+		if err := e.provider.Reap(ctx, sessionID); err != nil {
+			return nil, fmt.Errorf("replace pre-restore sandbox: %w", err)
+		}
+	}
 	sb, err := e.provider.Provision(ctx, sandbox.Spec{
 		SessionID:  sessionID,
 		Image:      e.cfg.Image,
@@ -446,6 +482,14 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 	})
 	if err != nil {
 		return nil, fmt.Errorf("provision sandbox: %w", err)
+	}
+	if restore {
+		// Failure surfaces rather than consuming the marker: the tool run
+		// errors, the lease reclaims it, and the next provision replaces the
+		// half-restored tree and retries — plan 24 D6's crash rule.
+		if err := e.restoreCheckpoint(ctx, conn, sessionID, blobKey, sb); err != nil {
+			return nil, fmt.Errorf("restore checkpoint: %w", err)
+		}
 	}
 	return sb, nil
 }

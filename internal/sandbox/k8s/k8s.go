@@ -384,6 +384,70 @@ func (p *Provider) Reap(ctx context.Context, sessionID domain.ID) error {
 	return errs
 }
 
+// Export streams one root out of the session's pod as a tar via an in-pod
+// `tar -cf - -C <parent> <base>` exec — members under one top-level directory
+// named after the root's base name, matching the Docker archive endpoint's
+// shape so the checkpoint engine reads one contract. The pod is selected by
+// label, never by derived name, and must be running: a K8s exec has no
+// stopped-container path, so an unexecable pod surfaces its error and the
+// caller degrades to reap-without-checkpoint (plan 24 D8). tar is the image
+// contract's one guaranteed archiver.
+func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string) (io.ReadCloser, error) {
+	pods, err := p.client.cs.CoreV1().Pods(p.client.namespace).List(ctx,
+		metav1.ListOptions{LabelSelector: sessionLabel + "=" + string(sessionID)})
+	if err != nil {
+		return nil, fmt.Errorf("k8s: list session %s pods: %w", sessionID, err)
+	}
+	if len(pods.Items) == 0 {
+		return nil, sandbox.ErrNotFound
+	}
+	name := pods.Items[0].Name
+	// A three-way probe, not a bare `test -e`: an exit-1 there conflates a
+	// genuinely missing root with one an unsearchable ancestor hides (an
+	// agent chmod-000ing a directory it owns), and skipping the latter would
+	// mark a PARTIAL checkpoint ready as if complete. Missing is believed
+	// only when the deepest existing ancestor is searchable — an ancestor
+	// that denies search makes the question unanswerable and the capture
+	// fails loudly instead (a root whose whole ancestor chain is absent, the
+	// shell root before any bash call, is an ordinary miss). `-e` follows
+	// symlinks, so the `-L` arm keeps a root an agent replaced with a
+	// dangling symlink: the entry exists and tar archives the link itself.
+	out, _, err := p.client.execOutput(ctx, name, containerName, []string{"sh", "-c",
+		`if [ -e "$1" ] || [ -L "$1" ]; then echo P; exit 0; fi
+p=$(dirname "$1")
+while :; do
+  if [ -e "$p" ]; then
+    if [ -d "$p" ] && [ ! -x "$p" ]; then echo E; else echo M; fi
+    exit 0
+  fi
+  [ "$p" = "/" ] && { echo M; exit 0; }
+  p=$(dirname "$p")
+done`, "probe", root})
+	if err != nil {
+		return nil, fmt.Errorf("k8s: probe %s in pod %s: %w", root, name, err)
+	}
+	switch strings.TrimSpace(out) {
+	case "P":
+	case "M":
+		return nil, sandbox.ErrFileNotExist
+	default:
+		return nil, fmt.Errorf("k8s: root %s in pod %s is unanswerable (an ancestor denies search?)", root, name)
+	}
+	clean := gopath.Clean(root)
+	pr, pw := io.Pipe()
+	go func() {
+		errOut := &cappedBuffer{limit: 4096}
+		res, err := p.client.exec(ctx, name, containerName,
+			[]string{"tar", "-cf", "-", "-C", gopath.Dir(clean), gopath.Base(clean)}, nil, pw, errOut)
+		if err == nil && res.code != 0 {
+			err = fmt.Errorf("k8s: tar exited %d exporting %s from pod %s: %s",
+				res.code, root, name, strings.TrimSpace(errOut.buf.String()))
+		}
+		pw.CloseWithError(err)
+	}()
+	return pr, nil
+}
+
 // deleteAndWaitGone removes a pod (UID-guarded, no grace) and waits for the
 // name to free up, so the caller can immediately recreate it — a pod delete is
 // asynchronous and a too-early create answers 409.
