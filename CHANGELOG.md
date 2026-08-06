@@ -15,6 +15,26 @@ copy of an entry here.
 
 ### Added
 
+- **Plan 25 authored (draft): git/repo mounting — `github_repository` session
+  resources** ([docs/plan/25_git-repo-mounting.md](./docs/plan/25_git-repo-mounting.md),
+  the second half of #55; the Files half landed with plan 08). Deep-researched against
+  the reference on 2026-08-06 — the public managed-agents GitHub guide and
+  session-resources API pages, the anthropic-sdk-go typed schema (pinned v1.61.0,
+  byte-identical to the checkout tip), and the `ant` CLI + SDK worker source, which
+  prove the clone is server-side (zero client-side repo handling) and that the
+  reference mounts nothing on self_hosted environments. Three user-settled decisions
+  (2026-08-06) shape the design: the clone is control-plane resource materialization
+  via go-git — the token never enters the sandbox and the egress gate is never
+  involved; BYOC stays reference-faithful (no worker materialization; a follow-up
+  issue takes the symmetric extension); and a failed clone surfaces as a
+  `github_repository_clone_error` `session.error` variant without failing the run.
+  Two slices: the wire + sealed token storage (`secrets.Cipher`, migration 0020,
+  token rotation goes live), then the executor clone + the brain's "Mounted
+  repositories" block + the `repo-answer` eval. The plan carries an executable
+  verification matrix — fixtures + acts + observations at the wire / sandbox-filesystem
+  / event-log surfaces, mandatory adversarial probes, a mutation duty on every new
+  guard, and PASS/FAIL/BLOCKED/SKIP verdicts — adapted from the verifiable-react
+  runtime-observation philosophy.
 - **The idle-TTL tier: an idle session's sandbox is checkpointed and reaped,
   and the next message gets it back** (plan 24 slice 5 — the final slice; #64,
   closing the workspace-continuity half of #28). The reaper gains its fourth
