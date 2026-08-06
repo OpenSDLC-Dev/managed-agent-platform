@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -44,6 +45,18 @@ func TestCheckpointAndRestoreMetrics(t *testing.T) {
 		t.Fatal("restore succeeded with a failing extraction")
 	}
 
+	// And the degraded outcome slice 5's TTL tier alerts on: an over-budget
+	// capture records too_large, distinct from error.
+	tiny := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{CheckpointMaxBytes: 8})
+	tiny.prov = tiny.exec.provider.(*fakeProvider)
+	tiny.prov.owned = []domain.ID{tiny.sid}
+	tiny.prov.exports = map[string][]byte{
+		"/workspace": exportTar(t, map[string]string{"workspace/big.bin": "far more than eight bytes"}, nil),
+	}
+	if err := tiny.exec.captureCheckpoint(context.Background(), tiny.sid); !errors.Is(err, ErrCheckpointTooLarge) {
+		t.Fatalf("over-budget capture: %v, want ErrCheckpointTooLarge", err)
+	}
+
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("collect: %v", err)
@@ -72,6 +85,9 @@ func TestCheckpointAndRestoreMetrics(t *testing.T) {
 	}
 	if counts[MetricCheckpoints+":ok"] != 1 {
 		t.Errorf("checkpoint counts = %v, want one ok", counts)
+	}
+	if counts[MetricCheckpoints+":too_large"] != 1 {
+		t.Errorf("checkpoint counts = %v, want one too_large", counts)
 	}
 	if counts[MetricRestores+":error"] != 1 {
 		t.Errorf("restore counts = %v, want one error", counts)

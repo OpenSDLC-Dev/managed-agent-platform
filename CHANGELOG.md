@@ -26,9 +26,11 @@ copy of an entry here.
   object storage, stripping the workdir's materialization sentinels so a
   restored workspace re-materializes skills and files instead of trusting an
   agent-writable marker, validating every member (clean relative paths;
-  regular files, directories and symlinks only) and budgeting the bytes
-  against the new `EXECUTOR_CHECKPOINT_MAX_BYTES` (default 2 GiB; compose and
-  Helm expose the knob). Restore fires on the new `session_checkpoints`
+  regular files, directories and symlinks only) and budgeting the framed tar
+  stream itself against the new `EXECUTOR_CHECKPOINT_MAX_BYTES` (default
+  2 GiB; compose and Helm expose the knob) — the same measure restore's
+  decompressed bound enforces, so an accepted capture is always restorable
+  under the same cap. Restore fires on the new `session_checkpoints`
   marker, never on "the container is fresh" — a mid-turn container death
   still recreates fresh on the event log's truth — and runs inside the
   provision lock: a `ready` marker makes provision replace whatever exists
@@ -38,8 +40,14 @@ copy of an entry here.
   flip the marker `consumed` only after the extraction, so a crash mid-restore
   is retried, never adopted. Two new instrument pairs:
   `sandbox.checkpoint` / `sandbox.restore` counters{outcome} with duration
-  histograms. In this slice the engine's only trigger is its test suite — the
-  idle-TTL tier that will drive it in production is slice 5.
+  histograms. Failure modes fail closed: an executor deployed without an
+  object store refuses to provision a session holding a ready checkpoint
+  rather than silently handing the agent an empty workspace, executor startup
+  refuses a workdir that would alias the checkpoint's other roots
+  (`ValidateWorkdir`), bounds the cap at 1 PiB, and raises the connection
+  floor to 3 (provision lock + reaper lock + transient queries each pin one).
+  In this slice the engine's only trigger is its test suite — the idle-TTL
+  tier that will drive it in production is slice 5.
 
 - **The reaper runs: terminal sessions lose their sandboxes** (plan 24 slice 3;
   #64). Sandbox destruction has an owner for the first time: every executor's

@@ -194,9 +194,12 @@ type fakeProvider struct {
 	reapFailFor domain.ID
 	// exports feeds Export: root path → tar bytes (checkpoint tests); calls
 	// records provision/reap ordering for the restore-replaces-first rule.
-	exports   map[string][]byte
-	exportErr error
-	calls     []string
+	// exportTrailErr, when set, arrives only AFTER the tar bytes — the shape
+	// of a K8s tar that exits non-zero behind a complete-looking archive.
+	exports        map[string][]byte
+	exportErr      error
+	exportTrailErr error
+	calls          []string
 }
 
 func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -258,8 +261,18 @@ func (p *fakeProvider) Export(_ context.Context, sid domain.ID, root string) (io
 	if !ok {
 		return nil, sandbox.ErrFileNotExist
 	}
-	return io.NopCloser(bytes.NewReader(data)), nil
+	r := io.Reader(bytes.NewReader(data))
+	if p.exportTrailErr != nil {
+		r = io.MultiReader(r, errReader{p.exportTrailErr})
+	}
+	return io.NopCloser(r), nil
 }
+
+// errReader answers every Read with its error — the tail of a stream that
+// died after delivering complete-looking bytes.
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
 // reapedSnapshot reads the reap record under the mutex — Run's reaper
 // goroutine appends concurrently with a polling test.

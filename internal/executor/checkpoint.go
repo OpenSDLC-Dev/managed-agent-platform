@@ -73,6 +73,31 @@ func (e *Executor) checkpointWorkdir() string {
 	return gopath.Clean(e.cfg.Workdir)
 }
 
+// ValidateWorkdir refuses a configured workdir that would alias the
+// checkpoint's other roots or its own machinery: a workdir under (or over)
+// the shell-state root or /mnt/session double-captures and double-charges the
+// shared subtree, and one under /tmp would put the restore staging file — and
+// state the checkpoint deliberately drops — inside the archive. cmd/executor
+// calls this at startup; a violation is configuration, not data.
+func ValidateWorkdir(workdir string) error {
+	if workdir == "" {
+		return nil
+	}
+	w := gopath.Clean(workdir)
+	if !gopath.IsAbs(w) {
+		return fmt.Errorf("workdir %q must be an absolute path", workdir)
+	}
+	if w == "/" {
+		return errors.New(`workdir "/" would checkpoint the whole filesystem`)
+	}
+	for _, reserved := range []string{"/tmp", sandbox.ShellStateRoot, "/mnt/session"} {
+		if w == reserved || strings.HasPrefix(w, reserved+"/") || strings.HasPrefix(reserved, w+"/") {
+			return fmt.Errorf("workdir %q overlaps the reserved path %s", workdir, reserved)
+		}
+	}
+	return nil
+}
+
 // captureCheckpoint reads the session's durable roots out of its sandbox into
 // one gzipped tar in object storage and marks it `ready`. Roots the session
 // never used are skipped; any other read failure aborts — a partial
@@ -94,9 +119,16 @@ func (e *Executor) captureCheckpoint(ctx context.Context, sid domain.ID) (err er
 		os.Remove(spool.Name())
 	}()
 	gz := gzip.NewWriter(spool)
-	tw := tar.NewWriter(gz)
+	// The budget meters the framed tar stream itself — every header, padding
+	// and trailer byte — because that is precisely what restore's decompressed
+	// bound measures. One measure on both sides makes "captured cleanly but
+	// arithmetically unrestorable" impossible; charging member content alone
+	// would let framing overhead (unbounded across many small members,
+	// directories and symlinks, which carry no content at all) push a passing
+	// capture over restore's identical cap.
+	lw := &limitedWriter{w: gz, remaining: e.cfg.CheckpointMaxBytes}
+	tw := tar.NewWriter(lw)
 
-	budget := e.cfg.CheckpointMaxBytes
 	workdir := e.checkpointWorkdir()
 	for _, root := range e.checkpointRoots(sid) {
 		rc, err := e.provider.Export(ctx, sid, root)
@@ -106,7 +138,16 @@ func (e *Executor) captureCheckpoint(ctx context.Context, sid domain.ID) (err er
 		if err != nil {
 			return fmt.Errorf("export %s: %w", root, err)
 		}
-		err = rerootInto(tw, rc, root, root == workdir, &budget)
+		err = rerootInto(tw, rc, root, root == workdir)
+		if err == nil {
+			// The export stream's own failure can arrive only AFTER the
+			// archive's end-of-archive blocks: tar.Reader stops reading at
+			// them, so a K8s tar that exited non-zero behind a
+			// syntactically complete archive is visible only by draining
+			// the stream to its close error. Without this, a partial
+			// export is captured and marked ready as if complete.
+			_, err = io.Copy(io.Discard, rc)
+		}
 		rc.Close()
 		if err != nil {
 			return fmt.Errorf("capture %s: %w", root, err)
@@ -153,7 +194,24 @@ func (e *Executor) captureCheckpoint(ctx context.Context, sid domain.ID) (err er
 // draw down the capture budget. Export's contract puts every member under one
 // top-level directory named after the root's base name; this strips that
 // prefix and re-roots the member at the root's real path.
-func rerootInto(tw *tar.Writer, rc io.Reader, root string, stripSentinels bool, budget *int64) error {
+// limitedWriter meters the capture's framed tar stream and refuses the byte
+// that would exceed the budget — the write path's half of the one-measure
+// rule captureCheckpoint documents.
+type limitedWriter struct {
+	w         io.Writer
+	remaining int64
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > l.remaining {
+		return 0, ErrCheckpointTooLarge
+	}
+	n, err := l.w.Write(p)
+	l.remaining -= int64(n)
+	return n, err
+}
+
+func rerootInto(tw *tar.Writer, rc io.Reader, root string, stripSentinels bool) error {
 	prefix := strings.TrimPrefix(gopath.Clean(root), "/")
 	base := gopath.Base(prefix)
 	tr := tar.NewReader(rc)
@@ -187,16 +245,21 @@ func rerootInto(tw *tar.Writer, rc io.Reader, root string, stripSentinels bool, 
 			continue
 		}
 		out := *hdr // shallow copy; Name is rewritten, everything else carried
-		if rest == "" {
+		// Except the detected wire format: re-rooting lengthens the name, and
+		// a member the export encoded as plain ustar would pin the writer to
+		// a format whose 100-byte name field the longer path can overflow.
+		// Unknown lets the writer pick (PAX when needed).
+		out.Format = tar.FormatUnknown
+		switch {
+		case rest == "" && hdr.Typeflag == tar.TypeDir:
 			out.Name = prefix + "/"
-		} else {
+		case rest == "":
+			// The root itself, but not a directory — an agent can replace a
+			// root with a plain file, and a trailing slash on a non-dir
+			// member is a malformed archive, not this member's name.
+			out.Name = prefix
+		default:
 			out.Name = prefix + "/" + rest
-		}
-		if hdr.Typeflag == tar.TypeReg {
-			*budget -= hdr.Size
-			if *budget < 0 {
-				return ErrCheckpointTooLarge
-			}
 		}
 		if err := tw.WriteHeader(&out); err != nil {
 			return err

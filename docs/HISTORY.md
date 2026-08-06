@@ -33,6 +33,87 @@ recorded nowhere else.
 
 ---
 
+## Sandbox teardown (plan 24, #64) — slice 4: the checkpoint/restore engine
+
+**Review hardening, landed in the same PR.** The verifier returned PASS WITH FINDINGS
+(gate green; its own discretionary seam probe streamed a real Docker `Export` through
+the real re-rooting walk and extracted the result into a second real container,
+byte-exact); its findings — the hardlink name-loss trade and the symlink `Linkname`
+handling undocumented — were fixed as code commentary and an ARCHITECTURE clause
+before review. The dual review (Codex `gpt-5.6-sol`, 7 findings; the Opus 5 review
+workflow, 21 raw findings adversarially verified to 11 confirmed / 10 refuted) then
+drove a hardening round whose headline both reviewers found independently, the
+workflow four times over:
+
+- **Capture and restore metered different quantities against the same cap** (Codex #1;
+  workflow C1/C4/C5/C7, three dimensions converging). Capture charged only regular
+  members' `hdr.Size`; restore bounds the whole decompressed framed tar — headers,
+  padding, the 1024-byte trailer, directories and symlinks charged nothing at capture —
+  so a cleanly-captured checkpoint could be arithmetically unrestorable forever:
+  restore fails, D6 leaves the marker `ready`, and every next provision reaps the
+  replacement sandbox and fails again. Fixed with one measure on both sides — a
+  `limitedWriter` meters the framed tar stream itself during capture.
+  `TestCaptureAndRestoreShareOneBudget` pins the arithmetic (3600 content bytes under
+  a 4096 cap must now fail at capture, where the old accounting accepted them).
+- **A K8s export could die behind a syntactically complete archive** (Codex #2; C2):
+  `tar.Reader` stops at the end-of-archive blocks and never issues the read that
+  surfaces the pipe's `CloseWithError`, so a tar that exited non-zero was captured and
+  marked ready. Capture now drains each export stream to its close. The finding's
+  probe half was real too: the single-level existence probe answered `ErrFileNotExist`
+  for a root hidden behind an unsearchable ancestor — replaced with a walking probe
+  (deepest existing ancestor: searchable means genuinely missing, an unsearchable
+  directory is an error), after the first draft of the walk was itself caught
+  misreading the shell-state root, whose parent legitimately does not exist before the
+  session's first bash run.
+- **A ready marker on a storage-less executor now fails the provision closed**
+  (Codex #3). The workflow's adversarial verify had refuted its own variant (R2) on
+  the single-executor scenario, but Codex's mixed-rollout scenario stood: a blob-less
+  executor provisioning fresh leaves the marker standing, and the next blob-configured
+  executor restores over the session's new work.
+- Codex's remaining confirmed findings: `Reap` inside restore can self-deadlock the
+  documented two-connection floor via the pool-backed gate-token revoker — the floor
+  is now 3 with the pin count named (#4); a configured workdir could alias the other
+  checkpoint roots, double-charging shared subtrees, and `/tmp` as workdir would
+  archive the restore staging file — `ValidateWorkdir` refuses overlap in either
+  direction at startup (#5); `EXECUTOR_CHECKPOINT_MAX_BYTES` at `MaxInt64` overflowed
+  restore's `cap+1` into an empty accepted spool — the cap is bounded at 1 PiB (#6).
+- Workflow C3 (a root an agent replaced with a plain file got a malformed trailing
+  slash) and C6 (the detected wire `Format` carried into the re-rooting writer) were
+  fixed — C6's mechanics verified by experiment before trusting either side: Go's
+  writer emits GNU LongLink itself, so the GNU shape never errors, but a strict-ustar
+  member whose re-rooted path exceeds every 100+155 prefix split fails exactly as
+  claimed. Both shapes are pinned (`TestCaptureCarriesAGNULongNameExport`, which also
+  proves the `@LongLink` pseudo-member never leaks into a checkpoint, and
+  `TestCaptureCarriesAUSTARDeepPathExport`, the discriminating one).
+- The confirmed test gaps each gained a test: re-capture re-arms a consumed marker
+  (C8), Docker `Export`'s ownership guard on the fake daemon — no archive request
+  escapes (C9), the `too_large` metric outcome (C10), and the absolute-path branches
+  of both walkers (C11 — restore's guard is the load-bearing one; capture's is
+  redundant with its top-level-directory check, which the mutant run demonstrated).
+
+Refuted with the verify agents' own evidence, unchanged: the missing FK/delete on
+`session_checkpoints` (R1/R9 — the delete tier's blob-then-tombstone path owns
+cleanup), the marker upsert riding the pool rather than the lock's connection (R3),
+restore-then-materialize ordering (R4 — the platform's pre-existing mount contract),
+unbounded concurrent restore spools (R5 — the executor loop is serial), the absent
+capture→restore round trip (R6 — refuted as harmless then, and this round's symmetry
+test performs it anyway), `markerState` swallowing its query error (R7), the
+stopped-container wait loop accepting any Exec error (R8, the same substance as
+Codex #7 — the compound scenario cannot occur on this code; an optional nit, left),
+and `EXECUTOR_CHECKPOINT_MAX_BYTES=0` as documented-legal (R10 — nothing documents it).
+
+Ten hardening mutants killed, each by exactly the test built for it: the budget check
+bypassed, the drain removed, fail-closed reverted to the silent skip, the `Format`
+reset removed (the GNU-shape test survives that mutant — Go's writer self-handles
+LongLink; the ustar deep-path test is the killer), the non-dir root's trailing slash
+restored, the marker upsert's `DO UPDATE` flipped to `DO NOTHING`, `ValidateWorkdir`
+gutted, `too_large` collapsed into `error`, restore's absolute-path guard dropped, and
+docker `Export`'s ownership check dropped. Not constructible: the K8s walking probe's
+unsearchable-ancestor branch (unit-unreachable without a cluster, and kind's root-user
+images make the permission scenario moot — the contract suite covers the missing-root
+answer), and the cmd startup guards (main glue, outside the tested surface by the
+convention slice 3 recorded).
+
 ## Sandbox teardown (plan 24, #64) — slice 3: the reaper's terminal tiers
 
 **Review hardening, landed in the same PR.** The verifier returned PASS WITH FINDINGS

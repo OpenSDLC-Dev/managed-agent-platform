@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -208,13 +209,266 @@ func TestCaptureOverBudgetFailsWithoutMarker(t *testing.T) {
 	}
 }
 
+// TestCaptureAndRestoreShareOneBudget: both sides meter the same framed tar
+// stream, so any capture the budget accepts is arithmetically restorable under
+// the same cap. 3600 content bytes under a 4096 cap fit by content but not by
+// framing (a 512-byte header plus padding to a block boundary), so capture
+// must refuse them — metering content alone would accept the capture and wedge
+// the session at restore forever.
+func TestCaptureAndRestoreShareOneBudget(t *testing.T) {
+	over := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{CheckpointMaxBytes: 4096})
+	over.prov = over.exec.provider.(*fakeProvider)
+	over.prov.owned = []domain.ID{over.sid}
+	over.prov.exports = map[string][]byte{
+		"/workspace": exportTar(t, map[string]string{"workspace/big.bin": strings.Repeat("A", 3600)}, nil),
+	}
+	if err := over.exec.captureCheckpoint(context.Background(), over.sid); !errors.Is(err, ErrCheckpointTooLarge) {
+		t.Fatalf("capture whose framing exceeds the budget: %v, want ErrCheckpointTooLarge", err)
+	}
+
+	// And the round trip: what capture accepts, restore replays under the
+	// same cap.
+	sb := &fakeSandbox{}
+	fits := newHarnessWith(t, &fakeProvider{sb: sb}, Config{CheckpointMaxBytes: 4096})
+	fits.prov = fits.exec.provider.(*fakeProvider)
+	fits.prov.owned = []domain.ID{fits.sid}
+	fits.prov.exports = map[string][]byte{
+		"/workspace": exportTar(t, map[string]string{"workspace/f.txt": strings.Repeat("A", 100)}, nil),
+	}
+	if err := fits.exec.captureCheckpoint(context.Background(), fits.sid); err != nil {
+		t.Fatalf("capture within budget: %v", err)
+	}
+	if _, err := fits.exec.provisionSandbox(context.Background(), fits.sid,
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); err != nil {
+		t.Fatalf("restore of an accepted capture under the same budget: %v", err)
+	}
+	if state, _ := markerState(t, fits); state != "consumed" {
+		t.Errorf("marker after the round trip = %q, want consumed", state)
+	}
+}
+
+// TestCaptureSurfacesAStreamErrorAfterTheArchive: a K8s export's tar can exit
+// non-zero after streaming a syntactically complete archive — the pipe's close
+// error arrives only past the end-of-archive blocks the tar walk stops at.
+// Capture must drain the stream and fail, not mark a possibly-partial export
+// ready.
+func TestCaptureSurfacesAStreamErrorAfterTheArchive(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	h.prov.owned = []domain.ID{h.sid}
+	h.prov.exports = map[string][]byte{
+		"/workspace": exportTar(t, map[string]string{"workspace/f.txt": "x"}, nil),
+	}
+	h.prov.exportTrailErr = errors.New("tar exited 1")
+	if err := h.exec.captureCheckpoint(context.Background(), h.sid); err == nil {
+		t.Fatal("capture succeeded over an export stream that failed after its archive")
+	}
+	if state, _ := markerState(t, h); state != "" {
+		t.Errorf("marker written on a failed capture: %q", state)
+	}
+}
+
+// TestRecaptureRearmsAConsumedMarker: an idle reap after a restore captures
+// again — the consumed marker flips back to ready and the blob is the fresh
+// capture, not the one the last restore consumed.
+func TestRecaptureRearmsAConsumedMarker(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	h.prov.owned = []domain.ID{h.sid}
+	setMarker(t, h, "consumed", checkpointBlob(t, h, map[string]string{"workspace/old.txt": "stale"}))
+	h.prov.exports = map[string][]byte{
+		"/workspace": exportTar(t, map[string]string{"workspace/new.txt": "fresh"}, nil),
+	}
+	if err := h.exec.captureCheckpoint(context.Background(), h.sid); err != nil {
+		t.Fatalf("re-capture: %v", err)
+	}
+	if state, _ := markerState(t, h); state != "ready" {
+		t.Errorf("marker after re-capture = %q, want ready", state)
+	}
+	got := checkpointMembers(t, h)
+	if _, ok := got["workspace/new.txt"]; !ok {
+		t.Errorf("blob not replaced by the re-capture: %v", keys(got))
+	}
+	if _, ok := got["workspace/old.txt"]; ok {
+		t.Error("the consumed blob's members survived the re-capture")
+	}
+}
+
+// TestCaptureAcceptsANonDirectoryRoot: an agent can replace a root with a
+// plain file. The root member is then written under its bare path — a
+// trailing slash on a non-directory member would be a malformed archive.
+func TestCaptureAcceptsANonDirectoryRoot(t *testing.T) {
+	h := newHarness(t, &fakeSandbox{})
+	h.prov.owned = []domain.ID{h.sid}
+	h.prov.exports = map[string][]byte{
+		outputsDir: exportTar(t, map[string]string{"outputs": "i am a file now"}, nil),
+	}
+	if err := h.exec.captureCheckpoint(context.Background(), h.sid); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	got := checkpointMembers(t, h)
+	if got["mnt/session/outputs"] != "i am a file now" {
+		t.Errorf("members = %v, want mnt/session/outputs as a regular file", keys(got))
+	}
+	if _, ok := got["mnt/session/outputs/"]; ok {
+		t.Error("non-directory root written with a trailing slash")
+	}
+}
+
+// gnuLongNameTar hand-crafts what busybox/GNU tar (the K8s export path)
+// streams for a path longer than ustar's 100-byte name field: a ././@LongLink
+// pseudo-member carrying the full name, then the real member under the
+// truncated name. Go's tar.Writer never produces this shape, so the fixture is
+// raw blocks.
+func gnuLongNameTar(t *testing.T, name, content string) []byte {
+	t.Helper()
+	octal := func(b []byte, v int64) {
+		copy(b, fmt.Sprintf("%0*o", len(b)-1, v))
+		b[len(b)-1] = 0
+	}
+	header := func(name string, typeflag byte, size int64) []byte {
+		blk := make([]byte, 512)
+		copy(blk[0:100], name)
+		octal(blk[100:108], 0o644)
+		octal(blk[108:116], 0)
+		octal(blk[116:124], 0)
+		octal(blk[124:136], size)
+		octal(blk[136:148], 0)
+		for i := 148; i < 156; i++ {
+			blk[i] = ' '
+		}
+		blk[156] = typeflag
+		copy(blk[257:265], "ustar  \x00")
+		var sum int64
+		for _, c := range blk {
+			sum += int64(c)
+		}
+		copy(blk[148:155], fmt.Sprintf("%06o", sum))
+		blk[154] = 0
+		blk[155] = ' '
+		return blk
+	}
+	pad := func(b []byte) []byte {
+		if r := len(b) % 512; r != 0 {
+			b = append(b, make([]byte, 512-r)...)
+		}
+		return b
+	}
+	var buf bytes.Buffer
+	buf.Write(header("././@LongLink", 'L', int64(len(name)+1)))
+	buf.Write(pad(append([]byte(name), 0)))
+	buf.Write(header(name[:100], '0', int64(len(content))))
+	buf.Write(pad([]byte(content)))
+	buf.Write(make([]byte, 1024))
+	return buf.Bytes()
+}
+
+// TestCaptureCarriesAGNULongNameExport: the K8s export path is GNU tar, whose
+// long names ride LongLink pseudo-members. The re-rooting walk must carry the
+// full name through — and never surface the pseudo-member itself.
+func TestCaptureCarriesAGNULongNameExport(t *testing.T) {
+	longName := "outputs/" + strings.Repeat("n", 150) + ".bin"
+	h := newHarness(t, &fakeSandbox{})
+	h.prov.owned = []domain.ID{h.sid}
+	h.prov.exports = map[string][]byte{
+		outputsDir: gnuLongNameTar(t, longName, "deliverable"),
+	}
+	if err := h.exec.captureCheckpoint(context.Background(), h.sid); err != nil {
+		t.Fatalf("capture of a GNU long-name export: %v", err)
+	}
+	got := checkpointMembers(t, h)
+	if want := "mnt/session/" + longName; got[want] != "deliverable" {
+		t.Errorf("member %q missing or wrong; members = %v", want, keys(got))
+	}
+	for name := range got {
+		if strings.Contains(name, "@LongLink") {
+			t.Errorf("GNU pseudo-member %q leaked into the checkpoint", name)
+		}
+	}
+}
+
+// TestCaptureCarriesAUSTARDeepPathExport: a strict-ustar export encodes a deep
+// path via the 155-byte prefix split, and re-rooting can push the name past
+// what any USTAR split carries (max 256). The walk resets the detected format
+// so the writer re-picks (PAX) instead of aborting the capture on a
+// cannot-encode error.
+func TestCaptureCarriesAUSTARDeepPathExport(t *testing.T) {
+	deep := "outputs/" + strings.Repeat("a", 145) + "/" + strings.Repeat("b", 95)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: deep, Typeflag: tar.TypeReg, Mode: 0o644, Size: 1, Format: tar.FormatUSTAR,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, &fakeSandbox{})
+	h.prov.owned = []domain.ID{h.sid}
+	h.prov.exports = map[string][]byte{outputsDir: buf.Bytes()}
+	if err := h.exec.captureCheckpoint(context.Background(), h.sid); err != nil {
+		t.Fatalf("capture of a ustar deep-path export: %v", err)
+	}
+	got := checkpointMembers(t, h)
+	if want := "mnt/session/" + deep; got[want] != "x" {
+		t.Errorf("member %q missing; members = %v", want, keys(got))
+	}
+}
+
+// TestProvisionFailsClosedOnAReadyMarkerWithoutBlobs: an executor deployed
+// without an object store must refuse to provision a session whose checkpoint
+// is ready — silently continuing would hand the agent an empty workspace while
+// its state sits unrestorable in the blob it cannot reach.
+func TestProvisionFailsClosedOnAReadyMarkerWithoutBlobs(t *testing.T) {
+	sb := &fakeSandbox{}
+	h := newHarness(t, sb)
+	setMarker(t, h, "ready", checkpointBlob(t, h, map[string]string{"workspace/prev.txt": "x"}))
+	bare := New(h.pool, h.log, h.queue, h.prov, nil, Config{})
+	_, err := bare.provisionSandbox(context.Background(), h.sid,
+		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}})
+	if err == nil || !strings.Contains(err.Error(), "no object store") {
+		t.Fatalf("err = %v, want the no-object-store refusal", err)
+	}
+	if len(h.prov.reapedSnapshot()) != 0 || indexOf(h.prov.calls, "provision") >= 0 {
+		t.Errorf("sandbox touched before failing closed: calls = %v", h.prov.calls)
+	}
+}
+
+// TestValidateWorkdir: the startup guard refuses a workdir that would alias
+// the checkpoint's other roots or its own machinery — in either direction.
+func TestValidateWorkdir(t *testing.T) {
+	for workdir, wantErr := range map[string]bool{
+		"":                               false,
+		"/workspace":                     false,
+		"/srv/agent":                     false,
+		"relative":                       true,
+		"/":                              true,
+		"/tmp":                           true,
+		"/tmp/work":                      true,
+		sandbox.ShellStateRoot:           true,
+		sandbox.ShellStateRoot + "/deep": true,
+		"/mnt/session/workdir":           true,
+		"/mnt":                           true, // parent of /mnt/session captures it wholesale
+		"/var/lib":                       true, // parent of the shell-state root
+	} {
+		if err := ValidateWorkdir(workdir); (err != nil) != wantErr {
+			t.Errorf("ValidateWorkdir(%q) = %v, want error %v", workdir, err, wantErr)
+		}
+	}
+}
+
 // TestCaptureRejectsAnEscapingMember: a member outside the export's top-level
-// directory (or dot-dot) aborts the capture — never silently reshaped.
+// directory (absolute, or dot-dot) aborts the capture — never silently
+// reshaped.
 func TestCaptureRejectsAnEscapingMember(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	h.prov.owned = []domain.ID{h.sid}
 	for name, tarBytes := range map[string][]byte{
 		"dot-dot":     exportTar(t, map[string]string{"../evil": "x"}, nil),
+		"absolute":    exportTar(t, map[string]string{"/etc/evil": "x"}, nil),
 		"foreign-top": exportTar(t, map[string]string{"other/file": "x"}, nil),
 	} {
 		h.prov.exports = map[string][]byte{"/workspace": tarBytes}
@@ -380,7 +634,8 @@ func TestRestoreFailureLeavesTheMarkerReady(t *testing.T) {
 // type aborts with the marker left ready.
 func TestRestoreRejectsATamperedBlob(t *testing.T) {
 	for name, files := range map[string]map[string]string{
-		"escape": {"../etc/passwd": "evil"},
+		"escape":   {"../etc/passwd": "evil"},
+		"absolute": {"/etc/passwd": "evil"},
 	} {
 		sb := &fakeSandbox{}
 		h := newHarness(t, sb)

@@ -402,10 +402,34 @@ func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string)
 		return nil, sandbox.ErrNotFound
 	}
 	name := pods.Items[0].Name
-	if _, code, err := p.client.execOutput(ctx, name, containerName, []string{"test", "-e", root}); err != nil {
+	// A three-way probe, not a bare `test -e`: an exit-1 there conflates a
+	// genuinely missing root with one an unsearchable ancestor hides (an
+	// agent chmod-000ing a directory it owns), and skipping the latter would
+	// mark a PARTIAL checkpoint ready as if complete. Missing is believed
+	// only when the deepest existing ancestor is searchable — an ancestor
+	// that denies search makes the question unanswerable and the capture
+	// fails loudly instead (a root whose whole ancestor chain is absent, the
+	// shell root before any bash call, is an ordinary miss).
+	out, _, err := p.client.execOutput(ctx, name, containerName, []string{"sh", "-c",
+		`if [ -e "$1" ]; then echo P; exit 0; fi
+p=$(dirname "$1")
+while :; do
+  if [ -e "$p" ]; then
+    if [ -d "$p" ] && [ ! -x "$p" ]; then echo E; else echo M; fi
+    exit 0
+  fi
+  [ "$p" = "/" ] && { echo M; exit 0; }
+  p=$(dirname "$p")
+done`, "probe", root})
+	if err != nil {
 		return nil, fmt.Errorf("k8s: probe %s in pod %s: %w", root, name, err)
-	} else if code != 0 {
+	}
+	switch strings.TrimSpace(out) {
+	case "P":
+	case "M":
 		return nil, sandbox.ErrFileNotExist
+	default:
+		return nil, fmt.Errorf("k8s: root %s in pod %s is unanswerable (an ancestor denies search?)", root, name)
 	}
 	clean := gopath.Clean(root)
 	pr, pw := io.Pipe()

@@ -23,8 +23,10 @@ resume with its workspace.
       blob-before-reap ordering, provision blocking on the lock) + the metric pin.
 - [x] Slice 4 — checkpoint/restore engine: `Export` on both backends (+3 contract
       rows), migration 0019 (consumption marker), capture (three roots, sentinel
-      strip, validate, budget, spool), restore (marker-gated, replace-first,
-      in-sandbox extract, consumed flip). Evidence: checkpoint_test.go (10 rows) +
-      the metric pin + the Docker stopped-container export row.
+      strip, validate, one-measure budget, spool), restore (marker-gated,
+      replace-first, in-sandbox extract, consumed flip), startup guards. Evidence:
+      checkpoint_test.go (18 rows incl. the budget-symmetry round trip) + the metric
+      pin + the Docker stopped-container and ownership-guard rows; 10 hardening
+      mutants killed (record in docs/HISTORY.md).
 - [ ] Slice 5 — the idle-TTL tier with its exclusions (cloud-only, no pending work, no
       unanswered asks), blob-less disablement, acceptance runs; archives the plan.

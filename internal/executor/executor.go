@@ -72,12 +72,13 @@ type Config struct {
 	// destroys sandboxes, so there is no off switch — a deployment that wants
 	// slower reaping sets it longer.
 	ReapInterval time.Duration
-	// CheckpointMaxBytes budgets a workspace checkpoint (checkpoint.go),
-	// counted on the members' actual bytes at capture and again on the
-	// decompressed stream at restore (EXECUTOR_CHECKPOINT_MAX_BYTES; 0 takes
-	// the 2 GiB default). Over budget, the TTL tier reaps without a
-	// checkpoint — an agent must not pin its sandbox immortal by filling the
-	// disk (plan 24 D8).
+	// CheckpointMaxBytes budgets a workspace checkpoint (checkpoint.go): ONE
+	// measure on both sides — the framed, uncompressed tar stream, metered as
+	// capture writes it and again as restore decompresses it — so a capture
+	// that fits is arithmetically guaranteed to restore
+	// (EXECUTOR_CHECKPOINT_MAX_BYTES; 0 takes the 2 GiB default). Over
+	// budget, the TTL tier reaps without a checkpoint — an agent must not
+	// pin its sandbox immortal by filling the disk (plan 24 D8).
 	CheckpointMaxBytes int64
 	// Hardening is the containment every session's sandbox is created with —
 	// cgroup limits, capability drops, optionally a uid and a read-only root
@@ -453,7 +454,14 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 	if err != nil {
 		return nil, fmt.Errorf("read checkpoint marker: %w", err)
 	}
-	restore := marker == "ready" && e.blobs != nil
+	// A ready marker fails closed without an object store: capture can only
+	// have written it through one, so blob-less here is a misconfiguration —
+	// and provisioning fresh anyway would let the standing marker rewind the
+	// session's NEW work the moment a blob-configured executor next sees it.
+	if marker == "ready" && e.blobs == nil {
+		return nil, errors.New("session has a ready checkpoint but this executor has no object store configured")
+	}
+	restore := marker == "ready"
 	if restore {
 		if err := e.provider.Reap(ctx, sessionID); err != nil {
 			return nil, fmt.Errorf("replace pre-restore sandbox: %w", err)
