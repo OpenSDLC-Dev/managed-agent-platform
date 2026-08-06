@@ -183,9 +183,13 @@ it ("is not echoed in API responses").
    never degrade into a backend-dependent 500); `checkout` is parsed
    strictly (unknown `type` or unknown keys 400 via the `rejectUnknownKeys` precedent;
    `branch.name` non-empty; `commit.sha` exactly 40 hex — "full commit SHA", INFERRED);
-   `mount_path` rides `validateMountPath` plus per-session uniqueness across *all*
-   resources, defaulting to `/workspace/<repo-name>` where `<repo-name>` is the URL's last
-   segment with `.git` stripped (derivation INFERRED). The repo arm is additionally
+   `mount_path` rides its own bound/storable checks plus per-session uniqueness across
+   *all* resources, defaulting to `/workspace/<repo-name>` where `<repo-name>` is the URL's
+   last segment with `.git` stripped (derivation INFERRED). It cannot share the file arm's
+   validator: `validateMountPath` was replaced by `resolveMountPath` in #323, which *roots*
+   its argument under `/mnt/session/uploads` — right for files, wrong for a repo whose
+   documented default is `/workspace/<repo-name>`. The length and storable-text bounds are
+   the parts worth carrying over. The repo arm is additionally
    stricter than the landed file arm: the path must equal its `path.Clean` form —
    `/workspace/./repo`, doubled separators, and trailing slashes are 400s, because
    raw-string uniqueness is otherwise evadable by aliases naming the same directory
@@ -199,8 +203,15 @@ it ("is not echoed in API responses").
    contract, and a re-clone's cleared target would be the sandbox itself) and any
    ancestor of the platform's staging path. Everything else stays legal on purpose —
    the mount sits inside the agent's own blast radius, bash can already write
-   anywhere in the sandbox, and the reference documents `mount_path` as an arbitrary
-   container path (the landed file arm has the same latitude). The default is resolved and
+   anywhere in the sandbox, and the reference documents the repo `mount_path` as an
+   arbitrary container path defaulting to `/workspace/<repo-name>`. **The file arm no
+   longer supports that symmetry** — #323 established that a file `mount_path` is rooted
+   under `/mnt/session/uploads`, because the docs say so for files specifically
+   (managed-agents/files § "File paths"); nothing equivalent is documented for repos, whose
+   default lives outside that root entirely. So the latitude here rests on the repo arm's
+   own documented default and the blast-radius argument above, not on parity with files —
+   an asymmetry between the two arms that is deliberate and recorded rather than an
+   oversight. The default is resolved and
    rendered at create (the files precedent, and the docs' List example shows a concrete
    path). `checkout` is stored and rendered **as given — `null` when omitted**: resolving
    "the repository's default branch" would take a GitHub call inside the create
