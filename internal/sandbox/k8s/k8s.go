@@ -64,6 +64,13 @@ const execErrProbeTimeout = 10 * time.Second
 // which runs off the caller's context so a cancelled caller still triggers it.
 const reclaimTimeout = 15 * time.Second
 
+// cleanupBudget bounds a write's own cleanup, which detaches from the caller's
+// context for reclaimTimeout's reason and needs a budget of its own once it has.
+// It matches the docker backend's, and is separate from reclaimTimeout because
+// what it bounds is one exec in a running pod rather than waiting out a
+// deletion.
+const cleanupBudget = 10 * time.Second
+
 // defaultNetSetupImage carries an `ip` command for the limited-networking init
 // container; the sandbox image is only guaranteed /bin/bash.
 const defaultNetSetupImage = "busybox"
@@ -1463,7 +1470,17 @@ func (pd *pod) prepareBulk(ctx context.Context, b *sandbox.BulkWrite) error {
 
 // discardBulk sheds what a failed batch left in the pod. Its own failure is not
 // worth reporting over the write's.
+//
+// It runs off the caller's context, on a budget of its own: a batch that failed
+// *because* its caller went away — a tool call that timed out, a disconnected
+// caller — is exactly the one whose residue must still be shed, and inheriting
+// that cancellation would leave up to ten thousand members' bytes in the pod
+// until it dies. Nothing this leaves is unremovable, unlike the docker backend's
+// (the extraction here is the sandbox user's own, so its `rm` always reaches
+// what it delivered) — but a cancelled caller is not a reason to leave it.
 func (pd *pod) discardBulk(ctx context.Context, b *sandbox.BulkWrite) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupBudget)
+	defer cancel()
 	_, _, _ = pd.bulkExec(ctx, bulkDiscardScript, b, nil)
 }
 

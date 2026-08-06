@@ -239,6 +239,96 @@ func (b *BulkWrite) blamed(stderr string) string {
 	return fmt.Sprintf("(one of %d files)", len(b.files))
 }
 
+// bulkLeftMarker prefixes the line __map_bulk_left prints for each of a batch's
+// own files still on the filesystem after a shed pass ran. Its argument is a
+// member's index in the manifest, or `m` / `d` for the two bookkeeping files —
+// never a path, for the reason bulkFailMarker carries an index rather than one:
+// the marker shares a stream with whatever the image writes to it, and a number
+// that indexes what this side already has cannot be confused with an image's own
+// line. It is also what keeps the report from steering anything: the shell reads
+// its indices out of a manifest the sandbox can rewrite, but LeftBehind resolves
+// them against the platform's own list, so a rewritten manifest can name nothing
+// but the paths this batch chose.
+const bulkLeftMarker = "map-bulk-left "
+
+// bulkLeftShell defines __map_bulk_left, which the rename and discard shells
+// both embed and call after their own `rm -f`: it names, on stdout, every file
+// of the batch's that is still there. Both sheds run as the sandbox user, and on
+// a backend whose delivery did not — the docker daemon extracts on the host, as
+// root — that user cannot unlink from a directory it cannot write, so its `rm`
+// silently leaves the whole payload. What it could not take, the backend that
+// landed it can (#316, the batch's half of #310); a backend whose delivery ran
+// as the sandbox user has nothing to read here and does not look.
+//
+// The walk is `[ -f ]` per member and nothing else, so it costs no process even
+// for the ten thousand members a skill may carry, and it reports only regular
+// files: a temporary the sandbox swapped for a directory or a symlink is that
+// sandbox's own object, in its own reach, and not this pass's to take away.
+//
+// __tmps is the array the caller already built from the manifest; $1 and $2 are
+// the manifest and directory list themselves.
+const bulkLeftShell = `
+__map_bulk_left() {
+  __i=0
+  while [ "$__i" -lt "${#__tmps[@]}" ]; do
+    if [ -f "${__tmps[$__i]}" ]; then printf '` + bulkLeftMarker + `%d\n' "$__i"; fi
+    __i=$((__i+1))
+  done
+  if [ -f "$1" ]; then printf '` + bulkLeftMarker + `m\n'; fi
+  if [ -f "$2" ]; then printf '` + bulkLeftMarker + `d\n'; fi
+}
+`
+
+// LeftBehind resolves the markers a shed pass printed back to the paths of this
+// batch's files that are still in the sandbox, so a backend whose delivery ran
+// with credentials the shed did not have can take them back itself. An index
+// that is not one of this batch's is dropped, as blamed drops one: the stream it
+// came off is shared with the image.
+//
+// The paths are always this batch's own — a member's temporary, or one of the
+// two bookkeeping files — never a target, so acting on them can neither destroy
+// what a failed write promised to leave alone nor reach outside what the batch
+// itself put in the sandbox.
+func (b *BulkWrite) LeftBehind(stdout string) []string {
+	var left []string
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, bulkLeftMarker) {
+			continue
+		}
+		switch token := strings.TrimPrefix(line, bulkLeftMarker); token {
+		case "m":
+			left = append(left, b.Manifest)
+		case "d":
+			left = append(left, b.DirList)
+		default:
+			n, err := strconv.Atoi(token)
+			if err != nil || n < 0 || n >= len(b.tmps) {
+				continue
+			}
+			left = append(left, b.tmps[n])
+		}
+	}
+	return left
+}
+
+// EmptyArchive streams a tar carrying a zero-byte entry for each of paths — the
+// batch's form of the single write's own emptying (docker's `reclaim`), and one
+// archive for the whole batch rather than one per member, because a batch that
+// failed under a root-owned parent left one file per member and ten thousand
+// round trips is not a cleanup. Extracting it puts the name back without the
+// payload; what the caller passes is what LeftBehind returned, so it never
+// recreates a file the shed already removed.
+func (b *BulkWrite) EmptyArchive(paths []string, w io.Writer) error {
+	tw := tar.NewWriter(w)
+	for _, path := range paths {
+		if err := b.entry(tw, path, nil, 0o644); err != nil {
+			return err
+		}
+	}
+	return tw.Close()
+}
+
 // BulkRenameShell defines __map_bulk_rename, which both backends embed: given
 // the manifest ($1) and the directory list ($2) an already-delivered archive
 // landed, it renames every member into place and takes both files away with it.
@@ -290,7 +380,9 @@ func (b *BulkWrite) blamed(stderr string) string {
 //
 // Everything the loop drops on the way out is a temporary file nobody will ever
 // claim: the member that failed, and every member after it, are removed rather
-// than left in the sandbox.
+// than left in the sandbox. The `rm` runs as the sandbox user, which on the
+// docker backend is not who landed them, so each failing exit says what is still
+// there (__map_bulk_left) for the backend to take back itself (#316).
 //
 // The manifest is a file on the agent's own filesystem, so a command running in
 // the sandbox can rewrite it between the delivery and this pass and steer where
@@ -298,7 +390,7 @@ func (b *BulkWrite) blamed(stderr string) string {
 // about to rename. It is the same bound in both cases and it is not a new one:
 // the move runs with the agent's own credentials, so a redirected member reaches
 // nothing the agent could not have written with its own `mv`.
-const BulkRenameShell = PreserveModeShell + `
+const BulkRenameShell = PreserveModeShell + bulkLeftShell + `
 __map_bulk_rename() {
   __tmps=(); __dsts=(); __bad=-1
   while IFS= read -r -d '' __t && IFS= read -r -d '' __d; do
@@ -309,6 +401,7 @@ __map_bulk_rename() {
   if [ "$__bad" -ge 0 ]; then
     [ "${#__tmps[@]}" -eq 0 ] || rm -f "${__tmps[@]}"
     rm -f "$1" "$2"
+    __map_bulk_left "$1" "$2"
     printf 'map-bulk-fail %d\n' "$__bad" >&2
     return 17
   fi
@@ -327,7 +420,10 @@ __map_bulk_rename() {
     if [ -d "$__d" ]; then rm -f "$__d/${__t##*/}"; __code=16; __bad=$__at; continue; fi
   done
   rm -f "$1" "$2"
-  [ "$__code" -eq 0 ] || printf 'map-bulk-fail %d\n' "$__bad" >&2
+  if [ "$__code" -ne 0 ]; then
+    __map_bulk_left "$1" "$2"
+    printf 'map-bulk-fail %d\n' "$__bad" >&2
+  fi
   return "$__code"
 }
 `
@@ -372,14 +468,16 @@ __map_bulk_prepare() {
 // the manifest ($1) and the directory list ($2), it sheds every member the batch
 // delivered and then the two files themselves, so a batch that ends badly leaves
 // the sandbox holding nothing of itself. A manifest that is not there took the
-// list of what to shed with it; the rest still goes.
-const BulkDiscardShell = `
+// list of what to shed with it; the rest still goes. What the `rm` could not
+// take is named on stdout, for __map_bulk_left's reason.
+const BulkDiscardShell = bulkLeftShell + `
 __map_bulk_discard() {
+  __tmps=()
   if [ -f "$1" ]; then
-    __tmps=()
     while IFS= read -r -d '' __t && IFS= read -r -d '' __d; do __tmps+=("$__t"); done < "$1"
     [ "${#__tmps[@]}" -eq 0 ] || rm -f "${__tmps[@]}"
   fi
   rm -f "$1" "$2"
+  __map_bulk_left "$1" "$2"
 }
 `

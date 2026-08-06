@@ -240,16 +240,21 @@ about and every other failed **single** write whose temporary the daemon landed,
 a transfer that died part way included — there the residue is a partial payload
 rather than an empty name. Where your sandbox cannot unlink, what stays behind
 afterwards is an empty file under the platform's own `.map-write-` name, until
-the container is destroyed. The **bulk** write (skill materialization) is
-deliberately not covered: its shed is your sandbox user's own `rm`. What makes
-that enough today is the *caller* — the one batch the platform writes goes under
-the workdir, which your sandbox user owns — and not the platform creating a
-batch's directories inside the container, which uses `mkdir -p` and so leaves a
-root-owned parent that already exists exactly as it found it. If you ship an
-image with a root-owned directory under the workdir, a failed batch will leave
-payload there that your sandbox user cannot unlink.
-[#316](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/316) tracks
-closing that rather than resting on the caller.
+the container is destroyed.
+
+The **bulk** write (skill materialization) is covered the same way, and used not
+to be (#316). Its shed is your sandbox user's own `rm` — in the rename script and
+in the discard pass alike — so under a parent that user cannot write a failed
+batch left *every* member's full payload, not one file but up to ten thousand.
+What held it back from being reachable was only the caller: the one batch the
+platform writes goes under the workdir, which your sandbox user owns. It was
+never the platform creating a batch's directories inside the container — that
+uses `mkdir -p`, which leaves a root-owned directory that already exists exactly
+as it found it, so an image shipping one under the workdir opened the gap. Both
+sheds now report which of the batch's own files they could not remove, and the
+daemon empties all of them in a single archive — one round trip for a whole
+batch, and still executing nothing. The same two limits below apply to it
+unchanged.
 
 Two limits are worth knowing rather than discovering. The emptying is best
 effort: it reports nothing of its own, and a daemon that will not answer leaves

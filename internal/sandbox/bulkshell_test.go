@@ -40,19 +40,29 @@ import (
 // with the suite still green.
 func bulkShell(t *testing.T, shell, fn, manifest, dirList string) (int, string) {
 	t.Helper()
-	var stderr bytes.Buffer
+	code, _, stderr := bulkShellOut(t, shell, fn, manifest, dirList)
+	return code, stderr
+}
+
+// bulkShellOut is bulkShell with the pass's stdout as well — the stream the two
+// sheds name what they could not remove on, which only the rows about that
+// naming care about.
+func bulkShellOut(t *testing.T, shell, fn, manifest, dirList string) (int, string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
 	cmd := exec.Command("/bin/bash", "-c",
 		"umask 077\n"+shell+"\n"+fn+" \"$1\" \"$2\"", "map-bulk-test", manifest, dirList)
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err == nil {
-		return 0, stderr.String()
+		return 0, stdout.String(), stderr.String()
 	}
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) {
 		t.Fatalf("run %s: %v", fn, err)
 	}
-	return ee.ExitCode(), stderr.String()
+	return ee.ExitCode(), stdout.String(), stderr.String()
 }
 
 // stageBatch writes a manifest and directory list naming each member, and creates
@@ -326,6 +336,81 @@ func TestBulkDiscardShell(t *testing.T) {
 	// goes, and the pass does not fail over it.
 	if code, _ := bulkShell(t, sandbox.BulkDiscardShell, "__map_bulk_discard", manifest, dirList); code != 0 {
 		t.Errorf("discarding twice exited %d, want 0", code)
+	}
+}
+
+// The two sheds name what their own `rm` could not take, and name nothing where
+// it worked — the second half being what keeps the backend acting on the report
+// from putting back a file the shed had just removed (#316).
+//
+// A directory the shell cannot write is how a member survives its own `rm` here;
+// in the sandbox it is a parent the docker daemon extracted into as root. Same
+// refusal, reached without a container.
+func TestBulkShedsNameWhatTheyCouldNotRemove(t *testing.T) {
+	for _, tc := range []struct{ name, shell, fn string }{
+		{"discard", sandbox.BulkDiscardShell, "__map_bulk_discard"},
+		{"rename", sandbox.BulkRenameShell, "__map_bulk_rename"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip("root ignores the write bit, so this proves nothing")
+			}
+			dir := t.TempDir()
+			manifest, dirList := stageBatch(t, dir,
+				map[string]string{"a.txt": "AAA", "b.txt": "BBB"}, nil)
+			// Registered after t.TempDir's own removal, so it runs before it:
+			// RemoveAll cannot empty a directory it may not write either.
+			t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			if err := os.Chmod(dir, 0o555); err != nil {
+				t.Fatalf("make the members' directory unwritable: %v", err)
+			}
+
+			code, stdout, stderr := bulkShellOut(t, tc.shell, tc.fn, manifest, dirList)
+			if tc.fn == "__map_bulk_rename" && code == 0 {
+				t.Fatalf("the rename reported success moving into a directory it cannot write; stderr: %s", stderr)
+			}
+			// Both members and both bookkeeping files are still there, and every
+			// one of them is named — a report that covered only the member the
+			// run stopped on would leave the rest of the payload behind.
+			for _, want := range []string{"map-bulk-left 0", "map-bulk-left 1", "map-bulk-left m", "map-bulk-left d"} {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("stdout = %q, want it to name %q", stdout, want)
+				}
+			}
+			// Nothing was written: a shed is not a write, and a refused rename
+			// leaves the target as it was — here, absent.
+			for _, name := range []string{"a.txt", "b.txt"} {
+				if _, err := os.Stat(dir + "/" + name); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("%s: %v, want the shed to have written nothing", name, err)
+				}
+			}
+		})
+	}
+}
+
+// The other half: a shed whose `rm` worked names nothing at all. Every existing
+// row above leaves a writable directory behind it, so this asks the two passes
+// the same question over one.
+func TestBulkShedsNameNothingTheyRemoved(t *testing.T) {
+	for _, tc := range []struct{ name, shell, fn string }{
+		{"discard", sandbox.BulkDiscardShell, "__map_bulk_discard"},
+		{"rename", sandbox.BulkRenameShell, "__map_bulk_rename"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// A directory target, so the rename fails too and reaches its own
+			// naming: a pass that never fails would report nothing trivially.
+			if err := os.Mkdir(dir+"/a.txt", 0o755); err != nil {
+				t.Fatalf("stage a directory target: %v", err)
+			}
+			manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
+
+			_, stdout, _ := bulkShellOut(t, tc.shell, tc.fn, manifest, dirList)
+			if strings.Contains(stdout, "map-bulk-left") {
+				t.Errorf("stdout = %q, want nothing named: the shed removed everything itself", stdout)
+			}
+			assertNoTemps(t, dir)
+		})
 	}
 }
 

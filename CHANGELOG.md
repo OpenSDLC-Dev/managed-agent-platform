@@ -311,6 +311,52 @@ copy of an entry here.
 
 ### Fixed
 
+- **A failed bulk write's payload no longer sits in the sandbox either — the
+  #310 fix, extended to batches, still executing nothing**
+  ([internal/sandbox/bulkwrite.go](./internal/sandbox/bulkwrite.go),
+  [internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
+  [internal/sandbox/k8s/k8s.go](./internal/sandbox/k8s/k8s.go); #316, raised by
+  the verifier and the Claude reviewer on #310's PR). #310 covered the single
+  write. A batch lands the same way — the docker daemon extracts its members on
+  the host, as root — but its only sheds were the sandbox user's `rm`, in
+  `__map_bulk_rename` and in `__map_bulk_discard` alike, so a batch refused
+  under a parent that user cannot write left **every member's full payload**
+  behind, up to 10,000 of them. Measured on a real non-root image before the
+  fix: a two-member batch into `/etc` left 8192 bytes the sandbox could neither
+  unlink nor read away
+  (`TestBulkWriteIntoARootOwnedParentOnANonRootImage`, red first).
+
+  Both sheds now **name what their own `rm` could not take** — on stdout, by
+  manifest index, `[ -f ]` per member and no process — and the docker backend
+  empties exactly those through the daemon in **one** archive: a refused batch
+  leaves every member at once, and ten thousand HEAD-plus-PUT round trips is
+  not a cleanup. Naming rather than emptying blindly is what keeps the pass
+  from recreating a temporary the `rm` already removed. The report steers
+  nothing: the shell counts a manifest the sandbox can rewrite, but the index
+  is resolved against the platform's own list, so what is emptied is always one
+  of the paths that batch chose — never a target, never a file the batch did
+  not put there.
+
+  The branch that must *not* empty is the same one as in #310: a rename whose
+  **exec** failed may have left a `mv` in flight, so it keeps `rm` and stops
+  there, and a fake-daemon row asserts no emptying archive is sent even when
+  the shed reports the whole payload still present. The one #310 called
+  "vacuous to fix" — the reported-fault return that sheds nothing because
+  `__map_bulk_rename` has already `rm -f`'d — turns out to be where the residue
+  actually **is**: under a root-owned parent every member's `mv` is refused and
+  every `rm` with it, so that return now empties rather than re-running a
+  discard whose `rm` has already failed.
+
+  The k8s twin needed no emptying — its `tar` runs inside the pod, as the
+  sandbox user, so nothing it leaves is unremovable — but its `discardBulk`
+  now runs on a context detached from the caller's (`context.WithoutCancel`
+  plus a 10-second budget), which #310 gave the docker cleanups and left it
+  out of: a batch cancelled mid-transfer could strand up to 10,000 members'
+  bytes in the pod until it died. No clientset fake can observe that (an exec
+  is a SPDY stream over the REST config, not a typed call, so no reactor ever
+  fires), so the row stands up an API server and asserts the pod was asked at
+  all — red without the change, 0 requests against 1.
+
 - **A refused write's payload no longer sits in the sandbox for the
   container's life — and no privileged exec was introduced to remove it**
   ([internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),

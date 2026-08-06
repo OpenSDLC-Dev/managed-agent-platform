@@ -252,3 +252,110 @@ func TestBulkWriteFault(t *testing.T) {
 		t.Errorf("err = %v, want the sandbox's own message carried through", err)
 	}
 }
+
+// What a shed pass names it could not remove is resolved against the batch's own
+// list, never against the report — so what a backend then empties is always one
+// of the paths this batch chose. That is what makes acting on a report read off
+// the agent's own filesystem safe: the manifest the shell counted is one the
+// sandbox can rewrite (#316).
+func TestBulkWriteLeftBehind(t *testing.T) {
+	files := []sandbox.FileWrite{
+		{Path: "/workspace/first", Data: []byte("1")},
+		{Path: "/etc/second", Data: []byte("2")},
+	}
+	b, err := sandbox.NewBulkWrite("/workspace", files)
+	if err != nil {
+		t.Fatalf("NewBulkWrite: %v", err)
+	}
+	tmps := map[string]string{}
+	for _, e := range readArchive(t, b)[2:] { // past the manifest and the directory list
+		tmps["/"+e.name] = string(e.data)
+	}
+	if len(tmps) != 2 {
+		t.Fatalf("archive carries %d members, want 2", len(tmps))
+	}
+
+	left := b.LeftBehind("map-bulk-left 0\nmap-bulk-left 1\nmap-bulk-left m\nmap-bulk-left d\n")
+	if len(left) != 4 {
+		t.Fatalf("LeftBehind named %d paths (%v), want all four of the batch's files", len(left), left)
+	}
+	for _, path := range left[:2] {
+		if _, ok := tmps[path]; !ok {
+			t.Errorf("LeftBehind named %q, want one of the temporaries the archive carried", path)
+		}
+	}
+	if left[2] != b.Manifest || left[3] != b.DirList {
+		t.Errorf("LeftBehind named %q and %q for the bookkeeping, want %q and %q",
+			left[2], left[3], b.Manifest, b.DirList)
+	}
+	// Order follows the report, so a batch that lost only its second member
+	// empties only that one.
+	if got := b.LeftBehind("map-bulk-left 1\n"); len(got) != 1 || got[0] != left[1] {
+		t.Errorf("LeftBehind = %v, want only member 1's temporary (%q)", got, left[1])
+	}
+
+	// An image shares the stream, and a marker naming a member that is not this
+	// batch's is not one. None of these may name a path — emptying a file this
+	// batch did not put there is the one thing a shed must never do.
+	for _, stdout := range []string{
+		"", "some image banner\n", "map-bulk-left\n", "map-bulk-left x\n",
+		"map-bulk-left 99\n", "map-bulk-left -1\n", "map-bulk-left 2\n",
+		"map-bulk-left M\n", "map-bulk-left /etc/passwd\n",
+		"not-the-marker map-bulk-left 0\n",
+	} {
+		if got := b.LeftBehind(stdout); len(got) != 0 {
+			t.Errorf("stdout %q: LeftBehind = %v, want nothing named", stdout, got)
+		}
+	}
+}
+
+// The emptying archive puts the names back without the payloads: one zero-byte
+// entry per path, relative like every other entry this file builds, so the one
+// extraction at `/` covers a whole batch's residue.
+func TestBulkWriteEmptyArchive(t *testing.T) {
+	b, err := sandbox.NewBulkWrite("/workspace", []sandbox.FileWrite{
+		{Path: "/etc/first", Data: bytes.Repeat([]byte("A"), 4096)},
+	})
+	if err != nil {
+		t.Fatalf("NewBulkWrite: %v", err)
+	}
+	left := b.LeftBehind("map-bulk-left 0\nmap-bulk-left m\n")
+
+	var buf bytes.Buffer
+	if err := b.EmptyArchive(left, &buf); err != nil {
+		t.Fatalf("EmptyArchive: %v", err)
+	}
+	var names []string
+	tr := tar.NewReader(&buf)
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read the emptying archive: %v", err)
+		}
+		if h.Size != 0 {
+			t.Errorf("entry %s is %d bytes, want 0: the payload is the whole point", h.Name, h.Size)
+		}
+		if h.Typeflag != tar.TypeReg {
+			t.Errorf("entry %s is type %q, want a regular file", h.Name, h.Typeflag)
+		}
+		if strings.HasPrefix(h.Name, "/") {
+			t.Errorf("entry %s is absolute, want a relative name the untar extracts at /", h.Name)
+		}
+		names = append(names, "/"+h.Name)
+	}
+	if len(names) != 2 || names[0] != left[0] || names[1] != b.Manifest {
+		t.Errorf("the emptying archive carries %v, want exactly what was named: %v", names, left)
+	}
+
+	// Nothing named is nothing to send; the caller is what decides not to.
+	var none bytes.Buffer
+	if err := b.EmptyArchive(nil, &none); err != nil {
+		t.Fatalf("EmptyArchive(nil): %v", err)
+	}
+	if _, err := tar.NewReader(&none).Next(); !errors.Is(err, io.EOF) {
+		t.Errorf("an empty batch built an archive with entries in it: %v", err)
+	}
+}
