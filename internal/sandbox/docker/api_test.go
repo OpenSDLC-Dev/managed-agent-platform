@@ -1028,6 +1028,47 @@ func TestCleanupOutlivesTheWriteThatWasCanceled(t *testing.T) {
 	}
 }
 
+// The batch sheds on the same terms. Its residue is the daemon's extraction too
+// — up to 10,000 members of it — so a batch abandoned mid-transfer must not be
+// the one write that keeps what it landed (#310, review round 5).
+func TestTheBatchesCleanupOutlivesTheWriteThatWasCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var commands []string
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			cancel()
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `{"message":"daemon gave up mid-transfer"}`)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			commands = append(commands, body.Cmd[len(body.Cmd)-2])
+			io.WriteString(w, `{"Id":"e1"}`)
+		case r.URL.Path == "/exec/e1/start":
+		case r.URL.Path == "/exec/e1/json":
+			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFiles(ctx, []sandbox.FileWrite{{Path: "/workspace/a.txt", Data: []byte("x")}})
+	if err == nil {
+		t.Fatal("write returned nil, want the failure the cancellation caused")
+	}
+	var shed bool
+	for _, cmd := range commands {
+		shed = shed || strings.Contains(cmd, "__map_bulk_discard")
+	}
+	if !shed {
+		t.Errorf("execs = %q, want the batch shed on a context the caller already canceled", commands)
+	}
+}
+
 // A PUT the daemon refuses on a replaceable target whose parent then refuses
 // the probe's create is the model's error: ErrNotWritable, carrying the
 // sandbox's own strerror text as the reason (plan 23, #306) — never the raw

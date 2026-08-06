@@ -1185,8 +1185,12 @@ func (c *container) prepareBulk(ctx context.Context, b *sandbox.BulkWrite) error
 }
 
 // discardBulk sheds what a failed batch left in the sandbox. Its own failure is not
-// worth reporting over the write's, exactly as the single write's discard is not.
+// worth reporting over the write's, exactly as the single write's discard is not —
+// and it runs on the same detached budget, for the same reason: a batch that failed
+// because its caller went away is the one whose residue most needs shedding.
 func (c *container) discardBulk(ctx context.Context, b *sandbox.BulkWrite) {
+	ctx, cancel := cleanup(ctx)
+	defer cancel()
 	_, _ = c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.BulkDiscardShell +
 		fmt.Sprintf("__map_bulk_discard %s %s", shellQuote(b.Manifest), shellQuote(b.DirList))})
 }
@@ -1331,7 +1335,11 @@ func (c *container) notWritable(ctx context.Context, path string) error {
 // after. Shedding what a failed write left is exactly the work that must still
 // happen when the caller's context is already dead — a tool call that timed out,
 // a disconnected caller — so the cleanups detach from it and take a budget of
-// their own rather than inheriting a cancellation and doing nothing.
+// their own rather than inheriting a cancellation and doing nothing. The budget
+// is per cleanup and the daemon client sets no timeout of its own, so the three
+// sites that shed both ways can hold a failed write for two of these before it
+// returns; that ceiling is the caller's whole exposure, and it is not the
+// caller's context that bounds it any more.
 const cleanupBudget = 10 * time.Second
 
 // cleanup detaches a cleanup from the write's own context, keeping its values
@@ -1367,13 +1375,17 @@ func (c *container) discard(ctx context.Context, tmp string) {
 // detail. The obvious fix was an exec as uid 0 (`rm -f` the temporary), and it
 // was written and measured before this: it hands root to a binary the sandbox's
 // own filesystem supplies, and that credential cannot be bounded by enumerating
-// what the image might aim at it. Three channels were found in two review
-// rounds — `bash -c` sourcing an image's `$BASH_ENV` from a sandbox-writable
-// path (measured: the agent's file ran as uid 0, twice per shed), the loader
-// honouring an image's `LD_PRELOAD` with no shell involved (measured), and an
-// image that leaves `/bin/rm` or the shared libraries it links against
-// writable by the sandbox user. Emptying that list is not a bound; not running
-// anything is. Best effort for discard's reason: the caller already has the
+// what the image might aim at it: the exec runs a binary and shared libraries
+// the image supplies, which an agent that can write part of that filesystem
+// also chooses. Four channels reached it across three review rounds — an
+// image's `$BASH_ENV`, sourced by `bash -c` from a sandbox-writable path
+// (measured: the agent's file ran as uid 0, twice per shed), `LD_PRELOAD` and
+// `LD_DEBUG_OUTPUT`, honoured by the loader with no shell involved (measured;
+// `docker exec -u 0` starts with `AT_SECURE=0`), and `/etc/ld.so.preload`,
+// which no environment setting can close. The same four are named in
+// CHANGELOG.md, docs/ARCHITECTURE.md and docs/self-hosted-security.md; keep
+// them in step. Emptying that list is not a bound; not running anything is.
+// Best effort for discard's reason: the caller already has the
 // error that matters, and a daemon that refuses this leaves only the residue it
 // was already leaving.
 //

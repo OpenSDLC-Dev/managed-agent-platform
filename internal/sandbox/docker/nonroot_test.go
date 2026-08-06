@@ -110,8 +110,9 @@ func TestBulkWriteOnANonRootImage(t *testing.T) {
 
 // hookedDockerfile is the non-root image contract plus a bash startup hook the
 // image's own environment names — an operator's `ENV BASH_ENV=…` pointing at a
-// path the sandbox user can write. Unusual, but it is the sharp case for the
-// platform's one root exec, and nothing stops an operator from shipping it.
+// path the sandbox user can write. Unusual, but it is the sharp case for any
+// privileged exec the cleanup might reach for, and nothing stops an operator
+// from shipping it.
 const hookedDockerfile = `FROM debian:stable-slim
 RUN useradd -m app && mkdir -p /workspace && chown app:app /workspace
 ENV BASH_ENV=/workspace/hook
@@ -158,7 +159,8 @@ func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
 	if err := sb.WriteFile(ctx, "/workspace/hook", []byte("id -u >> /workspace/ran\n")); err != nil {
 		t.Fatalf("plant the hook: %v", err)
 	}
-	// A write whose rename the sandbox user is refused: the shed runs as uid 0.
+	// A write whose rename the sandbox user is refused — the route whose shed is
+	// the daemon's, and the one an exec as uid 0 would have cleaned up.
 	if err := sb.WriteFile(ctx, "/etc/map-310-hooked.txt", []byte("x")); !errors.Is(err, sandbox.ErrNotWritable) {
 		t.Fatalf("err = %v, want ErrNotWritable — the route whose shed needs the daemon's credential", err)
 	}
@@ -166,6 +168,13 @@ func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
 	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "cat /workspace/ran 2>/dev/null || true"})
 	if err != nil {
 		t.Fatalf("read the hook's record: %v", err)
+	}
+	// An image that never sourced the hook at all would satisfy "no uid 0
+	// appears" without proving anything, so the record must first show the hook
+	// firing for the sandbox's own execs — the mechanism a privileged exec would
+	// have inherited.
+	if len(strings.Fields(res.Stdout)) == 0 {
+		t.Fatalf("the hook recorded nothing (%q): this row cannot tell a closed channel from an unused one", res.Stdout)
 	}
 	for _, uid := range strings.Fields(res.Stdout) {
 		if uid == "0" {

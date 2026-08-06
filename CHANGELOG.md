@@ -174,27 +174,23 @@ copy of an entry here.
   cancellation would have skipped the cleanup in the case that caused it
   (Codex and CodeRabbit, round 5).
 
-  The route not taken is the point. The obvious fix — an exec as `User: "0"`
-  running `rm -f` — was written, measured, and abandoned: `docker exec -u 0`
-  starts with `AT_SECURE=0` and runs a binary and libraries the *image*
-  supplies, so the image decides what that credential does, and so does an
-  agent that can write part of the image's filesystem. Four channels were
-  measured against that exec before it was dropped: `bash -c` sourcing an
-  `ENV BASH_ENV` file the sandbox user had written (the agent's code ran as
-  uid 0, twice per cleanup), the loader honouring `ENV LD_PRELOAD` with no
-  shell involved, `ENV LD_DEBUG_OUTPUT` writing root-owned files at a path
-  the image names, and `/etc/ld.so.preload`, which no environment setting can
-  neutralize. Emptying that list is not a bound; not running anything is — so
-  the platform still runs nothing in a sandbox as anyone but the sandbox's
-  own user, and `TestTheRootShedRunsNoAgentCodeOnANonRootImage` (a real image
-  whose `ENV BASH_ENV` names a sandbox-writable hook) pins that invariant
-  rather than one hole in it. The k8s backend needs nothing: its temporary is
-  created by the sandbox user, so the same credential that made it removes
-  it. Red observed first on every row: the real-image residue (the refused
-  payload's bytes in `/etc`, want 0), the fake-daemon emptying archive that
-  did not exist, and the raw route's re-pin — where the script's own rm
-  worked, no emptying archive may be sent, or the cleanup would make the
-  litter it exists to remove.
+  The route not taken is the point: the obvious fix — an exec as `User: "0"`
+  running `rm -f` — was written, measured against four escalation channels an
+  image controls, and abandoned, so **the platform still runs nothing in a
+  sandbox as anyone but the sandbox's own user**. What pins that is structural
+  (docker's `execConfig` has no `User` field to set); the real-image row
+  `TestTheRootShedRunsNoAgentCodeOnANonRootImage` covers the shell-hook
+  channel behind it. The evidence, the four channels and the rejected design
+  are recorded in [docs/HISTORY.md](./docs/HISTORY.md). The k8s backend needs
+  nothing: its temporary is created by the sandbox user, so the same
+  credential that made it removes it. The docker **bulk** write is knowingly
+  left out — its parents are made inside the container as the sandbox user, so
+  its own `rm` suffices — and #316 tracks closing that gap rather than relying
+  on the constraint. Red observed first on every row: the real-image residue
+  (the refused payload's bytes in `/etc`, want 0), the fake-daemon emptying
+  archive that did not exist, the raw route's re-pin — where the script's own
+  rm worked, no emptying archive may be sent, or the cleanup would make the
+  litter it exists to remove — and round 5's three.
 
 - **A write the sandbox cannot land is the model's error, not the platform's
   fault** ([internal/sandbox/sandbox.go](./internal/sandbox/sandbox.go),
