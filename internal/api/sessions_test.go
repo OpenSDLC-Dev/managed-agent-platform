@@ -744,4 +744,71 @@ func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("delete after idle: %d %v", status, body)
 	}
+
+	// The refusal is running-only — the registry's positive claim that
+	// rescheduling (an auto-retrying session) does not refuse is load-bearing:
+	// a guard tightened to "must be idle" would strand such a session's
+	// archive behind its transient-error loop.
+	resched := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	rid := resched["id"].(string)
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'rescheduling' WHERE id = $1`, rid); err != nil {
+		t.Fatalf("set rescheduling: %v", err)
+	}
+	status, body = s.do(http.MethodPost, "/v1/sessions/"+rid+"/archive", nil)
+	if status != http.StatusOK {
+		t.Fatalf("archive while rescheduling: %d %v", status, body)
+	}
+	status, body = s.do(http.MethodDelete, "/v1/sessions/"+rid, nil)
+	if status != http.StatusOK {
+		t.Fatalf("delete while rescheduling: %d %v", status, body)
+	}
+}
+
+// The guard's row lock is what closes the check-then-act window: a flip to
+// running committed while the archive is in flight must be observed, not
+// raced past. The concurrent writer here holds the session row exclusively
+// (as a confirmation dispatch flipping the session to running would), commits
+// after the archive has reached the guard, and the archive must answer 400 —
+// without FOR UPDATE the guard's plain SELECT reads the pre-flip snapshot,
+// sails past, and the archive lands on a running session.
+func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	id := sess["id"].(string)
+	ctx := context.Background()
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `UPDATE sessions SET status = 'running' WHERE id = $1`, id); err != nil {
+		t.Fatalf("flip to running: %v", err)
+	}
+
+	type resp struct {
+		status int
+		body   map[string]any
+	}
+	ch := make(chan resp, 1)
+	go func() {
+		st, b := s.do(http.MethodPost, "/v1/sessions/"+id+"/archive", nil)
+		ch <- resp{st, b}
+	}()
+
+	// Let the request reach the guard and block on the held row lock; a
+	// response arriving before the flip commits means nothing blocked.
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case r := <-ch:
+		t.Fatalf("archive answered %d before the running flip committed (body %v)", r.status, r.body)
+	default:
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	r := <-ch
+	wantErr(t, r.status, r.body, http.StatusBadRequest, "invalid_request_error")
 }
