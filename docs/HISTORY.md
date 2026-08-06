@@ -33,6 +33,63 @@ recorded nowhere else.
 
 ---
 
+## Sandbox teardown (plan 24, #64) — slice 5: the idle-TTL tier, and the plan's acceptance (2026-08-06)
+
+**Acceptance record.** The plan's acceptance section ran in full against the compose
+stack (all three server images rebuilt from the branch; `EXECUTOR_REAP_INTERVAL=5s`,
+`EXECUTOR_SANDBOX_IDLE_TTL=30s`; the brain on a real Anthropic-protocol endpoint,
+model `MiniMax-M3`) and against a host executor on `SANDBOX_BACKEND=k8s` pointed at
+the kind cluster — ten rows, all green:
+
+1. **Idle TTL round trip** (the plan's headline): a session wrote
+   `/workspace/keep.txt` and `cd /tmp`, idled 30s → marker `ready`, blob recorded,
+   container gone within a reap interval; the next `user.message` restored the file
+   *and* the persistent shell's cwd (`pwd` printed `/tmp`), marker `consumed`.
+2. **Deliverable continuity**: a `user.define_outcome` session's harvested
+   `report.txt` was downloadable via `GET /v1/files/{id}/content` before the reap and
+   **still listed and downloadable after the resume and the next grading cycle**, with
+   the restored `/mnt/session/outputs` still carrying it.
+3. **Archive** removed the sandbox within reap intervals.
+4. **A gated session's archive** removed the sandbox *and* the gate container, and
+   its live `session_gate_tokens` row went revoked in the same reap.
+5. **Delete** removed the marker row and wrote the tombstone — after the run's one
+   real find, below.
+6. **Running-session guards**: archive and delete of a running session both 400.
+7. **Mid-turn kill** (`docker rm -f` during a `sleep`): the turn settled, and the
+   resume ran on a **fresh** workspace — the pre-kill file was gone, no marker
+   involved (D6: a crash-recreate never rewinds).
+8. **The #29 wedge heals**: `EXECUTOR_IMAGE` flipped to `debian:stable` and the
+   executor restarted; the old-image sandbox reaped after the TTL, and the session
+   completed on the new image with its checkpointed workspace restored.
+9. **K8s TTL round trip** on kind: pod reaped, the in-pod exec capture path produced
+   the checkpoint, the resume restored file and cwd, marker `ready` → `consumed`.
+10. **K8s archive**: the archived session's pod reaped (the slice-2 RBAC `list` verb
+    and label-selected delete, live).
+
+**The run's find** — merged unit-green, caught live: the `session_checkpoints`
+row's assigned cleanup owner (slice 4's PR review had put it in the reaper's deleted
+tier) could never fire in the tier's steady state. The delete row first FAILED: a
+session the idle tier had already reaped no longer appears in any `Owned` listing, so
+no reap pass ever visits it and the row lingers forever — the unit test had the
+sandbox still owned, hiding the gap. Fixed by moving the delete into the API's
+deleting transaction (no FK cascades it), the reaper's tier keeping only the blob
+delete; the mutation (`DELETE` swapped for `SELECT 1`) fails the API test, and the
+delete row then passed.
+
+**Plan 24 progress summary (archived).** Five slices, five PRs: #314 (wire guards:
+archive/delete of `running` 400), #315 (`Owned`/`Reap` on both backends + contract
+rows), #317 (the reaper's terminal tiers: tombstone-evidenced deleted, archived,
+terminated — cloud-only — under the per-session advisory-lock protocol), #319 (the
+checkpoint/restore engine: `Export` on both backends, the one-measure budget, the
+marker table, replace-first restore), and the archiving PR (the idle-TTL tier with
+its three exclusions, blob-less disablement, D8 degradations, and this acceptance).
+The user's four requirements all hold as built: a running session's sandbox is never
+reaped (guards + lock + under-lock recheck), idle-timeout reap checkpoints and the
+resume restores (#28's workspace-continuity half), delete reaps (interrupt
+deliberately does not — the TTL is the backstop), and the whole mechanism is
+horizontally scalable (endpoint-local `Owned`, idempotent `Reap`, no cross-replica
+coordination).
+
 ## Sandbox teardown (plan 24, #64) — slice 4: the checkpoint/restore engine
 
 **Review hardening, landed in the same PR.** The verifier returned PASS WITH FINDINGS

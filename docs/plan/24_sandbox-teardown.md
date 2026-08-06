@@ -1,7 +1,11 @@
 ---
-status: in-progress
+status: archived
 issue: "#64"
 ---
+
+> **Archived — completed.** All five slices landed (PRs #314, #315, #317, #319, and
+> the slice-5 PR that archives this file); the acceptance runs are recorded in
+> docs/HISTORY.md, and the progress summary moved there in the archiving PR.
 
 # Sandbox teardown: the reaper, and the workspace that survives it (plan 24)
 
