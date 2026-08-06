@@ -3,12 +3,15 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 )
 
 // sessionRequiredFields is the BetaManagedAgentsSession wire surface; all
@@ -706,6 +709,27 @@ func TestSessionArchiveAndDelete(t *testing.T) {
 // Plan 24 slice 1: the reference documents that a running session cannot be
 // archived or deleted (an interrupt must land first). The reject status and
 // message are ours — INFERRED in docs/DIVERGENCES.md.
+// A deleted session's workspace checkpoint goes with the record (best-effort;
+// the reaper's deleted tier is the other remover — this path covers a session
+// whose sandbox is already gone, which no reap pass will visit again).
+func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	id := sess["id"].(string)
+	ctx := context.Background()
+	key := blob.SessionCheckpointKey(id)
+	if err := s.blobs.Put(ctx, key, strings.NewReader("tar"), 3, "application/gzip"); err != nil {
+		t.Fatalf("put checkpoint: %v", err)
+	}
+	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+id, nil); status != http.StatusOK {
+		t.Fatalf("delete: %d %v", status, body)
+	}
+	if _, _, err := s.blobs.Get(ctx, key); !errors.Is(err, blob.ErrNotFound) {
+		t.Errorf("checkpoint after delete: %v, want ErrNotFound", err)
+	}
+}
+
 func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)

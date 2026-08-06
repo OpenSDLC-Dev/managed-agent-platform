@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -1080,5 +1081,16 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 		"type":         "session.deleted",
 		"processed_at": time.Now().UTC(),
 	})
+	// The checkpoint blob goes with the record, best-effort for the same
+	// reason as the broadcast. Best-effort is enough because this is not the
+	// only remover: a session that still owns a sandbox is the reaper's
+	// deleted tier, which deletes this same key before it reaps (plan 24) —
+	// this covers the session whose sandbox is already gone, which no reap
+	// pass will ever visit again.
+	if s.blobs != nil {
+		if err := s.blobs.Delete(ctx, blob.SessionCheckpointKey(id)); err != nil {
+			slog.WarnContext(ctx, "session checkpoint blob not deleted", "session", id, "error", err)
+		}
+	}
 	return map[string]string{"id": id, "type": "session_deleted"}, nil
 }

@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -172,6 +174,11 @@ type fakeProvider struct {
 	// (a slow image pull) to observe the lease keeper renew across it.
 	entered chan struct{}
 	gate    chan struct{}
+	// owned/reaped drive and record the reaper (reaper_test.go); mu guards
+	// them because Run's reap loop is a separate goroutine.
+	mu     sync.Mutex
+	owned  []domain.ID
+	reaped []domain.ID
 }
 
 func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
@@ -196,9 +203,26 @@ func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbo
 	return p.sb, nil
 }
 
-func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) { return nil, nil }
+func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.owned), nil
+}
 
-func (p *fakeProvider) Reap(context.Context, domain.ID) error { return nil }
+func (p *fakeProvider) Reap(_ context.Context, sid domain.ID) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reaped = append(p.reaped, sid)
+	return nil
+}
+
+// reapedSnapshot reads the reap record under the mutex — Run's reaper
+// goroutine appends concurrently with a polling test.
+func (p *fakeProvider) reapedSnapshot() []domain.ID {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.reaped)
+}
 
 type harness struct {
 	pool  *pgxpool.Pool

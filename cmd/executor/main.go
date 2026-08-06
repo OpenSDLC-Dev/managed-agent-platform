@@ -165,6 +165,7 @@ func run(ctx context.Context) error {
 	}
 	for env, dst := range map[string]*time.Duration{
 		"EXECUTOR_LEASE_TTL": &cfg.LeaseTTL, "EXECUTOR_POLL_INTERVAL": &cfg.PollInterval,
+		"EXECUTOR_REAP_INTERVAL": &cfg.ReapInterval,
 	} {
 		if v := os.Getenv(env); v != "" {
 			d, err := time.ParseDuration(v)
