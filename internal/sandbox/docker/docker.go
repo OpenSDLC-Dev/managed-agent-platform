@@ -1034,8 +1034,10 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 		if mkErr := c.mkdirAll(ctx, dir); mkErr != nil {
 			// A put that was refused outright landed nothing, but one that died
 			// mid-transfer left a piece of the entry behind; shed it on the way out
-			// rather than let the directory keep it.
+			// rather than let the directory keep it. Nothing is in flight here, so
+			// the daemon can also take back what the sandbox user's rm could not.
 			c.discard(ctx, gopath.Join(dir, tmp))
+			c.reclaim(ctx, gopath.Join(dir, tmp))
 			return mkErr
 		}
 		err = c.api.putArchive(ctx, c.id, dir, bytes.NewReader(tarball))
@@ -1048,6 +1050,7 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 		// Whatever of the entry landed is nobody's file; the stream path sheds its
 		// residue the same way.
 		c.discard(ctx, tmp)
+		c.reclaim(ctx, tmp)
 		if cErr := c.unreplaceable(ctx, path); cErr != nil {
 			return cErr
 		}
@@ -1085,6 +1088,7 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 		// However much of the payload landed, it is nobody's file. Leaving it
 		// would cost a failed 500 MB mount 500 MB of the sandbox's disk.
 		c.discard(ctx, tmp)
+		c.reclaim(ctx, tmp)
 		if cErr := c.unreplaceable(ctx, path); cErr != nil {
 			return cErr
 		}
@@ -1219,10 +1223,16 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 	if err != nil {
 		// The bytes are landed and unnamed, and this exec is how they were to be
 		// named; shed them rather than leave the sandbox carrying a payload nothing
-		// will ever claim. `discard` tries the sandbox user's own `rm` first and
-		// has the daemon empty whatever that could not take back — which is the
-		// case here whenever this exec failed because the API is down, not just
-		// when the parent refuses the user (#310).
+		// will ever claim.
+		//
+		// `rm -f` and nothing more, on this branch alone. An error here does not
+		// say the script never ran — the daemon can fail us after starting it, and
+		// then a `mv` is still in flight. Unlinking the temporary makes that `mv`
+		// fail and leaves the target holding what it held; emptying it in place
+		// (`reclaim`) would let the `mv` succeed and put a zero-byte file where the
+		// caller's old data was, while the caller is being told the write failed.
+		// So the shed here is the one the sandbox user can do, and a payload under
+		// a parent that user cannot write survives on this branch (#310).
 		c.discard(ctx, tmp)
 		return err
 	}
@@ -1317,17 +1327,31 @@ func (c *container) notWritable(ctx context.Context, path string) error {
 	return &sandbox.PathNotWritableError{Path: path, Reason: strings.TrimSpace(res.Stdout)}
 }
 
+// cleanupBudget bounds a cleanup that has to outlive the write it cleans up
+// after. Shedding what a failed write left is exactly the work that must still
+// happen when the caller's context is already dead — a tool call that timed out,
+// a disconnected caller — so the cleanups detach from it and take a budget of
+// their own rather than inheriting a cancellation and doing nothing.
+const cleanupBudget = 10 * time.Second
+
+// cleanup detaches a cleanup from the write's own context, keeping its values
+// (the trace it belongs to) and dropping its cancellation.
+func cleanup(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupBudget)
+}
+
 // discard removes a temporary file a failed write left behind. Its own failure is
 // not worth reporting over the write's: the caller already has the error that
 // matters, and a sandbox that cannot delete the file is about to be thrown away.
 //
-// Every temporary on this backend was landed by the daemon's own extraction, so
-// the sandbox user's `rm` is not always the credential that can take it back —
-// a parent that user cannot write keeps whatever landed, however much of a
-// payload that is. So the daemon is asked for what the user could not do (#310).
+// Removing is all it does, deliberately: it is the one cleanup safe to run while
+// a write script may still be in flight, because a `mv` whose source has been
+// unlinked fails and leaves the target as it was. Emptying in place is not
+// (`reclaim`, and rename's comment on why it is not called there).
 func (c *container) discard(ctx context.Context, tmp string) {
+	ctx, cancel := cleanup(ctx)
+	defer cancel()
 	_, _ = c.Exec(ctx, sandbox.ExecRequest{Command: "rm -f " + shellQuote(tmp)})
-	c.reclaim(ctx, tmp)
 }
 
 // reclaim empties a temporary the sandbox user's own `rm -f` could not remove:
@@ -1353,9 +1377,18 @@ func (c *container) discard(ctx context.Context, tmp string) {
 // error that matters, and a daemon that refuses this leaves only the residue it
 // was already leaving.
 //
-// What remains where the sandbox cannot unlink is an empty file under the
-// platform's own temporary name. The payload — the harm #310 names — is gone.
+// What remains where the sandbox cannot unlink, once this succeeds, is an empty
+// file under the platform's own temporary name — the payload #310 names is gone.
+// When it does not succeed (the daemon is unreachable, the container is going
+// away), the payload stays: this raises no error of its own, so a caller must
+// read it as best effort and not as a guarantee that nothing is left.
+//
+// Callers must also be sure no write script is still running against tmp; a `mv`
+// racing this one lands the empty file on the target. rename's exec-error branch
+// is the site where that is possible, and it does not call this.
 func (c *container) reclaim(ctx context.Context, tmp string) {
+	ctx, cancel := cleanup(ctx)
+	defer cancel()
 	there, err := c.api.pathExists(ctx, c.id, tmp)
 	if err != nil || !there {
 		return

@@ -150,14 +150,29 @@ copy of an entry here.
   under a non-root uid, the route #306 classifies — the script's own `rm -f`
   runs as a user who cannot unlink from that directory, and the refused
   payload stayed behind as a root-owned `.map-write-*` file, one per refused
-  write (measured on a real non-root image). **The daemon takes back what it
-  landed**: after a HEAD that says something is still there, the same archive
-  endpoint extracts a zero-byte entry of the same name over it. The payload
-  is gone; where the sandbox cannot unlink, an empty name remains. It rides
-  `discard` rather than one route, because every temporary on this backend is
-  the daemon's to begin with — so a put that dies mid-transfer, whose residue
-  is a *partial payload* rather than an empty name, is covered by the same
-  rule (a verifier finding on the first exec-free iteration).
+  write (measured on a real non-root image). **The daemon is asked to take
+  back what it landed**: after a HEAD that says something is still there, the
+  same archive endpoint extracts a zero-byte entry of the same name over it.
+  Where that succeeds the payload is gone and only an empty name remains; it
+  reports nothing of its own, so it is best effort and a daemon that refuses
+  leaves the residue the sandbox user already could not shed. A put that dies
+  mid-transfer gets the same treatment, its residue being a *partial payload*
+  rather than an empty name (a verifier finding on the first exec-free
+  iteration).
+
+  Two boundaries came out of review. The emptying is **not** asked for on the
+  branch where the rename's exec itself failed: that error does not say the
+  script never started, so a `mv` may be in flight, and emptying the temporary
+  under it would land zero bytes on the very target the caller is being told
+  it did not touch. That branch unlinks with the sandbox user's `rm` and stops
+  — keeping a payload the container will take away beats destroying data the
+  write promised to leave alone (Codex, round 5; the fake-daemon row asserts
+  no HEAD and no archive on that route). And both cleanups now run on a
+  context detached from the write's own (`context.WithoutCancel` plus a
+  10-second budget), because a tool call that timed out mid-transfer is
+  exactly the write whose residue must still be shed — inheriting its
+  cancellation would have skipped the cleanup in the case that caused it
+  (Codex and CodeRabbit, round 5).
 
   The route not taken is the point. The obvious fix — an exec as `User: "0"`
   running `rm -f` — was written, measured, and abandoned: `docker exec -u 0`

@@ -227,11 +227,22 @@ file, the loader honouring `ENV LD_PRELOAD`, `ENV LD_DEBUG_OUTPUT` writing
 root-owned files at a path the image names, and `/etc/ld.so.preload`, which no
 environment setting can neutralize. So the daemon takes back what it landed
 instead: the same archive endpoint that extracted the temporary extracts an
-empty file over it, executing nothing. That covers every failed write whose
-temporary the daemon landed, a transfer that died part way included — there the
-residue is a partial payload rather than an empty name. The refused payload is
-gone; where your sandbox cannot unlink, an empty file under the platform's own
-`.map-write-` name remains until the container is destroyed.
+empty file over it, executing nothing. That covers the refused write #310 is
+about and every other failed write whose temporary the daemon landed, a transfer
+that died part way included — there the residue is a partial payload rather than
+an empty name. Where your sandbox cannot unlink, what stays behind afterwards is
+an empty file under the platform's own `.map-write-` name, until the container is
+destroyed.
+
+Two limits are worth knowing rather than discovering. The emptying is best
+effort: it reports nothing of its own, and a daemon that will not answer leaves
+the payload where it was — the same place the sandbox user could not reach it
+either. And one branch does not ask for it at all: when the rename's *exec*
+fails outright, the script it was running may still be mid-`mv`, and emptying
+the temporary under a live `mv` would put zero bytes onto the file the caller was
+just told it had not touched. Keeping a payload the container will take away is
+the lesser harm than destroying data the write promised to leave alone, so that
+branch unlinks with your sandbox user's own `rm` and stops there.
 
 The catch is the **workdir**. The container's entrypoint runs `mkdir -p
 <workdir>` as whatever user the container runs as, and a uid the image did not
