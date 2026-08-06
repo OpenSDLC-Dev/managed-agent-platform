@@ -1,14 +1,22 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 )
 
 // sessionRequiredFields is the BetaManagedAgentsSession wire surface; all
@@ -706,6 +714,72 @@ func TestSessionArchiveAndDelete(t *testing.T) {
 // Plan 24 slice 1: the reference documents that a running session cannot be
 // archived or deleted (an interrupt must land first). The reject status and
 // message are ours — INFERRED in docs/DIVERGENCES.md.
+// A deleted session's workspace checkpoint goes with the record (best-effort;
+// the reaper's deleted tier is the other remover — this path covers a session
+// whose sandbox is already gone, which no reap pass will visit again).
+func TestDeleteSessionRemovesCheckpointBlob(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	id := sess["id"].(string)
+	ctx := context.Background()
+	key := blob.SessionCheckpointKey(id)
+	if err := s.blobs.Put(ctx, key, strings.NewReader("tar"), 3, "application/gzip"); err != nil {
+		t.Fatalf("put checkpoint: %v", err)
+	}
+	if status, body := s.do(http.MethodDelete, "/v1/sessions/"+id, nil); status != http.StatusOK {
+		t.Fatalf("delete: %d %v", status, body)
+	}
+	if _, _, err := s.blobs.Get(ctx, key); !errors.Is(err, blob.ErrNotFound) {
+		t.Errorf("checkpoint after delete: %v, want ErrNotFound", err)
+	}
+	// The tombstone rides the deleting transaction — it is the reaper's
+	// deleted-tier evidence, and its recorded kind is what keeps the tier
+	// cloud-only (plan 24).
+	var deadKind string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT environment_kind FROM deleted_sessions WHERE id = $1`, id).Scan(&deadKind); err != nil {
+		t.Fatalf("deleted session left no tombstone: %v", err)
+	}
+	if deadKind != "cloud" {
+		t.Errorf("tombstone environment_kind = %q, want cloud", deadKind)
+	}
+}
+
+// failingDeleteBlobStore fails every Delete; the rest delegates.
+type failingDeleteBlobStore struct{ blob.Store }
+
+func (f failingDeleteBlobStore) Delete(context.Context, string) error {
+	return errors.New("storage down")
+}
+
+// TestDeleteSessionSurvivesCheckpointDeleteFailure: the checkpoint delete is
+// post-commit and best-effort — a failing object store must not change the
+// delete's response, and the row (with its tombstone) is already gone, so the
+// reaper's deleted tier remains the retrying remover.
+func TestDeleteSessionSurvivesCheckpointDeleteFailure(t *testing.T) {
+	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	pool := newPoolWithKey(t)
+	srv := httptest.NewServer(api.NewHandler(pool, failingDeleteBlobStore{Store: blobtest.Mem()}, cipher))
+	t.Cleanup(srv.Close)
+	s := &tserver{t: t, url: srv.URL, pool: pool}
+
+	agentID, envID := fixture(t, s)
+	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	id := sess["id"].(string)
+
+	status, body := s.do(http.MethodDelete, "/v1/sessions/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("delete with a failing blob store: %d %v", status, body)
+	}
+	if body["id"] != id || body["type"] != "session_deleted" {
+		t.Errorf("delete response = %v, want {id: %s, type: session_deleted}", body, id)
+	}
+}
+
 func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)

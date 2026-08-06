@@ -171,6 +171,10 @@ spec:
             - name: EXECUTOR_POLL_INTERVAL
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.executor.reapInterval }}
+            - name: EXECUTOR_REAP_INTERVAL
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.executor.gateImage }}
             {{- if semverCompare "<1.29-0" $.Capabilities.KubeVersion.Version }}
             {{- fail "executor.gateImage needs Kubernetes >= 1.29: the gate runs as a native sidecar (initContainer restartPolicy Always), which older kubelets reject" }}

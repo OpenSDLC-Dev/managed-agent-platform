@@ -15,6 +15,40 @@ copy of an entry here.
 
 ### Added
 
+- **The reaper runs: terminal sessions lose their sandboxes** (plan 24 slice 3;
+  #64). Sandbox destruction has an owner for the first time: every executor's
+  `Run` now starts a goroutine that sweeps its own endpoint once per
+  `EXECUTOR_REAP_INTERVAL` (default 1m; compose and Helm expose the knob) —
+  `Owned` for the candidates, the session's **database lifecycle** for the
+  verdict, never a caller's claim — and only for **cloud** sessions: a
+  self_hosted session's sandbox carries the same ownership label but belongs
+  to the customer's BYOC worker, so on a shared daemon it is skipped in every
+  tier (the tombstone records the environment kind because the row is gone by
+  the time the reaper asks). A deleted cloud session — its row gone **and its
+  tombstone present in the new `deleted_sessions` table**, written by the
+  delete in the same transaction — is reaped and its workspace-checkpoint blob
+  deleted (blob first, so a failed delete keeps the retry trigger); a holding
+  whose id this database never saw is skipped — a missing row alone also
+  describes another deployment's sandbox on a shared Docker daemon or K8s
+  namespace, or a contract suite's fixtures next to a compose stack, and none
+  of those are this reaper's to destroy; an archived or terminated session is
+  reaped with its checkpoint kept until the row goes; idle, running and
+  rescheduling sessions are untouchable (the idle-TTL tier is slice 5's).
+  Reap-versus-provision is serialized by a per-session Postgres advisory lock:
+  `provisionSandbox` holds it blocking around every provision, the reaper
+  try-locks (a provision in flight means the session is in use — skip, next
+  pass re-asks) and re-reads the criteria **under the lock, on the lock's own
+  connection**, so a session revived between classification and lock is left
+  alone and a deliberately tiny pool cannot self-deadlock (a one-connection
+  pool is refused at executor startup). `DELETE /v1/sessions/{id}` also drops
+  the checkpoint blob best-effort on a context detached from the request — the
+  reaper covers a session that still owns a sandbox, this covers one whose
+  sandbox is already gone, which no reap pass will visit again, and a client
+  hanging up must not skip it. One new metric: `sandbox.sessions.reaped`
+  counter by tier. This
+  closes #64's core: a session's containers no longer outlive it, and the
+  cumulative-sandbox ceiling stops being a function of uptime.
+
 - **The sandbox provider learns `Owned` and `Reap` on both backends — the
   reaper's hands, with no reaper yet** (plan 24 slice 2; #64).
   `sandbox.Provider` grows the teardown contract: `Owned(ctx)` lists the

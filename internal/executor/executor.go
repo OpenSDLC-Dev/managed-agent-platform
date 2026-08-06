@@ -66,6 +66,12 @@ type Config struct {
 	Workdir      string
 	LeaseTTL     time.Duration
 	PollInterval time.Duration
+	// ReapInterval paces the sandbox reaper (reaper.go): one sweep of this
+	// endpoint's owned sessions per interval (EXECUTOR_REAP_INTERVAL; 0 takes
+	// the 60s default). Teardown latency is bounded by it, and nothing else
+	// destroys sandboxes, so there is no off switch — a deployment that wants
+	// slower reaping sets it longer.
+	ReapInterval time.Duration
 	// Hardening is the containment every session's sandbox is created with —
 	// cgroup limits, capability drops, optionally a uid and a read-only root
 	// (#65). The zero value hardens nothing, which is what a test that builds a
@@ -125,6 +131,9 @@ func (c Config) withDefaults() Config {
 	if c.PollInterval <= 0 {
 		c.PollInterval = 500 * time.Millisecond
 	}
+	if c.ReapInterval <= 0 {
+		c.ReapInterval = time.Minute
+	}
 	return c
 }
 
@@ -178,6 +187,16 @@ func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.P
 // keeps serving other sessions, and the faulted item is reclaimed after its
 // lease lapses.
 func (e *Executor) Run(ctx context.Context) error {
+	// The reaper rides Run's lifetime: the derived cancel stops it when Run
+	// returns for any reason, not only a cancelled caller, and Run waits for
+	// it — a caller that closes the pool after Run must not race a reap pass
+	// still in flight. The work loop keeps checking the caller's own ctx —
+	// wrapping it would put a second Err between Run and the shutdown-race
+	// semantics #282 pinned.
+	reapCtx, cancel := context.WithCancel(ctx)
+	reapDone := make(chan struct{})
+	go func() { defer close(reapDone); e.reapLoop(reapCtx) }()
+	defer func() { cancel(); <-reapDone }()
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -398,6 +417,20 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 	if err != nil {
 		return nil, fmt.Errorf("resolve vault credentials: %w", err)
 	}
+	// The session advisory lock serializes the one pair that must not
+	// interleave: this provision against the reaper's checkpoint+destroy
+	// (plan 24 D4). Blocking, unlike the reaper's try-lock — work proceeds
+	// the moment a reap finishes, on a fresh sandbox. Slice 4's restore
+	// slots inside this same hold.
+	conn, err := e.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire session lock connection: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, sessionLockKey(sessionID)); err != nil {
+		return nil, fmt.Errorf("acquire session lock: %w", err)
+	}
+	defer unlockSession(conn, sessionID)
 	sb, err := e.provider.Provision(ctx, sandbox.Spec{
 		SessionID:  sessionID,
 		Image:      e.cfg.Image,

@@ -6,13 +6,20 @@
 // Configuration is environment-driven:
 //
 //	DATABASE_URL             Postgres DSN (required; same database as the
-//	                         controlplane and brain)
+//	                         controlplane and brain). A pool_max_conns below 2
+//	                         is refused: the session advisory lock pins one
+//	                         connection while other queries still need the pool
 //	EXECUTOR_IMAGE           sandbox base image (default "debian:stable-slim")
 //	EXECUTOR_WORKDIR         working directory inside the sandbox (default
 //	                         "/workspace")
 //	EXECUTOR_LEASE_TTL       work-item lease, Go duration (default "15m") —
 //	                         must comfortably exceed a single tool's timeout
 //	EXECUTOR_POLL_INTERVAL   idle queue poll, Go duration (default "500ms")
+//	EXECUTOR_REAP_INTERVAL   sandbox reap pass interval, Go duration (default
+//	                         "1m"); each pass destroys the sandboxes of
+//	                         deleted (tombstone-evidenced), archived, and
+//	                         terminated cloud sessions — self_hosted sandboxes
+//	                         belong to the BYOC worker and are never touched
 //	CONTROLPLANE_URL         where a session's egress gate fetches its config;
 //	                         set with EXECUTOR_GATE_IMAGE to opt into the gate.
 //	                         Unset: no gate runs; a gate-wanting session (limited
@@ -165,6 +172,7 @@ func run(ctx context.Context) error {
 	}
 	for env, dst := range map[string]*time.Duration{
 		"EXECUTOR_LEASE_TTL": &cfg.LeaseTTL, "EXECUTOR_POLL_INTERVAL": &cfg.PollInterval,
+		"EXECUTOR_REAP_INTERVAL": &cfg.ReapInterval,
 	} {
 		if v := os.Getenv(env); v != "" {
 			d, err := time.ParseDuration(v)
@@ -183,6 +191,13 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer pool.Close()
+	// The session advisory lock pins one connection while the gate-token mint
+	// (and the reaper's re-classification) still needs another — a one-
+	// connection pool would deadlock the first gated provision, so refuse it
+	// at startup instead of wedging silently.
+	if pool.Config().MaxConns < 2 {
+		return fmt.Errorf("DATABASE_URL pool_max_conns = %d: the executor needs at least 2 connections", pool.Config().MaxConns)
+	}
 
 	provider, err := backend.New(backend.Config{
 		Backend:             os.Getenv("SANDBOX_BACKEND"),
