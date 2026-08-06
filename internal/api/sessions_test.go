@@ -788,27 +788,72 @@ func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
 		t.Fatalf("flip to running: %v", err)
 	}
 
+	// The goroutine speaks plain net/http: tserver.do fatals on transport
+	// errors, and t.Fatalf must not run outside the test goroutine — an
+	// error is sent back instead, so the receives below can never hang.
 	type resp struct {
 		status int
 		body   map[string]any
+		err    error
 	}
 	ch := make(chan resp, 1)
 	go func() {
-		st, b := s.do(http.MethodPost, "/v1/sessions/"+id+"/archive", nil)
-		ch <- resp{st, b}
+		req, err := http.NewRequest(http.MethodPost, s.url+"/v1/sessions/"+id+"/archive", nil)
+		if err != nil {
+			ch <- resp{err: err}
+			return
+		}
+		req.Header.Set("x-api-key", testKey)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			ch <- resp{err: err}
+			return
+		}
+		defer res.Body.Close()
+		var body map[string]any
+		if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+			ch <- resp{err: err}
+			return
+		}
+		ch <- resp{status: res.StatusCode, body: body}
 	}()
 
-	// Let the request reach the guard and block on the held row lock; a
-	// response arriving before the flip commits means nothing blocked.
-	time.Sleep(300 * time.Millisecond)
-	select {
-	case r := <-ch:
-		t.Fatalf("archive answered %d before the running flip committed (body %v)", r.status, r.body)
-	default:
+	// Commit only once the guard's SELECT … FOR UPDATE is observably
+	// waiting on the held row lock. A fixed sleep would leave a scheduling
+	// window in which a lockless guard reads the post-commit row and
+	// answers 400 for the wrong reason; a guard without FOR UPDATE never
+	// waits at its SELECT, so this poll timing out is exactly how that
+	// mutant fails. (The poll's own query never matches: its
+	// wait_event_type is null, not Lock.)
+	waitSQL := `SELECT EXISTS (
+		SELECT 1 FROM pg_stat_activity
+		WHERE datname = current_database()
+		  AND wait_event_type = 'Lock'
+		  AND query LIKE '%FROM sessions%FOR UPDATE%')`
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		select {
+		case r := <-ch:
+			t.Fatalf("archive answered (%d, err %v) before the running flip committed", r.status, r.err)
+		default:
+		}
+		var waiting bool
+		if err := s.pool.QueryRow(ctx, waitSQL).Scan(&waiting); err != nil {
+			t.Fatalf("poll pg_stat_activity: %v", err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("guard never blocked on the held session row lock")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 	r := <-ch
+	if r.err != nil {
+		t.Fatalf("archive request: %v", r.err)
+	}
 	wantErr(t, r.status, r.body, http.StatusBadRequest, "invalid_request_error")
 }
