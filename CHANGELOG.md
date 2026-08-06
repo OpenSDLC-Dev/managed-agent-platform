@@ -23,11 +23,13 @@ copy of an entry here.
   (default 24h; `0` disables; compose and Helm expose the knob) has its
   workspace captured through the slice-4 engine and its sandbox destroyed —
   the TTL tier is the engine's first production trigger. Three exclusions,
-  all read in one snapshot under the session's advisory lock: a session
-  owing work (a `queued`/`starting`/`active` work item — a pending harvest
-  or tool run must find the tree it was enqueued against), a session with an
-  unanswered tool-confirmation ask (HITL-idle is still mid-turn; the ask
-  check is deliberately ordered before the main criteria query, because a
+  all evaluated under the session's advisory lock: a session owing work (a
+  `queued`/`starting`/`active` work item — a pending harvest or tool run
+  must find the tree it was enqueued against, read in the same snapshot as
+  the status and TTL-age predicates), a session with an unanswered
+  tool-confirmation ask (HITL-idle is still mid-turn; the ask check is its
+  own, deliberately *earlier* read — ordered before the main criteria query,
+  because a
   confirmation batch answers the ask, enqueues the tool's work and flips the
   session running in one transaction — asks-first means that transaction can
   never land between the two reads with both coming back permissive), and a
