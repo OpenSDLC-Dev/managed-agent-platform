@@ -1169,8 +1169,10 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 		if mkErr := c.mkdirAll(ctx, dir); mkErr != nil {
 			// A put that was refused outright landed nothing, but one that died
 			// mid-transfer left a piece of the entry behind; shed it on the way out
-			// rather than let the directory keep it.
+			// rather than let the directory keep it. Nothing is in flight here, so
+			// the daemon can also take back what the sandbox user's rm could not.
 			c.discard(ctx, gopath.Join(dir, tmp))
+			c.reclaim(ctx, gopath.Join(dir, tmp))
 			return mkErr
 		}
 		err = c.api.putArchive(ctx, c.id, dir, bytes.NewReader(tarball))
@@ -1183,6 +1185,7 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 		// Whatever of the entry landed is nobody's file; the stream path sheds its
 		// residue the same way.
 		c.discard(ctx, tmp)
+		c.reclaim(ctx, tmp)
 		if cErr := c.unreplaceable(ctx, path); cErr != nil {
 			return cErr
 		}
@@ -1220,6 +1223,7 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 		// However much of the payload landed, it is nobody's file. Leaving it
 		// would cost a failed 500 MB mount 500 MB of the sandbox's disk.
 		c.discard(ctx, tmp)
+		c.reclaim(ctx, tmp)
 		if cErr := c.unreplaceable(ctx, path); cErr != nil {
 			return cErr
 		}
@@ -1316,8 +1320,12 @@ func (c *container) prepareBulk(ctx context.Context, b *sandbox.BulkWrite) error
 }
 
 // discardBulk sheds what a failed batch left in the sandbox. Its own failure is not
-// worth reporting over the write's, exactly as the single write's discard is not.
+// worth reporting over the write's, exactly as the single write's discard is not —
+// and it runs on the same detached budget, for the same reason: a batch that failed
+// because its caller went away is the one whose residue most needs shedding.
 func (c *container) discardBulk(ctx context.Context, b *sandbox.BulkWrite) {
+	ctx, cancel := cleanup(ctx)
+	defer cancel()
 	_, _ = c.Exec(ctx, sandbox.ExecRequest{Command: sandbox.BulkDiscardShell +
 		fmt.Sprintf("__map_bulk_discard %s %s", shellQuote(b.Manifest), shellQuote(b.DirList))})
 }
@@ -1355,16 +1363,27 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		// The bytes are landed and unnamed, and this exec is how they were to be
 		// named; shed them rather than leave the sandbox carrying a payload nothing
 		// will ever claim.
+		//
+		// `rm -f` and nothing more, on this branch alone. An error here does not
+		// say the script never ran — the daemon can fail us after starting it, and
+		// then a `mv` is still in flight. Unlinking the temporary makes that `mv`
+		// fail and leaves the target holding what it held; emptying it in place
+		// (`reclaim`) would let the `mv` succeed and put a zero-byte file where the
+		// caller's old data was, while the caller is being told the write failed.
+		// So the shed here is the one the sandbox user can do, and a payload under
+		// a parent that user cannot write survives on this branch (#310).
 		c.discard(ctx, tmp)
 		return err
 	}
-	switch res.ExitCode {
-	case 0:
+	if res.ExitCode == 0 {
 		return nil
+	}
+	var ferr error
+	switch res.ExitCode {
 	case sandbox.ExitPathIsDirectory:
-		return fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
+		ferr = fmt.Errorf("%s: %w", path, sandbox.ErrIsDirectory)
 	case sandbox.ExitPathNotReplaceable:
-		return fmt.Errorf("%s: %w", path, sandbox.ErrNotReplaceable)
+		ferr = fmt.Errorf("%s: %w", path, sandbox.ErrNotReplaceable)
 	default:
 		// The daemon extracts the archive as root, so a parent the sandbox
 		// user cannot write takes the PUT and refuses the write only here, at
@@ -1374,10 +1393,18 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		// take a create keeps the raw error: that failure was the transfer's,
 		// not the target's (plan 23, #306).
 		if cErr := c.notWritable(ctx, path); cErr != nil {
-			return cErr
+			ferr = cErr
+		} else {
+			ferr = fmt.Errorf("docker: write %s: exit %d: %s", path, res.ExitCode, strings.TrimSpace(res.Stderr))
 		}
-		return fmt.Errorf("docker: write %s: exit %d: %s", path, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
+	// Every failure branch above had the script `rm -f` the temporary with the
+	// sandbox user's credentials — which is not the credential that landed it,
+	// so a parent the sandbox user cannot write keeps the refused payload
+	// forever. The daemon takes back what it put there (#310); a no-op where
+	// the script's own rm already worked.
+	c.reclaim(ctx, tmp)
+	return ferr
 }
 
 // pathFault asks the sandbox whether a non-directory is what blocked path,
@@ -1439,11 +1466,87 @@ func (c *container) notWritable(ctx context.Context, path string) error {
 	return &sandbox.PathNotWritableError{Path: path, Reason: strings.TrimSpace(res.Stdout)}
 }
 
+// cleanupBudget bounds a cleanup that has to outlive the write it cleans up
+// after. Shedding what a failed write left is exactly the work that must still
+// happen when the caller's context is already dead — a tool call that timed out,
+// a disconnected caller — so the cleanups detach from it and take a budget of
+// their own rather than inheriting a cancellation and doing nothing. The budget
+// is per cleanup and the daemon client sets no timeout of its own, so the three
+// sites that shed both ways can hold a failed write for two of these before it
+// returns; that ceiling is the caller's whole exposure, and it is not the
+// caller's context that bounds it any more.
+const cleanupBudget = 10 * time.Second
+
+// cleanup detaches a cleanup from the write's own context, keeping its values
+// (the trace it belongs to) and dropping its cancellation.
+func cleanup(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupBudget)
+}
+
 // discard removes a temporary file a failed write left behind. Its own failure is
 // not worth reporting over the write's: the caller already has the error that
 // matters, and a sandbox that cannot delete the file is about to be thrown away.
+//
+// Removing is all it does, deliberately: it is the one cleanup safe to run while
+// a write script may still be in flight, because a `mv` whose source has been
+// unlinked fails and leaves the target as it was. Emptying in place is not
+// (`reclaim`, and rename's comment on why it is not called there).
 func (c *container) discard(ctx context.Context, tmp string) {
+	ctx, cancel := cleanup(ctx)
+	defer cancel()
 	_, _ = c.Exec(ctx, sandbox.ExecRequest{Command: "rm -f " + shellQuote(tmp)})
+}
+
+// reclaim empties a temporary the sandbox user's own `rm -f` could not remove:
+// a failed write's temporary was landed by the daemon's root-credentialed
+// extraction, so a parent that user cannot write holds the refused payload —
+// megabytes of it per refused write — for the container's whole life (#310,
+// measured on non-root images). The daemon put it there, so the daemon takes it
+// back: the same archive endpoint extracts a zero-byte entry of the same name
+// over it. HEAD first, so a temporary the script's own `rm` already removed is
+// not recreated as an empty file.
+//
+// It **runs nothing**, and that is the design rather than an implementation
+// detail. The obvious fix was an exec as uid 0 (`rm -f` the temporary), and it
+// was written and measured before this: it hands root to a binary the sandbox's
+// own filesystem supplies, and that credential cannot be bounded by enumerating
+// what the image might aim at it: the exec runs a binary and shared libraries
+// the image supplies, which an agent that can write part of that filesystem
+// also chooses. Four channels reached it across three review rounds — an
+// image's `$BASH_ENV`, sourced by `bash -c` from a sandbox-writable path
+// (measured: the agent's file ran as uid 0, twice per shed), `LD_PRELOAD` and
+// `LD_DEBUG_OUTPUT`, honoured by the loader with no shell involved (measured;
+// `docker exec -u 0` starts with `AT_SECURE=0`), and `/etc/ld.so.preload`,
+// which no environment setting can close. The same four are named in
+// docs/ARCHITECTURE.md and docs/self-hosted-security.md, and recorded with
+// their evidence in docs/HISTORY.md; keep them in step. Emptying that list is
+// not a bound; not running anything is.
+//
+// Best effort for discard's reason: the caller already has the
+// error that matters, and a daemon that refuses this leaves only the residue it
+// was already leaving.
+//
+// What remains where the sandbox cannot unlink, once this succeeds, is an empty
+// file under the platform's own temporary name — the payload #310 names is gone.
+// When it does not succeed (the daemon is unreachable, the container is going
+// away), the payload stays: this raises no error of its own, so a caller must
+// read it as best effort and not as a guarantee that nothing is left.
+//
+// Callers must also be sure no write script is still running against tmp; a `mv`
+// racing this one lands the empty file on the target. rename's exec-error branch
+// is the site where that is possible, and it does not call this.
+func (c *container) reclaim(ctx context.Context, tmp string) {
+	ctx, cancel := cleanup(ctx)
+	defer cancel()
+	there, err := c.api.pathExists(ctx, c.id, tmp)
+	if err != nil || !there {
+		return
+	}
+	empty, err := tarFile(gopath.Base(tmp), nil)
+	if err != nil {
+		return
+	}
+	_ = c.api.putArchive(ctx, c.id, gopath.Dir(tmp), bytes.NewReader(empty))
 }
 
 // mkdirAll makes the directory a write needs, and is where a path blocked by a

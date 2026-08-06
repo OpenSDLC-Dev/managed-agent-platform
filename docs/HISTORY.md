@@ -33,6 +33,63 @@ recorded nowhere else.
 
 ---
 
+## The root-owned write residue (#310) — a rejected design and five review rounds, 2026-08-06
+
+The fix that shipped (PR #311) is in CHANGELOG.md. What a changelog cannot hold is the
+design that was written, measured, and withdrawn, and why five rounds were needed.
+
+**Rejected: a cleanup exec as uid 0.** The first three iterations cleaned the root-owned
+temporary with `docker exec -u 0 rm -f`. It worked, and it was abandoned because the
+credential cannot be bounded: `docker exec -u 0` starts with `AT_SECURE=0` and runs a
+binary and shared libraries the *image* supplies, so what root does there is decided by
+the image — and, wherever an agent can write part of that filesystem, by the agent. Each
+attempt to bound it by closing a channel was answered by another channel, found by a
+different reviewer:
+
+| Channel | Found by | Measured effect |
+|---|---|---|
+| `bash -c` sources `ENV BASH_ENV` | Codex (P1) | the agent's own file ran **as uid 0**, twice per cleanup |
+| loader honours `ENV LD_PRELOAD`, no shell needed | the implementer, checking the neighbouring case | `ld.so` loaded a sandbox-writable object |
+| image leaves `/bin/rm` (or its libraries) agent-writable — the *premise* the other four sit on, not a fifth variable to close | Codex (P1) | the credential runs the agent's binary |
+| `ENV LD_DEBUG_OUTPUT`, with every other hook emptied | verifier | root-owned file written at an image-chosen path |
+| `/etc/ld.so.preload` | verifier | honoured with no environment variable at all — no `Env` entry can close it |
+
+The conclusion is the decision: emptying a list of variables is not a bound, and not
+running anything is. The verifier **failed** the uid-0 iteration on a blocker — an absolute
+claim in `docs/self-hosted-security.md` that it measured false — which is what forced the
+question rather than a softer wording.
+
+**Round-5 hardening.** The exec-free design was itself wrong twice, both found in review
+after the verifier had passed it:
+
+- Folding the daemon-side emptying into every shed put it on the branch where the rename's
+  *exec* failed. That error cannot distinguish "the exec never started" from "the exec
+  started and the stream dropped", so a `mv` may be in flight; emptying the temporary under
+  it lets the `mv` land zero bytes on the target the caller is simultaneously being told was
+  untouched. Silent data loss, traded for a residue the container destroys anyway. Codex.
+- Both cleanups inherited the failed write's context, so a write that failed *because* its
+  caller went away shed nothing — the case that creates the residue was the case that
+  skipped the code removing it. Codex and CodeRabbit independently. The verifier measured
+  the difference on a real daemon: 896 KiB of agent payload stranded in a root-owned
+  directory without `context.WithoutCancel`, zero with it.
+
+**Refuted, with measurement rather than argument** (Codex P1, round 5): extraction over a
+hardlink an agent plants at the temporary path. `protected_hardlinks` refuses the sandbox
+user's link outright (`Operation not permitted`), and even with the link staged as root the
+daemon's extraction **replaces** the name rather than writing through it — the 16-byte 0600
+victim was byte-for-byte intact afterwards, its link count 2 → 1.
+
+**Left open deliberately**: the bulk write's own residue, tracked as
+[#316](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/316).
+
+**Model-pin deviation, disclosed**: the verifier's pinned `claude-fable-5` hit its usage
+limit partway through, so rounds 3–5 ran it under an explicit `opus` override — a departure
+from `.claude/skills/run-reviews/SKILL.md`'s pinning rule, forced by quota rather than
+chosen, and recorded here because a weaker verifier certifying this class of change is
+exactly what the pin exists to prevent.
+
+---
+
 ## Sandbox teardown (plan 24, #64) — slice 5: the idle-TTL tier, and the plan's acceptance (2026-08-06)
 
 **Acceptance record.** The plan's acceptance section ran in full against the compose

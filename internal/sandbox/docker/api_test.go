@@ -927,12 +927,28 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 // streaming half of it, through a short src). The removal is followed by the
 // unreplaceable probe — a refused put is the only signal a read-only rootfs
 // gives, so every failed put asks (#303) — and a target the probe answers
-// replaceable keeps the daemon's own error, as here.
+// replaceable keeps the daemon's own error, as here. A put that died mid-transfer
+// is the case where the residue is a *partial payload* rather than an empty name,
+// and the daemon extracted it as root — so the sandbox user's `rm` is followed by
+// the daemon emptying whatever it could not take back (#310).
 func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
 	var commands []string
+	var reclaimed []byte
+	headed := false
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			// The partial entry is still there: this parent refused the user's rm.
+			headed = true
+			w.WriteHeader(http.StatusOK)
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			// Only the put that follows the HEAD is the emptying one; the write's
+			// own put — and its retry after the mkdir — is what fails here.
+			if headed {
+				reclaimed, _ = io.ReadAll(r.Body)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(w, `{"message":"daemon gave up mid-transfer"}`)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
@@ -969,6 +985,114 @@ func TestWriteFileShedsItsTempWhenThePutFails(t *testing.T) {
 	if last := commands[len(commands)-1]; !strings.Contains(last, ": > '/workspace/"+sandbox.TempPrefix) {
 		t.Errorf("last exec = %q, want the writability probe", last)
 	}
+	if reclaimed == nil {
+		t.Fatal("the daemon was never handed the emptying archive for what its own put landed")
+	}
+	if name, size := tarEntry(t, reclaimed); !strings.HasPrefix(name, sandbox.TempPrefix) || size != 0 {
+		t.Errorf("the emptying archive carries %q of %d bytes, want the temporary's own name at 0", name, size)
+	}
+}
+
+// A write whose caller has already given up still sheds what it landed. Cleanup
+// is the work that most needs to outlive the context it cleans up after: a tool
+// call that timed out mid-transfer is a failed write like any other, and letting
+// it inherit the cancellation would skip the shedding in exactly the case that
+// produced the residue. Both halves are asserted, so neither can be quietly
+// re-attached to the caller's context (#310, review round 5).
+func TestCleanupOutlivesTheWriteThatWasCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var commands []string
+	var reclaimed []byte
+	headed := false
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			headed = true
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			if headed {
+				reclaimed, _ = io.ReadAll(r.Body)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			// The caller goes away while its own bytes are being extracted, so
+			// every step after this one has a dead context to work from.
+			cancel()
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `{"message":"daemon gave up mid-transfer"}`)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			commands = append(commands, body.Cmd[len(body.Cmd)-2])
+			io.WriteString(w, `{"Id":"e1"}`)
+		case r.URL.Path == "/exec/e1/start":
+		case r.URL.Path == "/exec/e1/json":
+			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	if err := c.WriteFile(ctx, "/workspace/f.txt", []byte("x")); err == nil {
+		t.Fatal("write returned nil, want the failure the cancellation caused")
+	}
+	var removed bool
+	for _, cmd := range commands {
+		removed = removed || strings.HasPrefix(cmd, "rm -f '/workspace/"+sandbox.TempPrefix)
+	}
+	if !removed {
+		t.Errorf("execs = %q, want the temporary removed on a context the caller already canceled", commands)
+	}
+	if reclaimed == nil {
+		t.Fatal("no emptying archive: the daemon-side shed inherited the caller's cancellation")
+	}
+	if name, size := tarEntry(t, reclaimed); !strings.HasPrefix(name, sandbox.TempPrefix) || size != 0 {
+		t.Errorf("the emptying archive carries %q of %d bytes, want the temporary's own name at 0", name, size)
+	}
+}
+
+// The batch sheds on the same terms. Its residue is the daemon's extraction too
+// — up to 10,000 members of it — so a batch abandoned mid-transfer must not be
+// the one write that keeps what it landed (#310, review round 5).
+func TestTheBatchesCleanupOutlivesTheWriteThatWasCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var commands []string
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			cancel()
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `{"message":"daemon gave up mid-transfer"}`)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			commands = append(commands, body.Cmd[len(body.Cmd)-2])
+			io.WriteString(w, `{"Id":"e1"}`)
+		case r.URL.Path == "/exec/e1/start":
+		case r.URL.Path == "/exec/e1/json":
+			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFiles(ctx, []sandbox.FileWrite{{Path: "/workspace/a.txt", Data: []byte("x")}})
+	if err == nil {
+		t.Fatal("write returned nil, want the failure the cancellation caused")
+	}
+	var shed bool
+	for _, cmd := range commands {
+		shed = shed || strings.Contains(cmd, "__map_bulk_discard")
+	}
+	if !shed {
+		t.Errorf("execs = %q, want the batch shed on a context the caller already canceled", commands)
+	}
 }
 
 // A PUT the daemon refuses on a replaceable target whose parent then refuses
@@ -987,6 +1111,11 @@ func TestWriteFileClassifiesAnUnwritableParentWhenThePutFails(t *testing.T) {
 			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
 		}
 		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			// A read-only root refuses every put outright, so nothing landed
+			// and there is nothing for the daemon to empty.
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"message":"Could not find the file"}`)
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
 			w.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(w, `{"message":"container rootfs is marked read-only"}`)
@@ -1070,6 +1199,10 @@ func TestWriteFileClassifiesARootOwnedParentAtRename(t *testing.T) {
 			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
 		}
 		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			// The refused rename's temporary is still there, and the emptying
+			// PUT that follows is this route's cleanup (#310).
+			w.WriteHeader(http.StatusOK)
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
 			w.WriteHeader(http.StatusOK)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
@@ -1118,11 +1251,118 @@ func TestWriteFileClassifiesARootOwnedParentAtRename(t *testing.T) {
 	}
 }
 
-// A failed move over a parent that can take a create keeps the raw error: the
-// failure was the transfer's, not the target's, and calling the path unwritable
-// would tell the model the path is bad when it is not.
-func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
+// tarEntry reads the single member of a tar body: its name and its size, which
+// is what the reclaim's assertion is about (#310).
+func tarEntry(t *testing.T, body []byte) (string, int64) {
+	t.Helper()
+	h, err := tar.NewReader(bytes.NewReader(body)).Next()
+	if err != nil {
+		t.Fatalf("read the tar the daemon was handed: %v", err)
+	}
+	return h.Name, h.Size
+}
+
+// A refused rename's temporary was landed by the daemon's own extraction, in a
+// parent the sandbox user cannot write — so its `rm` cannot take it back and the
+// refused payload would sit there for the container's life. The daemon empties
+// it, by extracting a zero-byte entry of the same name over it, after a HEAD
+// that says there is something to empty. Nothing is executed to do it: the
+// credential that landed the file is the one that takes it back, and no binary
+// of the image's runs with it (#310).
+func TestARefusedRenameReclaimsItsTempThroughTheDaemon(t *testing.T) {
 	var commands []string
+	var reclaimed []byte
+	var headed string
+	kinds := map[string]string{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			headed = r.URL.Query().Get("path")
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			if headed != "" {
+				reclaimed, _ = io.ReadAll(r.Body)
+			}
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			cmd := body.Cmd[len(body.Cmd)-2]
+			commands = append(commands, cmd)
+			switch {
+			case strings.Contains(cmd, "mv -f"):
+				kinds[id] = "rename"
+			case strings.Contains(cmd, ": > '/etc/"+sandbox.TempPrefix):
+				kinds[id] = "probe"
+			}
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+			switch kinds[execID()] {
+			case "rename":
+				w.Write(frame(streamStderr, "mv: cannot move '/etc/.map-write-x' to '/etc/f.txt': Permission denied"))
+			case "probe":
+				w.Write(frame(streamStdout, "Permission denied"))
+			}
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			switch kinds[execID()] {
+			case "rename":
+				io.WriteString(w, `{"Running":false,"ExitCode":1}`)
+			case "probe":
+				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, sandbox.ExitPathNotWritable)
+			default:
+				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
+	if !errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v, want ErrNotWritable", err)
+	}
+	if !strings.HasPrefix(headed, "/etc/"+sandbox.TempPrefix) {
+		t.Errorf("HEAD asked about %q, want the temporary the daemon landed", headed)
+	}
+	if reclaimed == nil {
+		t.Fatal("the daemon was never handed the emptying archive")
+	}
+	name, size := tarEntry(t, reclaimed)
+	if !strings.HasPrefix(name, sandbox.TempPrefix) || size != 0 {
+		t.Errorf("the emptying archive carries %q of %d bytes, want the temporary's own name at 0", name, size)
+	}
+	// And the cleanup ran nothing: every exec is the write path's own, none of
+	// them the removal of a file the sandbox user could not remove anyway.
+	for _, cmd := range commands {
+		if strings.Contains(cmd, "/bin/rm") {
+			t.Errorf("exec %q: the cleanup must execute nothing — the daemon empties what it landed", cmd)
+		}
+	}
+}
+
+// A rename exec that could not run at all — not a reported failure exit, the
+// exec itself dying — sheds with the sandbox user's `rm` and nothing else, even
+// though the daemon could empty a temporary that `rm` cannot touch.
+//
+// The daemon can fail this call after having started the script, and then a `mv`
+// is still in flight inside the container. Unlinking the temporary makes that
+// `mv` fail and leaves the target holding what it held. Emptying it in place
+// would let the `mv` succeed onto the target — replacing the caller's data with
+// zero bytes while the caller is told the write failed. So this branch keeps the
+// residue #310 is about rather than risk that, and the emptying is confined to
+// the sites where no script can be running (#310, review round 5).
+func TestARenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
+	var commands []string
+	var reclaimPuts, heads int
 	renames := map[string]bool{}
 	var execN int
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1130,7 +1370,76 @@ func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
 			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
 		}
 		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			// Were the emptying to run, this parent would report the temporary
+			// still there — the case that most tempts it.
+			heads++
+			w.WriteHeader(http.StatusOK)
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			if len(commands) > 0 {
+				reclaimPuts++
+			}
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			cmd := body.Cmd[len(body.Cmd)-2]
+			commands = append(commands, cmd)
+			renames[id] = strings.Contains(cmd, "mv -f")
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			if renames[execID()] {
+				w.WriteHeader(http.StatusInternalServerError)
+				io.WriteString(w, `{"message":"exec start went away"}`)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	err := c.WriteFile(context.Background(), "/etc/f.txt", []byte("x"))
+	if err == nil || !strings.Contains(err.Error(), "exec start went away") {
+		t.Fatalf("err = %v, want the exec's own failure", err)
+	}
+	if last := commands[len(commands)-1]; !strings.Contains(last, "rm -f '/etc/"+sandbox.TempPrefix) {
+		t.Errorf("last exec = %q, want the sandbox user's own rm", last)
+	}
+	if heads != 0 || reclaimPuts != 0 {
+		t.Errorf("the emptying ran (%d HEADs, %d archives) where a mv may still be in flight; "+
+			"it would land zero bytes on the target the caller was told kept its own", heads, reclaimPuts)
+	}
+}
+
+// A failed move over a parent that can take a create keeps the raw error: the
+// failure was the transfer's, not the target's, and calling the path unwritable
+// would tell the model the path is bad when it is not.
+func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
+	var commands []string
+	reclaimPuts := 0
+	renames := map[string]bool{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			// This parent takes the user's own rm, so the script already
+			// removed the temporary: nothing is left to empty.
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"message":"Could not find the file"}`)
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			if len(commands) > 0 {
+				reclaimPuts++
+			}
 			w.WriteHeader(http.StatusOK)
 		case strings.HasSuffix(r.URL.Path, "/exec"):
 			var body execConfig
@@ -1165,6 +1474,11 @@ func TestRenameFailureOnAWritableTargetKeepsTheRawError(t *testing.T) {
 	}
 	if last := commands[len(commands)-1]; !strings.Contains(last, ": > '/workspace/"+sandbox.TempPrefix) {
 		t.Errorf("last exec = %q, want the writability probe asked after the failed move", last)
+	}
+	// A temporary the script's own rm already removed is not recreated as an
+	// empty file: the HEAD is what keeps the cleanup from making litter (#310).
+	if reclaimPuts != 0 {
+		t.Errorf("%d emptying archives sent, want none — nothing was left to empty", reclaimPuts)
 	}
 }
 
@@ -1230,11 +1544,22 @@ func TestWriteFileSurfacesMkdirFailure(t *testing.T) {
 // landed under a name nothing will claim. The removal is attempted on the way out
 // — here it fails too, since this daemon refuses every exec, which is exactly why
 // the attempt is what gets asserted rather than its outcome.
+//
+// This daemon refuses the exec *create*, so nothing could have started and the
+// emptying would in fact be safe here. It still does not run: `Exec` reports one
+// error for a create that was refused and for a stream that dropped after the
+// script began, so the branch cannot tell the two apart and treats both as the
+// dangerous one (#310).
 func TestWriteFileShedsItsTempWhenTheRenameCannotRun(t *testing.T) {
-	var execs int
+	var execs, emptied int
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodHead:
+			w.WriteHeader(http.StatusOK)
 		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			if execs > 0 {
+				emptied++
+			}
 		case strings.HasSuffix(r.URL.Path, "/exec"):
 			execs++
 			w.WriteHeader(http.StatusInternalServerError)
@@ -1249,6 +1574,9 @@ func TestWriteFileShedsItsTempWhenTheRenameCannotRun(t *testing.T) {
 	}
 	if execs != 2 {
 		t.Errorf("%d exec attempts, want 2 — the rename, then the removal of what it could not name", execs)
+	}
+	if emptied != 0 {
+		t.Errorf("%d emptying archives, want none — an exec that failed may still be running a mv", emptied)
 	}
 }
 

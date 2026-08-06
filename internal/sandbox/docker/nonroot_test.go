@@ -108,6 +108,81 @@ func TestBulkWriteOnANonRootImage(t *testing.T) {
 	}
 }
 
+// hookedDockerfile is the non-root image contract plus a bash startup hook the
+// image's own environment names — an operator's `ENV BASH_ENV=…` pointing at a
+// path the sandbox user can write. Unusual, but it is the sharp case for any
+// privileged exec the cleanup might reach for, and nothing stops an operator
+// from shipping it.
+const hookedDockerfile = `FROM debian:stable-slim
+RUN useradd -m app && mkdir -p /workspace && chown app:app /workspace
+ENV BASH_ENV=/workspace/hook
+USER app
+`
+
+// The platform runs nothing in the sandbox as anyone but the sandbox's own
+// user, and this is the row that keeps it that way. #310's first fix cleaned up
+// with an exec as uid 0, and on this image it executed the agent's file
+// instead: `bash -c` sources $BASH_ENV before it runs anything, so the hook's
+// record came back carrying uid 0 — twice per cleanup, once for the wrapper's
+// shell and once for the command's. No exec does the cleaning now (the daemon
+// empties what it landed), so what this row pins is the invariant rather than
+// one hole in it: the hook still runs for the sandbox's own execs, because that
+// shell is the agent's and its own uid is no escalation, and uid 0 must never
+// be among them.
+func TestTheRootShedRunsNoAgentCodeOnANonRootImage(t *testing.T) {
+	image := "map-hooked-test:latest"
+	build := exec.Command("docker", "build", "-q", "-t", image, "-")
+	build.Stdin = strings.NewReader(hookedDockerfile)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the hooked image: %v\n%s", err, out)
+	}
+
+	p, err := docker.New(docker.Config{})
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	ctx := context.Background()
+	sb, err := p.Provision(ctx, sandbox.Spec{
+		SessionID: domain.NewID("sesn"), Image: image, Workdir: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sb.Destroy(context.Background()); err != nil {
+			t.Errorf("destroy: %v", err)
+		}
+	})
+
+	// The agent plants the hook, as itself — every shell in the container from
+	// here on records the uid that ran it.
+	if err := sb.WriteFile(ctx, "/workspace/hook", []byte("id -u >> /workspace/ran\n")); err != nil {
+		t.Fatalf("plant the hook: %v", err)
+	}
+	// A write whose rename the sandbox user is refused — the route whose shed is
+	// the daemon's, and the one an exec as uid 0 would have cleaned up.
+	if err := sb.WriteFile(ctx, "/etc/map-310-hooked.txt", []byte("x")); !errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("err = %v, want ErrNotWritable — the route whose shed needs the daemon's credential", err)
+	}
+
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "cat /workspace/ran 2>/dev/null || true"})
+	if err != nil {
+		t.Fatalf("read the hook's record: %v", err)
+	}
+	// An image that never sourced the hook at all would satisfy "no uid 0
+	// appears" without proving anything, so the record must first show the hook
+	// firing for the sandbox's own execs — the mechanism a privileged exec would
+	// have inherited.
+	if len(strings.Fields(res.Stdout)) == 0 {
+		t.Fatalf("the hook recorded nothing (%q): this row cannot tell a closed channel from an unused one", res.Stdout)
+	}
+	for _, uid := range strings.Fields(res.Stdout) {
+		if uid == "0" {
+			t.Fatalf("the hook ran as uid 0 (record: %q): the root shed must run no agent-chosen code", res.Stdout)
+		}
+	}
+}
+
 // A write into a parent the daemon can extract into but the sandbox user cannot
 // write is the model's error, not the platform's fault (plan 23, #306). The PUT
 // lands the temporary file because the daemon extracts as root; the `mv`,
@@ -147,5 +222,21 @@ func TestWriteIntoARootOwnedParentOnANonRootImage(t *testing.T) {
 	var pnw *sandbox.PathNotWritableError
 	if !errors.As(err, &pnw) || pnw.Reason != "Permission denied" {
 		t.Fatalf("err = %v, want the refused move's reason", err)
+	}
+
+	// And the refused write's payload is gone. The temporary landed through the
+	// daemon's root-credentialed extraction, so the sandbox user's own `rm -f`
+	// could not shed it and the refused bytes would sit in a directory it
+	// cannot touch for the container's whole life. The daemon takes back what
+	// it put there, by extracting nothing over it: what is left where the
+	// sandbox cannot unlink is an empty name, not a payload (#310).
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{
+		Command: "cat /etc/" + sandbox.TempPrefix + "* 2>/dev/null | wc -c",
+	})
+	if err != nil {
+		t.Fatalf("size what is left in /etc: %v", err)
+	}
+	if got := strings.TrimSpace(res.Stdout); got != "0" {
+		t.Errorf("%s bytes left in /etc = %s, want 0 (#310)", sandbox.TempPrefix, got)
 	}
 }

@@ -420,6 +420,25 @@ func (c *apiClient) processAlive(ctx context.Context, containerID string, pid in
 	return false, nil
 }
 
+// pathExists asks the daemon whether a path is there, without reading it — the
+// archive endpoint's HEAD answers with a stat header or a 404. It is how a
+// failed write learns whether the daemon's own extraction left a temporary
+// behind, in a directory nothing inside the sandbox may be able to read (#310).
+// A container that is gone answers 404 too, which is the right answer here:
+// there is nothing left to reclaim.
+func (c *apiClient) pathExists(ctx context.Context, id, path string) (bool, error) {
+	resp, err := c.request(ctx, http.MethodHead, "/containers/"+id+"/archive",
+		url.Values{"path": {path}}, nil, "")
+	if err != nil {
+		if statusIs(err, http.StatusNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	resp.Body.Close()
+	return true, nil
+}
+
 func (c *apiClient) getArchive(ctx context.Context, id, path string) (io.ReadCloser, error) {
 	resp, err := c.request(ctx, http.MethodGet, "/containers/"+id+"/archive",
 		url.Values{"path": {path}}, nil, "")

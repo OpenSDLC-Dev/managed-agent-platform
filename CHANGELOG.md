@@ -311,6 +311,67 @@ copy of an entry here.
 
 ### Fixed
 
+- **A refused write's payload no longer sits in the sandbox for the
+  container's life — and no privileged exec was introduced to remove it**
+  ([internal/sandbox/docker/docker.go](./internal/sandbox/docker/docker.go),
+  [internal/sandbox/docker/api.go](./internal/sandbox/docker/api.go); #310, the
+  verifier's finding on #306's PR). The docker daemon extracts a write's
+  archive as root, so when the rename is what fails — a root-owned parent
+  under a non-root uid, the route #306 classifies — the script's own `rm -f`
+  runs as a user who cannot unlink from that directory, and the refused
+  payload stayed behind as a root-owned `.map-write-*` file, one per refused
+  write (measured on a real non-root image). **The daemon is asked to take
+  back what it landed**: after a HEAD that says something is still there, the
+  same archive endpoint extracts a zero-byte entry of the same name over it.
+  Where that succeeds the payload is gone and only an empty name remains; it
+  reports nothing of its own, so it is best effort and a daemon that refuses
+  leaves the residue the sandbox user already could not shed. A put that dies
+  mid-transfer gets the same treatment, its residue being a *partial payload*
+  rather than an empty name (a verifier finding on the first exec-free
+  iteration).
+
+  Two boundaries came out of review. The emptying is **not** asked for on the
+  branch where the rename's exec itself failed: that error does not say the
+  script never started, so a `mv` may be in flight, and emptying the temporary
+  under it would land zero bytes on the very target the caller is being told
+  it did not touch. That branch unlinks with the sandbox user's `rm` and stops
+  — keeping a payload the container will take away beats destroying data the
+  write promised to leave alone (Codex, round 5; the fake-daemon row asserts
+  no HEAD and no archive on that route). And every cleanup on this backend
+  now runs on a context detached from the write's own (`context.WithoutCancel`
+  plus a 10-second budget) — the two single-write sheds, and the batch's
+  `discardBulk` alongside them — because a tool call that timed out
+  mid-transfer is exactly the write whose residue must still be shed:
+  inheriting its cancellation skipped the cleanup in the case that caused it,
+  and left a batch's members (up to 10,000 of them) behind for the container's
+  life. Sites that shed both ways can now hold a failed write for two budgets
+  before returning, which the code says out loud. Codex and CodeRabbit found
+  the single-write half; the verifier found that the batch had been left out
+  of it. The k8s twin keeps the caller's context for now — its temporaries are
+  the sandbox user's own, so nothing there is *unremovable*, which is what
+  #310 is about — and #316 carries the question for both backends.
+
+  The route not taken is the point: the obvious fix — an exec as `User: "0"`
+  running `rm -f` — was written, measured against four escalation channels an
+  image controls, and abandoned, so **the platform still runs nothing in a
+  sandbox as anyone but the sandbox's own user**. What pins that is structural
+  (docker's `execConfig` has no `User` field to set); the real-image row
+  `TestTheRootShedRunsNoAgentCodeOnANonRootImage` covers the shell-hook
+  channel behind it. The evidence, the four channels (over the premise they
+  all sit on) and the rejected design are recorded in
+  [docs/HISTORY.md](./docs/HISTORY.md). The k8s backend needs nothing *here*:
+  its temporary is created by the sandbox user, so the same credential that
+  made it removes it. The docker **bulk** write is knowingly left out — its
+  shed is the sandbox user's `rm`, and what makes that enough is the caller
+  (the one batch the platform writes goes under the workdir), not the
+  directories it creates, since `mkdir -p` leaves a root-owned parent that
+  already exists exactly as it found it — and #316 tracks closing that rather
+  than resting on the caller. Red observed first on every row: the real-image residue
+  (the refused payload's bytes in `/etc`, want 0), the fake-daemon emptying
+  archive that did not exist, the raw route's re-pin — where the script's own
+  rm worked, no emptying archive may be sent, or the cleanup would make the
+  litter it exists to remove — and round 5's three.
+
 - **A write the sandbox cannot land is the model's error, not the platform's
   fault** ([internal/sandbox/sandbox.go](./internal/sandbox/sandbox.go),
   [internal/sandbox/filefault.go](./internal/sandbox/filefault.go),

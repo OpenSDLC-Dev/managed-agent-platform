@@ -221,6 +221,46 @@ Kubernetes' `securityContext.runAsUser`). It is numeric because that is all both
 backends can express — a Kubernetes securityContext takes no user name.
 `debian:stable-slim` defaults to root; a hardened image does not have to.
 
+**The platform runs nothing in your container as anyone but that user** — no
+privileged exec, anywhere, and one place had to be designed around to keep it
+that way. On Docker the daemon extracts a write's archive as root, so when the
+rename that would finish the write is refused, the temporary is a root-owned
+file your sandbox uid cannot unlink from a directory it cannot write (#310).
+Cleaning it up with a `docker exec -u 0` was tried and abandoned: such an exec
+starts with `AT_SECURE=0` and runs a binary and libraries your *image* supplies,
+so what it really does is decided by the image — and where an agent can write
+part of that image's filesystem, by the agent. Four channels were found and
+measured before the approach was dropped: `bash -c` sourcing an `ENV BASH_ENV`
+file, the loader honouring `ENV LD_PRELOAD`, `ENV LD_DEBUG_OUTPUT` writing
+root-owned files at a path the image names, and `/etc/ld.so.preload`, which no
+environment setting can neutralize. So the daemon takes back what it landed
+instead: the same archive endpoint that extracted the temporary extracts an
+empty file over it, executing nothing. That covers the refused write #310 is
+about and every other failed **single** write whose temporary the daemon landed,
+a transfer that died part way included — there the residue is a partial payload
+rather than an empty name. Where your sandbox cannot unlink, what stays behind
+afterwards is an empty file under the platform's own `.map-write-` name, until
+the container is destroyed. The **bulk** write (skill materialization) is
+deliberately not covered: its shed is your sandbox user's own `rm`. What makes
+that enough today is the *caller* — the one batch the platform writes goes under
+the workdir, which your sandbox user owns — and not the platform creating a
+batch's directories inside the container, which uses `mkdir -p` and so leaves a
+root-owned parent that already exists exactly as it found it. If you ship an
+image with a root-owned directory under the workdir, a failed batch will leave
+payload there that your sandbox user cannot unlink.
+[#316](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/316) tracks
+closing that rather than resting on the caller.
+
+Two limits are worth knowing rather than discovering. The emptying is best
+effort: it reports nothing of its own, and a daemon that will not answer leaves
+the payload where it was — the same place the sandbox user could not reach it
+either. And one branch does not ask for it at all: when the rename's *exec*
+fails outright, the script it was running may still be mid-`mv`, and emptying
+the temporary under a live `mv` would put zero bytes onto the file the caller was
+just told it had not touched. Keeping a payload the container will take away is
+the lesser harm than destroying data the write promised to leave alone, so that
+branch unlinks with your sandbox user's own `rm` and stops there.
+
 The catch is the **workdir**. The container's entrypoint runs `mkdir -p
 <workdir>` as whatever user the container runs as, and a uid the image did not
 plan for usually cannot create a directory at the root of the filesystem — so the
