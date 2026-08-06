@@ -4,9 +4,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** Plan 24 (sandbox teardown, #64) archived with its final slice — the
-idle-TTL tier — landed; its progress summary and acceptance records are in
-[docs/HISTORY.md](./docs/HISTORY.md). The backlog lives in GitHub issues.
+**None.**
 
 ## Tasks
 
