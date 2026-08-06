@@ -83,7 +83,11 @@ discriminating test for the unlock-failure connection-close — every SQL-reacha
 unlock failure (aborted transaction, dead backend, cancelled context) already destroys
 the connection on release, freeing the lock; the guard covers the residual class
 (e.g. a pooling proxy) no real-Postgres test can simulate. The cmd startup floor is
-main-glue, outside the tested surface by convention. Refuted-and-unchanged, with the
+main-glue, outside the tested surface by convention. The detached-context blob delete
+likewise has no cancelled-request test — httptest offers no clean way to cancel the
+request context between the handler's commit and its post-commit tail; the change is
+one `context.WithoutCancel` line, verified by reading and by the failing-blob test
+covering the same tail. Refuted-and-unchanged, with the
 verify agents' own evidence: Run-return-before-reap-exit harms (the pool blocks on
 `Close` until conns release), the provision-side re-read (a stale sandbox adoption is
 the pre-slice status quo and slice 4's restore recuts it under the same hold).
