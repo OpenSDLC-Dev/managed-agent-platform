@@ -33,6 +33,33 @@ recorded nowhere else.
 
 ---
 
+## Sandbox teardown (plan 24, #64) — slice 1: the running-session archive/delete guard
+
+**Review hardening, landed in the same PR.** The verifier returned PASS, independently
+reproducing the guard's red (reverting `requireNotRunning` re-failed the new test) and
+adding one docs finding, fixed (ARCHITECTURE's sessions.go row now names the refusal).
+The Claude review (Opus 5) confirmed three gaps, each closed by a mutation-checked test
+or a registry entry: the registry's "rescheduling does not refuse" claim was untested — a
+guard tightened to `!= idle` survived the suite; the rescheduling case now goes red on
+that mutant. The `FOR UPDATE` row lock was untested — stripping it left the suite green;
+`TestArchiveObservesConcurrentRunningFlip` now fails on that mutant. And the documented
+"session update must be idle" requirement is silently unenforced — registered in
+DIVERGENCES, tracked as #312. Its fourth claim — a deadlock in this diff — was refuted
+for the diff, but both reviewers independently converged on the underlying pre-existing
+inversion: `deleteSession` locks session-then-token while `gatetoken.Ensure` locks
+token-then-session (its successor insert takes the FK's `KEY SHARE`); now #313. The first
+Codex pass died in its security-scan plugin (finalization schema error, no verdict — the
+rerun was steered to plain review mode). The rerun confirmed the six attacked invariants
+otherwise clean and forced two test rewrites: the concurrent test's 300 ms sleep proved
+nothing about *where* the archive was blocked (under CI pressure the lockless mutant
+could pass by reading the post-commit row), so the commit now waits on a
+`pg_stat_activity` barrier that observes the guard's `SELECT … FOR UPDATE` in a `Lock`
+wait — the mutant now fails deterministically by barrier timeout; and the goroutine
+called `t.Fatalf` off the test goroutine through `tserver.do` (a hang, not a failure, on
+transport error) — it now speaks plain `net/http` and reports errors over the channel.
+
+---
+
 ## Classified unwritable writes (plan 23) — archived 2026-08-05, delivered in one PR (#306)
 
 Drafted, verified against the reference checkouts, and delivered the same day. The plan's

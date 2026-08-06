@@ -1002,21 +1002,50 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	return out, nil
 }
 
+// requireNotRunning locks the session row and refuses the mutation while the
+// session is running — the reference documents that a running session cannot
+// be archived or deleted (an interrupt must land first); the reject status and
+// message are ours (docs/DIVERGENCES.md, INFERRED). The row lock holds the
+// status still until the caller's tx commits, so an approval flipping the
+// session to running cannot slip between the check and the mutation.
+func requireNotRunning(ctx context.Context, tx pgx.Tx, id, verb string) error {
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE id = $1 FOR UPDATE`, id).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errNotFound("session %s not found", id)
+	}
+	if err != nil {
+		return err
+	}
+	if status == string(domain.SessionRunning) {
+		return errInvalid("session %s is running; send a user.interrupt event before %s", id, verb)
+	}
+	return nil
+}
+
 func (s *server) archiveSession(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
-	row, err := scanSession(s.pool.QueryRow(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireNotRunning(ctx, tx, id, "archiving"); err != nil {
+		return nil, err
+	}
+	row, err := scanSession(tx.QueryRow(ctx,
 		`UPDATE sessions SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
 		 WHERE id = $1 RETURNING `+sessionColumns, id))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound("session %s not found", id)
-	}
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return renderSession(row)
@@ -1028,12 +1057,19 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
-	tag, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if tag.RowsAffected() == 0 {
-		return nil, errNotFound("session %s not found", id)
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireNotRunning(ctx, tx, id, "deleting"); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	// The session.deleted event terminates any active event stream. It
 	// cannot be persisted — the log rows just cascaded away with the
