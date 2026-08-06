@@ -4,7 +4,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.**
+**None.** (#323 — `mount_path` rooting — lands with this change; its narrative is
+in CHANGELOG.md. Follow-on for whoever picks up plan 25 / PR #325: that plan's
+validation design assumes file mounts keep arbitrary container-path latitude,
+which #323 removes from the file arm.)
 
 ## Tasks
 

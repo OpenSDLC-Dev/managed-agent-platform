@@ -85,8 +85,9 @@ type Hardening struct {
 	// provider mounts writable space over every path the platform itself writes
 	// (WritablePaths) when it is set, so this is a provision-time choice rather
 	// than a runtime-layer one — but it still needs an image that tolerates a
-	// read-only root everywhere else, and a session file resource given an
-	// explicit mount_path outside that set cannot be materialized.
+	// read-only root everywhere else. A session file resource created since #323
+	// always resolves under the uploads root and so is covered; one stored before
+	// it can still name a path outside the set and fail to materialize.
 	ReadOnlyRootfs bool
 	// RunAsUser overrides the image's default user with a numeric uid; nil
 	// keeps the image's own USER. Numeric because that is what both backends
@@ -162,11 +163,12 @@ func (h Hardening) EffectiveCapDrop(gated bool) []string {
 const ShellStateRoot = "/var/lib/map-shell"
 
 // sessionResourceRoot is the mount point a session's file resources land under.
-// The exact default path (`/mnt/session/uploads/<file_id>`) is resolved in
-// internal/api, which this package must not import; the parent is what has to be
-// writable, and mounting it covers any default-placed resource. A caller-supplied
-// mount_path outside the writable set still fails under a read-only root — stated
-// in docs/self-hosted-security.md §4 rather than guessed at here.
+// The exact paths (`/mnt/session/uploads/…`) are resolved in internal/api, which
+// this package must not import; the parent is what has to be writable. Since
+// #323 every mount_path resolves under that root, so mounting the parent covers
+// every resource created from then on, not just default-placed ones — a resource
+// stored before #323 keeps its literal path and can still fall outside, which
+// docs/self-hosted-security.md §4 states rather than guessing at here.
 const sessionResourceRoot = "/mnt"
 
 // WritablePaths are the mount points a read-only-rootfs sandbox still needs to
