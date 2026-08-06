@@ -50,7 +50,7 @@ different reviewer:
 |---|---|---|
 | `bash -c` sources `ENV BASH_ENV` | Codex (P1) | the agent's own file ran **as uid 0**, twice per cleanup |
 | loader honours `ENV LD_PRELOAD`, no shell needed | the implementer, checking the neighbouring case | `ld.so` loaded a sandbox-writable object |
-| image leaves `/bin/rm` (or its libraries) agent-writable | Codex (P1) | the credential runs the agent's binary |
+| image leaves `/bin/rm` (or its libraries) agent-writable — the *premise* the other four sit on, not a fifth variable to close | Codex (P1) | the credential runs the agent's binary |
 | `ENV LD_DEBUG_OUTPUT`, with every other hook emptied | verifier | root-owned file written at an image-chosen path |
 | `/etc/ld.so.preload` | verifier | honoured with no environment variable at all — no `Env` entry can close it |
 
@@ -87,6 +87,7 @@ limit partway through, so rounds 3–5 ran it under an explicit `opus` override 
 from `.claude/skills/run-reviews/SKILL.md`'s pinning rule, forced by quota rather than
 chosen, and recorded here because a weaker verifier certifying this class of change is
 exactly what the pin exists to prevent.
+
 ---
 
 ## Sandbox teardown (plan 24, #64) — slice 2: `Owned`/`Reap` on both backends

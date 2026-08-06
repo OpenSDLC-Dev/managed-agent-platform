@@ -1487,8 +1487,8 @@ func (c *container) discard(ctx context.Context, tmp string) {
 // `LD_DEBUG_OUTPUT`, honoured by the loader with no shell involved (measured;
 // `docker exec -u 0` starts with `AT_SECURE=0`), and `/etc/ld.so.preload`,
 // which no environment setting can close. The same four are named in
-// CHANGELOG.md, docs/ARCHITECTURE.md and docs/self-hosted-security.md; keep
-// them in step. Emptying that list is not a bound; not running anything is.
+// docs/ARCHITECTURE.md and docs/self-hosted-security.md, and recorded with
+// their evidence in docs/HISTORY.md; keep them in step. Emptying that list is not a bound; not running anything is.
 // Best effort for discard's reason: the caller already has the
 // error that matters, and a daemon that refuses this leaves only the residue it
 // was already leaving.

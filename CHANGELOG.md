@@ -218,12 +218,19 @@ copy of an entry here.
   it did not touch. That branch unlinks with the sandbox user's `rm` and stops
   — keeping a payload the container will take away beats destroying data the
   write promised to leave alone (Codex, round 5; the fake-daemon row asserts
-  no HEAD and no archive on that route). And both cleanups now run on a
-  context detached from the write's own (`context.WithoutCancel` plus a
-  10-second budget), because a tool call that timed out mid-transfer is
-  exactly the write whose residue must still be shed — inheriting its
-  cancellation would have skipped the cleanup in the case that caused it
-  (Codex and CodeRabbit, round 5).
+  no HEAD and no archive on that route). And every cleanup on this backend
+  now runs on a context detached from the write's own (`context.WithoutCancel`
+  plus a 10-second budget) — the two single-write sheds, and the batch's
+  `discardBulk` alongside them — because a tool call that timed out
+  mid-transfer is exactly the write whose residue must still be shed:
+  inheriting its cancellation skipped the cleanup in the case that caused it,
+  and left a batch's members (up to 10,000 of them) behind for the container's
+  life. Sites that shed both ways can now hold a failed write for two budgets
+  before returning, which the code says out loud. Codex and CodeRabbit found
+  the single-write half; the verifier found that the batch had been left out
+  of it. The k8s twin keeps the caller's context for now — its temporaries are
+  the sandbox user's own, so nothing there is *unremovable*, which is what
+  #310 is about — and #316 carries the question for both backends.
 
   The route not taken is the point: the obvious fix — an exec as `User: "0"`
   running `rm -f` — was written, measured against four escalation channels an
@@ -231,8 +238,9 @@ copy of an entry here.
   sandbox as anyone but the sandbox's own user**. What pins that is structural
   (docker's `execConfig` has no `User` field to set); the real-image row
   `TestTheRootShedRunsNoAgentCodeOnANonRootImage` covers the shell-hook
-  channel behind it. The evidence, the four channels and the rejected design
-  are recorded in [docs/HISTORY.md](./docs/HISTORY.md). The k8s backend needs
+  channel behind it. The evidence, the four channels (over the premise they
+  all sit on) and the rejected design are recorded in
+  [docs/HISTORY.md](./docs/HISTORY.md). The k8s backend needs
   nothing: its temporary is created by the sandbox user, so the same
   credential that made it removes it. The docker **bulk** write is knowingly
   left out — its parents are made inside the container as the sandbox user, so
