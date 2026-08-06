@@ -113,6 +113,7 @@ executor:
   leaseTTL: ""       # EXECUTOR_LEASE_TTL, e.g. "15m"; empty uses the binary default
   pollInterval: ""   # EXECUTOR_POLL_INTERVAL, e.g. "500ms"; empty uses the binary default
   reapInterval: ""   # EXECUTOR_REAP_INTERVAL, e.g. "60s"; empty uses the binary default (1m)
+  checkpointMaxBytes: ""   # EXECUTOR_CHECKPOINT_MAX_BYTES in bytes; empty uses the binary default (2 GiB)
   # -- Base image for the per-session sandbox pods the executor launches.
   sandboxImage: "debian:stable-slim"
   sandboxWorkdir: "/workspace"

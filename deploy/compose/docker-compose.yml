@@ -191,6 +191,7 @@ services:
       # database lifecycle says they may be destroyed (plan 24). Empty = the
       # binary's 1m default.
       EXECUTOR_REAP_INTERVAL: ${EXECUTOR_REAP_INTERVAL:-}
+      EXECUTOR_CHECKPOINT_MAX_BYTES: ${EXECUTOR_CHECKPOINT_MAX_BYTES:-}
       # Sandbox containment (#65). The executor applies its own defaults when
       # these are unset — 512 processes, 2 CPUs, and the NET_RAW/SETUID/SETGID
       # drops — so they are here to be *lowered* or turned off (0, or `none` for

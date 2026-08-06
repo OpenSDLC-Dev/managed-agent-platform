@@ -20,6 +20,9 @@
 //	                         deleted (tombstone-evidenced), archived, and
 //	                         terminated cloud sessions — self_hosted sandboxes
 //	                         belong to the BYOC worker and are never touched
+//	EXECUTOR_CHECKPOINT_MAX_BYTES   workspace-checkpoint size budget in bytes
+//	                         (default 2147483648, 2 GiB); over budget the TTL
+//	                         tier reaps without a checkpoint
 //	CONTROLPLANE_URL         where a session's egress gate fetches its config;
 //	                         set with EXECUTOR_GATE_IMAGE to opt into the gate.
 //	                         Unset: no gate runs; a gate-wanting session (limited
@@ -85,6 +88,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -181,6 +185,13 @@ func run(ctx context.Context) error {
 			}
 			*dst = d
 		}
+	}
+	if v := os.Getenv("EXECUTOR_CHECKPOINT_MAX_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return errors.New("EXECUTOR_CHECKPOINT_MAX_BYTES must be a positive byte count")
+		}
+		cfg.CheckpointMaxBytes = n
 	}
 
 	// The pool opens before the sandbox backend because the backend takes a

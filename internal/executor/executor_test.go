@@ -54,10 +54,21 @@ type fakeSandbox struct {
 	// execTruncated marks that listing as overflowing the exec output cap.
 	execStdout    string
 	execTruncated bool
+	// cmds records every Exec command in order; execHook, when set and
+	// answering non-nil, overrides one command's result (the restore tests
+	// fault the in-sandbox extraction).
+	cmds     []string
+	execHook func(sandbox.ExecRequest) *sandbox.ExecResult
 }
 
 func (f *fakeSandbox) ID() string { return "fake" }
 func (f *fakeSandbox) Exec(_ context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	f.cmds = append(f.cmds, req.Command)
+	if f.execHook != nil {
+		if res := f.execHook(req); res != nil {
+			return *res, nil
+		}
+	}
 	// The harvest's listing: synthesize the NUL-separated relative paths from
 	// the in-memory tree (or a forged/truncated listing when a test sets one).
 	if req.Command == harvestListScript {
@@ -181,11 +192,19 @@ type fakeProvider struct {
 	owned       []domain.ID
 	reaped      []domain.ID
 	reapFailFor domain.ID
+	// exports feeds Export: root path → tar bytes (checkpoint tests); calls
+	// records provision/reap ordering for the restore-replaces-first rule.
+	exports   map[string][]byte
+	exportErr error
+	calls     []string
 }
 
 func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sandbox, error) {
 	p.provisions++
 	p.lastSpec = spec
+	p.mu.Lock()
+	p.calls = append(p.calls, "provision")
+	p.mu.Unlock()
 	if p.entered != nil {
 		select {
 		case p.entered <- struct{}{}:
@@ -214,11 +233,32 @@ func (p *fakeProvider) Owned(context.Context) ([]domain.ID, error) {
 func (p *fakeProvider) Reap(_ context.Context, sid domain.ID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.calls = append(p.calls, "reap")
 	if sid == p.reapFailFor && sid != "" {
 		return errors.New("daemon unreachable")
 	}
 	p.reaped = append(p.reaped, sid)
 	return nil
+}
+
+// Export answers with the canned per-root tars in exports (keyed by root
+// path), sandbox.ErrFileNotExist for a root without one — the normal shape
+// for a session that never used a root — and ErrNotFound when the provider
+// holds nothing for the session.
+func (p *fakeProvider) Export(_ context.Context, sid domain.ID, root string) (io.ReadCloser, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.exportErr != nil {
+		return nil, p.exportErr
+	}
+	if !slices.Contains(p.owned, sid) {
+		return nil, sandbox.ErrNotFound
+	}
+	data, ok := p.exports[root]
+	if !ok {
+		return nil, sandbox.ErrFileNotExist
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 // reapedSnapshot reads the reap record under the mutex — Run's reaper

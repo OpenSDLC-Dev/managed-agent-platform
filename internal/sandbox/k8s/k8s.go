@@ -384,6 +384,42 @@ func (p *Provider) Reap(ctx context.Context, sessionID domain.ID) error {
 	return errs
 }
 
+// Export streams one root out of the session's pod as a tar via an in-pod
+// `tar -cf - -C <parent> <base>` exec — members under one top-level directory
+// named after the root's base name, matching the Docker archive endpoint's
+// shape so the checkpoint engine reads one contract. The pod is selected by
+// label, never by derived name, and must be running: a K8s exec has no
+// stopped-container path, so an unexecable pod surfaces its error and the
+// caller degrades to reap-without-checkpoint (plan 24 D8). tar is the image
+// contract's one guaranteed archiver.
+func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string) (io.ReadCloser, error) {
+	pods, err := p.client.cs.CoreV1().Pods(p.client.namespace).List(ctx,
+		metav1.ListOptions{LabelSelector: sessionLabel + "=" + string(sessionID)})
+	if err != nil {
+		return nil, fmt.Errorf("k8s: list session %s pods: %w", sessionID, err)
+	}
+	if len(pods.Items) == 0 {
+		return nil, sandbox.ErrNotFound
+	}
+	name := pods.Items[0].Name
+	if _, code, err := p.client.execOutput(ctx, name, containerName, []string{"test", "-e", root}); err != nil {
+		return nil, fmt.Errorf("k8s: probe %s in pod %s: %w", root, name, err)
+	} else if code != 0 {
+		return nil, sandbox.ErrFileNotExist
+	}
+	clean := gopath.Clean(root)
+	pr, pw := io.Pipe()
+	go func() {
+		res, err := p.client.exec(ctx, name, containerName,
+			[]string{"tar", "-cf", "-", "-C", gopath.Dir(clean), gopath.Base(clean)}, nil, pw, io.Discard)
+		if err == nil && res.code != 0 {
+			err = fmt.Errorf("k8s: tar exited %d exporting %s from pod %s", res.code, root, name)
+		}
+		pw.CloseWithError(err)
+	}()
+	return pr, nil
+}
+
 // deleteAndWaitGone removes a pod (UID-guarded, no grace) and waits for the
 // name to free up, so the caller can immediately recreate it — a pod delete is
 // asynchronous and a too-early create answers 409.
