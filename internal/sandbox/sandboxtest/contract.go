@@ -1653,8 +1653,8 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 	}
 }
 
-// catInSandbox reads a small file through Exec and trims it. The hardening rows
-// use it for the kernel's own cgroup reports, which is what a tool would see.
+// containsID reports whether the Owned listing carries the session — the reap
+// rows assert membership only, since the endpoint is shared with parallel tests.
 func containsID(ids []domain.ID, want domain.ID) bool {
 	for _, id := range ids {
 		if id == want {
@@ -1664,6 +1664,8 @@ func containsID(ids []domain.ID, want domain.ID) bool {
 	return false
 }
 
+// catInSandbox reads a small file through Exec and trims it. The hardening rows
+// use it for the kernel's own cgroup reports, which is what a tool would see.
 func catInSandbox(t *testing.T, sb sandbox.Sandbox, path string) string {
 	t.Helper()
 	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "cat " + path})
