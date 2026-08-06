@@ -15,6 +15,24 @@ copy of an entry here.
 
 ### Added
 
+- **Plan 25 drafted — verification hardening: checkers proven by what they
+  refuse, verdicts that travel with their evidence**
+  ([docs/plan/25_verification-hardening.md](./docs/plan/25_verification-hardening.md)).
+  Out of a comparative study of Anthropic's `how-we-claude-code` workshop sample
+  (a "verifiable component architecture": runtime observation at the surface,
+  mandatory adversarial fixtures, a PASS/FAIL/BLOCKED/SKIP verdict taxonomy)
+  against this repo's regime. Most workshop ideas are already here in stronger
+  form; five gaps survived the adversarial comparison, and the plan closes them
+  in five independent slices: known-bad subjects the contract suite and eval
+  graders must be seen to refuse; a `BLOCKED(environment)` marker on
+  environment-provisioning failures (labeled, still red); a structured per-rung
+  JSON verdict from the verifier plus red-run evidence required by default for
+  the diff's own new guards; failure artifacts that carry their own rerun
+  command; and an acceptance harness that dumps its buffered wire transcript on
+  failure. Equally deliberate is what it refuses to build: no self-declared
+  introspection contract, no implementer/certifier unification, no
+  BLOCKED-as-skip, no replay video, no registry over `go test`.
+
 - **The idle-TTL tier: an idle session's sandbox is checkpointed and reaped,
   and the next message gets it back** (plan 24 slice 5 — the final slice; #64,
   closing the workspace-continuity half of #28). The reaper gains its fourth
