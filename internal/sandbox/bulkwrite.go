@@ -272,6 +272,15 @@ const bulkLeftMarker = "map-bulk-left "
 //
 // It is a distinct line rather than a prefix of bulkLeftMarker so neither can be
 // read as the other: `map-bulk-left ` ends in a space and this does not.
+//
+// It is printed with a newline **in front of it**, and that is load-bearing
+// rather than cosmetic. The stream arrives as frames concatenated with no
+// separator, so an image whose output does not end in a newline would otherwise
+// absorb this line into its own last partial one — measured: the marker stops
+// being a line, the image's forged copy becomes the last valid one, and the
+// framing hands the attacker exactly what it was written to take away. Leading
+// with the newline terminates whatever came before, so this always lands as a
+// line of its own however the image left the stream.
 const bulkLeftBeginMarker = "map-bulk-left-begin"
 
 // bulkLeftNoListMarker is the shed saying it had no list to walk, because the
@@ -318,7 +327,7 @@ const bulkLeftNoListMarker = "map-bulk-left-nolist"
 // the manifest and directory list themselves.
 const bulkLeftShell = `
 __map_bulk_left() {
-  printf '` + bulkLeftBeginMarker + `\n'
+  printf '\n` + bulkLeftBeginMarker + `\n'
   [ "${#__tmps[@]}" -eq 0 ] && printf '` + bulkLeftNoListMarker + `\n'
   __i=0
   while [ "$__i" -lt "${#__tmps[@]}" ]; do
@@ -395,13 +404,18 @@ func (b *BulkWrite) LostItsList(stdout string) bool {
 	return false
 }
 
-// Delivered names every file this batch puts in the sandbox — each member's
-// temporary and the two bookkeeping files — the platform's own list, held here
-// all along and answering the manifest the sandbox can delete.
+// Delivered names every member's temporary — the platform's own list, held here
+// all along, and the answer to a manifest the sandbox deleted.
+//
+// The two bookkeeping files are deliberately NOT in it. A pass that lost its
+// list still removes them itself, and still looks at them afterwards, so it
+// speaks accurately about those two whatever became of the manifest: LeftBehind's
+// own answer is the one to trust there. Putting them in this list instead would
+// empty them on a branch that had *just removed them*, recreating as zero-byte
+// files exactly what the shed had taken away — the harm the naming exists to
+// avoid, reintroduced by the fallback meant to protect it.
 func (b *BulkWrite) Delivered() []string {
-	all := make([]string, 0, len(b.tmps)+2)
-	all = append(all, b.tmps...)
-	return append(all, b.Manifest, b.DirList)
+	return append([]string(nil), b.tmps...)
 }
 
 // EmptyArchive streams a tar carrying a zero-byte entry for each of paths — the

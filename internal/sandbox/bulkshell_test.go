@@ -388,6 +388,66 @@ func TestBulkShedsNameWhatTheyCouldNotRemove(t *testing.T) {
 	}
 }
 
+// The shed opens its report with a newline in FRONT of the marker, because the
+// stream it shares with the image is frames concatenated with no separator: an
+// image that leaves its last line unterminated would otherwise absorb the
+// opening line and leave its own forged copy as the last valid one. Asserted on
+// the shell's own bytes, since this is the shell's half of the guard.
+func TestBulkShedsOpenTheirReportOnALineOfTheirOwn(t *testing.T) {
+	for _, tc := range []struct{ name, shell, fn string }{
+		{"discard", sandbox.BulkDiscardShell, "__map_bulk_discard"},
+		{"rename", sandbox.BulkRenameShell, "__map_bulk_rename"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
+			_, stdout, _ := bulkShellOut(t, tc.shell, tc.fn, manifest, dirList)
+			if !strings.HasPrefix(stdout, "\nmap-bulk-left-begin\n") {
+				t.Errorf("stdout = %q, want the opening marker preceded by a newline so an "+
+					"unterminated image line cannot absorb it", stdout)
+			}
+		})
+	}
+}
+
+// A temporary the sandbox swapped for a symlink is not one of ours to hand the
+// daemon, and `-f` alone would not say so — it stats through the link, so a link
+// to any regular file answers yes. `! -h` is what makes the walk mean what its
+// comment says.
+func TestBulkShedsDoNotNameASymlinkedTemporary(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the write bit, so the member cannot survive its own rm")
+	}
+	dir := t.TempDir()
+	manifest, dirList := stageBatch(t, dir, map[string]string{"a.txt": "AAA"}, nil)
+	// Replace the staged temporary with a link to a file elsewhere, then make
+	// the directory unwritable so the shed's `rm` cannot take it either way.
+	tmp := dir + "/" + sandbox.TempPrefix + "batch-0"
+	target := t.TempDir() + "/elsewhere.txt"
+	if err := os.WriteFile(target, []byte("not the batch's"), 0o644); err != nil {
+		t.Fatalf("stage the link's target: %v", err)
+	}
+	if err := os.Remove(tmp); err != nil {
+		t.Fatalf("remove the staged temporary: %v", err)
+	}
+	if err := os.Symlink(target, tmp); err != nil {
+		t.Skipf("symlinks unavailable on this host: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("make the members' directory unwritable: %v", err)
+	}
+
+	_, stdout, _ := bulkShellOut(t, sandbox.BulkDiscardShell, "__map_bulk_discard", manifest, dirList)
+	if strings.Contains(stdout, "map-bulk-left 0") {
+		t.Errorf("stdout = %q, want the symlinked member unnamed: `-f` alone stats through "+
+			"the link, and what the delivery landed was a regular file", stdout)
+	}
+	if _, err := os.Lstat(tmp); err != nil {
+		t.Errorf("the link was disturbed: %v, want the shed to have left the sandbox's own object alone", err)
+	}
+}
+
 // A manifest that is not there leaves the shed with nothing to walk — and the
 // sandbox can arrange exactly that, the manifest being a file in its own workdir
 // delivered one round trip before the exec that reads it. Saying "nothing is

@@ -347,6 +347,43 @@ func TestBulkWriteLeftBehindRefusesWhatTheImagePrinted(t *testing.T) {
 	}
 }
 
+// The stream arrives as frames concatenated with no separator, so an image whose
+// output does not end in a newline would absorb the shed's opening line into its
+// own last partial one — measured on a real daemon. The marker would stop being
+// a line, the image's forged copy would become the last valid one, and the
+// framing would hand an attacker exactly what it exists to take away. The shed
+// prints a newline in front of its marker for that reason, and this row is the
+// regression guard: the shell's output is prefixed the way the shell prefixes it.
+func TestBulkWriteLeftBehindSurvivesAnUnterminatedImageLine(t *testing.T) {
+	b, err := sandbox.NewBulkWrite("/workspace", []sandbox.FileWrite{
+		{Path: "/etc/first", Data: []byte("1")},
+		{Path: "/etc/second", Data: []byte("2")},
+	})
+	if err != nil {
+		t.Fatalf("NewBulkWrite: %v", err)
+	}
+
+	// An image that forges a whole report and leaves its prompt unterminated,
+	// then the shed's own answer as the shell writes it — leading newline first.
+	forged := "map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left-nolist\n$ "
+	shed := "\nmap-bulk-left-begin\nmap-bulk-left 1\n"
+
+	got := b.LeftBehind(forged + shed)
+	if len(got) != 1 {
+		t.Fatalf("LeftBehind = %v, want only the member the shed itself named", got)
+	}
+	if b.LostItsList(forged + shed) {
+		t.Error("LostItsList = true, want the image's forged nolist to have been framed out")
+	}
+	// Without the leading newline the forgery wins, which is what the guard is
+	// for: this is the measured failure, asserted so removing the newline from
+	// the shell brings the row down with it.
+	if got := b.LeftBehind(forged + strings.TrimPrefix(shed, "\n")); len(got) == 1 {
+		t.Errorf("LeftBehind = %v; an unterminated image line no longer absorbs the "+
+			"opening marker, so this row is testing nothing", got)
+	}
+}
+
 // The emptying archive puts the names back without the payloads: one zero-byte
 // entry per path, relative like every other entry this file builds, so the one
 // extraction at `/` covers a whole batch's residue.

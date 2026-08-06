@@ -1315,10 +1315,16 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 	// and leave the pass with nothing to walk — removing nothing, naming nothing,
 	// and stranding every root-owned member exactly as before #316. What makes
 	// the answer safe *here* is that this branch is downstream of a members
-	// delivery the daemon accepted: they are all landed, none was removed, so
-	// emptying the platform's own list recreates nothing.
+	// delivery the daemon accepted: every member is landed and none was removed,
+	// a pass with no list having had nothing to remove them by.
+	//
+	// Only the members come from that list. The pass removes the two bookkeeping
+	// files itself and looks at them afterwards whatever became of the manifest,
+	// so its own report is what answers for those two — emptying them from the
+	// platform's list would recreate, as zero-byte files, what this very branch
+	// had just deleted.
 	if b.LostItsList(res.Stdout) {
-		c.reclaimBulkPaths(ctx, b, b.Delivered())
+		c.reclaimBulkPaths(ctx, b, append(b.Delivered(), b.LeftBehind(res.Stdout)...))
 	} else {
 		c.reclaimBulk(ctx, b, res.Stdout)
 	}

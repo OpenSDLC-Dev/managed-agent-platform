@@ -1487,7 +1487,7 @@ func TestABulkFaultReclaimsItsMembersThroughTheDaemon(t *testing.T) {
 			if kinds[execID()] == "rename" {
 				// Every member's move was refused, and every `rm` after it: the
 				// whole payload is still there and the script says so.
-				w.Write(frame(streamStdout, "map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n"))
+				w.Write(frame(streamStdout, "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n"))
 				w.Write(frame(streamStderr, "mv: cannot move: Permission denied\nmap-bulk-fail 0\n"))
 			}
 		case strings.HasSuffix(r.URL.Path, "/json"):
@@ -1560,10 +1560,10 @@ func TestABulkShedsBothWaysBeforeTheRenameCanRun(t *testing.T) {
 	}{
 		// The discard's `rm` was refused, so the daemon is asked to empty the
 		// two members it named. Deliveries: bookkeeping, members, emptying.
-		{"sheds what the rm could not take", "map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n", 3},
+		{"sheds what the rm could not take", "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n", 3},
 		// The discard's `rm` worked, so there is nothing to empty and no
 		// archive may be sent.
-		{"sends nothing when the rm worked", "map-bulk-left-begin\n", 2},
+		{"sends nothing when the rm worked", "\nmap-bulk-left-begin\n", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var commands []string
@@ -1673,7 +1673,7 @@ func TestASuccessfulBulkStillEmptiesBookkeepingItCouldNotRemove(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			if kinds[execID()] == "rename" {
 				// Every member landed; only the bookkeeping would not go.
-				w.Write(frame(streamStdout, "map-bulk-left-begin\nmap-bulk-left m\nmap-bulk-left d\n"))
+				w.Write(frame(streamStdout, "\nmap-bulk-left-begin\nmap-bulk-left m\nmap-bulk-left d\n"))
 			}
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			io.WriteString(w, `{"Running":false,"ExitCode":0}`)
@@ -1737,7 +1737,7 @@ func TestABulkThatLostItsManifestEmptiesThePlatformsOwnList(t *testing.T) {
 			if kinds[execID()] == "rename" {
 				// The manifest was deleted under it, so the pass walked
 				// nothing, removed nothing, and says exactly that.
-				w.Write(frame(streamStdout, "map-bulk-left-begin\nmap-bulk-left-nolist\n"))
+				w.Write(frame(streamStdout, "\nmap-bulk-left-begin\nmap-bulk-left-nolist\n"))
 				w.Write(frame(streamStderr, "map-bulk-fail 0\n"))
 			}
 		case strings.HasSuffix(r.URL.Path, "/json"):
@@ -1761,22 +1761,87 @@ func TestABulkThatLostItsManifestEmptiesThePlatformsOwnList(t *testing.T) {
 	if len(puts) != 3 {
 		t.Fatalf("%d archives delivered, want 3 — the emptying must not be skipped for want of a report", len(puts))
 	}
-	// Every member, plus the two bookkeeping files: the platform's whole list,
-	// because a pass that walked nothing removed nothing either.
+	// Every member, and ONLY the members. The pass removed the two bookkeeping
+	// files itself on this very branch and looked at them afterwards, so its own
+	// report answers for those — emptying them from the platform's list would
+	// recreate as zero-byte files exactly what the shed had just deleted.
 	emptying := tarEntries(t, puts[2])
-	if len(emptying) != 4 {
-		t.Fatalf("the emptying archive carries %d entries, want 4 (2 members + manifest + directory list)", len(emptying))
-	}
 	members := tarEntries(t, puts[1])
-	for i, e := range emptying[:len(members)] {
+	if len(emptying) != len(members) {
+		t.Fatalf("the emptying archive carries %d entries, want the %d members and nothing else",
+			len(emptying), len(members))
+	}
+	for i, e := range emptying {
 		if e.name != members[i].name {
 			t.Errorf("emptying entry %d is %q, want the member's own temporary %q", i, e.name, members[i].name)
 		}
-	}
-	for _, e := range emptying {
 		if e.size != 0 {
 			t.Errorf("emptying entry %s is %d bytes, want 0", e.name, e.size)
 		}
+	}
+}
+
+// The other half of the same branch: bookkeeping the shed *did* say it could not
+// remove is emptied, because there the report is speaking accurately about files
+// it looked at. A pass with no list still looks at those two.
+func TestABulkThatLostItsManifestStillEmptiesBookkeepingItNamed(t *testing.T) {
+	var puts [][]byte
+	kinds := map[string]string{}
+	var execN int
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		execID := func() string {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/exec/"), "/start"), "/json")
+		}
+		switch {
+		case r.URL.Path == "/containers/abc/archive" && r.Method == http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			puts = append(puts, body)
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			var body execConfig
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode exec create: %v", err)
+			}
+			execN++
+			id := fmt.Sprintf("e%d", execN)
+			if strings.Contains(body.Cmd[len(body.Cmd)-2], "__map_bulk_rename") {
+				kinds[id] = "rename"
+			}
+			fmt.Fprintf(w, `{"Id":%q}`, id)
+		case strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+			if kinds[execID()] == "rename" {
+				// No list to walk, and the directory list survived its own rm.
+				w.Write(frame(streamStdout, "\nmap-bulk-left-begin\nmap-bulk-left-nolist\nmap-bulk-left d\n"))
+				w.Write(frame(streamStderr, "map-bulk-fail 0\n"))
+			}
+		case strings.HasSuffix(r.URL.Path, "/json"):
+			if kinds[execID()] == "rename" {
+				fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, sandbox.ExitBulkIncomplete)
+			} else {
+				io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	c := p.attach("abc", "/workspace", "")
+	if err := c.WriteFiles(context.Background(), []sandbox.FileWrite{
+		{Path: "/etc/a.txt", Data: []byte("AAAA")},
+	}); err == nil {
+		t.Fatal("the batch reported success where its manifest had been deleted")
+	}
+	if len(puts) != 3 {
+		t.Fatalf("%d archives delivered, want 3", len(puts))
+	}
+	// The one member from the platform's list, plus the one bookkeeping file the
+	// shed named — never the manifest, which it removed and did not name.
+	emptying := tarEntries(t, puts[2])
+	if len(emptying) != 2 {
+		t.Fatalf("the emptying archive carries %d entries, want the member and the named directory list", len(emptying))
+	}
+	if !strings.HasSuffix(emptying[1].name, ".dirs") {
+		t.Errorf("second emptying entry is %q, want the directory list the shed named", emptying[1].name)
 	}
 }
 
@@ -1824,7 +1889,7 @@ func TestABulkRenameExecFailureShedsOnlyWithTheSandboxUsersRm(t *testing.T) {
 			if kinds[execID()] == "discard" {
 				// The temptation: the shed says the whole payload is still
 				// there, and the daemon could take it back.
-				w.Write(frame(streamStdout, "map-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n"))
+				w.Write(frame(streamStdout, "\nmap-bulk-left-begin\nmap-bulk-left 0\nmap-bulk-left 1\n"))
 			}
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			io.WriteString(w, `{"Running":false,"ExitCode":0}`)

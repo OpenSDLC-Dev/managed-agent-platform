@@ -354,6 +354,18 @@ copy of an entry here.
   knows the members were delivered answers by emptying the platform's own list
   instead.
 
+  Both of those answers were themselves wrong on the first attempt, and the
+  verifier measured both against a real daemon before merge. The opening marker
+  is printed with a newline **in front of it**, because the stream arrives as
+  frames concatenated with no separator: an image whose output does not end in
+  a newline absorbed the marker into its own last partial line and left its
+  forged copy as the last valid one — the framing handing an attacker exactly
+  what it was written to take away. And the list that answers a deleted
+  manifest carries the members only: it had carried the two bookkeeping files
+  too, which that same branch removes *itself* before reporting, so the
+  fallback recreated as zero-byte files precisely what the shed had just
+  deleted. Both are pinned by rows that go red without the fix.
+
   The branch that must *not* empty is the same one as in #310: a rename whose
   **exec** failed may have left a `mv` in flight, so it keeps `rm` and stops
   there, and a fake-daemon row asserts no emptying archive is sent even when
