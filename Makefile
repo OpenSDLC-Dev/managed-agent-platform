@@ -18,7 +18,7 @@ SHELL := /usr/bin/env bash
 .NOTPARALLEL:
 
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
-	changelog changelog-notes \
+	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild
 
@@ -119,6 +119,9 @@ changelog:
 
 changelog-notes:
 	@go run ./tools/changelog notes -version "$(VERSION)" -out "$(or $(OUT),-)" -cap "$(or $(CAP),0)"
+
+changelog-archive:
+	@go run ./tools/changelog archive -version "$(VERSION)"
 
 # ---------------------------------------------------------------------------
 # Release publishing (docs/RELEASING.md; plan 27). Like the gcp-* group,

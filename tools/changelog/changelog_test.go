@@ -814,3 +814,154 @@ func TestNotes(t *testing.T) {
 		t.Error("want error for non-numeric version")
 	}
 }
+
+// --- archive: the CHANGELOG slimming subcommand (plan 28) ---
+
+// slimmed is steadyChangelog after archiving 0.2.0 — the golden document
+// TestArchiveMovesSectionVerbatim asserts and later tests reuse.
+var slimmed = `# Changelog
+
+Preamble line.
+
+## [Unreleased]
+
+` + unreleasedPointer + `
+
+## [0.2.0] - 2026-08-07
+
+Added — the full section lives in [docs/changelog/0.2.0.md](./docs/changelog/0.2.0.md).
+
+## [0.1.0] - 2026-07-17
+
+Release summary.
+
+[Unreleased]: https://github.com/OpenSDLC-Dev/managed-agent-platform/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/OpenSDLC-Dev/managed-agent-platform/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/OpenSDLC-Dev/managed-agent-platform/releases/tag/v0.1.0
+`
+
+func TestArchiveMovesSectionVerbatim(t *testing.T) {
+	newContent, archived, err := archiveSection(steadyChangelog, "0.2.0", "docs/changelog/0.2.0.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArchive := "## [0.2.0] - 2026-08-07\n\n### Added\n\n- A added.\n"
+	if archived != wantArchive {
+		t.Errorf("archive content:\n%q\nwant:\n%q", archived, wantArchive)
+	}
+	if newContent != slimmed {
+		t.Errorf("slimmed changelog:\n%q\nwant:\n%q", newContent, slimmed)
+	}
+	// The move is lossless: swapping the stub block back for the archived
+	// section reproduces the original document byte-for-byte.
+	stub := "## [0.2.0] - 2026-08-07\n\nAdded — the full section lives in [docs/changelog/0.2.0.md](./docs/changelog/0.2.0.md).\n"
+	if got := strings.Replace(newContent, stub, archived, 1); got != steadyChangelog {
+		t.Errorf("re-composition is not byte-identical:\n%q", got)
+	}
+}
+
+// A section bounded by the trailing link-reference block (the oldest release)
+// archives cleanly, and a groupless body gets a plain pointer line.
+func TestArchiveOldestSection(t *testing.T) {
+	newContent, archived, err := archiveSection(slimmed, "0.1.0", "docs/changelog/0.1.0.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArchive := "## [0.1.0] - 2026-07-17\n\nRelease summary.\n"
+	if archived != wantArchive {
+		t.Errorf("archive content:\n%q\nwant:\n%q", archived, wantArchive)
+	}
+	wantStub := "## [0.1.0] - 2026-07-17\n\nThe full section lives in [docs/changelog/0.1.0.md](./docs/changelog/0.1.0.md).\n"
+	if !strings.Contains(newContent, wantStub) {
+		t.Errorf("stub missing:\n%q", newContent)
+	}
+	if !strings.Contains(newContent, "\n[Unreleased]: https://") {
+		t.Error("trailing link references were disturbed")
+	}
+	if got := strings.Replace(newContent, wantStub, archived, 1); got != slimmed {
+		t.Errorf("re-composition is not byte-identical:\n%q", got)
+	}
+}
+
+func TestArchiveRefusals(t *testing.T) {
+	if _, _, err := archiveSection(steadyChangelog, "9.9.9", "x.md"); err == nil {
+		t.Error("want error for a version with no section")
+	}
+	if _, _, err := archiveSection(steadyChangelog, "Unreleased", "x.md"); err == nil {
+		t.Error("want error for a non-numeric version")
+	}
+	if _, _, err := archiveSection(slimmed, "0.2.0", "x.md"); err == nil {
+		t.Error("want error re-archiving an already-archived section")
+	}
+}
+
+// Repeated groups — the shape the legacy-backlog absorption left in
+// § [0.2.0] — summarize deduplicated, in Keep-a-Changelog order.
+func TestArchiveStubDedupesGroups(t *testing.T) {
+	cl := "# C\n\n## [0.3.0] - 2026-08-08\n\n### Fixed\n\n- F1.\n\n### Added\n\n- A1.\n\n### Fixed\n\n- F2.\n\n[0.3.0]: https://e/compare/v0.2.0...v0.3.0\n"
+	newContent, _, err := archiveSection(cl, "0.3.0", "docs/changelog/0.3.0.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(newContent, "\nAdded · Fixed — the full section lives in [") {
+		t.Errorf("stub summary not deduplicated/ordered:\n%q", newContent)
+	}
+}
+
+// notes must refuse a stub instead of shipping a pointer line as the release
+// body; the error names the archive file.
+func TestNotesRefusesArchivedSection(t *testing.T) {
+	if _, err := notes(slimmed, "0.2.0"); err == nil || !strings.Contains(err.Error(), "docs/changelog/0.2.0.md") {
+		t.Errorf("want an error naming the archive file, got %v", err)
+	}
+}
+
+// latest keeps answering from the slimmed document — the stubs retain the
+// exact dated-heading grammar.
+func TestLatestOnSlimmedChangelog(t *testing.T) {
+	got, err := latest(slimmed)
+	if err != nil || got != "0.2.0" {
+		t.Errorf("latest = %q, %v; want 0.2.0", got, err)
+	}
+}
+
+// runArchive writes both files, refuses to clobber an existing archive file,
+// and a second run refuses the now-stubbed section.
+func TestRunArchive(t *testing.T) {
+	root := t.TempDir()
+	clPath := filepath.Join(root, "CHANGELOG.md")
+	if err := os.WriteFile(clPath, []byte(steadyChangelog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "docs", "changelog")
+	if err := runArchive(clPath, dir, "0.2.0"); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := os.ReadFile(filepath.Join(dir, "0.2.0.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(archived) != "## [0.2.0] - 2026-08-07\n\n### Added\n\n- A added.\n" {
+		t.Errorf("archive file:\n%q", archived)
+	}
+	got, err := os.ReadFile(clPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != slimmed {
+		t.Errorf("changelog on disk:\n%q", got)
+	}
+	if err := runArchive(clPath, dir, "0.2.0"); err == nil {
+		t.Error("want error re-archiving a stub")
+	}
+	// A pre-existing archive file is never clobbered.
+	if err := os.WriteFile(filepath.Join(dir, "0.1.0.md"), []byte("occupied"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runArchive(clPath, dir, "0.1.0"); err == nil {
+		t.Error("want error when the archive file already exists")
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "0.1.0.md")); string(b) != "occupied" {
+		t.Error("existing archive file was clobbered")
+	}
+}

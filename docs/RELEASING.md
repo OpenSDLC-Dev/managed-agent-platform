@@ -50,6 +50,14 @@ mid-slice in something the release would half-ship.
    LIGHT-tier docs), CI green, threads settled, squash merge.
 8. Tag the squash-merge commit and push the tag:
    `git tag -a vX.Y.Z -m "vX.Y.Z" <merge-sha> && git push origin vX.Y.Z`.
+9. After the release run is green: `make changelog-archive VERSION=X.Y.Z` in
+   the next docs PR (normally the one archiving the plan that drove the
+   release) — the section moves verbatim to `docs/changelog/X.Y.Z.md` behind
+   an index stub. The section must still be inline at tag time (step 2 of
+   the trigger list renders the notes from it), and the stub keeps the dated
+   heading, so
+   existing `CHANGELOG.md § [X.Y.Z]` citations resolve through it — no
+   citation sweep.
 
 ## What the tag triggers
 

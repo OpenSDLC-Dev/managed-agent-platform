@@ -1,9 +1,11 @@
-// Package main implements the release-time changelog tool (plan 27):
+// Package main implements the release-time changelog tool (plans 27 and 28):
 // `assemble` folds the changelog.d/ fragments — plus any legacy [Unreleased]
-// body — into a new dated section of CHANGELOG.md, and `notes` extracts a
-// released section's body for GitHub Release notes. The ritual that runs it
-// is docs/RELEASING.md; the Make entry points are `changelog` and
-// `changelog-notes`.
+// body — into a new dated section of CHANGELOG.md, `notes` extracts a
+// released section's body for GitHub Release notes, and `archive` moves a
+// released section verbatim to docs/changelog/<version>.md behind an index
+// stub, post-release. The ritual that runs them is docs/RELEASING.md; the
+// Make entry points are `changelog`, `changelog-notes` and
+// `changelog-archive`.
 package main
 
 import (
@@ -346,7 +348,14 @@ func notes(content, version string) (string, error) {
 			break
 		}
 	}
-	return joinTrimmed(doc[secIdx+1:end]) + "\n", nil
+	body := joinTrimmed(doc[secIdx+1:end]) + "\n"
+	// An archived section's stub must never ship as a release body; re-runs
+	// of a release workflow read the tag's checkout, where the section is
+	// still inline.
+	if strings.Contains(body, archiveMark) {
+		return "", fmt.Errorf("section [%s] is archived — %s", version, strings.TrimSpace(body))
+	}
+	return body, nil
 }
 
 // runAssemble is the `assemble` subcommand. Failure anywhere leaves the
@@ -503,4 +512,127 @@ func runNotes(changelogPath, version, out string, cap int) error {
 		return err
 	}
 	return os.WriteFile(out, []byte(body), 0o644)
+}
+
+// archiveMark is the text every archive stub carries. archiveSection writes
+// it; archiveSection and notes refuse a section that already carries it.
+const archiveMark = "full section lives in ["
+
+// archiveSection moves the dated section for version out of content (plan 28):
+// the returned changelog keeps the exact heading line — `latest` and the
+// tag-sanity check parse the file they always did — over a one-line pointer
+// stub, and the archive text is the heading plus the body, verbatim. Nothing
+// is returned unless swapping the stub back for the section reproduces
+// content byte-for-byte — a lossy split is an error, never output.
+func archiveSection(content, version, linkPath string) (string, string, error) {
+	if !versionRe.MatchString(version) {
+		return "", "", fmt.Errorf("version %q is not X.Y.Z", version)
+	}
+	lines := strings.Split(content, "\n")
+	_, doc := splitTrailingRefs(lines)
+	start := -1
+	for i, l := range doc {
+		if strings.HasPrefix(l, "## ["+version+"]") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return "", "", fmt.Errorf("no section [%s] in the changelog", version)
+	}
+	end := len(doc)
+	for i := start + 1; i < len(doc); i++ {
+		if strings.HasPrefix(doc[i], "## ") {
+			end = i
+			break
+		}
+	}
+	section := lines[start:end]
+	// The archive must be exactly one section: the exact dated heading, then
+	// a body with no further `## ` heading — a mis-slice that swallows a
+	// neighbor (or starts mid-section) is refused before anything is written.
+	// (The Replace round-trip below cannot catch slice-boundary errors: a
+	// verbatim slice put back verbatim always reproduces the document.)
+	if !regexp.MustCompile(`^## \[` + regexp.QuoteMeta(version) + `\] - \d{4}-\d{2}-\d{2}$`).MatchString(section[0]) {
+		return "", "", fmt.Errorf("section [%s] heading %q is not the exact dated grammar", version, section[0])
+	}
+	for _, l := range section[1:] {
+		if strings.HasPrefix(l, "## ") {
+			return "", "", fmt.Errorf("archiving [%s] would swallow a second section heading (%q) — refusing", version, l)
+		}
+	}
+	sectionBlock := strings.Join(section, "\n")
+	if strings.Contains(sectionBlock, archiveMark) {
+		return "", "", fmt.Errorf("section [%s] is already archived", version)
+	}
+	// Summarize the section's groups deduplicated in Keep-a-Changelog order —
+	// the absorbed legacy backlog repeats its group headings per PR era, and
+	// the stub names each group once.
+	seen := map[string]bool{}
+	for _, l := range section {
+		if strings.HasPrefix(l, "### ") {
+			seen[strings.TrimPrefix(l, "### ")] = true
+		}
+	}
+	groups := []string{}
+	for _, g := range kacOrder {
+		if seen[g] {
+			groups = append(groups, g)
+			delete(seen, g)
+		}
+	}
+	for _, l := range section {
+		if g := strings.TrimPrefix(l, "### "); g != l && seen[g] {
+			groups = append(groups, g)
+			delete(seen, g)
+		}
+	}
+	pointer := "The " + archiveMark + linkPath + "](./" + linkPath + ")."
+	if len(groups) > 0 {
+		pointer = strings.Join(groups, " · ") + " — the " + archiveMark + linkPath + "](./" + linkPath + ")."
+	}
+	stub := []string{section[0], "", pointer}
+	if end < len(doc) {
+		stub = append(stub, "")
+	}
+	newLines := append(append(append([]string{}, lines[:start]...), stub...), lines[end:]...)
+	newContent := strings.Join(newLines, "\n")
+	stubBlock := strings.Join(stub, "\n")
+	if strings.Replace(newContent, stubBlock, sectionBlock, 1) != content {
+		return "", "", fmt.Errorf("archiving [%s] would not round-trip byte-identically — refusing", version)
+	}
+	archive := sectionBlock
+	if !strings.HasSuffix(archive, "\n") {
+		archive += "\n"
+	}
+	return newContent, archive, nil
+}
+
+// runArchive is the `archive` subcommand: the archive file is written first
+// (a crash between the writes leaves the changelog intact and the copy
+// harmless), and an existing archive file is never clobbered.
+func runArchive(changelogPath, dir, version string) error {
+	content, err := os.ReadFile(changelogPath)
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(dir, version+".md")
+	linkPath, err := filepath.Rel(filepath.Dir(changelogPath), target)
+	if err != nil {
+		return err
+	}
+	newContent, archive, err := archiveSection(string(content), version, filepath.ToSlash(linkPath))
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(target); err == nil {
+		return fmt.Errorf("%s already exists — refusing to clobber it", target)
+	}
+	if err := os.WriteFile(target, []byte(archive), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(changelogPath, []byte(newContent), 0o644)
 }

@@ -11,7 +11,8 @@ import (
 const usage = `usage:
   changelog assemble -version X.Y.Z [-date YYYY-MM-DD] [-changelog CHANGELOG.md] [-dir changelog.d]
   changelog notes    -version X.Y.Z [-out FILE] [-cap BYTES] [-changelog CHANGELOG.md]
-  changelog latest   [-changelog CHANGELOG.md]`
+  changelog latest   [-changelog CHANGELOG.md]
+  changelog archive  -version X.Y.Z [-changelog CHANGELOG.md] [-dir docs/changelog]`
 
 func main() {
 	log.SetFlags(0)
@@ -52,6 +53,15 @@ func main() {
 			log.Fatal(err)
 		}
 		fmt.Println(v)
+	case "archive":
+		fs := flag.NewFlagSet("archive", flag.ExitOnError)
+		version := fs.String("version", "", "released version to archive (X.Y.Z, required)")
+		changelog := fs.String("changelog", "CHANGELOG.md", "path to the changelog")
+		dir := fs.String("dir", "docs/changelog", "archive directory")
+		_ = fs.Parse(os.Args[2:])
+		if err := runArchive(*changelog, *dir, *version); err != nil {
+			log.Fatal(err)
+		}
 	default:
 		log.Fatal(usage)
 	}
