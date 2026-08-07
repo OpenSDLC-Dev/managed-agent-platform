@@ -65,9 +65,11 @@ tar/gzip timestamp normalization is platform-conditional complexity for a
 guarantee nobody asked for — the shipped contract is "a re-run converges the
 release with equivalent, not byte-identical, artifacts", worded in release.yml
 and RELEASING.md. An editorial figure refresh inside the release PR's assembly
-(flagged P1 in review): reverted, so `§ [0.2.0]`'s 6,448 lines reproduce
-byte-for-byte from origin/main's fragments — fragment-verbatim is the
-precedent the first cut sets.
+(flagged P1 in review): reverted, so the assembled 6,448-line CHANGELOG.md
+reproduces byte-for-byte from the fragments as they stood on the release
+commit's parent (`4eb4245` — the release consumed them, so that parent is
+where an auditor finds the sources) — fragment-verbatim is the precedent the
+first cut sets.
 
 ---
 
@@ -81,7 +83,7 @@ multi-arch `release-images` (linux/amd64 + arm64), `release-chart` to OCI,
 
 - **GitHub Release** published, not draft: four worker tarballs
   (linux/darwin × amd64/arm64) plus sha256sums; notes body 85,528 characters —
-  the 446,323-byte un-clamped section clamped at a Keep-a-Changelog group
+  the 446,309-byte un-clamped notes body clamped at a Keep-a-Changelog group
   boundary under the 120,000 cap, ending with the tag-pinned CHANGELOG link.
 - **Worker binary leg:** the darwin/arm64 asset downloaded from the Release,
   `shasum -a 256 -c` OK, `./worker --version` → `0.2.0`.
