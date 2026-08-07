@@ -872,10 +872,12 @@ func TestCloneReasonBlamesOurselvesForCancellation(t *testing.T) {
 // EXECUTOR_REPO_CLONE_TIMEOUT bounds nothing but the fetch.
 //
 // The three re-checks that bound those phases are deliberately redundant — each
-// one downstream catches what the one before it would have — so removing any
-// single check leaves the outcome unchanged, and only their removal *as a bound*
-// is observable. That is what this row pins: with all three gone the clone below
-// runs to completion and hands back a tar.
+// one downstream catches what the one before it would have — so no single
+// check's removal changes the outcome, and what this row pins is the bound
+// rather than any one of them. Measured rather than assumed: the row goes red
+// with all three gone, and with the first and the last gone together; each one
+// alone is invisible. The middle check guards the commit checkout, an arm this
+// row does not take, so only the all-three run covers it.
 func TestRepoCloneStopsOnASpentBudgetAfterTheFetch(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	ctx := spentAfterFetch{Context: context.Background(), fetched: &fx.clones}
@@ -891,10 +893,13 @@ func TestRepoCloneStopsOnASpentBudgetAfterTheFetch(t *testing.T) {
 	}
 }
 
-// spentAfterFetch is live until the fixture has been asked for a pack and spent
-// from then on — the deadline that survives the fetch and expires in the phases
-// go-git leaves unbounded. Its Done channel never fires, so the transport itself
-// completes normally and nothing but an explicit ctx.Err() check can notice.
+// spentAfterFetch is live until the fixture is asked for a pack and spent from
+// then on — a budget that expires around the transport's end rather than strictly
+// after it, since the fixture counts the upload-pack POST when it arrives. Close
+// enough, and the mutation says why: with the re-checks gone the clone still
+// completes its transport and packs a tar, so nothing on this path consults
+// ctx.Err() by itself. The Done channel never fires, which is what keeps net/http
+// from aborting the request instead.
 type spentAfterFetch struct {
 	context.Context
 	fetched *atomic.Int64

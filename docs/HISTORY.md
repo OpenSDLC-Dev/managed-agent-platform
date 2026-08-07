@@ -3033,12 +3033,20 @@ gap nobody asserted was closed.
   never fires, so the transport completes normally and nothing but an explicit check can
   notice. Red under the mutation on `a clone whose budget expired after the fetch ran to
   completion, packing …/repo.tar (14848 bytes)`. The three checks are deliberately
-  redundant — each downstream one catches what the one before it would have — so a single
-  check's removal is genuinely unobservable, and that was measured rather than assumed:
-  with only the first neutralized the row stays green, because `packTree`'s per-entry check
-  catches the same expiry one step later. What the row pins is therefore the bound itself,
-  which is the property `EXECUTOR_REPO_CLONE_TIMEOUT` advertises; the CHANGELOG now says so
-  instead of claiming each check is separately pinned.
+  redundant — each downstream one catches what the one before it would have — so no single
+  check's removal is observable, and the verifier measured all three rather than accepting
+  the claim from the first: alone, each is invisible (`packTree`'s per-entry check catches
+  the expiry the first one would have); the first and the last removed *together* are
+  caught; and the middle one, which guards the commit checkout the row does not ask for, is
+  covered only by the all-three run. The first draft of this record said "only their
+  removal together is observable", which understated the pin in one direction and
+  overstated the middle check's share in the other. What the row pins is the bound itself,
+  the property `EXECUTOR_REPO_CLONE_TIMEOUT` advertises; the CHANGELOG says that rather
+  than claiming each check is separately pinned. One nuance is in the fixture, not the
+  guard: the context flips when the upload-pack POST *arrives* rather than after the pack
+  is written, so the budget expires around the transport's end and not strictly after it.
+  Immaterial, and the mutation is the proof — the mutant still completes its transport and
+  packs a tar, so nothing on that path consults `ctx.Err()` by itself.
 - **The brain's latest-reason ordering.** `seq DESC` → `ASC` in `cloneFailures` left all
   four `TestReposBlock*` rows green. The executor's dedupe is per (resource, reason) and
   deliberately re-emits when the reason changes, so a repository that first failed `auth`
