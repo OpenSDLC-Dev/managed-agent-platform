@@ -3,14 +3,20 @@ package executor
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/go-git/go-billy/v5"
+	"github.com/go-git/go-billy/v5/osfs"
 )
 
 // Unit M of plan 25 (docs/plan/25_git-repo-mounting.md, "Verification"): the
@@ -539,6 +545,75 @@ func TestRepoExtractFailureIsTolerated(t *testing.T) {
 	if got := readSandboxFile(t, sb, blocked+"/repo/README.md"); got != "x\n" {
 		t.Errorf("README.md = %q, want the retry to have materialized", got)
 	}
+}
+
+// TestMeteredFSChrootSharesTheBudget 🔍 covers the one property of the byte
+// budget that the integration row above cannot see.
+//
+// TestRepoOversizeAbortsMidClone proves a repository past the budget is refused
+// with `too_large` and ships no tar — but it would prove that just as well if
+// the meter were bolted on after the clone, and just as well if Chroot handed
+// back an unmetered filesystem: its fixture's oversize file lands in the
+// worktree, which is metered either way. The two properties that make the meter
+// what its comment claims are that a write is refused *at* the boundary rather
+// than after it, and that the .git chroot go-git takes counts against the same
+// budget as the tree — otherwise the objects, which are the bulk of a clone,
+// escape the meter entirely and only the checkout is bounded.
+func TestMeteredFSChrootSharesTheBudget(t *testing.T) {
+	var spent atomic.Int64
+	const limit = 100
+	root := newMeteredFS(osfs.New(t.TempDir()), &spent, limit)
+
+	sub, err := root.Chroot("objects")
+	if err != nil {
+		t.Fatalf("Chroot: %v", err)
+	}
+	if _, err := writeTo(t, sub, "pack", 80); err != nil {
+		t.Fatalf("an 80-byte write inside the budget failed: %v", err)
+	}
+	// 80 already spent beneath the chroot, so 40 more anywhere must not fit.
+	if _, err := writeTo(t, root, "tree-file", 40); !errors.Is(err, errCloneTooLarge) {
+		t.Errorf("writing 40 bytes after 80 gave %v, want errCloneTooLarge — "+
+			"the chroot is spending a budget of its own", err)
+	}
+	if got := spent.Load(); got != 120 {
+		t.Errorf("spent = %d, want 120 (both writes counted against one budget)", got)
+	}
+}
+
+// TestMeteredFSRefusesTheWriteThatCrosses 🔍 is the in-flight half: the write
+// that would cross the budget is refused and its bytes never reach the disk, so
+// a repository far past the cap costs the cap and not its own size.
+func TestMeteredFSRefusesTheWriteThatCrosses(t *testing.T) {
+	var spent atomic.Int64
+	dir := t.TempDir()
+	fs := newMeteredFS(osfs.New(dir), &spent, 100)
+
+	name, err := writeTo(t, fs, "big", 500)
+	if !errors.Is(err, errCloneTooLarge) {
+		t.Fatalf("a 500-byte write against a 100-byte budget gave %v, want errCloneTooLarge", err)
+	}
+	st, err := os.Stat(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatalf("stat the refused file: %v", err)
+	}
+	if st.Size() != 0 {
+		t.Errorf("the refused write left %d bytes on disk; the budget is measured "+
+			"as bytes land, so nothing past it may be written", st.Size())
+	}
+}
+
+// writeTo creates name on fs and writes n bytes to it in one call, returning the
+// name so the caller can inspect what actually landed.
+func writeTo(t *testing.T, fs billy.Filesystem, name string, n int) (string, error) {
+	t.Helper()
+	f, err := fs.Create(name)
+	if err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	defer f.Close()
+	_, err = f.Write(make([]byte, n))
+	return name, err
 }
 
 // TestRepoCloneErrorNeverQuotesTheToken 🔍 is the w-token-sweep rule applied to
