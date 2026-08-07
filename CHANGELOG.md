@@ -77,7 +77,10 @@ copy of an entry here.
   lands as executor and brain integration tests — a real git repository served
   over real smart-HTTP by an in-package fixture, ten rows against real Docker
   sandboxes, and a token sweep of the materialized `.git` — with red-run
-  mutation evidence for every new guard, the review rounds' included
+  mutation evidence for every new guard, the review rounds' included, and the
+  post-fetch context bound pinned as the ensemble it is (its three re-checks are
+  redundant by design — each downstream one catches what the one before it
+  would have — so only their removal together is observable)
   (docs/HISTORY.md carries the running record). The end-to-end `repo-answer` eval
   joins the opt-in suite (`RUN_EVALS=1` plus `GITHUB_EVAL_REPO_URL` /
   `GITHUB_EVAL_REPO_TOKEN` in `.env`): a passphrase reachable only through a

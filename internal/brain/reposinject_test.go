@@ -103,18 +103,9 @@ func TestReposBlockSkippedOnSelfHosted(t *testing.T) {
 // checkouts it does have.
 func TestReposBlockMarksAFailedClone(t *testing.T) {
 	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{textChunk(0, "ok"), done("end_turn", 1)}}, nil)
-	ctx := context.Background()
 	// The event the executor writes when a clone fails, for the first of the
 	// three repositories seeded below.
-	if _, err := events.NewLog(h.pool).Append(ctx, h.sessionID, []events.NewEvent{{
-		Type: domain.EventSessionError,
-		Payload: []byte(`{"error":{"type":"github_repository_clone_error","resource_id":"sesrsc_a",` +
-			`"url":"https://github.com/example-org/widget","mount_path":"/workspace/widget",` +
-			`"reason":"auth","message":"the repository could not be cloned into the sandbox",` +
-			`"retry_status":{"type":"retrying"}}}`),
-	}}); err != nil {
-		t.Fatalf("seed the clone error: %v", err)
-	}
+	seedCloneError(t, h, "sesrsc_a", "auth")
 
 	sys := seedRepos(t, h)
 
@@ -127,6 +118,42 @@ func TestReposBlockMarksAFailedClone(t *testing.T) {
 		if l := repoLine(t, sys, path); strings.Contains(strings.ToLower(l), "not available") {
 			t.Errorf("%s is marked unavailable, but only sesrsc_a failed: %q", path, l)
 		}
+	}
+}
+
+// TestReposBlockNamesTheLatestFailure 🔍: the reason the block reports is the
+// last one recorded for a repository, not the first one.
+//
+// The executor's dedupe is per (resource, reason), so it deliberately re-emits
+// when the reason changes: a repository that first failed to authenticate and
+// then failed to reach its host has two clone errors on the log, in that order.
+// Reading the older one sends the model — and the operator reading the prompt
+// back — after a credential that stopped being the problem, while the block
+// still claims to describe "the last clone attempt".
+func TestReposBlockNamesTheLatestFailure(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{textChunk(0, "ok"), done("end_turn", 1)}}, nil)
+	seedCloneError(t, h, "sesrsc_a", "auth")
+	seedCloneError(t, h, "sesrsc_a", "network")
+
+	line := repoLine(t, seedRepos(t, h), "/workspace/widget")
+	if !strings.Contains(line, "network") || strings.Contains(line, "auth") {
+		t.Errorf("the block reports a stale clone failure: %q — the last reason "+
+			"recorded for this repository was \"network\"", line)
+	}
+}
+
+// seedCloneError appends the session.error the executor writes when a clone
+// fails, for the repository the block calls /workspace/widget.
+func seedCloneError(t *testing.T, h *harness, resourceID, reason string) {
+	t.Helper()
+	if _, err := events.NewLog(h.pool).Append(context.Background(), h.sessionID, []events.NewEvent{{
+		Type: domain.EventSessionError,
+		Payload: []byte(`{"error":{"type":"github_repository_clone_error","resource_id":"` + resourceID + `",` +
+			`"url":"https://github.com/example-org/widget","mount_path":"/workspace/widget",` +
+			`"reason":"` + reason + `","message":"the repository could not be cloned into the sandbox",` +
+			`"retry_status":{"type":"retrying"}}}`),
+	}}); err != nil {
+		t.Fatalf("seed the clone error: %v", err)
 	}
 }
 

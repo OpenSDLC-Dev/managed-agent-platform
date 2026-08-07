@@ -3017,6 +3017,45 @@ mutations go red on `commands issued: []`, the no-sweep one and the cancelled-co
 alike. Third instance in this slice of a test that would have certified the bug it existed
 to catch, after the stage-and-rename row and the byte budget's two.
 
+**The verifier's second round found two guards with no test that could fail.** It reran
+the whole gate from scratch on the branch tip (`total statement coverage: 90.28%`,
+integration suites really running: executor 72.4s, brain 46.7s, docker 77.9s, k8s 70.0s)
+and returned PASS with no blockers — and then caught by its own mutation spot-checks what
+this branch's mutation duty had missed twice. One of them made a CHANGELOG claim untrue,
+which is the more serious half: an unsupported claim of evidence is worse than a
+gap nobody asserted was closed.
+
+- **The post-fetch context bound.** With all three `ctx.Err()` re-checks in `cloneToTar`
+  and `packTree` neutralized, every one of the 26 repository rows stayed green.
+  `TestRepoCloneStopsOnASpentBudgetAfterTheFetch` pins it now, with a context that is live
+  until the fixture has been asked for a pack and spent from then on — the deadline that
+  survives the fetch and expires in the phases go-git leaves unbounded. Its Done channel
+  never fires, so the transport completes normally and nothing but an explicit check can
+  notice. Red under the mutation on `a clone whose budget expired after the fetch ran to
+  completion, packing …/repo.tar (14848 bytes)`. The three checks are deliberately
+  redundant — each downstream one catches what the one before it would have — so a single
+  check's removal is genuinely unobservable, and that was measured rather than assumed:
+  with only the first neutralized the row stays green, because `packTree`'s per-entry check
+  catches the same expiry one step later. What the row pins is therefore the bound itself,
+  which is the property `EXECUTOR_REPO_CLONE_TIMEOUT` advertises; the CHANGELOG now says so
+  instead of claiming each check is separately pinned.
+- **The brain's latest-reason ordering.** `seq DESC` → `ASC` in `cloneFailures` left all
+  four `TestReposBlock*` rows green. The executor's dedupe is per (resource, reason) and
+  deliberately re-emits when the reason changes, so a repository that first failed `auth`
+  and then failed `network` carries both on the log, and reading the older one sends the
+  model — and the operator reading the prompt back — after a credential that stopped being
+  the problem, while the block still claims to describe "the last clone attempt".
+  `TestReposBlockNamesTheLatestFailure` seeds both and goes red on the mutant, quoting the
+  stale line it rendered.
+
+Two of the round's notes are accepted as known rather than fixed here. A `safeRepoMount`
+refusal reaches the wire as reason `internal` with the generic message: the registered
+vocabulary has no better fit, and the specific cause is named in the executor's logs — an
+operator debugging a repository named `skills` sees a wire signal indistinguishable from a
+platform fault. And the same guard refuses the sandbox workdir and its skills tree but not
+a strict *ancestor* of a custom nested workdir, which is unreachable under the default
+`/workspace`, whose only ancestor is `/` and already refused.
+
 **Plan 25 progress summary (archived).** Two slices, two PRs: #329 (the wire half —
 the `github_repository` create arm, migration 0020's `session_resource_credentials`,
 live token rotation, the repo-delete rejection, unit W, and the e-wire-cli acceptance

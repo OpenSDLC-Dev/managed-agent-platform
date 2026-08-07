@@ -864,6 +864,49 @@ func TestCloneReasonBlamesOurselvesForCancellation(t *testing.T) {
 	}
 }
 
+// TestRepoCloneStopsOnASpentBudgetAfterTheFetch 🔍: go-git applies a context to
+// its transport and to nothing else — the post-fetch worktree reset, the commit
+// checkout and the tar walk all run to completion whatever the budget says. Left
+// unbounded, a repository that downloads inside its budget and then checks out
+// or packs for hours holds the executor for as long as it likes, and
+// EXECUTOR_REPO_CLONE_TIMEOUT bounds nothing but the fetch.
+//
+// The three re-checks that bound those phases are deliberately redundant — each
+// one downstream catches what the one before it would have — so removing any
+// single check leaves the outcome unchanged, and only their removal *as a bound*
+// is observable. That is what this row pins: with all three gone the clone below
+// runs to completion and hands back a tar.
+func TestRepoCloneStopsOnASpentBudgetAfterTheFetch(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	ctx := spentAfterFetch{Context: context.Background(), fetched: &fx.clones}
+
+	tarPath, size, cleanup, err := cloneToTar(ctx, repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
+	defer cleanup()
+	if err == nil {
+		t.Fatalf("a clone whose budget expired after the fetch ran to completion, packing %s (%d bytes)",
+			tarPath, size)
+	}
+	if got := cloneReason(err); got != repoOutcomeTimeout {
+		t.Errorf("cloneReason = %q, want %q: %v", got, repoOutcomeTimeout, err)
+	}
+}
+
+// spentAfterFetch is live until the fixture has been asked for a pack and spent
+// from then on — the deadline that survives the fetch and expires in the phases
+// go-git leaves unbounded. Its Done channel never fires, so the transport itself
+// completes normally and nothing but an explicit ctx.Err() check can notice.
+type spentAfterFetch struct {
+	context.Context
+	fetched *atomic.Int64
+}
+
+func (c spentAfterFetch) Err() error {
+	if c.fetched.Load() > 0 {
+		return context.DeadlineExceeded
+	}
+	return c.Context.Err()
+}
+
 // TestCloneReasonBlamesTheRightSide 🔍: `internal` means *this platform* broke,
 // and it is the reason an operator reads as "go look at your own logs". Two
 // reachable failures were landing there while being someone else's fault
