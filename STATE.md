@@ -4,11 +4,17 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.** (#323 — `mount_path` rooting — lands with this change; its narrative is
-in CHANGELOG.md. Follow-on for whoever picks up plan 25 / PR #325: that plan's
-validation design assumes file mounts keep arbitrary container-path latitude,
-which #323 removes from the file arm.)
+**[Plan 25 — git/repo mounting](./docs/plan/25_git-repo-mounting.md)** (`in-progress`,
+the git half of #55): `github_repository` session resources, cloned platform-side into
+the sandbox. BYOC materialization is deferred to #322. (#323's follow-on note —
+file mounts lost arbitrary container-path latitude — is absorbed: the repo arm keeps
+literal paths; cross-resource rules run on resolved forms.)
 
 ## Tasks
 
-(none — nothing in flight)
+- [x] Slice 1 — the wire + sealed token storage: create acceptance/validation,
+      migration 0020, rotation live, delete rejection, unit W tests + mutation
+      evidence (this PR).
+- [ ] Slice 2 — the clone: go-git executor materialization, `session.error`
+      surfacing, the brain's "Mounted repositories" block, the `repo-answer`
+      eval; archive the plan, close #55.

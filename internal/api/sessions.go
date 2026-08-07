@@ -461,6 +461,20 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return nil, err
 	}
+	var sealedTokens []sealedToken
+	if resourceInputsHaveRepo(resourceInputs) {
+		if s.cipher == nil {
+			// Refused, never stored unencrypted (plan 25 decision 2).
+			recordResourceMutation(ctx, resourceOutcomeError, 1)
+			return nil, errRepoSecretsUnavailable
+		}
+		// Seal before the transaction opens — the cipher's network round trip
+		// must not run under the session/environment row locks (sealRepoTokens).
+		if sealedTokens, err = sealRepoTokens(ctx, s.cipher, resourceInputs); err != nil {
+			recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
+			return nil, err
+		}
+	}
 	vaultIDs, err := parseVaultIDs(obj)
 	if err != nil {
 		return nil, err
@@ -516,7 +530,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 
 	now := time.Now().UTC()
-	resources, err := materializeResourceInputs(ctx, tx, resourceInputs, now)
+	resources, repoIDs, err := materializeResourceInputs(ctx, tx, resourceInputs, now)
 	if err != nil {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return nil, err
@@ -570,6 +584,18 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 
+	// After the session INSERT (the rows FK it), inside the same transaction:
+	// a repo-bearing create either stores every pre-sealed token or creates
+	// nothing.
+	if len(repoIDs) > 0 {
+		if err := insertSessionResourceCredentials(ctx, tx, id, repoIDs, sealedTokens); err != nil {
+			recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
+			return nil, err
+		}
+		slog.InfoContext(ctx, "session repository credentials sealed",
+			"session_id", id, "repos", len(repoIDs))
+	}
+
 	if len(initialEvents) > 0 {
 		if err := events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), initialEvents, false); err != nil {
 			return nil, errInvalid("initial_events: %s", err)
@@ -617,7 +643,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 	if len(resources) > 0 {
 		recordResourceMutation(ctx, resourceOutcomeOK, len(resources))
-		slog.InfoContext(ctx, "session created with file resources",
+		slog.InfoContext(ctx, "session created with resources",
 			"session_id", id, "resource_count", len(resources))
 	}
 	return renderSession(row)

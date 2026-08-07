@@ -3,6 +3,7 @@ package openbao_test
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -117,6 +118,41 @@ func TestServerErrorTextNeverEchoesRequestValues(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString([]byte("super-secret-plaintext"))
 	if strings.Contains(err.Error(), encoded) {
 		t.Fatalf("error echoes the reflected plaintext: %v", err)
+	}
+}
+
+// A hostile endpoint is not limited to reflecting the request verbatim: it can
+// base64-DECODE the plaintext field and reflect the decoded secret, which a
+// scrub matching only the request's own strings would miss (Codex review,
+// plan 25 slice 1).
+func TestServerErrorTextNeverEchoesDecodedPlaintext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/encrypt/") {
+			raw, _ := io.ReadAll(r.Body)
+			var req struct {
+				Plaintext string `json:"plaintext"`
+			}
+			_ = json.Unmarshal(raw, &req)
+			decoded, _ := base64.StdEncoding.DecodeString(req.Plaintext)
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"errors":[%q]}`, "rejected value "+string(decoded))
+			return
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+	c, err := openbao.New(context.Background(), openbao.Config{
+		Address: srv.URL, Token: "x", Key: "k",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, _, err = c.Encrypt(context.Background(), []byte("ghp_decoded-secret-token"))
+	if err == nil {
+		t.Fatal("Encrypt succeeded against an all-errors endpoint")
+	}
+	if strings.Contains(err.Error(), "ghp_decoded-secret-token") {
+		t.Fatalf("error echoes the decoded plaintext: %v", err)
 	}
 }
 

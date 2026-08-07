@@ -15,6 +15,41 @@ copy of an entry here.
 
 ### Added
 
+- **`github_repository` session resources — the wire half lands** (plan 25
+  slice 1; the git half of #55 starts, and the plan flips `in-progress`).
+  `POST /v1/sessions` `resources[]` now accepts the repo variant: an exact
+  canonical `https://github.com/{owner}/{repo}` URL (userinfo/port/query/
+  fragment carriers all 400 — the url is a rendered field and must never
+  smuggle a credential), a write-only `authorization_token` (non-empty, ≤8 KiB)
+  sealed through `secrets.Cipher` into the new `session_resource_credentials`
+  table (migration 0020, ciphertext + key id, ON DELETE CASCADE with the
+  session), and a strict `branch`/`commit` checkout union stored and rendered
+  as given (`null` when omitted). The rendered resource is token-free by
+  construction — the echoed jsonb never holds the secret. Token rotation
+  (`POST …/resources/{rid}`) goes live: re-seals the ciphertext, bumps the
+  resource's `updated_at`, returns the full rendered resource; file resources,
+  archived sessions, and cipher-less deployments keep their rejections.
+  Post-create immutability is total — the add endpoint stays file-only
+  (wire-faithful per the SDK's typed Add) and repo DELETE is rejected
+  (attached-for-lifetime). Mount rules: clean-form literal paths (unlike the
+  file arm, which #323 roots under the uploads directory — the cross-resource
+  uniqueness and nesting rules compare files by their resolved paths),
+  no resource above a repo mount — enforced at create and by the post-create
+  add alike — no nested repos, `/` and `/tmp` reserved, at most eight repos
+  per session; the derived default mount is validated like a supplied one,
+  with the URL grammar bounding both segments so the default is clean and
+  storable by construction. Tokens seal **before** the transaction opens
+  (create and rotation both, the vault-credential precedent), so the cipher's
+  network round trip never runs under the session row lock. The review round
+  also hardened the OpenBao client's error scrub for every sealed secret
+  (vault credentials included): a hostile transit endpoint reflecting the
+  request's plaintext **decoded** — not just verbatim — into its error body is
+  now redacted in both forms before the text can reach a log. Unit W of the plan's verification
+  matrix lands as pgtest integration tests — token-sweep probe across every
+  response surface included — with red-run mutation evidence recorded for each
+  new guard. Divergences: the create-rejection entry carved down
+  (`memory_store` alone stays rejected) and the repo validation/rotation
+  strictness registered INFERRED in docs/DIVERGENCES.md.
 - **Plan 25 authored (draft): git/repo mounting — `github_repository` session
   resources** ([docs/plan/25_git-repo-mounting.md](./docs/plan/25_git-repo-mounting.md),
   the second half of #55; the Files half landed with plan 08). Deep-researched against

@@ -2686,3 +2686,103 @@ connection on a live GKE cluster. What is established is that it renders, that a
 server accepts the manifests, that the pinned `cloud-sql-proxy:2.24.1` accepts the exact
 argument vector the chart passes (it proceeds past flag parsing and fails only on absent
 credentials), and that the Terraform passes the credential-free checks.
+
+## e-wire-cli acceptance + mutation duty — plan 25 slice 1, `github_repository` resources (run 2026-08-07) — ✅ passed
+
+The real `ant` CLI (v1.21.0, built from the read-only reference checkout) against the
+compose stack built from the branch — controlplane + Postgres + MinIO + OpenBao only,
+wire-only by design: no brain, no executor, no clone, no network to GitHub. The
+`authorization_token` in every request was a deliberately fake sweep value
+(`ACCEPT-TOKEN-e2e-*`), so nothing in this record is a credential.
+
+The sequence: `beta:environments create` (cloud) → `beta:agents create` →
+`beta:sessions create` with two `--resource` `github_repository` objects (one with a
+`branch` checkout and a defaulted mount, one `.git`-suffixed with an explicit
+`mount_path`) → `beta:sessions:resources list` / `retrieve` → `update` with a new token →
+`delete` → `beta:sessions retrieve`. Every read shape came back with exactly the seven
+public fields; the defaulted mount rendered `/workspace/example-repo`, the `.git` suffix
+stripped for the name only (the stored `url` keeps it); the omitted checkout rendered
+`checkout: null`. Rotation returned 200 with the full resource and bumped only
+`updated_at` (`…:48.895882637Z` → `…:48.937895512Z`), and the later session GET proved the
+bump persisted. The delete returned the designed 400: "github_repository resources cannot
+be removed; repositories are attached for the lifetime of the session".
+
+Three sweeps, all zero: the transcript's **response** lines for both token values and the
+`"authorization_token"` key (command lines, which legitimately carry the fake token, were
+excluded); the controlplane's logs for both token values; and the database, where
+`session_resource_credentials` held ciphertext only — both rows sealed under the OpenBao
+transit key (`token_key_id=map-secrets`), the rotated row showing `updated_at <>
+created_at` and a different ciphertext length. The two designed `slog` lines fired once
+each: `session repository credentials sealed … repos=2` and `session resource token
+rotated`.
+
+**Mutation duty: nine probes, nine red.** Each guard was deleted in a git-archive scratch
+copy of the branch HEAD and its sentinel test rerun (a first workflow round had cut its
+copies from `main`, where the feature does not exist — nine "unverifiable" rows, discarded
+and rerun from the branch archive). All nine went red for their own reason: the token
+sweep caught the echo on all five response surfaces; the URL grammar's
+userinfo/query/fragment/port refusals each flipped to 200; the repo delete returned
+`session_resource_deleted`; the add path ran on to a file-shaped 404 instead of the
+file-only 400; rotation on an archived session returned 200; unclean mounts
+(`//`, `.` segment, trailing slash) passed; nested repos and a file above a repo mount
+passed; nine repos sealed (`repos=9` in the log); and the cipher-less refusal's removal
+turned the clean 500 into a nil-pointer panic surfacing as EOF. The tenth guard-shaped
+behavior — `checkout` union strictness — is covered by the same validation test's
+table rows and was not separately mutated.
+
+**Verifier round (same day): two live bypasses through the default-mount derivation.**
+The pinned verifier's behavior rung, probing a branch-built controlplane with curl, found
+what every review of the *supplied*-path rules had missed: the **derived** default mount
+`/workspace/<repo-name>` skipped validation entirely, and `parseGitHubRepoURL` accepted
+`.`/`..`/NUL/space as the repo segment. `url: …/acme/..` (no `mount_path`) stored
+`mount_path: "/workspace/.."` — the reserved `/` in disguise, on an unremovable resource —
+and `…/acme/%00repo` reached the jsonb bind as a 500 (the #135 failure class). Fixed
+TDD-red-first: five new validation cases (`..`, `.`, `%00`, `%20`, a 1200-char name) were
+run against the pre-fix code and failed exactly as the verifier observed (200/200/500/200/
+200), then the grammar was bounded (segment charset `[A-Za-z0-9._-]`, a repo name
+`path.Clean` would rewrite refused) and the derived default routed through
+`validateRepoMountPath` like a supplied path; all five went green. The same round added
+the captured-`slog` sweep to w-token-sweep (a mutex-buffered `slog.SetDefault` capture —
+zero token hits) and the archived-session **delete** assertion beside the rotation gate,
+and corrected two plan-matrix facts (create returns 200 on this server, not 201; the SSE
+stream is a live tail with no history replay, so the events list endpoint is the
+stored-event sweep surface).
+
+**Claude-side review stand-in round (Opus 5 workflow, /code-review being
+model-uninvocable; 4 dimensions, every finding adversarially re-verified against the
+source): 17 confirmed rows, three genuinely new after dedup.** Ten were the
+derived-default-mount family the verifier had already caught (the stand-in's verify pass
+independently reproduced the `%00` 500 and the `/workspace/..` store against the pre-fix
+commit, and noted the fix already in the working tree). The new three, each fixed
+red-first: (1) **the add endpoint skipped the ancestor rule** — a file added at the
+resolved `/mnt/session/uploads/repo` mounted above a repo at `…/repo/src` (observed 200,
+now the same 400 as create; the in-tree overlay add stays legal and is asserted); (2)
+**a bare trailing `?` or `#` passed the URL grammar** (`ForceQuery` is the only trace of
+a bare `?`, the raw string the only trace of a bare `#` — both observed stored, both now
+400); (3) **the cipher round trip ran under the session row lock** — create sealed inside
+the create transaction and rotation encrypted between `FOR UPDATE` and commit, so a slow
+OpenBao would have stalled every concurrent event append for the session; both now seal
+before their transaction opens, the vault-credential precedent
+(`vaultcredentials.go`'s "Seal before opening the transaction"), with the cipher-less
+refusal deliberately left inside the rotation transaction so a file resource still gets
+its type rejection first. Four smaller coverage gaps from the test-quality dimension
+were pinned the same day: the `.git`-strip default assertion, a relative repo
+`mount_path`, both caps accepted exactly at their limits, and the archived-session
+delete beside the rotation gate.
+
+**Codex round (gpt-5.6-sol, `task` subcommand, read-only) — report lost, findings
+recovered, one fix.** The run completed its analysis but its internal security-scan
+workflow failed at the completion step (`scan.target.snapshotDigest: expected a non-empty
+string`) and, per that workflow's rules, never issued the formal report — reported here
+rather than silently dropped, with the findings recovered from the session rollout's
+narration. Four items: the percent-decoded URL segment family and the add-endpoint
+ancestor gap (both independently found by the other two reviewers, both already fixed);
+test-assurance notes matching the stand-in's test-quality dimension; and one new finding,
+rated Low/P3 — **a hostile or misconfigured OpenBao endpoint could reflect the request's
+plaintext *decoded* into its error body**, and the client's scrub, which replaced only the
+request's own strings (the base64 form) and the token, would pass the raw secret through
+to the process error path. Fixed red-first in `internal/secrets/openbao`
+(`TestServerErrorTextNeverEchoesDecodedPlaintext` observed
+`status 400: rejected value ghp_decoded-secret-token` pre-fix): the scrub now redacts
+every request-borne value in both its verbatim and base64-decoded forms — a hardening
+shared by every sealed secret, vault credentials included.
