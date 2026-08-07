@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -408,12 +409,97 @@ func TestRepoWithoutCipher(t *testing.T) {
 }
 
 // TestRepoInterruptedExtractLeavesNoPartialTree is m-interrupted-extract 🔍:
-// an extraction that fails part way leaves no mount at all — stage-and-rename
-// means `<mount>/.git` can only ever name a complete tree — cleans its staging
-// up, and the next pass retries from scratch. The failure is forced the way a
-// real one would arrive: the mount's parent is a regular file, so the staging
-// directory cannot be created.
-func TestRepoInterruptedExtractLeavesNoPartialTree(t *testing.T) {
+// an extraction that dies **part way through the tar** leaves no `<mount>/.git`
+// behind — which is the whole point of staging into a sibling and renaming,
+// since a partial tree with a `.git` in it is precisely what the idempotence
+// probe would later trust and skip.
+//
+// The failure must be forced *during* the tar and identically for any candidate
+// implementation, which rules out planting an obstruction at a path: staging and
+// the mount are different paths, so an obstruction at either one would only ever
+// trip one of the two. What both share is the tar binary itself, so the fixture
+// shadows it with a script that extracts a `.git` and then dies — the shape a
+// truncated archive or a killed sandbox produces. Whatever `-C` names ends up
+// holding a half-tree, and the assertion is that the mount is not that thing.
+func TestRepoInterruptedExtractMidTarLeavesNoTree(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	h, provider := dockerRepoHarness(t)
+	h.seedRepoResource(t, "sesrsc_midtar", fx.url(), repoMount, "ghp_fixture", nil)
+
+	sb := adopt(t, provider, h)
+	installFailingTar(t, sb)
+
+	h.runPass(t)
+
+	if errs := h.repoErrors(t); len(errs) != 1 {
+		t.Fatalf("recorded %d clone errors, want exactly 1 (%v)", len(errs), errs)
+	}
+	// The load-bearing assertion. The half-tree exists somewhere — the point is
+	// that it is not at the mount, where the idempotence probe would find it.
+	res, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+		Command: "ls -a " + shellQuote(path.Dir(repoMount)) + "; test ! -e " + shellQuote(repoMount+"/.git")})
+	if err != nil {
+		t.Fatalf("inspect the mount: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Errorf("a partial tree carrying .git survived a mid-tar failure; %s holds: %s",
+			path.Dir(repoMount), res.Stdout)
+	}
+	if strings.Contains(res.Stdout, "map-repo-staging") {
+		t.Errorf("staging survived a failed extraction: %s", res.Stdout)
+	}
+
+	// With a working tar the next pass materializes — which it can only do
+	// because the failed attempt left no `.git` for the probe to trust.
+	if _, err := sb.Exec(context.Background(), sandbox.ExecRequest{
+		Command: "rm -f /usr/local/bin/tar"}); err != nil {
+		t.Fatalf("restore the real tar: %v", err)
+	}
+	h.runPass(t)
+	if got := readSandboxFile(t, sb, repoMount+"/README.md"); got != "x\n" {
+		t.Errorf("README.md = %q, want the retry to have materialized", got)
+	}
+}
+
+// installFailingTar shadows the container's tar with one that extracts a `.git`
+// into whatever `-C` names and then exits non-zero. It reads `-C` from the
+// argument list rather than a fixed position so it fails the same way for any
+// extraction command, not just the one this package happens to build today.
+// WriteFile lands the bytes over Docker's archive API, so installing the fake
+// does not itself depend on the binary being replaced.
+func installFailingTar(t *testing.T, sb sandbox.Sandbox) {
+	t.Helper()
+	const script = `#!/bin/sh
+d=.
+while [ $# -gt 0 ]; do
+	if [ "$1" = "-C" ]; then d=$2; fi
+	shift
+done
+mkdir -p "$d/.git"
+echo partial > "$d/.git/HEAD"
+echo 'tar: unexpected end of file' >&2
+exit 2
+`
+	ctx := context.Background()
+	if err := sb.WriteFile(ctx, "/usr/local/bin/tar", []byte(script)); err != nil {
+		t.Fatalf("install the failing tar: %v", err)
+	}
+	res, err := sb.Exec(ctx, sandbox.ExecRequest{Command: "chmod 0755 /usr/local/bin/tar && command -v tar"})
+	if err != nil {
+		t.Fatalf("chmod the failing tar: %v", err)
+	}
+	// It has to be the one bash resolves, or the row proves nothing.
+	if got := strings.TrimSpace(res.Stdout); got != "/usr/local/bin/tar" {
+		t.Fatalf("tar resolves to %q, want the shadow at /usr/local/bin/tar (exit %d, %s)",
+			got, res.ExitCode, res.Stderr)
+	}
+}
+
+// TestRepoExtractFailureIsTolerated 🔍 is the same tolerance from the other
+// direction: an extraction that cannot even begin — the mount's parent is a
+// regular file, so the staging directory cannot be created — surfaces as a
+// clone error, cleans up, and leaves the run to continue.
+func TestRepoExtractFailureIsTolerated(t *testing.T) {
 	const blocked = "/workspace/blocked"
 	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
 	h, provider := dockerRepoHarness(t)
