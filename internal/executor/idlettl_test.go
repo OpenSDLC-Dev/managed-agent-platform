@@ -183,7 +183,7 @@ func TestReapPassIdleTierLeavesIneligibleSessions(t *testing.T) {
 	})
 	t.Run("blob-less-disables", func(t *testing.T) {
 		h := ttlHarness(t, &fakeSandbox{})
-		bare := New(h.pool, h.log, h.queue, h.prov, nil, Config{SandboxIdleTTL: time.Hour})
+		bare := New(h.pool, h.log, h.queue, h.prov, nil, h.cipher, Config{SandboxIdleTTL: time.Hour})
 		if err := bare.reapPass(context.Background()); err != nil {
 			t.Fatalf("reap pass: %v", err)
 		}
@@ -366,7 +366,7 @@ func (failPutStore) Put(context.Context, string, io.Reader, int64, string) error
 // interval retries with the workspace intact (the deleted tier's own rule).
 func TestIdleReapAbortsWhenTheStoreFails(t *testing.T) {
 	h := ttlHarness(t, &fakeSandbox{})
-	bare := New(h.pool, h.log, h.queue, h.prov, failPutStore{h.blobs}, Config{SandboxIdleTTL: time.Hour})
+	bare := New(h.pool, h.log, h.queue, h.prov, failPutStore{h.blobs}, h.cipher, Config{SandboxIdleTTL: time.Hour})
 	err := bare.reapPass(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "upload checkpoint") {
 		t.Fatalf("reap pass error = %v, want the upload failure surfaced", err)
@@ -411,7 +411,7 @@ func (failDeleteStore) Delete(context.Context, string) error { return errBoom }
 // forever.
 func TestCaptureDeleteRaceWithFailedWithdrawAborts(t *testing.T) {
 	h := ttlHarness(t, &fakeSandbox{})
-	bare := New(h.pool, h.log, h.queue, h.prov, failDeleteStore{h.blobs}, Config{SandboxIdleTTL: time.Hour})
+	bare := New(h.pool, h.log, h.queue, h.prov, failDeleteStore{h.blobs}, h.cipher, Config{SandboxIdleTTL: time.Hour})
 	deleteSessionRow(t, h)
 	err := bare.captureCheckpoint(context.Background(), h.sid)
 	if err == nil || errors.Is(err, errCaptureSessionDeleted) {

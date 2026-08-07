@@ -21,6 +21,8 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -294,14 +296,15 @@ func (p *fakeProvider) reapedSnapshot() []domain.ID {
 }
 
 type harness struct {
-	pool  *pgxpool.Pool
-	log   *events.Log
-	queue *queue.Queue
-	exec  *Executor
-	prov  *fakeProvider
-	blobs *blobtest.MemStore
-	sid   domain.ID
-	envID domain.ID
+	pool   *pgxpool.Pool
+	log    *events.Log
+	queue  *queue.Queue
+	exec   *Executor
+	prov   *fakeProvider
+	blobs  *blobtest.MemStore
+	cipher secrets.Cipher
+	sid    domain.ID
+	envID  domain.ID
 }
 
 // newHarness builds an executor over a fresh Dockerized Postgres and a fake
@@ -327,11 +330,18 @@ func newHarnessWith(t *testing.T, provider sandbox.Provider, cfg Config) *harnes
 		`UPDATE sessions SET status = 'running' WHERE id = $1`, sid.String()); err != nil {
 		t.Fatal(err)
 	}
+	// A real (local AES-GCM) cipher under a fixed test key, so the repository
+	// clone path exercises the sealed-token decrypt end to end — the api
+	// harness's twin.
+	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
 	h := &harness{
 		pool: pool, log: events.NewLog(pool), queue: queue.New(pool),
-		blobs: blobtest.Mem(), sid: sid, envID: envID,
+		blobs: blobtest.Mem(), cipher: cipher, sid: sid, envID: envID,
 	}
-	h.exec = New(pool, h.log, h.queue, provider, h.blobs, cfg)
+	h.exec = New(pool, h.log, h.queue, provider, h.blobs, cipher, cfg)
 	return h
 }
 

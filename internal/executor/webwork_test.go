@@ -562,10 +562,10 @@ func TestWebSearchFiltersHitsOutsideAllowedDomains(t *testing.T) {
 // WEBTOOL_ALLOWED_DOMAINS must stay a nil set (unrestricted), never invert
 // into HostSet's own nil-set deny-all semantics.
 func TestNewBuildsTheAllowlistOnlyWhenConfigured(t *testing.T) {
-	if e := New(nil, nil, nil, nil, nil, Config{}); e.webAllowed != nil {
+	if e := New(nil, nil, nil, nil, nil, nil, Config{}); e.webAllowed != nil {
 		t.Error("empty config built an allowlist — unset must mean unrestricted")
 	}
-	e := New(nil, nil, nil, nil, nil, Config{WebAllowedDomains: []string{"example.com"}})
+	e := New(nil, nil, nil, nil, nil, nil, Config{WebAllowedDomains: []string{"example.com"}})
 	if e.webAllowed == nil || !e.webAllowed.Match("example.com") || e.webAllowed.Match("evil.test") {
 		t.Errorf("configured allowlist = %+v, want example.com admitted and evil.test refused", e.webAllowed)
 	}

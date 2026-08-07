@@ -24,6 +24,12 @@ const (
 	MetricFilesMaterialized = "files.materialized"
 	// MetricFilesMaterializeDuration is one whole file-materialization pass.
 	MetricFilesMaterializeDuration = "files.materialize.duration"
+	// MetricReposMaterialized counts per-repository materialization outcomes.
+	MetricReposMaterialized = "repos.materialized"
+	// MetricReposMaterializeDuration is one whole repo-materialization pass.
+	MetricReposMaterializeDuration = "repos.materialize.duration"
+	// MetricReposMaterializeBytes is one landed repository's shipped size.
+	MetricReposMaterializeBytes = "repos.materialize.bytes"
 )
 
 // Bounded outcome values — skill/file ids never label metrics (cardinality
@@ -40,6 +46,19 @@ const (
 	fileOutcomeOK       = "ok"
 	fileOutcomeNotFound = "not_found"
 	fileOutcomeFailed   = "failed"
+
+	// The repository outcomes are the clone-failure reasons the session.error
+	// variant carries (plan 25 decision 4), plus ok and the probe's skip.
+	// too_large and timeout are the platform's own budgets, with no wire twin.
+	repoOutcomeOK        = "ok"
+	repoOutcomeUnchanged = "unchanged"
+	repoOutcomeAuth      = "auth"
+	repoOutcomeNotFound  = "not_found"
+	repoOutcomeNetwork   = "network"
+	repoOutcomeCheckout  = "checkout"
+	repoOutcomeTooLarge  = "too_large"
+	repoOutcomeTimeout   = "timeout"
+	repoOutcomeInternal  = "internal"
 )
 
 // recordSkillMaterialized counts one skill's outcome. The meter is resolved
@@ -89,4 +108,40 @@ func recordFilesMaterializeDuration(ctx context.Context, d time.Duration) {
 		return
 	}
 	hist.Record(ctx, d.Seconds())
+}
+
+// recordRepoMaterialized counts one repository mount's outcome — ok, the
+// probe's unchanged skip, or one of the clone-failure reasons.
+func recordRepoMaterialized(ctx context.Context, outcome string) {
+	counter, err := otel.GetMeterProvider().Meter(meterName).Int64Counter(
+		MetricReposMaterialized,
+		metric.WithDescription("Repositories materialized into sandboxes, by outcome."))
+	if err != nil {
+		return
+	}
+	counter.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", outcome)))
+}
+
+// recordReposMaterializeDuration records one repo-materialization pass.
+func recordReposMaterializeDuration(ctx context.Context, d time.Duration) {
+	hist, err := otel.GetMeterProvider().Meter(meterName).Float64Histogram(
+		MetricReposMaterializeDuration,
+		metric.WithUnit("s"),
+		metric.WithDescription("Duration of a session's repository-materialization pass."))
+	if err != nil {
+		return
+	}
+	hist.Record(ctx, d.Seconds())
+}
+
+// recordRepoMaterializeBytes records one landed repository's shipped size.
+func recordRepoMaterializeBytes(ctx context.Context, n int64) {
+	hist, err := otel.GetMeterProvider().Meter(meterName).Int64Histogram(
+		MetricReposMaterializeBytes,
+		metric.WithUnit("By"),
+		metric.WithDescription("Bytes shipped into a sandbox for one materialized repository."))
+	if err != nil {
+		return
+	}
+	hist.Record(ctx, n)
 }

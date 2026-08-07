@@ -30,7 +30,7 @@ func tasks() []Task {
 		fibQuickstart(), echoNoTool(), shellState(),
 		editConfig(), needleSearch(), permAllow(), permDeny(),
 		exitCode(), journalMultiturn(), viewRange(), skillAnswer(),
-		fileAnswer(), outcomeSatisfy(), outcomeRevise(),
+		fileAnswer(), repoAnswer(), outcomeSatisfy(), outcomeRevise(),
 	}
 }
 

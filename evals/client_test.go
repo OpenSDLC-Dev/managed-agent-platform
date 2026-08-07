@@ -210,10 +210,15 @@ func (s *stack) createEnvironment(t *testing.T, name string) string {
 		map[string]any{"name": name}), "create environment")
 }
 
-func (s *stack) createSession(t *testing.T, agentID, envID string) string {
+func (s *stack) createSession(t *testing.T, agentID, envID string, resources []any) string {
 	t.Helper()
-	sessionID := id(t, s.do(t, http.MethodPost, "/v1/sessions",
-		map[string]any{"agent": agentID, "environment_id": envID}), "create session")
+	body := map[string]any{"agent": agentID, "environment_id": envID}
+	// Omitted rather than sent empty: an absent resources[] is the shape every
+	// other trial creates with, and the two must not diverge here.
+	if len(resources) > 0 {
+		body["resources"] = resources
+	}
+	sessionID := id(t, s.do(t, http.MethodPost, "/v1/sessions", body), "create session")
 	// Remember it for the teardown reap: the session's container (if the agent
 	// provisions one) is removed as part of the stack's post-loop cleanup.
 	s.mu.Lock()

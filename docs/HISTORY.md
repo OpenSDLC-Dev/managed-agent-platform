@@ -2786,3 +2786,292 @@ to the process error path. Fixed red-first in `internal/secrets/openbao`
 `status 400: rejected value ghp_decoded-secret-token` pre-fix): the scrub now redacts
 every request-borne value in both its verbatim and base64-decoded forms — a hardening
 shared by every sealed secret, vault credentials included.
+
+## Mutation duty + unit M — plan 25 slice 2, the `github_repository` clone (2026-08-07) — ✅ passed
+
+The clone half's verification record. Unit M (docs/plan/25_git-repo-mounting.md,
+"Verification") runs against a **real git repository served over real smart-HTTP**: an
+in-package fixture (`internal/executor/repofixture_test.go`) wraps go-git's own
+server-side transport in a pkt-line HTTP shim, because the library ships the server as a
+`transport.Transport` rather than an `http.Handler` and its `ServeUploadPack` lives in an
+internal package. Failure modes are handler-level — an answered status drives the auth
+and not-found reasons, a sleep drives the deadline — so one fixture drives every
+adversarial row. Ten rows run against **real Docker sandboxes**, because the claim
+"the agent's tools see a checkout" is only observable where tools really run: a fake
+sandbox never runs `tar`, so a clone could never make `<mount>/.git` appear there.
+
+**The nine guards, each shown red against code without it.** The probes ran against a
+`git archive` tarball of the branch tip in a scratch directory, never the checkout — a
+lesson from PR #321, where shared-scratch probes left a live mutant in the tree.
+
+| Guard | Mutation | Observed failure |
+|---|---|---|
+| probe-only idempotence | always clone, never probe | `clones = 2, want 1` |
+| clone-error dedupe | append without the EXISTS check | `recorded 2 clone errors … want 1` |
+| byte budget | drop the meter | `clone errors = [], want exactly one too_large` |
+| clone timeout | drop the deadline | `recorded 0 clone errors, want exactly 1` |
+| shell quoting | interpolate the mount path raw | `unexpected EOF while looking for matching '` |
+| brain cloud gate | inject the block unconditionally | `a self_hosted session was told repositories are mounted` |
+| repos before files | materialize files first | `/workspace/fixture/overlay.txt: sandbox: no such file` |
+| token in header, not URL | put the token in the remote URL | the sandbox sweep found `url = http://x-access-token:ghp_SWEEP-…@127.0.0.1:57178/o/r.git` inside `/workspace/fixture/.git/config` |
+| stage-and-rename | extract straight into the mount | see below |
+
+**The ninth guard failed its own mutation test first, and the test was the defect.**
+`TestRepoInterruptedExtractLeavesNoPartialTree` forced its failure by planting a regular
+file at the mount's *parent*, which aborts the very first `mkdir` — before `tar` runs at
+all. Both versions therefore passed identically (`--- PASS` on each), and the probe said
+so plainly: "both versions die at their FIRST mkdir with the identical message before any
+tar runs, so neither can leave a partial tree." It proved the mutation had really been
+applied by forcing `exit 77` and observing it surface. A guard whose test never saw the
+broken code proves nothing, so the row was rebuilt rather than accepted.
+
+The rebuild's problem is that staging and the mount are *different paths*, so no planted
+obstruction can trip both candidates — an obstruction at the mount only trips the mutant,
+one at staging only trips the shipped code. What they share is the `tar` binary. The row
+now shadows it (`/usr/local/bin/tar`, installed over Docker's archive API so installing
+the fake does not depend on the binary being replaced) with a script that extracts a
+`.git` into whatever `-C` names and then exits 2 — the shape a truncated archive or a
+killed sandbox produces. The mutant then failed **twice over**, which is the harm the
+guard exists to prevent, in sequence: `a partial tree carrying .git survived a mid-tar
+failure`, and then, on the retry, `repository already present, skipping clone` →
+`README.md: sandbox: no such file` — the idempotence probe trusting the half-tree, so the
+repository never re-clones and stays broken for the life of the session. The shipped
+staging-and-rename leaves the mount untouched and the retry materializes.
+
+**The `repo-answer` eval (E2E-2) is wired but unrun here.** It needs a real GitHub
+fixture repository and a fine-grained token (`GITHUB_EVAL_REPO_URL` /
+`GITHUB_EVAL_REPO_TOKEN`), which only the operator can create; the trial asks for a
+passphrase without naming the mount or the file's path, so the brain's injected
+"Mounted repositories" block is the only way to find it — the discovery mechanism is the
+thing under test, exactly as in its `skill-answer` and `file-answer` twins. Its transcript
+joins this record when the tier is first run.
+
+**Self-review round — two defects on the clone-error path, both fixed red-first.**
+Re-reading `materializeRepos` with fresh eyes turned up `scrubToken(err.Error(), "")`:
+a scrub called with an empty token, which the helper returns unchanged. It read as
+protection and was a no-op. Asking what it was meant to protect against found that the
+exposure is real rather than theoretical — go-git builds its 401/403/404 errors as
+`fmt.Errorf("%w: %s", sentinel, responseBody)`, so a git host that names the credential
+it rejected (and one that rejects a credential has already decoded it) puts the token
+into an error the executor logs, on the likeliest clone failure there is. A fixture that
+echoes the `Authorization` header, sent and decoded, made it observable:
+
+```
+the clone error quotes the token verbatim: authentication required: fixture refuses
+credentials Basic eC1hY2Nlc3MtdG9rZW46Z2hwX0VSUk9SLUVDSE8tU1dFRVAtOWYzYQ==
+(x-access-token:ghp_ERROR-ECHO-SWEEP-9f3a)
+```
+
+The same red run caught a second defect the test had not been written for: a 500 from
+the remote classified as `reason: internal` (`cloneReason = "internal", want "network"`)
+— the platform blaming itself for a git-host outage and sending the operator to read the
+wrong logs. Both fixed: `scrubTokenErr` removes the credential in both forms through a
+wrapper that keeps `Unwrap` intact — a fresh error would have turned every redacted auth
+failure into an `internal` one, which the row asserts against directly — and
+`isRemoteStatusError` reads the status off the transport error (unwrapping
+`plumbing.UnexpectedError` by hand, since it implements no `Unwrap`) and reports
+`network`. The row passes on both arms and is the eleventh guard with red-run evidence.
+
+
+
+**A second self-review pass — the byte budget's load-bearing half was untested.**
+`TestRepoOversizeAbortsMidClone` asserts an oversized repository is refused with
+`too_large` and ships no tar. It proves both, and neither is the property the design
+claims: the budget is metered *as the bytes land*, so an unbounded repository costs the
+cap rather than its own size, and `meteredFS.Chroot` propagates the *same* counter
+because go-git chroots `.git` out of the worktree and the objects are the bulk of a
+clone. Neither is observable through that row — its fixture's oversize file lands in the
+worktree, which is metered under either arrangement.
+
+Both mutations confirm the gap. With `Chroot` given a counter of its own the integration
+row still passed and the new direct row went red (`spent = 40, want 120 (both writes
+counted against one budget)`). With the meter moved to *after* the write — the
+measured-after shape — the integration row **passed unchanged** while logging
+`clone exceeded the byte budget: 1604098 bytes`, which is the whole 1.6 MB fixture
+landing on executor-local disk before anything complained; the new row went red with
+`the refused write left 500 bytes on disk`. Two direct rows now cover the chroot's shared
+budget and the refused write, bringing the slice to thirteen guards with red-run evidence.
+
+
+
+**Verifier round (pinned `claude-fable-5`) — PASS WITH FINDINGS, no blockers, coverage
+90.31%.** It reran the whole gate from scratch, spot-checked two guards by mutation in its
+own scratch copy, exercised the criterion rows against real Docker, and diffed the wire
+registrations field-by-field against the pinned SDK. Two of its five findings — the
+untested `Chroot` propagation and the `betaworker (tool_exec only)` citation naming a file
+that does not exist — had already been found and fixed by the self-review passes above
+while it was running, which is the useful kind of agreement: two independent readings, the
+same two defects. Three were new and are fixed here.
+
+The substantive one: a cipher-less executor emitted its `internal` clone error *before*
+the presence probe, so a session whose checkout was already on disk — restored from a
+checkpoint, or landed by a correctly configured executor before the drift — was told a
+repository had failed while the agent was reading it. Red first
+(`clone errors = [...], want none — the repository is already materialized`), then the
+cipher check moved into the loop behind the probe; the one warning line stays per-session
+rather than per-repository.
+
+The other two were docs, and one of them turned out to be code. ARCHITECTURE's `replay.go`
+row still enumerated the system prompt as agent → skills → files → `system.message`,
+missing the repositories block that now sits third. And the DIVERGENCES entry enumerated
+the clone-error payload without its `message` field — checking that also surfaced that
+`retry_status` is required on every variant of the reference's error union *and* carried by
+every other `session.error` this platform writes, while ours omitted it: not a divergence to
+register but an inconsistency to fix. Red first across all four failure arms
+(`retry_status = <nil>, want {type: retrying}`), then emitted as `retrying` for every
+reason — including `auth`, since the next work item re-probes and clones again, so no clone
+failure is ever the last attempt and `exhausted` would tell a client this repository is
+finished when it is not.
+
+
+
+**Codex round (`gpt-5.6-sol`, config `ultra` effort, read-only) — ten findings, two already
+fixed, six fixed here, two refuted.** It reviewed `e1cc0dd..366abdb` while the branch moved
+under it and said so, and it independently re-derived two defects the verifier round had
+already closed (the payload's missing `retry_status`; the cipher check running ahead of the
+presence probe). The six new ones were all real:
+
+- **The deadline bounded the fetch and nothing else.** `git.CloneContext` applies its
+  context to transport only, so go-git's post-fetch worktree reset, our detached commit
+  checkout, and `packTree`'s walk all ran to completion however long they took. A
+  repository that downloaded inside five minutes and then checked out for hours held the
+  executor indefinitely. The phases we control now check the context between them, and
+  `packTree` checks it per entry.
+- **`Symlink` bypassed the byte meter entirely.** `meteredFS` wrapped `Create`, `OpenFile`
+  and `TempFile`, but go-git checks a mode-120000 entry out by calling `Filesystem.Symlink`
+  directly. Hundreds of thousands of entries naming one stored blob cost almost nothing in
+  objects and land gigabytes of link data in a spool whose cap never counted it. `Symlink`
+  now charges its target.
+- **Absolute symlinks reached the sandbox rewritten.** `osfs.New` returns go-billy's
+  deprecated ChrootOS, which prepends its own root to an absolute link target, and
+  `packTree` reads the link back with raw `os.Readlink` rather than billy's un-rewriting
+  one — so `hostfile -> /etc/hosts` arrived pointing at the executor's temporary spool
+  path, dangling, inside a clone that reported success and that `.git` then made
+  permanently trusted. The spool is built with `osfs.WithBoundOS()` now, which keeps the
+  target verbatim and still refuses to escape the root. The Claude-side round reproduced
+  this end to end with the real `git` CLI (`git status --porcelain` printing `" M abs-link"`).
+- **A cancellation could strand the shipped tar in the sandbox.** Cleanup lived only in
+  the extraction command's own tail, so a context cancelled between `WriteFileStream` and
+  `Exec` left up to the whole byte budget sitting in the session's `/tmp` for its life.
+  Swept now on a context the cancellation cannot reach.
+- **Two reachable failures blamed the wrong side.** A branch name go-git will not build a
+  refspec from (`foo:bar`) and a remote answering 200 with an outage page both landed on
+  `internal`, which tells an operator to go read our logs over someone else's fault. They
+  classify as `checkout` and `network`.
+- **The executor never re-judged the mount path it builds an `rm -rf` from.** A row that
+  reached the database by any route but the create endpoint had that command built for it;
+  `/workspace/repo/..` cleans to `/workspace`. `safeRepoMount` now judges it independently.
+
+Refuted, with evidence rather than argument: Codex reported that `packTree` holds every
+source descriptor until it returns and dies on `EMFILE` for a repository of thousands of
+files. The `defer src.Close()` is inside the closure passed to `WalkDir`, so it runs per
+entry. A probe under a deliberately tiny limit settled it — 600 files packed with
+`RLIMIT_NOFILE` at 96 — and the same probe, run against a mutant that really did hold the
+descriptors, failed with `too many open files`, so the probe could see the bug it was
+looking for. Its dedupe-across-lease-handoff finding is accepted as a known low: the
+consequence is a duplicate `session.error`, and closing it properly means an append that
+asserts the lease, which is a queue-layer change this slice does not justify.
+
+**Claude-side round (six-dimension adversarial workflow, every agent pinned to Opus 5;
+`/code-review` itself is not model-invocable, so this is a disclosed stand-in) — 22
+findings raised, 8 survived refutation.** Two were the symlink rewrite and the malformed
+branch name, already covered above. Four more were real and are fixed:
+
+- **A zero commit sha silently checked out `master`.** The null object id is forty hex
+  characters, so it passes the create endpoint's validation, and go-git's
+  `CheckoutOptions.Validate` substitutes `master` for a zero hash rather than refusing it —
+  so the session was told its clone succeeded while the mount held a branch nobody named,
+  and the resource went on advertising the sha. GitHub's own webhooks put forty zeros in
+  `before`/`after` on branch create and delete, so a forwarding app reaches this without
+  inventing anything. Refused now, on the `checkout` reason.
+- **A repository named `skills` deleted the skills tree written four lines earlier.** Its
+  derived default mount is `<workdir>/skills`, and extraction begins by removing the mount
+  — while the system prompt goes on naming `skills/<dir>/SKILL.md`. The workdir and its
+  skills directory are refused executor-side, where the workdir is actually known.
+- **A repository could be mounted exactly at another's staging path.**
+  `/workspace/.x.map-repo-staging` is a mount path the API accepts, and cloning
+  `/workspace/x` removes it. Refused by the same guard.
+- **A lost lease was reported as the git host's failure.** `cloneReason` had an arm for
+  `DeadlineExceeded` and none for `Canceled`, and go-git surfaces a cancelled fetch as a
+  `*url.Error`, which the network fallback matches. Nothing but this platform cancels a
+  clone without a deadline, so it classifies `internal` now.
+
+The last two were paperwork the round was right to catch: this record and CHANGELOG both
+said "seven rows against real Docker" when `dockerRepoHarness` appears ten times — a count
+that never described any state of the branch — and the comment in
+`TestRepoCloneErrorNeverQuotesTheToken` had its two rows' rationales inverted. The round
+proved the inversion by mutation: with `scrubToken` gutted, the 500 row still passed and
+only the 401 row failed, because go-git splices a response body into the error it builds
+for 401/403/404 and for nothing else. The comment now says which row is the redaction's
+only coverage, so nobody deletes it as redundant.
+
+
+
+**The cancellation sweep's own row lied first.** The fix for a stranded tar landed without
+a test, so it was written afterwards — and its first draft proved nothing. The recording
+stub logged every command it was handed and checked the context only after, so the
+mutation that hands the sweep the *cancelled* context — the obvious implementation, which
+cleans up nothing — passed the row unchanged. A real sandbox refuses a command whose
+context is already done; the stub now records only what it actually runs, and both
+mutations go red on `commands issued: []`, the no-sweep one and the cancelled-context one
+alike. Third instance in this slice of a test that would have certified the bug it existed
+to catch, after the stage-and-rename row and the byte budget's two.
+
+**The verifier's second round found two guards with no test that could fail.** It reran
+the whole gate from scratch on the branch tip (`total statement coverage: 90.28%`,
+integration suites really running: executor 72.4s, brain 46.7s, docker 77.9s, k8s 70.0s)
+and returned PASS with no blockers — and then caught by its own mutation spot-checks what
+this branch's mutation duty had missed twice. One of them made a CHANGELOG claim untrue,
+which is the more serious half: an unsupported claim of evidence is worse than a
+gap nobody asserted was closed.
+
+- **The post-fetch context bound.** With all three `ctx.Err()` re-checks in `cloneToTar`
+  and `packTree` neutralized, every one of the 26 repository rows stayed green.
+  `TestRepoCloneStopsOnASpentBudgetAfterTheFetch` pins it now, with a context that is live
+  until the fixture has been asked for a pack and spent from then on — the deadline that
+  survives the fetch and expires in the phases go-git leaves unbounded. Its Done channel
+  never fires, so the transport completes normally and nothing but an explicit check can
+  notice. Red under the mutation on `a clone whose budget expired after the fetch ran to
+  completion, packing …/repo.tar (14848 bytes)`. The three checks are deliberately
+  redundant — each downstream one catches what the one before it would have — so no single
+  check's removal is observable, and the verifier measured all three rather than accepting
+  the claim from the first: alone, each is invisible (`packTree`'s per-entry check catches
+  the expiry the first one would have); the first and the last removed *together* are
+  caught; and the middle one, which guards the commit checkout the row does not ask for, is
+  covered only by the all-three run. The first draft of this record said "only their
+  removal together is observable", which understated the pin in one direction and
+  overstated the middle check's share in the other. What the row pins is the bound itself,
+  the property `EXECUTOR_REPO_CLONE_TIMEOUT` advertises; the CHANGELOG says that rather
+  than claiming each check is separately pinned. One nuance is in the fixture, not the
+  guard: the context flips when the upload-pack POST *arrives* rather than after the pack
+  is written, so the budget expires around the transport's end and not strictly after it.
+  Immaterial, and the mutation is the proof — the mutant still completes its transport and
+  packs a tar, so nothing on that path consults `ctx.Err()` by itself.
+- **The brain's latest-reason ordering.** `seq DESC` → `ASC` in `cloneFailures` left all
+  four `TestReposBlock*` rows green. The executor's dedupe is per (resource, reason) and
+  deliberately re-emits when the reason changes, so a repository that first failed `auth`
+  and then failed `network` carries both on the log, and reading the older one sends the
+  model — and the operator reading the prompt back — after a credential that stopped being
+  the problem, while the block still claims to describe "the last clone attempt".
+  `TestReposBlockNamesTheLatestFailure` seeds both and goes red on the mutant, quoting the
+  stale line it rendered.
+
+Two of the round's notes are accepted as known rather than fixed here. A `safeRepoMount`
+refusal reaches the wire as reason `internal` with the generic message: the registered
+vocabulary has no better fit, and the specific cause is named in the executor's logs — an
+operator debugging a repository named `skills` sees a wire signal indistinguishable from a
+platform fault. And the same guard refuses the sandbox workdir and its skills tree but not
+a strict *ancestor* of a custom nested workdir, which is unreachable under the default
+`/workspace`, whose only ancestor is `/` and already refused.
+
+**Plan 25 progress summary (archived).** Two slices, two PRs: #329 (the wire half —
+the `github_repository` create arm, migration 0020's `session_resource_credentials`,
+live token rotation, the repo-delete rejection, unit W, and the e-wire-cli acceptance
+recorded above) and the archiving PR (the clone: go-git materialization in the executor,
+the `github_repository_clone_error` surface, the brain's cloud-gated block, the
+`repo-answer` eval). #55 closes with it. The three decisions the user settled on
+2026-08-06 all hold as built: the clone is platform-side via go-git, so the token never
+enters the sandbox and the egress gate is never involved; only the platform half ships,
+with BYOC materialization deferred to #322 and the brain's environment-kind gate keeping
+that gap honest rather than silent; and a clone that fails surfaces as a `session.error`
+and leaves the session running with its other repositories mounted.

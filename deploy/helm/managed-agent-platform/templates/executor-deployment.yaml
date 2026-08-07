@@ -179,6 +179,14 @@ spec:
             - name: EXECUTOR_CHECKPOINT_MAX_BYTES
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.executor.repoCloneMaxBytes }}
+            - name: EXECUTOR_REPO_CLONE_MAX_BYTES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.executor.repoCloneTimeout }}
+            - name: EXECUTOR_REPO_CLONE_TIMEOUT
+              value: {{ . | quote }}
+            {{- end }}
             {{- /* Not `with`: template truthiness folds the numeric 0 — the
                  documented DISABLE value — into "unset", silently arming the
                  24h default. toString first, so 0 survives as "0". */}}
