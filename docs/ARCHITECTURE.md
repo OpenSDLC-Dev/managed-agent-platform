@@ -450,6 +450,16 @@ the upload paths is upload-caused and safe to echo as a 400.
 | `skills.go` | `FromFiles` (loose path-qualified parts → deterministic canonical zip: sorted entries, no timestamps) and `FromZip` (a valid archive is stored verbatim — the download endpoint streams it unmodified), both returning a `Bundle` (name/description/directory + archive + the archive's `Digest`, the sha256 the registry records so materialization can verify what it reads back). Validation: SKILL.md YAML frontmatter at the directory root (name ≤64 chars lowercase/digits/hyphens, no reserved words; description non-empty ≤1024 runes, no XML tags; unknown keys tolerated), directory-vs-name match (case- and underscore-insensitive), path hygiene (no escapes, path-qualified under one top directory), 30 MB total / 10k member caps. `IsZip` — the magic-byte form detection. |
 | `extract.go` | The materialization side: `ReadArchive` reads a stored archive under a compressed-byte cap **and** verifies it against the digest recorded for that version (`ErrDigestMismatch`; an empty expectation means none was recorded and the archive is read unverified) — verification lives in the one function both halves call between fetching and extracting, so a reader cannot forget it; `Extract` then opens it with the reference worker's guards (escape refusal, 10k members, 1 GiB decompressed — actual bytes counted, declared sizes untrusted; zip only, since the platform serves canonical zips) and strips the single top-level wrapper; `Digest` (the lowercase-hex sha256 both halves compare); `TargetDir` (the version's name, skill id fallback); `Sentinel` / `ParseSentinel` / `SentinelVersion` (canonical resolved-set encoding for the idempotence marker, carrying an integrity generation so a marker written under a weaker guarantee — one that predates digest verification — can never satisfy a stronger pass); `BlobKey` (the one `skills/{id}/{version}.zip` layout) and `ArchiveDigestHeader` (the download header that carries the digest to the database-less worker). |
 
+### internal/version
+
+The build-time version stamp every binary shares (plan 27 slice 2): one file,
+one `var Version = "dev"`, overwritten by `-ldflags -X` at release-build time
+(the Dockerfile's `ARG VERSION` on the shared build stage stamps the server
+and gate images alike; docs/RELEASING.md). A bare variable on purpose — zero
+statements keeps it inert under the coverage gate, and there is deliberately
+no version API endpoint (net-new wire surface, plan 27 decision 3). Each
+binary logs it on its startup line; the worker also answers `--version`.
+
 ### internal/mimetab
 
 The pinned extension → MIME table both writers of the `files` registry consult —
@@ -617,7 +627,10 @@ materialization + `EXECUTOR_IMAGE`/`EXECUTOR_WORKDIR` + `SANDBOX_BACKEND` select
 `docker` default, `k8s` — via `internal/sandbox/backend` + `CONTROLPLANE_URL`/`EXECUTOR_GATE_IMAGE`/
 `SANDBOX_DOCKER_GATE_NETWORK` for the egress gate + OTel), and `worker`
 (`ANTHROPIC_BASE_URL` / `ANTHROPIC_ENVIRONMENT_ID` / `ANTHROPIC_ENVIRONMENT_KEY`
-required; no `DATABASE_URL` by design).
+required; no `DATABASE_URL` by design; `--version` prints the injected
+`internal/version` stamp and exits before any configuration is read — the one
+binary users download and run standalone). All of them log that stamp on their
+startup line.
 
 A fifth binary, `gate`, is the per-session egress sidecar rather than a server — it holds no store
 and does not share the `service.Run` shape; its testable logic lives in `internal/gaterun` and it is
