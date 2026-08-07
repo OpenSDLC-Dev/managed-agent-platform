@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path"
 	"path/filepath"
@@ -450,7 +452,7 @@ func TestRepoWithoutCipherSparesAlreadyMaterialized(t *testing.T) {
 	}
 }
 
-// TestRepoInterruptedExtractLeavesNoPartialTree is m-interrupted-extract 🔍:
+// TestRepoInterruptedExtractMidTarLeavesNoTree is m-interrupted-extract 🔍:
 // an extraction that dies **part way through the tar** leaves no `<mount>/.git`
 // behind — which is the whole point of staging into a sibling and renaming,
 // since a partial tree with a `.git` in it is precisely what the idempotence
@@ -617,6 +619,49 @@ func TestMeteredFSChrootSharesTheBudget(t *testing.T) {
 	}
 }
 
+// TestCloneSpoolSymlinks 🔍 covers the two things a symlink does that a regular
+// file does not, both of which the meter and the checkout got wrong.
+//
+// A git tree may hold symlinks, and go-git checks a mode-120000 entry out by
+// calling the filesystem's Symlink directly — not Create, so the byte meter
+// never saw one: a repository of hundreds of thousands of entries pointing at
+// one stored blob costs almost nothing in objects and lands gigabytes of link
+// data in the spool, past a budget that never counted it.
+//
+// And go-billy's default (deprecated) ChrootOS *rewrites* an absolute target to
+// sit under its own root, so `hostfile -> /etc/hosts` would reach the sandbox
+// pointing at the executor's temporary spool path — a dangling link inside a
+// clone that reported success, which `.git` then makes permanently trusted by
+// the idempotence probe. A checkout must carry a symlink's target verbatim and
+// let the sandbox resolve it in its own namespace, which is what git does.
+func TestCloneSpoolSymlinks(t *testing.T) {
+	var spent atomic.Int64
+	dir := t.TempDir()
+	fs := newCloneFS(dir, &spent, 1<<20)
+
+	const target = "/etc/hosts"
+	if err := fs.Symlink(target, "hostfile"); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	got, err := os.Readlink(filepath.Join(dir, "hostfile"))
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if got != target {
+		t.Errorf("the checkout's symlink points at %q, want %q verbatim — an "+
+			"executor-local path would reach the sandbox dangling", got, target)
+	}
+	if spent.Load() < int64(len(target)) {
+		t.Errorf("spent = %d after a %d-byte symlink target; symlink data escapes the budget",
+			spent.Load(), len(target))
+	}
+	// And the budget is enforced on them, not merely counted.
+	big := "/" + strings.Repeat("p", 1<<20)
+	if err := fs.Symlink(big, "huge"); !errors.Is(err, errCloneTooLarge) {
+		t.Errorf("a symlink past the budget gave %v, want errCloneTooLarge", err)
+	}
+}
+
 // TestMeteredFSRefusesTheWriteThatCrosses 🔍 is the in-flight half: the write
 // that would cross the budget is refused and its bytes never reach the disk, so
 // a repository far past the cap costs the cap and not its own size.
@@ -652,6 +697,136 @@ func writeTo(t *testing.T, fs billy.Filesystem, name string, n int) (string, err
 	return name, err
 }
 
+// TestRepoRefusesADestructiveMountPath 🔍: the executor validates the mount
+// path itself before building a command that runs `rm -rf` on it.
+//
+// Create-time validation already refuses all of these, so reaching the executor
+// means the stored row was tampered with — which is exactly when the second
+// check earns its place, because the operation on the other side is
+// destructive and irreversible. `/workspace/repo/..` cleans to `/workspace` and
+// would delete the whole workspace; `/tmp` is the platform's own sandbox
+// staging root and would take every in-flight tar with it.
+func TestRepoRefusesADestructiveMountPath(t *testing.T) {
+	// An empty mount_path is not here: a resource missing one is malformed
+	// rather than dangerous, and materializeRepos' own filter drops it with the
+	// entries missing an id or a url, before any of this.
+	for _, mount := range []string{
+		"/workspace/repo/..", "/tmp", "/tmp/", "/", "relative/path",
+		// The sandbox workdir and the skills tree materialized into it a few
+		// lines earlier in the same pass. `/workspace/skills` is what a
+		// repository *named* skills derives as its default mount, so this one
+		// needs no tampering at all.
+		"/workspace", "/workspace/skills",
+		// Another repository's staging path, which this one's extraction
+		// removes twice.
+		"/workspace/.x.map-repo-staging",
+	} {
+		t.Run(mount, func(t *testing.T) {
+			fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+			sb := &fakeSandbox{}
+			h := newHarness(t, sb)
+			h.seedRepoResource(t, "sesrsc_evil", fx.url(), mount, "ghp_fixture", nil)
+
+			h.runPass(t)
+
+			errs := h.repoErrors(t)
+			if len(errs) != 1 || errs[0]["reason"] != repoOutcomeInternal {
+				t.Fatalf("clone errors = %v, want exactly one internal for %q", errs, mount)
+			}
+			// Refused before any work: no clone, so extractRepo — the only
+			// thing that builds the `rm -rf` — is never reached.
+			if fx.clones.Load() != 0 {
+				t.Error("the repository was cloned before its mount path was judged")
+			}
+		})
+	}
+}
+
+// TestRepoZeroShaIsRefused 🔍: the null object id is 40 hex characters, so it
+// passes create-time validation — and go-git's CheckoutOptions.Validate quietly
+// substitutes `master` for a zero hash rather than failing. The clone would
+// then report success while the mount holds a branch nobody asked for, and the
+// session's own resource keeps advertising the sha. (GitHub's webhook payloads
+// carry 40 zeros in `before`/`after` on branch create and delete, so a
+// forwarding app reaches this without inventing anything.)
+func TestRepoZeroShaIsRefused(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	_, _, cleanup, err := cloneToTar(context.Background(),
+		repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "commit", Sha: strings.Repeat("0", 40)}},
+		"ghp_fixture", 1<<30)
+	defer cleanup()
+	if err == nil {
+		t.Fatal("a zero commit sha cloned successfully; the mount would hold a substituted branch")
+	}
+	if got := cloneReason(err); got != repoOutcomeCheckout {
+		t.Errorf("cloneReason = %q, want %q — the sha is the caller's: %v", got, repoOutcomeCheckout, err)
+	}
+}
+
+// TestCloneReasonBlamesOurselvesForCancellation 🔍: nothing but this platform
+// cancels a clone's context without a deadline — a lost lease, or a shutting
+// down executor. go-git surfaces it as a *url.Error, which the network arm's
+// fallback matches, so the platform's own withdrawal was being counted and
+// logged as the git host's failure.
+func TestCloneReasonBlamesOurselvesForCancellation(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	fx.stall.Store(int64(2 * time.Second))
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(150 * time.Millisecond); cancel() }()
+
+	_, _, cleanup, err := cloneToTar(ctx, repoRef{URL: fx.url()}, "ghp_fixture", 1<<30)
+	defer cleanup()
+	if err == nil {
+		t.Fatal("the clone survived its context being cancelled")
+	}
+	if got := cloneReason(err); got != repoOutcomeInternal {
+		t.Errorf("cloneReason = %q, want %q — we cancelled it, not the remote: %v",
+			got, repoOutcomeInternal, err)
+	}
+}
+
+// TestCloneReasonBlamesTheRightSide 🔍: `internal` means *this platform* broke,
+// and it is the reason an operator reads as "go look at your own logs". Two
+// reachable failures were landing there while being someone else's fault
+// entirely — a caller's malformed branch name, and a remote answering 200 with
+// something that is not a git response, which is what a captive portal, an
+// outage page, or a proxy that swallowed the repository does.
+func TestCloneReasonBlamesTheRightSide(t *testing.T) {
+	t.Run("malformed branch name", func(t *testing.T) {
+		fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+		_, _, cleanup, err := cloneToTar(context.Background(),
+			repoRef{URL: fx.url(), Checkout: &repoCheckout{Type: "branch", Name: "foo:bar"}},
+			"ghp_fixture", 1<<30)
+		defer cleanup()
+		if err == nil {
+			t.Fatal("a branch name with a refspec separator cloned successfully")
+		}
+		if got := cloneReason(err); got != repoOutcomeCheckout {
+			t.Errorf("cloneReason = %q, want %q — the ref is the caller's, not ours: %v",
+				got, repoOutcomeCheckout, err)
+		}
+	})
+
+	t.Run("remote answers 200 with a non-git body", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+			_, _ = io.WriteString(w, "<html><body>502 Bad Gateway</body></html>")
+		}))
+		defer srv.Close()
+
+		_, _, cleanup, err := cloneToTar(context.Background(),
+			repoRef{URL: srv.URL + "/o/r.git"}, "ghp_fixture", 1<<30)
+		defer cleanup()
+		if err == nil {
+			t.Fatal("an HTML body cloned successfully")
+		}
+		if got := cloneReason(err); got != repoOutcomeNetwork {
+			t.Errorf("cloneReason = %q, want %q — the remote spoke, just not git: %v",
+				got, repoOutcomeNetwork, err)
+		}
+	})
+}
+
 // TestRepoCloneErrorNeverQuotesTheToken 🔍 is the w-token-sweep rule applied to
 // the one surface that can still reach a log: a clone's error text.
 //
@@ -673,8 +848,14 @@ func TestRepoCloneErrorNeverQuotesTheToken(t *testing.T) {
 		status     int
 		wantReason string
 	}{
-		// A 500 is the arm that carries a body into the error at all; the 401 is
-		// here because scrubbing must not cost the sentinel that classifies it.
+		// The 401 is the row that exercises the scrub: go-git splices a failing
+		// response's body into the error it builds for 401/403/404 and for
+		// nothing else — every other status becomes an UnexpectedError whose
+		// message renders only the URL and the status code, never the body. So
+		// the 500 row cannot see a token to redact; it is here because the
+		// scrub must not cost the classification (and because it is the only
+		// row covering isRemoteStatusError's arm). Do not drop the 401 row:
+		// it is the redaction's only mutation coverage.
 		{"server error", http.StatusInternalServerError, "network"},
 		{"unauthorized", http.StatusUnauthorized, "auth"},
 	} {

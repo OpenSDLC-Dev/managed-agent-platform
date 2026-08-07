@@ -16,8 +16,10 @@ import (
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/filesystem"
@@ -59,7 +61,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	cleanup = func() { _ = os.RemoveAll(spool) }
 
 	var spent atomic.Int64
-	tree := newMeteredFS(osfs.New(filepath.Join(spool, "tree")), &spent, maxBytes)
+	tree := newCloneFS(filepath.Join(spool, "tree"), &spent, maxBytes)
 	dotgit, err := tree.Chroot(".git")
 	if err != nil {
 		return "", 0, cleanup, err
@@ -82,18 +84,40 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 	if err != nil {
 		return "", 0, cleanup, err
 	}
+	// go-git applies the context to transport only — its post-fetch worktree
+	// reset runs to completion whatever the deadline says — so the phases after
+	// it are bounded here instead. Without this a repository that downloads
+	// inside the deadline and then checks out or packs for hours would hold the
+	// executor indefinitely, and the deadline would bound nothing but the fetch.
+	if err := ctx.Err(); err != nil {
+		return "", 0, cleanup, err
+	}
 	if r.Checkout != nil && r.Checkout.Type == "commit" {
+		hash := plumbing.NewHash(r.Checkout.Sha)
+		// The null object id is forty hex characters, so it passes the create
+		// endpoint's sha validation — and go-git's CheckoutOptions.Validate
+		// substitutes `master` for a zero hash rather than refusing it. Left
+		// alone, a session asking for 000…0 would be told its clone succeeded
+		// while the mount held a branch nobody named. (GitHub's webhooks put
+		// forty zeros in `before`/`after` on branch create and delete, so a
+		// forwarding app reaches this without inventing anything.)
+		if hash.IsZero() {
+			return "", 0, cleanup, fmt.Errorf("%w: the null commit id %s", plumbing.ErrObjectNotFound, r.Checkout.Sha)
+		}
 		wt, werr := repo.Worktree()
 		if werr != nil {
 			return "", 0, cleanup, werr
 		}
-		if werr := wt.Checkout(&git.CheckoutOptions{Hash: plumbing.NewHash(r.Checkout.Sha)}); werr != nil {
+		if werr := wt.Checkout(&git.CheckoutOptions{Hash: hash}); werr != nil {
 			return "", 0, cleanup, werr
+		}
+		if err := ctx.Err(); err != nil {
+			return "", 0, cleanup, err
 		}
 	}
 
 	tarPath = filepath.Join(spool, "repo.tar")
-	size, err = packTree(filepath.Join(spool, "tree"), tarPath, &spent, maxBytes)
+	size, err = packTree(ctx, filepath.Join(spool, "tree"), tarPath, &spent, maxBytes)
 	if err != nil {
 		return "", 0, cleanup, err
 	}
@@ -106,7 +130,7 @@ func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (t
 // repository cannot actually produce through go-git, but which would be a
 // sandbox-side surprise) is skipped. The tar's own bytes ride the same budget
 // the clone spent.
-func packTree(dir, tarPath string, spent *atomic.Int64, maxBytes int64) (int64, error) {
+func packTree(ctx context.Context, dir, tarPath string, spent *atomic.Int64, maxBytes int64) (int64, error) {
 	f, err := os.Create(tarPath)
 	if err != nil {
 		return 0, err
@@ -117,6 +141,13 @@ func packTree(dir, tarPath string, spent *atomic.Int64, maxBytes int64) (int64, 
 
 	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		// Per entry, so a tree large enough to outlast the deadline stops at it
+		// rather than after it: this walk is otherwise the one unbounded phase
+		// of a clone, and a repository with millions of entries spends its time
+		// here, not in the fetch.
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		rel, err := filepath.Rel(dir, p)
@@ -186,6 +217,12 @@ func cloneReason(err error) string {
 		return repoOutcomeTooLarge
 	case errors.Is(err, context.DeadlineExceeded):
 		return repoOutcomeTimeout
+	// Nothing but this platform cancels a clone without a deadline — a lost
+	// lease, or an executor shutting down. go-git surfaces it as a *url.Error,
+	// which the network fallback below happily matches, so our own withdrawal
+	// would otherwise be counted and logged as the git host's failure.
+	case errors.Is(err, context.Canceled):
+		return repoOutcomeInternal
 	case errors.Is(err, transport.ErrAuthenticationRequired),
 		errors.Is(err, transport.ErrAuthorizationFailed):
 		return repoOutcomeAuth
@@ -194,9 +231,15 @@ func cloneReason(err error) string {
 		return repoOutcomeNotFound
 	case errors.Is(err, plumbing.ErrObjectNotFound),
 		errors.Is(err, plumbing.ErrReferenceNotFound),
-		errors.Is(err, git.NoMatchingRefSpecError{}):
+		errors.Is(err, git.NoMatchingRefSpecError{}),
+		// A checkout descriptor go-git will not even build a refspec from —
+		// `foo:bar` as a branch name, say. It is the caller's ref that is
+		// wrong, so `internal` would send the operator to read our logs over
+		// their own typo.
+		errors.Is(err, config.ErrRefSpecMalformedSeparator),
+		errors.Is(err, config.ErrRefSpecMalformedWildcard):
 		return repoOutcomeCheckout
-	case isRemoteStatusError(err), isNetworkError(err):
+	case isRemoteStatusError(err), isNetworkError(err), isProtocolError(err):
 		return repoOutcomeNetwork
 	default:
 		return repoOutcomeInternal
@@ -218,6 +261,15 @@ func isRemoteStatusError(err error) bool {
 	}
 	var httpErr *githttp.Err
 	return errors.As(unexpected.Err, &httpErr)
+}
+
+// isProtocolError reports whether the remote answered but did not speak git:
+// a 200 carrying an outage page, a captive portal, or a proxy that replaced the
+// response. The bytes arrived, so nothing above matches and no HTTP status
+// betrays it — only the pkt-line scanner refusing what it was handed. The
+// remote's failure, not ours.
+func isProtocolError(err error) bool {
+	return errors.Is(err, pktline.ErrInvalidPktLen)
 }
 
 // isNetworkError reports whether err looks like a failure to reach or speak to
@@ -307,6 +359,21 @@ func newMeteredFS(inner billy.Filesystem, spent *atomic.Int64, limit int64) bill
 	return &meteredFS{Filesystem: inner, spent: spent, limit: limit}
 }
 
+// newCloneFS is the spool filesystem the clone checks out into: metered, and
+// rooted at root with **BoundOS** rather than go-billy's v5-compatibility
+// default.
+//
+// The default (ChrootOS, deprecated by go-billy itself) rewrites an absolute
+// symlink target to sit under its own root, so a repository's
+// `hostfile -> /etc/hosts` would be packed as a link to the executor's
+// temporary spool path and reach the sandbox dangling — inside a clone that
+// reported success, which the `.git` probe then trusts forever. BoundOS keeps
+// the target verbatim while still refusing to escape the root, which is what
+// git does and what the sandbox needs to resolve the link in its own namespace.
+func newCloneFS(root string, spent *atomic.Int64, limit int64) billy.Filesystem {
+	return newMeteredFS(osfs.New(root, osfs.WithBoundOS()), spent, limit)
+}
+
 func (m *meteredFS) Create(filename string) (billy.File, error) {
 	f, err := m.Filesystem.Create(filename)
 	return m.wrap(f), err
@@ -320,6 +387,18 @@ func (m *meteredFS) OpenFile(filename string, flag int, perm os.FileMode) (billy
 func (m *meteredFS) TempFile(dir, prefix string) (billy.File, error) {
 	f, err := m.Filesystem.TempFile(dir, prefix)
 	return m.wrap(f), err
+}
+
+// Symlink charges the link's own content — its target — against the budget.
+// go-git checks a mode-120000 tree entry out through here rather than through
+// Create, so without this a repository of hundreds of thousands of entries all
+// naming one stored blob would cost almost nothing in objects while landing
+// gigabytes of link data in the spool, past a cap that never counted it.
+func (m *meteredFS) Symlink(target, link string) error {
+	if n := m.spent.Add(int64(len(target))); n > m.limit {
+		return fmt.Errorf("%w: %d bytes", errCloneTooLarge, n)
+	}
+	return m.Filesystem.Symlink(target, link)
 }
 
 func (m *meteredFS) Chroot(path string) (billy.Filesystem, error) {

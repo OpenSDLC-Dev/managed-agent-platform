@@ -97,6 +97,21 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath)
 			continue
 		}
+		// Judged again here, having already been judged at create. The
+		// duplication is deliberate and narrow: what follows builds an `rm -rf`
+		// on this path inside the session's sandbox, and a row that reached the
+		// database by any route other than the create endpoint would otherwise
+		// have that command built for it. `/workspace/repo/..` cleans to
+		// `/workspace`; `/tmp` is the platform's own staging root.
+		if err := e.safeRepoMount(m.MountPath); err != nil {
+			failed++
+			recordRepoMaterialized(ctx, repoOutcomeInternal)
+			slog.WarnContext(ctx, "repository mount path refused by the executor",
+				"session_id", sid, "resource_id", m.ID, "mount_path", m.MountPath, "err", err)
+			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal,
+				"the repository could not be cloned into the sandbox")
+			continue
+		}
 		// Asked after the probe, not before it: a mount that already carries a
 		// checkout — restored from a checkpoint, or landed by a correctly
 		// configured executor before the drift — needs no token, and reporting
@@ -167,17 +182,102 @@ func (e *Executor) materializeRepo(ctx context.Context, sb sandbox.Sandbox, sid 
 	if err := sb.WriteFileStream(ctx, sandboxTar, f, size); err != nil {
 		return 0, err
 	}
+	// From here the sandbox holds up to the whole byte budget in /tmp, and the
+	// only thing that removes it is the extraction command's own cleanup tail.
+	// A context cancelled between the two — the clone deadline, or a lost lease
+	// — makes Exec return without ever running that tail, stranding a file the
+	// size of the repository inside the session's sandbox for its whole life.
+	// Swept here instead, on a context the cancellation cannot reach.
+	defer func() {
+		if ctx.Err() == nil {
+			return
+		}
+		sweep, stop := context.WithTimeout(context.WithoutCancel(ctx), repoSweepTimeout)
+		defer stop()
+		if _, err := sb.Exec(sweep, sandbox.ExecRequest{
+			Command: "rm -rf " + shellQuote(sandboxTar) + " " + shellQuote(stagingPath(m.MountPath)),
+		}); err != nil {
+			slog.WarnContext(ctx, "the cancelled clone's sandbox staging was not swept",
+				"session_id", sid, "resource_id", m.ID, "path", sandboxTar, "err", err)
+		}
+	}()
 	if err := extractRepo(ctx, sb, m.MountPath, sandboxTar); err != nil {
 		return 0, err
 	}
 	return size, nil
 }
 
+// repoSweepTimeout bounds the post-cancellation sweep. Short on purpose: the
+// work item is already over, and a sandbox that will not answer a `rm` will not
+// answer a longer one either.
+const repoSweepTimeout = 15 * time.Second
+
 // repoStagingRoot is where a clone's tar lands inside the sandbox on its way
 // to the mount. /tmp is one of the two reserved mount targets (plan 25
 // decision 3), which is what keeps a repository from being mounted over the
 // staging area.
 const repoStagingRoot = "/tmp"
+
+// safeRepoMount is the executor's own judgment of a mount path, independent of
+// the API's. It admits only an absolute path that is already in clean form and
+// names something strictly inside a parent — which is what makes `rm -rf` on it
+// bounded — and refuses what this executor knows is already spoken for.
+//
+// It is deliberately not a second copy of the API's full grammar (nesting,
+// per-session caps, the URL-derived default). Those decide what a caller may
+// ask for; this decides only what may be destroyed. Three of the refusals are
+// things the control plane cannot know, which is why they live here:
+//
+//   - the workdir, and the skills directory inside it. Skills are materialized
+//     into <workdir>/skills a few lines before repositories are, so a mount of
+//     either would `rm -rf` a tree written in the same pass — while the system
+//     prompt goes on naming skills/<dir>/SKILL.md. This is reachable without
+//     anyone trying: a repository named `skills` derives exactly
+//     <workdir>/skills as its default mount.
+//   - another repository's staging path. `/workspace/.x.map-repo-staging` is a
+//     mount path the API accepts, and cloning `/workspace/x` removes it twice.
+//
+// The workdir is executor configuration, and the staging name is an executor
+// implementation detail; neither is visible where the resource is validated.
+func (e *Executor) safeRepoMount(mount string) error {
+	if mount == "" || !path.IsAbs(mount) {
+		return fmt.Errorf("mount path %q is not absolute", mount)
+	}
+	if path.Clean(mount) != mount {
+		return fmt.Errorf("mount path %q is not in clean form", mount)
+	}
+	if mount == "/" || mount == repoStagingRoot {
+		return fmt.Errorf("mount path %q is reserved", mount)
+	}
+	if path.Dir(mount) == mount {
+		return fmt.Errorf("mount path %q has no parent to stage beside", mount)
+	}
+	workdir := e.cfg.Workdir
+	if workdir == "" {
+		workdir = sandbox.DefaultWorkdir
+	}
+	if mount == path.Clean(workdir) || mount == path.Join(workdir, "skills") {
+		return fmt.Errorf("mount path %q is the sandbox workdir or its skills directory", mount)
+	}
+	if strings.HasPrefix(path.Base(mount), ".") && strings.HasSuffix(mount, stagingSuffix) {
+		return fmt.Errorf("mount path %q is a repository staging path", mount)
+	}
+	return nil
+}
+
+// stagingPath is where a mount's tree is unpacked before being renamed into
+// place — a sibling of the mount, so the rename stays on one filesystem. Named
+// once because the cancellation sweep has to remove the same directory the
+// extraction would have.
+func stagingPath(mount string) string {
+	clean := path.Clean(mount)
+	return path.Join(path.Dir(clean), "."+path.Base(clean)+stagingSuffix)
+}
+
+// stagingSuffix marks a staging directory. It is also what safeRepoMount
+// refuses as a mount path, so no repository can be mounted where another one's
+// extraction will remove it.
+const stagingSuffix = ".map-repo-staging"
 
 // extractRepo unpacks the shipped tar into a staging directory beside the
 // mount and renames it into place, so `<mount>` — and therefore the
@@ -192,7 +292,7 @@ const repoStagingRoot = "/tmp"
 // so a failed extraction still removes the tar and any partial staging.
 func extractRepo(ctx context.Context, sb sandbox.Sandbox, mount, tarPath string) error {
 	clean := path.Clean(mount)
-	staging := path.Join(path.Dir(clean), "."+path.Base(clean)+".map-repo-staging")
+	staging := stagingPath(mount)
 	q := shellQuote
 	cmd := strings.Join([]string{
 		"rm -rf " + q(staging),

@@ -41,7 +41,11 @@ copy of an entry here.
   `internal`, classified over go-git's typed sentinels rather than message
   text — with a status go-git has no sentinel for, a 5xx or a 429, read off the
   transport error and reported as `network`, because a git-host outage told as
-  `internal` sends the operator to the wrong logs), deduped per
+  `internal` sends the operator to the wrong logs; a remote that answers 200
+  with an outage page and a checkout descriptor go-git will not build a refspec
+  from are `network` and `checkout` for the same reason, and a clone this
+  platform cancels — a lost lease, a shutdown — is `internal`, because it is),
+  deduped per
   (resource, reason) so a polling session cannot flood its own log, and carrying
   `retry_status: retrying` like every other `session.error` the platform writes —
   the next work item re-probes and clones again, so no clone failure is ever the
@@ -57,17 +61,24 @@ copy of an entry here.
   the error chain intact so the reason classification still reads the sentinel
   through it. Two new
   budgets bound the work per repository — `EXECUTOR_REPO_CLONE_MAX_BYTES`
-  (default 1 GiB, metered **as the bytes land**, so an oversized repository is
+  (default 1 GiB, metered **as the bytes land**, symlink targets included, and
+  shared across the `.git` chroot go-git takes, so an oversized repository is
   abandoned mid-clone rather than after) and `EXECUTOR_REPO_CLONE_TIMEOUT`
-  (default 5m) — both exposed in the compose file and the Helm chart. The brain
+  (default 5m, covering the checkout and the packing as well as the fetch, which
+  is all go-git's own context reaches) — both exposed in the compose file and
+  the Helm chart. The executor judges a mount path again before building the
+  `rm -rf` that lands a checkout there, refusing the sandbox workdir, the skills
+  tree materialized into it moments earlier, and another repository's staging
+  path — three things the control plane cannot know it is looking at. The brain
   appends a **"Mounted repositories"** block to the system prompt naming each
   path, url, and checkout, gated to `cloud` environments: BYOC workers
   materialize nothing (deliberate, #322), so asserting a checkout there would be
   a false statement to the model. Unit M of the plan's verification matrix
   lands as executor and brain integration tests — a real git repository served
-  over real smart-HTTP by an in-package fixture, seven rows against real Docker
+  over real smart-HTTP by an in-package fixture, ten rows against real Docker
   sandboxes, and a token sweep of the materialized `.git` — with red-run
-  mutation evidence for all nine new guards. The end-to-end `repo-answer` eval
+  mutation evidence for every new guard, the review rounds' included
+  (docs/HISTORY.md carries the running record). The end-to-end `repo-answer` eval
   joins the opt-in suite (`RUN_EVALS=1` plus `GITHUB_EVAL_REPO_URL` /
   `GITHUB_EVAL_REPO_TOKEN` in `.env`): a passphrase reachable only through a
   real cloned GitHub repository, asked for without naming the mount, so the

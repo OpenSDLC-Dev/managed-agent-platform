@@ -2796,7 +2796,7 @@ server-side transport in a pkt-line HTTP shim, because the library ships the ser
 `transport.Transport` rather than an `http.Handler` and its `ServeUploadPack` lives in an
 internal package. Failure modes are handler-level — an answered status drives the auth
 and not-found reasons, a sleep drives the deadline — so one fixture drives every
-adversarial row. Seven rows run against **real Docker sandboxes**, because the claim
+adversarial row. Ten rows run against **real Docker sandboxes**, because the claim
 "the agent's tools see a checkout" is only observable where tools really run: a fake
 sandbox never runs `tar`, so a clone could never make `<mount>/.git` appear there.
 
@@ -2922,6 +2922,88 @@ register but an inconsistency to fix. Red first across all four failure arms
 reason — including `auth`, since the next work item re-probes and clones again, so no clone
 failure is ever the last attempt and `exhausted` would tell a client this repository is
 finished when it is not.
+
+
+
+**Codex round (`gpt-5.6-sol`, config `ultra` effort, read-only) — ten findings, two already
+fixed, six fixed here, two refuted.** It reviewed `e1cc0dd..366abdb` while the branch moved
+under it and said so, and it independently re-derived two defects the verifier round had
+already closed (the payload's missing `retry_status`; the cipher check running ahead of the
+presence probe). The six new ones were all real:
+
+- **The deadline bounded the fetch and nothing else.** `git.CloneContext` applies its
+  context to transport only, so go-git's post-fetch worktree reset, our detached commit
+  checkout, and `packTree`'s walk all ran to completion however long they took. A
+  repository that downloaded inside five minutes and then checked out for hours held the
+  executor indefinitely. The phases we control now check the context between them, and
+  `packTree` checks it per entry.
+- **`Symlink` bypassed the byte meter entirely.** `meteredFS` wrapped `Create`, `OpenFile`
+  and `TempFile`, but go-git checks a mode-120000 entry out by calling `Filesystem.Symlink`
+  directly. Hundreds of thousands of entries naming one stored blob cost almost nothing in
+  objects and land gigabytes of link data in a spool whose cap never counted it. `Symlink`
+  now charges its target.
+- **Absolute symlinks reached the sandbox rewritten.** `osfs.New` returns go-billy's
+  deprecated ChrootOS, which prepends its own root to an absolute link target, and
+  `packTree` reads the link back with raw `os.Readlink` rather than billy's un-rewriting
+  one — so `hostfile -> /etc/hosts` arrived pointing at the executor's temporary spool
+  path, dangling, inside a clone that reported success and that `.git` then made
+  permanently trusted. The spool is built with `osfs.WithBoundOS()` now, which keeps the
+  target verbatim and still refuses to escape the root. The Claude-side round reproduced
+  this end to end with the real `git` CLI (`git status --porcelain` printing `" M abs-link"`).
+- **A cancellation could strand the shipped tar in the sandbox.** Cleanup lived only in
+  the extraction command's own tail, so a context cancelled between `WriteFileStream` and
+  `Exec` left up to the whole byte budget sitting in the session's `/tmp` for its life.
+  Swept now on a context the cancellation cannot reach.
+- **Two reachable failures blamed the wrong side.** A branch name go-git will not build a
+  refspec from (`foo:bar`) and a remote answering 200 with an outage page both landed on
+  `internal`, which tells an operator to go read our logs over someone else's fault. They
+  classify as `checkout` and `network`.
+- **The executor never re-judged the mount path it builds an `rm -rf` from.** A row that
+  reached the database by any route but the create endpoint had that command built for it;
+  `/workspace/repo/..` cleans to `/workspace`. `safeRepoMount` now judges it independently.
+
+Refuted, with evidence rather than argument: Codex reported that `packTree` holds every
+source descriptor until it returns and dies on `EMFILE` for a repository of thousands of
+files. The `defer src.Close()` is inside the closure passed to `WalkDir`, so it runs per
+entry. A probe under a deliberately tiny limit settled it — 600 files packed with
+`RLIMIT_NOFILE` at 96 — and the same probe, run against a mutant that really did hold the
+descriptors, failed with `too many open files`, so the probe could see the bug it was
+looking for. Its dedupe-across-lease-handoff finding is accepted as a known low: the
+consequence is a duplicate `session.error`, and closing it properly means an append that
+asserts the lease, which is a queue-layer change this slice does not justify.
+
+**Claude-side round (six-dimension adversarial workflow, every agent pinned to Opus 5;
+`/code-review` itself is not model-invocable, so this is a disclosed stand-in) — 22
+findings raised, 8 survived refutation.** Two were the symlink rewrite and the malformed
+branch name, already covered above. Four more were real and are fixed:
+
+- **A zero commit sha silently checked out `master`.** The null object id is forty hex
+  characters, so it passes the create endpoint's validation, and go-git's
+  `CheckoutOptions.Validate` substitutes `master` for a zero hash rather than refusing it —
+  so the session was told its clone succeeded while the mount held a branch nobody named,
+  and the resource went on advertising the sha. GitHub's own webhooks put forty zeros in
+  `before`/`after` on branch create and delete, so a forwarding app reaches this without
+  inventing anything. Refused now, on the `checkout` reason.
+- **A repository named `skills` deleted the skills tree written four lines earlier.** Its
+  derived default mount is `<workdir>/skills`, and extraction begins by removing the mount
+  — while the system prompt goes on naming `skills/<dir>/SKILL.md`. The workdir and its
+  skills directory are refused executor-side, where the workdir is actually known.
+- **A repository could be mounted exactly at another's staging path.**
+  `/workspace/.x.map-repo-staging` is a mount path the API accepts, and cloning
+  `/workspace/x` removes it. Refused by the same guard.
+- **A lost lease was reported as the git host's failure.** `cloneReason` had an arm for
+  `DeadlineExceeded` and none for `Canceled`, and go-git surfaces a cancelled fetch as a
+  `*url.Error`, which the network fallback matches. Nothing but this platform cancels a
+  clone without a deadline, so it classifies `internal` now.
+
+The last two were paperwork the round was right to catch: this record and CHANGELOG both
+said "seven rows against real Docker" when `dockerRepoHarness` appears ten times — a count
+that never described any state of the branch — and the comment in
+`TestRepoCloneErrorNeverQuotesTheToken` had its two rows' rationales inverted. The round
+proved the inversion by mutation: with `scrubToken` gutted, the 500 row still passed and
+only the 401 row failed, because go-git splices a response body into the error it builds
+for 401/403/404 and for nothing else. The comment now says which row is the redaction's
+only coverage, so nobody deletes it as redundant.
 
 **Plan 25 progress summary (archived).** Two slices, two PRs: #329 (the wire half —
 the `github_repository` create arm, migration 0020's `session_resource_credentials`,

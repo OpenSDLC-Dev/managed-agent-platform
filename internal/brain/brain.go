@@ -287,7 +287,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// files block, for cloud environments only (plan 25 decision 8). Every
 	// rendered fact already lives in the stored resource, so there is no join
 	// to miss.
-	reposBlock, reposInjected := b.resolveReposBlock(ctx, resourcesJSON, envKind)
+	reposBlock, reposInjected := b.resolveReposBlock(ctx, sid, resourcesJSON, envKind)
 	req, watermark, err := buildRequest(agent, history, skillsBlock, filesBlock, reposBlock)
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err))

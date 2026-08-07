@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
@@ -86,6 +88,58 @@ func TestReposBlockSkippedOnSelfHosted(t *testing.T) {
 	if strings.Contains(sys, "example-org/widget") {
 		t.Errorf("a self_hosted session's prompt names a repository:\n%s", sys)
 	}
+}
+
+// TestReposBlockMarksAFailedClone 🔍 is the per-repository twin of the
+// self_hosted gate: a repository the executor could not clone must not be
+// described to the model as checked out.
+//
+// The block is rebuilt from the configured resources on every turn, and a clone
+// failure is deliberately tolerated — the session runs on with an absent mount
+// and a session.error the model never sees in replay. Left unqualified, the
+// block would then assert a checkout that is not there for the rest of the
+// session, and the model would search a path that does not exist. The other
+// repositories are unaffected: one failure must not blind the model to the
+// checkouts it does have.
+func TestReposBlockMarksAFailedClone(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{textChunk(0, "ok"), done("end_turn", 1)}}, nil)
+	ctx := context.Background()
+	// The event the executor writes when a clone fails, for the first of the
+	// three repositories seeded below.
+	if _, err := events.NewLog(h.pool).Append(ctx, h.sessionID, []events.NewEvent{{
+		Type: domain.EventSessionError,
+		Payload: []byte(`{"error":{"type":"github_repository_clone_error","resource_id":"sesrsc_a",` +
+			`"url":"https://github.com/example-org/widget","mount_path":"/workspace/widget",` +
+			`"reason":"auth","message":"the repository could not be cloned into the sandbox",` +
+			`"retry_status":{"type":"retrying"}}}`),
+	}}); err != nil {
+		t.Fatalf("seed the clone error: %v", err)
+	}
+
+	sys := seedRepos(t, h)
+
+	line := repoLine(t, sys, "/workspace/widget")
+	if !strings.Contains(line, "auth") || !strings.Contains(strings.ToLower(line), "not available") {
+		t.Errorf("the failed repository is described as if it were checked out: %q", line)
+	}
+	// The two that did not fail are still offered plainly.
+	for _, path := range []string{"/workspace/lib", "/workspace/pin"} {
+		if l := repoLine(t, sys, path); strings.Contains(strings.ToLower(l), "not available") {
+			t.Errorf("%s is marked unavailable, but only sesrsc_a failed: %q", path, l)
+		}
+	}
+}
+
+// repoLine returns the block's bullet for one mount path.
+func repoLine(t *testing.T, sys, mount string) string {
+	t.Helper()
+	for _, l := range strings.Split(sys, "\n") {
+		if strings.HasPrefix(l, "- "+mount+" ") {
+			return l
+		}
+	}
+	t.Fatalf("no repositories-block line for %s in:\n%s", mount, sys)
+	return ""
 }
 
 // TestReposBlockCarriesNoToken is m-brain-no-token 🔍: the brain never reads
