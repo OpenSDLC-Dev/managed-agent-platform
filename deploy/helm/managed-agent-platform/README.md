@@ -49,8 +49,6 @@ generated credential is unstable under `helm template`/GitOps; MinIO requires a
 root password of at least 8 characters).
 
 ```bash
-# Until the first published release (v0.2.0), also pass image coordinates
-# pointing at your own build — see Prerequisites above.
 helm install map ./deploy/helm/managed-agent-platform \
   --namespace map --create-namespace \
   --set controlplane.apiKey=$(openssl rand -hex 24) \

@@ -38,8 +38,11 @@ mid-slice in something the release would half-ship.
    `appVersion`, both to `X.Y.Z`.
 5. Update README.md's status line if the release changes what it says.
 6. Re-point in-repo citations of the section that just moved: grep the docs
-   for `CHANGELOG.md § [Unreleased]` (docs/DIVERGENCES.md and docs/HISTORY.md
-   cite it as an evidence anchor) and retarget each to the new dated section.
+   for `§ [Unreleased]` — the broad pattern; docs/DIVERGENCES.md and
+   docs/HISTORY.md cite it as an evidence anchor under more than one phrasing
+   (`CHANGELOG.md § […]`, `CHANGELOG § […]`), and the v0.2.0 cut missed
+   seven variant-phrased citations with a narrower grep — and retarget each
+   to the new dated section.
 7. Normal PR flow — verifier plus **full dual review** (the PR touches
    `Chart.yaml`, and a release PR changes the deploy surface; it is not
    LIGHT-tier docs), CI green, threads settled, squash merge.

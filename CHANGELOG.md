@@ -43,7 +43,7 @@ by `make changelog` at release time (see [docs/RELEASING.md](./docs/RELEASING.md
   CAP=120000`: the `notes` subcommand now clamps an over-cap section to whole
   leading Keep-a-Changelog groups plus a link to the full CHANGELOG.md
   section — GitHub rejects a body over 125,000 characters, and the first
-  cut's absorbed legacy backlog (about 446,000 bytes at the cut) exceeds it. Deploy docs go
+  cut's absorbed legacy backlog (about 440,000 bytes at the cut) exceeds it. Deploy docs go
   live accordingly: the Helm values/README image guidance now points at the
   published coordinates (from v0.2.0 onward) instead of "build and push your
   own", README gains the `helm install oci://…` path, and RELEASING.md's

@@ -22,5 +22,5 @@ ending with v0.2.0 cut as the acceptance run.
       consumer), notes clamping, deploy-doc updates (PR #334).
 - [ ] Slice 4 — cut v0.2.0: the release PR (changelog assembled, chart 0.2.0,
       citations re-pointed — this PR), then the annotated tag, the release.yml
-      run, and the acceptance kind install from the published artifacts.
-- [ ] Slice 5 — archive the plan, acceptance record to docs/HISTORY.md.
+      run, the acceptance kind install from the published artifacts, and the
+      archiving PR (acceptance record to docs/HISTORY.md; plan archives).
