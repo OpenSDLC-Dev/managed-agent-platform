@@ -1,8 +1,12 @@
 ---
-status: in-progress
+status: archived
 ---
 
 # Plan 27 — release management
+
+> **Archived 2026-08-08, completed.** All four slices delivered (PRs #332,
+> #333, #334, #335 + tag v0.2.0); the progress summary and the v0.2.0
+> acceptance record are in docs/HISTORY.md.
 
 ## Why
 
