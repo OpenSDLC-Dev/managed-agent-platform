@@ -461,6 +461,11 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return nil, err
 	}
+	if resourceInputsHaveRepo(resourceInputs) && s.cipher == nil {
+		// Refused, never stored unencrypted (plan 25 decision 2).
+		recordResourceMutation(ctx, resourceOutcomeError, 1)
+		return nil, errRepoSecretsUnavailable
+	}
 	vaultIDs, err := parseVaultIDs(obj)
 	if err != nil {
 		return nil, err
@@ -516,7 +521,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 
 	now := time.Now().UTC()
-	resources, err := materializeResourceInputs(ctx, tx, resourceInputs, now)
+	resources, repoSeals, err := materializeResourceInputs(ctx, tx, resourceInputs, now)
 	if err != nil {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return nil, err
@@ -568,6 +573,17 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// After the session INSERT (the rows FK it), inside the same transaction:
+	// a repo-bearing create either seals every token or creates nothing.
+	if len(repoSeals) > 0 {
+		if err := insertSessionResourceCredentials(ctx, tx, s.cipher, id, repoSeals); err != nil {
+			recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
+			return nil, err
+		}
+		slog.InfoContext(ctx, "session repository credentials sealed",
+			"session_id", id, "repos", len(repoSeals))
 	}
 
 	if len(initialEvents) > 0 {

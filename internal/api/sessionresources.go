@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -34,6 +36,31 @@ const defaultMountRoot = "/mnt/session/uploads/"
 // never reaches the sandbox layer or the jsonb column.
 const maxMountPathBytes = 1024
 
+// defaultRepoMountRoot prefixes the default mount for a github_repository
+// resource: /workspace/<repo-name> (betasession.go:730 documents the default;
+// the <repo-name> derivation — last URL segment, ".git" stripped — is INFERRED,
+// plan 25 decision 3). Unlike file mounts, repo mounts are used literally.
+const defaultRepoMountRoot = "/workspace/"
+
+// maxAuthorizationTokenBytes caps a github_repository authorization_token (400
+// above it — INFERRED, plan 25 decision 3): real PATs are under a hundred
+// bytes, and the cap keeps every secrets.Cipher backend inside its plaintext
+// ceiling (gcpkms wraps ErrPlaintextTooLarge at 64 KiB, 8 KiB on HSM keys), so
+// an oversized token can never degrade into a backend-dependent 500.
+const maxAuthorizationTokenBytes = 8192
+
+// maxReposPerSession caps github_repository resources per session (INFERRED,
+// plan 25 decision 1 — ours: no repo cap is documented; files cap at 500). With
+// the serial executor loop and per-clone spool cleanup this bounds a session's
+// aggregate clone time and disk at count × the per-repo budget.
+const maxReposPerSession = 8
+
+// reservedRepoMounts are mount targets a repository may never take (plan 25
+// decision 3): "/" (extraction over the rootfs breaks the sandbox image
+// contract, and a re-clone's cleared target would be the sandbox itself) and
+// "/tmp" (the ancestor of the executor's in-sandbox staging path).
+var reservedRepoMounts = map[string]bool{"/": true, "/tmp": true}
+
 // fileResourceJSON is the materialized session file resource
 // (BetaManagedAgentsSessionResource file variant, betasessionresource.go:176-209):
 // every field is api:"required", so the server resolves the default mount_path
@@ -48,19 +75,66 @@ type fileResourceJSON struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// resourceInput is a validated-but-not-yet-materialized resource: its file has
-// not been proven to exist and it has no sesrsc_ id or timestamps.
+// repoResourceJSON is the materialized github_repository session resource
+// (BetaManagedAgentsGitHubRepositoryResource, betasessionresource.go:211-221):
+// {id, created_at, mount_path, type, updated_at, url, checkout} — every field
+// api:"required" except checkout (api:"nullable"). The authorization_token is
+// write-only on the wire and deliberately absent from this type: what lands in
+// the verbatim-echoed sessions.resources jsonb is token-free by construction
+// (plan 25 decision 2); the secret seals into session_resource_credentials.
+type repoResourceJSON struct {
+	ID        string        `json:"id"`
+	CreatedAt time.Time     `json:"created_at"`
+	MountPath string        `json:"mount_path"`
+	Type      string        `json:"type"`
+	UpdatedAt time.Time     `json:"updated_at"`
+	URL       string        `json:"url"`
+	Checkout  *checkoutJSON `json:"checkout"` // nullable: renders null when omitted (as-given, plan 25 decision 3)
+}
+
+// checkoutJSON is the branch|commit checkout union (betasession.go:803-807
+// registers exactly these two variants), stored and rendered as given.
+type checkoutJSON struct {
+	Type string `json:"type"`
+	Name string `json:"name,omitempty"` // branch variant
+	Sha  string `json:"sha,omitempty"`  // commit variant
+}
+
+// resourceKind discriminates the validated resource union.
+type resourceKind int
+
+const (
+	resourceKindFile resourceKind = iota
+	resourceKindRepo
+)
+
+// resourceInput is a validated-but-not-yet-materialized resource: a file has
+// not been proven to exist, a repo's token is not yet sealed, and neither has
+// a sesrsc_ id or timestamps. The token lives only here in memory on its way
+// to the cipher — it is never marshaled.
 type resourceInput struct {
-	fileID    string
+	kind      resourceKind
 	mountPath string
+	// file variant
+	fileID string
+	// github_repository variant
+	url      string
+	token    string
+	checkout *checkoutJSON
 }
 
 // parseResourceInputs validates the create-time resources[] union without
-// touching the database: each element must be a supported resource (only
-// type:"file" in v1; github_repository/memory_store keep the union seam open —
-// the git half of #55 lands there — but are rejected), a valid file_id, and an
-// absolute, unique, storable mount_path. Existence of the referenced file is
-// checked later, inside the create transaction (materializeResourceInputs).
+// touching the database: each element must be a supported resource (file or
+// github_repository; memory_store keeps its seam open but stays rejected), a
+// valid file_id or canonical GitHub URL + token, and an absolute, unique,
+// storable mount_path. Existence of a referenced file is checked later, inside
+// the create transaction (materializeResourceInputs). Cross-resource rules
+// (plan 25 decision 3): uniqueness is judged on path.Clean forms so aliases of
+// one directory cannot coexist; no resource may sit at a proper ancestor of a
+// repository's mount (a file there is a non-directory where the clone needs a
+// directory, and nested repos would let a fresh re-clone of the outer clear
+// the inner — file-inside-repo, the supported overlay, stays legal); and a
+// session mounts at most maxReposPerSession repositories.
 func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error) {
 	raw, ok := obj["resources"]
 	if !ok || isNull(raw) {
@@ -72,18 +146,48 @@ func parseResourceInputs(obj map[string]json.RawMessage) ([]resourceInput, error
 	}
 	out := make([]resourceInput, 0, len(items))
 	seen := make(map[string]bool, len(items))
+	repos := 0
 	for _, item := range items {
 		in, err := parseResourceItem(item)
 		if err != nil {
 			return nil, err
 		}
-		if seen[in.mountPath] {
+		clean := path.Clean(in.mountPath)
+		if seen[clean] {
 			return nil, errInvalid("mount_path %q is used by more than one resource", in.mountPath)
 		}
-		seen[in.mountPath] = true
+		seen[clean] = true
+		if in.kind == resourceKindRepo {
+			repos++
+		}
 		out = append(out, in)
 	}
+	if repos > maxReposPerSession {
+		return nil, errInvalid("a session can mount at most %d github_repository resources", maxReposPerSession)
+	}
+	for _, r := range out {
+		if r.kind != resourceKindRepo {
+			continue
+		}
+		for _, p := range out {
+			if properPathAncestor(path.Clean(p.mountPath), path.Clean(r.mountPath)) {
+				return nil, errInvalid("mount_path %q is an ancestor of repository mount_path %q", p.mountPath, r.mountPath)
+			}
+		}
+	}
 	return out, nil
+}
+
+// properPathAncestor reports whether clean path a is a proper ancestor
+// directory of clean path b.
+func properPathAncestor(a, b string) bool {
+	if a == b {
+		return false
+	}
+	if a == "/" {
+		return true
+	}
+	return strings.HasPrefix(b, a+"/")
 }
 
 func parseResourceItem(raw json.RawMessage) (resourceInput, error) {
@@ -104,7 +208,9 @@ func parseResourceObject(obj map[string]json.RawMessage) (resourceInput, error) 
 	switch typ {
 	case "file":
 		return parseFileResource(obj)
-	case "github_repository", "memory_store":
+	case "github_repository":
+		return parseRepoResource(obj)
+	case "memory_store":
 		return resourceInput{}, errInvalid("%s resources are not supported yet", typ)
 	default:
 		return resourceInput{}, errInvalid("resource type %q is not supported", typ)
@@ -134,6 +240,155 @@ func parseFileResource(obj map[string]json.RawMessage) (resourceInput, error) {
 	return resourceInput{fileID: fileID, mountPath: mountPath}, nil
 }
 
+// parseRepoResource validates the github_repository create variant
+// (betasession.go:722-733: authorization_token, type, url required;
+// mount_path and checkout optional). Validation is create-time-local — no
+// network call proves the repo or the token; the first materialization is the
+// probe (plan 25 decision 3).
+func parseRepoResource(obj map[string]json.RawMessage) (resourceInput, error) {
+	if err := rejectUnknownKeys(obj, "type", "url", "authorization_token", "mount_path", "checkout"); err != nil {
+		return resourceInput{}, err
+	}
+	rawURL, err := requiredString(obj, "url")
+	if err != nil {
+		return resourceInput{}, err
+	}
+	repoName, err := parseGitHubRepoURL(rawURL)
+	if err != nil {
+		return resourceInput{}, err
+	}
+	token, err := requiredString(obj, "authorization_token")
+	if err != nil {
+		return resourceInput{}, err
+	}
+	if len(token) > maxAuthorizationTokenBytes {
+		return resourceInput{}, errInvalid("authorization_token must be at most %d bytes", maxAuthorizationTokenBytes)
+	}
+	checkout, err := parseCheckout(obj)
+	if err != nil {
+		return resourceInput{}, err
+	}
+	mountPath, set, null, err := stringField(obj, "mount_path")
+	if err != nil {
+		return resourceInput{}, err
+	}
+	if !set || null || mountPath == "" {
+		mountPath = defaultRepoMountRoot + repoName
+	} else if err := validateRepoMountPath(mountPath); err != nil {
+		return resourceInput{}, err
+	}
+	return resourceInput{
+		kind: resourceKindRepo, mountPath: mountPath,
+		url: rawURL, token: token, checkout: checkout,
+	}, nil
+}
+
+// parseGitHubRepoURL enforces the exact canonical repository URL
+// (plan 25 decision 3, strictness INFERRED): https://github.com/{owner}/{repo}
+// — scheme https, host github.com with no userinfo and no port, exactly two
+// non-empty path segments (optional ".git" on the second), no query, no
+// fragment, no trailing slash. The url is a rendered, logged field: a
+// credential smuggled into it (https://TOKEN@github.com/o/r, ?token=…) would
+// break the write-only-token guarantee, so the grammar rejects every carrier.
+// Returns the derived <repo-name> for the default mount path.
+func parseGitHubRepoURL(raw string) (string, error) {
+	bad := func() error { return errInvalid("url must be a https://github.com/{owner}/{repo} repository URL") }
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", bad()
+	}
+	if u.Scheme != "https" || u.Host != "github.com" || u.User != nil ||
+		u.Opaque != "" || u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "" {
+		return "", bad()
+	}
+	segs := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if len(segs) != 2 || segs[0] == "" || segs[1] == "" {
+		return "", bad()
+	}
+	name := strings.TrimSuffix(segs[1], ".git")
+	if name == "" {
+		return "", bad()
+	}
+	return name, nil
+}
+
+// parseCheckout parses the optional checkout union: {type:"branch", name} |
+// {type:"commit", sha} (betasession.go:803-807 registers exactly these two).
+// Omitted or null means the repository's default branch, resolved at clone
+// time — stored and rendered as null (as-given, INFERRED, plan 25 decision 3).
+func parseCheckout(obj map[string]json.RawMessage) (*checkoutJSON, error) {
+	raw, ok := obj["checkout"]
+	if !ok || isNull(raw) {
+		return nil, nil
+	}
+	var co map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &co); err != nil {
+		return nil, errInvalid("checkout must be an object")
+	}
+	typ, err := requiredString(co, "type")
+	if err != nil {
+		return nil, errInvalid("checkout.type is required")
+	}
+	switch typ {
+	case "branch":
+		if err := rejectUnknownKeys(co, "type", "name"); err != nil {
+			return nil, err
+		}
+		name, err := requiredString(co, "name")
+		if err != nil {
+			return nil, errInvalid("checkout.name is required for a branch checkout")
+		}
+		return &checkoutJSON{Type: "branch", Name: name}, nil
+	case "commit":
+		if err := rejectUnknownKeys(co, "type", "sha"); err != nil {
+			return nil, err
+		}
+		sha, err := requiredString(co, "sha")
+		if err != nil {
+			return nil, errInvalid("checkout.sha is required for a commit checkout")
+		}
+		if !isFullCommitSHA(sha) {
+			return nil, errInvalid("checkout.sha must be a full 40-character commit SHA")
+		}
+		return &checkoutJSON{Type: "commit", Sha: sha}, nil
+	default:
+		return nil, errInvalid("checkout.type must be \"branch\" or \"commit\"")
+	}
+}
+
+// isFullCommitSHA reports whether s is exactly 40 hex characters ("Full commit
+// SHA to check out", betasession.go:575; the 40-hex strictness is INFERRED).
+func isFullCommitSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validateRepoMountPath is validateMountPath plus the repo arm's stricter
+// rules (plan 25 decision 3, INFERRED): the path must equal its path.Clean
+// form — aliases like /workspace/./r or a trailing slash would evade the
+// cleaned-form uniqueness check — and may not take a reserved target.
+func validateRepoMountPath(p string) error {
+	if err := validateMountPath(p); err != nil {
+		return err
+	}
+	if path.Clean(p) != p {
+		return errInvalid("mount_path must be a clean absolute path (no \".\", \"..\", doubled separators, or trailing slash)")
+	}
+	if reservedRepoMounts[p] {
+		return errInvalid("mount_path %q is reserved", p)
+	}
+	return nil
+}
+
 // validateMountPath enforces the mount-path shape: absolute, bounded, and
 // storable. An unstorable byte (U+0000, invalid UTF-8) would otherwise fail as a
 // 500 when the resources array binds into the jsonb column (see #135).
@@ -150,24 +405,88 @@ func validateMountPath(p string) error {
 	return nil
 }
 
+// repoSeal carries a repository's write-only token from validation to the
+// cipher: the resource_id of the rendered row it backs, and the clear token
+// that exists only in memory until insertSessionResourceCredentials seals it.
+type repoSeal struct {
+	resourceID string
+	token      string
+}
+
 // materializeResourceInputs verifies each referenced file exists in the same
 // transaction as the create (cheaper failure locality than an unvalidated
 // reference — an INFERRED divergence, docs/DIVERGENCES.md) and stamps each input
 // with a fresh sesrsc_ id and the create timestamp. A file deleted between this
 // check and a later materialization is tolerated by design (plan decision 2).
-func materializeResourceInputs(ctx context.Context, db querier, inputs []resourceInput, now time.Time) ([]fileResourceJSON, error) {
-	out := make([]fileResourceJSON, 0, len(inputs))
+// Repositories render token-free (plan 25 decision 2); their tokens come back
+// as seals for the caller to store once the session row exists (the credential
+// rows FK the session).
+func materializeResourceInputs(ctx context.Context, db querier, inputs []resourceInput, now time.Time) ([]json.RawMessage, []repoSeal, error) {
+	out := make([]json.RawMessage, 0, len(inputs))
+	var seals []repoSeal
 	for _, in := range inputs {
-		if err := fileMustExist(ctx, db, in.fileID); err != nil {
-			return nil, err
+		id := domain.NewID(domain.PrefixResource).String()
+		switch in.kind {
+		case resourceKindRepo:
+			out = append(out, mustJSON(repoResourceJSON{
+				ID: id, CreatedAt: now, MountPath: in.mountPath,
+				Type: "github_repository", UpdatedAt: now,
+				URL: in.url, Checkout: in.checkout,
+			}))
+			seals = append(seals, repoSeal{resourceID: id, token: in.token})
+		default:
+			if err := fileMustExist(ctx, db, in.fileID); err != nil {
+				return nil, nil, err
+			}
+			out = append(out, mustJSON(fileResourceJSON{
+				ID: id, CreatedAt: now, FileID: in.fileID,
+				MountPath: in.mountPath, Type: "file", UpdatedAt: now,
+			}))
 		}
-		out = append(out, fileResourceJSON{
-			ID:        domain.NewID(domain.PrefixResource).String(),
-			CreatedAt: now, FileID: in.fileID, MountPath: in.mountPath,
-			Type: "file", UpdatedAt: now,
-		})
 	}
-	return out, nil
+	return out, seals, nil
+}
+
+// errRepoSecretsUnavailable answers a repo-bearing create or a token rotation
+// on a deployment with no secrets cipher: refused, never stored unencrypted
+// (the errSecretsUnavailable twin, plan 25 decision 2).
+var errRepoSecretsUnavailable = &apiError{http.StatusInternalServerError, errTypeAPI,
+	"a secrets cipher is not configured on this deployment; github_repository resources are unavailable"}
+
+// resourceInputsHaveRepo reports whether any validated input is a repository —
+// the create path fails fast on a cipher-less deployment before touching the
+// database.
+func resourceInputsHaveRepo(inputs []resourceInput) bool {
+	for _, in := range inputs {
+		if in.kind == resourceKindRepo {
+			return true
+		}
+	}
+	return false
+}
+
+// insertSessionResourceCredentials seals each repository token and stores the
+// ciphertext beside the session (plan 25 decision 2). Runs after the session
+// INSERT in the same transaction: the rows FK the session with ON DELETE
+// CASCADE, so a credential can never outlive its session.
+func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, cipher secrets.Cipher, sessionID string, seals []repoSeal) error {
+	for _, sl := range seals {
+		ct, keyID, err := cipher.Encrypt(ctx, []byte(sl.token))
+		if errors.Is(err, secrets.ErrPlaintextTooLarge) {
+			// Unreachable behind maxAuthorizationTokenBytes; classified as the
+			// caller's error anyway per the secrets contract.
+			return errInvalid("authorization_token is too large for this deployment's cipher")
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO session_resource_credentials (resource_id, session_id, token_ciphertext, token_key_id)
+			 VALUES ($1, $2, $3, $4)`, sl.resourceID, sessionID, ct, keyID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // fileMustExist reports whether a file row exists, mapping absence to the wire
@@ -308,6 +627,13 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 	if err != nil {
 		return fileResourceJSON{}, err
 	}
+	if in.kind != resourceKindFile {
+		// The add endpoint is typed file-only in the SDK (Add returns the file
+		// resource, betasessionresource.go:135) and the docs pin repos to the
+		// session's lifetime — wire-faithful, message INFERRED (plan 25
+		// decision 3).
+		return fileResourceJSON{}, errInvalid("only file resources can be added to an existing session")
+	}
 	if err := checkID(id, "session"); err != nil {
 		return fileResourceJSON{}, err
 	}
@@ -391,6 +717,12 @@ func (s *server) deleteSessionResourceTx(ctx context.Context, id, rid string) er
 	if idx < 0 {
 		return errNotFound("session resource %s not found", rid)
 	}
+	if resourceType(resources[idx]) == "github_repository" {
+		// "Repositories are attached for the lifetime of the session" (the
+		// public GitHub guide); the rejection shape is INFERRED (plan 25
+		// decision 3). The credential row dies with the session cascade.
+		return errInvalid("github_repository resources cannot be removed; repositories are attached for the lifetime of the session")
+	}
 	resources = append(resources[:idx], resources[idx+1:]...)
 	if err := updateSessionResources(ctx, tx, id, resources); err != nil {
 		return err
@@ -398,14 +730,28 @@ func (s *server) deleteSessionResourceTx(ctx context.Context, id, rid string) er
 	return tx.Commit(ctx)
 }
 
-// updateSessionResource handles POST …/resources/{rid}. The reference accepts
-// only an authorization_token here and rotates it for github_repository
-// resources; every resource this platform stores is a file, so the operation is
-// always rejected (INFERRED error shape, docs/DIVERGENCES.md).
+// updateSessionResource handles POST …/resources/{rid} — token rotation, the
+// one mutation a github_repository resource supports ("Currently only
+// `github_repository` resources support token rotation",
+// betasessionresource.go:690-698). The new token seals over the old ciphertext
+// and the resource's updated_at bumps inside the echoed jsonb; an already
+// materialized clone is unaffected (no retroactive effect — INFERRED, plan 25
+// decision 5). File resources keep the established rejection.
 func (s *server) updateSessionResource(r *http.Request) (any, error) {
 	ctx := r.Context()
 	id := normalizeSessionID(r.PathValue("id"))
 	rid := r.PathValue("rid")
+	res, err := s.rotateResourceTokenTx(ctx, id, rid, r)
+	if err != nil {
+		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
+		return nil, err
+	}
+	recordResourceMutation(ctx, resourceOutcomeOK, 1)
+	slog.InfoContext(ctx, "session resource token rotated", "session_id", id, "resource_id", rid)
+	return res, nil
+}
+
+func (s *server) rotateResourceTokenTx(ctx context.Context, id, rid string, r *http.Request) (json.RawMessage, error) {
 	obj, err := decodeObject(r)
 	if err != nil {
 		return nil, err
@@ -413,23 +759,93 @@ func (s *server) updateSessionResource(r *http.Request) (any, error) {
 	if err := rejectUnknownKeys(obj, "authorization_token"); err != nil {
 		return nil, err
 	}
+	token, err := requiredString(obj, "authorization_token")
+	if err != nil {
+		return nil, err
+	}
+	if len(token) > maxAuthorizationTokenBytes {
+		return nil, errInvalid("authorization_token must be at most %d bytes", maxAuthorizationTokenBytes)
+	}
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
 	if err := checkResourceID(rid); err != nil {
 		return nil, err
 	}
-	resources, _, err := sessionResourceRows(ctx, s.pool, id, false)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	resources, archivedAt, err := sessionResourceRows(ctx, tx, id, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("session %s not found", id)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if findResource(resources, rid) == nil {
+	if archivedAt != nil {
+		return nil, errInvalid("session %s is archived", id)
+	}
+	idx := indexOfResource(resources, rid)
+	if idx < 0 {
 		return nil, errNotFound("session resource %s not found", rid)
 	}
-	return nil, errInvalid("only github_repository resources support token rotation")
+	if resourceType(resources[idx]) != "github_repository" {
+		return nil, errInvalid("only github_repository resources support token rotation")
+	}
+	if s.cipher == nil {
+		return nil, errRepoSecretsUnavailable
+	}
+	ct, keyID, err := s.cipher.Encrypt(ctx, []byte(token))
+	if errors.Is(err, secrets.ErrPlaintextTooLarge) {
+		return nil, errInvalid("authorization_token is too large for this deployment's cipher")
+	}
+	if err != nil {
+		return nil, err
+	}
+	tag, err := tx.Exec(ctx,
+		`UPDATE session_resource_credentials
+		    SET token_ciphertext = $1, token_key_id = $2, updated_at = now()
+		  WHERE resource_id = $3 AND session_id = $4`, ct, keyID, rid, id)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() != 1 {
+		// A stored repo resource always has its credential row (created in the
+		// same transaction); its absence is an invariant breach, not a 404.
+		return nil, errors.New("session resource credential row missing")
+	}
+	updated, err := resourceWithUpdatedAt(resources[idx], time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	resources[idx] = updated
+	if err := updateSessionResources(ctx, tx, id, resources); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// resourceWithUpdatedAt re-marshals a stored resource object with its
+// updated_at replaced. Key order may change (Go map marshaling); JSON key
+// order is not wire-significant.
+func resourceWithUpdatedAt(raw json.RawMessage, now time.Time) (json.RawMessage, error) {
+	var o map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &o); err != nil {
+		return nil, err
+	}
+	ts, err := json.Marshal(now)
+	if err != nil {
+		return nil, err
+	}
+	o["updated_at"] = ts
+	return json.Marshal(o)
 }
 
 // checkResourceID rejects a path id that is not a well-formed sesrsc_ id with the
@@ -464,6 +880,15 @@ func resourceID(raw json.RawMessage) string {
 	}
 	_ = json.Unmarshal(raw, &o)
 	return o.ID
+}
+
+// resourceType returns the stored resource object's type discriminator.
+func resourceType(raw json.RawMessage) string {
+	var o struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(raw, &o)
+	return o.Type
 }
 
 func mountPathTaken(resources []json.RawMessage, path string) bool {
@@ -513,10 +938,10 @@ func decodeResourceCursor(s string) (string, error) {
 	return rest, nil
 }
 
-// MetricSessionResources counts session file-resource mutations (create-attach,
-// add, delete) by outcome. Outcome-only labels: session/resource/file ids ride
-// the structured logs, never the metric (plan decision 9). Exported so the
-// integration test can assert the name and labels.
+// MetricSessionResources counts session resource mutations (create-attach,
+// add, delete, token rotation) by outcome. Outcome-only labels:
+// session/resource/file ids ride the structured logs, never the metric (plan
+// decision 9). Exported so the integration test can assert the name and labels.
 const MetricSessionResources = "session.resources"
 
 const (
@@ -547,7 +972,7 @@ func resourceOutcomeFor(err error) string {
 func recordResourceMutation(ctx context.Context, outcome string, count int) {
 	meter := otel.GetMeterProvider().Meter(apiMeterName)
 	c, err := meter.Int64Counter(MetricSessionResources,
-		metric.WithDescription("Session file-resource mutations by outcome."))
+		metric.WithDescription("Session resource mutations by outcome."))
 	if err != nil {
 		return
 	}

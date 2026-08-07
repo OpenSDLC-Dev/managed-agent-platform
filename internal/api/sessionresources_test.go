@@ -173,7 +173,7 @@ func TestSessionResourceValidation(t *testing.T) {
 		"nonexistent file":     {[]any{map[string]any{"type": "file", "file_id": "file_0000000000000000000000gk"}}, 404},
 		"malformed file id":    {[]any{map[string]any{"type": "file", "file_id": "not-an-id"}}, 400},
 		"missing file id":      {[]any{map[string]any{"type": "file"}}, 400},
-		"github unsupported":   {[]any{map[string]any{"type": "github_repository"}}, 400},
+		"github missing url":   {[]any{map[string]any{"type": "github_repository"}}, 400},
 		"memory unsupported":   {[]any{map[string]any{"type": "memory_store"}}, 400},
 		"unknown type":         {[]any{map[string]any{"type": "wizard"}}, 400},
 		"missing type":         {[]any{map[string]any{"file_id": fileA}}, 400},
