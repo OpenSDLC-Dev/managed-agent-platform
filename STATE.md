@@ -13,7 +13,7 @@ ending with v0.2.0 cut as the acceptance run.
 
 - [x] Slice 1 — fragment mechanism: `changelog.d/` + `tools/changelog`
       (mutation-checked tests), `make changelog`/`changelog-notes`,
-      docs/RELEASING.md, governance rewording (this PR).
+      docs/RELEASING.md, governance rewording (PR #332).
 - [x] Slice 2 — version embedding: `internal/version`, Dockerfile ARG + ldflags,
       startup-log version attribute on all five binaries, worker `--version`
       (this PR; the Make-side ldflags land with their consumer in slice 3).

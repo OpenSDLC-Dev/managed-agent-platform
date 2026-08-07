@@ -40,6 +40,9 @@
 //	                             init container (default "busybox")
 //	OTEL_EXPORTER_OTLP_ENDPOINT  optional OTLP/gRPC collector endpoint
 //	OTEL_EXPORTER_OTLP_INSECURE  "true" to export without TLS (default TLS)
+//
+// The one flag: --version (also -version) prints the build-time version
+// stamp (internal/version) and exits before any configuration is read.
 package main
 
 import (

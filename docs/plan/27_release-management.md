@@ -81,11 +81,13 @@ from a public, reproducible workflow run, not a maintainer's laptop.
    its test suite (mutation-checked), Make targets, docs/RELEASING.md, the
    governance rewording (CLAUDE.md, AGENTS.md, `.claude/agents/verifier.md`).
    From this PR on, new PRs write fragments.
-2. **Version embedding** — `internal/version`, Makefile LDFLAGS, Dockerfile
-   ARG, startup logs, worker `--version`.
-3. **Publishing pipeline** — `release.yml` + the release Make targets +
-   deploy-doc updates (Helm values comment, README install pointers,
-   RELEASING.md's "what the tag triggers" section goes live).
+2. **Version embedding** — `internal/version`, Dockerfile ARG + ldflags,
+   startup logs, worker `--version`.
+3. **Publishing pipeline** — `release.yml` + the release Make targets (which
+   bring the Make-side ldflags injection with its consumer,
+   `release-binaries`) + deploy-doc updates (Helm values comment, README
+   install pointers, RELEASING.md's "what the tag triggers" section goes
+   live).
 4. **Cut v0.2.0** — the acceptance run of the whole scheme: release PR
    (assembles the legacy backlog plus accumulated fragments, bumps the chart,
    README status line), annotated tag, `release.yml` publishes everything;
