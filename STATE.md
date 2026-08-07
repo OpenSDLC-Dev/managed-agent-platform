@@ -4,8 +4,15 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.**
+**[Plan 25 — git/repo mounting](./docs/plan/25_git-repo-mounting.md)** (`in-progress`,
+the git half of #55): `github_repository` session resources, cloned platform-side into
+the sandbox. BYOC materialization is deferred to #322.
 
 ## Tasks
 
-(none — nothing in flight)
+- [x] Slice 1 — the wire + sealed token storage: create acceptance/validation,
+      migration 0020, rotation live, delete rejection, unit W tests + mutation
+      evidence (this PR).
+- [ ] Slice 2 — the clone: go-git executor materialization, `session.error`
+      surfacing, the brain's "Mounted repositories" block, the `repo-answer`
+      eval; archive the plan, close #55.
