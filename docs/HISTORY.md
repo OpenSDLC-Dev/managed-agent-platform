@@ -33,6 +33,79 @@ recorded nowhere else.
 
 ---
 
+## Release management (plan 27) — archived 2026-08-08, all four slices delivered (#332 #333 #334 #335, tag v0.2.0)
+
+docs/plan/27_release-management.md is archived complete: the fragment changelog
+(`changelog.d/` + `tools/changelog`, slice 1, PR #332), version embedding
+(`internal/version` + ldflags through the Dockerfile and worker `--version`,
+slice 2, PR #333), the tag-triggered publishing pipeline (`release.yml`
+sequencing the `release-*` Make targets, slice 3, PR #334), and the v0.2.0 cut
+itself — release PR #335, the annotated tag, and the acceptance below (slice 4,
+closed by this archiving PR). The first cut absorbed the legacy `[Unreleased]`
+backlog into `§ [0.2.0]` byte-identically and re-pointed twelve evidence
+citations across DIVERGENCES/HISTORY — the ritual's prescribed search was
+widened to a fixed-string `grep -rF` after the narrow pattern missed seven
+variant spellings; both lessons now live in docs/RELEASING.md step 6.
+
+Review hardening that outlived the PRs: the GitHub Release step converges via
+create-if-missing → `gh release edit --draft=false` → `upload --clobber`,
+because `gh release view` matches drafts (confirmed against gh v2.97.0 source)
+and a cancelled first run would otherwise leave an unpublished draft that
+re-runs green-exit into; every pure check (strict-SemVer tag validation,
+`release-tag-check`, `release-chart-check` with the version/appVersion
+lockstep, the notes render) runs before anything publishes, so a half-bumped
+chart or an unrenderable notes body aborts an unpublished run; the Dockerfile
+build stage is pinned to `$BUILDPLATFORM` with Go cross-compiling to
+`$TARGETOS/$TARGETARCH` (probe: the amd64 target built natively on an arm64
+host in 12s, x86-64 ELF extracted); and `TestNotesCapChargesTrailer` pins the
+clamp trailer into the cap budget, mutation-proven red.
+
+Decisions evaluated and rejected. Byte-reproducible release tarballs:
+tar/gzip timestamp normalization is platform-conditional complexity for a
+guarantee nobody asked for — the shipped contract is "a re-run converges the
+release with equivalent, not byte-identical, artifacts", worded in release.yml
+and RELEASING.md. An editorial figure refresh inside the release PR's assembly
+(flagged P1 in review): reverted, so the assembled 6,448-line CHANGELOG.md
+reproduces byte-for-byte from the fragments as they stood on the release
+commit's parent (`4eb4245` — the release consumed them, so that parent is
+where an auditor finds the sources) — fragment-verbatim is the precedent the
+first cut sets.
+
+---
+
+## v0.2.0 release acceptance — the tag-triggered pipeline end to end (run 2026-08-08) — ✅ passed
+
+The annotated tag `v0.2.0` on the release PR's squash commit (`7a8dbdc`) drove
+release.yml run 31208475933 green on the first attempt — every step: SemVer
+resolve, `release-tag-check` + `release-chart-check`, the notes render,
+multi-arch `release-images` (linux/amd64 + arm64), `release-chart` to OCI,
+`release-binaries`, and the create→edit→upload Release step. Verified:
+
+- **GitHub Release** published, not draft: four worker tarballs
+  (linux/darwin × amd64/arm64) plus sha256sums; notes body 85,528 characters —
+  the 446,309-byte un-clamped notes body clamped at a Keep-a-Changelog group
+  boundary under the 120,000 cap, ending with the tag-pinned CHANGELOG link.
+- **Worker binary leg:** the darwin/arm64 asset downloaded from the Release,
+  `shasum -a 256 -c` OK, `./worker --version` → `0.2.0`.
+- **GHCR visibility:** the five packages (controlplane/brain/executor/gate
+  images + the chart) started private per the `GITHUB_TOKEN` default and were
+  flipped public in the org package settings — the documented one-time step
+  (browser-driven; the anonymous probe method was first validated against a
+  known-public package after an earlier "flipped" report turned out to be a
+  different package). All five answer anonymous `tags/list` 200.
+- **kind install from the published artifacts:** `helm install` from
+  `oci://ghcr.io/opensdlc-dev/charts/managed-agent-platform --version 0.2.0`
+  into a fresh namespace on the local kind cluster — six pods Ready; the three
+  platform pod specs name their per-component images and all three resolve to
+  one digest (`sha256:e3d6997c…`), the "same digest, three names" design
+  observed in its production form; the controlplane startup log reports
+  `version=0.2.0` (slice 2's embedding, live in-cluster); `GET
+  /v1/agents?beta=true` through a port-forward with the chart-Secret API key
+  answers the wire shape `{"data":[],"next_page":null}`. Uninstall and
+  namespace deletion clean.
+
+---
+
 ## The root-owned write residue (#310) — a rejected design and five review rounds, 2026-08-06
 
 The fix that shipped (PR #311) is in CHANGELOG.md. What a changelog cannot hold is the
