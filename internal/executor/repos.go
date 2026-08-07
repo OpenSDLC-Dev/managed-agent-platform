@@ -82,15 +82,10 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 
 	if e.cipher == nil {
 		// The control plane refuses a repo-bearing create without a cipher, so
-		// this is a deployment whose executor and control plane disagree.
+		// this is a deployment whose executor and control plane disagree. Said
+		// once for the session rather than once per repository below.
 		slog.WarnContext(ctx, "session references github_repository resources but no secrets cipher is configured",
 			"session_id", sid, "repos", len(mounts))
-		for _, m := range mounts {
-			recordRepoMaterialized(ctx, repoOutcomeInternal)
-			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal, "a secrets cipher is not configured on this executor")
-		}
-		span.SetAttributes(attribute.Int("repos.failed", len(mounts)))
-		return
 	}
 
 	var landed, unchanged, failed int
@@ -100,6 +95,18 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			recordRepoMaterialized(ctx, repoOutcomeUnchanged)
 			slog.InfoContext(ctx, "repository already present, skipping clone",
 				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath)
+			continue
+		}
+		// Asked after the probe, not before it: a mount that already carries a
+		// checkout — restored from a checkpoint, or landed by a correctly
+		// configured executor before the drift — needs no token, and reporting
+		// it as failed would tell the client a checkout is missing while the
+		// agent is reading it.
+		if e.cipher == nil {
+			failed++
+			recordRepoMaterialized(ctx, repoOutcomeInternal)
+			e.emitRepoCloneError(ctx, sid, m, repoOutcomeInternal,
+				"a secrets cipher is not configured on this executor")
 			continue
 		}
 		bytes, err := e.materializeRepo(ctx, sb, sid, m)
@@ -275,6 +282,13 @@ func (e *Executor) emitRepoCloneError(ctx context.Context, sid domain.ID, m repo
 			"mount_path":  m.MountPath,
 			"reason":      reason,
 			"message":     message,
+			// Required on every variant of the reference's error union, and
+			// carried by every other session.error this platform writes.
+			// `retrying` for all reasons, including auth: the next work item
+			// probes the mount, finds no .git, and clones again — so no clone
+			// failure is ever the last attempt, and `exhausted` would tell a
+			// client this repository is finished when it is not.
+			"retry_status": map[string]any{"type": "retrying"},
 		},
 	})
 	if err != nil {

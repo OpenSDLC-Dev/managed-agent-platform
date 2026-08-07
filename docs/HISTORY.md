@@ -2892,6 +2892,37 @@ landing on executor-local disk before anything complained; the new row went red 
 `the refused write left 500 bytes on disk`. Two direct rows now cover the chroot's shared
 budget and the refused write, bringing the slice to thirteen guards with red-run evidence.
 
+
+
+**Verifier round (pinned `claude-fable-5`) — PASS WITH FINDINGS, no blockers, coverage
+90.31%.** It reran the whole gate from scratch, spot-checked two guards by mutation in its
+own scratch copy, exercised the criterion rows against real Docker, and diffed the wire
+registrations field-by-field against the pinned SDK. Two of its five findings — the
+untested `Chroot` propagation and the `betaworker (tool_exec only)` citation naming a file
+that does not exist — had already been found and fixed by the self-review passes above
+while it was running, which is the useful kind of agreement: two independent readings, the
+same two defects. Three were new and are fixed here.
+
+The substantive one: a cipher-less executor emitted its `internal` clone error *before*
+the presence probe, so a session whose checkout was already on disk — restored from a
+checkpoint, or landed by a correctly configured executor before the drift — was told a
+repository had failed while the agent was reading it. Red first
+(`clone errors = [...], want none — the repository is already materialized`), then the
+cipher check moved into the loop behind the probe; the one warning line stays per-session
+rather than per-repository.
+
+The other two were docs, and one of them turned out to be code. ARCHITECTURE's `replay.go`
+row still enumerated the system prompt as agent → skills → files → `system.message`,
+missing the repositories block that now sits third. And the DIVERGENCES entry enumerated
+the clone-error payload without its `message` field — checking that also surfaced that
+`retry_status` is required on every variant of the reference's error union *and* carried by
+every other `session.error` this platform writes, while ours omitted it: not a divergence to
+register but an inconsistency to fix. Red first across all four failure arms
+(`retry_status = <nil>, want {type: retrying}`), then emitted as `retrying` for every
+reason — including `auth`, since the next work item re-probes and clones again, so no clone
+failure is ever the last attempt and `exhausted` would tell a client this repository is
+finished when it is not.
+
 **Plan 25 progress summary (archived).** Two slices, two PRs: #329 (the wire half —
 the `github_repository` create arm, migration 0020's `session_resource_credentials`,
 live token rotation, the repo-delete rejection, unit W, and the e-wire-cli acceptance

@@ -42,8 +42,12 @@ copy of an entry here.
   text — with a status go-git has no sentinel for, a 5xx or a 429, read off the
   transport error and reported as `network`, because a git-host outage told as
   `internal` sends the operator to the wrong logs), deduped per
-  (resource, reason) so a polling session cannot flood its own log, and the
-  session runs on with the other repositories mounted. Self-review found and
+  (resource, reason) so a polling session cannot flood its own log, and carrying
+  `retry_status: retrying` like every other `session.error` the platform writes —
+  the next work item re-probes and clones again, so no clone failure is ever the
+  last attempt. The session runs on with its other repositories mounted, and a
+  repository that is already materialized is never reported as failed, even on an
+  executor whose cipher configuration has drifted away from the control plane's. Self-review found and
   fixed one real leak on that path: go-git copies a failing response's body
   into the errors it builds for 401/403/404, so a host that named the
   credential it rejected — and a host that rejects one has already decoded it —

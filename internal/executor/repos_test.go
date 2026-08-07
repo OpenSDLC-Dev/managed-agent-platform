@@ -301,6 +301,15 @@ func TestRepoCloneFailuresSurface(t *testing.T) {
 			if errs[0]["resource_id"] != "sesrsc_fail" || errs[0]["url"] != fx.url() {
 				t.Errorf("payload = %v, want it to name the resource and its url", errs[0])
 			}
+			// Every other session.error this platform writes carries a
+			// retry_status, and the SDK's union makes it required on all of
+			// them; a variant of ours that omitted it would be the one error a
+			// client switching over the union could not read uniformly.
+			rs, _ := errs[0]["retry_status"].(map[string]any)
+			if rs["type"] != "retrying" {
+				t.Errorf("retry_status = %v, want {type: retrying} — the next work "+
+					"item re-probes and clones again", errs[0]["retry_status"])
+			}
 			if _, ok := sb.files[repoMount]; ok {
 				t.Error("the mount exists, but the clone failed")
 			}
@@ -372,8 +381,12 @@ func TestRepoPartialFailure(t *testing.T) {
 }
 
 // TestRepoOversizeAbortsMidClone is m-oversize 🔍: a repository past the byte
-// budget is abandoned *during* the clone — the spool's peak stays inside the
-// budget rather than being measured after the fact — and surfaces too_large.
+// budget is refused with `too_large` and ships nothing into the sandbox.
+//
+// It does NOT prove the abort was mid-clone — a meter that measured after the
+// fact would satisfy every assertion here, as its mutation confirms. The two
+// properties that make the meter in-flight are pinned directly by
+// TestMeteredFSRefusesTheWriteThatCrosses and TestMeteredFSChrootSharesTheBudget.
 func TestRepoOversizeAbortsMidClone(t *testing.T) {
 	big := strings.Repeat("payload\n", 200_000) // ~1.6 MB, compressible but real
 	fx := newGitFixture(t, map[string]string{"big.txt": big})
@@ -411,6 +424,29 @@ func TestRepoWithoutCipher(t *testing.T) {
 	}
 	if fx.clones.Load() != 0 {
 		t.Error("the fixture was cloned, but no token could be opened")
+	}
+}
+
+// TestRepoWithoutCipherSpareAlreadyMaterialized 🔍: config drift must not
+// manufacture a failure for a repository that is already on disk.
+//
+// A cipher-less executor cannot clone, but it also has nothing to clone for a
+// mount that already carries a `.git` — a restored checkpoint, or a pass by a
+// correctly-configured executor before the drift. Reporting that repository as
+// failed would tell the client a checkout is missing while the agent is reading
+// it, so the presence probe is asked first and only a repository that genuinely
+// needs a clone is refused.
+func TestRepoWithoutCipherSparesAlreadyMaterialized(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	sb := &fakeSandbox{files: map[string]string{repoMount + "/.git": "already here"}}
+	h := newHarness(t, sb)
+	h.seedRepoResource(t, "sesrsc_present", fx.url(), repoMount, "ghp_fixture", nil)
+	h.exec.cipher = nil
+
+	h.runPass(t)
+
+	if errs := h.repoErrors(t); len(errs) != 0 {
+		t.Errorf("clone errors = %v, want none — the repository is already materialized", errs)
 	}
 }
 
