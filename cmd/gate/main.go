@@ -32,6 +32,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
 )
 
 const (
@@ -149,7 +150,7 @@ func run(ctx context.Context) error {
 
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.ListenAndServe() }()
-	slog.Info("gate listening", "addr", addr, "uid", gateUID)
+	slog.Info("gate listening", "addr", addr, "uid", gateUID, "version", version.Version)
 
 	client := gateconfig.NewClient(controlplaneURL, token, &http.Client{Timeout: fetchTimeout})
 	loopDone := make(chan error, 1)

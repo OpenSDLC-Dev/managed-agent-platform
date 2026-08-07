@@ -13,9 +13,10 @@ ending with v0.2.0 cut as the acceptance run.
 
 - [x] Slice 1 — fragment mechanism: `changelog.d/` + `tools/changelog`
       (mutation-checked tests), `make changelog`/`changelog-notes`,
-      docs/RELEASING.md, governance rewording (this PR).
-- [ ] Slice 2 — version embedding: `internal/version`, LDFLAGS, Dockerfile ARG,
-      worker `--version`.
+      docs/RELEASING.md, governance rewording (PR #332).
+- [x] Slice 2 — version embedding: `internal/version`, Dockerfile ARG + ldflags,
+      startup-log version attribute on all five binaries, worker `--version`
+      (this PR; the Make-side ldflags land with their consumer in slice 3).
 - [ ] Slice 3 — publishing pipeline: `release.yml` + release Make targets +
       deploy-doc updates.
 - [ ] Slice 4 — cut v0.2.0 (acceptance: kind install from published artifacts);

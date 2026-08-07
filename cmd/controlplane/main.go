@@ -73,6 +73,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
 )
 
 var (
@@ -171,7 +172,7 @@ func run(ctx context.Context) error {
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	slog.Info("controlplane listening", "addr", addr)
+	slog.Info("controlplane listening", "addr", addr, "version", version.Version)
 
 	select {
 	case err := <-errCh:
