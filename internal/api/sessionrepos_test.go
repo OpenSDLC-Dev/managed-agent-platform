@@ -309,8 +309,14 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		"doubled slash":        {repoBody("g", map[string]any{"mount_path": "/workspace//r"})},
 		"trailing slash mount": {repoBody("g", map[string]any{"mount_path": "/workspace/r/"})},
 		// w-mount-bounds: the supplied path's own length and storability. The
-		// URL cases above reach the same two guards through the derived default;
-		// these drive them directly, which is the arm a caller controls.
+		// URL cases above reach the length guard through the derived default;
+		// "oversized mount" drives validateRepoMountPath directly, which is the
+		// arm a caller controls. "unstorable mount" lands one layer earlier —
+		// rejectNUL walks the whole decoded body (wire.go), so a NUL never
+		// reaches validateRepoMountPath's storableText — and what it pins is the
+		// outcome that matters: a 400, never the #135 500 at the jsonb bind.
+		// There is no invalid-UTF-8 case because JSON cannot carry one; the
+		// marshaller substitutes U+FFFD before the request leaves the client.
 		"oversized mount":  {repoBody("g", map[string]any{"mount_path": "/workspace/" + strings.Repeat("x", 1024)})},
 		"unstorable mount": {repoBody("g", map[string]any{"mount_path": "/workspace/\x00r"})},
 		// w-mount-collision (aliases of one directory; the file arm compares
