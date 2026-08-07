@@ -18,6 +18,7 @@ SHELL := /usr/bin/env bash
 .NOTPARALLEL:
 
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
+	changelog changelog-notes \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild
 
 build:
@@ -105,6 +106,18 @@ verify: build crossbuild vet fmt-check test cover-gate
 # one transcript per failed trial.
 eval:
 	RUN_EVALS=1 go test -count=1 -v -timeout 120m ./evals/...
+
+# Release-time changelog tooling (docs/RELEASING.md; the fragment format is
+# changelog.d/README.md). NOT part of `verify`: `changelog` rewrites
+# CHANGELOG.md, which only a release PR does, and `changelog-notes` exists for
+# the release workflow to extract a section as GitHub Release notes. The
+# tool's own tests DO run under `make test` (./... includes ./tools/...);
+# only the invocation is release-scoped.
+changelog:
+	go run ./tools/changelog assemble -version "$(VERSION)"
+
+changelog-notes:
+	@go run ./tools/changelog notes -version "$(VERSION)" -out "$(or $(OUT),-)"
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP

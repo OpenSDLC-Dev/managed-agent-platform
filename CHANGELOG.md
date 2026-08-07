@@ -1,15 +1,18 @@
 # Changelog
 
 All notable changes to this project are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); entries are
-grouped newest-first by the PR that landed them.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); released sections
+group entries newest-first by the PR that landed them.
 
-A change and its changelog entry land in the **same PR** — see CLAUDE.md →
-"Iteration workflow". This file is the **one place a change's narrative is
-written**: [docs/HISTORY.md](./docs/HISTORY.md) holds only what a changelog
-structurally cannot (acceptance-run and review-hardening records, decisions
-evaluated and rejected, archived plans' progress summaries), never a second
-copy of an entry here.
+A change and its changelog entry land in the **same PR** — the entry as a
+fragment in [changelog.d/](./changelog.d/), its body the final entry verbatim.
+A release PR assembles the fragments into a dated section here (`make
+changelog`; see [docs/RELEASING.md](./docs/RELEASING.md)); no other PR edits
+this file. The fragment is the **one place a change's narrative is written**:
+[docs/HISTORY.md](./docs/HISTORY.md) holds only what a changelog structurally
+cannot (acceptance-run and review-hardening records, decisions evaluated and
+rejected, archived plans' progress summaries), never a second copy of an
+entry here.
 
 ## [Unreleased]
 
