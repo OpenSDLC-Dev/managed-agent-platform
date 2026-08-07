@@ -2872,6 +2872,26 @@ failure into an `internal` one, which the row asserts against directly — and
 `plumbing.UnexpectedError` by hand, since it implements no `Unwrap`) and reports
 `network`. The row passes on both arms and is the eleventh guard with red-run evidence.
 
+
+
+**A second self-review pass — the byte budget's load-bearing half was untested.**
+`TestRepoOversizeAbortsMidClone` asserts an oversized repository is refused with
+`too_large` and ships no tar. It proves both, and neither is the property the design
+claims: the budget is metered *as the bytes land*, so an unbounded repository costs the
+cap rather than its own size, and `meteredFS.Chroot` propagates the *same* counter
+because go-git chroots `.git` out of the worktree and the objects are the bulk of a
+clone. Neither is observable through that row — its fixture's oversize file lands in the
+worktree, which is metered under either arrangement.
+
+Both mutations confirm the gap. With `Chroot` given a counter of its own the integration
+row still passed and the new direct row went red (`spent = 40, want 120 (both writes
+counted against one budget)`). With the meter moved to *after* the write — the
+measured-after shape — the integration row **passed unchanged** while logging
+`clone exceeded the byte budget: 1604098 bytes`, which is the whole 1.6 MB fixture
+landing on executor-local disk before anything complained; the new row went red with
+`the refused write left 500 bytes on disk`. Two direct rows now cover the chroot's shared
+budget and the refused write, bringing the slice to thirteen guards with red-run evidence.
+
 **Plan 25 progress summary (archived).** Two slices, two PRs: #329 (the wire half —
 the `github_repository` create arm, migration 0020's `session_resource_credentials`,
 live token rotation, the repo-delete rejection, unit W, and the e-wire-cli acceptance
