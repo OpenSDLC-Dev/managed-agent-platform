@@ -660,6 +660,53 @@ func TestLatest(t *testing.T) {
 	if _, err := latest("# Changelog\n\n## [Unreleased]\n\n- X.\n"); err == nil {
 		t.Error("want error when no released section exists")
 	}
+	// Only the assembler's exact dated-heading grammar counts — a decoy
+	// heading must not gate a release.
+	decoy := "# Changelog\n\n## [9.9.9] not-a-release\n\n## [0.2.0] - 2026-08-07\n\n- A.\n"
+	if got, err := latest(decoy); err != nil || got != "0.2.0" {
+		t.Errorf("latest over decoy = %q, %v; want 0.2.0", got, err)
+	}
+	leadingZero := "# Changelog\n\n## [0.02.0] - 2026-08-07\n\n- A.\n\n## [0.1.0] - 2026-07-17\n\n- B.\n"
+	if got, err := latest(leadingZero); err != nil || got != "0.1.0" {
+		t.Errorf("latest over leading-zero heading = %q, %v; want 0.1.0", got, err)
+	}
+}
+
+// The clamp budget must charge the trailer: the body is exactly one byte
+// over the cap, so both groups "fit" if candidates are sized without the
+// trailer — only trailer accounting can reject the second group.
+func TestNotesCapChargesTrailer(t *testing.T) {
+	const base = "https://github.com/OpenSDLC-Dev/managed-agent-platform"
+	body := "### Added\n\n- " + strings.Repeat("a", 250) + "\n\n" +
+		"### Fixed\n\n- " + strings.Repeat("b", 172) + "\n"
+	cap := len(body) - 1
+	got, err := clampNotes(body, base, "0.2.0", cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) > cap {
+		t.Errorf("clamped notes are %d bytes, above the %d-byte cap", len(got), cap)
+	}
+	if strings.Contains(got, "### Fixed") {
+		t.Error("second group kept — it fits only if the trailer is not charged against the cap")
+	}
+	if !strings.Contains(got, "### Added") {
+		t.Error("first group should survive the clamp")
+	}
+}
+
+// A cap the trailer alone cannot satisfy is an error, never an over-cap
+// "success".
+func TestNotesCapUnsatisfiable(t *testing.T) {
+	clPath, _ := writeFixture(t, steadyChangelog, nil)
+	out := filepath.Join(t.TempDir(), "notes.md")
+	err := runNotes(clPath, "0.2.0", out, 10)
+	if err == nil {
+		t.Fatal("want error for a cap smaller than the trailer")
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Error("no output file should be written on a refused clamp")
+	}
 }
 
 // Above the cap, notes truncate at a ### group boundary and end with a link

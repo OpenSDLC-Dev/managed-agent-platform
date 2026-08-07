@@ -19,7 +19,7 @@ SHELL := /usr/bin/env bash
 
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes \
-	release-tag-check release-images release-chart release-binaries \
+	release-tag-check release-images release-chart-check release-chart release-binaries \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild
 
 build:
@@ -166,12 +166,21 @@ release-images:
 		-t "$(RELEASE_IMAGE_NS)/gate:$(VERSION)" .
 
 # The chart version must already equal VERSION — the release PR bumps
-# Chart.yaml's version and appVersion in lockstep with the platform.
-release-chart:
+# Chart.yaml's version and appVersion in lockstep with the platform. A
+# target of its own so the workflow can run it next to release-tag-check,
+# before anything publishes: a half-bumped chart must fail the run while it
+# is still free to fail, not after the images are already public.
+release-chart-check:
 	@set -euo pipefail; \
 	test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }; \
 	grep -qxF 'version: $(VERSION)' deploy/helm/managed-agent-platform/Chart.yaml || { \
 		echo "Chart.yaml version is not $(VERSION) — the release PR bumps it" >&2; exit 1; }; \
+	grep -qxF 'appVersion: "$(VERSION)"' deploy/helm/managed-agent-platform/Chart.yaml || { \
+		echo "Chart.yaml appVersion is not $(VERSION) — version and appVersion move in lockstep" >&2; exit 1; }
+
+release-chart: release-chart-check
+	@set -euo pipefail; \
+	test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }; \
 	mkdir -p dist; \
 	helm package deploy/helm/managed-agent-platform -d dist; \
 	if [ "$(PUSH)" = "1" ]; then helm push "dist/managed-agent-platform-$(VERSION).tgz" "$(RELEASE_CHART_OCI)"; fi

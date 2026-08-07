@@ -411,10 +411,12 @@ func runAssemble(changelogPath, dir, version, date string) error {
 	return nil
 }
 
-// latest returns the newest released version — the first dated section
-// heading. The release workflow's tag-sanity check compares it to the tag.
+// latest returns the newest released version — the first heading in the
+// assembler's exact dated grammar, so a decoy or malformed heading cannot
+// gate a release. The release workflow's tag-sanity check compares it to
+// the tag.
 func latest(content string) (string, error) {
-	re := regexp.MustCompile(`^## \[(\d+\.\d+\.\d+)\]`)
+	re := regexp.MustCompile(`^## \[((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\] - \d{4}-\d{2}-\d{2}$`)
 	_, doc := splitTrailingRefs(strings.Split(content, "\n"))
 	for _, l := range doc {
 		if m := re.FindStringSubmatch(l); m != nil {
@@ -427,13 +429,17 @@ func latest(content string) (string, error) {
 // clampNotes bounds body to cap bytes for a GitHub Release (which rejects
 // oversized bodies outright): whole leading ### groups are kept while they
 // fit, and a trailer links to the full section in the changelog at the tag.
-// The first cut under the fragment scheme absorbs the 5,300-line legacy
-// backlog and needs this (plan 27 decision 4).
-func clampNotes(body, base, version string, cap int) string {
+// A cap even the trailer cannot satisfy is an error — over-cap output would
+// just move the 422 downstream. The first cut under the fragment scheme
+// absorbs the 5,300-line legacy backlog and needs this (plan 27 decision 4).
+func clampNotes(body, base, version string, cap int) (string, error) {
 	if cap <= 0 || len(body) <= cap {
-		return body
+		return body, nil
 	}
 	trailer := fmt.Sprintf("---\n\nTruncated: the full section is in [CHANGELOG.md](%s/blob/v%s/CHANGELOG.md).\n", base, version)
+	if len(trailer) > cap {
+		return "", fmt.Errorf("cap %d is smaller than the %d-byte truncation trailer itself", cap, len(trailer))
+	}
 	// Split into blocks at ### boundaries, then keep whole leading blocks
 	// while they (plus the trailer) fit — no group is ever cut mid-entry.
 	var blocks []string
@@ -458,9 +464,9 @@ func clampNotes(body, base, version string, cap int) string {
 	}
 	kept = strings.TrimRight(kept, "\n")
 	if kept == "" {
-		return trailer
+		return trailer, nil
 	}
-	return kept + "\n\n" + trailer
+	return kept + "\n\n" + trailer, nil
 }
 
 // runNotes is the `notes` subcommand; out == "" or "-" writes to stdout, and
@@ -487,7 +493,10 @@ func runNotes(changelogPath, version, out string, cap int) error {
 		if base == "" {
 			return fmt.Errorf("notes exceed the %d-byte cap and no [Unreleased] link reference exists to derive the changelog link from", cap)
 		}
-		body = clampNotes(body, base, version, cap)
+		var cerr error
+		if body, cerr = clampNotes(body, base, version, cap); cerr != nil {
+			return cerr
+		}
 	}
 	if out == "" || out == "-" {
 		_, err = os.Stdout.WriteString(body)

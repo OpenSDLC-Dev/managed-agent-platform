@@ -9,8 +9,9 @@
   — same digest, three names, the coordinates the Helm chart composes — plus
   `…/gate:X.Y.Z`; deliberately no `latest` tag; without `PUSH=1` it builds
   linux/amd64 into the local daemon and nothing leaves the machine),
-  `release-chart` (the chart, version-checked against the release PR's bump,
-  to `oci://ghcr.io/opensdlc-dev/charts`), and `release-binaries`
+  `release-chart` (the chart, its `version` and `appVersion` both checked
+  against the release PR's bump before anything publishes, to
+  `oci://ghcr.io/opensdlc-dev/charts`), and `release-binaries`
   (version-stamped worker tarballs for linux/darwin × amd64/arm64 with
   sha256sums). The GitHub Release's notes come from `make changelog-notes
   CAP=120000`: the `notes` subcommand now clamps an over-cap section to whole
