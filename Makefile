@@ -170,7 +170,7 @@ release-images:
 release-chart:
 	@set -euo pipefail; \
 	test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }; \
-	grep -q '^version: $(VERSION)$$' deploy/helm/managed-agent-platform/Chart.yaml || { \
+	grep -qxF 'version: $(VERSION)' deploy/helm/managed-agent-platform/Chart.yaml || { \
 		echo "Chart.yaml version is not $(VERSION) — the release PR bumps it" >&2; exit 1; }; \
 	mkdir -p dist; \
 	helm package deploy/helm/managed-agent-platform -d dist; \
