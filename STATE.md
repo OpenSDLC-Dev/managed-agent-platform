@@ -6,7 +6,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 **[Plan 25 — git/repo mounting](./docs/plan/25_git-repo-mounting.md)** (`in-progress`,
 the git half of #55): `github_repository` session resources, cloned platform-side into
-the sandbox. BYOC materialization is deferred to #322.
+the sandbox. BYOC materialization is deferred to #322. (#323's follow-on note —
+file mounts lost arbitrary container-path latitude — is absorbed: the repo arm keeps
+literal paths; cross-resource rules run on resolved forms.)
 
 ## Tasks
 

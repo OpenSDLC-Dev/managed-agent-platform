@@ -91,13 +91,18 @@ func TestSessionFileResourceRoundTrip(t *testing.T) {
 		t.Errorf("session GET resources = %v, want the one created", gr)
 	}
 
-	// Explicit mount path is honored.
-	sess2 := createSession(t, s, map[string]any{
-		"agent": agentID, "environment_id": envID,
-		"resources": []any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "/data/in.txt"}},
-	})
-	if r := resourcesOf(t, sess2); r[0]["mount_path"] != "/data/in.txt" {
-		t.Errorf("explicit mount_path = %v, want /data/in.txt", r[0]["mount_path"])
+	// An explicit mount path is honored, rooted under the uploads directory —
+	// the same resolved path whether the caller spells it absolute or relative
+	// (managed-agents/files, "File paths"), and left alone when already rooted.
+	for _, given := range []string{"/data/in.txt", "data/in.txt", "/mnt/session/uploads/data/in.txt"} {
+		sess2 := createSession(t, s, map[string]any{
+			"agent": agentID, "environment_id": envID,
+			"resources": []any{map[string]any{"type": "file", "file_id": fileA, "mount_path": given}},
+		})
+		if r := resourcesOf(t, sess2); r[0]["mount_path"] != "/mnt/session/uploads/data/in.txt" {
+			t.Errorf("mount_path %q resolved to %v, want /mnt/session/uploads/data/in.txt",
+				given, r[0]["mount_path"])
+		}
 	}
 
 	// List the first session's resources.
@@ -178,10 +183,18 @@ func TestSessionResourceValidation(t *testing.T) {
 		"unknown type":         {[]any{map[string]any{"type": "wizard"}}, 400},
 		"missing type":         {[]any{map[string]any{"file_id": fileA}}, 400},
 		"unknown resource key": {[]any{map[string]any{"type": "file", "file_id": fileA, "bogus": 1}}, 400},
-		"relative mount path":  {[]any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "rel/path"}}, 400},
+		// Only a relative path can still climb out once cleaned; an absolute one's
+		// ".." resolves away and roots normally (resolveMountPath).
+		"mount path escaping the root": {[]any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "../etc/passwd"}}, 400},
+		"mount path naming the root":   {[]any{map[string]any{"type": "file", "file_id": fileA, "mount_path": "/"}}, 400},
 		"duplicate mount path": {[]any{
 			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/same"},
 			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/same"},
+		}, 400},
+		// Two spellings of one resolved path collide the way they would in the sandbox.
+		"duplicate after resolution": {[]any{
+			map[string]any{"type": "file", "file_id": fileA, "mount_path": "/same"},
+			map[string]any{"type": "file", "file_id": fileA, "mount_path": "same"},
 		}, 400},
 	} {
 		status, body := create(tc.resources)
@@ -209,7 +222,9 @@ func TestSessionResourceValidation(t *testing.T) {
 		body       any
 		wantStatus int
 	}{
-		"add duplicate mount path": {map[string]any{"type": "file", "file_id": fileA, "mount_path": "/taken"}, 400},
+		// The add route resolves too, so the relative spelling of the taken path collides.
+		"add duplicate mount path": {map[string]any{"type": "file", "file_id": fileA, "mount_path": "taken"}, 400},
+		"add escaping mount path":  {map[string]any{"type": "file", "file_id": fileA, "mount_path": "../escaped"}, 400},
 		"add nonexistent file":     {map[string]any{"type": "file", "file_id": "file_0000000000000000000000gk"}, 404},
 		"add github":               {map[string]any{"type": "github_repository"}, 400},
 	}

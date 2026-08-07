@@ -116,23 +116,30 @@ func TestSessionRepoCreateRendersWireShape(t *testing.T) {
 	}
 
 	// w-multi: two repos + one file, all rendered, paths distinct. A file
-	// inside a repo's tree is the supported overlay direction.
+	// inside a repo's tree is the supported overlay direction — and since a
+	// file's mount_path resolves under the uploads root (#323), the overlaid
+	// repo mounts there and the file's already-rooted path passes through.
 	fileID := uploadOneFile(t, s, "overlay.txt")
 	sess = createRepoSession(t, s,
 		repoBody("ghp_a", nil),
-		repoBody("ghp_b", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/other"}),
-		map[string]any{"type": "file", "file_id": fileID, "mount_path": "/workspace/example-repo/config.json"},
+		repoBody("ghp_b", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/mnt/session/uploads/proj"}),
+		map[string]any{"type": "file", "file_id": fileID, "mount_path": "/mnt/session/uploads/proj/config.json"},
 	)
 	all := resourcesOf(t, sess)
 	if len(all) != 3 {
 		t.Fatalf("rendered %d resources, want 3", len(all))
 	}
 	types := map[string]int{}
+	mounts := map[string]bool{}
 	for _, r := range all {
 		types[r["type"].(string)]++
+		mounts[r["mount_path"].(string)] = true
 	}
 	if types["github_repository"] != 2 || types["file"] != 1 {
 		t.Errorf("resource types = %v, want 2 repos + 1 file", types)
+	}
+	if !mounts["/mnt/session/uploads/proj/config.json"] {
+		t.Errorf("mounts = %v, want the overlay file kept inside the repo tree", mounts)
 	}
 }
 
@@ -240,17 +247,19 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		"dot segment":          {repoBody("g", map[string]any{"mount_path": "/workspace/./r"})},
 		"doubled slash":        {repoBody("g", map[string]any{"mount_path": "/workspace//r"})},
 		"trailing slash mount": {repoBody("g", map[string]any{"mount_path": "/workspace/r/"})},
-		// w-mount-collision (aliases of one directory)
+		// w-mount-collision (aliases of one directory; the file arm compares
+		// by its uploads-resolved path since #323, so a relative file
+		// spelling collides with a repo's literal path at the same place)
 		"repo/repo collision": {
 			repoBody("g", map[string]any{"mount_path": "/workspace/same"}),
 			repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/same"})},
 		"alias collision": {
-			map[string]any{"type": "file", "file_id": fileID, "mount_path": "/workspace/./same"},
-			repoBody("g", map[string]any{"mount_path": "/workspace/same"})},
+			map[string]any{"type": "file", "file_id": fileID, "mount_path": "same"},
+			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/same"})},
 		// w-nesting
 		"file ancestor of repo": {
-			map[string]any{"type": "file", "file_id": fileID, "mount_path": "/workspace/repo"},
-			repoBody("g", map[string]any{"mount_path": "/workspace/repo/src"})},
+			map[string]any{"type": "file", "file_id": fileID, "mount_path": "repo"},
+			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/repo/src"})},
 		"nested repos": {
 			repoBody("g", map[string]any{"mount_path": "/workspace/outer"}),
 			repoBody("g", map[string]any{"url": "https://github.com/example-org/other", "mount_path": "/workspace/outer/inner"})},
