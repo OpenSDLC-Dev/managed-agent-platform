@@ -1155,7 +1155,7 @@ own `SKIP_CHOWN` escape hatch).
 
 [docs/plan/10_skill-archive-integrity.md](./plan/10_skill-archive-integrity.md), delivered in one PR
 (**#162**) for [#155](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/155). The change and its
-reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a changelog cannot hold.
+reasoning are the CHANGELOG § [0.2.0] entry; recorded here is only what a changelog cannot hold.
 
 **Why this was a plan, not a straight fix.** The read half that runs in a customer's BYOC worker
 never touches the database, and the pinned SDK (v1.58.0, `betaskillversion.go`) gives the version
@@ -1300,8 +1300,8 @@ The plan's slice-8 acceptance, deferred until the local stack existed, has now b
 ## Completed
 
 Pruned 2026-07-18 (plan 03). Each subsection's delivery narrative lives **once** in
-[CHANGELOG.md](../CHANGELOG.md) — find it under § 0.1.0 (or § [Unreleased] for later
-work) by the same slice/PR tag the heading carries; sections without a tag carry their
+[CHANGELOG.md](../CHANGELOG.md) — find it under § 0.1.0 (or a later released section
+for later work) by the same slice/PR tag the heading carries; sections without a tag carry their
 own pointer line below — and its per-file reference in
 [ARCHITECTURE.md](./ARCHITECTURE.md) § "Package reference". The headings survive as
 citation anchors for [DIVERGENCES.md](./DIVERGENCES.md); where a citation's parenthetical
@@ -1321,7 +1321,7 @@ foundation", "CI pipeline", "CI coverage gate", "GitHub checks", "Dual code revi
 ### `internal/telemetry` — OTel init + W3C trace-context propagation
 
 *Narrative: CHANGELOG § 0.1.0 → "`internal/telemetry` — OTel foundation"; the log bridge
-is under § [Unreleased] → "OTel logs on the execution chain".*
+is under § [0.2.0] → "OTel logs on the execution chain".*
 
 ### `internal/store` — Postgres schema + migrations
 
@@ -1472,7 +1472,7 @@ Deliberately deferred and filed as issues: a daily scheduled CI run ([#96](https
 
 [docs/plan/09_brain-turn-fault-span.md](./plan/09_brain-turn-fault-span.md), delivered in one PR
 (**#164**) for [#92](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/92). The change and
-its reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a changelog cannot
+its reasoning are the CHANGELOG § [0.2.0] entry; recorded here is only what a changelog cannot
 hold.
 
 **The issue's own "cheap version" was evaluated and rejected as inert — it does not compile into a
@@ -1549,7 +1549,7 @@ there is never an in-flight state for it to track.
 
 [docs/plan/07_reject-unknown-toolset-fields.md](./plan/07_reject-unknown-toolset-fields.md),
 delivered in one PR (**#151**) for [#26](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/26).
-The change and its reasoning are the CHANGELOG § [Unreleased] entry; recorded here is only what a
+The change and its reasoning are the CHANGELOG § [0.2.0] entry; recorded here is only what a
 changelog cannot hold.
 
 **Why this was a plan, not a straight fix.** The trigger was wire-schema verification: the accepted
@@ -1579,7 +1579,7 @@ to do).
 ## Work Stop 204 (plan 04) — archived 2026-07-20
 
 [docs/plan/04_work-stop-204.md](./plan/04_work-stop-204.md), delivered in one PR (**#122**). The
-change and the reasoning behind it are the CHANGELOG § [Unreleased] entry; recorded here is only
+change and the reasoning behind it are the CHANGELOG § [0.2.0] entry; recorded here is only
 what a changelog cannot hold.
 
 **The generalizable lesson: "confirmed" did not mean re-derivable.** The registry's entry was not a
@@ -1621,7 +1621,7 @@ a red one was.
 ## Docs restructure (plan 03) — archived 2026-07-18
 
 [docs/plan/03_docs-restructure.md](./plan/03_docs-restructure.md), delivered complete in
-three PRs (narratives in CHANGELOG § [Unreleased]): **#101** — docs/ARCHITECTURE.md
+three PRs (narratives in CHANGELOG § [0.2.0]): **#101** — docs/ARCHITECTURE.md
 created as the as-built reference and HISTORY.md slimmed 530 → 217 lines under the
 one-writer rule (verifier ×2, Codex 17 findings, /code-review 5 — all resolved against
 source); **#102** — STATE.md reduced to a pure active-work tracker (63 → 23 lines), the
@@ -1633,7 +1633,7 @@ archiving this plan.
 
 ## K8s silent short write (#103/#86) — investigation record (2026-07-19)
 
-Narrative and the defect itself: CHANGELOG.md § [Unreleased]. Recorded here is only what a
+Narrative and the defect itself: CHANGELOG.md § [0.2.0]. Recorded here is only what a
 changelog cannot hold — a refuted mechanism, the alternatives rejected, and the verification record.
 
 **A confidently-argued mechanism that was wrong.** The first account blamed client-go teardown:
@@ -1680,7 +1680,7 @@ the same shared subtest all pass); CI's fresh kind cluster on Linux is the gate.
 
 ## K8s read-side short-read guard (#105) — design record (2026-07-19)
 
-The hazard and the guard: CHANGELOG.md § [Unreleased]. Recorded here is only what a changelog
+The hazard and the guard: CHANGELOG.md § [0.2.0]. Recorded here is only what a changelog
 cannot hold — what was measured and rejected, and the sense in which nothing was reproduced.
 
 **Nothing was observed.** Roughly 35 reads of 1 MiB, 4 MiB and 20 MiB files through the pod-exec
@@ -1733,7 +1733,7 @@ contract suite. Coverage 91.38-91.48% across runs.
 
 ## `internal/events/toolflow.go` characterization suite — verification record (2026-07-19)
 
-Narrative: CHANGELOG.md § [Unreleased] → Added. Recorded here is only the verification, plus one
+Narrative: CHANGELOG.md § [0.2.0] → Added. Recorded here is only the verification, plus one
 claim this project made and then had to retract.
 
 **A claim of ours that was wrong.** The first version of the changelog entry said the two

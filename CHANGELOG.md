@@ -16,6 +16,77 @@ entry here.
 
 ## [Unreleased]
 
+Unreleased changes accumulate as one fragment file per PR in
+[changelog.d/](./changelog.d/) and are assembled into a dated section here
+by `make changelog` at release time (see [docs/RELEASING.md](./docs/RELEASING.md)).
+
+## [0.2.0] - 2026-08-07
+
+### Added
+
+- **The tag-triggered release pipeline lands** (plan 27 slice 3).
+  `.github/workflows/release.yml` fires on a `v*` tag and publishes with
+  `GITHUB_TOKEN` alone, invoking only root-Makefile targets so the release's
+  executable source stays the Makefile: `release-tag-check` (the version must
+  be the changelog's newest released section — served by the tool's new
+  `latest` subcommand — and the commit must sit on `origin/main`; nothing
+  publishes otherwise), `release-images` (one multi-arch server build pushed
+  as `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor}:X.Y.Z`
+  — same digest, three names, the coordinates the Helm chart composes — plus
+  `…/gate:X.Y.Z`; deliberately no `latest` tag; without `PUSH=1` it builds
+  linux/amd64 into the local daemon and nothing leaves the machine),
+  `release-chart` (the chart, its `version` and `appVersion` both checked
+  against the release PR's bump before anything publishes, to
+  `oci://ghcr.io/opensdlc-dev/charts`), and `release-binaries`
+  (version-stamped worker tarballs for linux/darwin × amd64/arm64 with
+  sha256sums). The GitHub Release's notes come from `make changelog-notes
+  CAP=120000`: the `notes` subcommand now clamps an over-cap section to whole
+  leading Keep-a-Changelog groups plus a link to the full CHANGELOG.md
+  section — GitHub rejects a body over 125,000 characters, and the first
+  cut's absorbed legacy backlog (measured 443,570) exceeds it. Deploy docs go
+  live accordingly: the Helm values/README image guidance now points at the
+  published coordinates (from v0.2.0 onward) instead of "build and push your
+  own", README gains the `helm install oci://…` path, and RELEASING.md's
+  "What the tag triggers" section replaces its "Not yet built" placeholder —
+  including the one-time note that `GITHUB_TOKEN`-created GHCR packages
+  start private and need a public flip for anonymous pulls.
+
+- **Binaries know their version** (plan 27 slice 2). New `internal/version`
+  package — a single `Version` variable, `"dev"` unless the build injects it
+  via `-ldflags -X` — wired into the Dockerfile as an `ARG VERSION=dev` on the
+  shared build stage, so both the server image and the gate image stamp their
+  binaries at release-build time. All five binaries log it on their existing
+  startup line (`controlplane listening` / `brain running` / `executor
+  running` / `worker running` / `gate listening` gain a `version` attribute),
+  and the worker — the one binary users download and run standalone — answers
+  `--version` (and `-version`) with the bare version string before touching
+  any configuration. Deliberately no version API endpoint: that would be
+  net-new wire surface (plan 27 decision 3).
+
+- **Release management lands — the fragment half** (plan 27 slice 1; the plan
+  starts `in-progress`). Changelog entries move out of CHANGELOG.md's
+  `[Unreleased]` section and into **`changelog.d/` fragments** — one file per
+  PR per Keep-a-Changelog group, the body being the final entry verbatim (this
+  entry is the first one) — so parallel PRs stop contending for the same
+  top-of-file insertion point; only a release PR touches CHANGELOG.md, via the
+  new `make changelog VERSION=X.Y.Z`. The assembler (`tools/changelog`, tested
+  with mutation evidence) folds fragments into a dated section in KaC group
+  order (entries newest-first by adding commit), moves any legacy
+  `[Unreleased]` body byte-identically below them — the one-time affordance
+  the 5,300-line backlog needs — leaves a pointer paragraph as the new
+  `[Unreleased]` body, advances the Keep-a-Changelog link references, and
+  refuses cleanly (empty release, existing version, malformed fragment names
+  so a typo'd section cannot silently drop an entry) leaving both files and
+  fragments untouched; `make changelog-notes` extracts a released section for
+  the coming release workflow. **docs/RELEASING.md** is the new ritual:
+  SemVer 0.x (Added/Changed → minor, fix-only → patch; 1.0 reserved for an
+  explicit stability promise), plan-archive-driven timing, annotated
+  `vX.Y.Z` tags, chart version/appVersion in lockstep — with the
+  tag-triggered publishing pipeline explicitly marked as arriving in plan 27
+  slice 3. CLAUDE.md/AGENTS.md step-2 wording and the verifier's
+  docs-consistency rung now require the fragment instead of a direct
+  CHANGELOG.md edit.
+
 ### Added
 
 - **`github_repository` session resources — the clone lands, and #55 closes**
@@ -6372,5 +6443,6 @@ entry below landed pre-release and ships here.
   (base_url is the API root) so it cannot silently regress. Matches what the compose
   stack's `model-providers.example.json` and README already document.
 
-[Unreleased]: https://github.com/OpenSDLC-Dev/managed-agent-platform/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/OpenSDLC-Dev/managed-agent-platform/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/OpenSDLC-Dev/managed-agent-platform/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/OpenSDLC-Dev/managed-agent-platform/releases/tag/v0.1.0
