@@ -633,7 +633,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 	if len(resources) > 0 {
 		recordResourceMutation(ctx, resourceOutcomeOK, len(resources))
-		slog.InfoContext(ctx, "session created with file resources",
+		slog.InfoContext(ctx, "session created with resources",
 			"session_id", id, "resource_count", len(resources))
 	}
 	return renderSession(row)

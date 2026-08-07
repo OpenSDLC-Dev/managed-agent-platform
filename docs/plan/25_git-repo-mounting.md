@@ -359,11 +359,11 @@ meets it. Its rules, translated to this repo:
 
 | Case | 🔍 | Act (drive) | Observe (surface S1 unless noted) |
 |---|---|---|---|
-| w-create-minimal | | create session, `resources: [{type, url, authorization_token}]` | 201; rendered resource has `sesrsc_` id, `mount_path` `/workspace/<repo>`, `checkout: null`, `created_at == updated_at` |
+| w-create-minimal | | create session, `resources: [{type, url, authorization_token}]` | 200 (this server's create status everywhere); rendered resource has `sesrsc_` id, `mount_path` `/workspace/<repo>`, `checkout: null`, `created_at == updated_at` |
 | w-create-full | | + `mount_path`, `checkout: branch` | echoed exactly as given |
 | w-create-commit | | `checkout: {type: commit, sha}` | echoed; sha preserved verbatim |
 | w-multi | | two repos + one file mount in one create | all three rendered, types correct, paths distinct |
-| w-token-sweep | 🔍 | sweep **every** surface a token could reach: the create 201 body itself, the rotation 200 body (both token values), GET session, GET resource, LIST resources, GET events, SSE replay, and the captured `slog` output | raw bytes contain neither the key `authorization_token` nor either token value — **zero hits, any hit anywhere is FAIL** (the mutating responses are the ones a rendering defect leaks through) |
+| w-token-sweep | 🔍 | sweep **every** surface a token could reach: the create response body itself, the rotation 200 body (both token values), GET session, GET resource, LIST resources, GET events (the stored-event surface — the SSE stream is a live tail from connect time with no history replay), and the captured `slog` output | raw bytes contain neither the key `authorization_token` nor either token value — **zero hits, any hit anywhere is FAIL** (the mutating responses are the ones a rendering defect leaks through) |
 | w-no-token | 🔍 | omit / empty-string `authorization_token`; a token above 8 KiB | 400 `invalid_request_error` each |
 | w-bad-url | 🔍 | `http://…`, non-github host, `https://github.com/onlyowner`, extra segments, garbage, `https://TOKEN@github.com/o/r`, `…?token=x`, `…#frag`, an explicit port | 400 each (the canonical-grammar rule) |
 | w-bad-checkout | 🔍 | `type: "tag"`, branch without `name`, sha not 40-hex, unknown keys | 400 each |

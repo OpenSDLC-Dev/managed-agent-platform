@@ -282,7 +282,11 @@ func parseRepoResource(obj map[string]json.RawMessage) (resourceInput, error) {
 	}
 	if !set || null || mountPath == "" {
 		mountPath = defaultRepoMountRoot + repoName
-	} else if err := validateRepoMountPath(mountPath); err != nil {
+	}
+	// The derived default is validated too, not just a supplied path: the
+	// grammar above keeps the repo name clean and storable, and this keeps
+	// that true by construction (and bounds a pathologically long name).
+	if err := validateRepoMountPath(mountPath); err != nil {
 		return resourceInput{}, err
 	}
 	return resourceInput{
@@ -310,14 +314,36 @@ func parseGitHubRepoURL(raw string) (string, error) {
 		return "", bad()
 	}
 	segs := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
-	if len(segs) != 2 || segs[0] == "" || segs[1] == "" {
+	if len(segs) != 2 || !validRepoURLSegment(segs[0]) || !validRepoURLSegment(segs[1]) {
 		return "", bad()
 	}
+	// The repo name becomes the default mount path's last element, so the
+	// names path.Clean would rewrite are refused here — "acme/.." would
+	// otherwise derive /workspace/.., the reserved "/" in disguise.
 	name := strings.TrimSuffix(segs[1], ".git")
-	if name == "" {
+	if name == "" || name == "." || name == ".." {
 		return "", bad()
 	}
 	return name, nil
+}
+
+// validRepoURLSegment bounds a URL path segment to the GitHub owner/repo
+// character set. url.Parse percent-decodes the path, so this is also what
+// keeps an encoded NUL or space out of the derived default mount path (the
+// #135 failure class the storableText checks exist to prevent).
+func validRepoURLSegment(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // parseCheckout parses the optional checkout union: {type:"branch", name} |

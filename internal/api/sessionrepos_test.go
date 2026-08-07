@@ -10,8 +10,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
@@ -145,13 +147,20 @@ func TestSessionRepoCreateRendersWireShape(t *testing.T) {
 
 // TestSessionRepoTokenSweep is w-token-sweep 🔍: every surface a token could
 // reach — the create body itself, rotation, session GET, resource GET, LIST,
-// events — swept for both token values and the authorization_token key. Zero
-// hits; any hit anywhere is a failure.
+// events, and the server's captured slog output — swept for both token values
+// and the authorization_token key. Zero hits; any hit anywhere is a failure.
+// (The SSE stream is a live tail from connect time with no history replay, so
+// the events list endpoint is the stored-event surface.)
 func TestSessionRepoTokenSweep(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	const tok1 = "SWEEP-TOKEN-ONE-8f3b2c"
 	const tok2 = "SWEEP-TOKEN-TWO-a91d4e"
+
+	var logBuf syncBuf
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	sweep := func(surface string, raw []byte) {
 		t.Helper()
@@ -203,6 +212,26 @@ func TestSessionRepoTokenSweep(t *testing.T) {
 	sweep("resource GET", get("/v1/sessions/"+sid+"/resources/"+rid))
 	sweep("resources LIST", get("/v1/sessions/"+sid+"/resources"))
 	sweep("events GET", get("/v1/sessions/"+sid+"/events"))
+	sweep("captured slog output", logBuf.Bytes())
+}
+
+// syncBuf is a mutex-guarded buffer for capturing slog output written from
+// the handler goroutines.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (sb *syncBuf) Write(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.b.Write(p)
+}
+
+func (sb *syncBuf) Bytes() []byte {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return append([]byte(nil), sb.b.Bytes()...)
 }
 
 // TestSessionRepoCreateValidation is w-no-token, w-bad-url, w-bad-checkout,
@@ -236,6 +265,16 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		"fragment url":    {repoBody("g", map[string]any{"url": repoTestURL + "#frag"})},
 		"explicit port":   {repoBody("g", map[string]any{"url": "https://github.com:443/o/r"})},
 		"trailing slash":  {repoBody("g", map[string]any{"url": repoTestURL + "/"})},
+		// The derived default mount is /workspace/<repo-name>; a repo segment
+		// that would make it unclean, unstorable, or oversized must be
+		// refused at the URL grammar, not stored (verifier findings, 2026-08-07:
+		// acme/.. stored mount_path /workspace/.. — the reserved "/" in
+		// disguise — and %00 reached the jsonb bind as a 500).
+		"dotdot repo url":     {repoBody("g", map[string]any{"url": "https://github.com/acme/.."})},
+		"dot repo url":        {repoBody("g", map[string]any{"url": "https://github.com/acme/."})},
+		"nul repo url":        {repoBody("g", map[string]any{"url": "https://github.com/acme/%00repo"})},
+		"space repo url":      {repoBody("g", map[string]any{"url": "https://github.com/acme/re%20po"})},
+		"oversized repo name": {repoBody("g", map[string]any{"url": "https://github.com/acme/" + strings.Repeat("r", 1200)})},
 		// w-bad-checkout
 		"tag checkout":      {repoBody("g", map[string]any{"checkout": map[string]any{"type": "tag", "name": "v1"}})},
 		"branch no name":    {repoBody("g", map[string]any{"checkout": map[string]any{"type": "branch"}})},
@@ -353,13 +392,15 @@ func TestSessionRepoRotation(t *testing.T) {
 		wantErr(t, status, body, tc.wantStatus, wantType)
 	}
 
-	// w-archived-gate: rotation on an archived session is the established
-	// archived-session error.
+	// w-archived-gate: rotation and delete on an archived session are the
+	// established archived-session error.
 	if status, body := s.do(http.MethodPost, "/v1/sessions/"+sid+"/archive", nil); status != http.StatusOK {
 		t.Fatalf("archive: status %d (%v)", status, body)
 	}
 	status, body := s.do(http.MethodPost, "/v1/sessions/"+sid+"/resources/"+repoRID,
 		map[string]any{"authorization_token": "t"})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	status, body = s.do(http.MethodDelete, "/v1/sessions/"+sid+"/resources/"+fileRID, nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 }
 

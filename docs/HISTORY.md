@@ -2729,3 +2729,21 @@ passed; nine repos sealed (`repos=9` in the log); and the cipher-less refusal's 
 turned the clean 500 into a nil-pointer panic surfacing as EOF. The tenth guard-shaped
 behavior — `checkout` union strictness — is covered by the same validation test's
 table rows and was not separately mutated.
+
+**Verifier round (same day): two live bypasses through the default-mount derivation.**
+The pinned verifier's behavior rung, probing a branch-built controlplane with curl, found
+what every review of the *supplied*-path rules had missed: the **derived** default mount
+`/workspace/<repo-name>` skipped validation entirely, and `parseGitHubRepoURL` accepted
+`.`/`..`/NUL/space as the repo segment. `url: …/acme/..` (no `mount_path`) stored
+`mount_path: "/workspace/.."` — the reserved `/` in disguise, on an unremovable resource —
+and `…/acme/%00repo` reached the jsonb bind as a 500 (the #135 failure class). Fixed
+TDD-red-first: five new validation cases (`..`, `.`, `%00`, `%20`, a 1200-char name) were
+run against the pre-fix code and failed exactly as the verifier observed (200/200/500/200/
+200), then the grammar was bounded (segment charset `[A-Za-z0-9._-]`, a repo name
+`path.Clean` would rewrite refused) and the derived default routed through
+`validateRepoMountPath` like a supplied path; all five went green. The same round added
+the captured-`slog` sweep to w-token-sweep (a mutex-buffered `slog.SetDefault` capture —
+zero token hits) and the archived-session **delete** assertion beside the rotation gate,
+and corrected two plan-matrix facts (create returns 200 on this server, not 201; the SSE
+stream is a live tail with no history replay, so the events list endpoint is the
+stored-event sweep surface).
