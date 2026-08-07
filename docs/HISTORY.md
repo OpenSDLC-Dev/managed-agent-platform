@@ -3005,6 +3005,18 @@ only the 401 row failed, because go-git splices a response body into the error i
 for 401/403/404 and for nothing else. The comment now says which row is the redaction's
 only coverage, so nobody deletes it as redundant.
 
+
+
+**The cancellation sweep's own row lied first.** The fix for a stranded tar landed without
+a test, so it was written afterwards — and its first draft proved nothing. The recording
+stub logged every command it was handed and checked the context only after, so the
+mutation that hands the sweep the *cancelled* context — the obvious implementation, which
+cleans up nothing — passed the row unchanged. A real sandbox refuses a command whose
+context is already done; the stub now records only what it actually runs, and both
+mutations go red on `commands issued: []`, the no-sweep one and the cancelled-context one
+alike. Third instance in this slice of a test that would have certified the bug it existed
+to catch, after the stage-and-rename row and the byte budget's two.
+
 **Plan 25 progress summary (archived).** Two slices, two PRs: #329 (the wire half —
 the `github_repository` create arm, migration 0020's `session_resource_credentials`,
 live token rotation, the repo-delete rejection, unit W, and the e-wire-cli acceptance
