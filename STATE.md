@@ -1,18 +1,22 @@
 # STATE.md — Active work
 
-What is being worked on right now, and how far along it is — nothing else. **Size budget: ~30 lines.** Everything static lives elsewhere: conventions and the doc index in [CLAUDE.md](./CLAUDE.md), the as-built system in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md), a change's narrative (written once) in [CHANGELOG.md](./CHANGELOG.md), the backlog in GitHub issues. The verifier checks this file's claims against reality on its docs-consistency rung.
+What is being worked on right now, and how far along it is — nothing else. **Size budget: ~30 lines.** Everything static lives elsewhere: conventions and the doc index in [CLAUDE.md](./CLAUDE.md), the as-built system in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md), a change's narrative (written once) as a [changelog.d/](./changelog.d/) fragment assembled into [CHANGELOG.md](./CHANGELOG.md) at release time, the backlog in GitHub issues. The verifier checks this file's claims against reality on its docs-consistency rung.
 
 ## Active work
 
-**None.** [Plan 25 — git/repo mounting](./docs/plan/25_git-repo-mounting.md) archived
-with its second slice; #55 is closed. The one deliberate gap it leaves, BYOC repository
-materialization, is tracked in #322 and is not started.
+**[Plan 27 — release management](./docs/plan/27_release-management.md)** (`in-progress`):
+SemVer 0.x, plan-archive-driven releases, changelog fragments, and a tag-triggered
+publishing pipeline (GHCR images, OCI Helm chart, worker binaries, GitHub Release),
+ending with v0.2.0 cut as the acceptance run.
 
 ## Tasks
 
-- [x] Slice 1 — the wire + sealed token storage: create acceptance/validation,
-      migration 0020, rotation live, delete rejection, unit W tests + mutation
-      evidence (PR #329).
-- [x] Slice 2 — the clone: go-git executor materialization, `session.error`
-      surfacing, the brain's "Mounted repositories" block, the `repo-answer`
-      eval; plan archived, #55 closed (this PR).
+- [x] Slice 1 — fragment mechanism: `changelog.d/` + `tools/changelog`
+      (mutation-checked tests), `make changelog`/`changelog-notes`,
+      docs/RELEASING.md, governance rewording (this PR).
+- [ ] Slice 2 — version embedding: `internal/version`, LDFLAGS, Dockerfile ARG,
+      worker `--version`.
+- [ ] Slice 3 — publishing pipeline: `release.yml` + release Make targets +
+      deploy-doc updates.
+- [ ] Slice 4 — cut v0.2.0 (acceptance: kind install from published artifacts);
+      archive the plan.
