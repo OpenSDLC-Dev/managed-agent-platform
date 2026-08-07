@@ -31,9 +31,11 @@ copy of an entry here.
   archived sessions, and cipher-less deployments keep their rejections.
   Post-create immutability is total — the add endpoint stays file-only
   (wire-faithful per the SDK's typed Add) and repo DELETE is rejected
-  (attached-for-lifetime). Mount rules: clean-form paths, cleaned-form
-  uniqueness, no resource above a repo mount, no nested repos, `/` and `/tmp`
-  reserved, at most eight repos per session. Unit W of the plan's verification
+  (attached-for-lifetime). Mount rules: clean-form literal paths (unlike the
+  file arm, which #323 roots under the uploads directory — the cross-resource
+  uniqueness and nesting rules compare files by their resolved paths),
+  no resource above a repo mount, no nested repos, `/` and `/tmp` reserved,
+  at most eight repos per session. Unit W of the plan's verification
   matrix lands as pgtest integration tests — token-sweep probe across every
   response surface included — with red-run mutation evidence recorded for each
   new guard. Divergences: the create-rejection entry carved down
