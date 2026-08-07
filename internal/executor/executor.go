@@ -39,6 +39,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gatetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
@@ -137,6 +138,15 @@ type Config struct {
 	// reference has per-tool allowed domains, but no wire field carries
 	// them, so this knob is platform-native (docs/DIVERGENCES.md).
 	WebAllowedDomains []string
+	// The clone budgets for github_repository mounts (plan 25 decision 1).
+	// The spool a clone lands in sits on executor-local disk, outside the
+	// sandbox's own storage hardening, so one unbounded repository could
+	// exhaust the executor and disrupt unrelated sessions. RepoCloneMaxBytes
+	// is metered as bytes land — over the tree and its tar together — and
+	// RepoCloneTimeout bounds one repository's clone; both surface as
+	// tolerated clone failures (too_large / timeout), never as a failed run.
+	RepoCloneTimeout  time.Duration
+	RepoCloneMaxBytes int64
 }
 
 func (c Config) withDefaults() Config {
@@ -155,6 +165,12 @@ func (c Config) withDefaults() Config {
 	if c.CheckpointMaxBytes <= 0 {
 		c.CheckpointMaxBytes = 2 << 30
 	}
+	if c.RepoCloneTimeout <= 0 {
+		c.RepoCloneTimeout = 5 * time.Minute
+	}
+	if c.RepoCloneMaxBytes <= 0 {
+		c.RepoCloneMaxBytes = 1 << 30
+	}
 	return c
 }
 
@@ -168,7 +184,13 @@ type Executor struct {
 	// blobs sources skill archives for materialization; nil (a storage-less
 	// deploy) skips materialization with a log line, never a fault.
 	blobs blob.Store
-	cfg   Config
+	// cipher opens the sealed authorization token of a github_repository
+	// resource so the executor can clone it (plan 25 decision 2). Nil means
+	// no cipher is configured — a deployment the control plane already
+	// refuses repo-bearing creates on, so a repo reaching here surfaces as a
+	// tolerated clone failure rather than a silent skip.
+	cipher secrets.Cipher
+	cfg    Config
 	// searcher and fetcher are the web tools' backends (webwork.go). Nil means
 	// unconfigured — the tool answers with an is_error naming what is missing.
 	// The fetcher needs either a key or an explicit base URL: the Jina Reader
@@ -188,8 +210,8 @@ type Executor struct {
 	kindOffset int
 }
 
-func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.Provider, blobs blob.Store, cfg Config) *Executor {
-	e := &Executor{pool: pool, log: log, queue: q, provider: provider, blobs: blobs, cfg: cfg.withDefaults()}
+func New(pool *pgxpool.Pool, log *events.Log, q *queue.Queue, provider sandbox.Provider, blobs blob.Store, cipher secrets.Cipher, cfg Config) *Executor {
+	e := &Executor{pool: pool, log: log, queue: q, provider: provider, blobs: blobs, cipher: cipher, cfg: cfg.withDefaults()}
 	if cfg.TavilyAPIKey != "" {
 		e.searcher = tavily.New(cfg.WebSearchBaseURL, cfg.TavilyAPIKey)
 	}
@@ -419,6 +441,9 @@ func (e *Executor) provisionAndRun(ctx context.Context, item *queue.Item, sess s
 		return nil, nil, err
 	}
 	e.materializeSkills(ctx, sb, item.SessionID, sess.skills)
+	// Repositories before files, so a file mount may deliberately overlay into
+	// a checkout (plan 25 decision 5).
+	e.materializeRepos(ctx, sb, item.SessionID, sess.repos)
 	e.materializeFiles(ctx, sb, item.SessionID, sess.files)
 	uses, err := e.unansweredToolUses(ctx, item.SessionID)
 	if err != nil {
@@ -671,11 +696,12 @@ type sessionRun struct {
 	networking domain.Networking
 	skills     []skillRef
 	files      []fileRef
+	repos      []repoRef
 	vaultIDs   []string
 }
 
 // sessionForRun loads the session's egress policy, its snapshot's skills
-// references, its file-mount resources, and its attached vault ids under the
+// references, its file and repository mount resources, and its attached vault ids under the
 // session's row lock, and reports whether the session is still live for tool
 // execution. A session that is not running, or has been archived, is stale: its
 // tool_exec item is completed here and false is returned, so a dead session
@@ -728,10 +754,17 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 	if err := json.Unmarshal(resourcesJSON, &resources); err != nil {
 		return sessionRun{}, false, err
 	}
+	// The same bytes decoded through the repository variant's shape — each
+	// materializer filters the array by type, so one read serves both.
+	var repos []repoRef
+	if err := json.Unmarshal(resourcesJSON, &repos); err != nil {
+		return sessionRun{}, false, err
+	}
 	return sessionRun{
 		networking: cfg.Networking,
 		skills:     agent.Skills,
 		files:      resources,
+		repos:      repos,
 		vaultIDs:   vaultIDs,
 	}, true, tx.Commit(ctx)
 }

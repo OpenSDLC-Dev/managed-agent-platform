@@ -1,6 +1,7 @@
 package evals
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/openai"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 )
 
 // evalKey is the management credential the harness sends as x-api-key. It is a
@@ -69,7 +71,15 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 	// One in-memory blob store shared by the API (skill uploads) and the
 	// executor (materialization), so eval tasks can exercise skills end to end.
 	blobs := blobtest.Mem()
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, nil))
+	// One local (AES-GCM) cipher shared by the API, which seals a
+	// github_repository resource's authorization token at create, and the
+	// executor, which opens it to clone — so a repo-mounting eval exercises
+	// the whole sealed-token chain rather than a stubbed half of it.
+	cipher, err := local.New(local.Config{KeyID: "evals-1", Key: bytes.Repeat([]byte{9}, 32)})
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher))
 	t.Cleanup(srv.Close)
 
 	// One default route. Config.Model is the id the *endpoint* receives, so it
@@ -117,7 +127,7 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 		}).Run(loopCtx)
 	})
 	execDone := runLoop(func() error {
-		return executor.New(pool, events.NewLog(pool), queue.New(pool), sbx, blobs, executor.Config{
+		return executor.New(pool, events.NewLog(pool), queue.New(pool), sbx, blobs, cipher, executor.Config{
 			Image: evalImage,
 			// Workdir left empty, which resolves to sandbox.DefaultWorkdir on
 			// both this executor and the file tools it runs, so a relative path

@@ -333,7 +333,7 @@ func TestHarvestWithoutBlobStoreStillChainsGrading(t *testing.T) {
 	// A storage-less deploy: no blob store, so no snapshot can publish — but
 	// grading must still run, transcript-only, and the previous snapshot (if
 	// any) must not be wiped by a harvest that cannot replace it.
-	h.exec = New(h.pool, h.log, h.queue, h.prov, nil, Config{})
+	h.exec = New(h.pool, h.log, h.queue, h.prov, nil, h.cipher, Config{})
 	prev := domain.NewID(domain.PrefixFile)
 	if _, err := h.pool.Exec(context.Background(),
 		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)

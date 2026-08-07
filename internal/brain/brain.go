@@ -191,7 +191,7 @@ func streamUsage(turn *turnResult) *domain.ModelUsage {
 func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Time) error {
 	sid := item.SessionID
 
-	agentJSON, resourcesJSON, outcomesJSON, live, err := b.claimLiveSession(ctx, item)
+	agentJSON, resourcesJSON, outcomesJSON, envKind, live, err := b.claimLiveSession(ctx, item)
 	if err != nil || !live {
 		return err
 	}
@@ -283,7 +283,12 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// reason as the skills misses.
 	filesBlock, filesInjected, filesMisses := b.resolveFilesBlock(ctx, resourcesJSON)
 	recordFileResolveMisses(ctx, filesMisses)
-	req, watermark, err := buildRequest(agent, history, skillsBlock, filesBlock)
+	// Mounted-repository injection: a "Mounted repositories" block after the
+	// files block, for cloud environments only (plan 25 decision 8). Every
+	// rendered fact already lives in the stored resource, so there is no join
+	// to miss.
+	reposBlock, reposInjected := b.resolveReposBlock(ctx, resourcesJSON, envKind)
+	req, watermark, err := buildRequest(agent, history, skillsBlock, filesBlock, reposBlock)
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("replay: %v", err))
 	}
@@ -311,6 +316,8 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 		attribute.Int("skills.block_chars", len(skillsBlock)),
 		attribute.Int("files.injected", filesInjected),
 		attribute.Int("files.block_chars", len(filesBlock)),
+		attribute.Int("repos.injected", reposInjected),
+		attribute.Int("repos.block_chars", len(reposBlock)),
 	)
 
 	kctx, keeper := b.queue.KeepLease(sctx, item, b.cfg.LeaseTTL)
@@ -396,28 +403,35 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 // forever) — completes the item while no concurrent trigger can interleave:
 // completing it unlocked could swallow a user.message whose enqueue this
 // still-live item had suppressed.
-func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJSON, resourcesJSON, outcomesJSON []byte, live bool, err error) {
+// The environment's kind rides the same locked read (the executor's
+// sessionForRun precedent) because the repositories block is emitted only for
+// cloud environments — nothing materializes repositories on self_hosted, so
+// asserting a checkout there would be a false statement to the model (plan 25
+// decision 8).
+func (b *Brain) claimLiveSession(ctx context.Context, item *queue.Item) (agentJSON, resourcesJSON, outcomesJSON []byte, envKind string, live bool, err error) {
 	tx, err := b.pool.Begin(ctx)
 	if err != nil {
-		return nil, nil, nil, false, err
+		return nil, nil, nil, "", false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var status string
 	var archivedAt *time.Time
 	err = tx.QueryRow(ctx,
-		`SELECT resolved_agent, resources, outcome_evaluations, status, archived_at FROM sessions WHERE id = $1 FOR UPDATE`,
-		item.SessionID.String()).Scan(&agentJSON, &resourcesJSON, &outcomesJSON, &status, &archivedAt)
+		`SELECT s.resolved_agent, s.resources, s.outcome_evaluations, s.status, s.archived_at, e.kind
+		   FROM sessions s JOIN environments e ON e.id = s.environment_id
+		  WHERE s.id = $1 FOR UPDATE OF s`,
+		item.SessionID.String()).Scan(&agentJSON, &resourcesJSON, &outcomesJSON, &status, &archivedAt, &envKind)
 	if err != nil {
-		return nil, nil, nil, false, fmt.Errorf("load session: %w", err)
+		return nil, nil, nil, "", false, fmt.Errorf("load session: %w", err)
 	}
 	if status != string(domain.SessionRunning) || archivedAt != nil {
 		if err := b.queue.Complete(ctx, tx, item); err != nil {
-			return nil, nil, nil, false, err
+			return nil, nil, nil, "", false, err
 		}
-		return nil, nil, nil, false, tx.Commit(ctx)
+		return nil, nil, nil, "", false, tx.Commit(ctx)
 	}
-	return agentJSON, resourcesJSON, outcomesJSON, true, tx.Commit(ctx)
+	return agentJSON, resourcesJSON, outcomesJSON, envKind, true, tx.Commit(ctx)
 }
 
 // pendingInputTypes are the inbound events whose arrival must chain the next

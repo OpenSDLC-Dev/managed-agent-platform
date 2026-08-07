@@ -150,7 +150,7 @@ func newStack(t *testing.T, scripts [][]provider.Chunk) *stack {
 		}).Run(loopCtx)
 	})
 	execDone := runLoop(func() error {
-		return executor.New(pool, events.NewLog(pool), queue.New(pool), sbx, blobs, executor.Config{
+		return executor.New(pool, events.NewLog(pool), queue.New(pool), sbx, blobs, nil, executor.Config{
 			Image:        sandboxImage,
 			LeaseTTL:     5 * time.Minute,
 			PollInterval: 100 * time.Millisecond,

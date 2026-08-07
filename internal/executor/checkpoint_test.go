@@ -431,7 +431,7 @@ func TestProvisionFailsClosedOnAReadyMarkerWithoutBlobs(t *testing.T) {
 	sb := &fakeSandbox{}
 	h := newHarness(t, sb)
 	setMarker(t, h, "ready", checkpointBlob(t, h, map[string]string{"workspace/prev.txt": "x"}))
-	bare := New(h.pool, h.log, h.queue, h.prov, nil, Config{})
+	bare := New(h.pool, h.log, h.queue, h.prov, nil, h.cipher, Config{})
 	_, err := bare.provisionSandbox(context.Background(), h.sid,
 		sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}})
 	if err == nil || !strings.Contains(err.Error(), "no object store") {

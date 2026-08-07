@@ -307,7 +307,7 @@ func TestMaterializeWithoutStorage(t *testing.T) {
 	sb := &fakeSandbox{}
 	prov := &fakeProvider{sb: sb}
 	h := newHarnessWith(t, prov, Config{})
-	h.exec = New(h.pool, h.log, h.queue, prov, nil, Config{})
+	h.exec = New(h.pool, h.log, h.queue, prov, nil, h.cipher, Config{})
 	h.refSkills(t, [2]string{"skill_mat_any", "latest"})
 	h.suspend(t, writeUse("out.txt", "hello"))
 

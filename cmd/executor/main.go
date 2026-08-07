@@ -31,6 +31,12 @@
 //	EXECUTOR_CHECKPOINT_MAX_BYTES   workspace-checkpoint size budget in bytes
 //	                         (default 2147483648, 2 GiB); over budget the TTL
 //	                         tier reaps without a checkpoint
+//	EXECUTOR_REPO_CLONE_MAX_BYTES   github_repository clone spool budget in
+//	                         bytes (default 1073741824, 1 GiB), metered as the
+//	                         clone's bytes land; over budget the clone is
+//	                         abandoned and surfaces as a session.error
+//	EXECUTOR_REPO_CLONE_TIMEOUT     per-repository clone deadline (default 5m);
+//	                         past it the clone is abandoned the same way
 //	CONTROLPLANE_URL         where a session's egress gate fetches its config;
 //	                         set with EXECUTOR_GATE_IMAGE to opt into the gate.
 //	                         Unset: no gate runs; a gate-wanting session (limited
@@ -69,11 +75,13 @@
 //	BLOB_ACCESS_KEY / BLOB_SECRET_KEY / BLOB_BUCKET / BLOB_REGION / BLOB_TLS /
 //	BLOB_BUCKET_PRECREATED   the rest of the storage config (as controlplane);
 //	                         the gcs backend takes BLOB_BUCKET alone
-//	SECRETS_BACKEND          secrets cipher for vault credential material
-//	                         (docs/plan/12): "openbao", "local", "gcpkms", or
-//	                         empty to run without one; validated at startup for
-//	                         deploy parity — egress substitution itself decrypts
-//	                         controlplane-side, for the per-session gate
+//	SECRETS_BACKEND          secrets cipher (docs/plan/12): "openbao", "local",
+//	                         "gcpkms", or empty to run without one. The executor
+//	                         decrypts one secret: a github_repository resource's
+//	                         sealed token, per clone (docs/plan/25). Egress
+//	                         substitution still decrypts controlplane-side, for
+//	                         the per-session gate. Without a cipher, repository
+//	                         mounts do not clone
 //	BAO_ADDR / BAO_TOKEN / BAO_TRANSIT_KEY / SECRETS_MASTER_KEY / SECRETS_KEY_ID /
 //	GCPKMS_KEY_NAME          the rest of the cipher config (as controlplane)
 //	TAVILY_API_KEY           web_search backend key; unset leaves the tool
@@ -184,7 +192,7 @@ func run(ctx context.Context) error {
 	}
 	for env, dst := range map[string]*time.Duration{
 		"EXECUTOR_LEASE_TTL": &cfg.LeaseTTL, "EXECUTOR_POLL_INTERVAL": &cfg.PollInterval,
-		"EXECUTOR_REAP_INTERVAL": &cfg.ReapInterval,
+		"EXECUTOR_REAP_INTERVAL": &cfg.ReapInterval, "EXECUTOR_REPO_CLONE_TIMEOUT": &cfg.RepoCloneTimeout,
 	} {
 		if v := os.Getenv(env); v != "" {
 			d, err := time.ParseDuration(v)
@@ -212,6 +220,15 @@ func run(ctx context.Context) error {
 			return errors.New("EXECUTOR_CHECKPOINT_MAX_BYTES must be a positive byte count of at most 1 PiB")
 		}
 		cfg.CheckpointMaxBytes = n
+	}
+	if v := os.Getenv("EXECUTOR_REPO_CLONE_MAX_BYTES"); v != "" {
+		// Same bound and shape as the checkpoint budget above: this one meters
+		// a clone's spool as its bytes land (plan 25 decision 1).
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 || n > 1<<50 {
+			return errors.New("EXECUTOR_REPO_CLONE_MAX_BYTES must be a positive byte count of at most 1 PiB")
+		}
+		cfg.RepoCloneMaxBytes = n
 	}
 	if err := executor.ValidateWorkdir(cfg.Workdir); err != nil {
 		return fmt.Errorf("EXECUTOR_WORKDIR: %w", err)
@@ -261,18 +278,20 @@ func run(ctx context.Context) error {
 		slog.Info("object storage not configured; skills will not materialize")
 	}
 
-	// Constructed for startup validation only (fail fast on a misconfigured or
-	// unreachable backend, matching the controlplane's wiring): egress
-	// substitution decrypts controlplane-side — the gate-config endpoint —
-	// never in the executor.
+	// The executor decrypts one secret and one only: a github_repository
+	// resource's sealed authorization token, opened per clone so the platform
+	// can fetch the repository on the session's behalf (plan 25 decision 2).
+	// Egress substitution still decrypts controlplane-side — the gate-config
+	// endpoint — never here. Constructing the cipher also fails fast on a
+	// misconfigured or unreachable backend, matching the controlplane's wiring.
 	cipher, err := secretsbackend.FromEnv(ctx)
 	if err != nil {
 		return err
 	}
 	if cipher == nil {
-		slog.Info("secrets cipher not configured")
+		slog.Info("secrets cipher not configured; github_repository resources will not clone")
 	}
 
 	slog.Info("executor running")
-	return executor.New(pool, events.NewLog(pool), queue.New(pool), provider, blobs, cfg).Run(ctx)
+	return executor.New(pool, events.NewLog(pool), queue.New(pool), provider, blobs, cipher, cfg).Run(ctx)
 }
