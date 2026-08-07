@@ -183,13 +183,19 @@ it ("is not echoed in API responses").
    never degrade into a backend-dependent 500); `checkout` is parsed
    strictly (unknown `type` or unknown keys 400 via the `rejectUnknownKeys` precedent;
    `branch.name` non-empty; `commit.sha` exactly 40 hex — "full commit SHA", INFERRED);
-   `mount_path` rides its own bound/storable checks plus per-session uniqueness across
-   *all* resources, defaulting to `/workspace/<repo-name>` where `<repo-name>` is the URL's
-   last segment with `.git` stripped (derivation INFERRED). It cannot share the file arm's
-   validator: `validateMountPath` was replaced by `resolveMountPath` in #323, which *roots*
-   its argument under `/mnt/session/uploads` — right for files, wrong for a repo whose
-   documented default is `/workspace/<repo-name>`. The length and storable-text bounds are
-   the parts worth carrying over. The repo arm is additionally
+   `mount_path` rides its own **absolute**-path, bound and storable checks plus per-session
+   uniqueness across *all* resources, defaulting to `/workspace/<repo-name>` where
+   `<repo-name>` is the URL's last segment with `.git` stripped (derivation INFERRED). It
+   cannot share the file arm's validator: `validateMountPath` was replaced by
+   `resolveMountPath` in #323, which *roots* its argument under `/mnt/session/uploads` —
+   right for files, wrong for a repo whose documented default is `/workspace/<repo-name>`.
+   What must be carried over from the deleted `validateMountPath` is all three of its
+   checks, the absolute requirement emphatically included: a relative `mount_path` would be
+   stored as spelled and only resolve against the workdir when a sandbox command reads it,
+   so `../mnt/session/uploads/x` would compare as distinct from the file mount it actually
+   aliases, defeating both the uniqueness check and the reserved-target rejections below.
+   The repo arm has no rooting step to normalize that away, so the absolute check is the
+   only thing standing between the two (case `w-relative-mount`). The repo arm is additionally
    stricter than the landed file arm: the path must equal its `path.Clean` form —
    `/workspace/./repo`, doubled separators, and trailing slashes are 400s, because
    raw-string uniqueness is otherwise evadable by aliases naming the same directory
@@ -379,6 +385,7 @@ meets it. Its rules, translated to this repo:
 | w-bad-url | 🔍 | `http://…`, non-github host, `https://github.com/onlyowner`, extra segments, garbage, `https://TOKEN@github.com/o/r`, `…?token=x`, `…#frag`, an explicit port | 400 each (the canonical-grammar rule) |
 | w-bad-checkout | 🔍 | `type: "tag"`, branch without `name`, sha not 40-hex, unknown keys | 400 each |
 | w-mount-collision | 🔍 | two resources (repo/repo and repo/file) sharing a `mount_path`; aliases of one path (`/workspace/repo` vs `/workspace/./repo`) | 400 each (uniqueness on the cleaned form) |
+| w-relative-mount | 🔍 | `mount_path` `workspace/repo`, `../mnt/session/uploads/x`, `.` | 400 each (the absolute-path rule); `path.Clean` leaves all three unchanged, so the clean-form rule below would pass them through to a uniqueness comparison against the wrong spelling |
 | w-unclean-mount | 🔍 | `mount_path` `/workspace/./r`, `/workspace//r`, trailing slash | 400 each (the clean-form rule) |
 | w-nesting | 🔍 | a file at `/workspace/repo` + a repo at `/workspace/repo/src`; two nested repos; a repo at `/` | 400 each (the nesting-direction and reserved-target rules); the inverse — a file *inside* a repo path — stays accepted |
 | w-repo-cap | 🔍 | nine `github_repository` resources in one create | 400 (the eight-repo cap) |
