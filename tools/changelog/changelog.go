@@ -353,9 +353,10 @@ func notes(content, version string) (string, error) {
 // pre-command state: fragments are first staged into `.consumed/` (a
 // dot-directory, so a stray leftover is invisible to a later run), the
 // changelog is written only after staging succeeds, and a failed write
-// unstages them. Only after the new document is on disk is the staging
-// directory removed — the one step whose failure leaves harmless residue
-// rather than a half-released state.
+// unstages them (best-effort — a fragment the rename-back cannot move is
+// named in the error, and git still holds it). Only after the new document
+// is on disk is the staging directory removed — the one step whose failure
+// leaves harmless residue rather than a half-released state.
 func runAssemble(changelogPath, dir, version, date string) error {
 	content, err := os.ReadFile(changelogPath)
 	if err != nil {
@@ -376,19 +377,30 @@ func runAssemble(changelogPath, dir, version, date string) error {
 			return err
 		}
 	}
-	unstage := func(n int) {
+	// Best-effort: a rename-back can itself fail, so report what stayed
+	// stranded in .consumed/ instead of claiming a clean restore — git
+	// still holds every fragment, so recovery is a checkout away.
+	unstage := func(n int) []string {
+		var stranded []string
 		for _, f := range frags[:n] {
-			_ = os.Rename(filepath.Join(consumed, f.name), filepath.Join(dir, f.name))
+			if err := os.Rename(filepath.Join(consumed, f.name), filepath.Join(dir, f.name)); err != nil {
+				stranded = append(stranded, f.name)
+			}
 		}
+		return stranded
 	}
 	for i, f := range frags {
 		if err := os.Rename(filepath.Join(dir, f.name), filepath.Join(consumed, f.name)); err != nil {
-			unstage(i)
+			if stranded := unstage(i); len(stranded) > 0 {
+				return fmt.Errorf("staging %s: %w (nothing was released; %s could not be moved back out of %s — restore from git)", f.name, err, strings.Join(stranded, ", "), consumed)
+			}
 			return fmt.Errorf("staging %s: %w (nothing was released)", f.name, err)
 		}
 	}
 	if err := os.WriteFile(changelogPath, []byte(out), 0o644); err != nil {
-		unstage(len(frags))
+		if stranded := unstage(len(frags)); len(stranded) > 0 {
+			return fmt.Errorf("writing the changelog: %w (nothing was released; %s could not be moved back out of %s — restore from git)", err, strings.Join(stranded, ", "), consumed)
+		}
 		return fmt.Errorf("writing the changelog: %w (fragments restored, nothing was released)", err)
 	}
 	if len(frags) > 0 {

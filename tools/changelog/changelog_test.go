@@ -612,6 +612,7 @@ func TestAssembleStagingFailureLeavesEverythingUntouched(t *testing.T) {
 	clPath, dir := writeFixture(t, steadyChangelog, map[string]string{"a.added.md": "- A.\n"})
 	// Pre-create .consumed so MkdirAll succeeds and the failure lands on the
 	// rename itself (removing a directory entry needs a writable parent).
+	// chmod-based denial assumes a non-root runner, which CI and local dev are.
 	if err := os.Mkdir(filepath.Join(dir, ".consumed"), 0o755); err != nil {
 		t.Fatal(err)
 	}
