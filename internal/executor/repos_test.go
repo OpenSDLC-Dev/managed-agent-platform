@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -739,6 +740,84 @@ func TestRepoRefusesADestructiveMountPath(t *testing.T) {
 				t.Error("the repository was cloned before its mount path was judged")
 			}
 		})
+	}
+}
+
+// sweepSandbox records the commands the executor issues and can cancel the run
+// at the one moment that matters: after the tar has landed in the sandbox and
+// before the extraction that would remove it.
+type sweepSandbox struct {
+	*fakeSandbox
+	mu      sync.Mutex
+	cmds    []string
+	onWrite func()
+}
+
+// Exec records only what it actually runs. The distinction is the row: a real
+// sandbox refuses a command whose context is already done, so a sweep handed the
+// cancelled context issues nothing — and a stub that recorded the attempt would
+// call that a pass.
+func (s *sweepSandbox) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+	if err := ctx.Err(); err != nil {
+		return sandbox.ExecResult{}, err
+	}
+	s.mu.Lock()
+	s.cmds = append(s.cmds, req.Command)
+	s.mu.Unlock()
+	return s.fakeSandbox.Exec(ctx, req)
+}
+
+func (s *sweepSandbox) WriteFileStream(ctx context.Context, p string, src io.Reader, size int64) error {
+	err := s.fakeSandbox.WriteFileStream(ctx, p, src, size)
+	if s.onWrite != nil {
+		s.onWrite()
+	}
+	return err
+}
+
+func (s *sweepSandbox) issued() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.cmds...)
+}
+
+// TestRepoCancelledCloneSweepsTheSandbox 🔍: from the moment the tar lands, the
+// sandbox holds up to the whole byte budget, and the only thing that removes it
+// is the extraction command's own cleanup tail. A context cancelled in between —
+// the clone deadline, or a lost lease — makes Exec return without ever running
+// that tail, so a file the size of the repository would sit in the session's
+// /tmp for the rest of its life. The sweep runs on a context the cancellation
+// cannot reach, which is the whole point: the obvious implementation, reusing
+// the cancelled one, cleans up nothing.
+func TestRepoCancelledCloneSweepsTheSandbox(t *testing.T) {
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	// The harness supplies the session, its sealed token and the cipher; the
+	// sandbox under test is passed to materializeRepo directly, because the row
+	// is about one repository's own cancellation path and not about a whole pass.
+	sb := &sweepSandbox{fakeSandbox: &fakeSandbox{}}
+	h := newHarness(t, &fakeSandbox{})
+	h.seedRepoResource(t, "sesrsc_sweep", fx.url(), repoMount, "ghp_fixture", nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sb.onWrite = cancel
+
+	_, err := h.exec.materializeRepo(ctx, sb, h.sid, repoRef{
+		ID: "sesrsc_sweep", Type: "github_repository", URL: fx.url(), MountPath: repoMount,
+	})
+	if err == nil {
+		t.Fatal("the materialization reported success after its context was cancelled")
+	}
+
+	const tar = repoStagingRoot + "/repo-sesrsc_sweep.tar"
+	var swept bool
+	for _, c := range sb.issued() {
+		if strings.HasPrefix(c, "rm -rf ") && strings.Contains(c, tar) {
+			swept = true
+		}
+	}
+	if !swept {
+		t.Errorf("the shipped tar %s was left in the sandbox; commands issued: %v", tar, sb.issued())
 	}
 }
 
