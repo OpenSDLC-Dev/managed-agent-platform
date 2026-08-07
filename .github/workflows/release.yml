@@ -1,0 +1,90 @@
+name: release
+
+# Tag-triggered publishing (plan 27 slice 3; the ritual is docs/RELEASING.md).
+# Every build/publish step is a root-Makefile target the workflow merely
+# sequences — registry logins and the final `gh release` calls are its own
+# glue — so the executable source of the release cannot drift from what a
+# maintainer can run locally. The whole run authenticates with GITHUB_TOKEN:
+# images and the chart go to GHCR under this repository's owner, the Release
+# to this repository. Re-running the workflow on the same tag rebuilds
+# equivalent artifacts from the same commit and converges the release —
+# partial-failure recovery is a re-run. (Equivalent, not byte-identical:
+# the Dockerfile's base tags float, apt-get is live, and tarballs carry
+# build timestamps.)
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Resolve the version from the tag
+        # Strict SemVer before the value reaches any shell/Make interpolation:
+        # git accepts metacharacters in tag names, and this job holds write
+        # tokens — an invalid tag must die here, not echo through a recipe.
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if ! printf '%s' "$v" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "tag '$GITHUB_REF_NAME' is not vX.Y.Z" >&2
+            exit 1
+          fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+      - name: Tag sanity — changelog, ancestry on main, chart bumped
+        run: |
+          git fetch origin main
+          make release-tag-check VERSION="$VERSION"
+          make release-chart-check VERSION="$VERSION"
+      - name: Render the release notes
+        # 120000 < GitHub's 125,000-char body cap, headroom included; over
+        # it, notes keep whole leading groups and link to the full section.
+        # The last pure check, run before anything publishes: a notes failure
+        # must abort an unpublished run, not strand images and chart on GHCR
+        # with no Release.
+        run: make changelog-notes VERSION="$VERSION" OUT=notes.md CAP=120000
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish images — multi-arch, three component names + the gate
+        run: make release-images PUSH=1 VERSION="$VERSION"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Publish the Helm chart (OCI)
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm registry login ghcr.io -u "$REGISTRY_USER" --password-stdin \
+            <<< "$REGISTRY_TOKEN"
+          make release-chart PUSH=1 VERSION="$VERSION"
+      - name: Build worker binaries
+        run: make release-binaries VERSION="$VERSION"
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Create-if-missing, then reconcile, then assets: a re-run after any
+          # partial failure converges — `edit` republishes a stuck draft and
+          # refreshes title/notes, `upload --clobber` replaces assets.
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release create "v$VERSION" \
+              --title "v$VERSION" --notes-file notes.md --verify-tag
+          fi
+          gh release edit "v$VERSION" \
+            --draft=false --title "v$VERSION" --notes-file notes.md
+          gh release upload "v$VERSION" --clobber \
+            dist/worker_"$VERSION"_*.tar.gz \
+            "dist/worker_${VERSION}_sha256sums.txt"

@@ -48,11 +48,42 @@ mid-slice in something the release would half-ship.
 
 ## What the tag triggers
 
-> **Not yet built.** The tag-triggered publishing workflow (`release.yml`:
-> GHCR images for server components and the gate, the Helm chart as an OCI
-> artifact, worker binaries, and a GitHub Release whose notes come from
-> `make changelog-notes VERSION=X.Y.Z [OUT=file]` — clamped to GitHub's
-> 125,000-character body cap with a link to the full CHANGELOG.md section
-> when the section is bigger, as the first cut's absorbed backlog will be)
-> arrives with plan 27 slice 3. Until it lands, a tag publishes nothing and
-> a release is the tag plus the assembled changelog.
+`release.yml` (`.github/workflows/release.yml`) fires on any `v*` tag (the
+version is validated as strict SemVer before it touches a shell) and
+publishes everything with `GITHUB_TOKEN` alone. Every build/publish step is
+a root-Makefile target the workflow merely sequences — registry logins and
+the final `gh release` calls are the workflow's own glue — and each target
+also runs locally, where without `PUSH=1` nothing leaves the machine:
+
+1. Every pure check, before anything publishes — a bad tag must fail while
+   the run is still free to fail: `make release-tag-check VERSION=X.Y.Z`
+   (the version is the changelog's newest released section, i.e. the
+   release PR merged first, and the tagged commit sits on `origin/main`)
+   and `make release-chart-check VERSION=X.Y.Z` (Chart.yaml's `version`
+   and `appVersion` both already bumped).
+2. `make changelog-notes VERSION=X.Y.Z OUT=notes.md CAP=120000` — the
+   release notes, rendered up front for the same reason: whole leading
+   Keep-a-Changelog groups under GitHub's 125,000-character body cap, then
+   a link to the full CHANGELOG.md section (the first cut's absorbed
+   backlog exceeds the cap).
+3. `make release-images PUSH=1 VERSION=X.Y.Z` — one server build
+   (linux/amd64 + arm64; the build stage cross-compiles rather than
+   emulating the Go toolchain) pushed as
+   `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor}:X.Y.Z`
+   (same digest, three names — the coordinates the Helm chart composes) plus
+   `…/gate:X.Y.Z` from the gate target. Deliberately no `latest` tag.
+4. `make release-chart PUSH=1 VERSION=X.Y.Z` — the chart to
+   `oci://ghcr.io/opensdlc-dev/charts` (its guards re-run as a
+   prerequisite).
+5. `make release-binaries VERSION=X.Y.Z` — version-stamped worker tarballs
+   for linux/darwin × amd64/arm64, plus a sha256sums file.
+6. The GitHub Release, from the notes rendered in step 2: created if
+   missing, then reconciled (`gh release edit` republishes a stuck draft
+   and refreshes title/notes), then assets uploaded with `--clobber`.
+
+Re-running the workflow on the same tag rebuilds equivalent artifacts from
+the same commit and converges the release, so partial-failure recovery is a
+re-run. (Equivalent, not byte-identical: the base images float and archives
+carry build timestamps.) One first-publish note: packages created by
+`GITHUB_TOKEN` start **private** — flip the four image packages and the chart
+to public once, in the org's package settings, so anonymous pulls work.

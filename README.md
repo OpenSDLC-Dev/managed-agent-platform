@@ -110,7 +110,7 @@ cp .env.example .env          # set CONTROLPLANE_API_KEY
 docker compose up --build     # control plane on http://localhost:8080 (loopback)
 ```
 
-Then drive it with the real CLI: `ANTHROPIC_API_KEY=<key> ant --base-url http://localhost:8080 beta:agents list` (management commands take `--base-url` explicitly; they ignore `ANTHROPIC_BASE_URL`, which only the worker/auth subcommands honor). The stack idles until you point the brain at your model endpoint (copy `model-providers.example.json` and set `MODEL_PROVIDERS_FILE`). See [`deploy/compose/README.md`](./deploy/compose/README.md) for details; production deploys use the [Helm chart](./deploy/helm).
+Then drive it with the real CLI: `ANTHROPIC_API_KEY=<key> ant --base-url http://localhost:8080 beta:agents list` (management commands take `--base-url` explicitly; they ignore `ANTHROPIC_BASE_URL`, which only the worker/auth subcommands honor). The stack idles until you point the brain at your model endpoint (copy `model-providers.example.json` and set `MODEL_PROVIDERS_FILE`). See [`deploy/compose/README.md`](./deploy/compose/README.md) for details; production deploys use the [Helm chart](./deploy/helm) — from v0.2.0 onward installable straight from the registry (`helm install map oci://ghcr.io/opensdlc-dev/charts/managed-agent-platform --version <X.Y.Z> ...`), with prebuilt worker binaries attached to each [GitHub Release](https://github.com/OpenSDLC-Dev/managed-agent-platform/releases).
 
 Contributions are welcome. Please read [CLAUDE.md](./CLAUDE.md) first — it documents the non-negotiable design principles and the working conventions (notably: **never guess at the wire schema**; verify against the real `ant` CLI) — and [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for how the platform is built.
 

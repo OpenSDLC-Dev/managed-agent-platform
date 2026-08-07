@@ -29,11 +29,14 @@ compute, outside the platform cluster, and reaches the control plane only over t
 ## Prerequisites
 
 - Kubernetes ≥ 1.26 and Helm ≥ 3.
-- **Container images.** This repository does not publish images yet. Build and push
-  `controlplane`, `brain`, and `executor` images to a registry your cluster can pull,
-  then point `image.registry` / `image.repository` / `image.tag` at them. Each process
-  is expected at `{registry}/{repository}/{component}:{tag}` and started with
-  `command: ["/<component>"]`.
+- **Container images.** From v0.2.0 onward, releases publish `controlplane`,
+  `brain`, and `executor` images to `ghcr.io/opensdlc-dev/managed-agent-platform`
+  (one build, three names — same digest; see docs/RELEASING.md), and the chart's
+  defaults resolve to them with the tag following `appVersion`. For a chart
+  predating the first published release, or to run your own build, push images a
+  cluster can pull and point `image.registry` / `image.repository` / `image.tag`
+  at them. Each process is expected at `{registry}/{repository}/{component}:{tag}`
+  and started with `command: ["/<component>"]`.
 - A model endpoint the brain can reach (an Anthropic-protocol endpoint or an
   OpenAI-compatible gateway), configured via `brain.modelProviders`.
 
@@ -46,11 +49,10 @@ generated credential is unstable under `helm template`/GitOps; MinIO requires a
 root password of at least 8 characters).
 
 ```bash
+# Until the first published release (v0.2.0), also pass image coordinates
+# pointing at your own build — see Prerequisites above.
 helm install map ./deploy/helm/managed-agent-platform \
   --namespace map --create-namespace \
-  --set image.registry=your-registry.example.com \
-  --set image.repository=your-org/managed-agent-platform \
-  --set image.tag=0.1.0 \
   --set controlplane.apiKey=$(openssl rand -hex 24) \
   --set postgresql.password=$(openssl rand -hex 24) \
   --set minio.rootUser=map \

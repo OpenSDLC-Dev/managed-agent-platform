@@ -6,7 +6,10 @@
 # Helm chart's Deployments invoke, so this one image serves compose and Helm both.
 #
 # syntax=docker/dockerfile:1
-FROM golang:1.26-bookworm AS build
+# The build stage is pinned to the build host's own platform and Go
+# cross-compiles to the target — a multi-arch `buildx --platform` run must
+# not execute the whole Go toolchain under QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 WORKDIR /src
 # Download modules first so the layer caches across source-only changes.
 COPY go.mod go.sum ./
@@ -16,7 +19,9 @@ COPY . .
 # VERSION is stamped into internal/version.Version by the release pipeline
 # (docs/RELEASING.md); an unarged build reports "dev".
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=${VERSION}" \
     -o /out/ ./cmd/...
 

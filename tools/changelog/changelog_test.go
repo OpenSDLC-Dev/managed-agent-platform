@@ -392,7 +392,7 @@ func TestBodyFinalRefLineSurvives(t *testing.T) {
 `
 	clPath, _ := writeFixture(t, cl, nil)
 	out := filepath.Join(t.TempDir(), "notes.md")
-	if err := runNotes(clPath, "0.1.0", out); err != nil {
+	if err := runNotes(clPath, "0.1.0", out, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, out); !strings.Contains(got, "[details]: https://example.com/details") {
@@ -651,6 +651,120 @@ func TestVersionGreaterHugeComponents(t *testing.T) {
 	}
 }
 
+// `latest` answers the release workflow's tag-sanity check: the newest
+// released section heading, nothing else.
+func TestLatest(t *testing.T) {
+	if got, err := latest(steadyChangelog); err != nil || got != "0.2.0" {
+		t.Errorf("latest = %q, %v; want 0.2.0", got, err)
+	}
+	if _, err := latest("# Changelog\n\n## [Unreleased]\n\n- X.\n"); err == nil {
+		t.Error("want error when no released section exists")
+	}
+	// Only the assembler's exact dated-heading grammar counts — a decoy
+	// heading must not gate a release.
+	decoy := "# Changelog\n\n## [9.9.9] not-a-release\n\n## [0.2.0] - 2026-08-07\n\n- A.\n"
+	if got, err := latest(decoy); err != nil || got != "0.2.0" {
+		t.Errorf("latest over decoy = %q, %v; want 0.2.0", got, err)
+	}
+	leadingZero := "# Changelog\n\n## [0.02.0] - 2026-08-07\n\n- A.\n\n## [0.1.0] - 2026-07-17\n\n- B.\n"
+	if got, err := latest(leadingZero); err != nil || got != "0.1.0" {
+		t.Errorf("latest over leading-zero heading = %q, %v; want 0.1.0", got, err)
+	}
+}
+
+// The clamp budget must charge the trailer: the body is exactly one byte
+// over the cap, so both groups "fit" if candidates are sized without the
+// trailer — only trailer accounting can reject the second group.
+func TestNotesCapChargesTrailer(t *testing.T) {
+	const base = "https://github.com/OpenSDLC-Dev/managed-agent-platform"
+	body := "### Added\n\n- " + strings.Repeat("a", 250) + "\n\n" +
+		"### Fixed\n\n- " + strings.Repeat("b", 172) + "\n"
+	cap := len(body) - 1
+	got, err := clampNotes(body, base, "0.2.0", cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) > cap {
+		t.Errorf("clamped notes are %d bytes, above the %d-byte cap", len(got), cap)
+	}
+	if strings.Contains(got, "### Fixed") {
+		t.Error("second group kept — it fits only if the trailer is not charged against the cap")
+	}
+	if !strings.Contains(got, "### Added") {
+		t.Error("first group should survive the clamp")
+	}
+}
+
+// A cap the trailer alone cannot satisfy is an error, never an over-cap
+// "success".
+func TestNotesCapUnsatisfiable(t *testing.T) {
+	clPath, _ := writeFixture(t, steadyChangelog, nil)
+	out := filepath.Join(t.TempDir(), "notes.md")
+	err := runNotes(clPath, "0.2.0", out, 10)
+	if err == nil {
+		t.Fatal("want error for a cap smaller than the trailer")
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Error("no output file should be written on a refused clamp")
+	}
+}
+
+// Above the cap, notes truncate at a ### group boundary and end with a link
+// into the changelog at the tag; below it, output is byte-identical.
+func TestNotesCap(t *testing.T) {
+	clPath, _ := writeFixture(t, steadyChangelog, nil)
+	out := filepath.Join(t.TempDir(), "notes.md")
+
+	if err := runNotes(clPath, "0.2.0", out, 100000); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readFile(t, out), "### Added\n\n- A added.\n"; got != want {
+		t.Errorf("under-cap notes must be untouched: %q", got)
+	}
+
+	big := `# Changelog
+
+## [Unreleased]
+
+` + unreleasedPointer + `
+
+## [0.2.0] - 2026-08-07
+
+### Added
+
+- ` + strings.Repeat("a", 300) + `
+
+### Fixed
+
+- ` + strings.Repeat("b", 300) + `
+
+[Unreleased]: https://github.com/o/r/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/o/r/compare/v0.1.0...v0.2.0
+`
+	clPath2, _ := writeFixture(t, big, nil)
+	if err := runNotes(clPath2, "0.2.0", out, 450); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, out)
+	if len(got) > 450 {
+		t.Errorf("clamped notes exceed the cap: %d bytes", len(got))
+	}
+	if !strings.Contains(got, "### Added") || strings.Contains(got, "### Fixed") {
+		t.Errorf("clamp must cut at a group boundary keeping whole leading groups:\n%s", got)
+	}
+	if !strings.Contains(got, "https://github.com/o/r/blob/v0.2.0/CHANGELOG.md") {
+		t.Errorf("clamped notes must link to the changelog at the tag:\n%s", got)
+	}
+
+	// A cap nothing fits under still yields a valid pointer-only body.
+	if err := runNotes(clPath2, "0.2.0", out, 200); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, out); len(got) > 200 || !strings.Contains(got, "CHANGELOG.md") {
+		t.Errorf("pointer-only clamp wrong (%d bytes):\n%s", len(got), got)
+	}
+}
+
 // The stdout path is what the default `make changelog-notes` invocation uses.
 func TestNotesStdout(t *testing.T) {
 	clPath, _ := writeFixture(t, steadyChangelog, nil)
@@ -661,7 +775,7 @@ func TestNotesStdout(t *testing.T) {
 	}
 	old := os.Stdout
 	os.Stdout = f
-	err = runNotes(clPath, "0.2.0", "-")
+	err = runNotes(clPath, "0.2.0", "-", 0)
 	os.Stdout = old
 	if cerr := f.Close(); cerr != nil {
 		t.Fatal(cerr)
@@ -678,7 +792,7 @@ func TestNotes(t *testing.T) {
 	clPath, _ := writeFixture(t, steadyChangelog, nil)
 
 	out := filepath.Join(t.TempDir(), "notes.md")
-	if err := runNotes(clPath, "0.2.0", out); err != nil {
+	if err := runNotes(clPath, "0.2.0", out, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := readFile(t, out), "### Added\n\n- A added.\n"; got != want {
@@ -686,17 +800,17 @@ func TestNotes(t *testing.T) {
 	}
 
 	// The last released section must not drag the link-ref block along.
-	if err := runNotes(clPath, "0.1.0", out); err != nil {
+	if err := runNotes(clPath, "0.1.0", out, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, out); strings.Contains(got, "[Unreleased]:") || !strings.Contains(got, "Release summary.") {
 		t.Errorf("notes for last section wrong: %q", got)
 	}
 
-	if err := runNotes(clPath, "9.9.9", out); err == nil {
+	if err := runNotes(clPath, "9.9.9", out, 0); err == nil {
 		t.Error("want error for missing version")
 	}
-	if err := runNotes(clPath, "Unreleased", out); err == nil {
+	if err := runNotes(clPath, "Unreleased", out, 0); err == nil {
 		t.Error("want error for non-numeric version")
 	}
 }

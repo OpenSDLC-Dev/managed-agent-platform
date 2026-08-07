@@ -1,6 +1,9 @@
 # Build output
 /bin/
 /dist/
+# The release notes the workflow (and a local changelog-notes dry run) renders
+# at the repo root — a throwaway artifact, never source.
+/notes.md
 *.exe
 
 # Go test / coverage artifacts
