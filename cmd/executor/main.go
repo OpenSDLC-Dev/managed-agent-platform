@@ -119,6 +119,7 @@ import (
 	secretsbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
 )
 
 // splitDomains parses the comma-separated WEBTOOL_ALLOWED_DOMAINS value. Empty
@@ -292,6 +293,6 @@ func run(ctx context.Context) error {
 		slog.Info("secrets cipher not configured; github_repository resources will not clone")
 	}
 
-	slog.Info("executor running")
+	slog.Info("executor running", "version", version.Version)
 	return executor.New(pool, events.NewLog(pool), queue.New(pool), provider, blobs, cipher, cfg).Run(ctx)
 }

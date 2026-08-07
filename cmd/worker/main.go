@@ -45,6 +45,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -53,10 +54,18 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worker"
 )
 
 func main() {
+	// The worker is the one binary users download and run standalone, so it
+	// answers --version without needing any environment configured.
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Println(version.Version)
+		return
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -111,6 +120,6 @@ func run(ctx context.Context) error {
 	}
 	client := worker.NewClient(baseURL, envKey)
 
-	slog.Info("worker running", "environment", envID)
+	slog.Info("worker running", "environment", envID, "version", version.Version)
 	return worker.NewWorker(client, provider, cfg).Run(ctx)
 }

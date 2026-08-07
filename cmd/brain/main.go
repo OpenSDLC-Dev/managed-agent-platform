@@ -34,6 +34,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/openai"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
 )
 
 func main() {
@@ -100,6 +101,6 @@ func run(ctx context.Context) error {
 		slog.Info("object storage not configured; file-rubric outcomes grade from the description alone")
 	}
 
-	slog.Info("brain running", "providers", providersPath)
+	slog.Info("brain running", "providers", providersPath, "version", version.Version)
 	return brain.New(pool, registry, blobs, cfg).Run(ctx)
 }

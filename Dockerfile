@@ -13,7 +13,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # Build every binary into /out (named controlplane, brain, executor, worker).
-RUN CGO_ENABLED=0 go build -trimpath -o /out/ ./cmd/...
+# VERSION is stamped into internal/version.Version by the release pipeline
+# (docs/RELEASING.md); an unarged build reports "dev".
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=${VERSION}" \
+    -o /out/ ./cmd/...
 
 # The per-session egress gate is a separate image (built with --target gate): it
 # needs iptables (to install owner-match rules) and a dedicated UID it drops to,
