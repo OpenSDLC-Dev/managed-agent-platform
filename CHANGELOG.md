@@ -34,8 +34,13 @@ copy of an entry here.
   (attached-for-lifetime). Mount rules: clean-form literal paths (unlike the
   file arm, which #323 roots under the uploads directory — the cross-resource
   uniqueness and nesting rules compare files by their resolved paths),
-  no resource above a repo mount, no nested repos, `/` and `/tmp` reserved,
-  at most eight repos per session. Unit W of the plan's verification
+  no resource above a repo mount — enforced at create and by the post-create
+  add alike — no nested repos, `/` and `/tmp` reserved, at most eight repos
+  per session; the derived default mount is validated like a supplied one,
+  with the URL grammar bounding both segments so the default is clean and
+  storable by construction. Tokens seal **before** the transaction opens
+  (create and rotation both, the vault-credential precedent), so the cipher's
+  network round trip never runs under the session row lock. Unit W of the plan's verification
   matrix lands as pgtest integration tests — token-sweep probe across every
   response surface included — with red-run mutation evidence recorded for each
   new guard. Divergences: the create-rejection entry carved down

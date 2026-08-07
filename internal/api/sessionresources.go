@@ -309,8 +309,12 @@ func parseGitHubRepoURL(raw string) (string, error) {
 	if err != nil {
 		return "", bad()
 	}
+	// ForceQuery catches a bare trailing "?" (RawQuery empty); a bare
+	// trailing "#" leaves every fragment field empty too, so the raw string
+	// is the only place the delimiter itself is visible.
 	if u.Scheme != "https" || u.Host != "github.com" || u.User != nil ||
-		u.Opaque != "" || u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "" {
+		u.Opaque != "" || u.ForceQuery || u.RawQuery != "" ||
+		u.Fragment != "" || u.RawFragment != "" || strings.Contains(raw, "#") {
 		return "", bad()
 	}
 	segs := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
@@ -490,12 +494,37 @@ func resolveMountPath(p string) (string, error) {
 	return resolved, nil
 }
 
-// repoSeal carries a repository's write-only token from validation to the
-// cipher: the resource_id of the rendered row it backs, and the clear token
-// that exists only in memory until insertSessionResourceCredentials seals it.
-type repoSeal struct {
-	resourceID string
-	token      string
+// sealedToken is a repository's write-only token after the cipher: the
+// ciphertext and key id sealRepoTokens produced, held in memory until the
+// create transaction binds them to their credential rows.
+type sealedToken struct {
+	ciphertext []byte
+	keyID      string
+}
+
+// sealRepoTokens runs each repository token through the cipher, in input
+// order, before the create transaction opens (the vault-credential precedent,
+// vaultcredentials.go): the seal depends only on the parsed inputs, so the
+// cipher's network round trip (OpenBao) never runs under the session and
+// environment row locks the create transaction holds.
+func sealRepoTokens(ctx context.Context, cipher secrets.Cipher, inputs []resourceInput) ([]sealedToken, error) {
+	var sealed []sealedToken
+	for _, in := range inputs {
+		if in.kind != resourceKindRepo {
+			continue
+		}
+		ct, keyID, err := cipher.Encrypt(ctx, []byte(in.token))
+		if errors.Is(err, secrets.ErrPlaintextTooLarge) {
+			// Unreachable behind maxAuthorizationTokenBytes; classified as the
+			// caller's error anyway per the secrets contract.
+			return nil, errInvalid("authorization_token is too large for this deployment's cipher")
+		}
+		if err != nil {
+			return nil, err
+		}
+		sealed = append(sealed, sealedToken{ciphertext: ct, keyID: keyID})
+	}
+	return sealed, nil
 }
 
 // materializeResourceInputs verifies each referenced file exists in the same
@@ -503,12 +532,13 @@ type repoSeal struct {
 // reference — an INFERRED divergence, docs/DIVERGENCES.md) and stamps each input
 // with a fresh sesrsc_ id and the create timestamp. A file deleted between this
 // check and a later materialization is tolerated by design (plan decision 2).
-// Repositories render token-free (plan 25 decision 2); their tokens come back
-// as seals for the caller to store once the session row exists (the credential
-// rows FK the session).
-func materializeResourceInputs(ctx context.Context, db querier, inputs []resourceInput, now time.Time) ([]json.RawMessage, []repoSeal, error) {
+// Repositories render token-free (plan 25 decision 2); their fresh sesrsc_
+// ids come back in input order for the caller to bind to the pre-sealed
+// ciphertexts (sealRepoTokens walks the same inputs in the same order) once
+// the session row exists — the credential rows FK the session.
+func materializeResourceInputs(ctx context.Context, db querier, inputs []resourceInput, now time.Time) ([]json.RawMessage, []string, error) {
 	out := make([]json.RawMessage, 0, len(inputs))
-	var seals []repoSeal
+	var repoIDs []string
 	for _, in := range inputs {
 		id := domain.NewID(domain.PrefixResource).String()
 		switch in.kind {
@@ -518,7 +548,7 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 				Type: "github_repository", UpdatedAt: now,
 				URL: in.url, Checkout: in.checkout,
 			}))
-			seals = append(seals, repoSeal{resourceID: id, token: in.token})
+			repoIDs = append(repoIDs, id)
 		default:
 			if err := fileMustExist(ctx, db, in.fileID); err != nil {
 				return nil, nil, err
@@ -529,7 +559,7 @@ func materializeResourceInputs(ctx context.Context, db querier, inputs []resourc
 			}))
 		}
 	}
-	return out, seals, nil
+	return out, repoIDs, nil
 }
 
 // errRepoSecretsUnavailable answers a repo-bearing create or a token rotation
@@ -550,24 +580,18 @@ func resourceInputsHaveRepo(inputs []resourceInput) bool {
 	return false
 }
 
-// insertSessionResourceCredentials seals each repository token and stores the
+// insertSessionResourceCredentials stores each repository's pre-sealed token
 // ciphertext beside the session (plan 25 decision 2). Runs after the session
-// INSERT in the same transaction: the rows FK the session with ON DELETE
-// CASCADE, so a credential can never outlive its session.
-func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, cipher secrets.Cipher, sessionID string, seals []repoSeal) error {
-	for _, sl := range seals {
-		ct, keyID, err := cipher.Encrypt(ctx, []byte(sl.token))
-		if errors.Is(err, secrets.ErrPlaintextTooLarge) {
-			// Unreachable behind maxAuthorizationTokenBytes; classified as the
-			// caller's error anyway per the secrets contract.
-			return errInvalid("authorization_token is too large for this deployment's cipher")
-		}
-		if err != nil {
-			return err
-		}
+// INSERT in the same transaction — the rows FK the session with ON DELETE
+// CASCADE, so a credential can never outlive its session — but the sealing
+// itself happened before the transaction opened (sealRepoTokens), keeping the
+// cipher's round trip out of the row locks. repoIDs and sealed walk the same
+// inputs in the same order.
+func insertSessionResourceCredentials(ctx context.Context, tx pgx.Tx, sessionID string, repoIDs []string, sealed []sealedToken) error {
+	for i, rid := range repoIDs {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO session_resource_credentials (resource_id, session_id, token_ciphertext, token_key_id)
-			 VALUES ($1, $2, $3, $4)`, sl.resourceID, sessionID, ct, keyID); err != nil {
+			 VALUES ($1, $2, $3, $4)`, rid, sessionID, sealed[i].ciphertext, sealed[i].keyID); err != nil {
 			return err
 		}
 	}
@@ -742,6 +766,13 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 	if mountPathTaken(resources, in.mountPath) {
 		return fileResourceJSON{}, errInvalid("mount_path %q is already in use by this session", in.mountPath)
 	}
+	if rm := repoMountBelow(resources, in.mountPath); rm != "" {
+		// The same ancestor rule create enforces (parseResourceInputs): a
+		// resource above a repository's mount is a non-directory where the
+		// clone needs a directory. A file inside the repo's tree — the
+		// supported overlay — stays legal.
+		return fileResourceJSON{}, errInvalid("mount_path %q is an ancestor of repository mount_path %q", in.mountPath, rm)
+	}
 	if err := fileMustExist(ctx, tx, in.fileID); err != nil {
 		return fileResourceJSON{}, err
 	}
@@ -858,6 +889,24 @@ func (s *server) rotateResourceTokenTx(ctx context.Context, id, rid string, r *h
 		return nil, err
 	}
 
+	// Seal before opening the transaction (the vault-credential precedent,
+	// vaultcredentials.go): the seal depends only on the parsed token, and the
+	// cipher's network round trip (OpenBao) must not run under the session row
+	// lock, where it would stall every concurrent event append. A cipher-less
+	// deployment defers its refusal into the transaction so a file resource
+	// still gets its type rejection first.
+	var ct []byte
+	var keyID string
+	if s.cipher != nil {
+		ct, keyID, err = s.cipher.Encrypt(ctx, []byte(token))
+		if errors.Is(err, secrets.ErrPlaintextTooLarge) {
+			return nil, errInvalid("authorization_token is too large for this deployment's cipher")
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -883,13 +932,6 @@ func (s *server) rotateResourceTokenTx(ctx context.Context, id, rid string, r *h
 	}
 	if s.cipher == nil {
 		return nil, errRepoSecretsUnavailable
-	}
-	ct, keyID, err := s.cipher.Encrypt(ctx, []byte(token))
-	if errors.Is(err, secrets.ErrPlaintextTooLarge) {
-		return nil, errInvalid("authorization_token is too large for this deployment's cipher")
-	}
-	if err != nil {
-		return nil, err
 	}
 	tag, err := tx.Exec(ctx,
 		`UPDATE session_resource_credentials
@@ -982,6 +1024,26 @@ func resourceType(raw json.RawMessage) string {
 // — that names the same file as a freshly resolved "/mnt/session/uploads/x", and
 // a raw string compare would admit the second and let it overwrite the first's
 // bytes at materialization. p is already canonical (resolveMountPath cleans).
+// repoMountBelow returns the mount_path of a stored github_repository
+// resource that p is a proper ancestor of, or "" — the add-endpoint half of
+// the no-resource-above-a-repo-mount rule create enforces. The stored side is
+// cleaned before comparing, like mountPathTaken; p is already canonical.
+func repoMountBelow(resources []json.RawMessage, p string) string {
+	for _, raw := range resources {
+		var o struct {
+			Type      string `json:"type"`
+			MountPath string `json:"mount_path"`
+		}
+		if json.Unmarshal(raw, &o) != nil || o.Type != "github_repository" {
+			continue
+		}
+		if properPathAncestor(p, path.Clean(o.MountPath)) {
+			return o.MountPath
+		}
+	}
+	return ""
+}
+
 func mountPathTaken(resources []json.RawMessage, p string) bool {
 	for _, raw := range resources {
 		var o struct {

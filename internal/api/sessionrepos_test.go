@@ -117,6 +117,18 @@ func TestSessionRepoCreateRendersWireShape(t *testing.T) {
 		t.Errorf("checkout = %v, want the commit object echoed", res["checkout"])
 	}
 
+	// w-create-minimal continued: ".git" strips for the derived name only —
+	// the stored url keeps it.
+	sess = createRepoSession(t, s, repoBody("ghp_git", map[string]any{
+		"url": "https://github.com/example-org/tool.git"}))
+	res = resourcesOf(t, sess)[0]
+	if res["mount_path"] != "/workspace/tool" {
+		t.Errorf("mount_path = %v, want /workspace/tool (.git stripped)", res["mount_path"])
+	}
+	if res["url"] != "https://github.com/example-org/tool.git" {
+		t.Errorf("url = %v, want the .git suffix kept", res["url"])
+	}
+
 	// w-multi: two repos + one file, all rendered, paths distinct. A file
 	// inside a repo's tree is the supported overlay direction — and since a
 	// file's mount_path resolves under the uploads root (#323), the overlaid
@@ -270,6 +282,8 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		// refused at the URL grammar, not stored (verifier findings, 2026-08-07:
 		// acme/.. stored mount_path /workspace/.. — the reserved "/" in
 		// disguise — and %00 reached the jsonb bind as a 500).
+		"bare query url":      {repoBody("g", map[string]any{"url": repoTestURL + "?"})},
+		"bare fragment url":   {repoBody("g", map[string]any{"url": repoTestURL + "#"})},
 		"dotdot repo url":     {repoBody("g", map[string]any{"url": "https://github.com/acme/.."})},
 		"dot repo url":        {repoBody("g", map[string]any{"url": "https://github.com/acme/."})},
 		"nul repo url":        {repoBody("g", map[string]any{"url": "https://github.com/acme/%00repo"})},
@@ -283,6 +297,7 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		"checkout bad keys": {repoBody("g", map[string]any{"checkout": map[string]any{"type": "branch", "name": "m", "sha": sha}})},
 		"unknown repo key":  {repoBody("g", map[string]any{"depth": 1})},
 		// w-unclean-mount
+		"relative mount":       {repoBody("g", map[string]any{"mount_path": "workspace/r"})},
 		"dot segment":          {repoBody("g", map[string]any{"mount_path": "/workspace/./r"})},
 		"doubled slash":        {repoBody("g", map[string]any{"mount_path": "/workspace//r"})},
 		"trailing slash mount": {repoBody("g", map[string]any{"mount_path": "/workspace/r/"})},
@@ -314,6 +329,20 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 			continue
 		}
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	}
+
+	// The caps are inclusive at the limit: a token of exactly 8 KiB and
+	// exactly eight repos are accepted.
+	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID,
+		"resources": []any{repoBody(strings.Repeat("t", 8192), nil)}})
+	if status != http.StatusOK {
+		t.Errorf("token at 8 KiB: status %d, want 200 (%v)", status, body)
+	}
+	status, body = s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": agentID, "environment_id": envID, "resources": nineRepos[:8]})
+	if status != http.StatusOK {
+		t.Errorf("eight repos: status %d, want 200 (%v)", status, body)
 	}
 }
 
@@ -453,10 +482,15 @@ func TestSessionRepoDeleteRejected(t *testing.T) {
 
 // TestSessionRepoAddPostCreateRejected is w-add-post-create 🔍: the add
 // endpoint stays file-only (the SDK types Add's body and response as the file
-// variant), even for a fully valid repository object.
+// variant), even for a fully valid repository object — and the file it does
+// accept obeys the same ancestor rule create enforces: a post-create add must
+// not land a resource above a repository's mount.
 func TestSessionRepoAddPostCreateRejected(t *testing.T) {
 	s := newTestServer(t)
-	sess := createRepoSession(t, s, repoBody("ghp_seed", nil))
+	sess := createRepoSession(t, s,
+		repoBody("ghp_seed", nil),
+		repoBody("ghp_up", map[string]any{
+			"url": "https://github.com/example-org/other", "mount_path": "/mnt/session/uploads/repo/src"}))
 	sid := sess["id"].(string)
 
 	status, body := s.do(http.MethodPost, "/v1/sessions/"+sid+"/resources",
@@ -464,6 +498,20 @@ func TestSessionRepoAddPostCreateRejected(t *testing.T) {
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	if msg := errMessage(body); !strings.Contains(msg, "only file resources") {
 		t.Errorf("add rejection message = %q, want the file-only wording", msg)
+	}
+
+	// A file added at /mnt/session/uploads/repo (the resolved form of "repo")
+	// would sit above the repo mounted at .../repo/src — the direction create
+	// rejects, so add rejects it too. A file *inside* the repo's tree stays
+	// the legal overlay.
+	fileID := uploadOneFile(t, s, "above.txt")
+	status, body = s.do(http.MethodPost, "/v1/sessions/"+sid+"/resources",
+		map[string]any{"type": "file", "file_id": fileID, "mount_path": "repo"})
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+	status, body = s.do(http.MethodPost, "/v1/sessions/"+sid+"/resources",
+		map[string]any{"type": "file", "file_id": fileID, "mount_path": "repo/src/inside.txt"})
+	if status != http.StatusOK {
+		t.Errorf("overlay add: status %d, want 200 (%v)", status, body)
 	}
 }
 

@@ -461,10 +461,19 @@ func (s *server) createSession(r *http.Request) (any, error) {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return nil, err
 	}
-	if resourceInputsHaveRepo(resourceInputs) && s.cipher == nil {
-		// Refused, never stored unencrypted (plan 25 decision 2).
-		recordResourceMutation(ctx, resourceOutcomeError, 1)
-		return nil, errRepoSecretsUnavailable
+	var sealedTokens []sealedToken
+	if resourceInputsHaveRepo(resourceInputs) {
+		if s.cipher == nil {
+			// Refused, never stored unencrypted (plan 25 decision 2).
+			recordResourceMutation(ctx, resourceOutcomeError, 1)
+			return nil, errRepoSecretsUnavailable
+		}
+		// Seal before the transaction opens — the cipher's network round trip
+		// must not run under the session/environment row locks (sealRepoTokens).
+		if sealedTokens, err = sealRepoTokens(ctx, s.cipher, resourceInputs); err != nil {
+			recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
+			return nil, err
+		}
 	}
 	vaultIDs, err := parseVaultIDs(obj)
 	if err != nil {
@@ -521,7 +530,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 
 	now := time.Now().UTC()
-	resources, repoSeals, err := materializeResourceInputs(ctx, tx, resourceInputs, now)
+	resources, repoIDs, err := materializeResourceInputs(ctx, tx, resourceInputs, now)
 	if err != nil {
 		recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 		return nil, err
@@ -576,14 +585,15 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	}
 
 	// After the session INSERT (the rows FK it), inside the same transaction:
-	// a repo-bearing create either seals every token or creates nothing.
-	if len(repoSeals) > 0 {
-		if err := insertSessionResourceCredentials(ctx, tx, s.cipher, id, repoSeals); err != nil {
+	// a repo-bearing create either stores every pre-sealed token or creates
+	// nothing.
+	if len(repoIDs) > 0 {
+		if err := insertSessionResourceCredentials(ctx, tx, id, repoIDs, sealedTokens); err != nil {
 			recordResourceMutation(ctx, resourceOutcomeFor(err), 1)
 			return nil, err
 		}
 		slog.InfoContext(ctx, "session repository credentials sealed",
-			"session_id", id, "repos", len(repoSeals))
+			"session_id", id, "repos", len(repoIDs))
 	}
 
 	if len(initialEvents) > 0 {

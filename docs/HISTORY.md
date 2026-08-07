@@ -2747,3 +2747,25 @@ zero token hits) and the archived-session **delete** assertion beside the rotati
 and corrected two plan-matrix facts (create returns 200 on this server, not 201; the SSE
 stream is a live tail with no history replay, so the events list endpoint is the
 stored-event sweep surface).
+
+**Claude-side review stand-in round (Opus 5 workflow, /code-review being
+model-uninvocable; 4 dimensions, every finding adversarially re-verified against the
+source): 17 confirmed rows, three genuinely new after dedup.** Ten were the
+derived-default-mount family the verifier had already caught (the stand-in's verify pass
+independently reproduced the `%00` 500 and the `/workspace/..` store against the pre-fix
+commit, and noted the fix already in the working tree). The new three, each fixed
+red-first: (1) **the add endpoint skipped the ancestor rule** — a file added at the
+resolved `/mnt/session/uploads/repo` mounted above a repo at `…/repo/src` (observed 200,
+now the same 400 as create; the in-tree overlay add stays legal and is asserted); (2)
+**a bare trailing `?` or `#` passed the URL grammar** (`ForceQuery` is the only trace of
+a bare `?`, the raw string the only trace of a bare `#` — both observed stored, both now
+400); (3) **the cipher round trip ran under the session row lock** — create sealed inside
+the create transaction and rotation encrypted between `FOR UPDATE` and commit, so a slow
+OpenBao would have stalled every concurrent event append for the session; both now seal
+before their transaction opens, the vault-credential precedent
+(`vaultcredentials.go`'s "Seal before opening the transaction"), with the cipher-less
+refusal deliberately left inside the rotation transaction so a file resource still gets
+its type rejection first. Four smaller coverage gaps from the test-quality dimension
+were pinned the same day: the `.git`-strip default assertion, a relative repo
+`mount_path`, both caps accepted exactly at their limits, and the archived-session
+delete beside the rotation gate.
