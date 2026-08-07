@@ -19,6 +19,7 @@ SHELL := /usr/bin/env bash
 
 .PHONY: build crossbuild vet fmt-check test cover-gate verify eval \
 	changelog changelog-notes \
+	release-tag-check release-images release-chart release-binaries \
 	gcp-fmt gcp-validate gcp-split-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-split-check-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild
 
 build:
@@ -117,7 +118,79 @@ changelog:
 	go run ./tools/changelog assemble -version "$(VERSION)"
 
 changelog-notes:
-	@go run ./tools/changelog notes -version "$(VERSION)" -out "$(or $(OUT),-)"
+	@go run ./tools/changelog notes -version "$(VERSION)" -out "$(or $(OUT),-)" -cap "$(or $(CAP),0)"
+
+# ---------------------------------------------------------------------------
+# Release publishing (docs/RELEASING.md; plan 27). Like the gcp-* group,
+# NEVER part of `verify`: these build and push release artifacts. Each target
+# is exactly what .github/workflows/release.yml invokes — the workflow only
+# sequences them — and each runs locally: without PUSH=1 the image target
+# builds linux/amd64 into the local daemon for a smoke run and nothing leaves
+# the machine.
+# ---------------------------------------------------------------------------
+
+RELEASE_REGISTRY ?= ghcr.io/opensdlc-dev
+RELEASE_IMAGE_NS  = $(RELEASE_REGISTRY)/managed-agent-platform
+RELEASE_CHART_OCI ?= oci://$(RELEASE_REGISTRY)/charts
+RELEASE_PLATFORMS ?= linux/amd64,linux/arm64
+RELEASE_LDFLAGS   = -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=$(VERSION)"
+
+# Tag sanity, run before anything publishes: the tag's version must be the
+# changelog's newest released section (i.e. the release PR merged first), and
+# the tagged commit must sit on origin/main.
+release-tag-check:
+	@set -euo pipefail; \
+	test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }; \
+	latest="$$(go run ./tools/changelog latest)"; \
+	if [ "$$latest" != "$(VERSION)" ]; then \
+		echo "tag says $(VERSION) but the changelog's newest released section is $$latest — merge the release PR first" >&2; \
+		exit 1; \
+	fi; \
+	git merge-base --is-ancestor HEAD origin/main || { echo "the tagged commit is not on origin/main" >&2; exit 1; }
+
+# One server build pushed under the three component names the Helm chart
+# composes ({registry}/{repository}/{component}:{tag} — same digest, three
+# names), plus the gate from its own Dockerfile target. Deliberately no
+# `latest` tag: the chart derives its default tag from appVersion, and a
+# mutable alias only invites drift.
+release-images:
+	@set -euo pipefail; \
+	test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }; \
+	mode="--load --platform linux/amd64"; \
+	if [ "$(PUSH)" = "1" ]; then mode="--push --platform $(RELEASE_PLATFORMS)"; fi; \
+	docker buildx build $$mode --build-arg VERSION="$(VERSION)" --target server \
+		-t "$(RELEASE_IMAGE_NS)/controlplane:$(VERSION)" \
+		-t "$(RELEASE_IMAGE_NS)/brain:$(VERSION)" \
+		-t "$(RELEASE_IMAGE_NS)/executor:$(VERSION)" .; \
+	docker buildx build $$mode --build-arg VERSION="$(VERSION)" --target gate \
+		-t "$(RELEASE_IMAGE_NS)/gate:$(VERSION)" .
+
+# The chart version must already equal VERSION — the release PR bumps
+# Chart.yaml's version and appVersion in lockstep with the platform.
+release-chart:
+	@set -euo pipefail; \
+	test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }; \
+	grep -q '^version: $(VERSION)$$' deploy/helm/managed-agent-platform/Chart.yaml || { \
+		echo "Chart.yaml version is not $(VERSION) — the release PR bumps it" >&2; exit 1; }; \
+	mkdir -p dist; \
+	helm package deploy/helm/managed-agent-platform -d dist; \
+	if [ "$(PUSH)" = "1" ]; then helm push "dist/managed-agent-platform-$(VERSION).tgz" "$(RELEASE_CHART_OCI)"; fi
+
+# Worker binaries for the platforms BYOC users run. No Windows: the worker
+# drives Docker sandboxes and has no Windows user story (plan 27 decision 4).
+release-binaries:
+	@set -euo pipefail; \
+	test -n "$(VERSION)" || { echo "VERSION is required" >&2; exit 1; }; \
+	mkdir -p dist; \
+	for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+		os="$${target%/*}"; arch="$${target#*/}"; \
+		dir="dist/worker_$(VERSION)_$${os}_$${arch}"; \
+		CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" go build -trimpath $(RELEASE_LDFLAGS) -o "$$dir/worker" ./cmd/worker; \
+		tar -czf "$$dir.tar.gz" -C "$$dir" worker; \
+		rm -r "$$dir"; \
+	done; \
+	(cd dist && shasum -a 256 worker_$(VERSION)_*.tar.gz > "worker_$(VERSION)_sha256sums.txt"); \
+	ls -l dist/worker_$(VERSION)_*
 
 # ---------------------------------------------------------------------------
 # GCP staging environment (docs/plan/20, Decision 9). Developer tooling for GCP

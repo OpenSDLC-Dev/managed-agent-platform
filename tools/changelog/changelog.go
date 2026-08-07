@@ -411,8 +411,62 @@ func runAssemble(changelogPath, dir, version, date string) error {
 	return nil
 }
 
-// runNotes is the `notes` subcommand; out == "" or "-" writes to stdout.
-func runNotes(changelogPath, version, out string) error {
+// latest returns the newest released version — the first dated section
+// heading. The release workflow's tag-sanity check compares it to the tag.
+func latest(content string) (string, error) {
+	re := regexp.MustCompile(`^## \[(\d+\.\d+\.\d+)\]`)
+	_, doc := splitTrailingRefs(strings.Split(content, "\n"))
+	for _, l := range doc {
+		if m := re.FindStringSubmatch(l); m != nil {
+			return m[1], nil
+		}
+	}
+	return "", fmt.Errorf("no released section in the changelog")
+}
+
+// clampNotes bounds body to cap bytes for a GitHub Release (which rejects
+// oversized bodies outright): whole leading ### groups are kept while they
+// fit, and a trailer links to the full section in the changelog at the tag.
+// The first cut under the fragment scheme absorbs the 5,300-line legacy
+// backlog and needs this (plan 27 decision 4).
+func clampNotes(body, base, version string, cap int) string {
+	if cap <= 0 || len(body) <= cap {
+		return body
+	}
+	trailer := fmt.Sprintf("---\n\nTruncated: the full section is in [CHANGELOG.md](%s/blob/v%s/CHANGELOG.md).\n", base, version)
+	// Split into blocks at ### boundaries, then keep whole leading blocks
+	// while they (plus the trailer) fit — no group is ever cut mid-entry.
+	var blocks []string
+	cur := ""
+	for _, line := range strings.SplitAfter(body, "\n") {
+		if strings.HasPrefix(line, "### ") && cur != "" {
+			blocks = append(blocks, cur)
+			cur = ""
+		}
+		cur += line
+	}
+	if cur != "" {
+		blocks = append(blocks, cur)
+	}
+	kept := ""
+	for _, b := range blocks {
+		candidate := strings.TrimRight(kept+b, "\n") + "\n\n" + trailer
+		if len(candidate) > cap {
+			break
+		}
+		kept += b
+	}
+	kept = strings.TrimRight(kept, "\n")
+	if kept == "" {
+		return trailer
+	}
+	return kept + "\n\n" + trailer
+}
+
+// runNotes is the `notes` subcommand; out == "" or "-" writes to stdout, and
+// a positive cap clamps the body (deriving the repository URL from the
+// [Unreleased] link reference).
+func runNotes(changelogPath, version, out string, cap int) error {
 	content, err := os.ReadFile(changelogPath)
 	if err != nil {
 		return err
@@ -420,6 +474,20 @@ func runNotes(changelogPath, version, out string) error {
 	body, err := notes(string(content), version)
 	if err != nil {
 		return err
+	}
+	if cap > 0 && len(body) > cap {
+		refs, _ := splitTrailingRefs(strings.Split(string(content), "\n"))
+		base := ""
+		for _, r := range refs {
+			if m := unreleasedRefRe.FindStringSubmatch(r); m != nil {
+				base = m[1]
+				break
+			}
+		}
+		if base == "" {
+			return fmt.Errorf("notes exceed the %d-byte cap and no [Unreleased] link reference exists to derive the changelog link from", cap)
+		}
+		body = clampNotes(body, base, version, cap)
 	}
 	if out == "" || out == "-" {
 		_, err = os.Stdout.WriteString(body)

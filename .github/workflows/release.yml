@@ -1,0 +1,73 @@
+name: release
+
+# Tag-triggered publishing (plan 27 slice 3; the ritual is docs/RELEASING.md).
+# Every step is a root-Makefile target — the workflow only sequences them, so
+# the executable source of the release cannot drift from what a maintainer
+# can run locally. The whole run authenticates with GITHUB_TOKEN alone:
+# images and the chart go to GHCR under this repository's owner, the Release
+# to this repository. Re-running the workflow on the same tag re-publishes
+# identical artifacts, so partial-failure recovery is a re-run (the final
+# step tolerates an already-existing release by uploading with --clobber).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Resolve the version from the tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Tag sanity — version matches the changelog, commit on main
+        run: |
+          git fetch origin main
+          make release-tag-check VERSION="$VERSION"
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish images — multi-arch, three component names + the gate
+        run: make release-images PUSH=1 VERSION="$VERSION"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Publish the Helm chart (OCI)
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          helm registry login ghcr.io -u "$REGISTRY_USER" --password-stdin \
+            <<< "$REGISTRY_TOKEN"
+          make release-chart PUSH=1 VERSION="$VERSION"
+      - name: Build worker binaries
+        run: make release-binaries VERSION="$VERSION"
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 120000 < GitHub's 125,000-char body cap, headroom included; over
+          # it, notes keep whole leading groups and link to the full section.
+          make changelog-notes VERSION="$VERSION" OUT=notes.md CAP=120000
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" --clobber \
+              dist/worker_"$VERSION"_*.tar.gz \
+              "dist/worker_${VERSION}_sha256sums.txt"
+          else
+            gh release create "v$VERSION" \
+              dist/worker_"$VERSION"_*.tar.gz \
+              "dist/worker_${VERSION}_sha256sums.txt" \
+              --title "v$VERSION" \
+              --notes-file notes.md \
+              --verify-tag
+          fi

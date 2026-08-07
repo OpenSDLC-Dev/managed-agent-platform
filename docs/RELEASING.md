@@ -48,11 +48,31 @@ mid-slice in something the release would half-ship.
 
 ## What the tag triggers
 
-> **Not yet built.** The tag-triggered publishing workflow (`release.yml`:
-> GHCR images for server components and the gate, the Helm chart as an OCI
-> artifact, worker binaries, and a GitHub Release whose notes come from
-> `make changelog-notes VERSION=X.Y.Z [OUT=file]` — clamped to GitHub's
-> 125,000-character body cap with a link to the full CHANGELOG.md section
-> when the section is bigger, as the first cut's absorbed backlog will be)
-> arrives with plan 27 slice 3. Until it lands, a tag publishes nothing and
-> a release is the tag plus the assembled changelog.
+`release.yml` (`.github/workflows/release.yml`) fires on any `v*` tag and
+publishes everything with `GITHUB_TOKEN` alone, invoking only root-Makefile
+targets — each also runs locally, and without `PUSH=1` nothing leaves the
+machine:
+
+1. `make release-tag-check VERSION=X.Y.Z` — the version must be the
+   changelog's newest released section (the release PR merged first) and the
+   tagged commit must sit on `origin/main`; nothing publishes otherwise.
+2. `make release-images PUSH=1` — one server build (linux/amd64 + arm64)
+   pushed as
+   `ghcr.io/opensdlc-dev/managed-agent-platform/{controlplane,brain,executor}:X.Y.Z`
+   (same digest, three names — the coordinates the Helm chart composes) plus
+   `…/gate:X.Y.Z` from the gate target. Deliberately no `latest` tag.
+3. `make release-chart PUSH=1` — the chart (whose `version`/`appVersion` the
+   release PR already bumped) to `oci://ghcr.io/opensdlc-dev/charts`.
+4. `make release-binaries` — version-stamped worker tarballs for
+   linux/darwin × amd64/arm64, plus a sha256sums file.
+5. `gh release create vX.Y.Z` with the binaries attached and notes from
+   `make changelog-notes VERSION=X.Y.Z OUT=notes.md CAP=120000` — whole
+   leading Keep-a-Changelog groups under GitHub's 125,000-character body
+   cap, then a link to the full CHANGELOG.md section (the first cut's
+   absorbed backlog exceeds the cap).
+
+Re-running the workflow on the same tag re-publishes identical artifacts, so
+partial-failure recovery is a re-run (an existing release gets its assets
+re-uploaded with `--clobber`). One first-publish note: packages created by
+`GITHUB_TOKEN` start **private** — flip the four image packages and the chart
+to public once, in the org's package settings, so anonymous pulls work.

@@ -5,8 +5,11 @@
 
 # -- Container images. Each process is pulled as a separate image at
 # {registry}/{repository}/{component}:{tag} (component is controlplane|brain|executor).
-# No images are published by this repository yet; build and push your own, then set
-# registry/repository/tag.
+# From v0.2.0 onward, releases publish these images (one build, three names —
+# same digest) to ghcr.io/opensdlc-dev/managed-agent-platform
+# (docs/RELEASING.md); the defaults below resolve to them, with the tag
+# following the chart's appVersion. Override registry/repository/tag to run
+# your own build.
 image:
   registry: ghcr.io
   repository: opensdlc-dev/managed-agent-platform

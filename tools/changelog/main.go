@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -9,7 +10,8 @@ import (
 
 const usage = `usage:
   changelog assemble -version X.Y.Z [-date YYYY-MM-DD] [-changelog CHANGELOG.md] [-dir changelog.d]
-  changelog notes    -version X.Y.Z [-out FILE] [-changelog CHANGELOG.md]`
+  changelog notes    -version X.Y.Z [-out FILE] [-cap BYTES] [-changelog CHANGELOG.md]
+  changelog latest   [-changelog CHANGELOG.md]`
 
 func main() {
 	log.SetFlags(0)
@@ -31,11 +33,25 @@ func main() {
 		fs := flag.NewFlagSet("notes", flag.ExitOnError)
 		version := fs.String("version", "", "release version (X.Y.Z, required)")
 		out := fs.String("out", "", "output file (default stdout)")
+		cap := fs.Int("cap", 0, "clamp the body to this many bytes (0 = unlimited)")
 		changelog := fs.String("changelog", "CHANGELOG.md", "path to the changelog")
 		_ = fs.Parse(os.Args[2:])
-		if err := runNotes(*changelog, *version, *out); err != nil {
+		if err := runNotes(*changelog, *version, *out, *cap); err != nil {
 			log.Fatal(err)
 		}
+	case "latest":
+		fs := flag.NewFlagSet("latest", flag.ExitOnError)
+		changelog := fs.String("changelog", "CHANGELOG.md", "path to the changelog")
+		_ = fs.Parse(os.Args[2:])
+		content, err := os.ReadFile(*changelog)
+		if err != nil {
+			log.Fatal(err)
+		}
+		v, err := latest(string(content))
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(v)
 	default:
 		log.Fatal(usage)
 	}

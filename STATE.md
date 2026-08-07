@@ -17,7 +17,8 @@ ending with v0.2.0 cut as the acceptance run.
 - [x] Slice 2 — version embedding: `internal/version`, Dockerfile ARG + ldflags,
       startup-log version attribute on all five binaries, worker `--version`
       (this PR; the Make-side ldflags land with their consumer in slice 3).
-- [ ] Slice 3 — publishing pipeline: `release.yml` + release Make targets +
-      deploy-doc updates.
+- [x] Slice 3 — publishing pipeline: `release.yml` + the four release Make
+      targets (tag-check, images, chart, binaries; ldflags with their
+      consumer), notes clamping, deploy-doc updates (this PR).
 - [ ] Slice 4 — cut v0.2.0 (acceptance: kind install from published artifacts);
       archive the plan.
