@@ -2769,3 +2769,20 @@ its type rejection first. Four smaller coverage gaps from the test-quality dimen
 were pinned the same day: the `.git`-strip default assertion, a relative repo
 `mount_path`, both caps accepted exactly at their limits, and the archived-session
 delete beside the rotation gate.
+
+**Codex round (gpt-5.6-sol, `task` subcommand, read-only) — report lost, findings
+recovered, one fix.** The run completed its analysis but its internal security-scan
+workflow failed at the completion step (`scan.target.snapshotDigest: expected a non-empty
+string`) and, per that workflow's rules, never issued the formal report — reported here
+rather than silently dropped, with the findings recovered from the session rollout's
+narration. Four items: the percent-decoded URL segment family and the add-endpoint
+ancestor gap (both independently found by the other two reviewers, both already fixed);
+test-assurance notes matching the stand-in's test-quality dimension; and one new finding,
+rated Low/P3 — **a hostile or misconfigured OpenBao endpoint could reflect the request's
+plaintext *decoded* into its error body**, and the client's scrub, which replaced only the
+request's own strings (the base64 form) and the token, would pass the raw secret through
+to the process error path. Fixed red-first in `internal/secrets/openbao`
+(`TestServerErrorTextNeverEchoesDecodedPlaintext` observed
+`status 400: rejected value ghp_decoded-secret-token` pre-fix): the scrub now redacts
+every request-borne value in both its verbatim and base64-decoded forms — a hardening
+shared by every sealed secret, vault credentials included.

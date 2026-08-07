@@ -149,13 +149,19 @@ func (c *Cipher) post(ctx context.Context, path string, body map[string]any) (ma
 		_ = json.Unmarshal(raw, &serverErr)
 		// The error body is server-controlled text; an interposed endpoint
 		// could reflect the request's token — or the request body, which on
-		// encrypt carries the base64 plaintext — so scrub every request-borne
-		// value before wrapping. Body values first: they are long and
-		// specific, while a short token would shred unrelated text.
+		// encrypt carries the base64 plaintext, verbatim or DECODED — so scrub
+		// every request-borne value in both forms before wrapping. Body values
+		// first: they are long and specific, while a short token would shred
+		// unrelated text.
 		msg := strings.Join(serverErr.Errors, "; ")
 		for _, v := range body {
-			if s, _ := v.(string); s != "" {
-				msg = strings.ReplaceAll(msg, s, "[redacted]")
+			s, _ := v.(string)
+			if s == "" {
+				continue
+			}
+			msg = strings.ReplaceAll(msg, s, "[redacted]")
+			if dec, err := base64.StdEncoding.DecodeString(s); err == nil && len(dec) > 0 {
+				msg = strings.ReplaceAll(msg, string(dec), "[redacted]")
 			}
 		}
 		msg = strings.ReplaceAll(msg, c.token, "[redacted]")

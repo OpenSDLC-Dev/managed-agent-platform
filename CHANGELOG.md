@@ -40,7 +40,11 @@ copy of an entry here.
   with the URL grammar bounding both segments so the default is clean and
   storable by construction. Tokens seal **before** the transaction opens
   (create and rotation both, the vault-credential precedent), so the cipher's
-  network round trip never runs under the session row lock. Unit W of the plan's verification
+  network round trip never runs under the session row lock. The review round
+  also hardened the OpenBao client's error scrub for every sealed secret
+  (vault credentials included): a hostile transit endpoint reflecting the
+  request's plaintext **decoded** — not just verbatim — into its error body is
+  now redacted in both forms before the text can reach a log. Unit W of the plan's verification
   matrix lands as pgtest integration tests — token-sweep probe across every
   response surface included — with red-run mutation evidence recorded for each
   new guard. Divergences: the create-rejection entry carved down
