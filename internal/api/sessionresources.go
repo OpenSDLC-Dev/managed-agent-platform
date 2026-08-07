@@ -1018,12 +1018,6 @@ func resourceType(raw json.RawMessage) string {
 	return o.Type
 }
 
-// mountPathTaken reports whether a session already mounts something at p. The
-// stored side is cleaned before comparing: a session created before mount paths
-// were resolved (#323) can hold a non-canonical literal — "/mnt/session/uploads//x"
-// — that names the same file as a freshly resolved "/mnt/session/uploads/x", and
-// a raw string compare would admit the second and let it overwrite the first's
-// bytes at materialization. p is already canonical (resolveMountPath cleans).
 // repoMountBelow returns the mount_path of a stored github_repository
 // resource that p is a proper ancestor of, or "" — the add-endpoint half of
 // the no-resource-above-a-repo-mount rule create enforces. The stored side is
@@ -1044,6 +1038,12 @@ func repoMountBelow(resources []json.RawMessage, p string) string {
 	return ""
 }
 
+// mountPathTaken reports whether a session already mounts something at p. The
+// stored side is cleaned before comparing: a session created before mount paths
+// were resolved (#323) can hold a non-canonical literal — "/mnt/session/uploads//x"
+// — that names the same file as a freshly resolved "/mnt/session/uploads/x", and
+// a raw string compare would admit the second and let it overwrite the first's
+// bytes at materialization. p is already canonical (resolveMountPath cleans).
 func mountPathTaken(resources []json.RawMessage, p string) bool {
 	for _, raw := range resources {
 		var o struct {
