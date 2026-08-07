@@ -18,8 +18,8 @@ are skipped since no slug can start with a dot.
 
 **Content:** the file body is the final CHANGELOG.md entry **verbatim** — the
 same `- **title** — narrative…` long-form style the changelog already uses,
-starting with `- ` and containing no `#` headings (grouping is the assembler's
-job). Assembly is pure concatenation, so what you write here is byte-for-byte
+starting with a `-` marker followed by a space and containing no `#` headings
+(grouping is the assembler's job). Assembly is pure concatenation, so what you write here is byte-for-byte
 what the release section will hold.
 
 At release time `make changelog VERSION=X.Y.Z` folds every fragment into a

@@ -606,6 +606,50 @@ func TestFirstEverReleaseLinkRef(t *testing.T) {
 	}
 }
 
+// A fragment directory that cannot be modified must fail BEFORE the changelog
+// is written — never a released section with fragments left behind.
+func TestAssembleStagingFailureLeavesEverythingUntouched(t *testing.T) {
+	clPath, dir := writeFixture(t, steadyChangelog, map[string]string{"a.added.md": "- A.\n"})
+	// Pre-create .consumed so MkdirAll succeeds and the failure lands on the
+	// rename itself (removing a directory entry needs a writable parent).
+	if err := os.Mkdir(filepath.Join(dir, ".consumed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := runAssemble(clPath, dir, "0.3.0", "2026-09-01"); err == nil {
+		t.Fatal("want error when fragments cannot be staged")
+	}
+	if got := readFile(t, clPath); got != steadyChangelog {
+		t.Error("CHANGELOG written despite fragment staging failure")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a.added.md")); err != nil {
+		t.Error("fragment missing after failed staging")
+	}
+}
+
+// Components longer than an int64 must still order correctly (no leading
+// zeros are possible, so longer means greater).
+func TestVersionGreaterHugeComponents(t *testing.T) {
+	huge := "99999999999999999999" // > int64
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{huge + ".0.0", "9.0.0", true},
+		{"9.0.0", huge + ".0.0", false},
+		{"0." + huge + ".0", "0.9.0", true},
+		{"10.0.0", "9.0.0", true},
+		{"0.2.0", "0.2.0", false},
+	} {
+		if got := versionGreater(tc.a, tc.b); got != tc.want {
+			t.Errorf("versionGreater(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
 // The stdout path is what the default `make changelog-notes` invocation uses.
 func TestNotesStdout(t *testing.T) {
 	clPath, _ := writeFixture(t, steadyChangelog, nil)

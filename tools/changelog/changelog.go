@@ -184,17 +184,27 @@ func prevReleased(refs []string) string {
 }
 
 // versionGreater reports a > b for X.Y.Z versions (both already
-// shape-validated).
+// shape-validated, so components carry no leading zeros — which makes
+// longer-is-greater plus lexicographic comparison exact at any length,
+// with no integer overflow to mishandle).
 func versionGreater(a, b string) bool {
 	as, bs := strings.SplitN(a, ".", 3), strings.SplitN(b, ".", 3)
 	for i := 0; i < 3; i++ {
-		ai, _ := strconv.Atoi(as[i])
-		bi, _ := strconv.Atoi(bs[i])
-		if ai != bi {
-			return ai > bi
+		if cmp := compareVersionPart(as[i], bs[i]); cmp != 0 {
+			return cmp > 0
 		}
 	}
 	return false
+}
+
+func compareVersionPart(a, b string) int {
+	if len(a) != len(b) {
+		if len(a) < len(b) {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(a, b)
 }
 
 // updateRefs rewrites [Unreleased] to compare from the new version and
@@ -339,9 +349,13 @@ func notes(content, version string) (string, error) {
 	return joinTrimmed(doc[secIdx+1:end]) + "\n", nil
 }
 
-// runAssemble is the `assemble` subcommand: every refusal leaves both the
-// changelog and the fragment directory untouched; fragments are deleted only
-// after the new document is on disk.
+// runAssemble is the `assemble` subcommand. Failure anywhere leaves the
+// pre-command state: fragments are first staged into `.consumed/` (a
+// dot-directory, so a stray leftover is invisible to a later run), the
+// changelog is written only after staging succeeds, and a failed write
+// unstages them. Only after the new document is on disk is the staging
+// directory removed — the one step whose failure leaves harmless residue
+// rather than a half-released state.
 func runAssemble(changelogPath, dir, version, date string) error {
 	content, err := os.ReadFile(changelogPath)
 	if err != nil {
@@ -355,12 +369,31 @@ func runAssemble(changelogPath, dir, version, date string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(changelogPath, []byte(out), 0o644); err != nil {
-		return err
+
+	consumed := filepath.Join(dir, ".consumed")
+	if len(frags) > 0 {
+		if err := os.MkdirAll(consumed, 0o755); err != nil {
+			return err
+		}
 	}
-	for _, f := range frags {
-		if err := os.Remove(filepath.Join(dir, f.name)); err != nil {
-			return fmt.Errorf("assembled, but removing %s failed: %w", f.name, err)
+	unstage := func(n int) {
+		for _, f := range frags[:n] {
+			_ = os.Rename(filepath.Join(consumed, f.name), filepath.Join(dir, f.name))
+		}
+	}
+	for i, f := range frags {
+		if err := os.Rename(filepath.Join(dir, f.name), filepath.Join(consumed, f.name)); err != nil {
+			unstage(i)
+			return fmt.Errorf("staging %s: %w (nothing was released)", f.name, err)
+		}
+	}
+	if err := os.WriteFile(changelogPath, []byte(out), 0o644); err != nil {
+		unstage(len(frags))
+		return fmt.Errorf("writing the changelog: %w (fragments restored, nothing was released)", err)
+	}
+	if len(frags) > 0 {
+		if err := os.RemoveAll(consumed); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: the release is complete but %s could not be removed (%v); it is inert and can be deleted by hand\n", consumed, err)
 		}
 	}
 	return nil
