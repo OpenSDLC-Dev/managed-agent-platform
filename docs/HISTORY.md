@@ -1633,7 +1633,7 @@ archiving this plan.
 
 ## K8s silent short write (#103/#86) — investigation record (2026-07-19)
 
-Narrative and the defect itself: CHANGELOG.md § [Unreleased]. Recorded here is only what a
+Narrative and the defect itself: CHANGELOG.md § [0.2.0]. Recorded here is only what a
 changelog cannot hold — a refuted mechanism, the alternatives rejected, and the verification record.
 
 **A confidently-argued mechanism that was wrong.** The first account blamed client-go teardown:
@@ -1680,7 +1680,7 @@ the same shared subtest all pass); CI's fresh kind cluster on Linux is the gate.
 
 ## K8s read-side short-read guard (#105) — design record (2026-07-19)
 
-The hazard and the guard: CHANGELOG.md § [Unreleased]. Recorded here is only what a changelog
+The hazard and the guard: CHANGELOG.md § [0.2.0]. Recorded here is only what a changelog
 cannot hold — what was measured and rejected, and the sense in which nothing was reproduced.
 
 **Nothing was observed.** Roughly 35 reads of 1 MiB, 4 MiB and 20 MiB files through the pod-exec
@@ -1733,7 +1733,7 @@ contract suite. Coverage 91.38-91.48% across runs.
 
 ## `internal/events/toolflow.go` characterization suite — verification record (2026-07-19)
 
-Narrative: CHANGELOG.md § [Unreleased] → Added. Recorded here is only the verification, plus one
+Narrative: CHANGELOG.md § [0.2.0] → Added. Recorded here is only the verification, plus one
 claim this project made and then had to retract.
 
 **A claim of ours that was wrong.** The first version of the changelog entry said the two
