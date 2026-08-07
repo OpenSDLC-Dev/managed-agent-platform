@@ -42,7 +42,7 @@ three-variant union (betasession.go:722-733):
 | `type` | required | const `"github_repository"` |
 | `url` | required | "Github URL of the repository" |
 | `authorization_token` | required | "GitHub authorization token used to clone the repository" — **write-only** |
-| `mount_path` | optional | "Mount path in the container. Defaults to `/workspace/<repo-name>`." Used literally (files, by contrast, re-root under `/mnt/session/uploads`) |
+| `mount_path` | optional | "Mount path in the container. Defaults to `/workspace/<repo-name>`." Used literally (files, by contrast, re-root under `/mnt/session/uploads`); a supplied value must be **absolute** and already in `path.Clean` form, and is bounded and storable-checked as spelled — see the validation rules below |
 | `checkout` | optional | union `{type:"branch", name}` \| `{type:"commit", sha}` (betasession.go:803-807 registers exactly these two); "Defaults to the repository's default branch"; `sha` is documented as a **full** commit SHA |
 
 **Read** (betasessionresource.go:211-221): `{id (sesrsc_…), created_at, mount_path, type,
@@ -200,8 +200,17 @@ it ("is not echoed in API responses").
    `/workspace/./repo`, doubled separators, and trailing slashes are 400s, because
    raw-string uniqueness is otherwise evadable by aliases naming the same directory
    (INFERRED) — and uniqueness is judged on the cleaned form against every other
-   resource. Nesting is directional: a file mounted **inside** a repo's tree is the
-   supported overlay (decision 5's ordering), but no resource of any type may sit at a
+   resource. Every cross-arm comparison is made against each resource's **stored** path,
+   which for a file is its `resolveMountPath` output rather than its supplied spelling: a
+   file supplied as `/workspace/repo` is stored at `/mnt/session/uploads/workspace/repo`,
+   so a repo at its documented default can never collide or nest with a file at all. The
+   cross-arm rules below are therefore only reachable when the repo's own `mount_path` is
+   itself under `/mnt/session/uploads` — legal, since the repo arm takes an arbitrary
+   container path, but not the default. Stating it this way matters for the fixtures:
+   a case written in supplied spellings would assert a 400 on a pair that is in fact
+   disjoint, and pass or fail for the wrong reason. Nesting is directional: a file mounted
+   **inside** a repo's tree is the supported overlay (decision 5's ordering, reachable
+   under that same condition), but no resource of any type may sit at a
    proper **ancestor** of a repo's mount path (a file there is a non-directory where
    the clone needs a directory), and repo mounts may not nest within each other (a
    probe-failed re-clone of the outer would clear the inner). Two reserved targets are
@@ -251,7 +260,12 @@ it ("is not echoed in API responses").
    sequence at internal/executor/executor.go:417-422: `provisionSandbox` →
    `materializeSkills` → **`materializeRepos`** → `materializeFiles` — repos before files
    so a file mount may deliberately overlay into a checkout (mount paths are
-   exact-match-unique, not nesting-exclusive). Idempotence is **the probe alone — no
+   exact-match-unique, not nesting-exclusive). The overlay is only *reachable* where the
+   two arms can meet — a repo whose `mount_path` is itself under `/mnt/session/uploads`,
+   since #323 roots every file mount there — so at the default `/workspace/<repo-name>`
+   the arms are disjoint by construction and the ordering costs nothing. It is retained
+   because the reachable case is the one that would corrupt a checkout if files landed
+   first. Idempotence is **the probe alone — no
    marker**, a deliberate divergence from the files sentinel: a repo materializes iff
    `test -e '<mount>/.git'` fails. A marker earns its keep by detecting configuration
    drift, and a repo mount has none to detect — the set is fixed at create (decision 3),
@@ -387,7 +401,9 @@ meets it. Its rules, translated to this repo:
 | w-mount-collision | 🔍 | two resources (repo/repo and repo/file) sharing a `mount_path`; aliases of one path (`/workspace/repo` vs `/workspace/./repo`) | 400 each (uniqueness on the cleaned form) |
 | w-relative-mount | 🔍 | `mount_path` `workspace/repo`, `../mnt/session/uploads/x`, `.` | 400 each (the absolute-path rule); `path.Clean` leaves all three unchanged, so the clean-form rule below would pass them through to a uniqueness comparison against the wrong spelling |
 | w-unclean-mount | 🔍 | `mount_path` `/workspace/./r`, `/workspace//r`, trailing slash | 400 each (the clean-form rule) |
-| w-nesting | 🔍 | a file at `/workspace/repo` + a repo at `/workspace/repo/src`; two nested repos; a repo at `/` | 400 each (the nesting-direction and reserved-target rules); the inverse — a file *inside* a repo path — stays accepted |
+| w-mount-bounds | 🔍 | `mount_path` an absolute path longer than `maxMountPathBytes` (1024); an absolute path carrying unstorable bytes (U+0000, invalid UTF-8) | 400 each (the bound and storable-text rules) — the storable case is the one that would otherwise surface as a 500 when the resources array binds into the jsonb column (#135) |
+| w-nesting | 🔍 | ancestor: a file supplied as `x` (stored `/mnt/session/uploads/x`) + a repo at `/mnt/session/uploads/x/src`; two nested repos; a repo at `/` | 400 each (the nesting-direction and reserved-target rules) |
+| w-geometry-ok | 🔍 | overlay: a repo at `/mnt/session/uploads/r` + a file supplied as `r/src/x`; disjoint: a file supplied as `/workspace/repo` + a repo at `/workspace/repo/src` | 201 for both pairs — the overlay is decision 5's supported direction, and the disjoint pair only *looks* nested (the file is stored at `/mnt/session/uploads/workspace/repo`). A 400 on either is a **FAIL**: it would mean a rule compared supplied spellings instead of stored paths |
 | w-repo-cap | 🔍 | nine `github_repository` resources in one create | 400 (the eight-repo cap) |
 | w-add-post-create | 🔍 | `POST …/resources` add with a `github_repository` body | 400 (add stays file-only — wire-faithful) |
 | w-rotate | | `POST …/{rid}` `{authorization_token: new}` | 200, full rendered resource, `updated_at` bumped; storage: ciphertext changed and the new token round-trips through the cipher |
