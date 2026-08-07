@@ -71,6 +71,12 @@ type Task struct {
 	// block. Exercises the whole file-mount chain — registry, session resource,
 	// materialization, Level-1 injection.
 	Files []FileFixture
+	// Repo, when set, attaches a github_repository resource at session create —
+	// the only place repositories may be attached, since the add endpoint stays
+	// file-only. The executor clones it into the sandbox before the first tool
+	// runs and the brain injects the Mounted-repositories block. Its url and
+	// token come from the environment, never from the task (see RepoFixture).
+	Repo *RepoFixture
 	// Turns are the user messages, sent one at a time; each waits for the
 	// session to go idle before the next is sent.
 	Turns []Turn
@@ -208,7 +214,18 @@ func runTrial(t *testing.T, s *stack, task Task, rec *record) *Trial {
 	}
 	agentID := s.createAgent(t, agentBody(task, s.model, tr, skillRefs))
 	envID := s.createEnvironment(t, "eval-"+task.ID)
-	tr.SessionID = s.createSession(t, agentID, envID)
+	// A repository can only be attached at create — the add endpoint is
+	// file-only — so it is resolved here, where a missing credential fails this
+	// trial and not the suite.
+	var resources []any
+	if task.Repo != nil {
+		url, token := repoConfig(t)
+		resources = append(resources, map[string]any{
+			"type": "github_repository", "url": url,
+			"authorization_token": token, "mount_path": task.Repo.MountPath,
+		})
+	}
+	tr.SessionID = s.createSession(t, agentID, envID, resources)
 	rec.Session = tr.SessionID
 
 	// Files are uploaded and mounted as session resources before the first turn,

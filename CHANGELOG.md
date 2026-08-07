@@ -15,6 +15,61 @@ copy of an entry here.
 
 ### Added
 
+- **`github_repository` session resources — the clone lands, and #55 closes**
+  (plan 25 slice 2; the plan archives). A repository attached at session create
+  is now cloned into the sandbox before the agent's first tool runs. The clone
+  happens **platform-side, in the executor**, with go-git
+  (`github.com/go-git/go-git/v5`, a new primary dependency): the executor opens
+  the sealed token through `secrets.Cipher`, clones over HTTPS with the token in
+  the `Authorization` header (`x-access-token` basic auth, so the on-disk
+  `.git/config` carries only the clean URL), packs the checkout to a tar, ships
+  it over the existing `WriteFileStream` path, and extracts it. **The token never
+  enters the sandbox** — no credential helper, no remote URL rewrite, nothing for
+  the agent to read — and the egress gate is never involved, because no sandbox
+  process talks to GitHub. `checkout` resolves here rather than at create: a
+  branch clones single-branch, a commit clones then checks out the sha, and
+  `null` takes the remote's default branch. Repositories materialize **before**
+  files, so a file mount may deliberately overlay into a checkout.
+  Idempotence is **probe-only** — `<mount>/.git` present means materialized —
+  which is what lets a workspace restored from a plan-24 checkpoint keep the
+  agent's work instead of being re-cloned over; a marker file would have been
+  stripped at capture. Extraction stages into a sibling directory and renames,
+  so a `<mount>/.git` the probe trusts can only ever name a complete tree.
+  Failure is surfaced, not fatal: a repository that will not clone records a
+  `session.error` of the new type `github_repository_clone_error` (reasons
+  `auth`, `not_found`, `network`, `checkout`, `too_large`, `timeout`,
+  `internal`, classified over go-git's typed sentinels rather than message
+  text — with a status go-git has no sentinel for, a 5xx or a 429, read off the
+  transport error and reported as `network`, because a git-host outage told as
+  `internal` sends the operator to the wrong logs), deduped per
+  (resource, reason) so a polling session cannot flood its own log, and the
+  session runs on with the other repositories mounted. Self-review found and
+  fixed one real leak on that path: go-git copies a failing response's body
+  into the errors it builds for 401/403/404, so a host that named the
+  credential it rejected — and a host that rejects one has already decoded it —
+  put the token into a line we log, on the likeliest clone failure there is.
+  Every error the clone returns is now scrubbed of the token verbatim **and**
+  of the base64 basic-auth blob it was sent as, through a wrapper that keeps
+  the error chain intact so the reason classification still reads the sentinel
+  through it. Two new
+  budgets bound the work per repository — `EXECUTOR_REPO_CLONE_MAX_BYTES`
+  (default 1 GiB, metered **as the bytes land**, so an oversized repository is
+  abandoned mid-clone rather than after) and `EXECUTOR_REPO_CLONE_TIMEOUT`
+  (default 5m) — both exposed in the compose file and the Helm chart. The brain
+  appends a **"Mounted repositories"** block to the system prompt naming each
+  path, url, and checkout, gated to `cloud` environments: BYOC workers
+  materialize nothing (deliberate, #322), so asserting a checkout there would be
+  a false statement to the model. Unit M of the plan's verification matrix
+  lands as executor and brain integration tests — a real git repository served
+  over real smart-HTTP by an in-package fixture, seven rows against real Docker
+  sandboxes, and a token sweep of the materialized `.git` — with red-run
+  mutation evidence for all nine new guards. The end-to-end `repo-answer` eval
+  joins the opt-in suite (`RUN_EVALS=1` plus `GITHUB_EVAL_REPO_URL` /
+  `GITHUB_EVAL_REPO_TOKEN` in `.env`): a passphrase reachable only through a
+  real cloned GitHub repository, asked for without naming the mount, so the
+  brain's block is the only way to find it. Divergences: the slice-2 clone
+  semantics registered INFERRED and the no-BYOC-materialization stance
+  CONFIRMED in docs/DIVERGENCES.md.
 - **`github_repository` session resources — the wire half lands** (plan 25
   slice 1; the git half of #55 starts, and the plan flips `in-progress`).
   `POST /v1/sessions` `resources[]` now accepts the repo variant: an exact

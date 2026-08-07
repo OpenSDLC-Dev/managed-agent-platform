@@ -3,6 +3,7 @@ package executor
 import (
 	"archive/tar"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,12 @@ const tokenUsername = "x-access-token"
 // sandbox's own storage hardening: one unbounded repository could otherwise
 // exhaust the executor and disrupt unrelated sessions.
 func cloneToTar(ctx context.Context, r repoRef, token string, maxBytes int64) (tarPath string, size int64, cleanup func(), err error) {
+	// Every error out of here is logged by the caller, and the ones go-git
+	// builds from a refusing host's response body can quote the credential
+	// straight back at us. Scrubbed once, at the boundary, rather than at each
+	// of the seven returns below.
+	defer func() { err = scrubTokenErr(err, token) }()
+
 	spool, err := os.MkdirTemp("", "map-repo-clone-")
 	if err != nil {
 		return "", 0, func() {}, err
@@ -189,11 +196,28 @@ func cloneReason(err error) string {
 		errors.Is(err, plumbing.ErrReferenceNotFound),
 		errors.Is(err, git.NoMatchingRefSpecError{}):
 		return repoOutcomeCheckout
-	case isNetworkError(err):
+	case isRemoteStatusError(err), isNetworkError(err):
 		return repoOutcomeNetwork
 	default:
 		return repoOutcomeInternal
 	}
+}
+
+// isRemoteStatusError reports whether the remote answered with an HTTP status
+// go-git had no sentinel for — a 5xx, a 429, anything but the 401/403/404 the
+// arms above already claim. It is the remote's failure, not ours, so reporting
+// it as `internal` would send the operator to read our logs over an outage at
+// the git host.
+//
+// The unwrapping is manual because go-git's UnexpectedError implements no
+// Unwrap, so errors.As cannot reach the transport error it holds.
+func isRemoteStatusError(err error) bool {
+	var unexpected *plumbing.UnexpectedError
+	if !errors.As(err, &unexpected) {
+		return false
+	}
+	var httpErr *githttp.Err
+	return errors.As(unexpected.Err, &httpErr)
 }
 
 // isNetworkError reports whether err looks like a failure to reach or speak to
@@ -219,15 +243,54 @@ func isNetworkError(err error) bool {
 	return false
 }
 
-// scrubToken removes a token that somehow reached an error message before it
-// can be logged. Auth rides a header, not the URL, so go-git's messages are
-// token-free by construction; this is belt and braces (plan 25 decision 4).
+// scrubToken removes the credential from a message in both the forms a git host
+// can hand back: verbatim, and inside the base64 basic-auth blob it was sent as.
+//
+// This is not belt and braces. go-git copies a failing response's body into the
+// error it returns for 401, 403 and 404 (`fmt.Errorf("%w: %s", sentinel,
+// reason)`), and a host that rejects a credential has already decoded it — so a
+// host that says which credential it rejected puts our token in an error we log.
+// Auth failure is the likeliest clone failure there is, which makes this the
+// likeliest path, not the unlikeliest.
 func scrubToken(msg, token string) string {
 	if token == "" {
 		return msg
 	}
-	return strings.ReplaceAll(msg, token, "[redacted]")
+	msg = strings.ReplaceAll(msg, token, redactedToken)
+	return strings.ReplaceAll(msg, basicAuthBlob(token), redactedToken)
 }
+
+const redactedToken = "[redacted]"
+
+// basicAuthBlob is what go-git puts after "Basic " for our credential — the
+// only encoded form of it that can appear anywhere.
+func basicAuthBlob(token string) string {
+	return base64.StdEncoding.EncodeToString([]byte(tokenUsername + ":" + token))
+}
+
+// scrubTokenErr presents err with the credential removed while keeping the
+// error itself reachable: the caller classifies the failure with errors.Is over
+// go-git's sentinels, so a scrub that returned a fresh error would silently
+// turn every redacted auth failure into an `internal` one.
+func scrubTokenErr(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	msg := err.Error()
+	scrubbed := scrubToken(msg, token)
+	if scrubbed == msg {
+		return err
+	}
+	return &scrubbedError{err: err, msg: scrubbed}
+}
+
+type scrubbedError struct {
+	err error
+	msg string
+}
+
+func (e *scrubbedError) Error() string { return e.msg }
+func (e *scrubbedError) Unwrap() error { return e.err }
 
 // meteredFS is a billy filesystem that counts every byte written beneath it
 // against a shared budget and fails the write past the cap. go-git chroots the

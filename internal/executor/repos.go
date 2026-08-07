@@ -112,7 +112,7 @@ func (e *Executor) materializeRepos(ctx context.Context, sb sandbox.Sandbox, sid
 			recordRepoMaterialized(ctx, reason)
 			slog.WarnContext(ctx, "repository not materialized",
 				"session_id", sid, "resource_id", m.ID, "url", m.URL, "mount_path", m.MountPath,
-				"reason", reason, "err", scrubToken(err.Error(), ""))
+				"reason", reason, "err", err)
 			e.emitRepoCloneError(ctx, sid, m, reason, "the repository could not be cloned into the sandbox")
 			continue
 		}

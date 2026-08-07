@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 
 	"net/http"
@@ -50,6 +51,11 @@ type gitFixture struct {
 	clones atomic.Int64
 	// status, when non-zero, is answered instead of serving the repository.
 	status atomic.Int64
+	// echoAuth makes the refusal body quote the credentials it was given, both
+	// as sent and decoded — what a hostile or over-chatty git host does, and the
+	// only way a token can reach a go-git error message (go-git copies up to 1
+	// KiB of an error response's body into the error it returns).
+	echoAuth atomic.Bool
 	// stall delays every request, for the deadline row.
 	stall atomic.Int64
 	// wantAuth, when set, is the Authorization header the fixture requires;
@@ -153,7 +159,16 @@ func (f *gitFixture) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if code := f.status.Load(); code != 0 {
-		http.Error(w, "fixture refuses", int(code))
+		body := "fixture refuses"
+		if f.echoAuth.Load() {
+			auth := r.Header.Get("Authorization")
+			decoded := auth
+			if raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic ")); err == nil {
+				decoded = string(raw)
+			}
+			body = "fixture refuses credentials " + auth + " (" + decoded + ")"
+		}
+		http.Error(w, body, int(code))
 		return
 	}
 

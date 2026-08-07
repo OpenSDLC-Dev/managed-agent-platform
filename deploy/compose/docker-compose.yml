@@ -193,6 +193,12 @@ services:
       EXECUTOR_REAP_INTERVAL: ${EXECUTOR_REAP_INTERVAL:-}
       EXECUTOR_CHECKPOINT_MAX_BYTES: ${EXECUTOR_CHECKPOINT_MAX_BYTES:-}
       EXECUTOR_SANDBOX_IDLE_TTL: ${EXECUTOR_SANDBOX_IDLE_TTL:-}
+      # Budgets for cloning a github_repository session resource (plan 25). Both
+      # are per repository and metered in flight, so a repository that outgrows
+      # them is abandoned mid-clone rather than after. Empty = the binary's
+      # defaults, 1 GiB and 5m.
+      EXECUTOR_REPO_CLONE_MAX_BYTES: ${EXECUTOR_REPO_CLONE_MAX_BYTES:-}
+      EXECUTOR_REPO_CLONE_TIMEOUT: ${EXECUTOR_REPO_CLONE_TIMEOUT:-}
       # Sandbox containment (#65). The executor applies its own defaults when
       # these are unset — 512 processes, 2 CPUs, and the NET_RAW/SETUID/SETGID
       # drops — so they are here to be *lowered* or turned off (0, or `none` for

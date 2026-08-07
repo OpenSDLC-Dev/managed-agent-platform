@@ -1,7 +1,12 @@
 ---
-status: in-progress
+status: archived
 issue: "#55"
 ---
+
+> **Archived — completed.** Both slices landed (PRs #329 and the slice-2 PR that
+> archives this file), closing #55; the e-wire-cli acceptance transcript is in
+> docs/HISTORY.md, and the progress summary moved there in the archiving PR.
+> BYOC repository materialization was deferred by design and is tracked in #322.
 
 # Git/repo mounting: `github_repository` session resources (plan 25)
 

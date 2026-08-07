@@ -541,6 +541,54 @@ func TestRepoExtractFailureIsTolerated(t *testing.T) {
 	}
 }
 
+// TestRepoCloneErrorNeverQuotesTheToken 🔍 is the w-token-sweep rule applied to
+// the one surface that can still reach a log: a clone's error text.
+//
+// go-git copies up to 1 KiB of a failing response's body into the error it
+// returns, and that error is logged when a repository does not materialize. A
+// git host that quotes the credentials it rejected — as sent, or decoded, which
+// a host that validates them has already done — therefore hands us the token
+// inside an error message. The token is scrubbed in both forms before the error
+// leaves the clone, and the classification the caller does over it must survive
+// the scrub, or a redacted auth failure would be reported as a network one.
+func TestRepoCloneErrorNeverQuotesTheToken(t *testing.T) {
+	const token = "ghp_ERROR-ECHO-SWEEP-9f3a"
+	basic := base64.StdEncoding.EncodeToString([]byte(tokenUsername + ":" + token))
+	fx := newGitFixture(t, map[string]string{"README.md": "x\n"})
+	fx.echoAuth.Store(true)
+
+	for _, tc := range []struct {
+		name       string
+		status     int
+		wantReason string
+	}{
+		// A 500 is the arm that carries a body into the error at all; the 401 is
+		// here because scrubbing must not cost the sentinel that classifies it.
+		{"server error", http.StatusInternalServerError, "network"},
+		{"unauthorized", http.StatusUnauthorized, "auth"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx.status.Store(int64(tc.status))
+			_, _, cleanup, err := cloneToTar(context.Background(),
+				repoRef{URL: fx.url()}, token, 1<<30)
+			defer cleanup()
+			if err == nil {
+				t.Fatal("the clone succeeded against a refusing fixture")
+			}
+			if strings.Contains(err.Error(), token) {
+				t.Errorf("the clone error quotes the token verbatim: %v", err)
+			}
+			if strings.Contains(err.Error(), basic) {
+				t.Errorf("the clone error quotes the token's basic-auth encoding: %v", err)
+			}
+			if got := cloneReason(err); got != tc.wantReason {
+				t.Errorf("cloneReason = %q, want %q (the scrub must not break classification): %v",
+					got, tc.wantReason, err)
+			}
+		})
+	}
+}
+
 // TestRepoRestoredCheckpointSkipsClone is m-checkpoint 🔍: a workspace restored
 // from a plan-24 checkpoint carries the tree but no marker — exactly the state
 // a marker-based scheme would re-clone over — and the probe-only idempotence
