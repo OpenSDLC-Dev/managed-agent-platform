@@ -2686,3 +2686,46 @@ connection on a live GKE cluster. What is established is that it renders, that a
 server accepts the manifests, that the pinned `cloud-sql-proxy:2.24.1` accepts the exact
 argument vector the chart passes (it proceeds past flag parsing and fails only on absent
 credentials), and that the Terraform passes the credential-free checks.
+
+## e-wire-cli acceptance + mutation duty — plan 25 slice 1, `github_repository` resources (run 2026-08-07) — ✅ passed
+
+The real `ant` CLI (v1.21.0, built from the read-only reference checkout) against the
+compose stack built from the branch — controlplane + Postgres + MinIO + OpenBao only,
+wire-only by design: no brain, no executor, no clone, no network to GitHub. The
+`authorization_token` in every request was a deliberately fake sweep value
+(`ACCEPT-TOKEN-e2e-*`), so nothing in this record is a credential.
+
+The sequence: `beta:environments create` (cloud) → `beta:agents create` →
+`beta:sessions create` with two `--resource` `github_repository` objects (one with a
+`branch` checkout and a defaulted mount, one `.git`-suffixed with an explicit
+`mount_path`) → `beta:sessions:resources list` / `retrieve` → `update` with a new token →
+`delete` → `beta:sessions retrieve`. Every read shape came back with exactly the seven
+public fields; the defaulted mount rendered `/workspace/example-repo`, the `.git` suffix
+stripped for the name only (the stored `url` keeps it); the omitted checkout rendered
+`checkout: null`. Rotation returned 200 with the full resource and bumped only
+`updated_at` (`…:48.895882637Z` → `…:48.937895512Z`), and the later session GET proved the
+bump persisted. The delete returned the designed 400: "github_repository resources cannot
+be removed; repositories are attached for the lifetime of the session".
+
+Three sweeps, all zero: the transcript's **response** lines for both token values and the
+`"authorization_token"` key (command lines, which legitimately carry the fake token, were
+excluded); the controlplane's logs for both token values; and the database, where
+`session_resource_credentials` held ciphertext only — both rows sealed under the OpenBao
+transit key (`token_key_id=map-secrets`), the rotated row showing `updated_at <>
+created_at` and a different ciphertext length. The two designed `slog` lines fired once
+each: `session repository credentials sealed … repos=2` and `session resource token
+rotated`.
+
+**Mutation duty: nine probes, nine red.** Each guard was deleted in a git-archive scratch
+copy of the branch HEAD and its sentinel test rerun (a first workflow round had cut its
+copies from `main`, where the feature does not exist — nine "unverifiable" rows, discarded
+and rerun from the branch archive). All nine went red for their own reason: the token
+sweep caught the echo on all five response surfaces; the URL grammar's
+userinfo/query/fragment/port refusals each flipped to 200; the repo delete returned
+`session_resource_deleted`; the add path ran on to a file-shaped 404 instead of the
+file-only 400; rotation on an archived session returned 200; unclean mounts
+(`//`, `.` segment, trailing slash) passed; nested repos and a file above a repo mount
+passed; nine repos sealed (`repos=9` in the log); and the cipher-less refusal's removal
+turned the clean 500 into a nil-pointer panic surfacing as EOF. The tenth guard-shaped
+behavior — `checkout` union strictness — is covered by the same validation test's
+table rows and was not separately mutated.

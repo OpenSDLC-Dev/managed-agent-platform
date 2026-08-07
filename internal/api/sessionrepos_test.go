@@ -215,8 +215,8 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 
 	for name, resources := range map[string][]any{
 		// w-no-token
-		"missing token": {map[string]any{"type": "github_repository", "url": repoTestURL}},
-		"empty token":   {repoBody("", nil)},
+		"missing token":    {map[string]any{"type": "github_repository", "url": repoTestURL}},
+		"empty token":      {repoBody("", nil)},
 		"token above 8KiB": {repoBody(strings.Repeat("t", 8193), nil)},
 		// w-bad-url
 		"http scheme":     {repoBody("g", map[string]any{"url": "http://github.com/o/r"})},
@@ -237,8 +237,8 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		"checkout bad keys": {repoBody("g", map[string]any{"checkout": map[string]any{"type": "branch", "name": "m", "sha": sha}})},
 		"unknown repo key":  {repoBody("g", map[string]any{"depth": 1})},
 		// w-unclean-mount
-		"dot segment":      {repoBody("g", map[string]any{"mount_path": "/workspace/./r"})},
-		"doubled slash":    {repoBody("g", map[string]any{"mount_path": "/workspace//r"})},
+		"dot segment":          {repoBody("g", map[string]any{"mount_path": "/workspace/./r"})},
+		"doubled slash":        {repoBody("g", map[string]any{"mount_path": "/workspace//r"})},
 		"trailing slash mount": {repoBody("g", map[string]any{"mount_path": "/workspace/r/"})},
 		// w-mount-collision (aliases of one directory)
 		"repo/repo collision": {
