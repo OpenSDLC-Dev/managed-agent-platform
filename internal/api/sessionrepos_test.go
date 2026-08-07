@@ -247,8 +247,9 @@ func (sb *syncBuf) Bytes() []byte {
 }
 
 // TestSessionRepoCreateValidation is w-no-token, w-bad-url, w-bad-checkout,
-// w-unclean-mount, w-mount-collision, w-nesting, and w-repo-cap 🔍: the
-// create-time rejections, all INFERRED strictness (plan 25 decision 3).
+// w-relative-mount, w-unclean-mount, w-mount-bounds, w-mount-collision,
+// w-nesting, and w-repo-cap 🔍: the create-time rejections, all INFERRED
+// strictness (plan 25 decision 3).
 func TestSessionRepoCreateValidation(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -296,11 +297,28 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		"non-hex sha":       {repoBody("g", map[string]any{"checkout": map[string]any{"type": "commit", "sha": strings.Repeat("g", 40)}})},
 		"checkout bad keys": {repoBody("g", map[string]any{"checkout": map[string]any{"type": "branch", "name": "m", "sha": sha}})},
 		"unknown repo key":  {repoBody("g", map[string]any{"depth": 1})},
+		// w-relative-mount: path.Clean leaves a relative path relative, so the
+		// clean-form rule below never sees these — the absolute check is the
+		// only guard between them and a uniqueness comparison on the wrong
+		// spelling (../mnt/session/uploads/x aliases a file mount).
+		"relative mount":     {repoBody("g", map[string]any{"mount_path": "workspace/r"})},
+		"parent-climb mount": {repoBody("g", map[string]any{"mount_path": "../mnt/session/uploads/x"})},
+		"dot mount":          {repoBody("g", map[string]any{"mount_path": "."})},
 		// w-unclean-mount
-		"relative mount":       {repoBody("g", map[string]any{"mount_path": "workspace/r"})},
 		"dot segment":          {repoBody("g", map[string]any{"mount_path": "/workspace/./r"})},
 		"doubled slash":        {repoBody("g", map[string]any{"mount_path": "/workspace//r"})},
 		"trailing slash mount": {repoBody("g", map[string]any{"mount_path": "/workspace/r/"})},
+		// w-mount-bounds: the supplied path's own length and storability. The
+		// URL cases above reach the length guard through the derived default;
+		// "oversized mount" drives validateRepoMountPath directly, which is the
+		// arm a caller controls. "unstorable mount" lands one layer earlier —
+		// rejectNUL walks the whole decoded body (wire.go), so a NUL never
+		// reaches validateRepoMountPath's storableText — and what it pins is the
+		// outcome that matters: a 400, never the #135 500 at the jsonb bind.
+		// There is no invalid-UTF-8 case because JSON cannot carry one; the
+		// marshaller substitutes U+FFFD before the request leaves the client.
+		"oversized mount":  {repoBody("g", map[string]any{"mount_path": "/workspace/" + strings.Repeat("x", 1024)})},
+		"unstorable mount": {repoBody("g", map[string]any{"mount_path": "/workspace/\x00r"})},
 		// w-mount-collision (aliases of one directory; the file arm compares
 		// by its uploads-resolved path since #323, so a relative file
 		// spelling collides with a repo's literal path at the same place)
@@ -343,6 +361,41 @@ func TestSessionRepoCreateValidation(t *testing.T) {
 		"agent": agentID, "environment_id": envID, "resources": nineRepos[:8]})
 	if status != http.StatusOK {
 		t.Errorf("eight repos: status %d, want 200 (%v)", status, body)
+	}
+}
+
+// TestSessionRepoAcceptedGeometry is w-geometry-ok 🔍: the two cross-arm
+// geometries that must be ACCEPTED. Both are traps for an implementation that
+// compares supplied mount_path spellings rather than stored ones — a file's
+// stored path is its resolveMountPath output (#323), a repo's is the literal
+// value — so a 400 here is the mirror image of the w-nesting rejections and
+// would go unnoticed by a matrix that only ever asserts refusals.
+func TestSessionRepoAcceptedGeometry(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	overlayFile := uploadOneFile(t, s, "overlay.txt")
+	disjointFile := uploadOneFile(t, s, "disjoint.txt")
+
+	for name, resources := range map[string][]any{
+		// The overlay decision 5 orders repos before files to support: the file
+		// lands inside the repo's tree. Reachable only where the two arms can
+		// meet — a repo mounted under the uploads root, not at the default.
+		"file overlays into repo": {
+			repoBody("g", map[string]any{"mount_path": "/mnt/session/uploads/r"}),
+			map[string]any{"type": "file", "file_id": overlayFile, "mount_path": "r/src/x"}},
+		// Reads as a file sitting at an ancestor of the repo, but is not: the
+		// file is stored at /mnt/session/uploads/workspace/repo, so the pair is
+		// disjoint and no nesting rule applies.
+		"apparent nesting is disjoint": {
+			map[string]any{"type": "file", "file_id": disjointFile, "mount_path": "/workspace/repo"},
+			repoBody("g", map[string]any{"mount_path": "/workspace/repo/src"})},
+	} {
+		status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
+			"agent": agentID, "environment_id": envID, "resources": resources})
+		if status != http.StatusOK {
+			t.Errorf("%s: status %d, want 200 — a rejection means a rule compared supplied spellings, not stored paths (%v)",
+				name, status, body)
+		}
 	}
 }
 
