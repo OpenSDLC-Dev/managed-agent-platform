@@ -417,7 +417,7 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
 | creating `controlplane-api-key`, `database-url` and `model-providers` | a human, once — `bootstrap.sh` does not create these |
 | replacing the `model-providers` placeholder | a human, once |
-| `gcloud builds submit` → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
+| build and push the four images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
 and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three
@@ -486,21 +486,48 @@ to finish a rotation, both of which are dispatches *on* `main`. Verify it the wa
 first be exercised — dispatch from a throwaway branch and confirm the auth step fails, not
 the guard.
 
-**Two IAM grants live outside Terraform, and the pipeline does not work without them.** They
-were made by hand against this project and are recorded here because nothing in the
-repository would otherwise say they exist:
+**CD does not use Cloud Build, and the reason is worth keeping.** The pipeline's first real
+run failed at the build step in under a second, before a byte was uploaded:
+
+```text
+ERROR: (gcloud.builds.submit) The user is forbidden from accessing the bucket
+[hh-opensdlc-managed-agents_cloudbuild]. Please check your organization's policy
+or if the user has the "serviceusage.services.use" permission.
+```
+
+It kept failing with `roles/storage.admin` on that bucket **and**
+`roles/serviceusage.serviceUsageConsumer` on the project — the documented remedy for exactly
+that message. The trap underneath it: **`gcloud builds submit` stages the source as the
+CALLER, not as the build's `--service-account`.** Every manual run that worked was called by
+a human with Owner, so none of them exercised the path CI takes, and no amount of granting
+the *build* identity more could have.
+
+So the workflow builds on the runner and pushes to Artifact Registry. That needs one
+permission the deploy identity already holds — `roles/artifactregistry.writer` — and no
+bucket, no staging upload and no Cloud Build API. `cloudbuild.yaml` remains the **manual**
+path's build definition; keep the two saying the same thing, which is why the workflow writes
+its four tags out rather than inferring them.
+
+**One IAM grant lives outside Terraform and the manual Cloud Build path does not work
+without it.** It was made by hand and is recorded here because nothing in the repository
+would otherwise say it exists:
 
 | Grant | Scope | Why |
 | --- | --- | --- |
 | `roles/logging.logWriter` | the project | `cloudbuild.yaml` sets `options.logging: CLOUD_LOGGING_ONLY`, which is *mandatory* once a build names its own service account — with a user-specified identity the API refuses a build that would write to the default logs bucket |
-| `roles/storage.admin` | `gs://hh-opensdlc-managed-agents_cloudbuild` | `gcloud builds submit .` **uploads** the source tarball to that bucket as the caller, and the build then **reads** it back as its `--service-account` — here the same identity for both, so a read-only role such as `roles/storage.objectViewer` fails the upload before the build starts. This is the grant that was made and proven; a narrower `roles/storage.objectAdmin` is plausible and untested |
 
-Both are on `cd-deployer@`, and the reason they are needed at all is the first line of the
-build step: `--service-account="projects/…/serviceAccounts/cd-deployer@…"`. **A project
-created under an organisation no longer gets the automatic Editor grant on the Compute
-Engine default service account**, so the identity Cloud Build would otherwise pick cannot
-read its own source upload. That is not a hypothetical — it is how the first submission
-failed:
+`roles/storage.admin` on `gs://hh-opensdlc-managed-agents_cloudbuild` and
+`roles/serviceusage.serviceUsageConsumer` on the project were also granted to `cd-deployer@`
+while diagnosing the above. Neither is needed by CD anymore. They are left in place because
+the manual `gcloud builds submit` path still uses that bucket, and are named here so that a
+later tidy-up knows what they were for.
+
+They are on `cd-deployer@`, and what makes them necessary is naming a build service account
+at all — `--service-account="projects/…/serviceAccounts/cd-deployer@…"`, which the manual
+path must pass here. **A project created under an organisation no longer gets the automatic
+Editor grant on the Compute Engine default service account**, so the identity Cloud Build
+would otherwise pick cannot read its own source upload. That is not a hypothetical — it is
+how the first submission failed:
 
 ```text
 754963270337-compute@developer.gserviceaccount.com does not have storage.objects.get

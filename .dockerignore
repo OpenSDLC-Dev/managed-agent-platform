@@ -11,6 +11,12 @@
 .claude/worktrees
 **/.env
 **/.env.*
+# google-github-actions/auth writes its federated credential into the workspace
+# as gha-creds-*.json, and the delivery workflow's `docker build .` has the
+# workspace as its context. The multi-stage build means it never reaches the
+# pushed image — only /out binaries are copied forward — but it would otherwise
+# sit in the build stage's layer and its cache for the life of the job.
+**/gha-creds-*.json
 **/*.local.yaml
 **/*.local.yml
 **/model-providers.json

@@ -42,8 +42,12 @@ what it does *not* cover: [docs/HISTORY.md](./docs/HISTORY.md).
       steps that render the values file (the sandbox pair, and the seven-key
       Secret contract in both directions), and the runbook split in
       `deploy/gcp/README.md`.
-- [ ] CD's first run **from the workflow itself**: every step is proven by hand,
-      but no push to `main` has yet driven it end to end.
+- [ ] CD's first **green** run from the workflow itself. It has now run: WIF auth
+      and `setup-gcloud` succeeded, and it died at `gcloud builds submit`, which
+      stages source as the *caller* — so the manual runs, called by a human with
+      Owner, had never exercised that path. #349 builds on the runner instead;
+      its merge is the next attempt. The console's pipeline is already green
+      end to end, including its selector-recreation guard firing for real.
 - [x] WIF ref gap closed — the provider now asserts `ref == refs/heads/main` and
       `ref_type == branch` as well as `repository_owner`, so a dispatched branch
       can no longer mint the deploy identity. Command and read-back in
