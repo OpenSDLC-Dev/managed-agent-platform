@@ -818,7 +818,7 @@ func TestNotes(t *testing.T) {
 // --- archive: the CHANGELOG slimming subcommand (plan 28) ---
 
 // slimmed is steadyChangelog after archiving 0.2.0 — the golden document
-// TestArchiveMovesSectionVerbatim asserts and later tests reuse.
+// TestArchiveMovesSection asserts and later tests reuse.
 var slimmed = `# Changelog
 
 Preamble line.
@@ -840,7 +840,7 @@ Release summary.
 [0.1.0]: https://github.com/OpenSDLC-Dev/managed-agent-platform/releases/tag/v0.1.0
 `
 
-func TestArchiveMovesSectionVerbatim(t *testing.T) {
+func TestArchiveMovesSection(t *testing.T) {
 	newContent, archived, err := archiveSection(steadyChangelog, "0.2.0", "docs/changelog/0.2.0.md")
 	if err != nil {
 		t.Fatal(err)

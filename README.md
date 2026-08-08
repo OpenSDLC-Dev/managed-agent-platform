@@ -49,7 +49,7 @@ v1 delivered the core loop: `create agent → create environment → create sess
 
 Progress is tracked in:
 
-- **[CHANGELOG.md](./CHANGELOG.md)** — landed work, newest first; from now on new changes accumulate as fragments in [changelog.d/](./changelog.d/) until a release folds them in.
+- **[CHANGELOG.md](./CHANGELOG.md)** — landed work, newest first; new changes accumulate as fragments in [changelog.d/](./changelog.d/) until a release folds them in, and released sections archive to [docs/changelog/](./docs/changelog/) behind index stubs post-release.
 - **[GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues)** — the backlog and open questions.
 - **[STATE.md](./STATE.md)** — the active work and its task progress. The as-built system is [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md); acceptance and decision records are [docs/HISTORY.md](./docs/HISTORY.md).
 
