@@ -65,7 +65,10 @@ func RequestDeadlineForTest(ctx context.Context) (time.Duration, bool) {
 // round trip, and fail only against a server that streams — which is every real
 // one.
 func RoundTripBodyForTest(ctx context.Context, url string, limit int64) (io.ReadCloser, error) {
-	tr := newLimitedTransport(nil, limit)
+	// A transport of its own for the same reason loopbackClient has one: passing
+	// nil here falls through to http.DefaultTransport, which every httptest
+	// server in the suite clears the idle connections of when it closes.
+	tr := newLimitedTransport(&http.Transport{}, limit)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -141,14 +144,17 @@ func LimitedTransportForTest(base http.RoundTripper, limit int64) http.RoundTrip
 	return newLimitedTransport(base, limit)
 }
 
-// PageAndHeaderBoundsForTest reports the page bound and the per-response raw
-// header bound. Their product is the part of a listing's reads the cumulative
-// byte budget cannot account for — net/http normalizes a header block before
-// this package can measure it — so keeping that product inside MaxResponseBytes
-// is what makes the published ceiling true, and it is an invariant across two
-// constants rather than a property of either.
-func PageAndHeaderBoundsForTest() (pages int, headerBytes int64) {
-	return maxToolPages, maxHeaderBytesPerResponse
+// PageAndHeaderBoundsForTest reports the three constants whose product is the
+// part of a listing's reads the cumulative byte budget cannot account for: the
+// page bound, the header blocks one response cycle can carry, and the raw cap on
+// each block.
+//
+// The published ceiling is that product, so a test asserts it exactly rather
+// than as an inequality. An inequality bounds the cap from above and leaves it
+// free below, which let a mutant tighten it to 1 KiB — a value that would break
+// essentially every real server — with the whole suite green.
+func PageAndHeaderBoundsForTest() (pages, blocks int, headerBytes int64) {
+	return maxToolPages, maxHeaderBlocksPerResponse, maxHeaderBytesPerResponse
 }
 
 // Budget is a handle on one connection's shared byte budget.

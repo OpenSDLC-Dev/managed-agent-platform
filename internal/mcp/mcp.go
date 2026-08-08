@@ -85,11 +85,20 @@ type Config struct {
 	// HTTPClient replaces the guarded client rather than adding to it. Nil
 	// selects [DefaultClient], which is what production uses; a test supplies
 	// its own to reach an httptest server on loopback. A supplied client gives
-	// up everything [DefaultClient] carries — the dial-time address guard and
-	// the refusal to follow redirects — so a non-test caller that wants its own
-	// transport policy installs those itself. The two bounds this package owns,
-	// the cumulative response budget and the fallback request deadline, are
-	// wrapped around whatever client is supplied and are not optional.
+	// up everything [DefaultClient] carries — the dial-time address guard, the
+	// refusal to follow redirects, and the per-block cap on raw response header
+	// bytes (maxHeaderBytesPerResponse, in place of net/http's 10 MiB default) —
+	// so a non-test caller that wants its own transport policy installs those
+	// itself.
+	//
+	// The header cap belongs on that list rather than under the bounds below,
+	// and the distinction is easy to get backwards: the two bounds this package
+	// owns — the cumulative response budget and the fallback request deadline —
+	// are wrapped around whatever client is supplied and are not optional, but
+	// the response budget can only charge header bytes that survive parsing.
+	// The bytes it cannot see are held by the transport setting, which lives on
+	// the client, so a supplied client is bounded on bodies and unbounded on
+	// padded, informational and trailing header blocks.
 	HTTPClient *http.Client
 }
 
@@ -147,11 +156,10 @@ type Conn struct {
 // unaccountable. Measured, a 200,076-byte response whose X-Pad value was one
 // character followed by 200,000 spaces reconstructed to 75 bytes — a factor of
 // 2,670, which is a distortion no arithmetic on the parsed map can correct. So
-// the raw block is bounded per response instead, and the constant is chosen
-// against the page bound rather than picked: maxToolPages of it is 6.4 MiB,
-// inside MaxResponseBytes, so a maximal listing's hidden header bytes stay
-// within the budget they cannot be charged to. net/http's own default would put
-// that product at a gigabyte.
+// the raw block is bounded here instead, per header block, and what a maximal
+// listing can hide is that constant times maxToolPages times
+// maxHeaderBlocksPerResponse — 18.75 MiB, against net/http's own default putting
+// it at nearly 3 GiB.
 var DefaultClient = &http.Client{
 	Timeout: DialTimeout,
 	CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -171,16 +179,48 @@ var DefaultClient = &http.Client{
 	},
 }
 
-// maxHeaderBytesPerResponse bounds one response's raw header block, before
-// net/http parses it. See DefaultClient for why this is the only bound those
-// bytes get; the invariant that makes the number rather than merely constrains
-// it is maxToolPages * maxHeaderBytesPerResponse <= MaxResponseBytes, asserted
-// in the suite so neither side can move without the other.
+// maxHeaderBytesPerResponse bounds a raw header block before net/http parses
+// it. See DefaultClient for why this is the only bound those bytes get.
 //
-// 64 KiB is roughly eight times what a server like nginx will emit in total by
-// default, and this client sets no cookie jar, so the header block it sees is
-// the server's own metadata and nothing accumulated across requests.
+// 64 KiB is generous rather than tight, deliberately: it is a hard ceiling on
+// what a *legitimate* server may send, and the cost of setting it too low is a
+// working server this client cannot talk to. Real response header blocks run a
+// few hundred bytes to a few kilobytes; the heavy realistic cases — SSO
+// Set-Cookie chains, dense tracing and rate-limit headers — reach the low tens
+// of kilobytes. The referent worth naming is nginx's proxy_buffer_size, the cap
+// it puts on an *upstream's* response header block, which defaults to 4k or 8k:
+// 64 KiB is eight times that, and any MCP server behind a default reverse proxy
+// is already held below this limit by the proxy rather than by us. (Comparing
+// it to what nginx *emits* of its own accord, a few hundred bytes, would make
+// this ~200x and is the wrong comparison; so is anything about cookie jars,
+// which govern outbound request headers and cannot affect the block a server
+// sends.)
 const maxHeaderBytesPerResponse = 64 << 10
+
+// maxHeaderBlocksPerResponse is how many separately-capped header blocks one
+// response cycle can carry, and it is 3 rather than 1 because the arithmetic
+// above is only as good as this number.
+//
+// The tempting reading is that MaxResponseHeaderBytes bounds a response. Over
+// HTTP/1.1 it very nearly does: net/http resets the read limit per 1xx block
+// only when a request carries an httptrace with Got1xxResponse set
+// (transport.go, readLoop), the SDK installs no httptrace, so informational
+// blocks and the final block draw on one limit and trailers are bounded
+// separately by the read buffer. Over HTTP/2 — which this client explicitly
+// enables, so this is not a hypothetical path — the limit becomes the
+// connection's maxHeaderListSize and applies to each decoded block on its own.
+// Measured against a fixture: a single 80 KiB final block is refused, while two
+// 30 KiB Early Hints plus a 60 KiB final block (~120 KiB) is accepted, and with
+// a 60 KiB trailer on top (~180 KiB) it is still accepted. Informational blocks
+// never enter resp.Header and trailers are not there when the charge runs, so
+// two of the three are invisible to the charge and all three are real bytes
+// read.
+//
+// Three blocks, then: the informational blocks in aggregate, the final block,
+// and the trailers. maxToolPages of those is what the ceiling published on
+// MaxResponseBytes states, and the suite asserts the exact product so that
+// number cannot drift from these constants.
+const maxHeaderBlocksPerResponse = 3
 
 // Connect opens a connection to one MCP server over Streamable HTTP.
 //
@@ -561,11 +601,21 @@ func (c *Conn) Close() error { return c.session.Close() }
 // depend on that; serving does.)
 //
 // What it covers is bodies in full and header blocks only as far as they can be
-// counted after parsing — see headerBytes. Header bytes that normalization
-// removes are outside this bound and are held by maxHeaderBytesPerResponse
-// instead, whose product with maxToolPages is kept inside MaxResponseBytes. So
-// the honest ceiling on what one listing reads is under twice this number, not
-// this number: 8 MiB accounted plus at most 6.4 MiB unaccountable.
+// counted after parsing — see headerBytes. Header bytes that never reach the
+// parsed map are outside this bound and are held by maxHeaderBytesPerResponse
+// instead, per block. So the honest ceiling on what one listing reads is this
+// number plus maxToolPages * maxHeaderBlocksPerResponse * that constant:
+// 8 MiB accounted plus at most 18.75 MiB unaccountable, or 26.75 MiB in all.
+//
+// Stating it that way rather than as "8 MiB" is the point, and the first two
+// attempts at this sentence were both wrong in the direction of flattering the
+// bound. It said "header blocks included", which whitespace padding falsified;
+// then "8 MiB plus 6.4 MiB, under twice the stated bound", which assumed the
+// per-response cap covered a whole response — true over HTTP/1.1 and false over
+// HTTP/2, the protocol this client explicitly enables, where a measured listing
+// moved 18.50 MiB against a ceiling that claimed 14.25. The number below is what
+// the constants actually produce, and the suite asserts that product exactly so
+// it cannot drift from them again.
 //
 // 8 MiB is far above any real catalog — the whole point of a tool definition is
 // to fit in a model request, and a catalog that cannot be sent to a model is not
@@ -677,16 +727,14 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // a value of one character followed by 200,000 spaces reconstructs to 75 bytes
 // against 200,076 on the wire.
 //
-// Three routes miss this map, in falling order of how much they can move. A 1xx
-// informational block — 103 Early Hints, say — never enters resp.Header at all,
-// and a server may send many before the final response; measured at 100 pages,
-// 91.8 MB on the wire for 3,900 bytes charged. Padding whitespace is the second.
-// Trailers are the third and smallest: they arrive after the body, so they are
-// not in the map when this runs, and net/http bounds them to its own read buffer
-// (transfer.go, seeUpcomingDoubleCRLF), which is a few kilobytes per response.
-// The first two are held by maxHeaderBytesPerResponse — net/http charges a
-// response's 1xx blocks and its final block to one shared readLimit, so that
-// cap bounds their sum rather than each — and the third by net/http itself.
+// Three routes miss this map. A 1xx informational block — 103 Early Hints, say
+// — never enters resp.Header at all, and a server may send many before the final
+// response; measured at 100 pages, 91.8 MB on the wire for 3,900 bytes charged.
+// Padding whitespace is the second. Trailers are the third: they arrive after
+// the body, so they are not in the map when this runs. All three are held by
+// maxHeaderBytesPerResponse, which is why maxHeaderBlocksPerResponse exists and
+// is 3 — over HTTP/2 that cap applies to each block separately, so a response
+// cycle's worth is three times it rather than one.
 //
 // Charging what is visible is still worth doing: a server sending large
 // *legitimate* headers on every page is charged for them, and splitting one

@@ -76,7 +76,22 @@ func tool(name, description string, required ...string) *sdk.Tool {
 // httptest servers above (which listen on 127.0.0.1 — exactly what the
 // production guard refuses). Every test that needs to talk to a fixture uses
 // it; TestDefaultClientRefusesLoopback covers the guard itself.
-func loopbackClient() *http.Client { return &http.Client{Timeout: mcp.DialTimeout} }
+// loopbackClient is the client every fixture connects with, and it carries a
+// transport of its own rather than falling through to http.DefaultTransport.
+//
+// That is not tidiness. httptest.Server.Close calls
+// http.DefaultTransport.CloseIdleConnections() as a convenience to its users
+// (httptest/server.go), so with the suite's tests running in parallel, one
+// test's server shutting down reaches into the pooled connection another test
+// is about to reuse. When the timing lands mid-flight the reused connection
+// dies as "http: CloseIdleConnections called", and the SDK's POST cannot be
+// retried, so the victim fails with an error naming a server it has nothing to
+// do with — which is how TestConnectOpensNoStandaloneStream failed in CI while
+// passing everywhere else. A transport per client removes the shared state the
+// race needs.
+func loopbackClient() *http.Client {
+	return &http.Client{Timeout: mcp.DialTimeout, Transport: &http.Transport{}}
+}
 
 // serveToolsList starts a server whose handshake is a real SDK server's but
 // whose tools/list result is written by hand, and counts the listing requests.
@@ -1120,14 +1135,21 @@ func TestDefaultClientConfigurationIsDeliberate(t *testing.T) {
 	// can reconstruct from resp.Header, and normalization removes padding
 	// whitespace before resp.Header exists, so this is the only bound those
 	// bytes get. What makes it enough is its product with the page bound.
-	pages, hdr := mcp.PageAndHeaderBoundsForTest()
+	pages, blocks, hdr := mcp.PageAndHeaderBoundsForTest()
 	if transport.MaxResponseHeaderBytes != hdr {
 		t.Errorf("DefaultClient allows %d bytes of response headers, want %d — the bound the page arithmetic below is done against",
 			transport.MaxResponseHeaderBytes, hdr)
 	}
-	if total := int64(pages) * hdr; total > mcp.MaxResponseBytes {
-		t.Errorf("a maximal listing may read %d bytes of headers the byte budget cannot see, past its own %d",
-			total, int64(mcp.MaxResponseBytes))
+	// Asserted as an exact figure, not an inequality. An inequality bounds the
+	// cap from above and leaves it free below, so tightening it to 1 KiB — which
+	// would break essentially every real server — stayed green. The exact form
+	// also means the published ceiling cannot drift from the constants: whoever
+	// moves one has to come here, and the number they find here is the one the
+	// doc comments and docs/DIVERGENCES.md print.
+	const unaccountable = 19_660_800 // 18.75 MiB
+	if total := int64(pages) * int64(blocks) * hdr; total != unaccountable {
+		t.Errorf("a maximal listing may read %d bytes of headers the byte budget cannot see; the published ceiling says %d — update both or neither",
+			total, int64(unaccountable))
 	}
 	// A whole-request cap. Without one, a server that trickles a response holds
 	// the work item — and its queue lease — for as long as it likes.
@@ -1153,16 +1175,23 @@ func TestPaddedResponseHeadersAreRefusedBeforeTheyAreRead(t *testing.T) {
 	if !ok {
 		t.Fatalf("DefaultClient.Transport = %T, want *http.Transport", mcp.DefaultClient.Transport)
 	}
-	_, hdr := mcp.PageAndHeaderBoundsForTest()
+	_, _, hdr := mcp.PageAndHeaderBoundsForTest()
 
 	for _, tc := range []struct {
 		name    string
 		pad     int
 		refused bool
 	}{
-		// Comfortably inside the bound: accepted, and charged almost nothing —
-		// which is the fact that makes the bound necessary rather than a nicety.
-		{name: "within the per-response bound", pad: int(hdr) / 2, refused: false},
+		// A heavy but entirely realistic header block — an SSO Set-Cookie chain
+		// with dense tracing headers reaches this — must be accepted, and is
+		// charged almost nothing, which is the fact that makes the raw bound
+		// necessary rather than a nicety.
+		//
+		// The size is absolute on purpose. Deriving it from the cap ("half of
+		// whatever the cap is") is true for every cap, so it pinned the bound
+		// from above and not at all from below: tightening the constant to 1 KiB
+		// left this green while breaking every real server.
+		{name: "a heavy but legitimate header block", pad: 16 << 10, refused: false},
 		// Past it. Under net/http's 10 MiB default this response is accepted and
 		// the budget charges it around 75 bytes, so a mutant restoring that
 		// default fails here.
