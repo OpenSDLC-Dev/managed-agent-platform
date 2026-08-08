@@ -61,15 +61,22 @@ func TestIPAllowed(t *testing.T) {
 		{name: "NAT64 /48 layout wrapping cloud metadata", ip: "64:ff9b:1:a9fe:a9:fe00:808:808", refused: true},
 		{name: "NAT64 /40 layout wrapping loopback", ip: "64:ff9b:7f:0:1::", refused: true},
 
-		// A deliberate false refusal, pinned so it stays a decision rather than
-		// a surprise. Under a /48 mapping this carries the public 8.127.8.8,
-		// but read as /56 the same bytes are 127.8.8.0 — loopback — and the
-		// guard cannot tell which layout the deployment meant. Measured over
-		// the whole address space this costs 12.8% of targets under a /48
-		// mapping on the local-use prefix and nothing at all under /96 or the
-		// well-known prefix; see the note on embeddedIPv4 for why that is the
-		// trade rather than an accident.
+		// Two deliberate false refusals, pinned so they stay decisions rather
+		// than surprises. The first depends on the target: under a /48 mapping
+		// it carries the public 8.127.8.8, but read as /56 the same bytes are
+		// 127.8.8.0 — loopback — and the guard cannot tell which layout the
+		// deployment meant. That costs 12.8% of targets under a /48 mapping on
+		// the local-use prefix.
 		{name: "NAT64 /48 layout, public target, refused by the /56 reading", ip: "64:ff9b:1:87f:8:800::", refused: true},
+
+		// The second depends on nothing but the prefix, which is the worse
+		// case and the reason "a /96 mapping costs nothing" is false as a
+		// general claim: 64:ff9b:1:7f00::/96 is a legal NSP whose own bytes
+		// read as 127.0.0.0 under the /48 layout, so every address it can
+		// express is refused however innocent the target. See the note on
+		// embeddedIPv4 for why the guard cannot do better with an address
+		// alone, and what a deployment that hits this would need.
+		{name: "NAT64 /96 NSP whose prefix bytes read as loopback", ip: "64:ff9b:1:7f00::808:808", refused: true},
 		{name: "6to4 wrapping loopback", ip: "2002:7f00:1::1", refused: true},
 		{name: "6to4 wrapping a public address", ip: "2002:5db8:d822::1"},
 		{name: "Teredo wrapping loopback", ip: "2001::5:0:0:80ff:fffe", refused: true},

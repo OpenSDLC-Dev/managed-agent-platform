@@ -204,10 +204,10 @@ func TestListToolsCannotTellAnAbsentToolsFieldFromAnEmptyOne(t *testing.T) {
 	// retryable error rather than the durable fact "this server has no tools".
 	// It is not treated that way, and the reason is not a judgment call: the
 	// SDK erases the difference before this package sees it. ListTools ends
-	// with `result.Tools = filterValidTools(...)`, and filterValidTools opens
-	// with `make([]*Tool, 0, len(tools))` — so a nil `tools` and an empty one
-	// both arrive here as a non-nil empty slice, and no check at this layer can
-	// separate them.
+	// with `result.Tools = filterValidTools(...)`, and filterValidTools builds
+	// its result with `make([]*Tool, 0, len(tools))` — so a nil `tools` and an
+	// empty one both arrive here as a non-nil empty slice, and no check at this
+	// layer can separate them.
 	//
 	// This test exists to pin that, because "distinguish absent from empty" is
 	// a natural thing for a reviewer to ask for and it cannot be built without

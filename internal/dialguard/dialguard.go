@@ -90,20 +90,31 @@ func refused(ip net.IP) bool {
 // byte loads and cannot admit anything, since the caller refuses on any
 // candidate rather than on a chosen one.
 //
-// It does over-refuse, and not rarely: a public address under one layout is
-// arbitrary bytes under the other five, and those bytes sometimes land in a
-// blocked class. Measured over the whole IPv4 space, on the RFC 8215 local-use
-// prefix, a legitimate target is refused for 12.8% of addresses under a /48
-// mapping (whenever octet 2 or 3 is 127 or in 224-239) and 6.6% under /56 and
-// /64. What makes that an acceptable price rather than a bug is where it
-// falls: under a /96 mapping, and under the well-known 64:ff9b::/96 prefix —
-// which is the only layout that prefix is allowed to use, and the case an
-// operator gets without choosing anything — the rate is **zero**, because
-// every speculative layout reads the zeroed prefix bytes and is skipped as
-// padding. The cost and the risk therefore coincide exactly: a deployment
-// where no layout ambiguity exists pays nothing, and a deployment where the
-// bypass is real is the one that pays. An operator debugging an inexplicably
-// refused NAT64 address on a local-use prefix is looking at this paragraph.
+// It does over-refuse, and how much depends on the deployment's prefix bytes
+// rather than on its prefix length — which is worth stating precisely, because
+// the tempting summary ("a /96 mapping costs nothing") is false.
+//
+// The well-known 64:ff9b::/96 costs exactly nothing, always: bytes 4-11 are
+// zero by definition, so every speculative layout reads padding and is skipped.
+// That is the case an operator gets without choosing anything, and RFC 6052
+// fixes that prefix at /96, so there is no ambiguity there to pay for.
+//
+// On the RFC 8215 local-use 64:ff9b:1::/48 the cost is real and ranges from
+// nothing to everything. With the remaining prefix bytes zero it is 12.8% of
+// targets under a /48 mapping (whenever octet 2 or 3 of the target is 127 or in
+// 224-239), 6.6% under /56 and /64, and 0% under /96 — measured over the whole
+// IPv4 space. But an operator may carve an NSP whose own fixed bytes read as a
+// blocked class under a shorter layout, and then the refusal does not depend on
+// the target at all: under 64:ff9b:1:7f00::/96 the /48 reading of the prefix is
+// 127.0.0.0, so **every** address that prefix can express is refused. Nothing
+// here can tell that apart from a genuine /48 mapping of loopback.
+//
+// That is the honest shape of the trade: fail-closed, sometimes total, and
+// unavoidable for a guard that is handed an address and not the layout that
+// produced it. The escape hatch, if a deployment ever hits it, is to tell the
+// guard its NAT64 prefix and collapse the six candidates to one — a knob
+// nothing needs today, and one this design does not foreclose. An operator
+// debugging an inexplicably refused NAT64 address is looking at this paragraph.
 //
 // IPv4-compatible is here because Go does not decode it for us and nothing else
 // catches it. ::ffff:127.0.0.1 (IPv4-*mapped*) is safe without any of this —
