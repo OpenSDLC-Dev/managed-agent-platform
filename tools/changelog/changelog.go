@@ -16,6 +16,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -560,6 +561,10 @@ func fenceStates(lines []string) []bool {
 // the closing paren — for rebaseLinks' unhandled-form guard.
 var linkTargetRe = regexp.MustCompile(`\]\(([^)\s]+)`)
 
+// refDefTargetRe captures a link-reference definition's target (`[label]:
+// target`) — a form the inline scan cannot see, checked separately.
+var refDefTargetRe = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:\s*(\S+)`)
+
 // linkSchemeRe matches an absolute-URL (or mailto:) target, which no rewrite
 // touches.
 var linkSchemeRe = regexp.MustCompile(`^[a-z][a-z0-9+.-]*:`)
@@ -582,6 +587,13 @@ func rebaseLinks(section []string, fenced []bool) ([]string, error) {
 		}
 		if strings.Contains(l, "](../") {
 			return nil, fmt.Errorf("%q: a parent-relative link cannot be re-based reversibly", strings.TrimSpace(l))
+		}
+		// A link-reference definition carries its target outside the `](`
+		// syntax; a relative one would move unrebased and silently break.
+		if m := refDefTargetRe.FindStringSubmatch(l); m != nil {
+			if t := m[1]; !strings.HasPrefix(t, "#") && !linkSchemeRe.MatchString(t) {
+				return nil, fmt.Errorf("%q: a link-reference definition with a relative target cannot be re-based — teach rebaseLinks its mapping first", strings.TrimSpace(l))
+			}
 		}
 		r := strings.ReplaceAll(l, "](./", "](../../")
 		r = strings.ReplaceAll(r, "](docs/", "](../")
@@ -624,6 +636,12 @@ func unrebaseLinks(section []string, fenced []bool) []string {
 func archiveSection(content, version, linkPath string) (string, string, error) {
 	if !versionRe.MatchString(version) {
 		return "", "", fmt.Errorf("version %q is not X.Y.Z", version)
+	}
+	// The link re-base hardcodes its two mappings for an archive exactly two
+	// levels below the changelog, in docs/changelog/ — any other layout would
+	// re-base wrongly, so it is refused rather than guessed at.
+	if path.Dir(filepath.ToSlash(linkPath)) != "docs/changelog" {
+		return "", "", fmt.Errorf("archive path %q is not docs/changelog/ next to the changelog — the link re-base assumes that layout", linkPath)
 	}
 	lines := strings.Split(content, "\n")
 	_, doc := splitTrailingRefs(lines)

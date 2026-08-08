@@ -884,14 +884,19 @@ func TestArchiveOldestSection(t *testing.T) {
 }
 
 func TestArchiveRefusals(t *testing.T) {
-	if _, _, err := archiveSection(steadyChangelog, "9.9.9", "x.md"); err == nil {
-		t.Error("want error for a version with no section")
+	if _, _, err := archiveSection(steadyChangelog, "9.9.9", "docs/changelog/9.9.9.md"); err == nil || !strings.Contains(err.Error(), "no section [9.9.9]") {
+		t.Errorf("want no-section refusal, got %v", err)
 	}
-	if _, _, err := archiveSection(steadyChangelog, "Unreleased", "x.md"); err == nil {
-		t.Error("want error for a non-numeric version")
+	if _, _, err := archiveSection(steadyChangelog, "Unreleased", "docs/changelog/Unreleased.md"); err == nil || !strings.Contains(err.Error(), "is not X.Y.Z") {
+		t.Errorf("want non-semver refusal, got %v", err)
 	}
-	if _, _, err := archiveSection(slimmed, "0.2.0", "x.md"); err == nil {
-		t.Error("want error re-archiving an already-archived section")
+	if _, _, err := archiveSection(slimmed, "0.2.0", "docs/changelog/0.2.0.md"); err == nil || !strings.Contains(err.Error(), "is already archived") {
+		t.Errorf("want already-archived refusal, got %v", err)
+	}
+	// The re-base mappings assume the canonical layout; any other archive
+	// location is refused, not guessed at.
+	if _, _, err := archiveSection(steadyChangelog, "0.2.0", "archive/0.2.0.md"); err == nil || !strings.Contains(err.Error(), "assumes that layout") {
+		t.Errorf("want layout refusal, got %v", err)
 	}
 }
 
@@ -951,8 +956,8 @@ func TestRunArchive(t *testing.T) {
 	if string(got) != slimmed {
 		t.Errorf("changelog on disk:\n%q", got)
 	}
-	if err := runArchive(clPath, dir, "0.2.0"); err == nil {
-		t.Error("want error re-archiving a stub")
+	if err := runArchive(clPath, dir, "0.2.0"); err == nil || !strings.Contains(err.Error(), "is already archived") {
+		t.Errorf("want already-archived refusal, got %v", err)
 	}
 	// A pre-existing archive file is never clobbered.
 	if err := os.WriteFile(filepath.Join(dir, "0.1.0.md"), []byte("occupied"), 0o644); err != nil {
@@ -995,13 +1000,25 @@ func TestArchiveRebasesLinks(t *testing.T) {
 }
 
 func TestArchiveRefusesUnhandledLinkForms(t *testing.T) {
+	link := "docs/changelog/0.4.0.md"
 	parent := "# C\n\n## [0.4.0] - 2026-09-01\n\n- A [link](../escape.md).\n\n[0.4.0]: https://e/1\n"
-	if _, _, err := archiveSection(parent, "0.4.0", "d/0.4.0.md"); err == nil || !strings.Contains(err.Error(), "parent-relative") {
+	if _, _, err := archiveSection(parent, "0.4.0", link); err == nil || !strings.Contains(err.Error(), "parent-relative") {
 		t.Errorf("want parent-relative refusal, got %v", err)
 	}
 	bare := "# C\n\n## [0.4.0] - 2026-09-01\n\n- A [link](internal/q.md).\n\n[0.4.0]: https://e/1\n"
-	if _, _, err := archiveSection(bare, "0.4.0", "d/0.4.0.md"); err == nil || !strings.Contains(err.Error(), "unhandled relative link target") {
+	if _, _, err := archiveSection(bare, "0.4.0", link); err == nil || !strings.Contains(err.Error(), "unhandled relative link target") {
 		t.Errorf("want unhandled-form refusal, got %v", err)
+	}
+	// A link-reference definition carries a relative target in a form the
+	// inline scan does not see — refused, not moved unrebased.
+	refDef := "# C\n\n## [0.4.0] - 2026-09-01\n\n- A [plan][p] entry.\n\n[p]: docs/plan/29_x.md\n\n[0.4.0]: https://e/1\n"
+	if _, _, err := archiveSection(refDef, "0.4.0", link); err == nil || !strings.Contains(err.Error(), "link-reference definition with a relative target") {
+		t.Errorf("want ref-def refusal, got %v", err)
+	}
+	// An absolute-URL definition is untouched and archives fine.
+	absDef := "# C\n\n## [0.4.0] - 2026-09-01\n\n- A [site][s] entry.\n\n[s]: https://example.com/x\n\n[0.4.0]: https://e/1\n"
+	if _, _, err := archiveSection(absDef, "0.4.0", link); err != nil {
+		t.Errorf("absolute-URL ref def refused: %v", err)
 	}
 }
 
@@ -1026,7 +1043,7 @@ func TestArchiveRoundTripGuardFires(t *testing.T) {
 // check could not parse back.
 func TestArchiveRefusesLooseHeadingGrammar(t *testing.T) {
 	cl := "# C\n\n## [0.8.0] - 2026-9-4\n\nBody.\n\n[0.8.0]: https://e/1\n"
-	if _, _, err := archiveSection(cl, "0.8.0", "d/0.8.0.md"); err == nil || !strings.Contains(err.Error(), "exact dated grammar") {
+	if _, _, err := archiveSection(cl, "0.8.0", "docs/changelog/0.8.0.md"); err == nil || !strings.Contains(err.Error(), "exact dated grammar") {
 		t.Errorf("want grammar refusal, got %v", err)
 	}
 }
@@ -1036,11 +1053,11 @@ func TestArchiveRefusesLooseHeadingGrammar(t *testing.T) {
 // a fenced `## ` line is quoted content and archives untouched.
 func TestArchiveSecondHeadingShapes(t *testing.T) {
 	indented := "# C\n\n## [0.6.0] - 2026-09-03\n\nBody.\n\n ## Legacy heading\n\n[0.6.0]: https://e/1\n"
-	if _, _, err := archiveSection(indented, "0.6.0", "d/0.6.0.md"); err == nil || !strings.Contains(err.Error(), "would swallow") {
+	if _, _, err := archiveSection(indented, "0.6.0", "docs/changelog/0.6.0.md"); err == nil || !strings.Contains(err.Error(), "would swallow") {
 		t.Errorf("want swallow refusal, got %v", err)
 	}
 	fenced := "# C\n\n## [0.7.0] - 2026-09-04\n\nBody.\n\n```\n## [9.9.9] - 2026-01-01\n```\n\n[0.7.0]: https://e/1\n"
-	_, archived, err := archiveSection(fenced, "0.7.0", "d/0.7.0.md")
+	_, archived, err := archiveSection(fenced, "0.7.0", "docs/changelog/0.7.0.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1056,7 +1073,7 @@ func TestArchiveStubPhraseInProseIsNotAStub(t *testing.T) {
 	cl := "# C\n\n## [0.9.0] - 2026-09-05\n\n" +
 		"- One entry noting the full section lives in [the ops guide](https://e/g).\n" +
 		"- Another entry.\n\n[0.9.0]: https://e/1\n"
-	if _, _, err := archiveSection(cl, "0.9.0", "d/0.9.0.md"); err != nil {
+	if _, _, err := archiveSection(cl, "0.9.0", "docs/changelog/0.9.0.md"); err != nil {
 		t.Errorf("prose quoting the stub phrase refused: %v", err)
 	}
 	if _, err := notes(cl, "0.9.0"); err != nil {
@@ -1068,7 +1085,7 @@ func TestArchiveStubPhraseInProseIsNotAStub(t *testing.T) {
 // after the canonical ones, in appearance order.
 func TestArchiveStubNonKacGroup(t *testing.T) {
 	cl := "# C\n\n## [0.5.0] - 2026-09-02\n\n### Special\n\n- S.\n\n### Added\n\n- A.\n\n[0.5.0]: https://e/1\n"
-	newContent, _, err := archiveSection(cl, "0.5.0", "d/0.5.0.md")
+	newContent, _, err := archiveSection(cl, "0.5.0", "docs/changelog/0.5.0.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1085,9 +1102,18 @@ func TestRunArchiveFailedArchiveWriteLeavesChangelog(t *testing.T) {
 	if err := os.WriteFile(clPath, []byte(steadyChangelog), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(root, "ro")
+	dir := filepath.Join(root, "docs", "changelog")
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(dir, 0o555); err != nil {
 		t.Fatal(err)
+	}
+	// Root bypasses directory write permission, so the unwritable-dir
+	// precondition cannot be established there.
+	if probe, err := os.Create(filepath.Join(dir, ".probe")); err == nil {
+		probe.Close()
+		t.Skip("process writes through a 0o555 dir (running as root?)")
 	}
 	if err := runArchive(clPath, dir, "0.2.0"); err == nil {
 		t.Fatal("want error from an unwritable archive dir")

@@ -13,5 +13,5 @@ stubs; HISTORY splits by period.
 - [x] Slice 1 — `archive` subcommand (round-trip-guarded, link-rebasing,
       mutation-checked), `make changelog-archive`, CHANGELOG split for
       0.2.0/0.1.0, governance wording, RELEASING.md post-release step
-      (this PR).
+      ([#337](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/337)).
 - [ ] Slice 2 — HISTORY.md split to docs/history/ by period; archive the plan.
