@@ -51,10 +51,24 @@ func IPAllowed(ip net.IP) error {
 		return fmt.Errorf("dial target %s is a disallowed address", ip)
 	}
 	for _, target := range embeddedIPv4(ip) {
-		// A decode landing on the unspecified address is reading prefix or
-		// suffix padding rather than a target — every NAT64 layout but the
-		// right one does that on a shorter prefix — and refusing it would
-		// refuse the legitimate address it was read from.
+		// A decode landing on the unspecified address is reading padding
+		// rather than a target, and must not refuse the address it was read
+		// from. RFC 6052 §2.2 puts the suffix — SHOULD-zero — in the low 32
+		// bits for every prefix length from /32 to /56, so a reader of those
+		// bits sees 0.0.0.0 for *every* conformant mapping under four of the
+		// six layouts. That is not a hypothetical: it is what the guard this
+		// package replaced did, refusing 64:ff9b:1:808:8:800:: (a /48 mapping
+		// of 8.8.8.8) as readily as it admitted the /48 mapping of cloud
+		// metadata below. One misreading, pointing both ways.
+		//
+		// The skip is therefore what makes the six-candidate check usable, and
+		// its own cost is small and stated: an address whose every non-padding
+		// reading is benign is admitted, which includes 64:ff9b:: and
+		// 64:ff9b:1:: themselves — prefix base addresses where a translator has
+		// no target and no host is listening. The unspecified address is in the
+		// refusal list because connect(0.0.0.0) reaches the local host, and
+		// that is a property of a local dial, not of a destination a translator
+		// forwards to.
 		if target.IsUnspecified() {
 			continue
 		}
@@ -87,8 +101,20 @@ func refused(ip net.IP) bool {
 // 64:ff9b:1:a9fe:a9:fe00:808:808 carries 169.254.169.254 in bytes 6,7,9,10 and
 // nothing but padding and suffix in the low 32, so a low-32 reader sees 8.8.8.8
 // and lets the metadata endpoint through. Trying all six costs a handful of
-// byte loads and cannot admit anything, since the caller refuses on any
-// candidate rather than on a chosen one.
+// byte loads, and adding candidates only ever adds refusals: the caller refuses
+// on any candidate rather than on a chosen one. What it is *not* is purely
+// additive against the low-32 guard this replaced, because that guard read the
+// zero suffix as a target — see the unspecified skip in IPAllowed for what that
+// cost and what admitting it back costs in turn.
+//
+// Only 64:ff9b::/32 is recognized. RFC 6052 equally allows a Network-Specific
+// Prefix from an operator's own space, and an address carries no mark saying it
+// is one, so a deployment translating through (say) 2001:db8:122:344::/96 gets
+// no NAT64 decoding here at all and its wrapped metadata address is admitted.
+// That is the same missing knob as the over-refusal below — a guard told its
+// deployment's prefix would fix both — and it is why this decoding is hardening
+// on the one prefix an attacker can rely on being routed, not a general
+// solution to NAT64.
 //
 // It does over-refuse, and how much depends on the deployment's prefix bytes
 // rather than on its prefix length — which is worth stating precisely, because

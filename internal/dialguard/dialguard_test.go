@@ -77,6 +77,29 @@ func TestIPAllowed(t *testing.T) {
 		// embeddedIPv4 for why the guard cannot do better with an address
 		// alone, and what a deployment that hits this would need.
 		{name: "NAT64 /96 NSP whose prefix bytes read as loopback", ip: "64:ff9b:1:7f00::808:808", refused: true},
+
+		// The other direction of the same trade, pinned because it is the one
+		// that reads as a loosening. Skipping a candidate that decodes to the
+		// unspecified address is what lets these through, and the old low-32
+		// guard refused all three: RFC 6052 puts the zero suffix in the low 32
+		// bits for every layout from /32 to /56, so reading only those bits saw
+		// 0.0.0.0 and refused *every* conformant mapping under four of the six
+		// prefix lengths — the same misreading that admitted the metadata
+		// address above, pointing the other way. The first row is the ordinary
+		// case that restores; the last two are prefix base addresses, where the
+		// decode is padding all the way down and no host exists to reach.
+		{name: "NAT64 /48 layout, ordinary public target", ip: "64:ff9b:1:808:8:800::"},
+		{name: "NAT64 well-known prefix base address", ip: "64:ff9b::"},
+		{name: "NAT64 local-use prefix base address", ip: "64:ff9b:1::"},
+
+		// RFC 6052 lets an operator assign a Network-Specific Prefix out of
+		// their own space, and nothing in an address marks it as one. Only
+		// 64:ff9b::/32 is decoded, so a deployment translating through its own
+		// NSP gets no NAT64 decoding at all and this reaches cloud metadata.
+		// Closing it needs the guard told its prefix — the same knob the
+		// over-refusal above would want, and equally not built.
+		{name: "NAT64 through an operator NSP is not decoded", ip: "2001:db8:122:344::a9fe:a9fe"},
+
 		{name: "6to4 wrapping loopback", ip: "2002:7f00:1::1", refused: true},
 		{name: "6to4 wrapping a public address", ip: "2002:5db8:d822::1"},
 		{name: "Teredo wrapping loopback", ip: "2001::5:0:0:80ff:fffe", refused: true},
