@@ -417,7 +417,7 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
 | creating `controlplane-api-key`, `database-url` and `model-providers` | a human, once — `bootstrap.sh` does not create these |
 | replacing the `model-providers` placeholder | a human, once |
-| `gcloud builds submit` → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
+| build and push the four images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
 and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three
@@ -489,7 +489,7 @@ the guard.
 **CD does not use Cloud Build, and the reason is worth keeping.** The pipeline's first real
 run failed at the build step in under a second, before a byte was uploaded:
 
-```
+```text
 ERROR: (gcloud.builds.submit) The user is forbidden from accessing the bucket
 [hh-opensdlc-managed-agents_cloudbuild]. Please check your organization's policy
 or if the user has the "serviceusage.services.use" permission.
@@ -518,7 +518,7 @@ would otherwise say it exists:
 
 `roles/storage.admin` on `gs://hh-opensdlc-managed-agents_cloudbuild` and
 `roles/serviceusage.serviceUsageConsumer` on the project were also granted to `cd-deployer@`
-while diagnosing the above. Neither is needed by CD any more. They are left in place because
+while diagnosing the above. Neither is needed by CD anymore. They are left in place because
 the manual `gcloud builds submit` path still uses that bucket, and are named here so that a
 later tidy-up knows what they were for.
 
