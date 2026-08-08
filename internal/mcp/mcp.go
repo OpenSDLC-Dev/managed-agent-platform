@@ -192,7 +192,7 @@ var DefaultClient = &http.Client{
 // explicitly enables, so this is not a hypothetical path — the limit becomes the
 // connection's maxHeaderListSize and applies to each decoded block on its own.
 // Measured with a one-off probe rather than a retained fixture, though each
-// figure follows from the constants above: a single 80 KiB final block is
+// figure follows from the constants: a single 80 KiB final block is
 // refused, while two 30 KiB Early Hints plus a 60 KiB final block (~120 KiB) is
 // accepted, and with a 60 KiB trailer on top (~180 KiB) it is still accepted.
 // What the suite does retain is the boundary itself, driven either side of it.
