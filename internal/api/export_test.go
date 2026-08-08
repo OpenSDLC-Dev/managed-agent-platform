@@ -3,6 +3,8 @@ package api
 import (
 	"net"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
 )
 
 // AllowLoopbackProbeForTest relaxes the validate probe's SSRF guard to permit
@@ -22,7 +24,7 @@ func AllowLoopbackProbeForTest() (restore func()) {
 
 // ProbeIPAllowedForTest exposes the production SSRF predicate so a test can
 // assert which addresses it refuses. Test binary only.
-func ProbeIPAllowedForTest(ip net.IP) error { return productionProbeIPAllowed(ip) }
+func ProbeIPAllowedForTest(ip net.IP) error { return dialguard.IPAllowed(ip) }
 
 // SetUpdateCredentialResealHookForTest installs a hook fired between the
 // unlocked re-seal read and the locked compare-and-set write in
