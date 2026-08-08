@@ -4,10 +4,14 @@
 //
 // Connections are per-work-item. A caller connects, does its work, and closes;
 // nothing is pooled and nothing is shared, so a crashed executor loses no state
-// a fresh one cannot rebuild. The 2026-07-28 revision of MCP makes that cheap:
-// it removed protocol-level sessions, so there is no handshake to amortize and
-// no affinity between the discovery of a server's tools and a later call to
-// one. Everything below is deliberately stateless for the same reason.
+// a fresh one cannot rebuild. The 2026-07-28 revision of MCP is what makes that
+// affordable: it removed protocol-level sessions, so nothing accumulates on the
+// server that a new connection has to re-establish, and there is no affinity
+// between discovering a server's tools and later calling one. Not free, though —
+// a connection still negotiates, and this client's negotiation is a `server/
+// discover` round trip (two, where the SDK retries it) before Connect returns.
+// What per-work-item connections cost is that round trip; what they buy is a
+// client with no state to lose.
 //
 // The SDK is a dependency of this package alone. Its types do not appear in the
 // wrapper's surface — the platform's domain model is Anthropic-native
@@ -24,16 +28,23 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// DialTimeout bounds a single connection attempt and each request on it. MCP
-// servers are third-party endpoints reached from a work item that holds a
-// queue lease, so an unbounded wait would hold the lease rather than fail the
-// item.
+// DialTimeout bounds a single connection attempt, and is the fallback deadline
+// for any request that reaches the transport without one. MCP servers are
+// third-party endpoints reached from a work item that holds a queue lease, so an
+// unbounded wait would hold the lease rather than fail the item.
+//
+// It is a floor, not a per-request cap: a request made under ListTools carries
+// ListTimeout's deadline and keeps it. What the fallback catches is the request
+// that carries no deadline at all — see withResponseLimit for why the SDK makes
+// one of those, and why the caller's http.Client.Timeout cannot be relied on to
+// bound it.
 const DialTimeout = 30 * time.Second
 
 // ListTimeout bounds a whole listing rather than one request in it. Pagination
@@ -288,8 +299,12 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 // usableName reports whether a server's tool name can be offered to a model.
 //
 // The rule is the MCP SDK's own — non-empty, at most 128 bytes, and the runes
-// [a-zA-Z0-9_.-] — which it applies when a server registers a tool and, for
-// whatever reason, not when a client reads one back. A name that fails it
+// [a-zA-Z0-9_.-] (validateToolName in mcp/tool.go; the 128 is a len(), so bytes,
+// whatever its error message calls them). Note what the SDK does *not* do with
+// it: AddTool logs a violation and registers the tool anyway, and nothing checks
+// it on the client side at all, so a name that breaks the rule reaches a client
+// as a perfectly ordinary listing entry. That makes this the first place it can
+// be caught, not a redundant second one. A name that fails it
 // reaches the model as a tool definition the Messages API refuses, and refusing
 // one tool is better than a request that fails carrying every other tool with
 // it. Deliberately the SDK's rule and not a guessed-at Anthropic one: if the
@@ -318,8 +333,17 @@ func usableName(name string) bool {
 // the server's JSON decoded to. MCP requires an object whose `type` is
 // "object"; a server is free to break that, and what breaks is refused rather
 // than repaired. A schema that is absent, null, or not a JSON object has no
-// honest translation, and a `type` that is present and is something other than
-// "object" describes a tool this platform cannot call.
+// honest translation, and one whose `type` is anything but "object" describes a
+// tool this platform cannot call.
+//
+// The `type` is required, not merely checked when present. An earlier shape
+// accepted a schema that simply omitted it, which let {} through as an
+// "unconstrained" contract — the same fabrication as the absent-schema case
+// below, arrived at from the other direction. Both MCP's schema and the pinned
+// SDK's own server require the root type: AddTool panics unless the decoded
+// schema's type is "object", and reads an absent type as not-"object" rather
+// than as a default (mcp/server.go). Anthropic's input_schema requires it too,
+// so a schema without it could not be offered to a model anyway.
 //
 // Substituting {"type":"object"} for an absent schema was the first shape of
 // this and was wrong: it reads as "this tool takes no arguments", which is a
@@ -356,19 +380,26 @@ func inputSchema(declared any) (json.RawMessage, bool) {
 	if json.Unmarshal(raw, &obj) != nil || obj == nil {
 		return nil, false
 	}
-	if t, ok := obj["type"]; ok {
-		var kind string
-		if json.Unmarshal(t, &kind) != nil || kind != "object" {
-			return nil, false
-		}
+	var kind string
+	if json.Unmarshal(obj["type"], &kind) != nil || kind != "object" {
+		return nil, false
 	}
 	return raw, true
 }
 
 // Close ends the connection. It is safe to call on a Conn whose work failed.
+//
+// It does not guard the zero value, where ListTools does, and the asymmetry is
+// the point rather than an oversight: ListTools sits in front of a recover that
+// would catch a nil dereference and report it as a server crashing the client
+// library, which is a lie about whose fault it is. Nothing catches a panic here,
+// so calling Close on a Conn that was never opened panics with a stack pointing
+// at the caller — already an accurate account of the misuse, and not worth a
+// branch to restate.
 func (c *Conn) Close() error { return c.session.Close() }
 
-// MaxResponseBytes bounds one MCP response body.
+// MaxResponseBytes bounds the total a connection will read from a server across
+// every response, not one response at a time.
 //
 // The bound is not optional politeness: go-sdk v1.7.0 reads a response with
 // io.ReadAll before it decodes anything (mcp/streamable.go, handleJSON), so a
@@ -379,52 +410,134 @@ func (c *Conn) Close() error { return c.session.Close() }
 // catches an out-of-memory. The only place to refuse is before the SDK sees the
 // body.
 //
+// It is cumulative because a per-response cap does not actually bound a listing.
+// maxToolPages responses of MaxResponseBytes each is 800 MiB, and both ends
+// retain it: the SDK caches every modern tools/list result under its cursor
+// (mcp/client.go ListTools → toolsCache.put) and never evicts an entry until the
+// same cursor is asked for again, while ListTools re-marshals each accepted
+// schema into its own result. A hundred unique cursors therefore hold a hundred
+// pages live, twice over. Cumulative makes the bound mean what it says.
+//
 // 8 MiB is far above any real catalog — the whole point of a tool definition is
-// to fit in a model request — and far below anything that threatens a process.
+// to fit in a model request, and a catalog that cannot be sent to a model is not
+// a catalog — and small enough that a host running many sessions is not one
+// hostile server away from an out-of-memory.
 const MaxResponseBytes = 8 << 20
 
-// withResponseLimit returns a copy of client whose responses stop at
-// MaxResponseBytes. It wraps whatever client the caller supplied, so the bound
-// does not depend on the caller having thought about it.
+// withResponseLimit returns a copy of client that reads at most
+// MaxResponseBytes in total and gives any request the SDK detached from the
+// caller's context a deadline of its own. It wraps whatever client the caller
+// supplied, so neither bound depends on the caller having thought about it.
+//
+// The deadline exists because http.Client.Timeout is the caller's to set and a
+// supplied client may leave it zero, while the SDK deliberately detaches some
+// requests from every context we control: it builds a connection's lifecycle
+// context with xcontext.Detach, which reports no deadline and a nil Done
+// channel, and sends the session-ending DELETE on it (mcp/streamable.go,
+// streamableClientConn.Close). A server that accepts that DELETE and never
+// answers would otherwise hang Close — and the work item's queue lease with it —
+// with nothing left to interrupt it. A request that already carries a deadline
+// keeps it, so this never shortens ListTimeout.
 func withResponseLimit(client *http.Client) *http.Client {
 	copied := *client
-	copied.Transport = &limitedTransport{base: client.Transport}
+	copied.Transport = &limitedTransport{base: client.Transport, limit: MaxResponseBytes, budget: budgetFor(MaxResponseBytes)}
 	return &copied
 }
 
-type limitedTransport struct{ base http.RoundTripper }
+// budgetFor is the counter a limit of n bytes starts at: one byte more, the
+// headroom limitedBody needs to tell "ended exactly on the limit" from "had more
+// to send". It exists as a function so the test seam cannot drift from it.
+func budgetFor(n int64) int64 { return n + 1 }
+
+// limitedTransport holds the connection's whole byte budget, so every response
+// it wraps draws from one counter. One connection is used by one work item at a
+// time, but the SDK is free to have a request in flight while a body is still
+// being read, so the counter is mutex-guarded rather than assumed serial.
+type limitedTransport struct {
+	base  http.RoundTripper
+	limit int64 // what the budget started as, for the error text
+
+	mu     sync.Mutex
+	budget int64
+}
 
 func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport
 	}
+	if _, ok := req.Context().Deadline(); !ok {
+		ctx, cancel := context.WithTimeout(req.Context(), DialTimeout)
+		req = req.Clone(ctx)
+		// Cancelling on return would kill the body before the caller reads it,
+		// so the deadline has to outlive RoundTrip. context.AfterFunc keeps the
+		// timer from leaking past it either way.
+		context.AfterFunc(ctx, cancel)
+	}
 	resp, err := base.RoundTrip(req)
 	if err != nil || resp.Body == nil {
 		return resp, err
 	}
-	resp.Body = &limitedBody{ReadCloser: resp.Body, left: MaxResponseBytes}
+	resp.Body = &limitedBody{ReadCloser: resp.Body, transport: t}
 	return resp, nil
+}
+
+// take draws up to n bytes from the connection's budget, reporting how many are
+// available. Zero means the budget is spent.
+func (t *limitedTransport) take(n int64) int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if n > t.budget {
+		n = t.budget
+	}
+	t.budget -= n
+	return n
 }
 
 // limitedBody is io.LimitedReader with an error instead of a clean EOF: a
 // truncated JSON-RPC body that ended quietly would be reported as a parse
 // failure, which reads like a broken server rather than a refused one.
+//
+// A body that ends exactly on the budget is not over it, which is why the
+// transport is funded with one byte of headroom rather than exactly the limit.
+// Reaching the limit leaves that byte unspent, so the read that would have
+// returned it instead returns io.EOF and the response is accepted; only a server
+// with something to put in it spends the byte, and the read after that is the
+// one refused. Without the headroom, whether an exactly-MaxResponseBytes
+// response succeeded would depend on whether its final bytes arrived with
+// io.EOF attached or on the read after them — a property of the server's
+// chunking, not of the response.
 type limitedBody struct {
 	io.ReadCloser
-	left int64
+	transport *limitedTransport
+	spent     bool
 }
 
 func (b *limitedBody) Read(p []byte) (int, error) {
-	if b.left <= 0 {
-		return 0, fmt.Errorf("mcp: server response exceeds %d bytes", MaxResponseBytes)
+	if b.spent {
+		return 0, fmt.Errorf("mcp: server responses exceed %d bytes in total", b.transport.limit)
 	}
-	if int64(len(p)) > b.left {
-		p = p[:b.left]
+	if len(p) == 0 {
+		return 0, nil
 	}
-	n, err := b.ReadCloser.Read(p)
-	b.left -= int64(n)
+	room := b.transport.take(int64(len(p)))
+	if room == 0 {
+		b.spent = true
+		return 0, fmt.Errorf("mcp: server responses exceed %d bytes in total", b.transport.limit)
+	}
+	n, err := b.ReadCloser.Read(p[:room])
+	if unused := room - int64(n); unused > 0 {
+		b.transport.give(unused)
+	}
 	return n, err
+}
+
+// give returns bytes drawn but not used, so a short read does not spend budget a
+// later response needs.
+func (t *limitedTransport) give(n int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.budget += n
 }
 
 // withBearer returns a shallow copy of client that sends the Authorization

@@ -49,7 +49,9 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 	// Custom tools are real Messages-API tool definitions minus the union
 	// discriminator; an agent_toolset entry expands to the built-in tools it
 	// enables (bash/read/write/edit/glob/grep), which the executor runs in the
-	// sandbox. mcp_toolset still waits for the MCP client — documented.
+	// sandbox. mcp_toolset still waits for the discovery driver that fills a
+	// server's catalog — the MCP client itself landed in plan 29 slice 2, but
+	// nothing calls it yet — documented.
 	for _, raw := range agent.Tools {
 		var probe struct {
 			Type        string          `json:"type"`
@@ -280,8 +282,8 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 // each tool's use commits under and — for platform built-ins — its permission
 // policy. A custom tool is client-executed (agent.custom_tool_use) and carries
 // no policy; an agent_toolset tool is platform-executed (agent.tool_use) and
-// carries a policy; mcp_toolset waits for the MCP client, so its tools are not
-// offered and never appear here. A name the model calls that is in neither map
+// carries a policy; mcp_toolset waits for the discovery driver that fills a
+// server's catalog, so its tools are not offered and never appear here. A name the model calls that is in neither map
 // falls back to custom at emission — the client can reject it — since the
 // platform only runs names it recognises as its own.
 //

@@ -128,9 +128,12 @@ func TestListToolsContainsAPanicInsideTheClientLibrary(t *testing.T) {
 	// goroutine, so an unhandled one here is not a failed work item — it is
 	// every concurrent tool call on that executor.
 	//
-	// If a later SDK release stops panicking, this test goes green a different
-	// way (an empty or partial listing rather than an error) and should be
-	// rewritten to assert the skip; what it must never do is crash.
+	// If a later SDK release stops panicking and skips the nil element instead,
+	// this test goes *red* rather than quietly green: the assertion below wants
+	// an error, and a clean empty listing is not one. That is deliberate — the
+	// failure is the notice to rewrite it as a skip assertion, where silence
+	// would let the recover outlive the bug it exists for. What it must never
+	// do is crash.
 	url, _ := serveToolsList(t, func(string) map[string]any {
 		return map[string]any{"tools": []any{nil}}
 	})
@@ -150,11 +153,19 @@ func TestListToolsContainsAPanicInsideTheClientLibrary(t *testing.T) {
 
 func TestListToolsSkipsEntriesThatCannotBeATool(t *testing.T) {
 	t.Parallel()
-	// Eight entries a server is free to send and the SDK decodes without
-	// complaint. One of them is a tool; the other seven are not, and none may
-	// take it down with them — the reference treats an unresolvable tool as a
-	// warning, so a malformed entry must not deny an agent the rest of a
-	// server's catalog.
+	// Entries a server is free to send and the SDK decodes without complaint.
+	// Two of them are tools; the rest are not, and none may take those down
+	// with them — the reference treats an unresolvable tool as a warning, so a
+	// malformed entry must not deny an agent the rest of a server's catalog.
+	//
+	// The boundary rows are the point of several of these. A 128-byte name is
+	// legal and a 129-byte one is not, so both are here: a guard written with
+	// >= would drop a name the rule allows, and the suite would never say so.
+	// Likewise "empty_schema" and "array_type" are the two ways a schema can
+	// fail the root-type rule without being obviously junk — {} carries no
+	// type at all and {"type":"array"} carries a well-formed wrong one — and a
+	// check that only rejects a *present* wrong type admits the first.
+	maxName := strings.Repeat("n", 128)
 	url, _ := serveToolsList(t, func(string) map[string]any {
 		return map[string]any{"tools": []any{
 			map[string]any{"name": "", "inputSchema": map[string]any{"type": "object"}},
@@ -164,6 +175,9 @@ func TestListToolsSkipsEntriesThatCannotBeATool(t *testing.T) {
 			map[string]any{"name": "null_schema", "inputSchema": nil},
 			map[string]any{"name": "no_schema", "description": "takes nothing"},
 			map[string]any{"name": "wrong_type", "inputSchema": map[string]any{"type": 42}},
+			map[string]any{"name": "array_type", "inputSchema": map[string]any{"type": "array"}},
+			map[string]any{"name": "empty_schema", "inputSchema": map[string]any{}},
+			map[string]any{"name": maxName, "inputSchema": map[string]any{"type": "object"}},
 			map[string]any{"name": "good", "inputSchema": map[string]any{
 				"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}},
 			}},
@@ -186,13 +200,14 @@ func TestListToolsSkipsEntriesThatCannotBeATool(t *testing.T) {
 		names = append(names, tl.Name)
 		byName[tl.Name] = tl
 	}
-	// Only "good" survives. In particular "no_schema" and "null_schema" do not:
-	// substituting {"type":"object"} for a schema the server never sent would
-	// publish "this tool takes no arguments" as though the server had said so,
-	// and a tool that in fact requires arguments would then be called with
-	// none. A fabricated contract is worse than a dropped tool.
-	if len(tools) != 1 || byName["good"].Name == "" {
-		t.Fatalf("got tools %v, want exactly [good]", names)
+	// "good" and the 128-byte name survive; nothing else does. In particular
+	// "no_schema", "null_schema" and "empty_schema" do not: substituting
+	// {"type":"object"} for a schema the server never sent — or reading {} as
+	// though it had said so — publishes "this tool takes no arguments" on the
+	// server's behalf, and a tool that in fact requires arguments would then be
+	// called with none. A fabricated contract is worse than a dropped tool.
+	if len(tools) != 2 || byName["good"].Name == "" || byName[maxName].Name == "" {
+		t.Fatalf("got tools %v, want exactly [%s good]", names, "<128-byte name>")
 	}
 	if !strings.Contains(string(byName["good"].InputSchema), `"properties"`) {
 		t.Errorf("good input_schema = %s, want the server's own schema", byName["good"].InputSchema)
@@ -638,14 +653,15 @@ func TestConnectFailsOnAnUnsupportedProtocolVersion(t *testing.T) {
 	// initialize with a version no revision defines. The client must reject it
 	// rather than proceed against a protocol it does not implement.
 	//
-	// Known upstream leak, recorded here because this is the test that reaches
-	// it: go-sdk v1.7.0 returns `unsupportedProtocolVersionError` without
-	// closing the session it just built (mcp/client.go, the
-	// `!slices.Contains(supportedProtocolVersions, ...)` branch — the adjacent
-	// initialize and initialized failure paths both call `cs.Close()`). Connect
-	// hands back no session, so there is nothing this package can close; a
-	// server that answers this way on every attempt leaks per attempt. The
-	// executor's retry policy is what bounds it until upstream is fixed.
+	// This is the path that reaches the upstream leak: go-sdk v1.7.0 returns
+	// `unsupportedProtocolVersionError` without closing the session it just
+	// built (mcp/client.go, the `!slices.Contains(supportedProtocolVersions,
+	// ...)` branch — the adjacent initialize and initialized failure paths both
+	// call `cs.Close()`), and Connect hands back no session for a caller to
+	// close. Connect works around it by capturing the transport's Connection,
+	// so a server answering this way on every attempt does not leak per
+	// attempt; TestConnectClosesTheConnectionItCannotHandBack is what asserts
+	// that, by watching for the DELETE. The upstream bug is still upstream's.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -684,6 +700,37 @@ func TestConnectFailsOnAnUnsupportedProtocolVersion(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), ts.URL) {
 		t.Errorf("error %q does not name the server URL", err)
+	}
+}
+
+func TestBearerIsScopedToSchemeAsWellAsHost(t *testing.T) {
+	t.Parallel()
+	// The origin check is two comparisons and both are load-bearing. The host
+	// half is what the redirect test covers; this covers the scheme half, whose
+	// failure mode is worse — an https endpoint answering with a redirect to
+	// http on the same host would put the credential on the wire in cleartext,
+	// and a host-only check would attach it happily.
+	for _, tc := range []struct {
+		name           string
+		endpoint, want string
+		attach         bool
+	}{
+		{name: "same origin", endpoint: "https://mcp.example:8443/rpc", want: "https://mcp.example:8443/rpc", attach: true},
+		{name: "host case folds", endpoint: "https://MCP.Example:8443/rpc", want: "https://mcp.example:8443/rpc", attach: true},
+		{name: "scheme downgraded on the same host", endpoint: "https://mcp.example:8443/rpc", want: "http://mcp.example:8443/rpc"},
+		{name: "scheme upgraded on the same host", endpoint: "http://mcp.example/rpc", want: "https://mcp.example/rpc"},
+		{name: "different host", endpoint: "https://mcp.example/rpc", want: "https://evil.example/rpc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mcp.BearerAttachesForTest(tc.endpoint, tc.want); got != tc.attach {
+				verb := "withheld from"
+				if got {
+					verb = "sent to"
+				}
+				t.Errorf("a credential scoped to %s was %s %s", tc.endpoint, verb, tc.want)
+			}
+		})
 	}
 }
 
@@ -870,13 +917,118 @@ func TestListToolsReportsATransportFailure(t *testing.T) {
 
 	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: ts.URL, HTTPClient: loopbackClient()})
 	if err != nil {
-		// Some negotiations issue the listing during connect; either way the
-		// failure must surface, which is what this test is about.
-		return
+		// Not tolerated: the fixture hands every non-listing request to a real
+		// SDK server, so Connect must succeed. It never issues tools/list — the
+		// SDK's only toolsCache.put is inside ListTools itself — so a Connect
+		// error here means the listing was never reached and the assertion below
+		// would pass without testing anything.
+		t.Fatalf("Connect: %v (the fixture only fails tools/list)", err)
 	}
 	defer conn.Close()
 	if tools, err := conn.ListTools(context.Background()); err == nil {
 		t.Fatalf("ListTools returned %d tools against a failing server, want an error — "+
 			"an empty catalog is recorded as \"this server has no tools\"", len(tools))
+	}
+}
+
+func TestResponseBudgetAllowsExactlyTheLimit(t *testing.T) {
+	t.Parallel()
+	// The bound must mean "at most MaxResponseBytes", not "fewer than". Whether
+	// a body ending exactly on it succeeds must also not depend on how the
+	// server chunked it — an underlying reader may hand back its final bytes
+	// with io.EOF attached or only on the read after them, and both are legal.
+	// Varying the read buffer exercises both shapes.
+	const limit = 64
+	for _, bufSize := range []int{1, 7, limit, limit * 2} {
+		for _, size := range []int{limit - 1, limit, limit + 1} {
+			body, _ := mcp.LimitedBodyForTest(io.NopCloser(bytes.NewReader(make([]byte, size))), limit)
+			got, err := readAllWith(body, bufSize)
+			switch {
+			case size <= limit && err != nil:
+				t.Errorf("body of %d read %d at a time: %v, want it accepted at a %d limit",
+					size, bufSize, err, limit)
+			case size <= limit && got != size:
+				t.Errorf("body of %d read %d at a time: got %d bytes, want %d",
+					size, bufSize, got, size)
+			case size > limit && err == nil:
+				t.Errorf("body of %d read %d at a time was accepted at a %d limit",
+					size, bufSize, limit)
+			}
+		}
+	}
+}
+
+func TestResponseBudgetIsSharedAcrossResponses(t *testing.T) {
+	t.Parallel()
+	// A per-response cap does not bound a listing: maxToolPages responses of
+	// MaxResponseBytes each is 800 MiB, and both the SDK's per-cursor cache and
+	// this package's own result hold it. So the budget is one counter for the
+	// connection, and a later body draws on what the earlier ones left.
+	const limit = 100
+	first, budget := mcp.LimitedBodyForTest(io.NopCloser(bytes.NewReader(make([]byte, 60))), limit)
+	if n, err := readAllWith(first, 16); err != nil || n != 60 {
+		t.Fatalf("first body: got %d bytes, %v; want 60 and no error", n, err)
+	}
+	second := budget.Wrap(io.NopCloser(bytes.NewReader(make([]byte, 40))))
+	if n, err := readAllWith(second, 16); err != nil || n != 40 {
+		t.Fatalf("second body: got %d bytes, %v; want 40 and no error", n, err)
+	}
+	third := budget.Wrap(io.NopCloser(bytes.NewReader(make([]byte, 1))))
+	if _, err := readAllWith(third, 16); err == nil {
+		t.Error("a third body was accepted after the connection's budget was spent")
+	}
+}
+
+// readAllWith drains r through a buffer of exactly bufSize, so a test can choose
+// where the read boundaries land relative to the budget.
+func readAllWith(r io.Reader, bufSize int) (int, error) {
+	buf := make([]byte, bufSize)
+	total := 0
+	for {
+		n, err := r.Read(buf)
+		total += n
+		if err == io.EOF {
+			return total, nil
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+}
+
+func TestListToolsRefusesPagesThatExceedTheBudgetTogether(t *testing.T) {
+	t.Parallel()
+	// Each page here is comfortably under MaxResponseBytes; together they are
+	// not. A per-response cap accepts every one of them.
+	const perPage = 5 << 20
+	pages := &atomic.Int32{}
+	url, _ := serveToolsList(t, func(string) map[string]any {
+		n := pages.Add(1)
+		return map[string]any{
+			"tools": []any{map[string]any{
+				"name":        fmt.Sprintf("t%d", n),
+				"description": strings.Repeat("d", perPage),
+				"inputSchema": map[string]any{"type": "object"},
+			}},
+			"nextCursor": fmt.Sprintf("c%d", n),
+		}
+	})
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	tools, err := conn.ListTools(context.Background())
+	if err == nil {
+		t.Fatalf("ListTools accepted %d tools over %d pages of %d bytes, want a refusal past %d in total",
+			len(tools), pages.Load(), perPage, mcp.MaxResponseBytes)
+	}
+	if !strings.Contains(err.Error(), "in total") {
+		t.Errorf("error %q does not report the cumulative bound", err)
+	}
+	if got := pages.Load(); got > 3 {
+		t.Errorf("server was asked for %d pages; the budget should have stopped it inside the second", got)
 	}
 }

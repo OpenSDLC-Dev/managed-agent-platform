@@ -23,6 +23,8 @@ end of slice 4.
       guard under the MCP client and the vault probe, and closes the probe's
       IPv4-compatible-IPv6 gap. Still open: `mcp_catalogs` migration + store, the
       `mcp_exec` driver and its egress check, the HTTP+SSE fallback.
+      Evidence: [mcp.go](./internal/mcp/mcp.go),
+      [dialguard.go](./internal/dialguard/dialguard.go).
 - [ ] Slice 3 — MCP confirmation gating and denial synthesis.
 - [ ] Slice 4 — brain expansion, execution driver, settlement chaining, spill.
 - [ ] Slice 5 — vault credentials, injection, OAuth refresh.

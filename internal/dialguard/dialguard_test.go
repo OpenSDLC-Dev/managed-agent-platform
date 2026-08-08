@@ -60,6 +60,12 @@ func TestIPAllowed(t *testing.T) {
 		// it Google DNS and dials cloud metadata.
 		{name: "NAT64 /48 layout wrapping cloud metadata", ip: "64:ff9b:1:a9fe:a9:fe00:808:808", refused: true},
 		{name: "NAT64 /40 layout wrapping loopback", ip: "64:ff9b:7f:0:1::", refused: true},
+		// The row above does not actually distinguish this guard from the low-32
+		// one it replaced — its own low 32 bits are zero, so the old code
+		// refused it too, as the unspecified address. This one does: the /40
+		// reading is 127.0.0.1 while the low 32 read as the public 8.8.8.8, so
+		// the old guard admitted it and only a real /40 decode refuses it.
+		{name: "NAT64 /40 layout wrapping loopback, non-zero suffix", ip: "64:ff9b:7f:0:1:0:808:808", refused: true},
 
 		// Two deliberate false refusals, pinned so they stay decisions rather
 		// than surprises. The first depends on the target: under a /48 mapping
@@ -81,13 +87,17 @@ func TestIPAllowed(t *testing.T) {
 		// The other direction of the same trade, pinned because it is the one
 		// that reads as a loosening. Skipping a candidate that decodes to the
 		// unspecified address is what lets these through, and the old low-32
-		// guard refused all three: RFC 6052 puts the zero suffix in the low 32
+		// guard refused all of them: RFC 6052 puts the zero suffix in the low 32
 		// bits for every layout from /32 to /56, so reading only those bits saw
-		// 0.0.0.0 and refused *every* conformant mapping under four of the six
-		// prefix lengths — the same misreading that admitted the metadata
-		// address above, pointing the other way. The first row is the ordinary
-		// case that restores; the last two are prefix base addresses, where the
-		// decode is padding all the way down and no host exists to reach.
+		// 0.0.0.0 and refused every conformant /48 and /56 mapping — the two
+		// layouts a deployment can use under this prefix — which is the same
+		// misreading that admitted the metadata address above, pointing the
+		// other way. The first row is the ordinary case that restores. The next
+		// two are prefix base addresses, where the decode is padding all the way
+		// down and no host exists to reach. The general shape of what the skip
+		// admits is already above as the /96-layout row: 64:ff9b:1::808:808 has
+		// a /48 reading that is padding and a /96 reading that is 8.8.8.8, and
+		// nothing in it says which the deployment meant.
 		{name: "NAT64 /48 layout, ordinary public target", ip: "64:ff9b:1:808:8:800::"},
 		{name: "NAT64 well-known prefix base address", ip: "64:ff9b::"},
 		{name: "NAT64 local-use prefix base address", ip: "64:ff9b:1::"},
@@ -99,6 +109,17 @@ func TestIPAllowed(t *testing.T) {
 		// Closing it needs the guard told its prefix — the same knob the
 		// over-refusal above would want, and equally not built.
 		{name: "NAT64 through an operator NSP is not decoded", ip: "2001:db8:122:344::a9fe:a9fe"},
+
+		// ISATAP lives in the interface identifier, so the prefix is arbitrary
+		// and a documentation-only prefix carries a real one here. The u bit is
+		// set when the embedded address is globally unique, so both 0:5efe and
+		// 200:5efe are the same form and both must decode.
+		{name: "ISATAP wrapping loopback", ip: "2001:db8:1234:5678:0:5efe:7f00:1", refused: true},
+		{name: "ISATAP wrapping cloud metadata, u bit set", ip: "2001:db8::200:5efe:a9fe:a9fe", refused: true},
+		{name: "ISATAP wrapping a public address", ip: "2001:db8:1234:5678:0:5efe:5db8:d822"},
+		// Not ISATAP: the OUI has to match, or every address whose bytes happen
+		// to sit there would be read as a tunnel.
+		{name: "ISATAP-shaped but wrong OUI", ip: "2001:db8:1234:5678:0:5eff:7f00:1"},
 
 		{name: "6to4 wrapping loopback", ip: "2002:7f00:1::1", refused: true},
 		{name: "6to4 wrapping a public address", ip: "2002:5db8:d822::1"},

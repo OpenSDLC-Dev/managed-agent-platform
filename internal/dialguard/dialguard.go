@@ -55,20 +55,30 @@ func IPAllowed(ip net.IP) error {
 		// rather than a target, and must not refuse the address it was read
 		// from. RFC 6052 §2.2 puts the suffix — SHOULD-zero — in the low 32
 		// bits for every prefix length from /32 to /56, so a reader of those
-		// bits sees 0.0.0.0 for *every* conformant mapping under four of the
-		// six layouts. That is not a hypothetical: it is what the guard this
-		// package replaced did, refusing 64:ff9b:1:808:8:800:: (a /48 mapping
-		// of 8.8.8.8) as readily as it admitted the /48 mapping of cloud
-		// metadata below. One misreading, pointing both ways.
+		// bits sees 0.0.0.0 rather than a target. For the layouts a deployment
+		// can actually use under this prefix that means /48 and /56, whose
+		// whole suffix lands there: the guard this package replaced refused
+		// *every* conformant mapping under both, 64:ff9b:1:808:8:800:: (a /48
+		// mapping of 8.8.8.8) as readily as it admitted the /48 mapping of
+		// cloud metadata below. One misreading, pointing both ways.
+		//
+		// (The /32 and /40 rows are arithmetic rather than deployments. RFC 6052
+		// fixes the well-known prefix at /96, and the only shorter prefix inside
+		// 64:ff9b::/32 an operator may use is RFC 8215's local-use
+		// 64:ff9b:1::/48 — so nothing legitimately maps at /32 or /40 here, and
+		// the decoder tries them because an address cannot prove that.)
 		//
 		// The skip is therefore what makes the six-candidate check usable, and
-		// its own cost is small and stated: an address whose every non-padding
-		// reading is benign is admitted, which includes 64:ff9b:: and
-		// 64:ff9b:1:: themselves — prefix base addresses where a translator has
-		// no target and no host is listening. The unspecified address is in the
-		// refusal list because connect(0.0.0.0) reaches the local host, and
-		// that is a property of a local dial, not of a destination a translator
-		// forwards to.
+		// dropping it would cost those two layouts entirely. Its own price is
+		// that an address whose every non-padding reading is benign is admitted
+		// even when some layout would read 0.0.0.0 from it: 64:ff9b:: and
+		// 64:ff9b:1:: — prefix base addresses where a translator has no target
+		// and no host is listening — and equally 64:ff9b:1::808:808, whose /48
+		// reading is padding and whose /96 reading is 8.8.8.8. Refusing those
+		// back is not available separately; it is the same rule. The unspecified
+		// address is in the refusal list because connect(0.0.0.0) reaches the
+		// local host, and that is a property of a local dial rather than of a
+		// destination a translator forwards a packet to.
 		if target.IsUnspecified() {
 			continue
 		}
@@ -85,12 +95,21 @@ func refused(ip net.IP) bool {
 		ip.IsUnspecified() || ip.IsMulticast()
 }
 
-// embeddedIPv4 returns every IPv4 address an IPv6 transition form could be
-// carrying — 6to4 (2002::/16, v4 in bytes 2–5), Teredo (2001:0::/32, client v4
-// in the inverted low 32 bits), IPv4-compatible (::/96, v4 in the low 32 bits),
-// and NAT64 (64:ff9b::/32, covering both the well-known 64:ff9b::/96 and the
-// RFC 8215 local-use 64:ff9b:1::/48) — so the guard can re-check the target a
-// translator would actually reach. Returns nil for a plain address.
+// embeddedIPv4 returns the IPv4 addresses an IPv6 transition form could be
+// carrying, so the guard can re-check the target a translator would actually
+// reach. Returns nil for a plain address.
+//
+// Five forms are decoded: 6to4 (2002::/16, v4 in bytes 2–5), Teredo
+// (2001:0::/32, client v4 in the inverted low 32 bits), IPv4-compatible (::/96,
+// v4 in the low 32 bits), NAT64 (64:ff9b::/32, covering both the well-known
+// 64:ff9b::/96 and the RFC 8215 local-use 64:ff9b:1::/48), and ISATAP
+// (RFC 5214's 00-00-5E-FE interface identifier under any prefix). That is not
+// "every transition form", and saying so would be the sort of claim this file
+// exists to avoid: 6rd carries an IPv4 address whose position depends on
+// provider-assigned parameters an address does not contain, and a NAT64
+// deployment using its own Network-Specific Prefix is invisible for the same
+// reason (see below). Both need the guard told its deployment's parameters,
+// which nothing does today.
 //
 // NAT64 returns six candidates because RFC 6052 §2.2 defines six prefix lengths
 // (/32 /40 /48 /56 /64 /96), each embedding the four IPv4 octets at different
@@ -127,9 +146,11 @@ func refused(ip net.IP) bool {
 //
 // On the RFC 8215 local-use 64:ff9b:1::/48 the cost is real and ranges from
 // nothing to everything. With the remaining prefix bytes zero it is 12.8% of
-// targets under a /48 mapping (whenever octet 2 or 3 of the target is 127 or in
-// 224-239), 6.6% under /56 and /64, and 0% under /96 — measured over the whole
-// IPv4 space. But an operator may carve an NSP whose own fixed bytes read as a
+// targets under a /48 mapping — mostly, but not only, the targets whose octet 2
+// or 3 is 127 or in 224-239, which alone accounts for 12.840% of the measured
+// 12.843%; the remainder is 169.254 turning up in the /56 and /64 readings —
+// then 6.6% under /56 and /64, and 0% under /96, each measured exhaustively over
+// the octets the layout reads rather than sampled. But an operator may carve an NSP whose own fixed bytes read as a
 // blocked class under a shorter layout, and then the refusal does not depend on
 // the target at all: under 64:ff9b:1:7f00::/96 the /48 reading of the prefix is
 // 127.0.0.0, so **every** address that prefix can express is refused. Nothing
@@ -158,27 +179,37 @@ func embeddedIPv4(ip net.IP) []net.IP {
 	if b == nil || ip.To4() != nil {
 		return nil
 	}
+	var out []net.IP
 	switch {
 	case b[0] == 0x20 && b[1] == 0x02:
-		return []net.IP{v4(b[2], b[3], b[4], b[5])}
+		out = append(out, v4(b[2], b[3], b[4], b[5]))
 	case b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x00:
-		return []net.IP{v4(^b[12], ^b[13], ^b[14], ^b[15])}
+		out = append(out, v4(^b[12], ^b[13], ^b[14], ^b[15]))
 	case b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b:
 		// RFC 6052 §2.2, one row per prefix length. Byte 8 is the reserved
 		// u-octet and is never part of the address, which is why the octets
 		// skip it rather than running consecutively.
-		return []net.IP{
+		out = append(out,
 			v4(b[4], b[5], b[6], b[7]),     // /32
 			v4(b[5], b[6], b[7], b[9]),     // /40
 			v4(b[6], b[7], b[9], b[10]),    // /48
 			v4(b[7], b[9], b[10], b[11]),   // /56
 			v4(b[9], b[10], b[11], b[12]),  // /64
 			v4(b[12], b[13], b[14], b[15]), // /96
-		}
+		)
 	case isZero(b[:12]):
-		return []net.IP{v4(b[12], b[13], b[14], b[15])}
+		out = append(out, v4(b[12], b[13], b[14], b[15]))
 	}
-	return nil
+	// ISATAP (RFC 5214 §6.1) is the one form here that lives in the interface
+	// identifier rather than in a prefix, so it is checked in addition to the
+	// cases above rather than as one of them: any /64 can carry one, including
+	// theirs. The identifier is the IANA OUI 00-00-5E, then 0xFE, then the IPv4
+	// address — with the u and g bits of the first octet free (u is set when the
+	// embedded address is globally unique), which is what the mask ignores.
+	if b[8]&0xfc == 0 && b[9] == 0x00 && b[10] == 0x5e && b[11] == 0xfe {
+		out = append(out, v4(b[12], b[13], b[14], b[15]))
+	}
+	return out
 }
 
 func v4(a, b, c, d byte) net.IP { return net.IPv4(a, b, c, d).To4() }
