@@ -81,7 +81,12 @@ func ValidateMCPToolset(raw json.RawMessage) error {
 	// the walk understands it has already accepted or named.
 	var e entry
 	if err := json.Unmarshal(raw, &e); err != nil {
-		return fmt.Errorf("%s: a field is repeated with values of different types", mcpToolsetType)
+		// Deliberately vague about *which* field: the conflict may be on the
+		// repeated key itself or on something nested under one of its
+		// occurrences, and the map the walk read cannot say which, having kept
+		// only the last. It is the one message here that names no path, which
+		// is the price of not naming a Go type.
+		return fmt.Errorf("%s: a repeated field carries conflicting values", mcpToolsetType)
 	}
 	return nil
 }

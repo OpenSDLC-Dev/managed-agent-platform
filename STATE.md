@@ -14,9 +14,12 @@ end of slice 4.
       four spec-resolving surfaces (the public MCP-connector guide pins both
       reference directions, superseding #66's one-way reading); `mcp_toolset`
       nested-shape validation, the #26 fail-open class closed on the MCP arm;
-      resolved-config echo for both toolset kinds at render. #59's doubt retired
-      — the permission-policies guide states both toolset defaults outright.
-      Verifier PASS (4 doc-accuracy findings, all fixed). Evidence:
+      resolved-config echo for both kinds at render, resolving only entries
+      naming a tool the toolset has. Both rungs bind stored specs, not just the
+      request that writes one. #59's doubt retired — the permission-policies
+      guide states both toolset defaults outright. Four review passes (Codex ×2,
+      xhigh multi-agent: 15 findings, 14 fixed / 1 refuted); verifier PASS WITH
+      FINDINGS after the hardening — note-severity only. Evidence:
       `internal/toolset/materialize.go`, `internal/api/wire.go`,
       `internal/api/mcptoolset_test.go`.
 - [ ] Slice 2 — `internal/mcp` client + `mcp_catalogs` + the discovery driver.

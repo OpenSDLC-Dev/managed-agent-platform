@@ -291,7 +291,14 @@ func TestValidateMCPToolset(t *testing.T) {
 		name: "a repeated field whose earlier value has the wrong type is rejected",
 		in: `{"type":"mcp_toolset","mcp_server_name":"g",` +
 			`"default_config":{"enabled":"yes","enabled":true}}`,
-		wantErr: "a field is repeated with values of different types",
+		wantErr: "a repeated field carries conflicting values",
+	}, {
+		// The conflict can also sit under one occurrence rather than on the
+		// repeated key itself, which is why the message names no path.
+		name: "a repeated field with a conflict nested under it is rejected",
+		in: `{"type":"mcp_toolset","mcp_server_name":"g",` +
+			`"configs":[{"name":"t","enabled":"yes"}],"configs":[{"name":"t","enabled":true}]}`,
+		wantErr: "a repeated field carries conflicting values",
 	}, {
 		name: "a repeated field of one type is accepted, last value winning",
 		in: `{"type":"mcp_toolset","mcp_server_name":"g",` +
