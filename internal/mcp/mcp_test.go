@@ -1411,6 +1411,24 @@ func TestInformationalBlocksShareOneAllowance(t *testing.T) {
 	// nothing in the suite would fail on the difference between "three blocks"
 	// and "unbounded blocks per response".
 	hdr, _ := mcp.HeaderBoundsForTest()
+	// One value, repeated as-is in every block including the final one, rather
+	// than a distinct key set and deleted around each WriteHeader. The mutation
+	// was a real data race and not a style point: per RFC 8297 net/http must not
+	// clear the handler's header map after writing a 1xx, so it hands the *live*
+	// map to the frame writer (h2_bundle.go, writeHeaders), which may return
+	// early when the stream is already closing — which is precisely the refusal
+	// path these rows exercise. The race reported under -race against
+	// http2encodeHeaders, and because a race report fails every parallel test
+	// running at the time, it produced bursts of unrelated failures. Nothing
+	// mutates the map after the first WriteHeader now.
+	//
+	// Leaving the value set on the final block as well changes none of the
+	// thresholds, because over HTTP/2 the accumulator covers the informational
+	// blocks *only* — net/http says so where it keeps the running total: "This
+	// differs a bit from the HTTP/1 implementation, which limits the size of all
+	// 1xx headers plus the final response" (h2_bundle.go, readLoop's 1xx
+	// branch). The final block is capped on its own, which is the same
+	// separately-capped-blocks fact the rest of this suite drives.
 	const hint = 30000
 
 	for _, tc := range []struct {
@@ -1429,17 +1447,15 @@ func TestInformationalBlocksShareOneAllowance(t *testing.T) {
 			// The protocol is recorded server-side rather than read from
 			// resp.Proto, because the rows that matter most have no response to
 			// read it from. Asserted only on the client's side, the two refused
-			// rows would pass over HTTP/1.1 as well — three 30,000-byte blocks
-			// also bust its combined 1xx-plus-final limit — leaving the claim
-			// this test exists for resting on the one row that succeeds.
+			// rows would pass over HTTP/1.1 as well — blocks this size also bust
+			// its combined 1xx-plus-final limit — leaving the claim this test
+			// exists for resting on the one row that succeeds.
 			var serverProto atomic.Value
 			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				serverProto.Store(r.Proto)
-				for i := range tc.hints {
-					key := fmt.Sprintf("X-Hint-%d", i)
-					w.Header().Set(key, strings.Repeat("h", hint))
+				w.Header().Set("X-Hint", strings.Repeat("h", hint))
+				for range tc.hints {
 					w.WriteHeader(http.StatusEarlyHints)
-					w.Header().Del(key)
 				}
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte("ok"))
@@ -1497,16 +1513,21 @@ func TestAConnectionAnswersMoreResponsesThanItHasPages(t *testing.T) {
 	// how the doc comment learns it may tighten again. What it must never do is
 	// go quietly green while the comment claims a ceiling nobody enforces.
 	//
-	// Each answer carries a padded header too, so the count means bytes. The
-	// padding is trimmed by textproto before resp.Header exists, so the
-	// cumulative budget charges roughly a hundred bytes for a block of fifty
-	// thousand — the logged figure below is what one short listing delivered
-	// that no bound in this package can see.
-	const pad = 50000
+	// A count and nothing more. An earlier revision padded each answer with a
+	// 50,000-byte header value and reported responses × 50,000 as bytes
+	// delivered — which was false by two orders of magnitude, and false in
+	// exactly the way this package keeps having to correct: a formula published
+	// as a measurement. net/http trims a header value in writeSubset
+	// (net/http/header.go, textproto.TrimString) *before writing it*, so against
+	// an httptest server the padding never reaches the wire at all. That is why
+	// the fixture for padded blocks is serveRaw and not this one. What a
+	// hostile server can leave uncharged per response is measured by the tests
+	// that drive raw and HTTP/2 blocks; what this test contributes is that the
+	// number of responses those blocks arrive in has no bound. Multiplying the
+	// two here would be the same mistake in a third form.
 	var responses, events atomic.Int64
 	stream := func(w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("X-Pad", "p"+strings.Repeat(" ", pad))
 		w.WriteHeader(http.StatusOK)
 		// retry: 1 keeps the reconnect delay at a millisecond; the id advances,
 		// which is what resets the SDK's no-progress counter.
@@ -1561,8 +1582,7 @@ func TestAConnectionAnswersMoreResponsesThanItHasPages(t *testing.T) {
 	// magnitude even on a loaded runner.
 	const anyPageArithmetic = 104
 	got := responses.Load()
-	t.Logf("one listing answered by %d responses, delivering %d bytes of header padding the byte budget cannot charge",
-		got, got*pad)
+	t.Logf("one listing answered by %d responses", got)
 	if got <= anyPageArithmetic {
 		t.Errorf("one connection answered %d responses; the page arithmetic this test refutes assumed at most %d — if the SDK has grown a total-attempt limit, MaxResponseBytes' doc may publish a ceiling again",
 			got, anyPageArithmetic)

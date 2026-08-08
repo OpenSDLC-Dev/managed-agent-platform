@@ -198,6 +198,15 @@ var DefaultClient = &http.Client{
 // final block is ever charged, so what this constant bounds is the peak any one
 // block reaches and not what a connection delivers in total.
 //
+// Three is a ceiling on that cycle rather than a sample, because each of the
+// three is capped in aggregate rather than per frame: 1xx blocks accumulate into
+// one running total that is never reset, and CONTINUATION frames are bounded
+// inside the block they continue. The 1xx total covers the informational phase
+// alone — net/http says so where it keeps it, "This differs a bit from the
+// HTTP/1 implementation, which limits the size of all 1xx headers plus the final
+// response" — which is why the final block and the trailers are positions of
+// their own rather than more of the same one.
+//
 // 64 KiB is generous rather than tight, deliberately: it is a hard ceiling on
 // what a *legitimate* server may send, and the cost of setting it too low is a
 // working server this client cannot talk to. Real response header blocks run a
@@ -575,8 +584,10 @@ func inputSchema(declared any) (json.RawMessage, bool) {
 // branch to restate.
 func (c *Conn) Close() error { return c.session.Close() }
 
-// MaxResponseBytes bounds the total a connection will read from a server across
-// every response, not one response at a time.
+// MaxResponseBytes bounds what a connection accounts for across every response
+// rather than one response at a time — bodies in full, header blocks only as far
+// as they survive parsing to be counted, which is a distinction this comment
+// draws out below rather than one to take on trust from this line.
 //
 // The bound is not optional politeness: go-sdk v1.7.0 reads a response with
 // io.ReadAll before it decodes anything (mcp/streamable.go, handleJSON), so a
@@ -612,9 +623,8 @@ func (c *Conn) Close() error { return c.session.Close() }
 // parsed map are outside it, held per block by maxHeaderBytesPerResponse
 // instead, and *per block* is where the arithmetic stops rather than continues.
 //
-// There is no cumulative bound on the header bytes a connection delivers, and
-// four revisions of this comment published one regardless, each falsified in
-// turn: "header blocks included", which whitespace padding falsified; "8 MiB
+// No cumulative bound on delivered header bytes is worth publishing, and four
+// revisions of this comment published one regardless, each falsified in turn: "header blocks included", which whitespace padding falsified; "8 MiB
 // plus 6.4 MiB", which assumed the cap covered a response rather than a block; a
 // figure whose mechanism was right and which still claimed a socket total no
 // header arithmetic can produce (a measured maximal listing read 26.898 MiB on
@@ -632,14 +642,23 @@ func (c *Conn) Close() error { return c.session.Close() }
 // advances, the server picks the delay through the SSE `retry:` field, and the
 // SDK's own TODO beside it records that a limit on total attempts for one
 // logical request is still missing (mcp/streamable.go, handleSSE/connectSSE).
-// TestAConnectionAnswersMoreResponsesThanItHasPages drives it: 2,027 responses
-// to a single listing in three seconds, delivering 96.7 MiB of header padding
-// nothing here can charge — three of the 120 seconds ListTimeout allows, and
-// three and a half times over the ceiling the last revision published. It is
-// written to go red if that upstream limit ever lands, which is how this comment
-// would learn it may tighten again.
+// TestAConnectionAnswersMoreResponsesThanItHasPages drives it: around two
+// thousand responses to a single listing in three seconds, in three of the 120
+// seconds ListTimeout allows, against the 104 the last revision multiplied by.
+// It is written to go red if that upstream limit ever lands, which is how this
+// comment would learn it may tighten again. It counts responses and says nothing
+// about their bytes, deliberately — see the note there on the fifth wrong figure
+// this package published, which came of multiplying that count by a per-response
+// size instead of measuring one.
 //
-// What is bounded, then, is the peak and not the sum: one header block at a
+// Strictly a cumulative bound does follow, and it is worth naming only to say
+// why it is not published: headerBytes charges every response at least the
+// twenty-odd bytes of its status line and terminator, so this budget does cap
+// the response count, at a few hundred thousand — and three maximal blocks on
+// each of those is a figure in the tens of terabytes. That is arithmetic, not a
+// bound, and publishing it would repeat the mistake in a sixth form.
+//
+// What is bounded usefully is the peak and not the sum: one header block at a
 // time, plus this cumulative figure for everything that can be accounted. The
 // unaccounted blocks are parsed and dropped per response rather than retained,
 // so they cost bandwidth rather than memory, and the loop that produces them
