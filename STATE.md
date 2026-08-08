@@ -18,7 +18,7 @@ end of slice 4.
       naming a tool the toolset has. Both rungs bind stored specs, not just the
       request that writes one. #59's doubt retired — the permission-policies
       guide states both toolset defaults outright. Verifier PASS WITH FINDINGS
-      (note-severity only) after two review rounds. Evidence:
+      (note-severity only). Evidence:
       [materialize.go](./internal/toolset/materialize.go),
       [wire.go](./internal/api/wire.go),
       [mcptoolset_test.go](./internal/api/mcptoolset_test.go).
