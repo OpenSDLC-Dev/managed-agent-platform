@@ -4,12 +4,10 @@ status: archived
 
 # Plan 28 — changelog and history slimming
 
-**Archived 2026-08-08 — completed.** Slice 1 landed in #337, slice 2 in the
-archiving PR. One acceptance figure landed off its estimate: the split kept 1,823 of
-HISTORY.md's 3,150 lines in place, far above the ~1,000 target — 2026-08
-alone is the project's heaviest month, and the figure falls as it
-archives in turn. The delivery
-record is docs/HISTORY.md § "Changelog and history slimming (plan 28)".
+> Archived 2026-08-08 — completed. The delivery record — including the one
+> acceptance figure that landed off its estimate — is
+> [docs/HISTORY.md](../HISTORY.md) § "Changelog and history slimming
+> (plan 28)"; the narrative is in CHANGELOG.md.
 
 ## Why
 
