@@ -151,6 +151,23 @@ func TestAgentCreateModelObjectAndFullConfig(t *testing.T) {
 			"mcp_server_name": "docs",
 		},
 	}
+	// Every value the client supplied comes back exactly as it was sent; only
+	// the omitted ones are filled in, because both toolset kinds echo their
+	// configuration resolved (plan 29 slice 1 — the rule itself is pinned by
+	// TestToolsetConfigsEchoResolved). The first entry set every knob, so it is
+	// its own expectation; the bare mcp_toolset gains the MCP default.
+	wantTools := []any{
+		tools[0],
+		tools[1],
+		map[string]any{
+			"type":            "mcp_toolset",
+			"mcp_server_name": "docs",
+			"configs":         []any{},
+			"default_config": map[string]any{
+				"enabled": true, "permission_policy": map[string]any{"type": "always_ask"},
+			},
+		},
+	}
 	body := map[string]any{
 		"name":        "full",
 		"model":       map[string]any{"id": "claude-opus-4-8", "speed": "fast"},
@@ -170,8 +187,8 @@ func TestAgentCreateModelObjectAndFullConfig(t *testing.T) {
 	if res["system"] != "be careful" || res["description"] != "a fully configured agent" {
 		t.Errorf("system/description = %v / %v", res["system"], res["description"])
 	}
-	if !reflect.DeepEqual(jsonNorm(t, res["tools"]), jsonNorm(t, tools)) {
-		t.Errorf("tools did not round-trip:\ngot  %v\nwant %v", res["tools"], tools)
+	if !reflect.DeepEqual(jsonNorm(t, res["tools"]), jsonNorm(t, wantTools)) {
+		t.Errorf("tools did not round-trip:\ngot  %v\nwant %v", res["tools"], wantTools)
 	}
 	if !reflect.DeepEqual(jsonNorm(t, res["mcp_servers"]), jsonNorm(t, body["mcp_servers"])) {
 		t.Errorf("mcp_servers did not round-trip: %v", res["mcp_servers"])
@@ -211,7 +228,7 @@ func TestAgentCreateModelObjectAndFullConfig(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("get: %d", status)
 	}
-	if !reflect.DeepEqual(jsonNorm(t, got["tools"]), jsonNorm(t, tools)) {
+	if !reflect.DeepEqual(jsonNorm(t, got["tools"]), jsonNorm(t, wantTools)) {
 		t.Errorf("tools changed across GET: %v", got["tools"])
 	}
 }

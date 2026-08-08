@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 issue: "#45"
 ---
 
@@ -16,9 +16,13 @@ failure semantics — the round-trip in the event log.
 Scope decisions settled with the user on 2026-08-08:
 
 1. **Full reference parity** — the core loop plus all four peripherals: OAuth
-   refresh-on-expiry, materialized `mcp_toolset` config echo + bidirectional reference
+   refresh-on-expiry, materialized toolset-config echo + bidirectional reference
    validation, the gate's `allow_mcp_servers` finally honored, and the >100k-character
-   output spill into the sandbox.
+   output spill into the sandbox. Materialization applies to **both** toolset kinds
+   (settled 2026-08-08): the SDK marks `configs`/`default_config` and their inner
+   `enabled`/`permission_policy` required on the `agent_toolset_20260401` response type
+   exactly as on `mcp_toolset`'s, and the docs say the two share one shape — so echoing
+   one resolved and the other sparse would be an inconsistency of our own making.
 2. **Discovery runs in the executor; the catalog lives in Postgres** (three
    architectures were weighed; brain-inline discovery and a standing control-plane
    reconciler were rejected — the executor already owns every other piece of platform
@@ -59,10 +63,21 @@ managed-agents surface.
   configs?}`. `configs` is an **array** of `{name (1–128 chars), enabled?,
   permission_policy?}` — not the Messages connector's map. `default_config` =
   `{enabled?, permission_policy?}`; `enabled` **defaults to true**; policy union is
-  exactly `always_allow` | `always_ask` (no `always_deny`). **The response shape is
-  resolved**: `configs[]`/`default_config` come back with `enabled` and
-  `permission_policy` required and materialized (betaagent.go:1773-1820) — the server
-  fills defaults, it does not round-trip the sparse request.
+  exactly `always_allow` | `always_ask` (no `always_deny`). The docs state the shape is
+  shared: "The `mcp_toolset` entry supports the same `default_config` and `configs`
+  shape as the built-in agent toolset", and "The `name` in each `configs` entry is the
+  bare tool name as reported by the server."
+- **Resolved config echo — both toolset kinds**: `configs` and `default_config` are
+  `api:"required"` on the response types of *both* `mcp_toolset`
+  (betaagent.go:1773-1820) and `agent_toolset_20260401` (`BetaManagedAgentsAgentToolset
+  20260401`), and so are their inner `enabled` + `permission_policy`
+  (`BetaManagedAgentsAgentToolsetDefaultConfig`, `BetaManagedAgentsAgentToolConfig`,
+  and the MCP twins). The server resolves defaults and echoes them; it does not
+  round-trip the sparse request. What `configs[]` *contains* is unobserved — an MCP
+  server's tool names are unknowable at agent-create time (the docs make unknown names
+  a warning, not an error), so the only rule that can hold for both kinds is "echo the
+  entries the caller supplied, each resolved", which is what this plan implements
+  (INFERRED).
 - **`agent.mcp_tool_use`** (betasessionevent.go:325-381): `{id, name, mcp_server_name,
   input (object), processed_at, type}` required; `evaluated_permission`
   (`allow`|`ask`|`deny`) optional; `session_thread_id` nullable. `deny` has no
@@ -163,10 +178,12 @@ Provision — cloud and self_hosted alike):
    `agent.mcp_tool_use`, and denial synthesis gains the MCP shape
    (`agent.mcp_tool_result{is_error:true}`, the "slice-8+ work" note in
    `internal/events/toolflow.go`).
-5. Allowed calls: brain enqueues by precedence `mcp_exec` → `web_exec` → `tool_exec`
-   (a turn with MCP calls enqueues `mcp_exec` first; each driver answers its own family
-   and chains the next needed — webwork.go's settlement grows from three branches to
-   four).
+5. Allowed calls: enqueue by precedence `mcp_exec` → `web_exec` → `tool_exec` (a turn
+   with MCP calls enqueues `mcp_exec` first; each driver answers its own family and
+   chains the next needed — webwork.go's settlement grows from three branches to four).
+   The precedence has **two** sites, not one: the brain's own settlement
+   (`internal/brain/brain.go`) and the confirmation POST that releases a gated turn
+   (`internal/api/events.go`, which today picks between `web_exec` and `tool_exec`).
 6. The MCP driver answers each unanswered call: connect (credentials + policy),
    `CallTool`, convert `Content` → the four block types (`EmbeddedResource` →
    `document`; text through `toolset.SanitizeText`; inline content capped by
@@ -209,21 +226,34 @@ the server → `session.error{mcp_authentication_failed_error}`.
 
 ### Retry semantics (inference — DIVERGENCES entry)
 
-Connection-failure attempts per server per session are derived from the log (count
-prior `session.error` events for that server — no new state): attempts 1–2 emit
-`retry_status: "retrying"` and retry on the next turn; attempt 3 emits `"exhausted"`
-and the server stops participating in discovery/expansion for the session; a policy
-block is `"terminal"` immediately. The exact reference thresholds are unobserved.
+What the sources pin: a failure emits `session.error` naming the server, the session
+keeps running without that server's tools, and "the connection is retried on the next
+`session.status_idle` to `session.status_running` transition" (docs); `exhausted` is
+tied to a turn ending with `stop_reason.retries_exhausted` (SDK). Nothing documents a
+server being disabled for the rest of a session, so this plan does **not** invent one:
+every turn re-attempts a failed server, a transient failure therefore heals by itself,
+and `retry_status` reports which of the three the attempt was — `retrying` for a
+failure the next turn will re-attempt, `terminal` for one no retry can fix (an egress
+policy block, an unresolvable host), `exhausted` reserved for the case that ends the
+turn. The per-server attempt count, if a threshold is ever needed, is derivable from
+the log (prior `session.error` events for that server) rather than from new state.
 
 ## Slices
 
 Ordered so no landed slice leaves an incoherent state (tools are never offered to the
 model before they can be gated and executed):
 
-1. **Wire correctness** — materialized `mcp_toolset` echo (agent create/update/read +
-   session resolve) and bidirectional reference validation (dangling toolsets now
-   rejected — the public docs pin both directions, superseding #66's one-way reading;
-   that DIVERGENCES entry is rewritten in this slice).
+1. **Wire correctness** — three rungs, none of which needs an MCP client: bidirectional
+   reference validation (dangling toolsets now rejected — the public docs pin both
+   directions verbatim, superseding #66's one-way reading; that DIVERGENCES entry is
+   rewritten here); `mcp_toolset` nested-shape validation at the API boundary, parity
+   with what `toolset.Validate` already gives `agent_toolset_20260401` (unknown keys and
+   unevaluable policy types rejected — the #26 fail-open class, currently open on the
+   MCP arm because `parseTools` checks only `mcp_server_name`); and resolved-config echo
+   for **both** toolset kinds, applied non-mutatingly in the two render funnels
+   (`renderAgent`, `renderSession`) so stored bytes stay verbatim and pre-existing rows
+   echo resolved without a backfill — and so the resolved default policy stays a
+   constant to flip (#59) rather than a value frozen into old rows.
 2. **`internal/mcp` + catalog** — the client wrapper, `mcp_catalogs` migration + store,
    the `mcp_exec` discovery driver **including the MCP-client egress policy check**
    (limited networking is never fail-open, even one slice long; before slice 5 the
@@ -258,5 +288,8 @@ against the SDK checkout field by field.
 - `mcp__{server}__{tool}` internal model-facing naming + custom-collision skip
   (slice 4).
 - `self_hosted`: no spill (slice 4) and unconstrained MCP egress (slice 2).
-- Retry thresholds and log-derived attempt counting (slice 6).
+- Retry-status mapping, and that a failed server is re-attempted every turn rather than
+  disabled for the session (slice 6).
 - Reject statuses/messages for the new validation rungs (slice 1).
+- Resolved-config echo: that `configs[]` echoes the supplied entries rather than every
+  tool, and that the echo is computed at render rather than stored (slice 1).

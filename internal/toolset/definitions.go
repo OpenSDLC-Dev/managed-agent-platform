@@ -15,6 +15,22 @@ import (
 // one constant once a real managed-agents endpoint can be recorded.
 const DefaultAgentToolsetPolicy = domain.PolicyAlwaysAllow
 
+// DefaultMCPToolsetPolicy is the permission policy an MCP tool resolves to when
+// its mcp_toolset entry sets none. Unlike its agent-toolset twin above this one
+// is recorded rather than inferred: "the agent toolset defaults to
+// `always_allow`, and MCP toolsets default to `always_ask`" (the reference's
+// permission-policies guide), so that new tools appearing on an MCP server
+// cannot execute without approval.
+const DefaultMCPToolsetPolicy = domain.PolicyAlwaysAsk
+
+// The two tool types that share the default_config / configs shape. They name
+// themselves in every error this package raises, so a client reading a 400
+// knows which entry of tools[] to fix.
+const (
+	agentToolsetType = "agent_toolset_20260401"
+	mcpToolsetType   = "mcp_toolset"
+)
+
 // definitions are the eight built-in tools in the order the reference lists
 // them, each already in the Messages-API tool shape the provider request
 // carries (name / description / input_schema). The six sandbox tools' schemas
@@ -193,9 +209,9 @@ type resolved struct {
 func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 	var e entry
 	if err := json.Unmarshal(raw, &e); err != nil {
-		return nil, fmt.Errorf("agent_toolset_20260401: %w", err)
+		return nil, fmt.Errorf("%s: %w", agentToolsetType, err)
 	}
-	if err := rejectUnknownToolsetKeys(raw); err != nil {
+	if err := rejectUnknownToolsetKeys(agentToolsetType, raw); err != nil {
 		return nil, err
 	}
 
@@ -245,7 +261,7 @@ func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 		}
 		policy := DefaultAgentToolsetPolicy
 		if pc != nil {
-			p, err := policyType(pc.Type)
+			p, err := policyType(agentToolsetType, pc.Type)
 			if err != nil {
 				return nil, err
 			}
@@ -256,9 +272,13 @@ func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 	return out, nil
 }
 
-// rejectUnknownToolsetKeys fails on any key outside the pinned agent_toolset_20260401
-// wire schema — at the toolset object and every nested default_config, configs[]
-// entry, and permission_policy. encoding/json silently drops unknown object keys,
+// rejectUnknownToolsetKeys fails on any key outside the pinned toolset wire
+// schema — at the toolset object and every nested default_config, configs[]
+// entry, and permission_policy. kind names the entry's type in the error and
+// selects the keys the toolset object itself accepts, the one place the two
+// kinds differ: an mcp_toolset carries mcp_server_name where an
+// agent_toolset_20260401 carries nothing extra.
+// encoding/json silently drops unknown object keys,
 // so without this a misspelled permission_policy (the issue's permission_polciy) is
 // discarded, PermissionPolicy stays nil, and the tool resolves to the always_allow
 // default rather than the intended gate — a fail-open at the human-in-the-loop
@@ -273,22 +293,26 @@ func resolveToolset(raw json.RawMessage) ([]resolved, error) {
 // default_config), AgentToolsetDefaultConfigParams (enabled/permission_policy),
 // AgentToolConfigParams (name/enabled/permission_policy), and the always_allow/
 // always_ask policy params (type only).
-func rejectUnknownToolsetKeys(raw json.RawMessage) error {
+func rejectUnknownToolsetKeys(kind string, raw json.RawMessage) error {
 	top, ok := jsonObject(raw)
 	if !ok {
 		return nil // not an object: the typed unmarshal already reported it
 	}
-	if err := rejectKeysOutside(top, "", "type", "configs", "default_config"); err != nil {
+	allowed := []string{"type", "configs", "default_config"}
+	if kind == mcpToolsetType {
+		allowed = append(allowed, "mcp_server_name")
+	}
+	if err := rejectKeysOutside(kind, top, "", allowed...); err != nil {
 		return err
 	}
 	if dc, ok := jsonObject(top["default_config"]); ok {
-		if err := rejectConfigKeys(dc, "default_config", false); err != nil {
+		if err := rejectConfigKeys(kind, dc, "default_config", false); err != nil {
 			return err
 		}
 	}
 	for i, item := range jsonArray(top["configs"]) {
 		if c, ok := jsonObject(item); ok {
-			if err := rejectConfigKeys(c, fmt.Sprintf("configs[%d]", i), true); err != nil {
+			if err := rejectConfigKeys(kind, c, fmt.Sprintf("configs[%d]", i), true); err != nil {
 				return err
 			}
 		}
@@ -298,31 +322,31 @@ func rejectUnknownToolsetKeys(raw json.RawMessage) error {
 
 // rejectConfigKeys checks a default_config or configs[] object and its nested
 // permission_policy. perTool adds "name", accepted only on a configs[] entry.
-func rejectConfigKeys(obj map[string]json.RawMessage, path string, perTool bool) error {
+func rejectConfigKeys(kind string, obj map[string]json.RawMessage, path string, perTool bool) error {
 	allowed := []string{"enabled", "permission_policy"}
 	if perTool {
 		allowed = append(allowed, "name")
 	}
-	if err := rejectKeysOutside(obj, path, allowed...); err != nil {
+	if err := rejectKeysOutside(kind, obj, path, allowed...); err != nil {
 		return err
 	}
 	if pp, ok := jsonObject(obj["permission_policy"]); ok {
-		return rejectKeysOutside(pp, path+".permission_policy", "type")
+		return rejectKeysOutside(kind, pp, path+".permission_policy", "type")
 	}
 	return nil
 }
 
 // rejectKeysOutside fails on the first key of obj not in allowed, naming its path
 // (the toolset object itself for the empty path).
-func rejectKeysOutside(obj map[string]json.RawMessage, path string, allowed ...string) error {
+func rejectKeysOutside(kind string, obj map[string]json.RawMessage, path string, allowed ...string) error {
 	for k := range obj {
 		if slices.Contains(allowed, k) {
 			continue
 		}
 		if path == "" {
-			return fmt.Errorf("agent_toolset_20260401: unknown field %q", k)
+			return fmt.Errorf("%s: unknown field %q", kind, k)
 		}
-		return fmt.Errorf("agent_toolset_20260401: unknown field %q in %s", k, path)
+		return fmt.Errorf("%s: unknown field %q in %s", kind, k, path)
 	}
 	return nil
 }
@@ -357,12 +381,12 @@ func jsonArray(raw json.RawMessage) []json.RawMessage {
 // policyType validates a permission_policy's type against the wire enum. An
 // unknown value (including empty) is a rejection, never a silent default: a
 // policy this platform cannot evaluate must not resolve to "run it anyway".
-func policyType(s string) (domain.PermissionPolicyType, error) {
+func policyType(kind, s string) (domain.PermissionPolicyType, error) {
 	switch p := domain.PermissionPolicyType(s); p {
 	case domain.PolicyAlwaysAllow, domain.PolicyAlwaysAsk:
 		return p, nil
 	default:
-		return "", fmt.Errorf("agent_toolset_20260401: unknown permission_policy type %q", s)
+		return "", fmt.Errorf("%s: unknown permission_policy type %q", kind, s)
 	}
 }
 

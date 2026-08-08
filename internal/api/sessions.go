@@ -19,6 +19,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -99,6 +100,9 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	if agent.Tools == nil {
 		agent.Tools = []json.RawMessage{}
 	}
+	// The resolved-agent snapshot echoes resolved toolset configuration, the
+	// same rule renderAgent applies to the agent resource itself.
+	agent.Tools = toolset.MaterializeTools(agent.Tools)
 	if agent.MCPServers == nil {
 		agent.MCPServers = []json.RawMessage{}
 	}

@@ -381,6 +381,14 @@ func parseTools(raw json.RawMessage) ([]json.RawMessage, error) {
 			if probe.MCPServerName == "" {
 				return nil, errInvalid("mcp_toolset tools require mcp_server_name")
 			}
+			// The same eager shape check the agent toolset gets above, for the
+			// same reason: encoding/json drops a misspelled key, so an
+			// unchecked `permission_polciy` would leave the tool on the
+			// toolset's default — and this toolset's default is the one that
+			// gates on human confirmation (issue #26, extended to the MCP arm).
+			if err := toolset.ValidateMCPToolset(item); err != nil {
+				return nil, errInvalid("%s", err)
+			}
 		default:
 			return nil, errInvalid("unknown tool type %q", probe.Type)
 		}
@@ -464,6 +472,15 @@ func validateAgentSpec(spec agentSpec) error {
 		switch probe.Type {
 		case "mcp_toolset":
 			// The server's tools materialize at run time; nothing to name here.
+			// The reference rejects both halves of the pairing — "every
+			// `mcp_toolset` must reference a declared server" as well as the
+			// unreferenced-server direction checked below — so a toolset naming
+			// a server this spec does not declare is a 400 rather than a
+			// toolset the brain would have no server to expand.
+			if !seen[probe.MCPServerName] {
+				return errInvalid("mcp_toolset references mcp_server %q, which is not declared in mcp_servers",
+					probe.MCPServerName)
+			}
 			referenced[probe.MCPServerName] = true
 			continue
 		case "agent_toolset_20260401":

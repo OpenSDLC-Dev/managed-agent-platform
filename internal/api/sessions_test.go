@@ -428,7 +428,10 @@ func TestSessionCreatePinsAgentVersionAndSupportsOverrides(t *testing.T) {
 	if m, _ := a["model"].(map[string]any); m["id"] != "claude-haiku-4-5" {
 		t.Errorf("override model = %v", a["model"])
 	}
-	if !reflect.DeepEqual(jsonNorm(t, a["tools"]), jsonNorm(t, tools)) {
+	// The override replaced the tool list; the echo renders each entry with its
+	// configuration resolved (pinned by TestToolsetConfigsEchoResolved), so what
+	// this assertion owns is which entries came back, not their config shape.
+	if got := toolTypes(t, a["tools"]); !reflect.DeepEqual(got, []string{"agent_toolset_20260401"}) {
 		t.Errorf("override tools = %v", a["tools"])
 	}
 	// The base agent resource is untouched by overrides.
@@ -549,7 +552,8 @@ func TestSessionUpdate(t *testing.T) {
 		t.Errorf("metadata = %v", updated["metadata"])
 	}
 	a, _ := updated["agent"].(map[string]any)
-	if !reflect.DeepEqual(jsonNorm(t, a["tools"]), jsonNorm(t, tools)) {
+	if got := toolTypes(t, a["tools"]); !reflect.DeepEqual(got,
+		[]string{"agent_toolset_20260401", "mcp_toolset"}) {
 		t.Errorf("agent.tools = %v", a["tools"])
 	}
 	if !reflect.DeepEqual(jsonNorm(t, a["mcp_servers"]), jsonNorm(t, mcp)) {
