@@ -1343,8 +1343,11 @@ func TestHTTP2CapsEachHeaderBlockSeparately(t *testing.T) {
 		// 32-byte per-field accounting h2 adds.
 		{name: "a block within the per-block cap", value: hdr - 1024},
 		// Above the raw cap yet still admitted, which is the overhead being real
-		// rather than a rounding note: without it the published total is short
-		// by 320 bytes per block, three blocks a page, a hundred pages.
+		// rather than a rounding note: the boundary bisects to 65,856 accepted
+		// and 65,857 refused, landing on the sum of the two constants rather
+		// than near it. An earlier comment here justified the overhead by
+		// multiplying it out across blocks and pages, against a total this
+		// package no longer publishes and should not have then.
 		{name: "a block above the raw cap but inside h2's inflated one", value: hdr + h2Overhead - 128},
 		// Just past the inflated cap — and *just* past on purpose. A generous
 		// margin here would be refused under any value of the overhead, so the

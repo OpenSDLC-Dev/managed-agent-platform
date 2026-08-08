@@ -8,17 +8,17 @@
 // package-level and keeps an ordinary net/http connection pool, so two work
 // items reaching the same origin may well share a TCP connection, or multiplex
 // over one HTTP/2 connection. That is deliberate — the state worth not sharing
-// is protocol state, and there is none to share. The 2026-07-28 revision of MCP is what makes that
-// affordable: it removed protocol-level sessions, so nothing accumulates on the
-// server that a new connection has to re-establish, and there is no affinity
-// between discovering a server's tools and later calling one. Not free, though —
-// a connection still negotiates, and what that costs depends on the server it
-// reaches: against a 2026-07-28 one a single `server/discover` round trip (two,
-// where the SDK retries it after an unsupported-version answer), and against an
-// older one that discover plus the legacy `initialize` and
-// `notifications/initialized`, three requests, before Connect returns. What
-// per-work-item connections cost is that handshake; what they buy is a client
-// with no state to lose.
+// is protocol state, and there is none to share. The 2026-07-28 revision of
+// MCP is what makes that affordable: it removed protocol-level sessions, so
+// nothing accumulates on the server that a new connection has to re-establish,
+// and there is no affinity between discovering a server's tools and later
+// calling one. Not free, though — a connection still negotiates, and what that
+// costs depends on the server it reaches: against a 2026-07-28 one a single
+// `server/discover` round trip (two, where the SDK retries it after an
+// unsupported-version answer), and against an older one that discover plus the
+// legacy `initialize` and `notifications/initialized`, three requests, before
+// Connect returns. What per-work-item connections cost is that handshake; what
+// they buy is a client with no state to lose.
 //
 // The SDK is a dependency of this package alone. Its types do not appear in the
 // wrapper's surface — the platform's domain model is Anthropic-native
@@ -153,9 +153,10 @@ type Conn struct {
 // charges what it can reconstruct from resp.Header, and net/http normalizes the
 // block before handing it over: a value's padding whitespace is trimmed and a
 // folded continuation is joined, so the bytes are read, allocated, and then
-// unaccountable. Measured, a 200,076-byte response whose X-Pad value was one
-// character followed by 200,000 spaces reconstructed to 75 bytes — a factor of
-// 2,670, which is a distortion no arithmetic on the parsed map can correct. So
+// unaccountable. Measured against a raw listener answering Content-Length and an
+// X-Pad value of one character followed by 200,000 spaces: 200,048 header bytes
+// on the wire, reconstructed to 49 — a factor of 4,083, which is a distortion no
+// arithmetic on the parsed map can correct. So
 // the raw block is bounded here instead — 64 KiB rather than net/http's 10 MiB
 // default, per header block, which is a bound on the peak one block reaches and
 // deliberately not a total: how many blocks a connection answers is not this
@@ -235,9 +236,9 @@ const maxHeaderBytesPerResponse = 64 << 10
 // fixture rather than reasoned about: the largest trailer value accepted is
 // 65,856 bytes and the first refused is 65,857 — landing exactly on the sum,
 // which is what makes this constant a description of net/http rather than of
-// itself. The fixtures either side of the cap sit within a few dozen bytes of
-// that boundary for the same reason; rounder margins would pass under any
-// overhead value.
+// itself. The fixtures either side of the cap sit 128 bytes below it and 64
+// above for the same reason; rounder margins would pass under any overhead
+// value, so they would assert nothing about net/http.
 const http2HeaderListOverhead = 320
 
 // Connect opens a connection to one MCP server over Streamable HTTP.
@@ -625,18 +626,17 @@ func (c *Conn) Close() error { return c.session.Close() }
 // parsed map are outside it, held per block by maxHeaderBytesPerResponse
 // instead, and *per block* is where the arithmetic stops rather than continues.
 //
-// No cumulative bound on delivered header bytes is worth publishing, and four
-// revisions of this comment published one regardless, each falsified in turn:
-// "header blocks included", which whitespace padding falsified; "8 MiB plus
-// 6.4 MiB", which assumed the cap covered a response rather than a block; a
-// figure whose mechanism was right and which still claimed a socket total no
-// header arithmetic can produce (a measured maximal listing read 26.898 MiB on
-// the wire against a ceiling of 26.750, the excess being HPACK, frame headers
-// and TLS records); and then a per-block figure multiplied by a response count.
-// Every one of them needed the same missing thing — a bound on how many
-// responses one connection answers — and go-sdk v1.7.0 does not have one.
-// Counting the handshake, a hundred pages and the session-ending DELETE reaches
-// 104, and two paths walk past it. A server that answers the first
+// No cumulative bound on delivered header bytes is worth publishing. Successive
+// revisions of this comment published one anyway and every one was falsified —
+// by whitespace padding, by mistaking a block for a response, by claiming a
+// socket total that no header arithmetic can produce, by multiplying a per-block
+// cap by a response count, and finally by getting that multiplication wrong by
+// three orders of magnitude. An earlier revision enumerated them and miscounted
+// its own history twice, which is its own argument: the useful part is the
+// mechanism, and the mechanism is that every one of those figures needed a bound
+// on how many responses one connection answers, which go-sdk v1.7.0 does not
+// have. Counting the handshake, a hundred pages and the session-ending DELETE
+// reaches 104, and two paths walk past it. A server that answers the first
 // server/discover with CodeUnsupportedProtocolVersion and a supported-version
 // list is probed a second time (mcp/client.go, `for range 2`). And any response
 // delivered as text/event-stream may end carrying a fresh `id:` and no call
@@ -650,22 +650,18 @@ func (c *Conn) Close() error { return c.session.Close() }
 // seconds ListTimeout allows, against the 104 the last revision multiplied by.
 // It is written to go red if that upstream limit ever lands, which is how this
 // comment would learn it may tighten again. It counts responses and says nothing
-// about their bytes, deliberately — see the note there on the fifth wrong figure
-// this package published, which came of multiplying that count by a per-response
-// size instead of measuring one.
+// about their bytes, deliberately — see the note there on the figure that came
+// of multiplying that count by a per-response size instead of measuring one.
 //
 // One thing here is bounded and worth saying: headerBytes charges every response
 // at least the twenty-odd bytes of its status line and terminator, so this budget
 // caps the response count too, at a few hundred thousand. The product of that
-// count with a maximal block is not written down, and the omission is deliberate
-// rather than lazy. The revision before this one did write it, as "tens of
-// terabytes", and it was wrong by a factor of a thousand — the arithmetic comes
-// to some eighty gigabytes. That was the sixth wrong figure in this paragraph's
-// history, published inside the sentence explaining why a sixth must not be, one
-// file over from a test comment saying multiplying these two would be the same
-// mistake in a third form. The rule this paragraph now keeps is the narrow one
-// it kept failing: numbers here are measured, and a product of two of them is
-// not a measurement.
+// count with a maximal block is deliberately not written down. The revision
+// before this one did write it, as "tens of terabytes", inside the very sentence
+// explaining why it should not be written — and got it wrong by three orders of
+// magnitude, the arithmetic coming to some eighty gigabytes. The rule this
+// paragraph now keeps is the narrow one it kept failing: a figure stated here is
+// one that was measured, and a product of two measurements is not one.
 //
 // What is bounded usefully is the peak and not the sum: one header block at a
 // time, plus this cumulative figure for everything that can be accounted. The
@@ -784,9 +780,12 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // distortion". The bytes are gone by the time this runs, and normalization does
 // not merely perturb their count — textproto trims a value's leading and
 // trailing whitespace and joins an obsolete folded continuation, so a server
-// that pads deliberately spends header bytes this cannot see at all. Measured:
-// a value of one character followed by 200,000 spaces reconstructs to 75 bytes
-// against 200,076 on the wire.
+// that pads deliberately spends header bytes this cannot see at all. Measured
+// against a raw listener whose only other header is Content-Length: a value of
+// one character followed by 200,000 spaces reconstructs to 49 bytes against
+// 200,048 on the wire, a factor of 4,083. Both halves move with whatever else
+// the response carries, which is why the fixture is named rather than just the
+// pair.
 //
 // Three routes miss this map. A 1xx informational block — 103 Early Hints, say
 // — never enters resp.Header at all, and a server may send many before the final
