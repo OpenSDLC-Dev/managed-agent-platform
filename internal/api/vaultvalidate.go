@@ -13,9 +13,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -64,63 +64,13 @@ const (
 )
 
 // The validate probe dials credential-supplied URLs from the control plane and
-// returns their response bodies, so it is a full-response SSRF vector. The
-// guard blocks the addresses that are never a legitimate MCP server or OAuth
-// endpoint but are prime exfiltration targets — loopback (the control plane's
-// own surfaces), link-local (cloud metadata, 169.254.169.254 / fe80::/10),
-// the unspecified address, and multicast — checked on the *resolved* IP at
-// connect time (net.Dialer.Control) on every dial, so DNS rebinding cannot slip
-// a blocked address past it. HTTP redirects are a separate matter: probeClient
-// refuses to follow them at all, because the IP guard cannot see that following
-// one would replay the request body to the new target. RFC 1918 private ranges
-// are deliberately allowed: this
-// platform's premise is on-prem / in-VPC operation (CLAUDE.md), where MCP
-// servers and token endpoints legitimately live on the operator's own private
-// network. A blocked target surfaces as a connection failure — connect_error
+// returns their response bodies, so it is a full-response SSRF vector.
+// internal/dialguard holds the address guard and the reasoning behind what it
+// refuses; this var is the seam a test overrides to reach an httptest server on
+// loopback. A blocked target surfaces as a connection failure — connect_error
 // on refresh, a null http_response on the probe — never revealing whether the
 // internal host exists.
-var probeIPAllowed = productionProbeIPAllowed
-
-func productionProbeIPAllowed(ip net.IP) error {
-	// An IPv6 transition address forwards to an embedded IPv4 target through a
-	// translator on the deployment path; check that real target, not the v6
-	// wrapper, so 64:ff9b::7f00:1 cannot smuggle 127.0.0.1 past the guard.
-	target := ip
-	if v4 := embeddedIPv4(ip); v4 != nil {
-		target = v4
-	}
-	switch {
-	case target.IsLoopback(), target.IsLinkLocalUnicast(), target.IsLinkLocalMulticast(),
-		target.IsUnspecified(), target.IsMulticast():
-		return fmt.Errorf("probe target %s is a disallowed address", ip)
-	default:
-		return nil
-	}
-}
-
-// embeddedIPv4 returns the IPv4 address wrapped by an IPv6 transition form —
-// NAT64 (the whole 64:ff9b::/32, covering both the 64:ff9b::/96 well-known and
-// 64:ff9b:1::/48 local prefixes; v4 in the low 32 bits), 6to4 (2002::/16, v4 in
-// bytes 2–5), and Teredo (2001:0::/32, client v4 in the inverted low 32 bits) —
-// so the guard re-checks the target a translator would actually reach. The
-// NAT64 match is deliberately broad and assumes /96-style low-32 embedding: a
-// mis-decode can only add a refusal, never an admit, so it stays fail-safe.
-// Returns nil for a plain address.
-func embeddedIPv4(ip net.IP) net.IP {
-	b := ip.To16()
-	if b == nil || ip.To4() != nil {
-		return nil
-	}
-	switch {
-	case b[0] == 0x20 && b[1] == 0x02:
-		return net.IPv4(b[2], b[3], b[4], b[5]).To4()
-	case b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x00:
-		return net.IPv4(^b[12], ^b[13], ^b[14], ^b[15]).To4()
-	case b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b:
-		return net.IPv4(b[12], b[13], b[14], b[15]).To4()
-	}
-	return nil
-}
+var probeIPAllowed = dialguard.IPAllowed
 
 // probeClient is the SSRF-guarded client for both outbound validate calls. The
 // Control hook reads probeIPAllowed on every dial (so a test override takes
@@ -138,17 +88,7 @@ var probeClient = &http.Client{
 	Transport: &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout: validateCallTimeout,
-			Control: func(_, address string, _ syscall.RawConn) error {
-				host, _, err := net.SplitHostPort(address)
-				if err != nil {
-					return err
-				}
-				ip := net.ParseIP(host)
-				if ip == nil {
-					return fmt.Errorf("probe address %q did not resolve to an IP", address)
-				}
-				return probeIPAllowed(ip)
-			},
+			Control: dialguard.Control(func(ip net.IP) error { return probeIPAllowed(ip) }),
 		}).DialContext,
 	},
 }

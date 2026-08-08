@@ -65,6 +65,8 @@ internal/
   worker/     # BYOC worker — the customer-hosted twin of executor/, wire-only
   toolset/    # the built-in tools (agent_toolset_20260401)
   webtool/    # web_fetch/web_search backends: Searcher/Fetcher ifaces + tavily/ + jina/
+  mcp/        # the MCP client: a thin wrapper over the official go-sdk (plan 29)
+  dialguard/  # the address guard every customer-URL dial runs through (SSRF floor)
   sandbox/    # Sandbox/Provider iface + docker/ + k8s/ + backend selection + shell/
   blob/       # object-storage seam: Store iface + s3/ (S3-compatible via minio-go)
               #   + gcs/ (GCS-native, Application Default Credentials) + backend/ (selection)
@@ -77,9 +79,9 @@ internal/
 deploy/{helm,compose,gcp}
 ```
 
-(Plus test-support: `internal/{pgtest,modeltest}`, `internal/sandbox/sandboxtest`, `internal/blob/blobtest`, `internal/blob/gcs/gcstest`, `internal/provider/providertest`, `internal/secrets/secretstest`, `internal/secrets/gcpkms/gcpkmstest`, `internal/webtool/webtooltest`, and the top-level `evals/` live suite and `acceptance/` doc-example suite. There is no `internal/mcp` or `internal/policy`: no MCP client is built yet, and permission policy lives across `domain`/`toolset`/`brain`/`api`.) What each package's files actually do: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) → "Package reference".
+(Plus test-support: `internal/{pgtest,modeltest}`, `internal/sandbox/sandboxtest`, `internal/blob/blobtest`, `internal/blob/gcs/gcstest`, `internal/provider/providertest`, `internal/secrets/secretstest`, `internal/secrets/gcpkms/gcpkmstest`, `internal/webtool/webtooltest`, and the top-level `evals/` live suite and `acceptance/` doc-example suite. There is no `internal/policy`: permission policy lives across `domain`/`toolset`/`brain`/`api`.) What each package's files actually do: [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) → "Package reference".
 
-Primary deps: `github.com/anthropics/anthropic-sdk-go`, `go.opentelemetry.io/otel` (+ OTLP), `github.com/jackc/pgx`, `github.com/minio/minio-go` (S3-compatible blob storage), `cloud.google.com/go/storage` (the GCS-native blob backend) and `github.com/go-git/go-git/v5` (the executor's `github_repository` clone — pure Go, so no `git` binary is a runtime dependency of any image). Neither `github.com/modelcontextprotocol/go-sdk` (no MCP client yet) nor `google.golang.org/adk/v2` is a dependency.
+Primary deps: `github.com/anthropics/anthropic-sdk-go`, `go.opentelemetry.io/otel` (+ OTLP), `github.com/jackc/pgx`, `github.com/minio/minio-go` (S3-compatible blob storage), `cloud.google.com/go/storage` (the GCS-native blob backend) and `github.com/go-git/go-git/v5` (the executor's `github_repository` clone — pure Go, so no `git` binary is a runtime dependency of any image) and `github.com/modelcontextprotocol/go-sdk` (the MCP client, plan 29 — a dependency of `internal/mcp` alone, whose types never reach the domain layer). `google.golang.org/adk/v2` is not a dependency.
 
 ## Development
 

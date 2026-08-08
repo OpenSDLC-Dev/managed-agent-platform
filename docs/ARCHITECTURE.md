@@ -253,9 +253,10 @@ Config-driven model access (design principle 4).
 | `config.go` | `LoadRoutes` reads the `model_providers` JSON file (`model` / `protocol` / `base_url` / `upstream_model` / `api_key` or `api_key_env` / optional `stall_timeout`, a Go duration parsed at startup so a typo fails the process rather than silently taking the default, / optional `max_tokens`, the route's default output cap for turns that set none — zero and negative rejected at startup; unknown keys rejected). |
 | `providertest/contract.go` | The one suite both protocol adapters must pass (test support; production never imports it): a turn terminates with a single `done` carrying its stop reason and usage; a well-formed tool turn's `done` carries `stop_reason` `tool_use` — which the OpenAI adapter forces from the tool calls it saw while the Anthropic adapter passes the endpoint's label straight through, so what it pins is the two adapters agreeing on a well-formed turn, not a promise about either endpoint behind them (which is why the brain classifies on the tool blocks instead, #181); a tool input accumulates across frames and defaults to `{}` when empty; a usage reading is nil only when the endpoint reported none (#90); a cancelled context surfaces as a stream error rather than a silent completion; an endpoint that goes silent — before its response headers or mid-stream — ends the turn inside the route's stall budget while a keepalive-only upstream is left to think (#121); and `Close` releases the stream both after completion and before draining. Each adapter renders the suite's abstract `Script` into its own wire protocol on a fake upstream (the providertest analogue of `sandboxtest.Harness`). |
 
-There is no `internal/mcp` (reserved in early sketches; no MCP client is built — the
-brain's replay treats `mcp_toolset` as awaiting it) and no `internal/policy` (permission
-policy lives across `domain` / `toolset` / `brain` / `api` — see those rows).
+There is no `internal/policy` (permission policy lives across `domain` / `toolset` /
+`brain` / `api` — see those rows). `internal/mcp` now exists (plan 29 slice 2) but
+nothing calls it yet: the brain's replay still treats `mcp_toolset` as awaiting the
+discovery driver, which lands next.
 
 ### internal/sandbox
 
@@ -322,6 +323,33 @@ constructing both adapters from its config (`TAVILY_API_KEY`/`JINA_API_KEY`,
 | `webtool.go` | `Searcher` / `Fetcher` — the interfaces the executor's web driver runs — plus the shared adapter helpers: `MaxContentBytes` (4 MiB; a response body is untrusted-length input, capped the way sandbox file reads are), `ReadCapped` (reads one past the cap so "more" is detected without draining an unbounded stream; a fetch truncates and says so, a search refuses — truncated JSON decodes as nothing), and `HTTPError` (a non-2xx error carrying a short body excerpt with the credential redacted **before** the cut, so an endpoint that echoes its Authorization header back cannot land the key in a tool-result event). |
 | `tavily/tavily.go` | The Tavily `web_search` adapter: one `POST {base}/search` per call, Bearer-authenticated, fixed `max_results` 5 (the tool's input schema is deliberately just `{query}`; a bounded, deterministic result size belongs to the platform, not the model), hits mapped onto `SearchResult` in order. Base URL configurable with `DefaultBaseURL` as the public endpoint — never hard-coded in a caller. |
 | `jina/jina.go` | The Jina Reader `web_fetch` adapter: one GET with the target URL riding percent-encoded as one path segment (concatenated raw, everything from the target's first `#` would parse as the outer URL's fragment and silently never be sent), `Authorization` sent only when a key is configured (the rate-limited free tier takes none), and the model-supplied target validated to an absolute http(s) URL before anything touches the network. |
+
+### internal/mcp
+
+The MCP client (docs/plan/29_mcp-toolset.md, #45) — a thin wrapper over the official
+`github.com/modelcontextprotocol/go-sdk`, which is a dependency of this package alone. The
+SDK's types never appear in the wrapper's surface: an MCP tool reaches the rest of the
+platform as this package's own `Tool`, so the domain model stays Anthropic-native (design
+principle 1) and a wire-schema question is never answered by a third-party struct.
+Connections are per-work-item — connect, ask, close — which the 2026-07-28 revision makes
+cheap by removing protocol-level sessions: there is no handshake to amortize and no
+affinity between discovering a server's tools and later calling one. **Nothing calls this
+package yet**; the executor's discovery driver is the next slice.
+
+| File | Contents |
+|---|---|
+| `mcp.go` | `Connect(ctx, Config)` → `Conn`, with `ListTools` and `Close`. `Config` carries the server URL, an optional bearer token, and an optional `*http.Client` (nil selects `DefaultClient`; the executor will supply its own to attach egress policy). `ListTools` follows pagination to the end and returns `Tool{Name, Description, InputSchema}` — JSON-tagged with the **Anthropic** field names (`input_schema`), so a catalog row is stored as-is and needs no second translation at request assembly. An empty listing is a fact, not an error: the reference documents an unknown MCP tool name as a warning. Transport is Streamable HTTP only — the SDK negotiates every protocol version from 2024-11-05 up over it, while the separate HTTP+SSE transport of 2024-11-05 is deprecated ("New implementations SHOULD NOT adopt it") and a client-side fallback to it is deliberately not wired. The standalone SSE stream is disabled: 2026-07-28 removed the GET endpoint it used, and a per-work-item connection wants no server-initiated messages. `DefaultClient` is guarded twice — `internal/dialguard` on every dial, and redirects never followed, since following one would replay the request and its `Authorization` header to a target the per-hop guard vets but never approved. A bearer token is injected by wrapping a **copy** of the caller's client: `Config.HTTPClient` may be shared, and mutating it would carry one server's credential onto the next connection. |
+
+### internal/dialguard
+
+The address floor under every dial to a customer-supplied URL — a vault credential's MCP
+server or token endpoint (`internal/api/vaultvalidate.go`), an agent's `mcp_servers` entry
+(`internal/mcp`). Extracted from the validate probe in plan 29 slice 2 so both callers
+enforce one rule rather than two copies of it.
+
+| File | Contents |
+|---|---|
+| `dialguard.go` | `IPAllowed(ip)` refuses loopback, link-local (cloud metadata), the unspecified address and multicast — and the IPv4 target embedded in an IPv6 transition address (NAT64 `64:ff9b::/32`, 6to4, Teredo), so `64:ff9b::7f00:1` cannot smuggle `127.0.0.1` past it. RFC 1918 is deliberately **allowed**: this platform's premise is on-prem / in-VPC operation, so the guard is the floor beneath an agent's egress policy, not the policy itself. `Control(allow)` builds the `net.Dialer` hook that runs the predicate on the **resolved** address of every dial, which is what makes DNS rebinding ineffective; `allow` is a parameter so a caller keeps its own overridable seam (the api probe's test override) and is read per dial rather than captured once. A refusal names only the address class — a caller that surfaces it must not become an internal-host oracle. |
 
 ### internal/executor
 

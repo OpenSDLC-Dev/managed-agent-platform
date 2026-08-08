@@ -10,19 +10,18 @@ end of slice 4.
 
 ## Tasks
 
-- [x] **Slice 1 — wire correctness.** Dangling `mcp_toolset` rejected on all
-      four spec-resolving surfaces (the public MCP-connector guide pins both
-      reference directions, superseding #66's one-way reading); `mcp_toolset`
-      nested-shape validation, the #26 fail-open class closed on the MCP arm;
-      resolved-config echo for both kinds at render, resolving only entries
-      naming a tool the toolset has. Both rungs bind stored specs, not just the
-      request that writes one. #59's doubt retired — the permission-policies
-      guide states both toolset defaults outright. Verifier PASS WITH FINDINGS
-      (note-severity only). Evidence:
+- [x] **Slice 1 — wire correctness.** Dangling `mcp_toolset` rejected on all four
+      spec-resolving surfaces and on stored specs, `mcp_toolset` nested-shape
+      validation (#26's fail-open class closed on the MCP arm), resolved-config
+      echo for both toolset kinds at render. #66's one-way reading corrected,
+      #59 retired. Verifier PASS WITH FINDINGS (note-severity only). Evidence:
       [materialize.go](./internal/toolset/materialize.go),
       [wire.go](./internal/api/wire.go),
       [mcptoolset_test.go](./internal/api/mcptoolset_test.go).
 - [ ] Slice 2 — `internal/mcp` client + `mcp_catalogs` + the discovery driver.
+      Client landed (streamable HTTP, guarded dialing, bearer injection, paging);
+      still open: `mcp_catalogs` migration + store, the `mcp_exec` driver and its
+      egress check, and the deprecated-HTTP+SSE fallback split out of the client.
 - [ ] Slice 3 — MCP confirmation gating and denial synthesis.
 - [ ] Slice 4 — brain expansion, execution driver, settlement chaining, spill.
 - [ ] Slice 5 — vault credentials, injection, OAuth refresh.
