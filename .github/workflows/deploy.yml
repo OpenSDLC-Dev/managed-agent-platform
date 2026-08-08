@@ -43,12 +43,15 @@ name: deploy
 # The provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'` and
 # each repository is bound to the deploy identity separately, so a fork cannot use
 # it. It also asserts `assertion.ref == 'refs/heads/main'` and
-# `assertion.ref_type == 'branch'`, so a `workflow_dispatch` on any other branch
-# fails at token exchange rather than at the guard step below — which matters
-# because a branch carrying an edited copy of this file could delete that guard
-# along with it. The condition is cloud-side and the provider is not in this
-# repository's Terraform, so the command that set it lives in deploy/gcp/README.md's
-# "Continuous delivery" section, which is the only place it is written down.
+# `assertion.ref_type == 'branch'`. Two controls, in this order: the guard step
+# below runs before the auth action, so an ordinary `workflow_dispatch` from
+# another branch stops there and never reaches a token exchange. The provider
+# condition is the backstop for the case the guard cannot cover — a branch
+# carrying an edited copy of this file, which would delete the guard along with
+# it, and which then fails at the exchange instead. The condition is cloud-side
+# and the provider is not in this repository's Terraform, so the command that set
+# it lives in deploy/gcp/README.md's "Continuous delivery" section, the only place
+# it is written down.
 
 on:
   push:

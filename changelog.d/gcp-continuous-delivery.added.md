@@ -53,12 +53,16 @@
   and the job still fails by name if that secret ever has no readable version.
   The deploy identity is scoped down to what needs it: `id-token: write` is
   granted to the one job rather than to the workflow, and the job's first step
-  refuses a `workflow_dispatch` from any ref but `refs/heads/main`. That guard is
-  honest about its limits — it stops an accident, not an attacker, since a branch
-  that edits the workflow deletes the guard with it — and the cloud-side
-  `assertion.ref` condition that would actually close it is recorded as an
-  **unapplied** open gap, with its command, in
-  [deploy/gcp/README.md](./deploy/gcp/README.md#continuous-delivery).
+  refuses a `workflow_dispatch` from any ref but `refs/heads/main`, before the
+  auth action runs, so an ordinary dispatch from elsewhere never reaches a token
+  exchange. That guard is honest about its limits — it stops an accident, not an
+  attacker, since a branch that edits the workflow deletes the guard with it — so
+  the real control is cloud-side, where an edited workflow cannot reach it: the
+  provider asserts `assertion.ref` and `assertion.ref_type` alongside
+  `repository_owner`, and is **applied to this project**. The command and the
+  read-back are in
+  [deploy/gcp/README.md](./deploy/gcp/README.md#continuous-delivery), since the
+  provider is not in this repository's Terraform.
   CI's `helm` job now renders `staging-values.yaml` itself and asserts two things
   about it. That both halves of the sandbox placement pair reach the executor —
   the chart ships no `values.schema.json`, so `sandboxPlacment:` renders green
