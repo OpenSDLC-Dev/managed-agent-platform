@@ -8,20 +8,18 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
-// DefaultAgentToolsetPolicy is the permission policy a built-in tool resolves to
-// when its agent_toolset entry sets none. The plan states the reference resolves
-// the agent toolset to always_allow; the wire types carry no resolved default to
-// corroborate that, so this is the plan's value, not a recorded one — flip this
-// one constant once a real managed-agents endpoint can be recorded.
-const DefaultAgentToolsetPolicy = domain.PolicyAlwaysAllow
-
-// DefaultMCPToolsetPolicy is the permission policy an MCP tool resolves to when
-// its mcp_toolset entry sets none. Unlike its agent-toolset twin above this one
-// is recorded rather than inferred: "the agent toolset defaults to
-// `always_allow`, and MCP toolsets default to `always_ask`" (the reference's
-// permission-policies guide), so that new tools appearing on an MCP server
-// cannot execute without approval.
-const DefaultMCPToolsetPolicy = domain.PolicyAlwaysAsk
+// The permission policy each toolset kind resolves to when an entry sets none.
+// Both are documented rather than inferred: "Each toolset kind has its own
+// default: the agent toolset defaults to `always_allow`, and MCP toolsets
+// default to `always_ask`", and, for the built-in kind again, "`default_config`
+// is optional. If you omit it, the agent toolset is enabled with the default
+// permission policy, `always_allow`" (the reference's permission-policies
+// guide). MCP asks by default so that a tool newly appearing on someone else's
+// server cannot execute without approval.
+const (
+	DefaultAgentToolsetPolicy = domain.PolicyAlwaysAllow
+	DefaultMCPToolsetPolicy   = domain.PolicyAlwaysAsk
+)
 
 // The two tool types that share the default_config / configs shape. They name
 // themselves in every error this package raises, so a client reading a 400

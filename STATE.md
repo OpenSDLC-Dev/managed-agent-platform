@@ -14,8 +14,10 @@ end of slice 4.
       four spec-resolving surfaces (the public MCP-connector guide pins both
       reference directions, superseding #66's one-way reading); `mcp_toolset`
       nested-shape validation, the #26 fail-open class closed on the MCP arm;
-      resolved-config echo for both toolset kinds at render.
-      Evidence: `internal/toolset/materialize.go`, `internal/api/wire.go`,
+      resolved-config echo for both toolset kinds at render. #59's doubt retired
+      — the permission-policies guide states both toolset defaults outright.
+      Verifier PASS (4 doc-accuracy findings, all fixed). Evidence:
+      `internal/toolset/materialize.go`, `internal/api/wire.go`,
       `internal/api/mcptoolset_test.go`.
 - [ ] Slice 2 — `internal/mcp` client + `mcp_catalogs` + the discovery driver.
 - [ ] Slice 3 — MCP confirmation gating and denial synthesis.

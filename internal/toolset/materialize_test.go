@@ -65,6 +65,19 @@ func TestMaterializeResolvesBothToolsetKinds(t *testing.T) {
 			`"default_config":{"enabled":true,"permission_policy":{"type":"always_ask"}},` +
 			`"mcp_server_name":"s","type":"mcp_toolset"}`,
 	}, {
+		// Only a row written before ValidateMCPToolset existed can carry an
+		// unknown key inside a config object; the echo rebuilds those objects
+		// from the schema's three fields, so it drops — toward the safe
+		// reading, since the tool really does resolve to the default policy the
+		// echo now shows. A stray key at the toolset object's own level rides
+		// along instead, because that object is echoed rather than rebuilt.
+		name: "an unknown nested key is dropped, an unknown top-level key is kept",
+		in: `{"type":"mcp_toolset","mcp_server_name":"s","stray":1,` +
+			`"configs":[{"name":"t","permission_polciy":{"type":"always_allow"}}]}`,
+		want: `{"configs":[{"enabled":true,"name":"t","permission_policy":{"type":"always_ask"}}],` +
+			`"default_config":{"enabled":true,"permission_policy":{"type":"always_ask"}},` +
+			`"mcp_server_name":"s","stray":1,"type":"mcp_toolset"}`,
+	}, {
 		name: "a custom tool is not a toolset and passes through untouched",
 		in:   `{"type":"custom","name":"x","description":"d","input_schema":{"type":"object"}}`,
 		want: `{"type":"custom","name":"x","description":"d","input_schema":{"type":"object"}}`,

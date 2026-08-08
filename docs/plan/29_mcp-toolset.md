@@ -252,8 +252,11 @@ model before they can be gated and executed):
    MCP arm because `parseTools` checks only `mcp_server_name`); and resolved-config echo
    for **both** toolset kinds, applied non-mutatingly in the two render funnels
    (`renderAgent`, `renderSession`) so stored bytes stay verbatim and pre-existing rows
-   echo resolved without a backfill — and so the resolved default policy stays a
-   constant to flip (#59) rather than a value frozen into old rows.
+   echo resolved without a backfill — and so each kind's resolved default policy
+   stays a single constant rather than a value frozen into old rows. Both
+   defaults turn out to be documented outright by the permission-policies guide,
+   which retires the doubt #59 was opened on; that entry is updated in the same
+   slice.
 2. **`internal/mcp` + catalog** — the client wrapper, `mcp_catalogs` migration + store,
    the `mcp_exec` discovery driver **including the MCP-client egress policy check**
    (limited networking is never fail-open, even one slice long; before slice 5 the

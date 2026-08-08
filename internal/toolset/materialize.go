@@ -84,9 +84,16 @@ func MaterializeTools(tools []json.RawMessage) []json.RawMessage {
 // values frozen into old rows.
 //
 // It fills in what was omitted and validates nothing: a supplied value is
-// echoed exactly as stored, malformed or not. Rejecting malformed input is the
-// API boundary's job (Validate, ValidateMCPToolset), and a read of an older row
-// must not fail because of what a write once let through.
+// echoed as stored, malformed or not. Rejecting malformed input is the API
+// boundary's job (Validate, ValidateMCPToolset), and a read of an older row
+// must not fail because of what a write once let through. One thing does not
+// survive: an unknown *key* nested inside default_config or a configs[] entry
+// is dropped, because those two objects are rebuilt from the three fields the
+// schema defines. Only a row written before that validation existed can carry
+// one, an unknown key at the toolset object's own level is preserved, and the
+// drop is toward the safe reading — a stored `permission_polciy` disappears
+// from the echo and the tool renders with the default policy it actually
+// resolves to.
 func Materialize(raw json.RawMessage) json.RawMessage {
 	top, ok := jsonObject(raw)
 	if !ok {
