@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -32,6 +33,12 @@ type agentJSON struct {
 func renderAgent(id, name string, version int64, spec agentSpec, metadata map[string]string,
 	createdAt, updatedAt time.Time, archivedAt *time.Time) agentJSON {
 	spec.Normalize()
+	// The response carries resolved toolset configuration: both toolset kinds
+	// come back with configs and default_config present and every enabled /
+	// permission_policy inside them concrete. Resolution happens here rather
+	// than at write, so the store keeps the client's own bytes — see
+	// toolset.Materialize.
+	spec.Tools = toolset.MaterializeTools(spec.Tools)
 	if metadata == nil {
 		metadata = map[string]string{}
 	}
