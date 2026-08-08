@@ -222,8 +222,12 @@ func TestLimitedNetworkingRefusesAnMCPServerItDoesNotName(t *testing.T) {
 	if got.status != "failed" {
 		t.Fatalf("row = %+v, want the dial refused by the networking policy", got)
 	}
-	if !strings.Contains(got.reason, "networking policy") {
-		t.Errorf("reason = %q, want it to name the policy that refused", got.reason)
+	// The `limited` wording specifically, not merely "networking policy": the
+	// other refusal this check can produce says that too, and a test that
+	// accepted either would let the two swap places unnoticed.
+	if !strings.Contains(got.reason, "`limited` networking policy") ||
+		!strings.Contains(got.reason, "allowed_hosts") {
+		t.Errorf("reason = %q, want it to name `limited` and the list that would admit the host", got.reason)
 	}
 	if len(got.tools) != 0 {
 		t.Errorf("tools = %v, want none: the server was never reached", got.tools)
@@ -241,12 +245,18 @@ func TestLimitedNetworkingRefusesAnMCPServerItDoesNotName(t *testing.T) {
 // it. Reading a missing discriminator as the wire default would make exactly
 // that row the one admitted everywhere, so an unrecognized policy on a cloud
 // environment refuses, the way `gate.newPolicy` does.
+//
+// The config deliberately satisfies *both* of `limited`'s admitting
+// conditions — the host is in allowed_hosts and allow_mcp_servers is set — so
+// the refusal can only be coming from the missing discriminator. A fixture
+// that named neither would be refused by a check that had merely fallen
+// through to the allow-list, and would prove nothing about the default.
 func TestACloudEnvironmentNamingNoPolicyRefusesRatherThanAdmits(t *testing.T) {
 	url := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
 	h := mcpHarness(t)
 	if _, err := h.pool.Exec(context.Background(),
 		`UPDATE environments SET config = $2::jsonb WHERE id = $1`, h.envID.String(),
-		`{"type":"cloud","networking":{"allowed_hosts":["api.corp.example"],"allow_mcp_servers":false}}`); err != nil {
+		`{"type":"cloud","networking":{"allowed_hosts":["127.0.0.1"],"allow_mcp_servers":true}}`); err != nil {
 		t.Fatalf("write the malformed config: %v", err)
 	}
 	h.declareMCPServers(t, [2]string{"github", url})
@@ -254,8 +264,20 @@ func TestACloudEnvironmentNamingNoPolicyRefusesRatherThanAdmits(t *testing.T) {
 
 	h.stepOnce(t)
 
-	if got := h.catalog(t)["github"]; got.status != "failed" {
-		t.Errorf("row = %+v, want the dial refused: the environment names no policy the platform recognizes", got)
+	got := h.catalog(t)["github"]
+	if got.status != "failed" {
+		t.Fatalf("row = %+v, want the dial refused: the environment names no policy the platform recognizes", got)
+	}
+	// The two refusals are told apart, because one of them has no advice an
+	// operator can act on. This config carries both admitting fields — the host
+	// is in allowed_hosts under `limited`'s own reading — so a reason telling
+	// its owner to add the host to that list sends them to a list nothing
+	// consults, and to a change they have already made.
+	if strings.Contains(got.reason, "allowed_hosts") {
+		t.Errorf("reason = %q, want it to blame the unrecognized policy rather than a list that is not consulted", got.reason)
+	}
+	if !strings.Contains(got.reason, "does not recognize") {
+		t.Errorf("reason = %q, want it to name the unrecognized policy as the cause", got.reason)
 	}
 }
 

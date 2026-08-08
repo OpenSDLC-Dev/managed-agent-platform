@@ -62,6 +62,10 @@ type Content struct {
 // attempt bounded only on its own, so without an aggregate budget a server that
 // keeps asking holds the caller — and the queue lease behind it — for ten times
 // a single request's cap.
+//
+// Two minutes because that is what a tool call gets on this platform already
+// (toolset.DefaultTimeout), and an MCP tool is a tool: a remote one should not
+// outlive a local one by default.
 const CallTimeout = 2 * time.Minute
 
 // CallTool runs one tool on the connected server and returns its answer.
