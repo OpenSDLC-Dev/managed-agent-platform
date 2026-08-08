@@ -1217,7 +1217,7 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 //
 // Every term only ever adds a timeout. That is what lets the mark be in-pod
 // state at all — the thing docker keeps out of its container on purpose
-// (docs/HISTORY.md § "`internal/sandbox` — the hands (slice 6, first part)").
+// (docs/history/2026-07.md § "`internal/sandbox` — the hands (slice 6, first part)").
 // Kubernetes exposes no out-of-band handle on a running exec, so this backend's
 // verdict already rested on in-pod state (the pid file) before the mark existed;
 // what the mark adds is a tenant that forges it mislabelling its own tool call,

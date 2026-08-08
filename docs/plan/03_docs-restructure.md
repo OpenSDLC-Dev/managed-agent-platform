@@ -4,7 +4,7 @@ status: archived
 
 > Archived 2026-07-18: completed. All four workstreams delivered across PRs #101
 > (ARCHITECTURE.md + HISTORY slimming), #102 (STATE.md as active-work tracker), and the
-> issue-triage PR; the progress summary is in docs/HISTORY.md, the narratives in
+> issue-triage PR; the progress summary is in docs/history/2026-07.md, the narratives in
 > CHANGELOG.md.
 
 # Docs restructure: ARCHITECTURE.md, HISTORY slimming, STATE.md as work tracker, issue triage

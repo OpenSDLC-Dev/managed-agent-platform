@@ -8,7 +8,7 @@ issue: "#55"
 > **Archived 2026-07-23, completed (Files half of #55).** All four slices landed (PRs
 > #156–#158 plus the slice-4 BYOC-worker PR). The as-built system is in
 > docs/ARCHITECTURE.md; the delivery narrative in CHANGELOG.md; acceptance-run records and
-> this plan's progress summary in docs/HISTORY.md. #55 stays open for its other half —
+> this plan's progress summary in docs/history/2026-07.md. #55 stays open for its other half —
 > git/repo mounting (`github_repository` resources). Retained for the rationale below,
 > consulted before large changes.
 
@@ -257,7 +257,7 @@ request/session/file ids) **and** OTel metrics/spans, mirroring the density alre
    environment-scoped authorization check (decision 10);
    `internal/worker/files.go` wire-only twin with the same sentinel and metrics; E2E-3
    manual acceptance (worker on the host materializes a mount; transcript to
-   docs/HISTORY.md); README/ARCHITECTURE updates for the landed feature; archive this
+   docs/history/2026-07.md); README/ARCHITECTURE updates for the landed feature; archive this
    plan, post the Files-half completion on #55 (the issue stays open for git mounting).
    **Acceptance:** `ant beta:worker`-equivalent BYOC run shows the mounted file inside
    the sandbox; the env-key lane rejects non-content file paths.
@@ -272,7 +272,7 @@ request/session/file ids) **and** OTel metrics/spans, mirroring the density alre
   (API upload → session mount → executor materialization → agent file-tool read →
   answer).
 - **E2E-3 (BYOC, manual):** a worker outside the platform materializes the same mount
-  wire-only; transcript recorded in docs/HISTORY.md (slice 4).
+  wire-only; transcript recorded in docs/history/2026-07.md (slice 4).
 
 ## Observability
 

@@ -1,8 +1,13 @@
 ---
-status: in-progress
+status: archived
 ---
 
 # Plan 28 — changelog and history slimming
+
+> Archived 2026-08-08 — completed. The delivery record — including the one
+> acceptance figure that landed off its estimate — is
+> [docs/HISTORY.md](../HISTORY.md) § "Changelog and history slimming
+> (plan 28)"; the narrative is in CHANGELOG.md.
 
 ## Why
 
@@ -59,10 +64,16 @@ user asked for the slimming on 2026-08-08, choosing the shape below.
    per release for anchors that were never broken.
 5. **HISTORY splits by period.** docs/HISTORY.md keeps its intro, the
    Delivery-slices table, and the sections of the current month; older
-   sections move verbatim to `docs/history/<YYYY-MM>.md` by the date each
-   section's heading carries, with a pointer paragraph in HISTORY.md naming
-   the archive files. Section-level citations from other docs re-point in the
-   same PR. (Manual move with a byte-count check in the PR — HISTORY has no
+   sections move to `docs/history/<YYYY-MM>.md` by the date each section's
+   heading carries — decision 1's lesson applies here too: relative links
+   re-based for the new directory (`](../` up one more, then `](./` to
+   `](../`), byte-reversibly — with a pointer paragraph in HISTORY.md naming
+   the archive files. Section-level citations from other docs re-point in
+   the same PR, except inside archives themselves — `docs/changelog/`
+   (bytes frozen by the inversion guard) and prior `docs/history/` files —
+   whose text records its era as written; readers there resolve through
+   HISTORY.md's pointer.
+   (Manual move with a byte-identity check in the PR — HISTORY has no
    parsing tool to extend, and building one for a two-file split is exactly
    the speculative tooling CLAUDE.md's simplicity rule forbids.)
 

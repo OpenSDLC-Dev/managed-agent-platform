@@ -7,7 +7,7 @@ issue: "#155"
 
 > Archived 2026-07-23: completed. Delivered in one PR
 > ([#162](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/162)); the delivery record is in
-> [docs/HISTORY.md](../HISTORY.md) § "Skill archive integrity (plan 10)", the narrative in
+> [docs/history/2026-07.md](../history/2026-07.md) § "Skill archive integrity (plan 10)", the narrative in
 > CHANGELOG.md. **Everything below describes the state of the repository *before* that PR** — read it
 > as the argument for the change, not a description of the result — "The change" and "Acceptance
 > criteria" are what was *planned*, not a report of what shipped (that is CHANGELOG.md). The one

@@ -7,7 +7,7 @@ issue: "#92"
 
 > Archived 2026-07-23: completed. Delivered in one PR
 > ([#164](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/164)); the narrative is in
-> CHANGELOG.md and the decisions evaluated and rejected are in [docs/HISTORY.md](../HISTORY.md)
+> CHANGELOG.md and the decisions evaluated and rejected are in [docs/history/2026-07.md](../history/2026-07.md)
 > § "Brain turn-fault correlation (plan 09)". **Everything below describes the state of the
 > repository *before* that PR** — read it as the argument for the change, not a description of the
 > result.

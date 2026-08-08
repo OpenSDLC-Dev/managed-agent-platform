@@ -7,7 +7,7 @@ issue: "#27"
 
 > Archived 2026-07-20: completed. Delivered in PR
 > [#122](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/122); the progress summary is
-> in [docs/HISTORY.md](../HISTORY.md) § "Work Stop 204 (plan 04)", the narrative in CHANGELOG.md.
+> in [docs/history/2026-07.md](../history/2026-07.md) § "Work Stop 204 (plan 04)", the narrative in CHANGELOG.md.
 > **Everything below describes the state of the repository *before* that PR** — in particular, the
 > registry entry it calls wrong has since been replaced, so read it as the argument for the change
 > rather than as a description of the code.

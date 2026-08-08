@@ -7,7 +7,7 @@ issue: "#120"
 
 > Archived 2026-07-20: completed. Delivered in PR
 > [#131](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/131); the verification outcome
-> is in [docs/HISTORY.md](../HISTORY.md) § "anthropic-sdk-go v1.58.0 bump (#120)", the narrative in
+> is in [docs/history/2026-07.md](../history/2026-07.md) § "anthropic-sdk-go v1.58.0 bump (#120)", the narrative in
 > CHANGELOG.md. **Everything below describes the state of the repository *before* that PR** — read it
 > as the argument for doing the verification, not as a description of the result.
 
@@ -59,7 +59,7 @@ version leaves docs asserting evidence that may no longer be where they say it i
 
 ## Acceptance
 
-- The three questions above answered with file:line evidence, recorded in docs/HISTORY.md as a
+- The three questions above answered with file:line evidence, recorded in docs/history/2026-07.md as a
   verification record (that file's remit covers exactly this, plus any decisions rejected).
 - `make verify` green, and no code change required — or, if one is, it lands in the same PR.
 - Every live pinned-version label updated, and every `file:line` the Stop Work divergence cites
