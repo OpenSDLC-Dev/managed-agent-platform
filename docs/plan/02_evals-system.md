@@ -9,7 +9,7 @@ The plan for [#30](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues
 phase 1: an end-to-end **eval suite** that drives the whole stack against a real model
 endpoint, plus the ten regression tasks it runs. Phase 1 is delivered — all ten tasks run
 10/10 green live via `make eval`; the delivery narrative lives in
-[HISTORY.md](../HISTORY.md) and [CHANGELOG.md](../../CHANGELOG.md), and the leftovers are
+[docs/history/2026-07.md](../history/2026-07.md) and [CHANGELOG.md](../../CHANGELOG.md), and the leftovers are
 issues (#96 and phase 1.5 on #30; #99 closed the grader-rigor gaps).
 
 ## Why
@@ -83,7 +83,7 @@ the live-test tier + `internal/modeltest` (the opt-in contract, removing the `.e
 auto-opt-in defect); OTel traces and metrics on the execution chain; the OTel log bridge
 (split out of the metrics PR); the harness + tasks 1–3 + `make eval`; and tasks 4–10 with
 the wrap-up. The delivery record — what each PR actually shipped and found — lives in
-[HISTORY.md](../HISTORY.md) and [CHANGELOG.md](../../CHANGELOG.md), not here.
+[docs/history/2026-07.md](../history/2026-07.md) and [CHANGELOG.md](../../CHANGELOG.md), not here.
 
 ## The ten tasks
 

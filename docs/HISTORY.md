@@ -57,12 +57,17 @@ is disclosed in the PR as defense-in-depth.
 Slice 2 (the archiving PR): the 31 sections of 2026-07 (1,327 lines) moved
 to docs/history/2026-07.md by a one-off scripted manual move —
 recomposition from the two output files reproduces the pre-split file
-byte-for-byte — links re-based the same way, and 69 citations of moved
-sections re-pointed in docs/DIVERGENCES.md. Citations inside the
-docs/changelog/ archives stay frozen (the inversion guard pins their
-bytes) and resolve through this file's pointer paragraph. The split left
-HISTORY.md at 1,829 lines, not the plan's ~1,000 estimate — 2026-08 alone
-is the heaviest month yet, and the figure falls as it archives in turn.
+byte-for-byte — links re-based the same way, and 96 references to moved
+sections re-pointed: 69 citations in docs/DIVERGENCES.md, 24 across
+thirteen archived plan files, one each in docs/ARCHITECTURE.md and
+README.md, and one Go comment (internal/sandbox/k8s) — the wider net after
+the single-reviewer pass caught the quoted-grammar sweep missing every
+variant phrasing, the v0.2.0 lesson again. Citations inside archives stay as written
+(docs/changelog/ bytes are pinned by the inversion guard; a docs/history/
+file records its era) and resolve through this file's pointer paragraph. The split left
+HISTORY.md at 1,828 lines (`wc -l`), not the plan's ~1,000 estimate —
+2026-08 alone is the heaviest month yet, and the figure falls as it
+archives in turn.
 Rejected en route: a citation sweep at changelog-archive time (the stubs
 keep anchors resolvable — plan 28 decision 4), and a shipped
 HISTORY-split tool (speculative for a two-file split).

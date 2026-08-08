@@ -7,7 +7,7 @@ issue: "#26"
 
 > Archived 2026-07-22: completed. Delivered in one PR
 > ([#151](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/151)); the delivery record is in
-> [docs/HISTORY.md](../HISTORY.md) § "Reject unknown agent_toolset fields (plan 07)", the narrative in
+> [docs/history/2026-07.md](../history/2026-07.md) § "Reject unknown agent_toolset fields (plan 07)", the narrative in
 > CHANGELOG.md. **Everything below describes the state of the repository *before* that PR** — read it
 > as the argument for the change, not a description of the result.
 

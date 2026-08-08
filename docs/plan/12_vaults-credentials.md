@@ -6,7 +6,7 @@ issue: "#50"
 # Vaults + egress-time credential injection (plan 12)
 
 > **Archived 2026-07-25 — all four slices delivered and the end-to-end acceptance passed.**
-> The delivery record and the acceptance transcript are in docs/HISTORY.md ("Vaults plan —
+> The delivery record and the acceptance transcript are in docs/history/2026-07.md ("Vaults plan —
 > archived" and "Vaults acceptance"); the as-built system is docs/ARCHITECTURE.md. The two
 > deliberately-split-out follow-ons stay open as their own issues: BYOC gate delivery (#165)
 > and TLS-terminating in-sandbox substitution (#166). This file is the original design plan,
@@ -203,7 +203,7 @@ documented, deliberate gap, not an oversight.
 decision's "random per credential-resolution": the placeholder is **deterministic** —
 `vltph_` + 128 bits of SHA-256 over `(session_id, secret_name)` — so it is stable across a
 session's create-bound re-provisions and the gate can recover the exact token; see
-`internal/egress/engine.go` and docs/HISTORY.md.)* This needs the one seam neither backend has today: an `Env` field on
+`internal/egress/engine.go` and docs/history/2026-07.md.)* This needs the one seam neither backend has today: an `Env` field on
 `sandbox.Spec` threaded into the Docker container config and the K8s pod spec. The
 substitution engine — placeholder registry, `allowed_hosts` matcher (exact / `*.`
 subdomain-not-apex), `injection_location` scoping, host-unreachable diagnostics
@@ -310,7 +310,7 @@ credential and assert both revocation halves — a fresh resolution mints no pla
 **and** a request reusing the pre-archive placeholder is no longer substituted (the gate
 substitutes from a config the controlplane renders from current rows at fetch time, so a
 config fetched after the archive no longer carries the credential or its purged
-ciphertext). Record the transcript in docs/HISTORY.md as the acceptance run.
+ciphertext). Record the transcript in docs/history/2026-07.md as the acceptance run.
 
 ## Observability
 

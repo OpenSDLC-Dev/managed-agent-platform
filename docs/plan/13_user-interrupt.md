@@ -7,7 +7,7 @@ issue: https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/68
 
 > Archived on landing: the decisions below and the code that implements them are one PR.
 > The narrative is in CHANGELOG.md, the rejected alternatives in
-> [docs/HISTORY.md](../HISTORY.md) § "`user.interrupt` semantics — wire resolution and
+> [docs/history/2026-07.md](../history/2026-07.md) § "`user.interrupt` semantics — wire resolution and
 > rejected alternatives", the new inference in
 > [docs/DIVERGENCES.md](../DIVERGENCES.md). **"The gap" and "What has to be resolved" below
 > describe the state of the repository *before* that PR** — read them as the argument for
@@ -96,7 +96,7 @@ first and the claimant commits nothing; claimant first and the interrupt answers
 it left outstanding.
 
 The alternative — leaving the items alone and teaching the brain to notice an interrupt at
-settlement time — is rejected in docs/HISTORY.md.
+settlement time — is rejected in docs/history/2026-07.md.
 
 ## Design
 

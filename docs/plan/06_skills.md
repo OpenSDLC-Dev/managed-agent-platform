@@ -8,7 +8,7 @@ issue: "#54"
 > **Archived 2026-07-22, completed.** All five slices landed (PRs #145–#148 plus the
 > slice-5 injection PR). The as-built system is in docs/ARCHITECTURE.md; the delivery
 > narrative in CHANGELOG.md; acceptance-run records and this plan's progress summary in
-> docs/HISTORY.md. Retained for the rationale below, consulted before large changes.
+> docs/history/2026-07.md. Retained for the rationale below, consulted before large changes.
 
 The plan for [#54](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/54): lift
 the reserved skills seam (`skill_` prefix, the `parseSkills` normalization that accepts
@@ -197,7 +197,7 @@ with code; the listed DIVERGENCES.md entries land in the slice that creates the 
    frontmatter validation; all nine endpoints; per-resource list limits; wire error
    shapes; API upload/download logs+metrics. Acceptance: contract tests modeled on
    `agents_test.go`; CI compose smoke extended with the curl skills round-trip (E2E-1);
-   a real `ant beta:skills` zip-form transcript recorded in docs/HISTORY.md.
+   a real `ant beta:skills` zip-form transcript recorded in docs/history/2026-07.md.
 3. **Anthropic prebuilt import** — the run-once importer, date versions, idempotent
    upsert, import summary logging; self-authored Apache-2.0 CI fixture skills; license
    stance documented. Acceptance: importing a real checkout locally shows the four
@@ -209,7 +209,7 @@ with code; the listed DIVERGENCES.md entries land in the slice that creates the 
    overrides; materialization spans/metrics/logs on both halves. Acceptance: executor
    and worker contract tests; an end-to-end compose session whose bash tool `cat`s a
    materialized SKILL.md; a real `ant beta:worker poll` transcript (the reference
-   worker's own SetupSkills against this platform) recorded in docs/HISTORY.md (E2E-3).
+   worker's own SetupSkills against this platform) recorded in docs/history/2026-07.md (E2E-3).
 5. **Brain injection + closure** — `buildRequest` reads `agent.Skills`, looks up
    name/description from the store, appends the Level-1 block to `System` (inferred
    template: a skills list of `name - description` lines plus a usage note pointing at
@@ -231,7 +231,7 @@ with code; the listed DIVERGENCES.md entries land in the slice that creates the 
   anthropics/skills document skill when a checkout is present locally.
 - **E2E-3 (BYOC, manual acceptance)** — the real `ant beta:worker poll` (whose SDK
   internals run SetupSkills) against this platform: the strongest wire evidence for the
-  env-key lane and `/content`; transcript recorded in docs/HISTORY.md.
+  env-key lane and `/content`; transcript recorded in docs/history/2026-07.md.
 
 ## Observability
 

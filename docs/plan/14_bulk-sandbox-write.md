@@ -6,7 +6,7 @@ issue: "#206"
 # A bulk sandbox write — N files for one exec
 
 > Archived on landing: the decisions below and the code that implements them are one PR. The
-> narrative is in CHANGELOG.md and the delivery record in [docs/HISTORY.md](../HISTORY.md) §
+> narrative is in CHANGELOG.md and the delivery record in [docs/history/2026-07.md](../history/2026-07.md) §
 > "A bulk sandbox write (plan 14)". **"The gap" describes the state of the repository *before*
 > that PR** — read it as the argument for the design, not a description of the result. "Design"
 > and "Acceptance" are what was *planned*; what shipped is CHANGELOG.md.

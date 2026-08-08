@@ -6,8 +6,8 @@ status: archived
 
 **Archived 2026-08-08 — completed.** Slice 1 landed in #337, slice 2 in the
 archiving PR. One acceptance figure landed off its estimate: the split left
-HISTORY.md at 1,829 lines, not ~1,000 — 2026-08 alone is the project's
-heaviest month, and the figure falls as it archives in turn. The delivery
+HISTORY.md at 1,828 lines (`wc -l`), not ~1,000 — 2026-08 alone is the
+project's heaviest month, and the figure falls as it archives in turn. The delivery
 record is docs/HISTORY.md § "Changelog and history slimming (plan 28)".
 
 ## Why
@@ -70,8 +70,10 @@ user asked for the slimming on 2026-08-08, choosing the shape below.
    re-based for the new directory (`](../` up one more, then `](./` to
    `](../`), byte-reversibly — with a pointer paragraph in HISTORY.md naming
    the archive files. Section-level citations from other docs re-point in
-   the same PR, except inside `docs/changelog/` archives, whose bytes the
-   inversion guard freezes (readers resolve through HISTORY.md's pointer).
+   the same PR, except inside archives themselves — `docs/changelog/`
+   (bytes frozen by the inversion guard) and prior `docs/history/` files —
+   whose text records its era as written; readers there resolve through
+   HISTORY.md's pointer.
    (Manual move with a byte-identity check in the PR — HISTORY has no
    parsing tool to extend, and building one for a two-file split is exactly
    the speculative tooling CLAUDE.md's simplicity rule forbids.)

@@ -5,7 +5,7 @@ status: archived
 # Bump anthropic-sdk-go v1.58.0 → v1.59.0
 
 > Archived on landing: the bump and its verification are one PR. The measurements are in
-> [docs/HISTORY.md](../HISTORY.md) § "anthropic-sdk-go v1.59.0 bump — wire-schema verification
+> [docs/history/2026-07.md](../history/2026-07.md) § "anthropic-sdk-go v1.59.0 bump — wire-schema verification
 > record", the narrative in CHANGELOG.md. **Everything below describes the state of the
 > repository *before* that PR** — read it as the argument for doing the verification, not as a
 > description of the result.
@@ -67,7 +67,7 @@ A third, specific to this bump: a constant whose *Go identifier* is unchanged bu
 
 ## Acceptance
 
-- The three questions answered with file:line evidence, recorded in docs/HISTORY.md as a
+- The three questions answered with file:line evidence, recorded in docs/history/2026-07.md as a
   verification record.
 - `make verify` green, and no code change required — or, if one is, it lands in the same PR
   with a test that fails before it.
