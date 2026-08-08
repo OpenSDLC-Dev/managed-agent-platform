@@ -150,29 +150,52 @@ jobs:
       # becomes `image.tag` and the `gate:` reference below. Deriving it twice is
       # how a deploy comes to name an image that was never pushed.
       #
-      # --service-account is REQUIRED here and is not a hardening preference. A
-      # project created under an organisation no longer gets the automatic Editor
-      # grant on the Compute Engine default service account, so the build Cloud
-      # Build would otherwise run as cannot even read the source tarball
-      # `builds submit` just uploaded:
+      # Built on the runner rather than submitted to Cloud Build, and that is a
+      # correction rather than a preference: the first real run of this workflow
+      # failed here, in under a second, before a byte was uploaded —
       #
-      #   754963270337-compute@developer.gserviceaccount.com does not have
-      #   storage.objects.get access to .../hh-opensdlc-managed-agents_cloudbuild
+      #   ERROR: (gcloud.builds.submit) The user is forbidden from accessing the
+      #   bucket [hh-opensdlc-managed-agents_cloudbuild]. Please check your
+      #   organization's policy or if the user has the
+      #   "serviceusage.services.use" permission.
       #
-      # `cd-deployer@` is the identity this job already holds, and it carries the
-      # two grants that make a build work — roles/storage.admin on that
-      # `_cloudbuild` source bucket, and roles/logging.logWriter on the project.
-      # Naming a service account is also what makes `options.logging:
-      # CLOUD_LOGGING_ONLY` mandatory in cloudbuild.yaml: with a user-specified
-      # identity the API refuses a build that would write to the default logs
-      # bucket. Both are recorded in deploy/gcp/README.md.
+      # — and it kept failing with roles/storage.admin on that bucket AND
+      # roles/serviceusage.serviceUsageConsumer on the project, which is the
+      # documented remedy. `builds submit` stages the source as the CALLER, not
+      # as the build's --service-account, so the manual runs that worked proved
+      # nothing about this one: there the caller was a human with Owner.
+      #
+      # Building here needs exactly one permission the job already holds,
+      # artifactregistry.writer, and no bucket, no staging upload and no Cloud
+      # Build API at all. deploy/gcp/cloudbuild.yaml stays as the manual path's
+      # build definition; the two must be kept saying the same thing, which is
+      # why the tags below are written out rather than inferred.
+      #
+      # DOCKER_BUILDKIT is not set: Docker on ubuntu-latest already defaults to
+      # BuildKit, which is what `FROM --platform=$BUILDPLATFORM` in the
+      # Dockerfile requires. cloudbuild.yaml has to ask for it because the
+      # classic builder is what `gcr.io/cloud-builders/docker` still runs.
       - name: Build and push the images
         run: |
-          gcloud builds submit --config deploy/gcp/cloudbuild.yaml \
-            --project="$GCP_PROJECT" \
-            --service-account="projects/$GCP_PROJECT/serviceAccounts/$DEPLOY_SA" \
-            --substitutions="_IMAGE_PREFIX=$ARTIFACT_REGISTRY,_TAG=$GITHUB_SHA" \
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+          # One build, three tags — so controlplane, brain and executor resolve
+          # to a single digest and cannot drift apart between components.
+          docker build \
+            -t "$ARTIFACT_REGISTRY/controlplane:$GITHUB_SHA" \
+            -t "$ARTIFACT_REGISTRY/brain:$GITHUB_SHA" \
+            -t "$ARTIFACT_REGISTRY/executor:$GITHUB_SHA" \
             .
+          # The gate is a separate image: the per-session egress sidecar needs
+          # iptables and a dedicated UID that do not belong in the server image.
+          # Reuses the layers just built, so it is cheap.
+          docker build --target gate \
+            -t "$ARTIFACT_REGISTRY/gate:$GITHUB_SHA" \
+            .
+
+          for component in controlplane brain executor gate; do
+            docker push "$ARTIFACT_REGISTRY/$component:$GITHUB_SHA"
+          done
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
