@@ -1,8 +1,11 @@
 // Command executor runs the platform-managed sandbox worker: it claims
 // tool_exec work from the shared Postgres queue, runs the built-in toolset
 // inside per-session Docker containers, and appends the agent.tool_result
-// events the brain resumes on. Disposable "hands" — run as many as needed;
-// a container dying is one tool-call error, not a lost session.
+// events the brain resumes on. It also claims the kinds that need no sandbox
+// at all — web_exec, outputs_harvest and mcp_exec — on both environment
+// kinds, since those run in this process rather than in a session's hands.
+// Disposable "hands" — run as many as needed; a container dying is one
+// tool-call error, not a lost session.
 // Configuration is environment-driven:
 //
 //	DATABASE_URL             Postgres DSN (required; same database as the

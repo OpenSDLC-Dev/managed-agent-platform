@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -273,11 +275,17 @@ func TestCallToolFallsBackToTheStructuredAnswer(t *testing.T) {
 // that fallback: a server that follows the recommendation sends both, and
 // appending the structured value as well would show the model the same answer
 // twice.
+//
+// The server's text deliberately is not the structured value's JSON. The
+// recommendation is that a server send both, not that the text be a rendering
+// of the structure — and with the two identical, a fallback that fired
+// unconditionally and *replaced* the text would be indistinguishable from one
+// that never fired at all.
 func TestCallToolKeepsTheServersOwnTextOverTheStructuredAnswer(t *testing.T) {
 	t.Parallel()
 	url, _ := serveToolCall(t, func(json.RawMessage) map[string]any {
 		return map[string]any{
-			"content":           []any{map[string]any{"type": "text", "text": `{"stars":42}`}},
+			"content":           []any{map[string]any{"type": "text", "text": "42 stars"}},
 			"structuredContent": map[string]any{"stars": 42},
 		}
 	})
@@ -287,7 +295,10 @@ func TestCallToolKeepsTheServersOwnTextOverTheStructuredAnswer(t *testing.T) {
 		t.Fatalf("CallTool: %v", err)
 	}
 	if len(res.Content) != 1 {
-		t.Errorf("content = %+v, want the server's one block and no duplicate", res.Content)
+		t.Fatalf("content = %+v, want the server's one block and no duplicate", res.Content)
+	}
+	if got := res.Content[0]; got.Type != "text" || got.Text != "42 stars" {
+		t.Errorf("content = %+v, want the server's own text rather than the structured value", got)
 	}
 }
 
@@ -319,6 +330,72 @@ func TestCallToolDropsBlocksAToolResultCannotCarry(t *testing.T) {
 	}
 }
 
+// TestCallToolFailsWhenEveryBlockOfTheAnswerIsDropped is the case dropping
+// blocks quietly cannot cover: with nothing left, the caller cannot tell an
+// answer this platform could not read from a tool that legitimately returned
+// nothing, and only one of those two is something the model should act on.
+func TestCallToolFailsWhenEveryBlockOfTheAnswerIsDropped(t *testing.T) {
+	t.Parallel()
+	url, _ := serveToolCall(t, func(json.RawMessage) map[string]any {
+		return map[string]any{"content": []any{
+			map[string]any{"type": "tool_use", "id": "t1", "name": "nested"},
+			map[string]any{"type": "resource"},
+		}}
+	})
+
+	res, err := connect(t, url).CallTool(context.Background(), "echo", json.RawMessage(`{"q":"x"}`))
+	if err == nil {
+		t.Fatalf("CallTool reported success for an answer it could not read: %+v", res)
+	}
+	if !strings.Contains(err.Error(), "cannot carry") {
+		t.Errorf("error %q does not say the blocks were untranslatable", err)
+	}
+}
+
+// TestCallToolStillSucceedsWhenATrulyEmptyAnswerComesBack is the other side of
+// that line, and the reason the check counts the server's blocks rather than
+// this package's: a tool is allowed to return nothing, and a call that failed
+// whenever Content came back empty would fail every one of those.
+func TestCallToolStillSucceedsWhenATrulyEmptyAnswerComesBack(t *testing.T) {
+	t.Parallel()
+	url, _ := serveToolCall(t, func(json.RawMessage) map[string]any {
+		return map[string]any{"content": []any{}}
+	})
+
+	res, err := connect(t, url).CallTool(context.Background(), "echo", json.RawMessage(`{"q":"x"}`))
+	if err != nil {
+		t.Fatalf("CallTool failed a tool that returned nothing: %v", err)
+	}
+	if len(res.Content) != 0 || res.IsError {
+		t.Errorf("result = %+v, want an empty successful answer", res)
+	}
+}
+
+// TestCallToolRefusesAnInputRequiredAnswerItCannotFulfil pins the one multi
+// round-trip shape that reaches this package. The SDK's client middleware
+// drives its retry loop off a non-nil `inputRequests` map, so an answer that
+// omits the key entirely is handed back untouched — carrying no output, from a
+// tool that never ran. Left alone it is a successful empty result, which is the
+// one reading of it the model can neither detect nor recover from.
+func TestCallToolRefusesAnInputRequiredAnswerItCannotFulfil(t *testing.T) {
+	t.Parallel()
+	url, _ := serveToolCall(t, func(json.RawMessage) map[string]any {
+		return map[string]any{
+			"content":      []any{},
+			"resultType":   "input_required",
+			"requestState": "opaque",
+		}
+	})
+
+	res, err := connect(t, url).CallTool(context.Background(), "echo", json.RawMessage(`{"q":"x"}`))
+	if err == nil {
+		t.Fatalf("CallTool reported success for a tool that never ran: %+v", res)
+	}
+	if !strings.Contains(err.Error(), "further input") {
+		t.Errorf("error %q does not say why the call could not complete", err)
+	}
+}
+
 // TestCallToolOnAConnectionThatWasNeverOpened pins that this package's own
 // misuse is reported as such rather than as a nil dereference in an executor
 // shared by every session on the host.
@@ -333,11 +410,53 @@ func TestCallToolOnAConnectionThatWasNeverOpened(t *testing.T) {
 	}
 }
 
+// TestConnectFailureRedactsCredentialsInTheURL pins that a failed connection
+// does not carry the endpoint's password. An `mcp_servers` entry's url is
+// customer-supplied and may hold userinfo, and the executor's discovery pass
+// stores this error text in a database column — so the wrapper naming the
+// endpoint is the one place a secret could enter it. net/http already redacts
+// its own half of the message; this is ours.
+//
+// Both halves are asserted: a message that dropped the endpoint entirely would
+// pass a check for the password's absence while leaving an operator unable to
+// tell which server failed. The second assertion is on this package's own
+// prefix rather than on the host appearing somewhere in the string, because the
+// SDK error being wrapped names the host too — a substring check would be
+// satisfied by that alone and would say nothing about what this package wrote.
+func TestConnectFailureRedactsCredentialsInTheURL(t *testing.T) {
+	t.Parallel()
+	// Port 1 on loopback: nothing listens, so the connection is refused and the
+	// error is the one a discovery pass would record.
+	const raw = "http://alice:s3cr3t-token@127.0.0.1:1/mcp"
+	_, err := mcp.Connect(context.Background(), mcp.Config{URL: raw, HTTPClient: loopbackClient()})
+	if err == nil {
+		t.Fatal("Connect reported success against a port nothing listens on")
+	}
+	if strings.Contains(err.Error(), "s3cr3t-token") {
+		t.Errorf("error carries the URL's password: %v", err)
+	}
+	endpoint, perr := url.Parse(raw)
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	if want := "mcp: connect to " + endpoint.Redacted() + ":"; !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("error %q does not open by naming the endpoint it failed to reach (%q)", err, want)
+	}
+}
+
 // TestRequestsCarryW3CTraceContext pins the propagation MCP 2026-07-28
 // documents (SEP-414): the trace context rides `_meta` under the bare W3C key
 // names, not the protocol's namespaced ones, so a trace that starts in this
 // platform continues inside the server. Both request kinds carry it — a listing
 // that lost it would break the discovery half of the same trace.
+//
+// It also pins the boundary of that claim, which is the reason to connect here
+// under the traced context rather than through the shared helper: the handshake
+// is the SDK's to build and takes no caller metadata, so a traced Connect
+// reaches the server untraced. A trace covers this client from its first
+// request, not from its first packet. Pinned because it is the kind of gap a
+// reader assumes away, and because an SDK that later grew the hook should
+// surface here as a failing test rather than as a quietly better wire.
 func TestRequestsCarryW3CTraceContext(t *testing.T) {
 	t.Parallel()
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
@@ -348,6 +467,8 @@ func TestRequestsCarryW3CTraceContext(t *testing.T) {
 	want := fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID())
 
 	listed, called := &atomic.Pointer[json.RawMessage]{}, &atomic.Pointer[json.RawMessage]{}
+	var handshakeMu sync.Mutex
+	handshake := map[string]json.RawMessage{}
 	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
 		return sdk.NewServer(&sdk.Implementation{Name: "meta-server", Version: "1"}, nil)
 	}, nil)
@@ -377,6 +498,11 @@ func TestRequestsCarryW3CTraceContext(t *testing.T) {
 			called.Store(&params)
 			result = map[string]any{"content": []any{}}
 		default:
+			if req.Method != "" {
+				handshakeMu.Lock()
+				handshake[req.Method] = params
+				handshakeMu.Unlock()
+			}
 			inner.ServeHTTP(w, r)
 			return
 		}
@@ -386,7 +512,11 @@ func TestRequestsCarryW3CTraceContext(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	ctx := trace.ContextWithSpanContext(context.Background(), sc)
-	conn := connect(t, ts.URL)
+	conn, err := mcp.Connect(ctx, mcp.Config{URL: ts.URL, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
 	if _, err := conn.ListTools(ctx); err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
@@ -407,6 +537,24 @@ func TestRequestsCarryW3CTraceContext(t *testing.T) {
 		}
 		if decoded.Meta["traceparent"] != want {
 			t.Errorf("%s _meta.traceparent = %v, want %q (in %s)", name, decoded.Meta["traceparent"], want, *params)
+		}
+	}
+
+	handshakeMu.Lock()
+	defer handshakeMu.Unlock()
+	if len(handshake) == 0 {
+		t.Fatal("no handshake request reached the server, so the gap this asserts was never exercised")
+	}
+	for method, params := range handshake {
+		var decoded struct {
+			Meta map[string]any `json:"_meta"`
+		}
+		if len(params) > 0 && json.Unmarshal(params, &decoded) != nil {
+			continue // a handshake params shape this test does not model
+		}
+		if _, ok := decoded.Meta["traceparent"]; ok {
+			t.Errorf("%s now carries a traceparent (%s) — the SDK grew the hook this package works around; "+
+				"drop the caveat from the docs and pass the context through", method, params)
 		}
 	}
 }

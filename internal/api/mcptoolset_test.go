@@ -552,6 +552,107 @@ func TestSessionAgentPatchInvalidatesTheMCPCatalog(t *testing.T) {
 		t.Fatalf("patch: status %d (body %v)", status, res)
 	}
 
+	if left := catalogRows(t, s, sid); len(left) != 1 || left[0] != "keep" {
+		t.Errorf("catalog rows after the patch = %v, want only the untouched server", left)
+	}
+}
+
+// TestSessionAgentPatchClearingMCPServersEmptiesTheCatalog is the boundary of
+// that invalidation, and the one the SQL is easiest to get wrong at: the
+// surviving set is passed as two arrays, and an empty one has to delete every
+// row rather than none. A patch that drops the last server leaves a catalog
+// whose every entry names an endpoint the session no longer declares.
+func TestSessionAgentPatchClearingMCPServersEmptiesTheCatalog(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	created := createSession(t, s, map[string]any{
+		"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
+			"mcp_servers": []any{mcpServer("one"), mcpServer("two")},
+			"tools":       []any{mcpToolset("one"), mcpToolset("two")}},
+		"environment_id": envID,
+	})
+	sid := created["id"].(string)
+
+	for _, name := range []string{"one", "two"} {
+		if _, err := s.pool.Exec(context.Background(),
+			`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status)
+			 VALUES ($1, $2, $3, '[]'::jsonb, 'ready')`,
+			sid, name, "https://mcp.example/"+name); err != nil {
+			t.Fatalf("seed catalog row %q: %v", name, err)
+		}
+	}
+
+	// The toolsets go with the servers; a toolset naming a server the patch
+	// removed would be dangling and the patch would be rejected before it
+	// reached the catalog.
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"mcp_servers": []any{}, "tools": []any{}}})
+	if status != http.StatusOK {
+		t.Fatalf("patch: status %d (body %v)", status, res)
+	}
+
+	if left := catalogRows(t, s, sid); len(left) != 0 {
+		t.Errorf("catalog rows after clearing mcp_servers = %v, want none", left)
+	}
+}
+
+// TestSessionAgentPatchLeavesOtherSessionsCatalogsAlone pins the scoping of a
+// statement that is destructive and cross-session by construction: one patch on
+// one session runs a DELETE over a table every live session has rows in. Widen
+// its predicate — drop the session_id, or move it inside the NOT EXISTS — and
+// every other session in the deployment silently loses its catalog and re-dials
+// all of its MCP servers on its next turn, which no single-session fixture can
+// see.
+func TestSessionAgentPatchLeavesOtherSessionsCatalogsAlone(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	newSession := func(names ...string) string {
+		t.Helper()
+		servers, tools := []any{}, []any{}
+		for _, n := range names {
+			servers, tools = append(servers, mcpServer(n)), append(tools, mcpToolset(n))
+		}
+		created := createSession(t, s, map[string]any{
+			"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
+				"mcp_servers": servers, "tools": tools},
+			"environment_id": envID,
+		})
+		sid := created["id"].(string)
+		for _, n := range names {
+			if _, err := s.pool.Exec(context.Background(),
+				`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status)
+				 VALUES ($1, $2, $3, '[]'::jsonb, 'ready')`,
+				sid, n, "https://mcp.example/"+n); err != nil {
+				t.Fatalf("seed catalog row %q: %v", n, err)
+			}
+		}
+		return sid
+	}
+	patched, bystander := newSession("keep", "drop"), newSession("keep", "drop")
+
+	// The patch removes "drop" from the first session only. Both sessions carry
+	// rows under the same two names, so a DELETE that lost its session scoping
+	// would take the bystander's "drop" with it.
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+patched, map[string]any{
+		"agent": map[string]any{
+			"mcp_servers": []any{mcpServer("keep")},
+			"tools":       []any{mcpToolset("keep")},
+		}})
+	if status != http.StatusOK {
+		t.Fatalf("patch: status %d (body %v)", status, res)
+	}
+
+	if left := catalogRows(t, s, patched); len(left) != 1 || left[0] != "keep" {
+		t.Errorf("patched session's rows = %v, want only the server it still declares", left)
+	}
+	if left := catalogRows(t, s, bystander); len(left) != 2 {
+		t.Errorf("another session's rows = %v, want both untouched by a patch on a different session", left)
+	}
+}
+
+// catalogRows reports the session's catalog server names in name order.
+func catalogRows(t *testing.T, s *tserver, sid string) []string {
+	t.Helper()
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT server_name FROM mcp_catalogs WHERE session_id = $1 ORDER BY server_name`, sid)
 	if err != nil {
@@ -569,7 +670,5 @@ func TestSessionAgentPatchInvalidatesTheMCPCatalog(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if len(left) != 1 || left[0] != "keep" {
-		t.Errorf("catalog rows after the patch = %v, want only the untouched server", left)
-	}
+	return left
 }

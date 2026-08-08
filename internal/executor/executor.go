@@ -148,6 +148,13 @@ type Config struct {
 	// tolerated clone failures (too_large / timeout), never as a failed run.
 	RepoCloneTimeout  time.Duration
 	RepoCloneMaxBytes int64
+	// MCPDiscoveryTimeout bounds one mcp_exec pass across all of the session's
+	// MCP servers, for the reason the clone budgets exist: the dials are serial
+	// and the endpoints are third-party, so an unbounded pass would hold this
+	// process's single work goroutine and disrupt unrelated sessions. A server
+	// the pass does not reach in time is recorded as a tolerated failure, never
+	// as a failed run.
+	MCPDiscoveryTimeout time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -171,6 +178,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RepoCloneMaxBytes <= 0 {
 		c.RepoCloneMaxBytes = 1 << 30
+	}
+	if c.MCPDiscoveryTimeout <= 0 {
+		c.MCPDiscoveryTimeout = 5 * time.Minute
 	}
 	return c
 }
@@ -701,6 +711,10 @@ func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, erro
 // lock: the egress policy, the snapshot's skills and file mounts, and the
 // attached vault ids that drive credential resolution.
 type sessionRun struct {
+	// envConfig is the environment's whole config, not only its networking
+	// block: a policy decision that must distinguish a cloud environment from a
+	// self_hosted one needs the kind, which lives on the config (mcpwork.go).
+	envConfig  domain.EnvironmentConfig
 	networking domain.Networking
 	skills     []skillRef
 	files      []fileRef
@@ -771,6 +785,7 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 		return sessionRun{}, false, err
 	}
 	return sessionRun{
+		envConfig:  cfg,
 		networking: cfg.Networking,
 		skills:     agent.Skills,
 		files:      resources,

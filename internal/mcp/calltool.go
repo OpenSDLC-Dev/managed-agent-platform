@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -54,18 +55,21 @@ type Content struct {
 	URI string
 }
 
+// CallTimeout bounds a whole call rather than any one request inside it, the
+// way [ListTimeout] bounds a whole listing. A call is one request only for as
+// long as the server answers it with the tool's output: under the multi
+// round-trip pattern below, the SDK re-sends the call up to ten times, each
+// attempt bounded only on its own, so without an aggregate budget a server that
+// keeps asking holds the caller — and the queue lease behind it — for ten times
+// a single request's cap.
+const CallTimeout = 2 * time.Minute
+
 // CallTool runs one tool on the connected server and returns its answer.
 //
 // arguments is sent verbatim: json.RawMessage marshals as itself, so the bytes
 // the model produced reach the server unaltered rather than through a
 // map[string]any round trip that would reorder keys and re-render numbers.
 // Empty arguments become the empty object the SDK sends in place of a nil.
-//
-// A call is one request, so it is bounded by whatever bounds a request on the
-// connection's HTTP client — under [DefaultClient], [DialTimeout] as a
-// whole-request cap; under a client that sets no Timeout, the same duration as
-// the fallback deadline this package's transport installs. There is no
-// listing-style aggregate budget because there is nothing to aggregate.
 //
 // One thing a fresh connection does not do, which matters when a server uses it:
 // the SDK lifts a tool parameter annotated `x-mcp-header` (SEP-2243) out of the
@@ -77,18 +81,29 @@ type Content struct {
 // One request is also not always one round trip. A server may answer with
 // `resultType: "input_required"` instead of the tool's output — the multi
 // round-trip pattern that replaced roots, sampling and elicitation in MCP
-// 2026-07-28 (SEP-2322) — and the SDK's own client middleware answers those
-// requests and re-sends the call, up to ten attempts, before giving up with an
-// error. So a server that keeps asking costs ten round trips and then fails the
-// call; the result never reaches here still carrying the requests, which is why
-// nothing below looks for them. This platform offers no interactive surface to
-// fulfil such a request with, and a bounded failure is the right end for a call
-// it cannot complete — what matters is that it is a failure the caller sees
-// rather than an empty answer the model cannot account for.
+// 2026-07-28 (SEP-2322). This platform offers no interactive surface to fulfil
+// such a request with, so every shape of it ends the call, and the three shapes
+// end it differently because the SDK's client middleware handles them
+// differently:
+//
+//   - `inputRequests` with entries: the middleware answers them itself and
+//     re-sends the call, up to ten attempts, then fails. The result never
+//     reaches here still carrying them.
+//   - `inputRequests` present and empty — which the spec gives servers as a
+//     load-shedding signal: the middleware retries a few times and fails.
+//   - `inputRequests` absent altogether: the middleware's retry loop turns on a
+//     non-nil map, so this one is handed straight back, and it is the shape
+//     that would otherwise pass for success. The tool did not run and the
+//     answer carries no output, so a caller reading only Content would show the
+//     model an empty result from a tool that was never executed. It is refused
+//     here instead.
 func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMessage) (*CallResult, error) {
 	if c == nil || c.session == nil {
 		return nil, fmt.Errorf("mcp: call tool on a connection that was never opened")
 	}
+	ctx, cancel := context.WithTimeout(ctx, CallTimeout)
+	defer cancel()
+
 	var args any
 	if len(arguments) > 0 {
 		args = arguments
@@ -100,6 +115,10 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mcp: call tool %q: %w", name, err)
+	}
+	if res.NeedsInput() {
+		return nil, fmt.Errorf("mcp: call tool %q: the server asked for further input, "+
+			"which this platform has no surface to supply", name)
 	}
 	out := &CallResult{IsError: res.IsError, Content: convertContent(res.Content)}
 	// A tool that declares an outputSchema answers with structuredContent, and
@@ -115,6 +134,16 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 			return nil, fmt.Errorf("mcp: call tool %q: structured content: %w", name, err)
 		}
 		out.Content = append(out.Content, Content{Type: "text", Text: string(b)})
+	}
+	// An answer whose every block was dropped, with no structured value behind
+	// it, is not an empty answer — it is an answer this platform could not read.
+	// The two are indistinguishable to a model, and the wrong one of them is the
+	// one it can act on, so the difference is kept here: a tool that returned
+	// nothing succeeds with no content, and a tool whose whole answer was
+	// untranslatable fails loudly enough to be fixed.
+	if len(out.Content) == 0 && len(res.Content) > 0 {
+		return nil, fmt.Errorf("mcp: call tool %q: the answer's %d content block(s) are all of "+
+			"types a tool result cannot carry", name, len(res.Content))
 	}
 	return out, nil
 }

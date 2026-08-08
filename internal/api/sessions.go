@@ -894,9 +894,10 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		// the same transaction as the patch: a listing that outlived its
 		// endpoint would reach the model as tools that are not there. The
 		// executor's discovery pass rebuilds what is still declared on the next
-		// turn. Empty arrays are the removed-everything case and delete the
-		// session's rows outright, which is why they are never nil (a NULL
-		// would make unnest yield no rows and the NOT EXISTS vacuously true).
+		// turn. A patch that clears mcp_servers leaves empty arrays, which match
+		// nothing and so delete the session's rows outright — the
+		// removed-everything case, and the reason this is a NOT EXISTS rather
+		// than an IN list.
 		names, urls := []string{}, []string{}
 		for _, item := range agent.MCPServers {
 			var probe struct {

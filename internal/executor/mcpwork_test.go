@@ -3,10 +3,18 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp/mcptest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
@@ -15,10 +23,20 @@ import (
 // mcpHarness is the executor harness with the MCP client pointed at a transport
 // that can reach loopback — the production client's dial guard refuses it, which
 // is the whole reason a fixture needs its own.
+//
+// It also writes the networking block, because the shared fixture does not. A
+// cloud environment created through the REST surface always carries one — the
+// config normalizer defaults it to `{"type":"unrestricted"}` — but pgtest
+// inserts its environment row directly, so it lands as bare `{"type":"cloud"}`,
+// which is a shape no live cloud environment has. Since the egress check refuses
+// a cloud environment naming no policy it recognizes, a fixture left as pgtest
+// builds it would have every test here failing on a shape production never
+// produces.
 func mcpHarness(t *testing.T) *harness {
 	t.Helper()
 	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{})
 	h.exec.mcpHTTP = mcptest.Client()
+	h.setNetworking(t, domain.Networking{Type: domain.NetUnrestricted})
 	return h
 }
 
@@ -129,8 +147,11 @@ func TestDiscoveryWritesTheCatalogAndWakesTheBrain(t *testing.T) {
 			t.Errorf("tool %q stored without an input schema", tool.Name)
 		}
 	}
-	if len(names) != 2 || !strings.Contains(strings.Join(names, ","), "search_issues") {
-		t.Errorf("stored tools = %v, want both of the server's", names)
+	// The exact set, not a count and a spot check: those would accept two
+	// copies of one tool while the other was dropped.
+	sort.Strings(names)
+	if want := []string{"create_issue", "search_issues"}; !slices.Equal(names, want) {
+		t.Errorf("stored tools = %v, want %v", names, want)
 	}
 	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
 		t.Errorf("live model_turn items = %d, want the chained turn", n)
@@ -178,10 +199,21 @@ func TestAnUnreachableServerIsRecordedAndTheTurnStillRuns(t *testing.T) {
 // enforced before the dial, not after: a refusal that still opened the
 // connection would have already told the server the session exists.
 func TestLimitedNetworkingRefusesAnMCPServerItDoesNotName(t *testing.T) {
-	url := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	// A counting listener rather than an MCP server: the assertion is that
+	// nothing reaches it at all. A fixture that only checked the stored row
+	// would pass against an implementation that dialled first and wrote the
+	// refusal afterwards — which is the ordering this test exists for, since a
+	// connection that opened has already told the server the session exists.
+	reached := &atomic.Int32{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+
 	h := mcpHarness(t)
 	h.setNetworking(t, domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"elsewhere.test"}})
-	h.declareMCPServers(t, [2]string{"github", url})
+	h.declareMCPServers(t, [2]string{"github", ts.URL})
 	h.enqueueMCP(t)
 
 	h.stepOnce(t)
@@ -195,6 +227,35 @@ func TestLimitedNetworkingRefusesAnMCPServerItDoesNotName(t *testing.T) {
 	}
 	if len(got.tools) != 0 {
 		t.Errorf("tools = %v, want none: the server was never reached", got.tools)
+	}
+	if n := reached.Load(); n != 0 {
+		t.Errorf("the refused server was contacted %d times; the check must run before the dial", n)
+	}
+}
+
+// TestACloudEnvironmentNamingNoPolicyRefusesRatherThanAdmits pins the direction
+// the egress check fails in. Only the REST surface normalizes a cloud config's
+// networking to a literal type — the schema constrains `config->>'type'` against
+// the environment kind and leaves `config->'networking'` alone, and a
+// config-preserving update carries a stored value forward without revalidating
+// it. Reading a missing discriminator as the wire default would make exactly
+// that row the one admitted everywhere, so an unrecognized policy on a cloud
+// environment refuses, the way `gate.newPolicy` does.
+func TestACloudEnvironmentNamingNoPolicyRefusesRatherThanAdmits(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	h := mcpHarness(t)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE environments SET config = $2::jsonb WHERE id = $1`, h.envID.String(),
+		`{"type":"cloud","networking":{"allowed_hosts":["api.corp.example"],"allow_mcp_servers":false}}`); err != nil {
+		t.Fatalf("write the malformed config: %v", err)
+	}
+	h.declareMCPServers(t, [2]string{"github", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if got := h.catalog(t)["github"]; got.status != "failed" {
+		t.Errorf("row = %+v, want the dial refused: the environment names no policy the platform recognizes", got)
 	}
 }
 
@@ -331,5 +392,267 @@ func TestDiscoveryDrainsAnItemForADeadSession(t *testing.T) {
 	}
 	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
 		t.Errorf("live model_turn items = %d, want no turn chained for a dead session", n)
+	}
+}
+
+// TestAServerControlledNULDoesNotWedgeDiscovery pins the catalog's storage
+// boundary against a byte the server chooses. Postgres jsonb cannot hold
+// U+0000 inside a string, so an unsanitized description would fail the INSERT
+// before queue.Complete — the lease would lapse, the reclaim would re-list the
+// same server, and the settlement would fail again, forever. The assertion that
+// carries that is the completed work item: a stored row alone would not
+// distinguish a pass that settled from one that had not run yet.
+func TestAServerControlledNULDoesNotWedgeDiscovery(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "ok_tool", Description: "bad\x00description"})
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	got := h.catalog(t)["github"]
+	if got.status != "ready" {
+		t.Fatalf("row = %+v, want the listing stored", got)
+	}
+	if len(got.tools) != 1 {
+		t.Fatalf("tools = %+v, want the one tool the server offers", got.tools)
+	}
+	if strings.Contains(got.tools[0].Description, "\x00") {
+		t.Errorf("stored description still carries a NUL: %q", got.tools[0].Description)
+	}
+	if n := h.liveOf(t, queue.MCPExec); n != 0 {
+		t.Errorf("live mcp_exec items = %d: the settlement faulted and will reclaim-loop", n)
+	}
+}
+
+// TestASchemaCarryingNULCostsItsToolAndNotTheListing covers the arm the
+// end-to-end fixture cannot reach: in a schema a NUL is not a byte to strip but
+// the six characters of a JSON escape, and stripping those textually would
+// corrupt a schema whose own text contains a literal backslash-u-0000. So the
+// tool is dropped and the rest of the listing survives.
+func TestASchemaCarryingNULCostsItsToolAndNotTheListing(t *testing.T) {
+	got := storableTools([]mcp.Tool{
+		{Name: "keep", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "drop", InputSchema: json.RawMessage(`{"type":"object","title":"a\u0000b"}`)},
+		{Name: "keep_too", Description: "fine", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	})
+	names := []string{}
+	for _, tool := range got {
+		names = append(names, tool.Name)
+	}
+	if want := []string{"keep", "keep_too"}; !slices.Equal(names, want) {
+		t.Errorf("storable tools = %v, want %v", names, want)
+	}
+}
+
+// TestSettlementSkipsAServerTheAgentNoLongerDeclares pins the settlement's own
+// re-read. The dials happen outside the session row lock, so a mid-session
+// agent patch can land while they are in flight — and `mcp_servers` is one of
+// only two agent fields a running session may patch. A patch that removes or
+// repoints a server finds no row to invalidate yet, so without this check the
+// pass would write one behind it for a server the agent no longer declares,
+// which nothing revisits: discovery only ever walks the declared array.
+//
+// settleMCP is called directly because the window it closes cannot be opened
+// from outside — it needs the agent to change between the pass's read and its
+// write, which is exactly the interleaving the row lock now prevents.
+func TestSettlementSkipsAServerTheAgentNoLongerDeclares(t *testing.T) {
+	h := mcpHarness(t)
+	h.declareMCPServers(t,
+		[2]string{"kept", "https://kept.test/mcp"},
+		[2]string{"moved", "https://now.test/mcp"})
+	h.enqueueMCP(t)
+	item, err := h.queue.Claim(context.Background(), queue.MCPExec, time.Minute)
+	if err != nil || item == nil {
+		t.Fatalf("claim mcp_exec: %+v %v", item, err)
+	}
+
+	// What a pass that read the agent before the patch would be holding: one
+	// server still declared unchanged, one removed, one repointed since.
+	if err := h.exec.settleMCP(context.Background(), item, []catalogRow{
+		{name: "kept", url: "https://kept.test/mcp", status: "ready"},
+		{name: "removed", url: "https://gone.test/mcp", status: "ready"},
+		{name: "moved", url: "https://before.test/mcp", status: "ready"},
+	}); err != nil {
+		t.Fatalf("settleMCP: %v", err)
+	}
+
+	cat := h.catalog(t)
+	if len(cat) != 1 {
+		t.Fatalf("catalog = %v, want only the server still declared at that url", cat)
+	}
+	if _, ok := cat["kept"]; !ok {
+		t.Errorf("catalog = %v, want the row for the unchanged server", cat)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn items = %d, want the turn chained regardless", n)
+	}
+}
+
+// TestAFailureReasonKeepsTheServersCredentialsOutOfTheCatalog pins the storage
+// boundary for the text half of a row. An mcp_servers url is customer-supplied
+// and may carry a credential in its userinfo or its query, and everything that
+// builds a failure reason quotes the endpoint back: this package's client, and
+// net/http under it. A reason is a stored column that later slices surface, so
+// the whole class is cut off where the text becomes storage.
+//
+// Port 1 on loopback refuses immediately, which is what makes the reason a
+// transport error rather than something this driver wrote itself.
+func TestAFailureReasonKeepsTheServersCredentialsOutOfTheCatalog(t *testing.T) {
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", "http://tok3n:hunter2@127.0.0.1:1/mcp?api_key=SECRET"})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	got := h.catalog(t)["github"]
+	if got.status != "failed" || got.reason == "" {
+		t.Fatalf("row = %+v, want a failed row carrying a reason", got)
+	}
+	for _, secret := range []string{"tok3n", "hunter2", "SECRET", "api_key"} {
+		if strings.Contains(got.reason, secret) {
+			t.Errorf("stored reason leaks %q: %q", secret, got.reason)
+		}
+	}
+	// The host has to survive, or the redaction has taken the diagnosis with it.
+	if !strings.Contains(got.reason, "127.0.0.1:1") {
+		t.Errorf("reason = %q, want it to still name the host that could not be reached", got.reason)
+	}
+}
+
+// TestStorableReasonRedactsTruncatesAndSanitizes covers the arms an end-to-end
+// fixture cannot produce on demand: a reason megabytes long (a server's own
+// JSON-RPC error message, bounded only by mcp.MaxResponseBytes), and one whose
+// truncation lands mid-rune — which would leave a byte sequence Postgres rejects
+// on a text column, re-opening by the back door the wedge the NUL strip closes.
+func TestStorableReasonRedactsTruncatesAndSanitizes(t *testing.T) {
+	t.Run("every url is cut to scheme and host", func(t *testing.T) {
+		got := storableReason(`mcp: connect to https://u:p@mcp.example:8443/x?token=SECRET: ` +
+			`Post "https://u:p@mcp.example:8443/x?token=SECRET": dial tcp: refused`)
+		for _, secret := range []string{"SECRET", "token", "u:p", "/x"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("reason %q still carries %q", got, secret)
+			}
+		}
+		if want := "https://mcp.example:8443"; !strings.Contains(got, want) {
+			t.Errorf("reason %q no longer names the endpoint's host (%q)", got, want)
+		}
+		if !strings.Contains(got, "dial tcp: refused") {
+			t.Errorf("reason %q lost the cause", got)
+		}
+	})
+
+	t.Run("a NUL never reaches the column", func(t *testing.T) {
+		if got := storableReason("before\x00after"); strings.Contains(got, "\x00") {
+			t.Errorf("reason %q still carries a NUL", got)
+		}
+	})
+
+	t.Run("an oversized reason is capped and stays valid utf-8", func(t *testing.T) {
+		// A multi-byte rune straddling the cut: with maxCatalogReason bytes of
+		// ASCII ahead of it, the cap lands inside the "…" that follows.
+		got := storableReason(strings.Repeat("x", maxCatalogReason-1) + "…" + strings.Repeat("y", 100))
+		if len(got) > maxCatalogReason+8 {
+			t.Errorf("reason kept %d bytes, want it capped near %d", len(got), maxCatalogReason)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("capped reason is not valid utf-8: %q", got)
+		}
+	})
+}
+
+// TestDiscoveryStopsWhenThePassRunsOutOfTime pins the aggregate budget. The
+// dials are serial, the endpoints are third-party, and this process runs one
+// work item at a time — so without a bound on the pass as a whole, one tarpit
+// server holds every other session's tool calls on the host behind it for as
+// long as it cares to. The servers the budget does not reach are recorded as
+// failures, which the next turn re-attempts; the item itself still completes.
+//
+// It costs about ten seconds of wall clock for a budget of a third of a second,
+// and that is the behaviour under test rather than a slow fixture: the SDK
+// answers a cancelled request with a `notifications/cancelled` sent on a
+// context detached from the one that was cancelled and bounded at five seconds
+// of its own, and a connection can have two calls outstanding. What the budget
+// stops is the pass reaching any further server, which is what the second
+// server's untouched counter shows; it does not cap the wall clock.
+func TestDiscoveryStopsWhenThePassRunsOutOfTime(t *testing.T) {
+	release := make(chan struct{})
+	hang := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	reached := &atomic.Int32{}
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	client := mcptest.Client()
+	// Teardown in one place, because its order matters and the default is
+	// wrong twice over. The tarpit is released explicitly rather than by its
+	// request context — a client that abandons a request does not reliably
+	// cancel the server's side of it — and the client's pooled connections are
+	// dropped before the servers close, because httptest.Server.Close waits for
+	// every connection to go idle and the abandoned response bodies never do.
+	t.Cleanup(func() {
+		close(release)
+		client.CloseIdleConnections()
+		hang.Close()
+		second.Close()
+	})
+
+	h := newHarnessWith(t, &fakeProvider{sb: &fakeSandbox{}}, Config{MCPDiscoveryTimeout: 300 * time.Millisecond})
+	h.exec.mcpHTTP = client
+	h.setNetworking(t, domain.Networking{Type: domain.NetUnrestricted})
+	h.declareMCPServers(t, [2]string{"slow", hang.URL}, [2]string{"after", second.URL})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	cat := h.catalog(t)
+	if got := cat["slow"]; got.status != "failed" {
+		t.Errorf("row = %+v, want the tarpit server recorded as a failure", got)
+	}
+	if got := cat["after"]; got.status != "failed" || !strings.Contains(got.reason, "out of time") {
+		t.Errorf("row = %+v, want a row saying the pass ran out of time before reaching it", got)
+	}
+	if n := reached.Load(); n != 0 {
+		t.Errorf("the server behind the tarpit was contacted %d times; the budget was already spent", n)
+	}
+	if n := h.liveOf(t, queue.MCPExec); n != 0 {
+		t.Errorf("live mcp_exec items = %d: a spent budget is a recorded failure, not a faulted item", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
+		t.Errorf("live model_turn items = %d, want the turn chained regardless", n)
+	}
+}
+
+// TestNoTurnIsChainedWhileAToolCallIsUnanswered pins the condition the turn is
+// chained on, which is the one every other settlement uses. mcp_exec and
+// tool_exec are different queue kinds, so nothing keeps one from settling while
+// the other is in flight — and a model_turn sent with an agent.tool_use still
+// unanswered assembles a request the Messages API rejects, failing the turn the
+// user sees. Whichever settlement finishes last finds the set answered, so the
+// gate costs no wakeup.
+func TestNoTurnIsChainedWhileAToolCallIsUnanswered(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	h := mcpHarness(t)
+	if _, err := h.log.Append(context.Background(), h.sid, []events.NewEvent{{
+		Type:    domain.EventAgentToolUse,
+		Payload: json.RawMessage(`{"id":"toolu_pending","name":"bash","input":{"command":"sleep 1"}}`),
+	}}); err != nil {
+		t.Fatalf("append the outstanding tool_use: %v", err)
+	}
+	h.declareMCPServers(t, [2]string{"github", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if got := h.catalog(t)["github"]; got.status != "ready" {
+		t.Errorf("row = %+v, want discovery to have run and stored its listing", got)
+	}
+	if n := h.liveOf(t, queue.MCPExec); n != 0 {
+		t.Errorf("live mcp_exec items = %d, want the item completed", n)
+	}
+	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+		t.Errorf("live model_turn items = %d: waking the brain now sends a request the API rejects", n)
 	}
 }

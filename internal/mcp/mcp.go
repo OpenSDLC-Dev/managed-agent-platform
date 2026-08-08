@@ -60,6 +60,17 @@ import (
 // minutes bound the listing across its pages rather than any single one of them.
 // A caller supplying its own client sets that policy itself, and may set none —
 // which is the case the fallback exists for.
+//
+// None of the deadlines here is exact, and the overshoot is the SDK's: when a
+// caller's context ends a request that is still outstanding, the SDK tells the
+// server so with a `notifications/cancelled`, and it sends that on a context
+// deliberately detached from the one that just ended (context.WithoutCancel)
+// with a 5-second timeout of its own. Against a server that has stopped
+// answering, that notification is itself unanswerable, so every cancelled call
+// costs up to five seconds after its deadline — twice over for a connection,
+// which may have both a `server/discover` and a legacy `initialize` in flight.
+// Callers that bound a whole pass should treat these as budgets that stop the
+// work rather than ceilings on the wall clock.
 const DialTimeout = 30 * time.Second
 
 // ListTimeout bounds a whole listing rather than one request in it. Pagination
@@ -277,7 +288,11 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	}
 	endpoint, err := url.Parse(cfg.URL)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: server URL %q: %w", cfg.URL, err)
+		// The url.Error being wrapped already quotes the URL it could not
+		// parse, so naming it again would put a second copy of a string that
+		// may carry userinfo into the message. One copy is the most this can
+		// be reduced to without discarding the reason the parse failed.
+		return nil, fmt.Errorf("mcp: server URL: %w", err)
 	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
@@ -317,7 +332,12 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		if conn := transport.conn; conn != nil {
 			_ = conn.Close()
 		}
-		return nil, fmt.Errorf("mcp: connect to %s: %w", cfg.URL, connErr)
+		// Redacted, not raw: an mcp_servers URL may carry userinfo, and this
+		// error is a stored column by the time the executor's discovery pass is
+		// done with it. net/http already redacts the password out of its own
+		// half of the message (`Post "http://user:***@host"`), so a raw prefix
+		// here would be the one copy of the secret in the whole string.
+		return nil, fmt.Errorf("mcp: connect to %s: %w", endpoint.Redacted(), connErr)
 	}
 	return &Conn{session: session}, nil
 }
@@ -480,11 +500,16 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 	return c.session.ListTools(ctx, &sdk.ListToolsParams{Meta: requestMeta(ctx), Cursor: cursor})
 }
 
-// requestMeta is the `_meta` this platform puts on every MCP request it sends.
+// requestMeta is the `_meta` this platform puts on the MCP requests it issues
+// itself — the listing and the call.
 //
 // It carries W3C trace context, so a trace that starts in the brain reaches the
 // MCP server's own spans rather than stopping at this process's edge (CLAUDE.md
-// design principle 3). MCP 2026-07-28 documents the convention and pins the key
+// design principle 3). Not every request on the wire, and the difference is the
+// SDK's: it builds the handshake itself (`server/discover`, and a legacy
+// negotiation's `initialize` and `notifications/initialized`) with no hook for a
+// caller's metadata, so those reach the server untraced. A traced connection is
+// therefore traced from its first *request*, not from its first packet. MCP 2026-07-28 documents the convention and pins the key
 // names to the bare `traceparent`, `tracestate` and `baggage` — deliberately not
 // namespaced like the protocol's own `io.modelcontextprotocol/*` keys, so that a
 // carrier written by any OpenTelemetry SDK drops in unrenamed (SEP-414).
