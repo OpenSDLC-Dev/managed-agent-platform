@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -476,7 +477,37 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 			res, err = nil, fmt.Errorf("the MCP client library panicked on this server's response: %v", r)
 		}
 	}()
-	return c.session.ListTools(ctx, &sdk.ListToolsParams{Cursor: cursor})
+	return c.session.ListTools(ctx, &sdk.ListToolsParams{Meta: requestMeta(ctx), Cursor: cursor})
+}
+
+// requestMeta is the `_meta` this platform puts on every MCP request it sends.
+//
+// It carries W3C trace context, so a trace that starts in the brain reaches the
+// MCP server's own spans rather than stopping at this process's edge (CLAUDE.md
+// design principle 3). MCP 2026-07-28 documents the convention and pins the key
+// names to the bare `traceparent`, `tracestate` and `baggage` — deliberately not
+// namespaced like the protocol's own `io.modelcontextprotocol/*` keys, so that a
+// carrier written by any OpenTelemetry SDK drops in unrenamed (SEP-414).
+// internal/telemetry propagates trace context alone, so `baggage` never appears
+// and the carrier's keys are already the spec's; nothing here translates
+// anything, which is the point of the convention.
+//
+// The SDK fills the protocol's own `_meta` keys itself and only where they are
+// absent (injectRequestMeta), so a map supplied here is added to rather than
+// replaced. Nil when no span is active, which says "nothing to add" rather than
+// changing what goes out: `_meta` is `omitempty`, so an empty map would be
+// omitted from the request just the same.
+func requestMeta(ctx context.Context) sdk.Meta {
+	carrier := map[string]string{}
+	telemetry.Inject(ctx, carrier)
+	if len(carrier) == 0 {
+		return nil
+	}
+	meta := make(sdk.Meta, len(carrier))
+	for k, v := range carrier {
+		meta[k] = v
+	}
+	return meta
 }
 
 // usableName reports whether a server's tool name can be offered to a model.

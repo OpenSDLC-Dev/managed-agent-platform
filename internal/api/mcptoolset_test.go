@@ -508,3 +508,68 @@ func TestAgentVersionEchoResolved(t *testing.T) {
 	listedEntry, _ := listed[0].(map[string]any)
 	wantConfig(t, "list default_config", listedEntry["default_config"], true, "always_allow")
 }
+
+// TestSessionAgentPatchInvalidatesTheMCPCatalog pins the catalog's invalidation
+// (plan 29 slice 2). mcp_servers is one of only two mid-session-mutable agent
+// fields and a patch replaces the array whole, so a server can be removed or
+// repointed under a catalog that still holds the tools its old endpoint
+// reported. Those rows die with the patch, in its own transaction: a listing
+// that outlived its endpoint would reach the model as tools that are not there.
+// A server the patch leaves alone keeps its row — re-discovering every server
+// because one moved would spend a round trip per turn on servers nothing
+// changed about.
+func TestSessionAgentPatchInvalidatesTheMCPCatalog(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	created := createSession(t, s, map[string]any{
+		"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
+			"mcp_servers": []any{mcpServer("keep"), mcpServer("move"), mcpServer("drop")},
+			"tools":       []any{mcpToolset("keep"), mcpToolset("move"), mcpToolset("drop")}},
+		"environment_id": envID,
+	})
+	sid := created["id"].(string)
+
+	for _, name := range []string{"keep", "move", "drop"} {
+		if _, err := s.pool.Exec(context.Background(),
+			`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status)
+			 VALUES ($1, $2, $3, '[]'::jsonb, 'ready')`,
+			sid, name, "https://mcp.example/"+name); err != nil {
+			t.Fatalf("seed catalog row %q: %v", name, err)
+		}
+	}
+
+	// "keep" is unchanged, "move" is repointed, "drop" is gone. The tools move
+	// with them, since a dangling toolset would reject the patch outright.
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{
+			"mcp_servers": []any{
+				mcpServer("keep"),
+				map[string]any{"type": "url", "name": "move", "url": "https://elsewhere.example/move"},
+			},
+			"tools": []any{mcpToolset("keep"), mcpToolset("move")},
+		}})
+	if status != http.StatusOK {
+		t.Fatalf("patch: status %d (body %v)", status, res)
+	}
+
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT server_name FROM mcp_catalogs WHERE session_id = $1 ORDER BY server_name`, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var left []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		left = append(left, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 || left[0] != "keep" {
+		t.Errorf("catalog rows after the patch = %v, want only the untouched server", left)
+	}
+}

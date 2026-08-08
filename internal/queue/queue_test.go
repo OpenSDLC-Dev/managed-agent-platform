@@ -639,6 +639,56 @@ func TestOutputsHarvestIsClaimedAndNeverPolled(t *testing.T) {
 	}
 }
 
+// TestMCPExecIsClaimedForEveryEnvironmentAndNeverPolled pins mcp_exec's
+// routing (docs/plan/29_mcp-toolset.md): MCP tool discovery and execution are
+// server-side on every environment kind — the SDK's session tool runner says so
+// three times, the work API has no MCP surface at all, and the BYOC worker's
+// contract is agent.tool_use + agent.custom_tool_use only. So Claim serves both
+// environment kinds, Poll serves neither, and the item carries the enqueuing
+// turn's trace context for the MCP driver's consumer span to parent on — the
+// web_exec precedent exactly.
+func TestMCPExecIsClaimedForEveryEnvironmentAndNeverPolled(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	cloudSess, cloudEnv := pgtest.NewSession(t, pool, "cloud")
+	selfSess, selfEnv := pgtest.NewSession(t, pool, "self_hosted")
+	q := queue.New(pool)
+
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f},
+		SpanID:     trace.SpanID{0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78},
+		TraceFlags: trace.FlagsSampled,
+	})
+	if _, err := q.Enqueue(trace.ContextWithSpanContext(ctx, sc), pool, selfEnv, selfSess, queue.MCPExec); err != nil {
+		t.Fatal(err)
+	}
+	if w, err := q.Poll(ctx, selfEnv, time.Minute); err != nil || w != nil {
+		t.Fatalf("poll served an mcp_exec item to a worker: %+v %v", w, err)
+	}
+	it, err := q.Claim(ctx, queue.MCPExec, time.Minute)
+	if err != nil || it == nil {
+		t.Fatalf("executor did not claim the self_hosted mcp_exec item: %+v %v", it, err)
+	}
+	if it.EnvironmentID != selfEnv || it.Kind != queue.MCPExec {
+		t.Errorf("claimed item = %+v, want the self_hosted mcp_exec item", it)
+	}
+	want := fmt.Sprintf("00-%s-%s-01", sc.TraceID(), sc.SpanID())
+	if got := it.TraceContext["traceparent"]; got != want {
+		t.Errorf("claimed trace_context[traceparent] = %q, want %q", got, want)
+	}
+
+	if _, err := q.Enqueue(ctx, pool, cloudEnv, cloudSess, queue.MCPExec); err != nil {
+		t.Fatal(err)
+	}
+	ci, err := q.Claim(ctx, queue.MCPExec, time.Minute)
+	if err != nil || ci == nil {
+		t.Fatalf("executor did not claim the cloud mcp_exec item: %+v %v", ci, err)
+	}
+	if ci.EnvironmentID != cloudEnv {
+		t.Errorf("claimed item environment = %s, want the cloud env %s", ci.EnvironmentID, cloudEnv)
+	}
+}
+
 func TestCancelSessionTakesEveryLiveItem(t *testing.T) {
 	// What a user.interrupt does to the turn it ends: every item the session
 	// still has in flight is stopped, whoever holds it. A claimant's lease proof
