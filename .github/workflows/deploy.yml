@@ -1,0 +1,466 @@
+name: deploy
+
+# Continuous delivery to the one staging environment on GCP: build, push, deploy,
+# smoke — and nothing else. The operating notes are in deploy/gcp/README.md's
+# "Continuous delivery" section; this header carries only the decisions the file
+# itself cannot show.
+#
+# The deployment is **mode 2** — Cloud SQL, Cloud Storage and Cloud KMS behind the
+# pre-created Secret `deploy/gcp/staging-values.yaml` names in `existingSecret`.
+# Not mode 1: a pipeline that installed the bundled Postgres/MinIO/OpenBao on
+# every push would keep the platform's data in three StatefulSets while the Cloud
+# SQL instance `environment/` created — and `make gcp-db-init` already prepared —
+# sat unused.
+#
+# The trigger is every push to main. There is one environment, no promotion
+# pipeline and no release train to synchronise with, so "what is deployed" is
+# simply "what is on main" — and a staging environment that lags main is a
+# staging environment nobody trusts. workflow_dispatch is for the cases a push
+# cannot express: redeploying onto a rebuilt cluster from an unchanged commit, or
+# re-running after a human has rotated a Secret Manager value.
+#
+# This workflow never runs Terraform. The infrastructure lives in
+# deploy/gcp/foundation/ and deploy/gcp/environment/, whose applies are
+# interactive on purpose and whose state is local by design (plan 20, Decision 9).
+# A CD job running `terraform apply` would have to hold that state somewhere it
+# could reach, and would be one bad plan away from destroying the Cloud SQL
+# instance the platform's data lives in. `make gcp-foundation-apply`,
+# `make gcp-bootstrap`, `make gcp-env-apply` and `make gcp-db-init` stay
+# human-driven; this workflow assumes they have already run. In mode 2 that last
+# one is not a formality: the DSN in `database-url` names the `map` role, and
+# `gcp-db-init` is the only thing that creates it.
+#
+# There is no GitHub secret in this repository and there must not be one. The job
+# mints an OIDC token, Workload Identity Federation exchanges it for a short-lived
+# impersonation of `cd-deployer@`, and every credential the deploy needs is then
+# read from Secret Manager at run time. So rotating a credential is a
+# `gcloud secrets versions add` and nothing else — no repository setting to update
+# afterwards, and no long-lived key sitting in a settings page to leak. The
+# provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'` and each
+# repository is bound to the deploy identity separately, so a fork cannot use it.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Queue, never cancel. A cancelled `helm upgrade` does not roll back — it leaves
+# the release wedged mid-upgrade with no run left to finish it, which is exactly
+# the half-updated cluster `--atomic` exists to prevent. Two pushes in quick
+# succession therefore deploy in order and the later one wins, at the cost of
+# waiting out the first.
+#
+# The group name is not unique across the organisation — managed-agent-console has
+# a `deploy-staging` of its own — and it does not need to be: a concurrency group
+# is scoped to ONE repository, so the two never contend. Nor should they be read
+# as serialised because they share a name. They deploy two different Helm releases
+# into the same namespace, and nothing here can order them against each other;
+# GitHub has no cross-repository lock to ask for.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # mint the OIDC token WIF exchanges; the only reason this job can authenticate
+  contents: read
+
+# None of these is a credential — they are project, cluster, bucket and identity
+# NAMES, and the WIF provider is public infrastructure locked by attribute
+# condition. They live here rather than in repository variables so the deployment
+# target is reviewable in the diff that changes it. Every one came from
+# `terraform -chdir=deploy/gcp/environment output`.
+env:
+  GCP_PROJECT: hh-opensdlc-managed-agents
+  GCP_ZONE: us-central1-a
+  GKE_CLUSTER: map-staging
+  ARTIFACT_REGISTRY: us-central1-docker.pkg.dev/hh-opensdlc-managed-agents/map-images
+  WIF_PROVIDER: projects/754963270337/locations/global/workloadIdentityPools/github/providers/github-oidc
+  DEPLOY_SA: cd-deployer@hh-opensdlc-managed-agents.iam.gserviceaccount.com
+  K8S_NAMESPACE: map
+  K8S_SECRET: map-platform
+  HELM_RELEASE: map
+  # The two non-secret coordinates that go INTO the pre-created Secret. They are
+  # not credentials — a bucket name and a KMS resource name — but the chart reads
+  # them from that Secret in mode 2, because `existingSecret` means the chart
+  # writes no Secret at all and so has nowhere else to put them.
+  BLOB_BUCKET: hh-opensdlc-managed-agents-map-blob
+  KMS_KEY_NAME: projects/hh-opensdlc-managed-agents/locations/us-central1/keyRings/map-keyring/cryptoKeys/map-credentials
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes, so the token has no reason to outlive this step —
+          # checkout v6+ would otherwise leave it in a credentials file wired into
+          # the job's git config, in a job that also holds a cloud impersonation.
+          persist-credentials: false
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ env.GCP_PROJECT }}
+          # `kubectl` on the runner cannot talk to GKE without this: since
+          # client-go 1.26 the in-tree GCP auth provider is gone, and
+          # `get-credentials` writes a kubeconfig whose exec credential names the
+          # plugin. Missing, every kubectl call fails with "no Auth Provider
+          # found" — after the images have already been built and pushed.
+          install_components: gke-gcloud-auth-plugin
+
+      # Submitted from the repository ROOT with `.` as the context, because the
+      # Dockerfile builds the whole Go module. `cloudbuild.yaml` turns that one
+      # context into four images: controlplane/brain/executor are three tags on a
+      # single build — the chart composes `registry/repository/COMPONENT:tag`, so
+      # it looks for three names, and three tags on one build means they cannot
+      # drift — plus `--target gate` for the egress sidecar.
+      #
+      # `_TAG` is the full commit SHA, and it is derived ONCE: the same value
+      # becomes `image.tag` and the `gate:` reference below. Deriving it twice is
+      # how a deploy comes to name an image that was never pushed.
+      #
+      # --service-account is REQUIRED here and is not a hardening preference. A
+      # project created under an organisation no longer gets the automatic Editor
+      # grant on the Compute Engine default service account, so the build Cloud
+      # Build would otherwise run as cannot even read the source tarball
+      # `builds submit` just uploaded:
+      #
+      #   754963270337-compute@developer.gserviceaccount.com does not have
+      #   storage.objects.get access to .../hh-opensdlc-managed-agents_cloudbuild
+      #
+      # `cd-deployer@` is the identity this job already holds, and it carries the
+      # two grants that make a build work — roles/storage.admin on that
+      # `_cloudbuild` source bucket, and roles/logging.logWriter on the project.
+      # Naming a service account is also what makes `options.logging:
+      # CLOUD_LOGGING_ONLY` mandatory in cloudbuild.yaml: with a user-specified
+      # identity the API refuses a build that would write to the default logs
+      # bucket. Both are recorded in deploy/gcp/README.md.
+      - name: Build and push the images
+        run: |
+          gcloud builds submit --config deploy/gcp/cloudbuild.yaml \
+            --project="$GCP_PROJECT" \
+            --service-account="projects/$GCP_PROJECT/serviceAccounts/$DEPLOY_SA" \
+            --substitutions="_IMAGE_PREFIX=$ARTIFACT_REGISTRY,_TAG=$GITHUB_SHA" \
+            .
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Cluster credentials
+        run: |
+          gcloud container clusters get-credentials "$GKE_CLUSTER" \
+            --zone "$GCP_ZONE" --project "$GCP_PROJECT"
+
+      # Mode 2's Secret, assembled here because nothing else can assemble it: the
+      # chart renders no Secret when `existingSecret` is set, and Terraform holds
+      # no secret VALUES by design. Three keys come from Secret Manager and four
+      # are literals that belong in the same object only because that is the shape
+      # `existingSecret` defines.
+      #
+      # `kubectl create secret --dry-run=client -o yaml | kubectl apply -f -`
+      # rather than `create`: this runs on every push, and `create` fails the
+      # second time. Apply also makes a rotation a re-run of this job.
+      - name: Assemble the mode-2 Secret
+        run: |
+          set -euo pipefail
+
+          # Outside the checkout, so no later step can sweep a credential into an
+          # image, an artifact or a `git add -A`. Mode 700 because the values are
+          # written by `gcloud --out-file`, which does not chmod what it creates.
+          d="$(mktemp -d)"
+          chmod 700 "$d"
+          echo "SECRET_DIR=$d" >> "$GITHUB_ENV"
+
+          # Register a value as a redaction BEFORE anything else can print it.
+          # This workflow's log is public, and the two ways a value gets into it
+          # are both one edit away rather than hypothetical: dropping `--out-file`
+          # from the `gcloud secrets versions access` below, which then prints the
+          # value to stdout, and a `set -x` added while debugging, which prints
+          # every expansion.
+          #
+          # What masking does NOT cover is the base64 form — `add-mask` is a
+          # literal string replacement — and `kubectl create secret -o yaml` emits
+          # every value base64-encoded. That output stays on the pipe into
+          # `kubectl apply` for exactly that reason: do not capture it into a
+          # variable, and do not `tee` it while debugging.
+          #
+          # Short lines are left alone deliberately. A mask replaces EVERY
+          # occurrence of the string in the log, so masking something like "map"
+          # would redact half the output and hide the failure it was added to
+          # catch. Eight characters is the shortest value worth protecting here;
+          # anything shorter is not a credential we can usefully hide anyway.
+          mask() {
+            while IFS= read -r line || [ -n "$line" ]; do
+              if [ "${#line}" -ge 8 ]; then printf '::add-mask::%s\n' "$line"; fi
+            done < "$1"
+          }
+
+          # fetch SECRET_ID DEST — reads the latest version straight to a file.
+          # `--out-file` rather than a command substitution: the value never
+          # becomes a shell variable, never reaches an argv, and keeps its exact
+          # bytes, which is what `--from-file` then hands to Kubernetes.
+          fetch() {
+            if ! gcloud secrets versions access latest \
+                   --secret="$1" --project="$GCP_PROJECT" --out-file="$d/$2"; then
+              echo "::error::cannot read Secret Manager secret '$1' in $GCP_PROJECT"
+              echo "The mode-2 deploy needs it. Check it exists and has an ENABLED version:" >&2
+              echo "  gcloud secrets versions list $1 --project=$GCP_PROJECT" >&2
+              return 1
+            fi
+            # A zero-byte value is the failure worth catching here rather than at
+            # pod start: it is what a failed generator piped into
+            # `gcloud secrets versions add` produces — stored successfully, and
+            # now `latest`. The Secret would apply cleanly and the platform would
+            # then authenticate as nobody.
+            if [ ! -s "$d/$2" ]; then
+              echo "::error::Secret Manager secret '$1' has an EMPTY latest version"
+              echo "Add a real version and disable that one." >&2
+              return 1
+            fi
+            mask "$d/$2"
+          }
+
+          fetch controlplane-api-key controlplane-api-key
+          fetch database-url         database-url
+
+          # A trailing newline is the classic way one of these gets stored (an
+          # `echo` where bootstrap.sh uses `printf '%s'`), and both are embedded
+          # VERBATIM: one in an x-api-key comparison, one as a DSN. So the deploy
+          # would succeed and the platform would then reject the very key this job
+          # smoke-tests with, or fail to parse its own database URL. Refuse it
+          # here, where the fix is one command.
+          #
+          # model-providers.json is deliberately NOT checked this way: it is a
+          # JSON document read by a parser, a human adds it with
+          # `--data-file=/path/to/file`, and every editor on earth ends a file
+          # with a newline. Its shape is checked below instead.
+          for f in controlplane-api-key database-url; do
+            if [ "$(wc -l < "$d/$f")" -ne 0 ]; then
+              echo "::error::Secret Manager secret '$f' contains a newline"
+              echo "It is used verbatim, so a trailing newline is part of the value." >&2
+              echo "Re-add it without one: printf '%s' \"\$value\" | gcloud secrets" >&2
+              echo "versions add $f --project=$GCP_PROJECT --data-file=-" >&2
+              exit 1
+            fi
+          done
+
+          # model-providers is fetched on its own because its failure mode is its
+          # own. The secret CONTAINER is created by the foundation apply and can
+          # sit without a version: it carries a live model API key, the one
+          # credential no automation may mint. If that is the state, this job stops
+          # here — loudly, naming the command — rather than deploying a brain that
+          # crash-loops on an empty config.
+          #
+          # It DOES have a version today, and that version is a PLACEHOLDER: a real
+          # endpoint (https://api.anthropic.com) with a fake key, stored so this
+          # pipeline could be proven end to end without inventing a credential. The
+          # platform comes up, /v1/agents answers 200, this job goes green — and
+          # the first session that calls a model fails with an auth error, which is
+          # the truth about it. Replace it, in one line:
+          #
+          #   printf '%s' '[{"model":"*","protocol":"anthropic","base_url":"https://api.anthropic.com","api_key":"sk-ant-REAL"}]' \
+          #     | gcloud secrets versions add model-providers --project=hh-opensdlc-managed-agents --data-file=-
+          if ! gcloud secrets versions access latest \
+                 --secret=model-providers --project="$GCP_PROJECT" \
+                 --out-file="$d/model-providers.json"; then
+            echo "::error::the 'model-providers' secret has no readable version — a human must add one"
+            cat >&2 <<EOF
+          This is deliberate and this workflow cannot fix it: model-providers holds a
+          live model API key. Write the routes to a file and add them as a version:
+
+            [ { "model": "*", "protocol": "anthropic",
+                "base_url": "https://your-gateway.example",
+                "api_key": "sk-..." } ]
+
+            gcloud secrets versions add model-providers \\
+              --project=$GCP_PROJECT --data-file=/path/to/model-providers.json
+
+          The accepted keys are documented under brain.modelProviders in
+          deploy/helm/managed-agent-platform/values.yaml. base_url is the API ROOT:
+          the adapter appends /v1/messages or /v1/chat/completions itself, so omit a
+          trailing /v1. Then re-run this workflow (Actions -> deploy -> Run workflow).
+          EOF
+            exit 1
+          fi
+
+          # The brain's loader (internal/provider.LoadRoutes) requires a JSON ARRAY
+          # of route objects and rejects anything else with "must be a JSON array".
+          # Checking it here costs a second; getting it wrong costs the full
+          # `--wait --atomic --timeout 10m` before the release rolls back.
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; has("model"))' \
+               "$d/model-providers.json" > /dev/null; then
+            echo "::error::the 'model-providers' secret is not a non-empty JSON array of route objects"
+            echo "Each entry needs at least \"model\" (\"*\" is the default route)." >&2
+            exit 1
+          fi
+
+          # The api_key inside is the actual secret; the surrounding JSON is not.
+          # Masking per line would be useless here (a pretty-printed payload would
+          # register "[" as a redaction), so mask exactly the keys.
+          jq -r '.[].api_key // empty' "$d/model-providers.json" |
+            while IFS= read -r k; do
+              if [ "${#k}" -ge 8 ]; then printf '::add-mask::%s\n' "$k"; fi
+            done
+
+          # The four literals. Non-secret coordinates, but the chart reads all
+          # seven keys from this one object — `blob-backend` missing does not fail,
+          # it reads as the default "s3" and then looks for an endpoint that is not
+          # there.
+          printf '%s' gcs             > "$d/blob-backend"
+          printf '%s' "$BLOB_BUCKET"  > "$d/blob-bucket"
+          printf '%s' gcpkms          > "$d/secrets-backend"
+          printf '%s' "$KMS_KEY_NAME" > "$d/gcpkms-key-name"
+
+          # The namespace must exist before the Secret does, and `helm --create-namespace`
+          # runs after this step. Applied the same way for the same reason: it is
+          # already there on every run but the first.
+          kubectl create namespace "$K8S_NAMESPACE" --dry-run=client -o yaml \
+            | kubectl apply -f - > /dev/null
+
+          # --from-file, never --from-literal. A literal would put every one of
+          # these on this process's argv, visible in `ps` to anything else on the
+          # runner and in any log that captured the command line. The file name is
+          # the Secret key, which is why the fetch destinations above are named
+          # after the keys rather than after the Secret Manager secrets.
+          kubectl create secret generic "$K8S_SECRET" \
+            --namespace "$K8S_NAMESPACE" \
+            --from-file="$d/controlplane-api-key" \
+            --from-file="$d/database-url" \
+            --from-file="$d/model-providers.json" \
+            --from-file="$d/blob-backend" \
+            --from-file="$d/blob-bucket" \
+            --from-file="$d/secrets-backend" \
+            --from-file="$d/gcpkms-key-name" \
+            --dry-run=client -o yaml \
+            | kubectl apply -f - > /dev/null
+
+          echo "secret/$K8S_SECRET applied in namespace $K8S_NAMESPACE"
+
+      # --atomic is the whole reason this is one command and not a sequence: a
+      # failed upgrade rolls the release back instead of leaving half the pods on
+      # the new images and half on the old, with the schema migrated by whichever
+      # got there first. --wait is what gives --atomic something to judge.
+      #
+      # There is not one credential on this command line, and that is a property of
+      # mode 2 rather than a discipline applied to it: `existingSecret` in
+      # staging-values.yaml means the chart writes no Secret, so it takes no
+      # credential VALUES at all. The step above put them in the cluster; this step
+      # only names the release, the values file and the two references that come
+      # from the build.
+      #
+      # --set-string, not --set, for both. Both values are strings by definition,
+      # and `--set` would infer the type instead of being told it — a question
+      # that does not need asking about a value whose answer is known. (A 40-char
+      # hex SHA is safe either way; the point is not to re-derive that for the
+      # next value someone adds here.)
+      - name: Deploy the chart
+        run: |
+          set -euo pipefail
+          helm upgrade --install "$HELM_RELEASE" deploy/helm/managed-agent-platform \
+            --namespace "$K8S_NAMESPACE" --create-namespace \
+            -f deploy/gcp/staging-values.yaml \
+            --set-string "image.tag=$GITHUB_SHA" \
+            --set-string "executor.gateImage=$ARTIFACT_REGISTRY/gate:$GITHUB_SHA" \
+            --wait --atomic --timeout 10m
+
+      # Ready pods are not a working API. This is the only step that proves the
+      # LoadBalancer exists, that the deployed key is the key Secret Manager holds,
+      # that the control plane can reach Cloud SQL — a 200 on a list endpoint is a
+      # round trip through the database — and that the API is not answering
+      # everyone.
+      - name: Smoke — the public API answers
+        run: |
+          set -euo pipefail
+
+          # By label, not by name. The Service is named from the release
+          # (map.fullname → "map-managed-agent-platform-controlplane"), so a
+          # hard-coded name would fail here as "not found" and read like an
+          # infrastructure problem the day the release or chart name changes.
+          #
+          # No `|| true`: kubectl's jsonpath tolerates a missing key
+          # (--allow-missing-template-keys defaults to true), so a Service whose
+          # `ingress` is not yet assigned prints nothing and exits 0 — which is
+          # what this loop is polling for. Swallowing the status would only hide a
+          # real kubectl failure (expired credentials, unreachable API server) as
+          # ten minutes of empty polling blamed on the load balancer.
+          ip=""
+          for _ in $(seq 1 60); do
+            ip="$(kubectl get svc --namespace "$K8S_NAMESPACE" \
+              --selector "app.kubernetes.io/instance=$HELM_RELEASE,app.kubernetes.io/component=controlplane" \
+              -o jsonpath='{.items[*].status.loadBalancer.ingress[0].ip}')"
+            if [ -n "$ip" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "$ip" ]; then
+            echo "::error::the controlplane Service never got an external IP (10 min)"
+            kubectl get svc --namespace "$K8S_NAMESPACE" >&2
+            kubectl describe svc --namespace "$K8S_NAMESPACE" \
+              --selector "app.kubernetes.io/instance=$HELM_RELEASE,app.kubernetes.io/component=controlplane" >&2
+            exit 1
+          fi
+          echo "controlplane external IP: $ip"
+
+          # The key goes into a curl CONFIG FILE, not onto curl's argv — the same
+          # rule the Secret step states about --from-literal, and it applies just
+          # as much here: `-H "x-api-key: $key"` is an argument, visible in `ps`
+          # for the life of the request. Mode 600, inside the 700 temp dir, built
+          # by concatenation so the value is never even a shell variable.
+          cfg="$SECRET_DIR/curlrc"
+          : > "$cfg"
+          chmod 600 "$cfg"
+          { printf 'header = "x-api-key: '
+            cat "$SECRET_DIR/controlplane-api-key"
+            printf '"\n'
+          } >> "$cfg"
+
+          # Port 8080 on the LoadBalancer, not 80: the chart publishes the Service
+          # on controlplane.service.port, which is 8080, and a Service of type
+          # LoadBalancer forwards the port it declares.
+          url="http://$ip:8080/v1/agents?limit=1"
+
+          # The IP appears before the backend is healthy, so retry: a fresh GCP
+          # forwarding rule commonly answers nothing at all for a minute or two.
+          code=000
+          for _ in $(seq 1 30); do
+            if ! code="$(curl -sS -K "$cfg" -o /dev/null -w '%{http_code}' \
+                 --max-time 10 "$url")"; then
+              code=000
+            fi
+            if [ "$code" = "200" ]; then break; fi
+            sleep 10
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error::GET /v1/agents?limit=1 on $ip:8080 answered $code, wanted 200"
+            echo "000 means nothing answered — the load balancer's backend is still" >&2
+            echo "unhealthy or the Service selects no ready pod. 401 means the" >&2
+            echo "deployed controlplane-api-key is not the one this job read." >&2
+            kubectl get pods --namespace "$K8S_NAMESPACE" >&2
+            exit 1
+          fi
+
+          # The other half, and the one that matters most for an address on the
+          # public internet: the same request WITHOUT the config file must not
+          # answer 200. A 200 here means the platform is unguarded, which no
+          # readiness check and no successful authenticated call would reveal.
+          open="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$url" || echo 000)"
+          if [ "$open" = "200" ]; then
+            echo "::error::$ip:8080 answered 200 with NO api key — the API is unguarded"
+            exit 1
+          fi
+
+          echo "deployed $GITHUB_SHA — http://$ip:8080 answers 200 with a key, $open without one"
+
+      # The runner is ephemeral, so this is hygiene rather than protection — but
+      # it is the step that keeps that true if this workflow ever moves to a
+      # self-hosted runner, where the working directory outlives the job.
+      - name: Shred the fetched credentials
+        if: always()
+        # Guarded, because the step also runs when the fetch never got far enough
+        # to set SECRET_DIR — and `rm -rf ""` fails, which would turn a clean
+        # early exit into a red cleanup step on top of it.
+        run: |
+          if [ -n "${SECRET_DIR:-}" ]; then rm -rf "$SECRET_DIR"; fi

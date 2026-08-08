@@ -1,0 +1,162 @@
+# Helm values for the staging deployment `.github/workflows/deploy.yml` installs.
+#
+# This is **mode 2** — Cloud SQL, Cloud Storage and Cloud KMS behind a pre-created
+# Secret — and it is the file that was actually installed, not a plausible one:
+# `helm upgrade --install map … -f <this> --wait --atomic --timeout 10m` returned
+# 0 against cluster `map-staging`, all three Deployments became Ready, and
+# `GET /v1/agents?limit=1` on the LoadBalancer answered 200 with a key and 401
+# without one.
+#
+# Mode 1 (bundled Postgres/MinIO/OpenBao) is not what this environment runs. It is
+# the fewest moving parts and the right first proof, but a pipeline that installs
+# it every push keeps the platform's data in three StatefulSets whose
+# PersistentVolumes the teardown section of docs/deploy-gcp.md warns about, and
+# leaves Cloud SQL — which `environment/` creates and `make gcp-db-init` has
+# already prepared — sitting unused.
+#
+# Every coordinate below came from `terraform -chdir=deploy/gcp/environment
+# output`, transcribed rather than generated. If `main.tf` changes the taint, the
+# registry, or a service account, this file is the second place to change.
+#
+# What is deliberately NOT here:
+#
+#   * Every credential — and in mode 2 that is not a list of values withheld, it
+#     is a whole mechanism moved: the chart writes no Secret at all, so there is
+#     nothing here to withhold. `controlplane-api-key`, `database-url` and
+#     `model-providers.json` reach the cluster in the pre-created Secret named
+#     below, which the workflow assembles from Secret Manager at deploy time.
+#   * `image.tag` and `executor.gateImage`. Both name a build, and the workflow
+#     sets both from the *same* commit SHA it built with. An empty `image.tag`
+#     falls back to the chart's appVersion, which this Artifact Registry does not
+#     hold — all three platform pods sit in ImagePullBackOff. Pinning a tag in
+#     this file would be worse: it would deploy whatever commit was current when
+#     the line was last edited.
+
+# The chart composes each component's image as {registry}/{repository}/{component}:{tag}
+# (templates/_helpers.tpl, "map.image"), so the Artifact Registry prefix
+# `us-central1-docker.pkg.dev/hh-opensdlc-managed-agents/map-images` splits at the
+# FIRST slash and not anywhere else. Get the split wrong — put the project into
+# `registry`, say — and Helm renders a reference that is merely wrong rather than
+# invalid, so the render succeeds and the pods fail to pull.
+image:
+  registry: us-central1-docker.pkg.dev
+  repository: hh-opensdlc-managed-agents/map-images
+
+# The switch that selects mode 2. Set, the chart renders NO Secret of its own and
+# every process reads its configuration from this one instead. The workflow's
+# "Assemble the mode-2 Secret" step creates it in namespace `map` with exactly the
+# seven keys the chart's `map.secretsEnv` helper looks for:
+#
+#   controlplane-api-key   the management API key          (Secret Manager)
+#   database-url           the Cloud SQL DSN, sslmode=require (Secret Manager)
+#   model-providers.json   the model routes, a JSON array   (Secret Manager)
+#   blob-backend           gcs                              (literal)
+#   blob-bucket            hh-opensdlc-managed-agents-map-blob (literal)
+#   secrets-backend        gcpkms                           (literal)
+#   gcpkms-key-name        the full CryptoKey resource name (literal)
+#
+# Object storage carries no credential key since #240 — the workloads authenticate
+# to GCS as themselves through Workload Identity, which is what the three
+# annotations below are for. `gcsObjectStorage.enabled` is deliberately left false:
+# it is the mode-1 route to the same bucket, and the chart refuses it alongside
+# `existingSecret` because in this mode the value would select nothing.
+existingSecret: map-platform
+
+# Not tidiness — the chart fails the render on each of these while `existingSecret`
+# is set (templates/secret.yaml's first three guards), because it will not deploy
+# two of anything. Mode 2's Postgres is Cloud SQL, its object store is the GCS
+# bucket, and its credential cipher is Cloud KMS.
+postgresql:
+  enabled: false
+minio:
+  enabled: false
+openbao:
+  enabled: false
+
+controlplane:
+  # LoadBalancer is what makes the API reachable at all: this deployment has no
+  # domain, so there is no Ingress or Gateway to put in front of it and nothing
+  # for a certificate to be issued against. GKE gives the Service a bare external
+  # IP and the pipeline's smoke check curls it.
+  #
+  # It is PLAIN HTTP, on purpose, and it is a real cost, not an oversight:
+  # `controlplane` is an `http.Server` with no TLS configuration (docs/deploy-gcp.md,
+  # "Exposing the control plane"), so the management `x-api-key`, every prompt and
+  # output, and the whole SSE stream cross the internet in cleartext. Accepted for a
+  # staging environment holding nothing anyone would miss; the moment this
+  # environment gets a domain, the fix is a GKE Gateway terminating TLS and this
+  # value back to ClusterIP.
+  service:
+    type: LoadBalancer
+  # Workload Identity needs BOTH halves and `environment/` applies only one: it
+  # creates the IAM binding that lets this release's Kubernetes ServiceAccount
+  # impersonate the Google one. The annotation is the other half, and it lives
+  # here. Missing, ADC fails at pod startup rather than denying a permission later.
+  serviceAccount:
+    annotations:
+      iam.gke.io/gcp-service-account: map-controlplane@hh-opensdlc-managed-agents.iam.gserviceaccount.com
+  # A request, not a limit. The request is what the scheduler reads, and a
+  # container with none is BestEffort: it costs the scheduler nothing and the
+  # kubelet evicts it first under node pressure. The numbers are floors that make
+  # placement deterministic, not measurements — and no limit is set precisely
+  # because nothing here has a measured working set, and a guessed limit is an
+  # OOMKill nobody asked for.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+brain:
+  # **Apply this one.** It is the annotation people skip, because it used to exist
+  # only for the Cloud SQL Auth Proxy and this deployment connects to the private
+  # IP directly. #240 ended that: the brain reads file bytes out of the blob bucket
+  # to grade rubrics, and its account is what carries `roles/storage.objectViewer`
+  # there. Omitting it does not fail — the render succeeds, the pod starts, and the
+  # brain's reads degrade to grading against the outcome description alone. Silent
+  # is the reason to set it now rather than to discover it from a grade.
+  serviceAccount:
+    annotations:
+      iam.gke.io/gcp-service-account: map-brain@hh-opensdlc-managed-agents.iam.gserviceaccount.com
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+executor:
+  # This identity is what the sandbox path and the executor's own blob access
+  # authenticate as; the IAM binding for it is already applied by `environment/`.
+  serviceAccount:
+    annotations:
+      iam.gke.io/gcp-service-account: map-executor@hh-opensdlc-managed-agents.iam.gserviceaccount.com
+  # No memory limit here either, and the reason is more than the one above: this
+  # is the process that moves the big payloads, but a checkpoint restore spools to
+  # a temp FILE (internal/executor/checkpoint.go) and a repository clone to a temp
+  # DIRECTORY (repoclone.go), so the budgets those paths enforce —
+  # EXECUTOR_CHECKPOINT_MAX_BYTES at 2 GiB, EXECUTOR_REPO_CLONE_MAX_BYTES at 1 GiB
+  # per repository — are claims on the NODE's ephemeral disk, not on this pod's
+  # address space. Size the node pool's boot disk for them.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# Where sandbox pods run — the PAIR, and neither half is useful alone. The
+# selector finds `google_container_node_pool.sandbox`, which
+# deploy/gcp/environment/main.tf labels with exactly this key and value; the
+# toleration is what gets admitted onto it past the taint that same block sets.
+# Ship only the tolerations and sandbox pods land on the platform pool, which is
+# the pool the taint exists to protect; ship only the selector and every sandbox
+# pod stays Pending forever, because nothing else tolerates that taint. This is
+# the same pair `terraform output -raw helm_values_mode1` emits — mode-1 named,
+# but the sandbox pool is not one of the things the two modes differ about —
+# transcribed rather than generated.
+sandboxPlacement:
+  nodeSelector:
+    map.opensdlc.dev/sandbox: "true"
+  tolerations:
+    - key: map.opensdlc.dev/sandbox
+      operator: Equal
+      value: "true"
+      # GKE's node-pool API spells this NO_SCHEDULE and the Kubernetes Toleration
+      # spells it NoSchedule. Not drift — two APIs.
+      effect: NoSchedule

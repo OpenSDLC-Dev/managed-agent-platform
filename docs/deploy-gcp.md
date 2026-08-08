@@ -67,6 +67,29 @@ gcloud builds submit ...     # the component images
 helm install ...             # the platform
 ```
 
+The **last two lines are the only ones this project automates**. `.github/workflows/deploy.yml`
+runs them against its own staging environment — in **mode 2** — on every push to `main`,
+reading [`deploy/gcp/staging-values.yaml`](../deploy/gcp/staging-values.yaml), assembling the
+pre-created Secret from Secret Manager, and authenticating throughout by Workload Identity
+Federation rather than by any stored GitHub secret.
+
+**All four `make` targets above it stay human-driven, and all four are prerequisites of the
+pipeline rather than steps in it** — including `gcp-db-init`, which mode 2 genuinely depends
+on: the DSN in the pre-created Secret names the `map` role, and `dbinit.sql` is the only thing
+that creates it. Terraform stays out of CD because its applies are interactive by design and
+its state is local (plan 20, Decision 9), which leaves the pipeline owning exactly
+build → push → deploy → smoke. The reasoning, the two out-of-band IAM grants it needs, and
+what an operator still owes a rebuilt environment are in
+[`deploy/gcp/README.md`](../deploy/gcp/README.md#continuous-delivery). Nothing about that
+workflow is required to deploy this platform; it is how *this* repository runs *its* staging
+environment, and the manual path above remains the supported one.
+
+`gcloud builds submit` has one requirement worth knowing before the first run on a fresh
+project: the images build under **BuildKit** (`env: ["DOCKER_BUILDKIT=1"]` in
+`cloudbuild.yaml`), because the Dockerfile's `FROM --platform=$BUILDPLATFORM` uses variables
+the classic builder does not define — without it the build fails with
+`"" is an invalid component of ""` rather than with anything about platforms.
+
 `foundation/` is never destroyed; `environment/` is created and destroyed freely. Never
 destroyed is not the same as applied once: the configuration is idempotent, and re-applying
 it is how anything is ever *added* to it. That matters for an existing
@@ -242,6 +265,18 @@ network the balancer sits on. This is a prerequisite for any exposed deployment,
 optional hardening step.
 
 Both acceptance runs behind this guide used `kubectl port-forward` and exposed nothing.
+
+**This project's own staging environment now breaks that rule on purpose, and the exception
+is recorded here rather than only in the pull request that made it.**
+[`deploy/gcp/staging-values.yaml`](../deploy/gcp/staging-values.yaml) sets
+`controlplane.service.type: LoadBalancer`, so the CD pipeline's deployment answers on a bare
+external IP over plain HTTP. The reason is that there is no domain yet: with no name, there
+is nothing for a certificate to be issued against and nothing for the Gateway below to route,
+so the alternative was not "HTTPS instead" but "unreachable". The cost is exactly the one
+stated above, unmitigated — the global `x-api-key`, every prompt and output, and the entire
+SSE stream in cleartext across the internet — and it is accepted only because that
+environment is staging and holds nothing anyone would miss. Do not read it as a pattern; the
+moment a domain exists the fix is the Gateway below and `service.type` back to `ClusterIP`.
 
 When you do expose it, a GKE Gateway with a Google-managed certificate is the least
 surprising way:

@@ -346,6 +346,26 @@ helm install map deploy/helm/managed-agent-platform \
   --set "executor.gateImage=$prefix/gate:$tag"
 ```
 
+**That build needs BuildKit, and `cloudbuild.yaml` now asks for it explicitly.** The
+Dockerfile's first line is `FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build`,
+and `BUILDPLATFORM` / `TARGETOS` / `TARGETARCH` are BuildKit-only variables. Under Cloud
+Build's classic builder they expand to the empty string and the daemon rejects the platform
+specifier outright — `failed to parse platform : "" is an invalid component of ""` — so
+`env: ["DOCKER_BUILDKIT=1"]` on both docker steps is what makes the build run at all, not a
+performance choice. This was a real defect in this path, not something continuous delivery
+introduced: the file had always described a build nobody had run since the Dockerfile gained
+that line.
+
+**On a project created under an organisation, name the build's service account.** Such a
+project no longer gets the automatic Editor grant on the Compute Engine default service
+account, so the identity Cloud Build otherwise picks cannot read the source tarball
+`builds submit` has just uploaded — `does not have storage.objects.get access to …
+<project>_cloudbuild`. Add `--service-account="projects/<project>/serviceAccounts/<sa>"` and
+give that account `roles/storage.admin` on the `_cloudbuild` bucket and
+`roles/logging.logWriter` on the project; the "Continuous delivery" section below records the
+two grants this environment made and why `CLOUD_LOGGING_ONLY` becomes mandatory alongside
+them.
+
 The sandbox-placement values in that fragment are a **pair, and neither half works alone**.
 Without the tolerations every sandbox pod stays `Pending` forever — the pool's taint has no
 other tolerator. Without the node selector sandbox pods land on the platform pool, and the
@@ -381,6 +401,174 @@ IAM binding permitting a Kubernetes ServiceAccount to impersonate the Google ser
 account is created here; the **annotation** on that KSA comes from the chart values above.
 `namespace` and `release_name` are what the binding names — install the chart somewhere
 else and ADC fails at pod startup rather than denying a permission later.
+
+## Continuous delivery
+
+Everything above is the manual path, and it stays the manual path. What
+[`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) automates is only the
+last two lines of it — the build and the install — against **one** staging environment, in
+**mode 2**, on every push to `main` and on `workflow_dispatch`.
+
+| Step | Who runs it |
+| --- | --- |
+| `make gcp-foundation-apply` | a human, interactively |
+| `PROJECT=… make gcp-bootstrap` | a human, once — it fills the two database-password secrets |
+| `make gcp-env-apply` | a human, interactively |
+| `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
+| creating `controlplane-api-key`, `database-url` and `model-providers` | a human, once — `bootstrap.sh` does not create these |
+| replacing the `model-providers` placeholder | a human, once |
+| `gcloud builds submit` → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
+
+**Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
+and `<prefix>-db-admin-password`, because those are the two Terraform reads back. The three
+the pipeline reads — `controlplane-api-key`, `database-url`, `model-providers` — are created
+out of band by whoever stands the environment up, and there is no script for them here for
+the same reason there is none for the mode-2 Secret: a tool that generated all of them would
+be a credential-handling tool of its own. `controlplane-api-key` is any high-entropy value
+(`openssl rand -hex 32`), `database-url` is composed below, and `model-providers` is the one
+a human must supply.
+
+**`gcp-db-init` is a prerequisite here, not a formality.** Mode 1 never ran it at all — the
+bundled Postgres creates its own role from `postgresql.password`. Mode 2's `database-url`
+names the `map` role on the Cloud SQL instance, and
+[`dbinit.sql`](./dbinit.sql) is the only thing that creates it: with plain `CREATE ROLE`,
+outside `cloudsqlsuperuser`, and it asserts the result. Skip it and the pipeline still goes
+green through `helm upgrade` and then fails at the first connection, because the DSN names a
+role the database does not have.
+
+**CD runs no Terraform, and the split is not a phase.** The applies are interactive on
+purpose and the state is local by design (plan 20, Decision 9; "State, and recovering it"
+above) — and it lives in the main checkout, not anywhere a runner could reach. A pipeline
+that ran them would need that state somewhere it could reach, and would be one bad plan away
+from destroying the Cloud SQL instance the platform's data lives in — which `environment/`
+is built to allow, because a staging rebuild has to be one command. So the pipeline assumes
+the environment exists: Terraform, `gcp-bootstrap` and `gcp-db-init` stay human-driven, and
+CD owns exactly **build → push → deploy → smoke**.
+
+**There is no GitHub secret in this repository, and adding one would be a regression.** The
+job mints an OIDC token, Workload Identity Federation exchanges it for a short-lived
+impersonation of `cd-deployer@`, and every credential is then read from Secret Manager at
+run time. So a rotation is `gcloud secrets versions add` and nothing else — no repository
+setting to update afterwards, and no long-lived key in a settings page to leak. The
+provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'`, and each repository
+is bound separately, so a fork cannot use it.
+
+**Two IAM grants live outside Terraform, and the pipeline does not work without them.** They
+were made by hand against this project and are recorded here because nothing in the
+repository would otherwise say they exist:
+
+| Grant | Scope | Why |
+| --- | --- | --- |
+| `roles/logging.logWriter` | the project | `cloudbuild.yaml` sets `options.logging: CLOUD_LOGGING_ONLY`, which is *mandatory* once a build names its own service account — with a user-specified identity the API refuses a build that would write to the default logs bucket |
+| `roles/storage.admin` | `gs://hh-opensdlc-managed-agents_cloudbuild` | `gcloud builds submit .` uploads the source tarball to that bucket, and the identity the build runs as has to read it back |
+
+Both are on `cd-deployer@`, and the reason they are needed at all is the first line of the
+build step: `--service-account="projects/…/serviceAccounts/cd-deployer@…"`. **A project
+created under an organisation no longer gets the automatic Editor grant on the Compute
+Engine default service account**, so the identity Cloud Build would otherwise pick cannot
+read its own source upload. That is not a hypothetical — it is how the first submission
+failed:
+
+```text
+754963270337-compute@developer.gserviceaccount.com does not have storage.objects.get
+access to the Google Cloud Storage object. ... hh-opensdlc-managed-agents_cloudbuild
+```
+
+Reproduce the grants with:
+
+```sh
+sa=cd-deployer@hh-opensdlc-managed-agents.iam.gserviceaccount.com
+gcloud projects add-iam-policy-binding hh-opensdlc-managed-agents \
+  --member="serviceAccount:$sa" --role=roles/logging.logWriter
+gcloud storage buckets add-iam-policy-binding gs://hh-opensdlc-managed-agents_cloudbuild \
+  --member="serviceAccount:$sa" --role=roles/storage.admin
+```
+
+[`staging-values.yaml`](./staging-values.yaml) is the versioned input the pipeline reads, and
+it is **mode 2**: `existingSecret: map-platform`, the bundled Postgres/MinIO/OpenBao all
+`enabled: false`, all three Workload Identity annotations, the sandbox
+`nodeSelector`/`tolerations` pair, `controlplane.service.type: LoadBalancer`, and modest
+resource requests. It holds **no credential and no `image.tag`**. The credentials are not
+withheld from it — in mode 2 the chart renders no Secret at all, so it takes no credential
+values; and `image.tag` must come from the same commit SHA the build used, which is the whole
+reason it is not a line in a file someone edits.
+
+Rebuilding `environment/` does not change any of this **unless a coordinate changes**, and
+there are now two files to check rather than one: the sandbox pair, the image
+`registry`/`repository` split and the three service-account emails in `staging-values.yaml`,
+and `BLOB_BUCKET` plus `KMS_KEY_NAME` in the workflow's `env:` block. All of them are
+transcribed from `environment/`, not generated from it, so diff them against
+`terraform output` after a change to `main.tf`. Get the registry split wrong and the render
+still succeeds — it just names images that do not exist, and all three pods sit in
+`ImagePullBackOff`.
+
+**The `map-platform` Secret is assembled by the pipeline**, because nothing else can: the
+chart writes no Secret in this mode and Terraform holds no secret *values* by design. The
+workflow reads `controlplane-api-key`, `database-url` and `model-providers` out of Secret
+Manager into a mode-700 temp directory, writes the four non-secret literals
+(`blob-backend=gcs`, `blob-bucket`, `secrets-backend=gcpkms`, `gcpkms-key-name`) beside them,
+and applies all seven with `kubectl create secret generic … --from-file=… --dry-run=client
+-o yaml | kubectl apply -f -`. `--from-file` and never `--from-literal`: a literal puts every
+credential on the process's argv. Rotating `controlplane-api-key` or `model-providers` is
+`gcloud secrets versions add` followed by a re-run of the workflow.
+
+`database-url` is the exception, because it is **derived** rather than primary: it is
+`postgres://map:<map-db-password>@10.136.0.3:5432/map?sslmode=require`, composed once by hand
+from the secret the table above already calls the platform's password. So rotating
+`map-db-password` is three steps, not one — add the version, re-run `make gcp-db-init` so the
+`ALTER ROLE` lands, then re-compose `database-url` — and skipping the third leaves a value in
+Secret Manager that the database no longer accepts, discovered at the next pod restart.
+(`sslmode=require`, not `disable`: the pod reaches the private IP directly, the same path
+`gcp-db-init` takes. `require` encrypts without verifying the server certificate; the Cloud
+SQL Auth Proxy is the better shape and is the chart's `cloudSQLProxy.enabled`.)
+
+The five **mode-1** secrets — `postgres-password`, `minio-root-user`, `minio-root-password`,
+`openbao-seal-key`, `openbao-platform-token` — are no longer read by this deploy. They are
+deliberately left in place rather than deleted: mode 1 is still the documented manual path
+above, and a secret with a version is a secret that can still decrypt something.
+
+**`model-providers` has a version, and that version is a placeholder.** It is a real endpoint
+(`https://api.anthropic.com`) with a fake key, stored so the pipeline could be proven end to
+end without inventing a credential. An unreachable host would have been a *different* failure
+— the brain retrying a dead name — from the one this is honest about, which is an invalid
+key: the platform comes up, `/v1/agents` answers, the deploy gate passes, and the first
+session that calls a model fails with an auth error. Replace it in one line:
+
+```sh
+printf '%s' '[{"model":"*","protocol":"anthropic","base_url":"https://api.anthropic.com","api_key":"sk-ant-REAL"}]' \
+  | gcloud secrets versions add model-providers --project=hh-opensdlc-managed-agents --data-file=-
+```
+
+The workflow still fails **by name** if that secret ever has no readable version — no
+automation may mint a live model API key, so the run stops printing the command above rather
+than installing a brain that crash-loops on an empty config.
+
+**What the smoke step proves, and what it does not.** It waits for the LoadBalancer's
+external IP, then requires `GET /v1/agents?limit=1` to answer 200 with the management key —
+which exercises the key end to end and takes a round trip through Cloud SQL, so it is a real
+check rather than a readiness probe restated — and to answer something *other* than 200
+without it, which is the check that an address on the public internet is not simply open. It
+does **not** run a session, so it says nothing about the model route (which is a placeholder
+today), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the
+pipeline's.
+
+**That address is plain HTTP on a bare IP**, and
+[docs/deploy-gcp.md](../../docs/deploy-gcp.md#exposing-the-control-plane) tells you not to
+do exactly this. It is a deliberate staging exception with a stated reason — there is no
+domain yet, so there is no name for a certificate to be issued against and nothing for a
+GKE Gateway to route — and a stated cost: the management key, every prompt and output, and
+the whole SSE stream cross the internet in cleartext. The moment this environment gets a
+domain, the fix is the Gateway in that section and `service.type` back to `ClusterIP`.
+
+The **web console** does not use that address. It is deployed from its own repository into
+this same cluster and this same namespace, and reaches the control plane over cluster DNS at
+`http://map-managed-agent-platform-controlplane.map.svc.cluster.local:8080` — so the
+management key never leaves the cluster, which is the one thing the cleartext external
+address would otherwise put on the wire on every console page load. What the console *does*
+publish is a second LoadBalancer of its own, for browsers, and its login gate
+(`CONSOLE_PASSWORD`, the project's `console-password` secret) is mandatory precisely because
+*that* address is public: an ungated console is an open door in front of a full-power
+management key it holds server-side.
 
 ## Five settings that are not the provider's defaults
 
