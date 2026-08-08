@@ -1,16 +1,22 @@
-// Package main implements the release-time changelog tool (plan 27):
+// Package main implements the release-time changelog tool (plans 27 and 28):
 // `assemble` folds the changelog.d/ fragments — plus any legacy [Unreleased]
-// body — into a new dated section of CHANGELOG.md, and `notes` extracts a
-// released section's body for GitHub Release notes. The ritual that runs it
-// is docs/RELEASING.md; the Make entry points are `changelog` and
-// `changelog-notes`.
+// body — into a new dated section of CHANGELOG.md, `notes` extracts a
+// released section's body for GitHub Release notes, and `archive` moves a
+// released section to docs/changelog/<version>.md behind an index stub,
+// post-release — byte-reversibly: relative links are re-based for the new
+// location and the inverse rewrite must reproduce the moved section. The ritual that runs them is docs/RELEASING.md; the
+// Make entry points are `changelog`, `changelog-notes` and
+// `changelog-archive`.
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -346,7 +352,15 @@ func notes(content, version string) (string, error) {
 			break
 		}
 	}
-	return joinTrimmed(doc[secIdx+1:end]) + "\n", nil
+	body := joinTrimmed(doc[secIdx+1:end]) + "\n"
+	// An archived section's stub must never ship as a release body; re-runs
+	// of a release workflow read the tag's checkout, where the section is
+	// still inline. (Stub-shaped only: a real body quoting the phrase
+	// mid-entry is not a stub.)
+	if isArchiveStub(strings.Split(body, "\n")) {
+		return "", fmt.Errorf("section [%s] is archived — %s", version, strings.TrimSpace(body))
+	}
+	return body, nil
 }
 
 // runAssemble is the `assemble` subcommand. Failure anywhere leaves the
@@ -503,4 +517,299 @@ func runNotes(changelogPath, version, out string, cap int) error {
 		return err
 	}
 	return os.WriteFile(out, []byte(body), 0o644)
+}
+
+// archiveMark is the text every archive stub carries. archiveSection writes
+// it; archiveSection and notes refuse a stub-shaped section that carries it.
+const archiveMark = "full section lives in ["
+
+// isArchiveStub reports whether a section body is an archive stub: exactly
+// one non-empty line, carrying archiveMark. A multi-line body that merely
+// quotes the phrase is a real section, not a stub.
+func isArchiveStub(body []string) bool {
+	nonEmpty, marked := 0, false
+	for _, l := range body {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		nonEmpty++
+		if strings.Contains(l, archiveMark) {
+			marked = true
+		}
+	}
+	return nonEmpty == 1 && marked
+}
+
+// fenceStates reports, per line, whether the line sits inside a fenced code
+// block (the fence markers themselves count as inside): a `## ` line in a
+// fenced example is quoted content, never a section boundary.
+func fenceStates(lines []string) []bool {
+	states := make([]bool, len(lines))
+	fenced := false
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimLeft(l, " "), "```") {
+			states[i] = true
+			fenced = !fenced
+			continue
+		}
+		states[i] = fenced
+	}
+	return states
+}
+
+// linkTargetRe captures inline-link targets — `](target` up to whitespace or
+// the closing paren — for rebaseLinks' unhandled-form guard.
+var linkTargetRe = regexp.MustCompile(`\]\(([^)\s]+)`)
+
+// refDefTargetRe captures a link-reference definition's target (`[label]:
+// target`) — a form the inline scan cannot see, checked separately.
+var refDefTargetRe = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:\s*(\S+)`)
+
+// linkSchemeRe matches an absolute-URL (or mailto:) target, which no rewrite
+// touches.
+var linkSchemeRe = regexp.MustCompile(`^[a-z][a-z0-9+.-]*:`)
+
+// rebaseLinks rewrites a section's relative link targets for a file two
+// directories below the changelog (docs/changelog/): `](./` becomes
+// `](../../`, and the bare `](docs/` form becomes `](../`. unrebaseLinks is
+// the exact inverse (longest prefix first), and archiveSection verifies the
+// inversion against the bytes it returns for writing. Fenced lines are
+// quoted examples and are left alone. What the inverse could not undo is
+// refused instead of guessed at: a `](../` already present would collide
+// with the rewrite's own output, and any other relative form needs a
+// mapping (and its inverse) added here first.
+func rebaseLinks(section []string, fenced []bool) ([]string, error) {
+	out := make([]string, len(section))
+	for i, l := range section {
+		if fenced[i] {
+			out[i] = l
+			continue
+		}
+		if strings.Contains(l, "](../") {
+			return nil, fmt.Errorf("%q: a parent-relative link cannot be re-based reversibly", strings.TrimSpace(l))
+		}
+		// A link-reference definition carries its target outside the `](`
+		// syntax; a relative one would move unrebased and silently break.
+		if m := refDefTargetRe.FindStringSubmatch(l); m != nil {
+			if t := m[1]; !strings.HasPrefix(t, "#") && !linkSchemeRe.MatchString(t) {
+				return nil, fmt.Errorf("%q: a link-reference definition with a relative target cannot be re-based — teach rebaseLinks its mapping first", strings.TrimSpace(l))
+			}
+		}
+		r := strings.ReplaceAll(l, "](./", "](../../")
+		r = strings.ReplaceAll(r, "](docs/", "](../")
+		for _, m := range linkTargetRe.FindAllStringSubmatch(r, -1) {
+			t := m[1]
+			if strings.HasPrefix(t, "../") || strings.HasPrefix(t, "#") || linkSchemeRe.MatchString(t) {
+				continue
+			}
+			return nil, fmt.Errorf("%q: unhandled relative link target %q — teach rebaseLinks its mapping first", strings.TrimSpace(l), t)
+		}
+		out[i] = r
+	}
+	return out, nil
+}
+
+// unrebaseLinks is rebaseLinks' inverse: every `](../../` came from `](./`,
+// and the remaining `](../` from the bare `](docs/` form.
+func unrebaseLinks(section []string, fenced []bool) []string {
+	out := make([]string, len(section))
+	for i, l := range section {
+		if fenced[i] {
+			out[i] = l
+			continue
+		}
+		r := strings.ReplaceAll(l, "](../../", "](./")
+		r = strings.ReplaceAll(r, "](../", "](docs/")
+		out[i] = r
+	}
+	return out
+}
+
+// archiveSection moves the dated section for version out of content (plan 28):
+// the returned changelog keeps the exact heading line — `latest` and the
+// tag-sanity check parse the file they always did — over a one-line pointer
+// stub, and the archive text is the heading plus the body with its relative
+// links re-based for docs/changelog/ (rebaseLinks). Nothing is returned
+// unless swapping the stub back for the section reproduces content
+// byte-for-byte AND the archive bytes invert to the moved section — a lossy
+// split is an error, never output.
+func archiveSection(content, version, linkPath string) (string, string, error) {
+	if !versionRe.MatchString(version) {
+		return "", "", fmt.Errorf("version %q is not X.Y.Z", version)
+	}
+	// The link re-base hardcodes its two mappings for an archive exactly two
+	// levels below the changelog, in docs/changelog/ — any other layout would
+	// re-base wrongly, so it is refused rather than guessed at.
+	if path.Dir(filepath.ToSlash(linkPath)) != "docs/changelog" {
+		return "", "", fmt.Errorf("archive path %q is not docs/changelog/ next to the changelog — the link re-base assumes that layout", linkPath)
+	}
+	lines := strings.Split(content, "\n")
+	_, doc := splitTrailingRefs(lines)
+	fenced := fenceStates(lines)
+	start := -1
+	for i, l := range doc {
+		if !fenced[i] && strings.HasPrefix(l, "## ["+version+"]") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return "", "", fmt.Errorf("no section [%s] in the changelog", version)
+	}
+	end := len(doc)
+	for i := start + 1; i < len(doc); i++ {
+		if !fenced[i] && strings.HasPrefix(doc[i], "## ") {
+			end = i
+			break
+		}
+	}
+	section := lines[start:end]
+	// The archive must be exactly one section: the exact dated heading, then
+	// a body with no further section heading. The boundary scan above stops
+	// at the first unfenced column-0 `## ` line, so what this guard adds is
+	// the boundary shape that scan does not see but a renderer does — an ATX
+	// `## ` heading indented one to three spaces — plus, under a future
+	// boundary regression, the swallowed neighbor itself (the mutation the
+	// tests pin). A fenced `## ` line is a quoted example and stays.
+	if !regexp.MustCompile(`^## \[` + regexp.QuoteMeta(version) + `\] - \d{4}-\d{2}-\d{2}$`).MatchString(section[0]) {
+		return "", "", fmt.Errorf("section [%s] heading %q is not the exact dated grammar", version, section[0])
+	}
+	for j, l := range section[1:] {
+		if fenced[start+1+j] {
+			continue
+		}
+		trim := strings.TrimLeft(l, " ")
+		if len(l)-len(trim) <= 3 && strings.HasPrefix(trim, "## ") {
+			return "", "", fmt.Errorf("archiving [%s] would swallow a second section heading (%q) — refusing", version, l)
+		}
+	}
+	sectionBlock := strings.Join(section, "\n")
+	if isArchiveStub(section[1:]) {
+		return "", "", fmt.Errorf("section [%s] is already archived", version)
+	}
+	// Summarize the section's groups deduplicated in Keep-a-Changelog order —
+	// the absorbed legacy backlog repeats its group headings per PR era, and
+	// the stub names each group once.
+	seen := map[string]bool{}
+	for j, l := range section {
+		if !fenced[start+j] && strings.HasPrefix(l, "### ") {
+			seen[strings.TrimPrefix(l, "### ")] = true
+		}
+	}
+	groups := []string{}
+	for _, g := range kacOrder {
+		if seen[g] {
+			groups = append(groups, g)
+			delete(seen, g)
+		}
+	}
+	for j, l := range section {
+		if fenced[start+j] {
+			continue
+		}
+		if g := strings.TrimPrefix(l, "### "); g != l && seen[g] {
+			groups = append(groups, g)
+			delete(seen, g)
+		}
+	}
+	pointer := "The " + archiveMark + linkPath + "](./" + linkPath + ")."
+	if len(groups) > 0 {
+		pointer = strings.Join(groups, " · ") + " — the " + archiveMark + linkPath + "](./" + linkPath + ")."
+	}
+	stub := []string{section[0], "", pointer}
+	if end < len(doc) {
+		stub = append(stub, "")
+	}
+	newLines := append(append(append([]string{}, lines[:start]...), stub...), lines[end:]...)
+	newContent := strings.Join(newLines, "\n")
+	stubBlock := strings.Join(stub, "\n")
+	// Re-composition must find the stub it just planted: if the stub text
+	// already occurs earlier in the document (say, quoted mid-entry), the
+	// first-occurrence Replace would restore the wrong spot — refuse.
+	if strings.Replace(newContent, stubBlock, sectionBlock, 1) != content {
+		return "", "", fmt.Errorf("archiving [%s] would not round-trip byte-identically — refusing", version)
+	}
+	rebased, err := rebaseLinks(section, fenced[start:end])
+	if err != nil {
+		return "", "", fmt.Errorf("archiving [%s]: %v", version, err)
+	}
+	archive := strings.Join(rebased, "\n")
+	appended := false
+	if !strings.HasSuffix(archive, "\n") {
+		archive += "\n"
+		appended = true
+	}
+	// The inversion guard is anchored on the exact bytes runArchive writes,
+	// not an intermediate: strip only the newline this function added, then
+	// the inverse rewrite must reproduce the moved section. Under today's
+	// two mappings the inverse is exact by construction — the golden tests
+	// pin the written bytes; what this guard adds is refusal the day a
+	// mapping is added to rebaseLinks without its inverse.
+	candidate := archive
+	if appended {
+		candidate = strings.TrimSuffix(candidate, "\n")
+	}
+	restored := strings.Join(unrebaseLinks(strings.Split(candidate, "\n"), fenced[start:end]), "\n")
+	if restored != sectionBlock {
+		return "", "", fmt.Errorf("archiving [%s]: the written archive would not invert to the moved section byte-for-byte — refusing", version)
+	}
+	return newContent, archive, nil
+}
+
+// runArchive is the `archive` subcommand: the archive file is written first
+// (a crash between the writes leaves the changelog intact and the copy
+// harmless), creation is exclusive so an existing archive file is never
+// clobbered — except that a file left by exactly such an interrupted run,
+// byte-identical to what this run would write, converges the retry.
+func runArchive(changelogPath, dir, version string) error {
+	content, err := os.ReadFile(changelogPath)
+	if err != nil {
+		return err
+	}
+	// Resolve both ends to absolute paths first: with a relative -dir and an
+	// absolute -changelog (or the reverse) filepath.Rel has no common root
+	// and fails with a raw stdlib error.
+	absChangelog, err := filepath.Abs(changelogPath)
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(dir, version+".md")
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	linkPath, err := filepath.Rel(filepath.Dir(absChangelog), absTarget)
+	if err != nil {
+		return err
+	}
+	newContent, archive, err := archiveSection(string(content), version, filepath.ToSlash(linkPath))
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	switch {
+	case errors.Is(err, fs.ErrExist):
+		existing, rerr := os.ReadFile(target)
+		if rerr != nil {
+			return rerr
+		}
+		if string(existing) != archive {
+			return fmt.Errorf("%s already exists with different content — refusing to clobber it", target)
+		}
+	case err != nil:
+		return err
+	default:
+		_, werr := f.Write([]byte(archive))
+		cerr := f.Close()
+		if werr != nil {
+			return werr
+		}
+		if cerr != nil {
+			return cerr
+		}
+	}
+	return os.WriteFile(changelogPath, []byte(newContent), 0o644)
 }

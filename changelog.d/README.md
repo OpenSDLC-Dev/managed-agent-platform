@@ -1,7 +1,8 @@
 # changelog.d/ — unreleased changelog fragments
 
 Every PR that lands a notable change adds **one file per Keep-a-Changelog
-group** here instead of editing CHANGELOG.md (which only a release PR touches,
+group** here instead of editing CHANGELOG.md (which only a release PR — plus
+the post-release `make changelog-archive` move to docs/changelog/ — touches,
 via `make changelog` — see [docs/RELEASING.md](../docs/RELEASING.md)). Fragments
 remove the top-of-file insertion race between parallel PRs: each PR adds its
 own new file. (Two in-flight branches picking the same slug and section can

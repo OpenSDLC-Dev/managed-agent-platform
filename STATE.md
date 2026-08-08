@@ -4,10 +4,14 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None** — plan 27 (release management) archived 2026-08-08; v0.2.0 is released
-(tag on PR #335's squash commit, acceptance record in
-[docs/HISTORY.md](./docs/HISTORY.md)).
+**[Plan 28 — changelog and history slimming](./docs/plan/28_changelog-slimming.md)**
+(`in-progress`): released CHANGELOG sections archive per release behind index
+stubs; HISTORY splits by period.
 
 ## Tasks
 
-(none)
+- [x] Slice 1 — `archive` subcommand (round-trip-guarded, link-rebasing,
+      mutation-checked), `make changelog-archive`, CHANGELOG split for
+      0.2.0/0.1.0, governance wording, RELEASING.md post-release step
+      ([#337](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/337)).
+- [ ] Slice 2 — HISTORY.md split to docs/history/ by period; archive the plan.
