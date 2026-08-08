@@ -52,12 +52,13 @@ mid-slice in something the release would half-ship.
    `git tag -a vX.Y.Z -m "vX.Y.Z" <merge-sha> && git push origin vX.Y.Z`.
 9. After the release run is green: `make changelog-archive VERSION=X.Y.Z` in
    the next docs PR (normally the one archiving the plan that drove the
-   release) — the section moves verbatim to `docs/changelog/X.Y.Z.md` behind
-   an index stub. The section must still be inline at tag time (step 2 of
-   the trigger list renders the notes from it), and the stub keeps the dated
-   heading, so
-   existing `CHANGELOG.md § [X.Y.Z]` citations resolve through it — no
-   citation sweep.
+   release) — the section moves to `docs/changelog/X.Y.Z.md` behind an index
+   stub, byte-reversibly (the tool re-bases relative links for the new
+   directory and refuses any move it cannot invert). The section must still
+   be inline at tag time (step 2 of the trigger list renders the notes from
+   it), and the stub keeps the dated heading, so existing
+   `CHANGELOG.md § [X.Y.Z]` citations resolve through it — no citation
+   sweep.
 
 ## What the tag triggers
 

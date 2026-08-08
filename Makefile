@@ -110,10 +110,12 @@ eval:
 
 # Release-time changelog tooling (docs/RELEASING.md; the fragment format is
 # changelog.d/README.md). NOT part of `verify`: `changelog` rewrites
-# CHANGELOG.md, which only a release PR does, and `changelog-notes` exists for
-# the release workflow to extract a section as GitHub Release notes. The
-# tool's own tests DO run under `make test` (./... includes ./tools/...);
-# only the invocation is release-scoped.
+# CHANGELOG.md, which only a release PR does, `changelog-notes` exists for
+# the release workflow to extract a section as GitHub Release notes, and
+# `changelog-archive` moves a released section to docs/changelog/ in the
+# post-release PR (RELEASING.md step 9). The tool's own tests DO run under
+# `make test` (./... includes ./tools/...); only the invocations are
+# release-scoped.
 changelog:
 	go run ./tools/changelog assemble -version "$(VERSION)"
 

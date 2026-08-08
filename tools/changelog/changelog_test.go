@@ -965,3 +965,178 @@ func TestRunArchive(t *testing.T) {
 		t.Error("existing archive file was clobbered")
 	}
 }
+
+// Relative links are re-based for docs/changelog/ — `](./` two levels up,
+// the bare `](docs/` form one — while absolute URLs and fenced examples stay
+// untouched, and the written bytes invert to the moved section.
+func TestArchiveRebasesLinks(t *testing.T) {
+	cl := "# C\n\n## [0.4.0] - 2026-09-01\n\n### Added\n\n" +
+		"- See [plan](./docs/plan/29_x.md) and [old plan](docs/plan/10_y.md), plus\n" +
+		"  [the SDK](https://example.com/sdk).\n\n" +
+		"```\nquoted [link](./docs/plan/inside-fence.md) stays\n```\n\n" +
+		"## [0.3.0] - 2026-08-08\n\nOlder.\n\n" +
+		"[0.4.0]: https://e/1\n[0.3.0]: https://e/2\n"
+	newContent, archived, err := archiveSection(cl, "0.4.0", "docs/changelog/0.4.0.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArchive := "## [0.4.0] - 2026-09-01\n\n### Added\n\n" +
+		"- See [plan](../../docs/plan/29_x.md) and [old plan](../plan/10_y.md), plus\n" +
+		"  [the SDK](https://example.com/sdk).\n\n" +
+		"```\nquoted [link](./docs/plan/inside-fence.md) stays\n```\n"
+	if archived != wantArchive {
+		t.Errorf("archive content:\n%q\nwant:\n%q", archived, wantArchive)
+	}
+	// The stub keeps the original-document link style — it lives in the
+	// changelog, which never moved.
+	if !strings.Contains(newContent, "Added — the full section lives in [docs/changelog/0.4.0.md](./docs/changelog/0.4.0.md).") {
+		t.Errorf("stub wrong:\n%q", newContent)
+	}
+}
+
+func TestArchiveRefusesUnhandledLinkForms(t *testing.T) {
+	parent := "# C\n\n## [0.4.0] - 2026-09-01\n\n- A [link](../escape.md).\n\n[0.4.0]: https://e/1\n"
+	if _, _, err := archiveSection(parent, "0.4.0", "d/0.4.0.md"); err == nil || !strings.Contains(err.Error(), "parent-relative") {
+		t.Errorf("want parent-relative refusal, got %v", err)
+	}
+	bare := "# C\n\n## [0.4.0] - 2026-09-01\n\n- A [link](internal/q.md).\n\n[0.4.0]: https://e/1\n"
+	if _, _, err := archiveSection(bare, "0.4.0", "d/0.4.0.md"); err == nil || !strings.Contains(err.Error(), "unhandled relative link target") {
+		t.Errorf("want unhandled-form refusal, got %v", err)
+	}
+}
+
+// The re-composition guard is reachable: when the exact stub text already
+// occurs earlier in the document (quoted mid-entry), the first-occurrence
+// Replace would restore the wrong spot, and archiveSection must refuse.
+// Deleting the round-trip comparison turns this red — the mutation duty
+// plan 28 slice 1 names.
+func TestArchiveRoundTripGuardFires(t *testing.T) {
+	cl := "# C\n\n## [0.3.0] - 2026-08-08\n\n### Added\n\n" +
+		"- Quoting a stub verbatim: junk ## [0.2.0] - 2026-08-07\n\n" +
+		"Added — the full section lives in [docs/changelog/0.2.0.md](./docs/changelog/0.2.0.md).\n\n" +
+		"## [0.2.0] - 2026-08-07\n\n### Added\n\n- Real entry.\n\n" +
+		"[0.3.0]: https://e/1\n[0.2.0]: https://e/2\n"
+	_, _, err := archiveSection(cl, "0.2.0", "docs/changelog/0.2.0.md")
+	if err == nil || !strings.Contains(err.Error(), "would not round-trip") {
+		t.Errorf("want round-trip refusal, got %v", err)
+	}
+}
+
+// The exact-dated-grammar guard refuses a heading `latest` and the tag-sanity
+// check could not parse back.
+func TestArchiveRefusesLooseHeadingGrammar(t *testing.T) {
+	cl := "# C\n\n## [0.8.0] - 2026-9-4\n\nBody.\n\n[0.8.0]: https://e/1\n"
+	if _, _, err := archiveSection(cl, "0.8.0", "d/0.8.0.md"); err == nil || !strings.Contains(err.Error(), "exact dated grammar") {
+		t.Errorf("want grammar refusal, got %v", err)
+	}
+}
+
+// The swallow guard is reachable: an indented `## ` heading is a renderer
+// boundary the column-0 scan does not see, and archiving over it is refused;
+// a fenced `## ` line is quoted content and archives untouched.
+func TestArchiveSecondHeadingShapes(t *testing.T) {
+	indented := "# C\n\n## [0.6.0] - 2026-09-03\n\nBody.\n\n ## Legacy heading\n\n[0.6.0]: https://e/1\n"
+	if _, _, err := archiveSection(indented, "0.6.0", "d/0.6.0.md"); err == nil || !strings.Contains(err.Error(), "would swallow") {
+		t.Errorf("want swallow refusal, got %v", err)
+	}
+	fenced := "# C\n\n## [0.7.0] - 2026-09-04\n\nBody.\n\n```\n## [9.9.9] - 2026-01-01\n```\n\n[0.7.0]: https://e/1\n"
+	_, archived, err := archiveSection(fenced, "0.7.0", "d/0.7.0.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(archived, "\n## [9.9.9] - 2026-01-01\n") {
+		t.Errorf("fenced example line altered:\n%q", archived)
+	}
+}
+
+// Stub detection is structural — one non-empty body line carrying the mark —
+// so a real multi-line body that quotes the phrase is neither "already
+// archived" nor refused by notes.
+func TestArchiveStubPhraseInProseIsNotAStub(t *testing.T) {
+	cl := "# C\n\n## [0.9.0] - 2026-09-05\n\n" +
+		"- One entry noting the full section lives in [the ops guide](https://e/g).\n" +
+		"- Another entry.\n\n[0.9.0]: https://e/1\n"
+	if _, _, err := archiveSection(cl, "0.9.0", "d/0.9.0.md"); err != nil {
+		t.Errorf("prose quoting the stub phrase refused: %v", err)
+	}
+	if _, err := notes(cl, "0.9.0"); err != nil {
+		t.Errorf("notes refused a real section quoting the stub phrase: %v", err)
+	}
+}
+
+// A group outside Keep a Changelog's canon still reaches the stub summary,
+// after the canonical ones, in appearance order.
+func TestArchiveStubNonKacGroup(t *testing.T) {
+	cl := "# C\n\n## [0.5.0] - 2026-09-02\n\n### Special\n\n- S.\n\n### Added\n\n- A.\n\n[0.5.0]: https://e/1\n"
+	newContent, _, err := archiveSection(cl, "0.5.0", "d/0.5.0.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(newContent, "\nAdded · Special — the full section lives in [") {
+		t.Errorf("non-canonical group missing or misordered:\n%q", newContent)
+	}
+}
+
+// The write order is the crash-safety invariant: when the archive write
+// fails, the changelog must be untouched.
+func TestRunArchiveFailedArchiveWriteLeavesChangelog(t *testing.T) {
+	root := t.TempDir()
+	clPath := filepath.Join(root, "CHANGELOG.md")
+	if err := os.WriteFile(clPath, []byte(steadyChangelog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "ro")
+	if err := os.Mkdir(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := runArchive(clPath, dir, "0.2.0"); err == nil {
+		t.Fatal("want error from an unwritable archive dir")
+	}
+	if got := readFile(t, clPath); got != steadyChangelog {
+		t.Error("changelog was rewritten although the archive write failed")
+	}
+}
+
+// An archive file left by an interrupted run — byte-identical to what this
+// run would write — converges the retry instead of blocking it.
+func TestRunArchiveIdempotentResume(t *testing.T) {
+	root := t.TempDir()
+	clPath := filepath.Join(root, "CHANGELOG.md")
+	if err := os.WriteFile(clPath, []byte(steadyChangelog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "docs", "changelog")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prior := "## [0.2.0] - 2026-08-07\n\n### Added\n\n- A added.\n"
+	if err := os.WriteFile(filepath.Join(dir, "0.2.0.md"), []byte(prior), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runArchive(clPath, dir, "0.2.0"); err != nil {
+		t.Fatalf("identical leftover archive should converge, got %v", err)
+	}
+	if got := readFile(t, clPath); got != slimmed {
+		t.Errorf("changelog on disk:\n%q", got)
+	}
+}
+
+// An absolute -changelog with the relative -dir default must still resolve
+// the stub's link path (filepath.Rel needs a common root).
+func TestRunArchiveAbsoluteChangelogRelativeDir(t *testing.T) {
+	t.Chdir(t.TempDir())
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clPath := filepath.Join(root, "CHANGELOG.md")
+	if err := os.WriteFile(clPath, []byte(steadyChangelog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runArchive(clPath, filepath.Join("docs", "changelog"), "0.2.0"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, clPath); !strings.Contains(got, "[docs/changelog/0.2.0.md](./docs/changelog/0.2.0.md)") {
+		t.Errorf("stub link path wrong:\n%q", got)
+	}
+}

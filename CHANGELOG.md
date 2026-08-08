@@ -8,12 +8,13 @@ A change and its changelog entry land in the **same PR** — the entry as a
 fragment in [changelog.d/](./changelog.d/), its body the final entry verbatim.
 A release PR assembles the fragments into a dated section here (`make
 changelog`; see [docs/RELEASING.md](./docs/RELEASING.md)); post-release, the
-section moves verbatim to [docs/changelog/](./docs/changelog/) behind the
-index stub below (`make changelog-archive`); no other PR edits this file. The fragment is the **one place a change's narrative is written**:
-[docs/HISTORY.md](./docs/HISTORY.md) holds only what a changelog structurally
-cannot (acceptance-run and review-hardening records, decisions evaluated and
-rejected, archived plans' progress summaries), never a second copy of an
-entry here.
+section moves to [docs/changelog/](./docs/changelog/) behind the index stub
+below (`make changelog-archive`, relative links re-based, byte-reversibly);
+no other PR edits this file. The fragment is the **one place a change's
+narrative is written**: [docs/HISTORY.md](./docs/HISTORY.md) holds only what
+a changelog structurally cannot (acceptance-run and review-hardening records,
+decisions evaluated and rejected, archived plans' progress summaries), never
+a second copy of an entry here.
 
 ## [Unreleased]
 

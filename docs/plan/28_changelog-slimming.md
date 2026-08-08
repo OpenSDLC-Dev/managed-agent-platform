@@ -17,23 +17,29 @@ user asked for the slimming on 2026-08-08, choosing the shape below.
 ## Decisions
 
 1. **Per-release archive files, everything released.** Each dated section of
-   CHANGELOG.md moves **verbatim** to `docs/changelog/<X.Y.Z>.md`. CHANGELOG.md
-   keeps the preamble, the `[Unreleased]` pointer paragraph, and one **index
-   stub** per release: the exact dated heading (`## [X.Y.Z] - YYYY-MM-DD` —
-   the grammar `latest` and `release-tag-check` parse stays untouched in the
-   file they already read) followed by a one-line body naming the group
-   summary and linking the archive file. The trailing link-reference block
-   stays in CHANGELOG.md; the archive file is self-contained (it carries its
-   own copy of the refs its text uses). Rejected: a single archive file — it
+   CHANGELOG.md moves to `docs/changelog/<X.Y.Z>.md` — byte-reversibly, not
+   byte-verbatim: relative link targets are re-based for the new directory
+   (`](./` two levels up, the bare `](docs/` form one; anything else relative
+   is refused until taught), because a verbatim copy would break every one of
+   them from `docs/changelog/`. CHANGELOG.md keeps the preamble, the
+   `[Unreleased]` pointer paragraph, and one **index stub** per release: the
+   exact dated heading (`## [X.Y.Z] - YYYY-MM-DD` — the grammar `latest` and
+   `release-tag-check` parse stays untouched in the file they already read)
+   followed by a one-line body naming the group summary and linking the
+   archive file. The trailing link-reference block stays in CHANGELOG.md —
+   section bodies use inline links only, so the archive file needs no
+   reference definitions; its own dated heading's brackets render literally
+   there, as raw Keep a Changelog does. Rejected: a single archive file — it
    regrows the original problem; keeping only the latest release inline — the
    5,507-line `§ [0.2.0]` *is* the latest, so nothing would slim today.
 2. **Mechanized, not manual.** A new `archive` subcommand on
    `tools/changelog` performs the move: extract the section, write the
    archive file, replace the body with the stub, and refuse to write anything
-   unless re-composing (archive body + stub → original) round-trips
-   byte-identically. `make changelog-archive VERSION=X.Y.Z` wraps it.
-   Rejected: a documented manual step — a 5,500-line verbatim move performed
-   by hand is exactly where bytes go missing.
+   unless the document round-trips (stub → section restores it byte-for-byte)
+   **and** the archive file's bytes invert to the moved section under the
+   inverse link rewrite. `make changelog-archive VERSION=X.Y.Z` wraps it.
+   Rejected: a documented manual step — a 5,500-line move performed by hand
+   is exactly where bytes go missing.
 3. **Ritual placement.** Archiving a release's section is a **post-release**
    step: the section must be in CHANGELOG.md at tag time (`changelog-notes`
    extracts it there), so the archive lands in the next docs PR after the tag
@@ -76,6 +82,6 @@ user asked for the slimming on 2026-08-08, choosing the shape below.
 
 `make verify` green; `go run ./tools/changelog latest` still answers from the
 slimmed CHANGELOG.md; the real move re-composes to the pre-move document
-byte-for-byte; every `CHANGELOG.md § [X.Y.Z]` citation still resolves through
-the stub's onward link; CHANGELOG.md lands under ~60 lines and HISTORY.md
-under ~1,000.
+byte-for-byte under the inverse link rewrite; every `CHANGELOG.md § [X.Y.Z]`
+citation still resolves through the stub's onward link; CHANGELOG.md lands
+under ~60 lines and HISTORY.md under ~1,000.
