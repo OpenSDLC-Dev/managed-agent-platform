@@ -17,6 +17,10 @@ func TestIPAllowed(t *testing.T) {
 	}{
 		{name: "IPv4 loopback", ip: "127.0.0.1", refused: true},
 		{name: "IPv4 loopback, not just .0.1", ip: "127.9.9.9", refused: true},
+		// ::1 is also load-bearing for the shape of the check: its low 32 bits
+		// decode to the IPv4 bytes 0.0.0.1, which no rule calls loopback, so a
+		// guard that replaced the address with its decoded target instead of
+		// checking both would admit it.
 		{name: "IPv6 loopback", ip: "::1", refused: true},
 		{name: "IPv4 link-local (cloud metadata)", ip: "169.254.169.254", refused: true},
 		{name: "IPv6 link-local", ip: "fe80::1", refused: true},
@@ -43,9 +47,40 @@ func TestIPAllowed(t *testing.T) {
 		{name: "NAT64 well-known prefix wrapping loopback", ip: "64:ff9b::7f00:1", refused: true},
 		{name: "NAT64 local prefix wrapping link-local", ip: "64:ff9b:1::a9fe:a9fe", refused: true},
 		{name: "NAT64 wrapping a public address", ip: "64:ff9b::5db8:d822"},
+		// Trying six layouts can over-refuse, so the layouts a real deployment
+		// uses to reach a real address are asserted allowed, not assumed to be.
+		{name: "NAT64 local prefix, /96 layout, public address", ip: "64:ff9b:1::808:808"},
+		{name: "NAT64 local prefix, /64 layout, public address", ip: "64:ff9b:1:2:8:808:800:0"},
+
+		// RFC 6052 embeds the four IPv4 octets at a different offset for each
+		// of its six prefix lengths, and an address does not say which its
+		// deployment uses. This one is the /48 layout: bytes 6,7,9,10 carry
+		// 169.254.169.254 while the low 32 bits — the only place a /96 reader
+		// looks — carry 8.8.8.8. A guard that reads just the low 32 bits calls
+		// it Google DNS and dials cloud metadata.
+		{name: "NAT64 /48 layout wrapping cloud metadata", ip: "64:ff9b:1:a9fe:a9:fe00:808:808", refused: true},
+		{name: "NAT64 /40 layout wrapping loopback", ip: "64:ff9b:7f:0:1::", refused: true},
 		{name: "6to4 wrapping loopback", ip: "2002:7f00:1::1", refused: true},
 		{name: "6to4 wrapping a public address", ip: "2002:5db8:d822::1"},
 		{name: "Teredo wrapping loopback", ip: "2001::5:0:0:80ff:fffe", refused: true},
+
+		// IPv4-mapped (::ffff:a.b.c.d) is classified by net.IP itself, so these
+		// rows guard against a refactor that stopped it doing so rather than
+		// against the decoder.
+		{name: "IPv4-mapped loopback", ip: "::ffff:127.0.0.1", refused: true},
+		{name: "IPv4-mapped cloud metadata", ip: "::ffff:169.254.169.254", refused: true},
+		{name: "IPv4-mapped public address", ip: "::ffff:93.184.216.34"},
+
+		// IPv4-compatible (::a.b.c.d) is the one net.IP does not classify: every
+		// class predicate returns false and To4 returns nil, so without an
+		// explicit decode the guard admits it. Stock kernels will not route it
+		// (see the note in dialguard.go), which is why these rows assert the
+		// guard's own answer rather than reachability — the guard must not
+		// depend on the kernel to be the thing that says no.
+		{name: "IPv4-compatible loopback", ip: "::127.0.0.1", refused: true},
+		{name: "IPv4-compatible cloud metadata", ip: "::169.254.169.254", refused: true},
+		{name: "IPv4-compatible multicast", ip: "::224.0.0.1", refused: true},
+		{name: "IPv4-compatible public address", ip: "::93.184.216.34"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

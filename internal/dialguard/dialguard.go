@@ -36,44 +36,111 @@ import (
 // disallowed: a caller that surfaces it must not reveal whether an internal
 // host exists.
 func IPAllowed(ip net.IP) error {
-	// An IPv6 transition address forwards to an embedded IPv4 target through a
-	// translator on the deployment path; check that real target, not the v6
-	// wrapper, so 64:ff9b::7f00:1 cannot smuggle 127.0.0.1 past the guard.
-	target := ip
-	if v4 := embeddedIPv4(ip); v4 != nil {
-		target = v4
-	}
-	switch {
-	case target.IsLoopback(), target.IsLinkLocalUnicast(), target.IsLinkLocalMulticast(),
-		target.IsUnspecified(), target.IsMulticast():
+	// The address itself, and then — because an IPv6 transition address
+	// forwards to an embedded IPv4 target through a translator on the
+	// deployment path — every IPv4 target a translator could reach through it,
+	// so 64:ff9b::7f00:1 cannot smuggle 127.0.0.1 past the guard.
+	//
+	// Both, never one instead of the other. Replacing the address with its
+	// decoded target would make the guard depend on the decoder being right
+	// about every prefix: ::1 decodes to the IPv4 bytes 0.0.0.1, which is
+	// loopback under no rule at all, so a decoder that reached it would turn
+	// the most obvious refusal in the list into an admission. Checking each in
+	// turn keeps a wrong decode able only to add a refusal.
+	if refused(ip) {
 		return fmt.Errorf("dial target %s is a disallowed address", ip)
-	default:
-		return nil
 	}
+	for _, target := range embeddedIPv4(ip) {
+		// A decode landing on the unspecified address is reading prefix or
+		// suffix padding rather than a target — every NAT64 layout but the
+		// right one does that on a shorter prefix — and refusing it would
+		// refuse the legitimate address it was read from.
+		if target.IsUnspecified() {
+			continue
+		}
+		if refused(target) {
+			return fmt.Errorf("dial target %s is a disallowed address", ip)
+		}
+	}
+	return nil
 }
 
-// embeddedIPv4 returns the IPv4 address wrapped by an IPv6 transition form —
-// NAT64 (the whole 64:ff9b::/32, covering both the 64:ff9b::/96 well-known and
-// 64:ff9b:1::/48 local prefixes; v4 in the low 32 bits), 6to4 (2002::/16, v4 in
-// bytes 2–5), and Teredo (2001:0::/32, client v4 in the inverted low 32 bits) —
-// so the guard re-checks the target a translator would actually reach. The
-// NAT64 match is deliberately broad and assumes /96-style low-32 embedding: a
-// mis-decode can only add a refusal, never an admit, so it stays fail-safe.
-// Returns nil for a plain address.
-func embeddedIPv4(ip net.IP) net.IP {
+// refused is the address-class list, applied to one address.
+func refused(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsMulticast()
+}
+
+// embeddedIPv4 returns every IPv4 address an IPv6 transition form could be
+// carrying — 6to4 (2002::/16, v4 in bytes 2–5), Teredo (2001:0::/32, client v4
+// in the inverted low 32 bits), IPv4-compatible (::/96, v4 in the low 32 bits),
+// and NAT64 (64:ff9b::/32, covering both the well-known 64:ff9b::/96 and the
+// RFC 8215 local-use 64:ff9b:1::/48) — so the guard can re-check the target a
+// translator would actually reach. Returns nil for a plain address.
+//
+// NAT64 returns six candidates because RFC 6052 §2.2 defines six prefix lengths
+// (/32 /40 /48 /56 /64 /96), each embedding the four IPv4 octets at different
+// offsets around the reserved u-byte, and an address on its own does not say
+// which one its deployment uses. Reading only the low 32 bits — the /96 layout,
+// and the obvious guess because the well-known prefix must be /96 — is wrong
+// for the other five and wrong in the admitting direction: under a /48 prefix
+// 64:ff9b:1:a9fe:a9:fe00:808:808 carries 169.254.169.254 in bytes 6,7,9,10 and
+// nothing but padding and suffix in the low 32, so a low-32 reader sees 8.8.8.8
+// and lets the metadata endpoint through. Trying all six costs a handful of
+// byte loads and cannot admit anything, since the caller refuses on any
+// candidate rather than on a chosen one. It can over-refuse — a public address
+// under one layout is arbitrary bytes under the other five, and those bytes
+// could land in a blocked class — which is the direction to be wrong in, and
+// rare enough in practice that no legitimate mapping in the tests hits it.
+//
+// IPv4-compatible is here because Go does not decode it for us and nothing else
+// catches it. ::ffff:127.0.0.1 (IPv4-*mapped*) is safe without any of this —
+// To4 returns 127.0.0.1 and IsLoopback says yes — which makes it easy to assume
+// the deprecated ::127.0.0.1 (IPv4-*compatible*) behaves the same way. It does
+// not: To4 returns nil and every net.IP class predicate returns false, so
+// without this case the guard admits it. It is listed as hardening, not as a
+// patched bypass: a connect to ::127.0.0.1 does not reach a listener on
+// 127.0.0.1 on either platform (Linux answers ENETUNREACH, macOS drops the SYN),
+// so the address only goes anywhere on a host configured for 6-over-4
+// tunneling. Refusing it costs nothing and does not depend on that remaining
+// true.
+func embeddedIPv4(ip net.IP) []net.IP {
 	b := ip.To16()
 	if b == nil || ip.To4() != nil {
 		return nil
 	}
 	switch {
 	case b[0] == 0x20 && b[1] == 0x02:
-		return net.IPv4(b[2], b[3], b[4], b[5]).To4()
+		return []net.IP{v4(b[2], b[3], b[4], b[5])}
 	case b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x00:
-		return net.IPv4(^b[12], ^b[13], ^b[14], ^b[15]).To4()
+		return []net.IP{v4(^b[12], ^b[13], ^b[14], ^b[15])}
 	case b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b:
-		return net.IPv4(b[12], b[13], b[14], b[15]).To4()
+		// RFC 6052 §2.2, one row per prefix length. Byte 8 is the reserved
+		// u-octet and is never part of the address, which is why the octets
+		// skip it rather than running consecutively.
+		return []net.IP{
+			v4(b[4], b[5], b[6], b[7]),     // /32
+			v4(b[5], b[6], b[7], b[9]),     // /40
+			v4(b[6], b[7], b[9], b[10]),    // /48
+			v4(b[7], b[9], b[10], b[11]),   // /56
+			v4(b[9], b[10], b[11], b[12]),  // /64
+			v4(b[12], b[13], b[14], b[15]), // /96
+		}
+	case isZero(b[:12]):
+		return []net.IP{v4(b[12], b[13], b[14], b[15])}
 	}
 	return nil
+}
+
+func v4(a, b, c, d byte) net.IP { return net.IPv4(a, b, c, d).To4() }
+
+func isZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Control builds a net.Dialer Control hook that runs allow on the resolved

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,9 +27,18 @@ import (
 
 // serveMCP starts an httptest server hosting an MCP server with the given
 // tools, and returns its URL.
+// fixturePageSize is small on purpose. The SDK server's default is 1,000
+// (mcp.DefaultPageSize), so a fixture that leaves it alone answers every
+// realistic listing in one page — and a client that fetched only the first page
+// would pass a test named for following pagination. Every fixture pages, so the
+// cursor loop is exercised by the whole suite rather than by one test that has
+// to remember to ask for it.
+const fixturePageSize = 7
+
 func serveMCP(t *testing.T, tools ...*sdk.Tool) string {
 	t.Helper()
-	server := sdk.NewServer(&sdk.Implementation{Name: "test-server", Version: "1"}, nil)
+	server := sdk.NewServer(&sdk.Implementation{Name: "test-server", Version: "1"},
+		&sdk.ServerOptions{PageSize: fixturePageSize})
 	for _, tool := range tools {
 		server.AddTool(tool, func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
 			return &sdk.CallToolResult{}, nil
@@ -61,6 +71,233 @@ func tool(name, description string, required ...string) *sdk.Tool {
 // it; TestDefaultClientRefusesLoopback covers the guard itself.
 func loopbackClient() *http.Client { return &http.Client{Timeout: mcp.DialTimeout} }
 
+// serveToolsList starts a server whose handshake is a real SDK server's but
+// whose tools/list result is written by hand, and counts the listing requests.
+//
+// The suite otherwise runs against SDK servers on purpose, and this is the
+// deliberate exception rather than a retreat from it: what these tests are
+// about is what a *non-SDK* server can put on the wire — a null entry in the
+// tools array, a schema that is not an object, a cursor that never advances.
+// An SDK server cannot produce any of it, so a fixture that only ever speaks
+// through one cannot reach the code that survives it. Everything except the
+// listing still goes through the real handler, so the connection under test is
+// a real negotiated one.
+func serveToolsList(t *testing.T, result func(cursor string) map[string]any) (url string, calls *atomic.Int32) {
+	t.Helper()
+	calls = &atomic.Int32{}
+	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return sdk.NewServer(&sdk.Implementation{Name: "raw-server", Version: "1"}, nil)
+	}, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read", http.StatusInternalServerError)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params struct {
+				Cursor string `json:"cursor"`
+			} `json:"params"`
+		}
+		if json.Unmarshal(body, &req) != nil || req.Method != "tools/list" {
+			inner.ServeHTTP(w, r)
+			return
+		}
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result":  result(req.Params.Cursor),
+		})
+	}))
+	t.Cleanup(ts.Close)
+	return ts.URL, calls
+}
+
+func TestListToolsContainsAPanicInsideTheClientLibrary(t *testing.T) {
+	t.Parallel()
+	// `"tools": [null]` is legal JSON that go-sdk v1.7.0 decodes into a nil
+	// element and then dereferences without checking (filterValidTools →
+	// validateParamHeaderAnnotations), so the client panics on a response a
+	// customer-named server chose to send. The caller is an executor shared by
+	// every session on the host and a Go panic is not confined to its
+	// goroutine, so an unhandled one here is not a failed work item — it is
+	// every concurrent tool call on that executor.
+	//
+	// If a later SDK release stops panicking, this test goes green a different
+	// way (an empty or partial listing rather than an error) and should be
+	// rewritten to assert the skip; what it must never do is crash.
+	url, _ := serveToolsList(t, func(string) map[string]any {
+		return map[string]any{"tools": []any{nil}}
+	})
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	// Reaching the next line at all is most of the assertion: an uncontained
+	// panic ends the test binary rather than failing this test.
+	if _, err := conn.ListTools(context.Background()); err == nil {
+		t.Fatal("ListTools reported success on a response the client library cannot parse")
+	}
+}
+
+func TestListToolsSkipsEntriesThatCannotBeATool(t *testing.T) {
+	t.Parallel()
+	// Four entries a server is free to send and the SDK decodes without
+	// complaint. Two of them are tools; the other two are not, and neither may
+	// take the others down with it — the reference treats an unresolvable tool
+	// as a warning, so one malformed entry must not deny an agent the rest of
+	// a server's catalog.
+	url, _ := serveToolsList(t, func(string) map[string]any {
+		return map[string]any{"tools": []any{
+			map[string]any{"name": "", "inputSchema": map[string]any{"type": "object"}},
+			map[string]any{"name": "not_a_schema", "inputSchema": 42},
+			map[string]any{"name": "no_schema", "description": "takes nothing"},
+			map[string]any{"name": "good", "inputSchema": map[string]any{
+				"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}},
+			}},
+		}}
+	})
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	tools, err := conn.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	var names []string
+	byName := map[string]mcp.Tool{}
+	for _, tl := range tools {
+		names = append(names, tl.Name)
+		byName[tl.Name] = tl
+	}
+	if len(tools) != 2 || byName["no_schema"].Name == "" || byName["good"].Name == "" {
+		t.Fatalf("got tools %v, want exactly [no_schema good]", names)
+	}
+
+	// An absent schema means a tool that takes no arguments, and Anthropic's
+	// input_schema must be an object regardless — so it is rendered as the
+	// empty object schema rather than as null, which the model API rejects.
+	if got := string(byName["no_schema"].InputSchema); got != `{"type":"object"}` {
+		t.Errorf("no_schema input_schema = %s, want an empty object schema", got)
+	}
+	if !strings.Contains(string(byName["good"].InputSchema), `"properties"`) {
+		t.Errorf("good input_schema = %s, want the server's own schema", byName["good"].InputSchema)
+	}
+}
+
+func TestListToolsCannotTellAnAbsentToolsFieldFromAnEmptyOne(t *testing.T) {
+	t.Parallel()
+	// MCP requires a successful tools/list result to carry a `tools`
+	// collection, so a result of `{}` is malformed and arguably ought to be a
+	// retryable error rather than the durable fact "this server has no tools".
+	// It is not treated that way, and the reason is not a judgment call: the
+	// SDK erases the difference before this package sees it. ListTools ends
+	// with `result.Tools = filterValidTools(...)`, and filterValidTools opens
+	// with `make([]*Tool, 0, len(tools))` — so a nil `tools` and an empty one
+	// both arrive here as a non-nil empty slice, and no check at this layer can
+	// separate them.
+	//
+	// This test exists to pin that, because "distinguish absent from empty" is
+	// a natural thing for a reviewer to ask for and it cannot be built without
+	// abandoning the SDK's typed call. If a later SDK release stops normalizing
+	// it, this test goes red and the choice becomes a real one.
+	url, _ := serveToolsList(t, func(string) map[string]any {
+		return map[string]any{} // no "tools" key at all
+	})
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	tools, err := conn.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools: %v — the SDK now distinguishes absent from empty, "+
+			"so this package can too; see docs/DIVERGENCES.md", err)
+	}
+	if len(tools) != 0 {
+		t.Fatalf("got %d tools from a result with no tools field", len(tools))
+	}
+}
+
+func TestListToolsRefusesACursorThatNeverAdvances(t *testing.T) {
+	t.Parallel()
+	// Pagination is server-driven: the loop ends when a server omits the next
+	// cursor, so a server that returns the same cursor forever never ends it.
+	// This is the shape a broken cursor implementation actually takes, and the
+	// work item doing the listing holds a queue lease while it spins.
+	url, calls := serveToolsList(t, func(string) map[string]any {
+		return map[string]any{"tools": []any{}, "nextCursor": "stuck"}
+	})
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	tools, err := conn.ListTools(context.Background())
+	if err == nil {
+		t.Fatalf("ListTools returned %d tools against a stuck cursor, want an error", len(tools))
+	}
+	if !strings.Contains(err.Error(), "cursor") {
+		t.Errorf("error %q does not say the cursor is the problem", err)
+	}
+	// Caught on the request that proves it, not after a hundred round trips.
+	if got := calls.Load(); got != 2 {
+		t.Errorf("server saw %d listing requests, want 2", got)
+	}
+}
+
+func TestListToolsStopsOnAServerThatPaginatesForever(t *testing.T) {
+	t.Parallel()
+	// The cursor advances every time, so nothing about any single response is
+	// wrong — only the sequence is. Without a bound this call never returns,
+	// so the assertion that matters is that it returns at all.
+	url, calls := serveToolsList(t, func(cursor string) map[string]any {
+		return map[string]any{"tools": []any{}, "nextCursor": cursor + "x"}
+	})
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := conn.ListTools(context.Background())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("ListTools returned no error against a server that never stops paginating")
+		}
+		if !strings.Contains(err.Error(), "paginating") {
+			t.Errorf("error %q does not say pagination is the problem", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("ListTools did not return — the page bound is not bounding")
+	}
+	if got := calls.Load(); got < 2 {
+		t.Errorf("server saw %d listing requests, want the loop to have actually run", got)
+	}
+}
+
 func TestListToolsReportsWhatTheServerOffers(t *testing.T) {
 	t.Parallel()
 	url := serveMCP(t,
@@ -85,8 +322,10 @@ func TestListToolsReportsWhatTheServerOffers(t *testing.T) {
 		t.Errorf("tools[0] = %+v", tools[0])
 	}
 
-	// The schema is carried through as the server wrote it, under the
-	// Anthropic field name, so a catalog row needs no second translation.
+	// The schema's meaning is carried through, under the Anthropic field name,
+	// so a catalog row needs no second translation. Meaning rather than bytes:
+	// the SDK hands over a decoded value, so re-marshaling sorts keys — which
+	// is why this reads the fields rather than comparing the JSON text.
 	var schema struct {
 		Type     string   `json:"type"`
 		Required []string `json:"required"`
@@ -130,11 +369,14 @@ func TestListToolsOnAServerWithNoTools(t *testing.T) {
 
 func TestListToolsFollowsPagination(t *testing.T) {
 	t.Parallel()
-	// More tools than one page: the SDK's server pages its own listing, so
-	// this exercises the cursor loop rather than simulating one.
+	// Several times one page: the SDK's server pages its own listing, so this
+	// exercises the cursor loop rather than simulating one.
 	var tools []*sdk.Tool
 	for i := range 30 {
 		tools = append(tools, tool(fmt.Sprintf("tool_%02d", i), "d"))
+	}
+	if len(tools) <= fixturePageSize {
+		t.Fatalf("the fixture fits in one page of %d — nothing here paginates", fixturePageSize)
 	}
 	url := serveMCP(t, tools...)
 
@@ -151,12 +393,13 @@ func TestListToolsFollowsPagination(t *testing.T) {
 	if len(got) != len(tools) {
 		t.Fatalf("got %d tools, want %d — pagination dropped some", len(got), len(tools))
 	}
-	seen := map[string]bool{}
-	for _, tl := range got {
-		if seen[tl.Name] {
-			t.Fatalf("tool %q listed twice", tl.Name)
+	// By position, not as a set: a set assertion passes on a listing whose
+	// pages came back interleaved or reversed, and the order a server lists
+	// its tools in is the order they are offered to the model.
+	for i, tl := range got {
+		if want := fmt.Sprintf("tool_%02d", i); tl.Name != want {
+			t.Fatalf("tools[%d] = %q, want %q — pagination reordered the listing", i, tl.Name, want)
 		}
-		seen[tl.Name] = true
 	}
 }
 
@@ -225,6 +468,115 @@ func TestBearerTokenIsSentAndDoesNotLeak(t *testing.T) {
 			t.Errorf("unauthenticated request %d carried Authorization %q — the token leaked "+
 				"onto the shared client", i, h)
 		}
+	}
+}
+
+func TestBearerTokenDoesNotFollowARedirectToAnotherServer(t *testing.T) {
+	t.Parallel()
+	// net/http strips Authorization when a redirect changes origin — but only
+	// from headers set on the outbound request. A header a RoundTripper adds is
+	// invisible to that logic, so the stripping has nothing to strip and the
+	// wrapper simply runs again against the new host. The caller's client is
+	// what decides whether redirects are followed, and the executor supplies
+	// its own; the credential must not depend on that choice.
+	var mu sync.Mutex
+	var elsewhereSaw []string
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		elsewhereSaw = append(elsewhereSaw, r.Header.Get("Authorization"))
+		mu.Unlock()
+		http.Error(w, "not the server the token was resolved for", http.StatusOK)
+	}))
+	defer elsewhere.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+
+	// A caller-supplied client that follows redirects, which is the default and
+	// therefore the case a caller falls into without choosing it.
+	conn, err := mcp.Connect(context.Background(), mcp.Config{
+		URL:         redirector.URL,
+		BearerToken: "s3cret",
+		HTTPClient:  &http.Client{Timeout: mcp.DialTimeout},
+	})
+	if err == nil {
+		// Connecting through a redirector is not expected to work; what matters
+		// is where the credential went, asserted below either way.
+		defer conn.Close()
+		_, _ = conn.ListTools(context.Background())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The redirect is followed — the client under test is one that follows
+	// them — so this is not the vacuous "nothing happened, therefore nothing
+	// leaked". The other server was reached; it must not have been given the
+	// credential.
+	if len(elsewhereSaw) == 0 {
+		t.Fatal("the redirect target was never reached, so this test asserted nothing")
+	}
+	for i, h := range elsewhereSaw {
+		if h != "" {
+			t.Errorf("redirect target request %d carried %q — the credential "+
+				"resolved for one server reached another", i, h)
+		}
+	}
+}
+
+func TestConnectFailsOnAnUnsupportedProtocolVersion(t *testing.T) {
+	t.Parallel()
+	// A server that refuses server/discover and then answers the legacy
+	// initialize with a version no revision defines. The client must reject it
+	// rather than proceed against a protocol it does not implement.
+	//
+	// Known upstream leak, recorded here because this is the test that reaches
+	// it: go-sdk v1.7.0 returns `unsupportedProtocolVersionError` without
+	// closing the session it just built (mcp/client.go, the
+	// `!slices.Contains(supportedProtocolVersions, ...)` branch — the adjacent
+	// initialize and initialized failure paths both call `cs.Close()`). Connect
+	// hands back no session, so there is nothing this package can close; a
+	// server that answers this way on every attempt leaks per attempt. The
+	// executor's retry policy is what bounds it until upstream is fixed.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read", http.StatusInternalServerError)
+			return
+		}
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if json.Unmarshal(body, &req) != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		enc := json.NewEncoder(w)
+		switch req.Method {
+		case "initialize":
+			_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{
+				"protocolVersion": "2099-01-01",
+				"capabilities":    map[string]any{},
+				"serverInfo":      map[string]any{"name": "from-the-future", "version": "1"},
+			}})
+		default: // server/discover and anything else
+			_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{
+				"code": -32601, "message": "method not found",
+			}})
+		}
+	}))
+	defer ts.Close()
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: ts.URL, HTTPClient: loopbackClient()})
+	if err == nil {
+		conn.Close()
+		t.Fatal("Connect accepted a protocol version no revision defines")
+	}
+	if !strings.Contains(err.Error(), ts.URL) {
+		t.Errorf("error %q does not name the server URL", err)
 	}
 }
 
