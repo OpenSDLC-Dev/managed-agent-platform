@@ -415,18 +415,24 @@ func TestSessionUpdatedEventNormalizesAbsentTools(t *testing.T) {
 	}
 
 	_, listed := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events", nil)
+	var updated map[string]any
 	for _, ev := range listData(t, listed) {
-		if ev["type"] != "session.updated" {
-			continue
+		if ev["type"] == "session.updated" {
+			updated = ev
 		}
-		agent, ok := ev["agent"].(map[string]any)
-		if !ok {
-			t.Fatalf("session.updated carries no agent: %v", ev)
-		}
-		if _, ok := agent["tools"].([]any); !ok {
-			t.Fatalf("session.updated agent tools = %v, want an array — the same "+
-				"update answered %v over HTTP", agent["tools"], res["agent"].(map[string]any)["tools"])
-		}
+	}
+	// Asserted rather than looped over: a change that stopped emitting the
+	// event would satisfy every check below by never running one.
+	if updated == nil {
+		t.Fatalf("no session.updated event in %v", listed)
+	}
+	agent, ok := updated["agent"].(map[string]any)
+	if !ok {
+		t.Fatalf("session.updated carries no agent: %v", updated)
+	}
+	if _, ok := agent["tools"].([]any); !ok {
+		t.Fatalf("session.updated agent tools = %v, want an array — the same "+
+			"update answered %v over HTTP", agent["tools"], res["agent"].(map[string]any)["tools"])
 	}
 }
 

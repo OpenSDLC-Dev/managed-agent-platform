@@ -17,11 +17,11 @@ end of slice 4.
       resolved-config echo for both kinds at render, resolving only entries
       naming a tool the toolset has. Both rungs bind stored specs, not just the
       request that writes one. #59's doubt retired — the permission-policies
-      guide states both toolset defaults outright. Four review passes (Codex ×2,
-      xhigh multi-agent: 15 findings, 14 fixed / 1 refuted); verifier PASS WITH
-      FINDINGS after the hardening — note-severity only. Evidence:
-      `internal/toolset/materialize.go`, `internal/api/wire.go`,
-      `internal/api/mcptoolset_test.go`.
+      guide states both toolset defaults outright. Verifier PASS WITH FINDINGS
+      (note-severity only) after two review rounds. Evidence:
+      [materialize.go](./internal/toolset/materialize.go),
+      [wire.go](./internal/api/wire.go),
+      [mcptoolset_test.go](./internal/api/mcptoolset_test.go).
 - [ ] Slice 2 — `internal/mcp` client + `mcp_catalogs` + the discovery driver.
 - [ ] Slice 3 — MCP confirmation gating and denial synthesis.
 - [ ] Slice 4 — brain expansion, execution driver, settlement chaining, spill.
