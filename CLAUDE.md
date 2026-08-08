@@ -66,7 +66,8 @@ internal/
   toolset/    # the built-in tools (agent_toolset_20260401)
   webtool/    # web_fetch/web_search backends: Searcher/Fetcher ifaces + tavily/ + jina/
   mcp/        # the MCP client: a thin wrapper over the official go-sdk (plan 29)
-  dialguard/  # the address guard the vault probe and MCP client dial through (SSRF floor)
+  dialguard/  # the address guard under the vault probe's dials and the MCP client's
+              #   DefaultClient (SSRF floor; only the probe is live today)
   sandbox/    # Sandbox/Provider iface + docker/ + k8s/ + backend selection + shell/
   blob/       # object-storage seam: Store iface + s3/ (S3-compatible via minio-go)
               #   + gcs/ (GCS-native, Application Default Credentials) + backend/ (selection)

@@ -14,15 +14,15 @@ end of slice 4.
       spec-resolving surfaces and on stored specs, `mcp_toolset` nested-shape
       validation (#26's fail-open class closed on the MCP arm), resolved-config
       echo for both toolset kinds at render. #66's one-way reading corrected,
-      #59 retired. Evidence: [materialize.go](./internal/toolset/materialize.go),
+      #59 settled and closable. Evidence: [materialize.go](./internal/toolset/materialize.go),
       [wire.go](./internal/api/wire.go),
       [mcptoolset_test.go](./internal/api/mcptoolset_test.go).
 - [ ] Slice 2 — `internal/mcp` client + `mcp_catalogs` + the discovery driver.
       Client landed: streamable HTTP, bearer injection, self-driven paging, a
       listing that survives a hostile server, and `internal/dialguard` extracted
       as one guard under it and the vault probe. Still open: `mcp_catalogs`
-      migration + store, the `mcp_exec` driver and its egress check.
-      Evidence: [mcp.go](./internal/mcp/mcp.go),
+      migration + store, `Conn.CallTool` (needed by slice 4), the `mcp_exec`
+      driver and its egress check. Evidence: [mcp.go](./internal/mcp/mcp.go),
       [dialguard.go](./internal/dialguard/dialguard.go).
 - [ ] Slice 3 — MCP confirmation gating and denial synthesis.
 - [ ] Slice 4 — brain expansion, execution driver, settlement chaining, spill.

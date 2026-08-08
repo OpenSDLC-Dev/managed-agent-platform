@@ -8,10 +8,13 @@
 // affordable: it removed protocol-level sessions, so nothing accumulates on the
 // server that a new connection has to re-establish, and there is no affinity
 // between discovering a server's tools and later calling one. Not free, though —
-// a connection still negotiates, and this client's negotiation is a `server/
-// discover` round trip (two, where the SDK retries it) before Connect returns.
-// What per-work-item connections cost is that round trip; what they buy is a
-// client with no state to lose.
+// a connection still negotiates, and what that costs depends on the server it
+// reaches: against a 2026-07-28 one a single `server/discover` round trip (two,
+// where the SDK retries it after an unsupported-version answer), and against an
+// older one that discover plus the legacy `initialize` and
+// `notifications/initialized`, three requests, before Connect returns. What
+// per-work-item connections cost is that handshake; what they buy is a client
+// with no state to lose.
 //
 // The SDK is a dependency of this package alone. Its types do not appear in the
 // wrapper's surface — the platform's domain model is Anthropic-native
@@ -60,9 +63,11 @@ const DialTimeout = 30 * time.Second
 // it — for maxToolPages requests in a row.
 const ListTimeout = 2 * time.Minute
 
-// clientName identifies this platform to MCP servers. The protocol carries it
-// on every request's `_meta` (2026-07-28) so a server operator can see which
-// client is calling.
+// clientName identifies this platform to MCP servers. Under a 2026-07-28
+// negotiation the spec asks a client to put it on every request's `_meta` — a
+// SHOULD, unlike the required protocolVersion and clientCapabilities — and
+// go-sdk does; under an older one it rides `initialize`'s clientInfo instead.
+// Either way a server operator can see which client is calling.
 const clientName = "managed-agent-platform"
 
 // Config describes one MCP server connection.
@@ -73,9 +78,14 @@ type Config struct {
 	// a session vault's matching credential; an empty token connects
 	// anonymously, which is the reference's documented no-match behavior.
 	BearerToken string
-	// HTTPClient overrides the guarded client. Nil selects [DefaultClient],
-	// which is what production uses; a test supplies its own to reach an
-	// httptest server on loopback.
+	// HTTPClient replaces the guarded client rather than adding to it. Nil
+	// selects [DefaultClient], which is what production uses; a test supplies
+	// its own to reach an httptest server on loopback. A supplied client gives
+	// up everything [DefaultClient] carries — the dial-time address guard and
+	// the refusal to follow redirects — so a non-test caller that wants its own
+	// transport policy installs those itself. The two bounds this package owns,
+	// the cumulative response budget and the fallback request deadline, are
+	// wrapped around whatever client is supplied and are not optional.
 	HTTPClient *http.Client
 }
 
@@ -106,6 +116,24 @@ type Conn struct {
 // redirects are never followed: following one would replay the request — with
 // its Authorization header — to a target the per-hop guard vets but never
 // approved as a destination.
+//
+// The transport is spelled out rather than cloned from http.DefaultTransport,
+// so three of its settings are decisions rather than omissions.
+//
+// No Proxy. http.DefaultTransport reads HTTP_PROXY/HTTPS_PROXY from the
+// environment; this deliberately does not, because a proxy moves the dial off
+// the target and onto the proxy, and the address guard would then be vetting the
+// proxy's address while the proxy fetched whatever the URL named. That is the
+// guard removed rather than satisfied. A deployment whose egress genuinely
+// requires a proxy supplies its own client and owns the consequence.
+//
+// ForceAttemptHTTP2, because setting DialContext at all turns HTTP/2 off unless
+// it is set — an MCP server reached over https would otherwise be spoken to in
+// HTTP/1.1 only, which is a downgrade nobody chose.
+//
+// Idle-connection settings, because this Transport is package-level: it outlives
+// every connection made through it, and with the zero values an idle connection
+// to a server never reached again is held until the process ends.
 var DefaultClient = &http.Client{
 	Timeout: DialTimeout,
 	CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -116,6 +144,11 @@ var DefaultClient = &http.Client{
 			Timeout: DialTimeout,
 			Control: dialguard.Control(dialguard.IPAllowed),
 		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConnsPerHost:   2,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
 	},
 }
 
@@ -135,13 +168,17 @@ var DefaultClient = &http.Client{
 //
 // The setting therefore does nothing against a modern server: go-sdk v1.7.0
 // returns before opening the GET whenever the negotiated version is 2026-07-28
-// or later (streamable.go, sessionUpdated), so this only takes effect on an
-// older negotiation, where the spec makes the GET optional and a tools/list
-// answer comes back on the POST regardless. That is also why the contract suite
-// cannot assert it behaviorally: every fixture here negotiates 2026-07-28, so
-// removing this line leaves the suite green. It is kept as the explicit
-// statement of what this client wants — one request, one answer, no listener —
-// on the revisions where the SDK still asks.
+// or later (streamable.go, sessionUpdated), so it only takes effect on an older
+// negotiation, where the spec makes the GET optional and a tools/list answer
+// comes back on the POST regardless.
+//
+// That older negotiation is what the contract suite actually runs against, which
+// is easy to get backwards. go-sdk serves 2026-07-28 only from a stateless
+// handler, so a default sdk.NewStreamableHTTPHandler does not answer
+// server/discover at all and every fixture here falls back to the legacy
+// initialize and negotiates 2025-11-25 — precisely the era where this line is
+// load-bearing. It is asserted rather than assumed:
+// TestConnectOpensNoStandaloneStream counts the GETs.
 func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	if cfg.URL == "" {
 		return nil, fmt.Errorf("mcp: server URL is required")
@@ -163,13 +200,21 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	// The SDK closes the session it built on most failure paths but not on all
 	// of them — an initialize answered with a protocol version it does not
 	// support returns before Close, where the two adjacent branches call it —
-	// and Connect hands back no session for the caller to close. Capturing the
-	// transport's connection is the only handle left: the wrapper returns the
-	// SDK's own Connection unchanged (the SDK type-asserts it to reach
-	// sessionUpdated, so substituting anything would break negotiation) and
-	// keeps a reference so a failed Connect does not leave the reader goroutine
-	// and its HTTP connection alive on a server that answers that way to every
-	// attempt.
+	// and Connect hands back no session for the caller to close. Reported
+	// upstream as modelcontextprotocol/go-sdk#1154; this stays until a release
+	// carries the fix, since it costs one wrapper and removing it early would
+	// leak on every attempt against a server that answers that way. Capturing the
+	// transport's connection is the only handle left, and it keeps a failed
+	// Connect from leaving the reader goroutine and its HTTP connection alive on
+	// a server that answers that way to every attempt.
+	//
+	// The wrapper hands back the SDK's own Connection unchanged. Substituting
+	// one is not forbidden — the SDK ships LoggingTransport, which does exactly
+	// that, and a substituted connection still negotiates — but the SDK reaches
+	// sessionUpdated through a type assertion to an unexported interface, so a
+	// substitute silently loses it, and with it the Mcp-Protocol-Version header
+	// on every post-handshake request of a legacy negotiation. Since a legacy
+	// negotiation is what this client mostly gets, the wrapper stays transparent.
 	transport := &capturingTransport{inner: &sdk.StreamableClientTransport{
 		Endpoint:             cfg.URL,
 		HTTPClient:           httpClient,
@@ -213,10 +258,14 @@ func (t *capturingTransport) Connect(ctx context.Context) (sdk.Connection, error
 const maxToolPages = 100
 
 // ListTools returns every tool the server reports, following pagination to the
-// end. A server that reports none is not an error: the docs make an MCP server
-// with no tools, or a tool name a config addresses but the server does not
-// offer, a warning rather than a failure, so the empty catalog is a fact to
-// record and not a reason to fail the work item.
+// end. A server that reports none is not an error, and neither is an entry this
+// refuses. The nearest documented case is adjacent rather than identical:
+// Anthropic's *Messages API* MCP connector states that a `configs` entry naming
+// a tool the server does not offer logs a backend warning and returns no error,
+// because MCP servers may have dynamic tool availability. The managed-agents
+// pages say nothing about either an empty listing or a malformed entry, so
+// treating both as facts to record rather than failures is consistent with that
+// posture by analogy — it is not the reference stating it.
 //
 // Pagination is driven here rather than through the SDK's Tools iterator
 // because the iterator hides the cursor, and the cursor is the only thing that
@@ -239,6 +288,10 @@ func (c *Conn) ListTools(ctx context.Context) ([]Tool, error) {
 	defer cancel()
 
 	out := []Tool{}
+	// Every cursor the server has already handed out, and every name already
+	// accepted. Both exist because a server is free to repeat itself and this
+	// package is the only thing that notices.
+	seenCursor, seenName := map[string]bool{}, map[string]bool{}
 	var cursor string
 	for page := 0; page < maxToolPages; page++ {
 		res, err := c.listPage(ctx, cursor)
@@ -256,10 +309,21 @@ func (c *Conn) ListTools(ctx context.Context) ([]Tool, error) {
 			if tool == nil || !usableName(tool.Name) {
 				continue
 			}
+			// A name is how a configs[] entry and a model's tool_use address a
+			// tool, so a second entry claiming one already taken is not a second
+			// tool — it is an ambiguity, and one that would reach the model as
+			// two tool definitions sharing a name in a single request. First
+			// wins: the order is the server's own, so the first entry is the
+			// one it led with. Checked after the schema, so a malformed first
+			// entry does not consume the name a valid later one could use.
+			if seenName[tool.Name] {
+				continue
+			}
 			schema, ok := inputSchema(tool.InputSchema)
 			if !ok {
 				continue
 			}
+			seenName[tool.Name] = true
 			out = append(out, Tool{
 				Name:        tool.Name,
 				Description: tool.Description,
@@ -269,13 +333,22 @@ func (c *Conn) ListTools(ctx context.Context) ([]Tool, error) {
 		if res.NextCursor == "" {
 			return out, nil
 		}
-		if res.NextCursor == cursor {
-			// Distinct from the page bound on purpose: this is the shape a
-			// broken cursor implementation actually takes, and catching it on
-			// the second request rather than the hundredth keeps a wedged
-			// server from holding the lease for ninety-eight round trips.
-			return nil, fmt.Errorf("mcp: list tools: server repeated its pagination cursor")
+		// Every cursor, not just the one immediately before. A server that
+		// alternates between two cursors never repeats one in consecutive
+		// answers, so a check against `cursor` alone walks the full hundred
+		// pages — and under a 2026-07-28 negotiation those pages cost the server
+		// nothing after the first cycle, because the SDK serves an
+		// already-requested cursor from its own per-cursor cache with no
+		// request on the wire (mcp/client.go ListTools -> cachedListResult).
+		// Pages that never reach the wire never draw on the byte budget either,
+		// so the cumulative bound below does not bound them; this does. Catching
+		// it on the second sighting rather than the hundredth also keeps a
+		// wedged server from holding the queue lease for the round trips in
+		// between.
+		if seenCursor[res.NextCursor] {
+			return nil, fmt.Errorf("mcp: list tools: server repeated a pagination cursor")
 		}
+		seenCursor[res.NextCursor] = true
 		cursor = res.NextCursor
 	}
 	return nil, fmt.Errorf("mcp: list tools: server did not stop paginating within %d pages", maxToolPages)
@@ -311,12 +384,17 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 // it: AddTool logs a violation and registers the tool anyway, and nothing checks
 // it on the client side at all, so a name that breaks the rule reaches a client
 // as a perfectly ordinary listing entry. That makes this the first place it can
-// be caught, not a redundant second one. A name that fails it
-// reaches the model as a tool definition the Messages API refuses, and refusing
-// one tool is better than a request that fails carrying every other tool with
-// it. Deliberately the SDK's rule and not a guessed-at Anthropic one: if the
-// reference is stricter, the place to enforce that is where the request is
-// assembled and the constraint can be checked against the reference, not here.
+// be caught, not a redundant second one. Refusing one tool is better than a
+// request that fails carrying every other tool with it.
+//
+// It is deliberately the SDK's rule and not a guessed-at Anthropic one, and it
+// is a floor rather than the whole constraint. The reference states a charset
+// only for a *custom* tool — "1-128 characters; letters, digits, underscores,
+// and hyphens" (anthropic-sdk-go betaagent.go, BetaManagedAgentsCustomToolParams)
+// — and states none at all for the field that names an MCP tool, which
+// documents length alone. So this admits '.', which that custom-tool charset
+// excludes. Where a reference-checked rule belongs is where the request is
+// assembled and the constraint can be diffed against the reference, not here.
 func usableName(name string) bool {
 	if name == "" || len(name) > 128 {
 		return false
@@ -370,11 +448,14 @@ func usableName(name string) bool {
 // is the catalog slice's problem to give them somewhere.
 //
 // What comes back is the schema's meaning, not its bytes. The SDK hands over a
-// value already decoded into `any`, so re-marshaling sorts the object's keys
-// and renders every number through float64 — an integer bound above 2^53 does
-// not survive that. Reaching the original bytes would mean not using the SDK's
-// typed result at all, and a JSON Schema whose correctness depends on key order
-// or on a 17-digit integer is not one this platform needs to carry.
+// value already decoded into `any`, so re-marshaling sorts the object's keys and
+// renders every number through float64, which makes a large integer bound
+// unreliable rather than uniformly lost: 2^53+1 comes back as 2^53 and 2^60 as
+// 1152921504606847000, anything from 1e21 up comes back in exponent form, and
+// some even values just above 2^53 survive untouched. Reaching the original
+// bytes would mean not using the SDK's typed result at all, and a JSON Schema
+// whose correctness depends on key order or on a 17-digit integer is not one
+// this platform needs to carry.
 func inputSchema(declared any) (json.RawMessage, bool) {
 	if declared == nil {
 		return nil, false
@@ -419,11 +500,15 @@ func (c *Conn) Close() error { return c.session.Close() }
 //
 // It is cumulative because a per-response cap does not actually bound a listing.
 // maxToolPages responses of MaxResponseBytes each is 800 MiB, and both ends
-// retain it: the SDK caches every modern tools/list result under its cursor
-// (mcp/client.go ListTools → toolsCache.put) and never evicts an entry until the
-// same cursor is asked for again, while ListTools re-marshals each accepted
-// schema into its own result. A hundred unique cursors therefore hold a hundred
-// pages live, twice over. Cumulative makes the bound mean what it says.
+// retain it. Under a 2026-07-28 negotiation the SDK caches each tools/list
+// result under its cursor (mcp/client.go ListTools → toolsCache.put, gated on
+// usesNewProtocol) and drops an entry only when that cursor is asked for again,
+// or when the server sends notifications/tools/list_changed, which clears the
+// cache outright (mcp/cache.go invalidate) — neither of which a listing can
+// count on. This package retains its own copy alongside: names and descriptions
+// are shared string backings rather than second copies, but every accepted
+// schema exists twice, once as the SDK's decoded map and once as the bytes
+// re-marshaled here. Cumulative makes the bound mean what it says.
 //
 // 8 MiB is far above any real catalog — the whole point of a tool definition is
 // to fit in a model request, and a catalog that cannot be sent to a model is not
@@ -439,8 +524,10 @@ const MaxResponseBytes = 8 << 20
 // The deadline exists because http.Client.Timeout is the caller's to set and a
 // supplied client may leave it zero, while the SDK deliberately detaches some
 // requests from every context we control: it builds a connection's lifecycle
-// context with xcontext.Detach, which reports no deadline and a nil Done
-// channel, and sends the session-ending DELETE on it (mcp/streamable.go,
+// context as context.WithCancel(xcontext.Detach(ctx)) — no deadline, and cut off
+// from the caller's cancellation, so the only thing that ends it is the
+// connection's own Close, and only after the DELETE has returned — then sends
+// the session-ending DELETE on it (mcp/streamable.go,
 // streamableClientConn.Close). A server that accepts that DELETE and never
 // answers would otherwise hang Close — and the work item's queue lease with it —
 // with nothing left to interrupt it. A request that already carries a deadline
@@ -461,9 +548,16 @@ func newLimitedTransport(base http.RoundTripper, limit int64) *limitedTransport 
 }
 
 // limitedTransport holds the connection's whole byte budget, so every response
-// it wraps draws from one counter. One connection is used by one work item at a
-// time, but the SDK is free to have a request in flight while a body is still
-// being read, so the counter is mutex-guarded rather than assumed serial.
+// it wraps draws from one counter. The counter is mutex-guarded, which keeps it
+// from being corrupted; what it does not do is make the *policy* concurrency-safe,
+// and the difference is worth naming. A body draws before it reads and refunds
+// what it did not use, so two bodies read at once could see a transient zero and
+// latch themselves refused over a budget that was only borrowed. Nothing here
+// produces that: one connection belongs to one work item and one goroutine (see
+// [Conn]), the standalone SSE stream is disabled, and the SDK reads each response
+// to completion before issuing the next. The reserve-then-refund order is kept
+// because its failure direction under a concurrency this package does not have is
+// an over-refusal rather than an over-delivery.
 type limitedTransport struct {
 	base  http.RoundTripper
 	limit int64 // what the budget started as, for the error text
@@ -481,8 +575,11 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		ctx, cancel := context.WithTimeout(req.Context(), DialTimeout)
 		req = req.Clone(ctx)
 		// Cancelling on return would kill the body before the caller reads it,
-		// so the deadline has to outlive RoundTrip. context.AfterFunc keeps the
-		// timer from leaking past it either way.
+		// so the deadline has to outlive RoundTrip. context.AfterFunc discharges
+		// the lost-cancel rule instead — the CancelFunc is guaranteed to be
+		// called — and costs nothing; what releases the timer is the deadline
+		// firing or the parent being cancelled, either way no later than
+		// DialTimeout.
 		context.AfterFunc(ctx, cancel)
 	}
 	resp, err := base.RoundTrip(req)
@@ -583,9 +680,12 @@ func (t *limitedTransport) give(n int64) {
 // Two separate things keep one server's credential away from another, and each
 // answers a leak the other does not.
 //
-// The **copy** is because Config.HTTPClient may be shared — the package-level
-// DefaultClient is — so installing the transport on the caller's own client
-// would put this token on every later connection made through it.
+// The **copy** is defence in depth on a client that may be shared — the
+// package-level DefaultClient is — where installing the transport in place would
+// put this token on every later connection made through it. Today it is a second
+// copy rather than the protecting one: Connect runs withResponseLimit first and
+// that already returns a copy, so this function never receives the caller's own
+// client. It is kept because the ordering it depends on is one line away.
 //
 // The **origin check** is because net/http's own protection does not apply
 // here. net/http strips Authorization when a redirect changes origin, but only

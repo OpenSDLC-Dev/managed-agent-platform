@@ -32,10 +32,21 @@ import (
 )
 
 // IPAllowed reports whether a resolved address may be dialed, returning an
-// error naming the refusal. The error text says only that the address is
-// disallowed: a caller that surfaces it must not reveal whether an internal
-// host exists.
+// error naming the refusal. The text names the resolved address and says only
+// that it is disallowed — never which class matched it, and never whether
+// anything is listening there: the refusal is produced before any connect(2), so
+// it reads identically either way and a caller that surfaces it cannot become an
+// internal-host oracle.
 func IPAllowed(ip net.IP) error {
+	// An address this cannot read is refused rather than admitted. net.IP is a
+	// byte slice, so a nil or wrong-length value is an ordinary value of the
+	// type rather than a compile error, every predicate below answers false for
+	// one, and net.ParseIP returns exactly that for anything it cannot parse —
+	// so without this line the shape a caller naturally writes,
+	// IPAllowed(net.ParseIP(host)), admits every host that is not an IP at all.
+	if ip.To16() == nil {
+		return fmt.Errorf("dial target is not a usable address")
+	}
 	// The address itself, and then — because an IPv6 transition address
 	// forwards to an embedded IPv4 target through a translator on the
 	// deployment path — every IPv4 target a translator could reach through it,
@@ -64,21 +75,27 @@ func IPAllowed(ip net.IP) error {
 		// of cloud metadata below. One misreading, pointing both ways.
 		//
 		// (The /32 and /40 rows are arithmetic rather than deployments. RFC 6052
-		// fixes the well-known prefix at /96, and the only shorter prefix inside
+		// fixes the well-known prefix at /96, and the shortest prefix inside
 		// 64:ff9b::/32 an operator may use is RFC 8215's local-use
-		// 64:ff9b:1::/48 — so nothing legitimately maps at /32 or /40 here, and
+		// 64:ff9b:1::/48, from which a /48, /56, /64 or /96 translation prefix
+		// may be carved — so nothing legitimately maps at /32 or /40 here, and
 		// the decoder tries them because an address cannot prove that.)
 		//
 		// The skip is therefore what makes the six-candidate check usable, and
-		// dropping it would cost those two layouts entirely. Its own price is
-		// that an address whose every non-padding reading is benign is admitted
-		// even when some layout would read 0.0.0.0 from it: 64:ff9b:: and
-		// 64:ff9b:1:: — prefix base addresses where a translator has no target
-		// and no host is listening — and equally 64:ff9b:1::808:808, whose /48
-		// reading is padding and whose /96 reading is 8.8.8.8. Refusing those
-		// back is not available separately; it is the same rule. The unspecified
-		// address is in the refusal list because connect(0.0.0.0) reaches the
-		// local host, and that is a property of a local dial rather than of a
+		// dropping it would cost those two layouts entirely. Its own price is a
+		// rule rather than a list: an address every one of whose non-padding
+		// readings is benign is admitted even when some other layout would read
+		// 0.0.0.0 from it. Under this prefix that is 64:ff9b:: and 64:ff9b:1:: —
+		// prefix base addresses where a translator has no target and no host is
+		// listening — and equally 64:ff9b:1::808:808, whose /48 reading is
+		// padding and whose /96 reading is 8.8.8.8. It is not confined to NAT64,
+		// because the skip is not: 2002::/32 (a 6to4 wrapper carrying 0.0.0.0),
+		// a Teredo address whose low 32 bits are all-ones, and an ISATAP
+		// identifier carrying 0.0.0.0 are admitted for the same reason and are
+		// wrappers around no target in the same way. Refusing them back is not
+		// available separately; it is the same rule. The unspecified address is
+		// itself in the refusal list because connect(0.0.0.0) reaches the local
+		// host, and that is a property of a local dial rather than of a
 		// destination a translator forwards a packet to.
 		if target.IsUnspecified() {
 			continue
@@ -100,17 +117,20 @@ func refused(ip net.IP) bool {
 // carrying, so the guard can re-check the target a translator would actually
 // reach. Returns nil for a plain address.
 //
-// Five forms are decoded: 6to4 (2002::/16, v4 in bytes 2–5), Teredo
+// Six forms are decoded: 6to4 (2002::/16, v4 in bytes 2–5), Teredo
 // (2001:0::/32, client v4 in the inverted low 32 bits), IPv4-compatible (::/96,
-// v4 in the low 32 bits), NAT64 (64:ff9b::/32, covering both the well-known
-// 64:ff9b::/96 and the RFC 8215 local-use 64:ff9b:1::/48), and ISATAP
-// (RFC 5214's 00-00-5E-FE interface identifier under any prefix). That is not
-// "every transition form", and saying so would be the sort of claim this file
-// exists to avoid: 6rd carries an IPv4 address whose position depends on
-// provider-assigned parameters an address does not contain, and a NAT64
-// deployment using its own Network-Specific Prefix is invisible for the same
-// reason (see below). Both need the guard told its deployment's parameters,
-// which nothing does today.
+// v4 in the low 32 bits), IPv4-translated (RFC 2765 §2.1's ::ffff:0:0:0/96, v4
+// likewise in the low 32 bits behind a different prefix), NAT64 (64:ff9b::/32,
+// covering both the well-known 64:ff9b::/96 and the RFC 8215 local-use
+// 64:ff9b:1::/48), and ISATAP (RFC 5214's 00-00-5E-FE interface identifier under
+// any prefix). That is not "every transition form", and saying so would be the
+// sort of claim this file exists to avoid — but what is left out is now of one
+// kind: 6rd carries an IPv4 address whose position depends on provider-assigned
+// parameters an address does not contain, and a NAT64 deployment using its own
+// Network-Specific Prefix is invisible for the same reason (see below). Both
+// need the guard told its deployment's parameters, which nothing does today.
+// What is decoded is every form whose prefix or interface identifier a
+// specification fixes rather than a deployment assigns.
 //
 // NAT64 returns six candidates because RFC 6052 §2.2 defines six prefix lengths
 // (/32 /40 /48 /56 /64 /96), each embedding the four IPv4 octets at different
@@ -136,14 +156,20 @@ func refused(ip net.IP) bool {
 // on the one prefix an attacker can rely on being routed, not a general
 // solution to NAT64.
 //
-// It does over-refuse, and how much depends on the deployment's prefix bytes
-// rather than on its prefix length — which is worth stating precisely, because
-// the tempting summary ("a /96 mapping costs nothing") is false.
+// It does over-refuse, and its prefix length does not determine how much: the
+// prefix bytes decide it too, and can decide it entirely. Both halves matter,
+// because the tempting summary ("a /96 mapping costs nothing") is false.
 //
-// The well-known 64:ff9b::/96 costs exactly nothing, always: bytes 4-11 are
-// zero by definition, so every speculative layout reads padding and is skipped.
-// That is the case an operator gets without choosing anything, and RFC 6052
-// fixes that prefix at /96, so there is no ambiguity there to pay for.
+// The well-known 64:ff9b::/96 costs exactly nothing, always — measured
+// exhaustively over the whole IPv4 target space, zero refusals. Bytes 4-11 are
+// zero by definition, so the /32 through /56 layouts read padding and are
+// skipped. Saying *every* speculative layout is skipped would be the neat
+// version and is wrong: the /64 layout reads bytes 9-12, and byte 12 is the
+// target's own first octet, so it decodes to 0.0.0.x rather than to padding. It
+// costs nothing because no blocked class matches 0.0.0.x for any of its 256
+// values, not because it goes unread. That is the case an operator gets without
+// choosing anything, and RFC 6052 fixes that prefix at /96, so there is no
+// ambiguity there to pay for.
 //
 // On the RFC 8215 local-use 64:ff9b:1::/48 the cost is real and ranges from
 // nothing to everything. With the remaining prefix bytes zero it is 12.8% of
@@ -166,17 +192,29 @@ func refused(ip net.IP) bool {
 // nothing needs today, and one this design does not foreclose. An operator
 // debugging an inexplicably refused NAT64 address is looking at this paragraph.
 //
-// IPv4-compatible is here because Go does not decode it for us and nothing else
-// catches it. ::ffff:127.0.0.1 (IPv4-*mapped*) is safe without any of this —
-// To4 returns 127.0.0.1 and IsLoopback says yes — which makes it easy to assume
-// the deprecated ::127.0.0.1 (IPv4-*compatible*) behaves the same way. It does
-// not: To4 returns nil and every net.IP class predicate returns false, so
-// without this case the guard admits it. It is listed as hardening, not as a
-// patched bypass: a connect to ::127.0.0.1 does not reach a listener on
-// 127.0.0.1 on either platform (Linux answers ENETUNREACH, macOS drops the SYN),
-// so the address only goes anywhere on a host configured for 6-over-4
-// tunneling. Refusing it costs nothing and does not depend on that remaining
-// true.
+// The two zero-prefix forms are here because Go decodes neither and nothing
+// else catches them. ::ffff:127.0.0.1 (IPv4-*mapped*) is safe without any of
+// this — To4 returns 127.0.0.1 and IsLoopback says yes — which makes it easy to
+// assume that the deprecated ::127.0.0.1 (IPv4-*compatible*) and
+// ::ffff:0:127.0.0.1 (IPv4-*translated*) behave the same way. Neither does: To4
+// returns nil for both, because it insists on the mapped prefix's 0xffff in
+// bytes 10-11, and every predicate in the refusal list answers false. The
+// standard library does not merely stay silent about them either —
+// IsGlobalUnicast affirmatively answers true. So without these two cases the
+// guard admits them.
+//
+// They are hardening rather than patched bypasses, and the reason is not that a
+// kernel would refuse them. Both kernels route ::127.0.0.1 as an ordinary
+// global IPv6 destination — macOS resolves it to the LAN's IPv6 default router
+// and the connect blocks until it times out, Linux does the same where it has
+// IPv6 connectivity and fails immediately with ENETUNREACH where it has none —
+// so the SYN leaves the host and simply never arrives at 127.0.0.1. The
+// mechanism that would have delivered it to the embedded address is RFC 2893 §5
+// automatic tunneling, which RFC 4213 §8 removed — the same RFC whose §3.6
+// makes ::/96 an invalid tunnel source a decapsulator MUST silently discard.
+// Refusing these
+// costs nothing and does not depend on any of that staying true: a guard that
+// holds only because the kernel also says no is not a guard.
 func embeddedIPv4(ip net.IP) []net.IP {
 	b := ip.To16()
 	if b == nil || ip.To4() != nil {
@@ -200,6 +238,11 @@ func embeddedIPv4(ip net.IP) []net.IP {
 			v4(b[9], b[10], b[11], b[12]),  // /64
 			v4(b[12], b[13], b[14], b[15]), // /96
 		)
+	case isZero(b[:8]) && b[8] == 0xff && b[9] == 0xff && b[10] == 0x00 && b[11] == 0x00:
+		// IPv4-translated, RFC 2765 §2.1. One byte-pair away from the mapped
+		// form net.IP already decodes — 0xffff sits at bytes 8-9 here and at
+		// 10-11 there — which is exactly why To4 answers nil for it.
+		out = append(out, v4(b[12], b[13], b[14], b[15]))
 	case isZero(b[:12]):
 		out = append(out, v4(b[12], b[13], b[14], b[15]))
 	}
@@ -227,10 +270,12 @@ func isZero(b []byte) bool {
 }
 
 // Control builds a net.Dialer Control hook that runs allow on the resolved
-// address of every dial. allow is taken as a parameter rather than called
-// directly so a caller can keep its own overridable seam (a test pointing at an
-// httptest server on loopback needs one), and it is read per dial rather than
-// captured once for the same reason.
+// address of every dial — the address the connection is about to be made to
+// rather than the name it came from, which is what makes DNS rebinding
+// ineffective. allow is a parameter rather than a hard-wired call so a caller
+// can hand in a closure over its own overridable seam (a test pointing at an
+// httptest server on loopback needs one); the closure itself is captured once
+// and called per dial, so a seam it reads is consulted afresh on each one.
 func Control(allow func(net.IP) error) func(network, address string, c syscall.RawConn) error {
 	return func(_, address string, _ syscall.RawConn) error {
 		host, _, err := net.SplitHostPort(address)

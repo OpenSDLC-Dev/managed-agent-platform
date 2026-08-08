@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,9 +31,14 @@ import (
 // fixturePageSize is small on purpose. The SDK server's default is 1,000
 // (mcp.DefaultPageSize), so a fixture that leaves it alone answers every
 // realistic listing in one page — and a client that fetched only the first page
-// would pass a test named for following pagination. Every fixture pages, so the
-// cursor loop is exercised by the whole suite rather than by one test that has
-// to remember to ask for it.
+// would pass a test named for following pagination. serveMCP sets 7 so that test
+// means what its name says.
+//
+// It is not "every fixture pages", which is the tempting way to describe it: the
+// three servers built inline further down keep the SDK's default, and 7 only
+// paginates a listing of more than 7 tools, which among serveMCP's callers is
+// TestListToolsFollowsPagination alone. Every other multi-page path in this
+// suite is driven by a hand-written tools/list.
 const fixturePageSize = 7
 
 func serveMCP(t *testing.T, tools ...*sdk.Tool) string {
@@ -220,11 +226,11 @@ func TestListToolsCannotTellAnAbsentToolsFieldFromAnEmptyOne(t *testing.T) {
 	// collection, so a result of `{}` is malformed and arguably ought to be a
 	// retryable error rather than the durable fact "this server has no tools".
 	// It is not treated that way, and the reason is not a judgment call: the
-	// SDK erases the difference before this package sees it. ListTools ends
-	// with `result.Tools = filterValidTools(...)`, and filterValidTools builds
-	// its result with `make([]*Tool, 0, len(tools))` — so a nil `tools` and an
-	// empty one both arrive here as a non-nil empty slice, and no check at this
-	// layer can separate them.
+	// SDK erases the difference before this package sees it. ListTools passes
+	// the decoded slice through `filterValidTools` before returning, and
+	// filterValidTools builds its result with `make([]*Tool, 0, len(tools))` —
+	// so a nil `tools` and an empty one both arrive here as a non-nil empty
+	// slice, and no check at this layer can separate them.
 	//
 	// This test exists to pin that, because "distinguish absent from empty" is
 	// a natural thing for a reviewer to ask for and it cannot be built without
@@ -417,6 +423,136 @@ func TestListToolsStopsOnAServerThatPaginatesForever(t *testing.T) {
 	}
 	if got := calls.Load(); got < 2 {
 		t.Errorf("server saw %d listing requests, want the loop to have actually run", got)
+	}
+}
+
+func TestListToolsRefusesACursorItHasAlreadySeen(t *testing.T) {
+	t.Parallel()
+	// A server alternating between two cursors never repeats one in consecutive
+	// answers, so comparing only against the cursor just used walks the full
+	// hundred pages instead of stopping on the second sighting. Worse than slow:
+	// under a 2026-07-28 negotiation the SDK answers an already-requested cursor
+	// out of its own per-cursor cache with no request on the wire, so the
+	// repeated pages cost the server nothing and draw nothing from the
+	// cumulative byte budget — while this package appends their tools again on
+	// every lap.
+	url, calls := serveToolsList(t, func(cursor string) map[string]any {
+		next := "A"
+		if cursor == "A" {
+			next = "B"
+		}
+		return map[string]any{"tools": []any{}, "nextCursor": next}
+	})
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	tools, err := conn.ListTools(context.Background())
+	if err == nil {
+		t.Fatalf("ListTools returned %d tools against a cycling cursor, want an error", len(tools))
+	}
+	if !strings.Contains(err.Error(), "cursor") {
+		t.Errorf("error %q does not say the cursor is the problem", err)
+	}
+	// "" answers A, A answers B, B answers A again — caught there, not on the
+	// hundredth page.
+	if got := calls.Load(); got != 3 {
+		t.Errorf("server saw %d listing requests, want 3", got)
+	}
+}
+
+func TestListToolsKeepsOneToolPerName(t *testing.T) {
+	t.Parallel()
+	// A name is a tool's address: it is what a configs[] entry selects and what
+	// a model emits in tool_use. Two entries carrying one name are therefore not
+	// two tools but an ambiguity, and sent onward they would be two definitions
+	// sharing a name inside a single model request. The first entry wins,
+	// including against a duplicate arriving on a later page.
+	//
+	// "late" pins the order of the two checks: its first entry is refused for
+	// its schema, so the name must still be free for the valid entry that
+	// follows. A dedupe done before the schema check would swallow it.
+	url, _ := serveToolsList(t, func(cursor string) map[string]any {
+		if cursor == "" {
+			return map[string]any{
+				"tools": []any{
+					map[string]any{"name": "dup", "description": "first", "inputSchema": map[string]any{"type": "object"}},
+					map[string]any{"name": "dup", "description": "second", "inputSchema": map[string]any{"type": "object"}},
+					map[string]any{"name": "late", "description": "unusable", "inputSchema": "not an object"},
+				},
+				"nextCursor": "p2",
+			}
+		}
+		return map[string]any{"tools": []any{
+			map[string]any{"name": "late", "description": "recovered", "inputSchema": map[string]any{"type": "object"}},
+			map[string]any{"name": "dup", "description": "third", "inputSchema": map[string]any{"type": "object"}},
+		}}
+	})
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	tools, err := conn.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	got := map[string]string{}
+	for _, tool := range tools {
+		if _, dup := got[tool.Name]; dup {
+			t.Errorf("tool %q was reported twice", tool.Name)
+		}
+		got[tool.Name] = tool.Description
+	}
+	if len(tools) != 2 || got["dup"] != "first" || got["late"] != "recovered" {
+		t.Errorf("listing = %v, want exactly dup=first and late=recovered", got)
+	}
+}
+
+func TestConnectOpensNoStandaloneStream(t *testing.T) {
+	t.Parallel()
+	// DisableStandaloneSSE is doing real work on every fixture in this suite,
+	// which is the opposite of what it looks like. go-sdk serves the 2026-07-28
+	// revision only from a stateless handler, so a default
+	// sdk.NewStreamableHTTPHandler never answers server/discover, every
+	// connection here falls back to the legacy initialize and negotiates
+	// 2025-11-25 — and that is exactly the era in which the SDK opens a
+	// standalone GET stream after initializing. Without the setting it opens one
+	// per connection; this asserts on it rather than trusting the reading.
+	var gets atomic.Int32
+	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return sdk.NewServer(&sdk.Implementation{Name: "sse-server", Version: "1"}, nil)
+	}, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets.Add(1)
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	defer ts.Close()
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: ts.URL, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if _, err := conn.ListTools(context.Background()); err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	// The stream is opened from a goroutine of the SDK's own, so a bare read
+	// here could miss one that is merely late rather than absent. Close is a
+	// round trip of its own, and the poll after it turns "never opened" into
+	// something the assertion can actually distinguish from "not yet".
+	_ = conn.Close()
+	for i := 0; i < 50 && gets.Load() == 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := gets.Load(); got != 0 {
+		t.Errorf("server saw %d standalone GET streams, want none", got)
 	}
 }
 
@@ -848,9 +984,17 @@ func TestDefaultClientGuardsEveryDial(t *testing.T) {
 	if transport.DialContext == nil {
 		t.Fatal("DefaultClient dials without a Control hook")
 	}
-	for _, addr := range []string{"127.0.0.1:443", "169.254.169.254:80", "[::1]:443", "[64:ff9b::7f00:1]:443"} {
-		if _, err := transport.DialContext(context.Background(), "tcp", addr); err == nil {
-			t.Errorf("dial to %s succeeded, want refusal", addr)
+	for _, addr := range []string{
+		"127.0.0.1:443", "169.254.169.254:80", "[::1]:443",
+		"[64:ff9b::7f00:1]:443", "[::ffff:0:169.254.169.254]:80",
+	} {
+		_, err := transport.DialContext(context.Background(), "tcp", addr)
+		// Asserting only that the dial failed proves nothing about the guard:
+		// none of these addresses answers, so each fails with or without one,
+		// and deleting the Control hook left this test green. The failure has
+		// to be the guard's own refusal.
+		if err == nil || !strings.Contains(err.Error(), "disallowed address") {
+			t.Errorf("dial to %s = %v, want the guard's refusal", addr, err)
 		}
 	}
 	// A routable address is not refused by the guard — it fails to connect for
@@ -862,6 +1006,38 @@ func TestDefaultClientGuardsEveryDial(t *testing.T) {
 	_, err := transport.DialContext(ctx, "tcp", "192.0.2.1:9")
 	if err != nil && strings.Contains(err.Error(), "disallowed address") {
 		t.Errorf("guard refused a routable address: %v", err)
+	}
+}
+
+func TestDefaultClientSpeaksHTTP2(t *testing.T) {
+	t.Parallel()
+	// Setting DialContext at all turns HTTP/2 off unless ForceAttemptHTTP2 says
+	// otherwise, and the dial guard is a DialContext — so the guard would
+	// silently downgrade every https MCP server to HTTP/1.1. The production
+	// transport is cloned rather than rebuilt, and only its dialer is swapped
+	// for one that will talk to a loopback fixture; everything the assertion
+	// rests on is DefaultClient's own configuration.
+	base, ok := mcp.DefaultClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("DefaultClient.Transport = %T, want *http.Transport", mcp.DefaultClient.Transport)
+	}
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	defer ts.Close()
+
+	transport := base.Clone()
+	transport.DialContext = (&net.Dialer{Timeout: mcp.DialTimeout}).DialContext
+	transport.TLSClientConfig = ts.Client().Transport.(*http.Transport).TLSClientConfig
+	resp, err := (&http.Client{Transport: transport, Timeout: mcp.DialTimeout}).Get(ts.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.Proto != "HTTP/2.0" {
+		t.Errorf("server was spoken to over %s, want HTTP/2.0", resp.Proto)
 	}
 }
 
@@ -919,9 +1095,11 @@ func TestListToolsReportsATransportFailure(t *testing.T) {
 	if err != nil {
 		// Not tolerated: the fixture hands every non-listing request to a real
 		// SDK server, so Connect must succeed. It never issues tools/list — the
-		// SDK's only toolsCache.put is inside ListTools itself — so a Connect
-		// error here means the listing was never reached and the assertion below
-		// would pass without testing anything.
+		// SDK sends that method from exactly one place, ClientSession.ListTools,
+		// and Connect issues only server/discover, initialize and
+		// notifications/initialized — so a Connect error here means the listing
+		// was never reached and the assertion below would pass without testing
+		// anything.
 		t.Fatalf("Connect: %v (the fixture only fails tools/list)", err)
 	}
 	defer conn.Close()

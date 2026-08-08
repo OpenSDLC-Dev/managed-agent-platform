@@ -26,9 +26,17 @@ func TestIPAllowed(t *testing.T) {
 		{name: "IPv6 link-local", ip: "fe80::1", refused: true},
 		{name: "unspecified v4", ip: "0.0.0.0", refused: true},
 		{name: "unspecified v6", ip: "::", refused: true},
+		// The first two are link-local multicast (224.0.0.0/24 and ff02::/16),
+		// which the refusal list catches a clause earlier, so on their own they
+		// leave the general IsMulticast clause unpinned — deleting it kept the
+		// suite green. These two are multicast and nothing else: 239.0.0.0/8 is
+		// IPv4 administratively-scoped multicast and ff0e::/16 is IPv6
+		// global-scope multicast.
 		{name: "multicast v4", ip: "224.0.0.1", refused: true},
 		{name: "multicast v6", ip: "ff02::1", refused: true},
 		{name: "link-local multicast v4", ip: "224.0.0.251", refused: true},
+		{name: "multicast v4, not link-local", ip: "239.1.2.3", refused: true},
+		{name: "multicast v6, not link-local", ip: "ff0e::1", refused: true},
 
 		// RFC 1918 is deliberately allowed: the platform's premise is on-prem
 		// operation, where an MCP server legitimately lives on the operator's
@@ -50,6 +58,9 @@ func TestIPAllowed(t *testing.T) {
 		// Trying six layouts can over-refuse, so the layouts a real deployment
 		// uses to reach a real address are asserted allowed, not assumed to be.
 		{name: "NAT64 local prefix, /96 layout, public address", ip: "64:ff9b:1::808:808"},
+		// The conformant /64-layout mapping of 8.8.8.8 under 64:ff9b:1:2::/64 —
+		// bytes 9-12 carry it exactly, and the /96 reading of the same address
+		// is the equally public 8.0.0.0.
 		{name: "NAT64 local prefix, /64 layout, public address", ip: "64:ff9b:1:2:8:808:800:0"},
 
 		// RFC 6052 embeds the four IPv4 octets at a different offset for each
@@ -58,8 +69,20 @@ func TestIPAllowed(t *testing.T) {
 		// 169.254.169.254 while the low 32 bits — the only place a /96 reader
 		// looks — carry 8.8.8.8. A guard that reads just the low 32 bits calls
 		// it Google DNS and dials cloud metadata.
+		//
+		// One row per layout, because a layout with no row of its own is a line
+		// of the decoder no test can fail on: the /32 and /64 rows were both
+		// deletable while the suite stayed green. Each address below is refused
+		// by exactly one layout — the others read benign addresses from it — so
+		// each pins the row it names.
 		{name: "NAT64 /48 layout wrapping cloud metadata", ip: "64:ff9b:1:a9fe:a9:fe00:808:808", refused: true},
 		{name: "NAT64 /40 layout wrapping loopback", ip: "64:ff9b:7f:0:1::", refused: true},
+		// /32: bytes 4-7 are 127.0.0.1 and every other layout reads 0.0.1.0,
+		// 0.1.0.0, 1.0.0.0 or padding.
+		{name: "NAT64 /32 layout wrapping loopback", ip: "64:ff9b:7f00:1::", refused: true},
+		// /64: bytes 9-12 are 127.0.0.1 under the local-use prefix carved to a
+		// /64; the /96 reading of the same address is the public 1.0.0.0.
+		{name: "NAT64 /64 layout wrapping loopback", ip: "64:ff9b:1:2:7f:0:100:0", refused: true},
 		// The row above does not actually distinguish this guard from the low-32
 		// one it replaced — its own low 32 bits are zero, so the old code
 		// refused it too, as the unspecified address. This one does: the /40
@@ -117,9 +140,11 @@ func TestIPAllowed(t *testing.T) {
 		{name: "ISATAP wrapping loopback", ip: "2001:db8:1234:5678:0:5efe:7f00:1", refused: true},
 		{name: "ISATAP wrapping cloud metadata, u bit set", ip: "2001:db8::200:5efe:a9fe:a9fe", refused: true},
 		{name: "ISATAP wrapping a public address", ip: "2001:db8:1234:5678:0:5efe:5db8:d822"},
-		// Not ISATAP: the OUI has to match, or every address whose bytes happen
-		// to sit there would be read as a tunnel.
-		{name: "ISATAP-shaped but wrong OUI", ip: "2001:db8:1234:5678:0:5eff:7f00:1"},
+		// Not ISATAP, and the OUI is not what rules it out — 00-00-5E is right
+		// here. RFC 5214 §6.1 lists the 0xFE byte after the OUI separately, and
+		// this address carries 0xFF there. It has to match too, or every address
+		// whose bytes happen to sit in that position would be read as a tunnel.
+		{name: "ISATAP-shaped, right OUI but wrong 0xFE byte", ip: "2001:db8:1234:5678:0:5eff:7f00:1"},
 
 		{name: "6to4 wrapping loopback", ip: "2002:7f00:1::1", refused: true},
 		{name: "6to4 wrapping a public address", ip: "2002:5db8:d822::1"},
@@ -132,16 +157,20 @@ func TestIPAllowed(t *testing.T) {
 		{name: "IPv4-mapped cloud metadata", ip: "::ffff:169.254.169.254", refused: true},
 		{name: "IPv4-mapped public address", ip: "::ffff:93.184.216.34"},
 
-		// IPv4-compatible (::a.b.c.d) is the one net.IP does not classify: every
-		// class predicate returns false and To4 returns nil, so without an
-		// explicit decode the guard admits it. Stock kernels will not route it
-		// (see the note in dialguard.go), which is why these rows assert the
-		// guard's own answer rather than reachability — the guard must not
-		// depend on the kernel to be the thing that says no.
+		// IPv4-compatible (::a.b.c.d) and IPv4-translated (::ffff:0:a.b.c.d) are
+		// the two forms net.IP does not classify: To4 returns nil for both and
+		// every predicate in the refusal list answers false, so without an
+		// explicit decode the guard admits them. A kernel will not deliver
+		// either to the embedded address (see the note in dialguard.go), which is
+		// why these rows assert the guard's own answer rather than reachability —
+		// the guard must not depend on the kernel to be the thing that says no.
 		{name: "IPv4-compatible loopback", ip: "::127.0.0.1", refused: true},
 		{name: "IPv4-compatible cloud metadata", ip: "::169.254.169.254", refused: true},
 		{name: "IPv4-compatible multicast", ip: "::224.0.0.1", refused: true},
 		{name: "IPv4-compatible public address", ip: "::93.184.216.34"},
+		{name: "IPv4-translated loopback", ip: "::ffff:0:127.0.0.1", refused: true},
+		{name: "IPv4-translated cloud metadata", ip: "::ffff:0:169.254.169.254", refused: true},
+		{name: "IPv4-translated public address", ip: "::ffff:0:93.184.216.34"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -156,11 +185,43 @@ func TestIPAllowed(t *testing.T) {
 			case !tc.refused && err != nil:
 				t.Fatalf("IPAllowed(%s) = %v, want nil", tc.ip, err)
 			}
-			// The refusal must not confirm anything about the target beyond
-			// the address class: a caller surfacing it must not become an
-			// internal-host oracle.
+			// The refusal names the resolved address and says only that it is
+			// disallowed. It must not name the class that matched, and must
+			// read the same whether or not anything is listening — a caller
+			// surfacing it must not become an internal-host oracle.
 			if err != nil && !strings.Contains(err.Error(), "disallowed address") {
-				t.Errorf("refusal %q does not read as an address-class refusal", err)
+				t.Errorf("refusal %q does not read as an address refusal", err)
+			}
+			for _, class := range []string{"loopback", "link-local", "multicast", "unspecified"} {
+				if err != nil && strings.Contains(err.Error(), class) {
+					t.Errorf("refusal %q names the class that matched", err)
+				}
+			}
+		})
+	}
+}
+
+func TestIPAllowedRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	// net.IP is a byte slice, so these are ordinary values of the type rather
+	// than compile errors, and every class predicate answers false for them —
+	// which is fail-open unless the guard refuses them itself. The nil case is
+	// the one a caller reaches by accident: net.ParseIP returns it for anything
+	// that is not an address, so IPAllowed(net.ParseIP(host)) would admit every
+	// host that is not one.
+	for _, tc := range []struct {
+		name string
+		ip   net.IP
+	}{
+		{name: "nil", ip: nil},
+		{name: "empty", ip: net.IP{}},
+		{name: "unparseable through ParseIP", ip: net.ParseIP("example.com")},
+		{name: "wrong length", ip: net.IP{10, 0, 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := dialguard.IPAllowed(tc.ip); err == nil {
+				t.Fatalf("IPAllowed(%#v) = nil, want a refusal", tc.ip)
 			}
 		})
 	}
