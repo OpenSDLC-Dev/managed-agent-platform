@@ -188,6 +188,41 @@ func TestValidateMCPToolset(t *testing.T) {
 		name:    "a non-object configs entry is rejected",
 		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":["t"]}`,
 		wantErr: "mcp_toolset",
+	}, {
+		// An explicit null decodes into the same nil pointer an absent key
+		// does, so accepting it would let a per-tool gate be erased silently:
+		// under `default_config.permission_policy: always_allow`, a config
+		// entry whose policy is null inherits the permissive default. The
+		// wire's policy union has no null arm, so refusing it is also the
+		// reading that matches the reference's schema.
+		name: "an explicit null permission_policy is rejected",
+		in: `{"type":"mcp_toolset","mcp_server_name":"g",` +
+			`"default_config":{"permission_policy":{"type":"always_allow"}},` +
+			`"configs":[{"name":"danger","permission_policy":null}]}`,
+		wantErr: "configs[0].permission_policy must not be null",
+	}, {
+		name:    "an explicit null enabled is rejected",
+		in:      `{"type":"mcp_toolset","mcp_server_name":"g","default_config":{"enabled":null}}`,
+		wantErr: "default_config.enabled must not be null",
+	}, {
+		// name identifies the tool an entry configures and is required on the
+		// response type: an entry without one configures nothing and would
+		// render an echo the wire schema rejects.
+		name:    "a configs entry without a name is rejected",
+		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":[{"enabled":true}]}`,
+		wantErr: "configs[0] requires a non-empty name",
+	}, {
+		name:    "a null configs entry is rejected",
+		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":[null]}`,
+		wantErr: "configs[0] must be an object",
+	}, {
+		name:    "an empty name is rejected",
+		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":[{"name":""}]}`,
+		wantErr: "configs[0] requires a non-empty name",
+	}, {
+		name:    "a null name is rejected",
+		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":[{"name":null}]}`,
+		wantErr: "configs[0] requires a non-empty name",
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

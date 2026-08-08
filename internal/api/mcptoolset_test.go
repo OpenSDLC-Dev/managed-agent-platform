@@ -1,6 +1,8 @@
 package api_test
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 )
@@ -195,6 +197,89 @@ func TestToolsetConfigsEchoResolved(t *testing.T) {
 	_, gotSession := s.do(http.MethodGet, "/v1/sessions/"+session["id"].(string), nil)
 	sessionAgent, _ = gotSession["agent"].(map[string]any)
 	assertResolved(t, "session get", sessionAgent["tools"].([]any))
+}
+
+// TestResolvedEchoDoesNotReachTheStore reads the stored bytes directly, which
+// is the only way to tell render-time resolution from write-time resolution:
+// every HTTP surface renders, so both would look identical through the API.
+// What the store holds decides what an update merges against and what a stored
+// spec means, so it is asserted rather than assumed.
+func TestResolvedEchoDoesNotReachTheStore(t *testing.T) {
+	s := newTestServer(t)
+	bare := map[string]any{"type": "agent_toolset_20260401"}
+	agent := createAgent(t, s, agentBody(map[string]any{"tools": []any{bare}}))
+	id := agent["id"].(string)
+
+	env := createEnvironment(t, s, map[string]any{"name": "e"})
+	session := createSession(t, s, map[string]any{"agent": id, "environment_id": env["id"].(string)})
+
+	ctx := context.Background()
+	for _, q := range []struct {
+		what, sql string
+		arg       any
+	}{
+		{"agents.spec", `SELECT spec->'tools' FROM agents WHERE id = $1`, id},
+		{"agent_versions.spec", `SELECT spec->'tools' FROM agent_versions WHERE agent_id = $1 AND version = 1`, id},
+		{"sessions.resolved_agent", `SELECT resolved_agent->'tools' FROM sessions WHERE id = $1`, session["id"].(string)},
+	} {
+		var stored []byte
+		if err := s.pool.QueryRow(ctx, q.sql, q.arg).Scan(&stored); err != nil {
+			t.Fatalf("%s: %v", q.what, err)
+		}
+		var tools []map[string]any
+		if err := json.Unmarshal(stored, &tools); err != nil {
+			t.Fatalf("%s: decode %s: %v", q.what, stored, err)
+		}
+		if len(tools) != 1 {
+			t.Fatalf("%s: %d tools, want 1", q.what, len(tools))
+		}
+		if _, ok := tools[0]["default_config"]; ok {
+			t.Errorf("%s holds a resolved entry, so materialization reached the store: %s", q.what, stored)
+		}
+		if _, ok := tools[0]["configs"]; ok {
+			t.Errorf("%s holds a resolved entry, so materialization reached the store: %s", q.what, stored)
+		}
+	}
+}
+
+// TestSessionUpdatedEventCarriesResolvedAgent pins the one surface that ships a
+// resolved-agent snapshot without going through renderSession. The reference
+// types the event's `agent` as the same resolved session-agent object the
+// session response carries, so a sparse agent there would answer one update in
+// two different shapes.
+func TestSessionUpdatedEventCarriesResolvedAgent(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	session := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	sid := session["id"].(string)
+
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"tools": []any{map[string]any{"type": "agent_toolset_20260401"}}},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("update: %d %v", status, res)
+	}
+
+	_, listed := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events", nil)
+	var updated map[string]any
+	for _, ev := range listData(t, listed) {
+		if ev["type"] == "session.updated" {
+			updated = ev
+		}
+	}
+	if updated == nil {
+		t.Fatalf("no session.updated event in %v", listed)
+	}
+	eventAgent, ok := updated["agent"].(map[string]any)
+	if !ok {
+		t.Fatalf("session.updated carries no agent: %v", updated)
+	}
+	tools, _ := eventAgent["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("event agent tools = %v, want one entry", eventAgent["tools"])
+	}
+	entry, _ := tools[0].(map[string]any)
+	wantConfig(t, "session.updated agent default_config", entry["default_config"], true, "always_allow")
 }
 
 // toolTypes lists the `type` of each entry of an echoed tools[], for the tests

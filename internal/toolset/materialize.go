@@ -22,6 +22,10 @@ import (
 // no enumerable tool list, so "is this tool actually enabled" cannot be decided
 // here, and a policy that cannot be evaluated is a defect wherever it sits.
 func ValidateMCPToolset(raw json.RawMessage) error {
+	// The typed unmarshal is the leaf type-check: it is what refuses an
+	// `enabled` that is not a boolean or a `configs` that is not an array. The
+	// raw walk below answers the questions a typed decode cannot — an explicit
+	// null is indistinguishable from an absent key once decoded into a pointer.
 	var e entry
 	if err := json.Unmarshal(raw, &e); err != nil {
 		return fmt.Errorf("%s: %w", mcpToolsetType, err)
@@ -29,18 +33,53 @@ func ValidateMCPToolset(raw json.RawMessage) error {
 	if err := rejectUnknownToolsetKeys(mcpToolsetType, raw); err != nil {
 		return err
 	}
-	policies := make([]*policyConfig, 0, len(e.Configs)+1)
-	if e.DefaultConfig != nil {
-		policies = append(policies, e.DefaultConfig.PermissionPolicy)
+	top, ok := jsonObject(raw)
+	if !ok {
+		return fmt.Errorf("%s: entry must be an object", mcpToolsetType)
 	}
-	for _, c := range e.Configs {
-		policies = append(policies, c.PermissionPolicy)
-	}
-	for _, pc := range policies {
-		if pc == nil {
-			continue
+	if dc, ok := jsonObject(top["default_config"]); ok {
+		if err := checkMCPConfigFields(dc, "default_config"); err != nil {
+			return err
 		}
-		if _, err := policyType(mcpToolsetType, pc.Type); err != nil {
+	}
+	for i, item := range jsonArray(top["configs"]) {
+		path := fmt.Sprintf("configs[%d]", i)
+		c, ok := jsonObject(item)
+		if !ok {
+			return fmt.Errorf("%s: %s must be an object", mcpToolsetType, path)
+		}
+		// name identifies the tool the entry configures and is required on the
+		// response type, so an entry without one both configures nothing and
+		// would render an echo the wire schema rejects.
+		var name string
+		if err := json.Unmarshal(c["name"], &name); err != nil || name == "" {
+			return fmt.Errorf("%s: %s requires a non-empty name", mcpToolsetType, path)
+		}
+		if err := checkMCPConfigFields(c, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkMCPConfigFields validates the two settings a default_config or configs[]
+// entry carries. A permission_policy must name a policy this platform can
+// evaluate, and neither setting may be an explicit null: the wire's unions have
+// no null arm, and null is indistinguishable from an omission once decoded — so
+// accepting it would let `"permission_policy": null` silently inherit a
+// permissive default where the author wrote a gate. Absent keys are fine; that
+// is what inheritance is for.
+func checkMCPConfigFields(obj map[string]json.RawMessage, path string) error {
+	for _, field := range []string{"enabled", "permission_policy"} {
+		if raw, ok := obj[field]; ok && string(raw) == "null" {
+			return fmt.Errorf("%s: %s.%s must not be null (omit it to inherit)",
+				mcpToolsetType, path, field)
+		}
+	}
+	if pp, ok := jsonObject(obj["permission_policy"]); ok {
+		var typ string
+		_ = json.Unmarshal(pp["type"], &typ)
+		if _, err := policyType(mcpToolsetType, typ); err != nil {
 			return err
 		}
 	}
