@@ -1192,6 +1192,88 @@ func TestPaddedResponseHeadersAreRefusedBeforeTheyAreRead(t *testing.T) {
 	}
 }
 
+func TestARefusedResponseDoesNotLeakItsConnection(t *testing.T) {
+	t.Parallel()
+	// Refusing a response means returning an error in place of it, and the body
+	// that came with it is then nobody's to close: the caller never sees the
+	// response, and net/http will not reclaim the socket until the body is
+	// closed. So the refusal closes it — and nothing in the suite could fail on
+	// that, because the line runs on every refusal whether or not it does
+	// anything a test asserts. This asserts it at the only place the difference
+	// is visible, the connection itself.
+	raw := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Pad: " + strings.Repeat("v", 4096) + "\r\n\r\nok"
+	url := serveRaw(t, raw)
+
+	var mu sync.Mutex
+	var opened, closed int
+	base := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := (&net.Dialer{Timeout: mcp.DialTimeout}).DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			opened++
+			mu.Unlock()
+			return &countingConn{Conn: conn, onClose: func() {
+				mu.Lock()
+				closed++
+				mu.Unlock()
+			}}, nil
+		},
+	}
+	defer base.CloseIdleConnections()
+
+	// A budget smaller than the header block alone, so the refusal happens at
+	// the header charge — the branch that owns the Close.
+	//
+	// Deliberately no Timeout on this client, and it is the difference between
+	// a test that means this and one that does not: http.Client.Timeout installs
+	// a per-request cancel and calls it on the error return path, which makes
+	// the inner transport abandon the connection on its own. With one set, the
+	// mutant that deletes the Close still passes. The bound here is the poll
+	// deadline below instead.
+	client := &http.Client{Transport: mcp.LimitedTransportForTest(base, 1024)}
+	const requests = 5
+	for i := range requests {
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			t.Fatalf("request %d was accepted, but its %d-byte header block is past the 1024-byte budget", i, len(raw))
+		}
+	}
+
+	// net/http reclaims the socket once the body is closed, but not
+	// synchronously with RoundTrip returning.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		o, c := opened, closed
+		mu.Unlock()
+		if o == requests && c == requests {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after %d refused responses: %d connections opened, %d closed — a refusal leaks the socket it refused",
+				requests, o, c)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// countingConn reports its own close exactly once, so a connection net/http
+// closes twice is not counted twice.
+type countingConn struct {
+	net.Conn
+	once    sync.Once
+	onClose func()
+}
+
+func (c *countingConn) Close() error {
+	c.once.Do(c.onClose)
+	return c.Conn.Close()
+}
+
 // serveRaw answers every request on a fresh listener with a hand-written
 // response, which httptest cannot do: net/http writes the header block itself
 // and trims what this test needs on the wire.

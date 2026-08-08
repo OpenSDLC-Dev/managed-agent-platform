@@ -675,9 +675,23 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // trailing whitespace and joins an obsolete folded continuation, so a server
 // that pads deliberately spends header bytes this cannot see at all. Measured:
 // a value of one character followed by 200,000 spaces reconstructs to 75 bytes
-// against 200,076 on the wire. Charging what is visible is still worth doing —
-// a server sending large *legitimate* headers on every page is charged for them
-// — but the hostile case is held by maxHeaderBytesPerResponse, not here.
+// against 200,076 on the wire.
+//
+// Three routes miss this map, in falling order of how much they can move. A 1xx
+// informational block — 103 Early Hints, say — never enters resp.Header at all,
+// and a server may send many before the final response; measured at 100 pages,
+// 91.8 MB on the wire for 3,900 bytes charged. Padding whitespace is the second.
+// Trailers are the third and smallest: they arrive after the body, so they are
+// not in the map when this runs, and net/http bounds them to its own read buffer
+// (transfer.go, seeUpcomingDoubleCRLF), which is a few kilobytes per response.
+// The first two are held by maxHeaderBytesPerResponse — net/http charges a
+// response's 1xx blocks and its final block to one shared readLimit, so that
+// cap bounds their sum rather than each — and the third by net/http itself.
+//
+// Charging what is visible is still worth doing: a server sending large
+// *legitimate* headers on every page is charged for them, and splitting one
+// large value across many headers or repeating a key is not a way out, both
+// measuring within one byte of the wire.
 func headerBytes(resp *http.Response) int64 {
 	n := int64(len(resp.Proto) + len(resp.Status) + 4)
 	for key, values := range resp.Header {

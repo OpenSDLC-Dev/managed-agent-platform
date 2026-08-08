@@ -152,6 +152,15 @@ func TestIPAllowed(t *testing.T) {
 		// tunnel anywhere in it, and a mask that ignored the group bit would
 		// decode 127.0.0.1 from it and refuse a reachable endpoint.
 		{name: "ISATAP-shaped but the group bit is set", ip: "2606:4700:1234:5678:100:5efe:7f00:1"},
+		// The rest of the mask, which the g-bit row above does not reach. RFC
+		// 5214 §6.1 fixes the identifier's first two octets at 0x0000 apart from
+		// u and g, so a third bit set rules ISATAP out as surely as g does —
+		// these two say so, and each pins a mask that a green suite otherwise
+		// let drift wider. Both are ordinary addresses being *admitted*, which
+		// is the direction a loosened mask breaks: it decodes a tunnel that is
+		// not there and refuses a reachable endpoint.
+		{name: "ISATAP-shaped but a bit above u and g is set", ip: "2001:db8::400:5efe:7f00:1"},
+		{name: "ISATAP-shaped but the identifier's second octet is not zero", ip: "2001:db8::201:5efe:7f00:1"},
 
 		{name: "6to4 wrapping loopback", ip: "2002:7f00:1::1", refused: true},
 		{name: "6to4 wrapping a public address", ip: "2002:5db8:d822::1"},

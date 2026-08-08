@@ -128,6 +128,19 @@ func (s *headerSpy) RoundTrip(req *http.Request) (*http.Response, error) {
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}, nil
 }
 
+// LimitedTransportForTest wraps base with a budget of limit bytes, exactly as a
+// connection's transport is wrapped, so a test can drive a budget small enough
+// that the header charge alone refuses a response.
+//
+// It exists for the refusal path's Close: the line executes on every refusal, so
+// statement coverage is satisfied whether or not it is there, and deleting it
+// left the whole suite green while leaking a socket and its reader goroutine per
+// refused response. What separates the two is not reachable from the assertions
+// a fixture normally makes — only from the connection underneath.
+func LimitedTransportForTest(base http.RoundTripper, limit int64) http.RoundTripper {
+	return newLimitedTransport(base, limit)
+}
+
 // PageAndHeaderBoundsForTest reports the page bound and the per-response raw
 // header bound. Their product is the part of a listing's reads the cumulative
 // byte budget cannot account for — net/http normalizes a header block before
