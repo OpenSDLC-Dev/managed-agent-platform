@@ -11,7 +11,7 @@ Provenance: this file began 2026-07-16 as the verbatim completed-work archive mo
 of [STATE.md](../STATE.md), and documents — [DIVERGENCES.md](./DIVERGENCES.md) above
 all — cite its section headings as evidence anchors. On 2026-07-18 the per-PR delivery
 narratives were verified section-by-section against CHANGELOG.md and pruned (git history
-is the backstop); every cited heading is preserved below, and anything still under one is
+is the backstop); every cited heading is preserved below or in [docs/history/](./history/), and anything still under one is
 recorded nowhere else.
 
 Older periods archive by month to [docs/history/](./history/) — so far
@@ -50,9 +50,10 @@ link re-base with its inversion guard anchored on the written bytes; the
 Opus review panel proved the original round-trip guard constructively true
 and it gained a reachable firing input (a stub quoted mid-entry); the
 fence-aware boundary scan closed a pseudo-section corruption vector no
-reviewer's first pass had named. Eleven guard mutations run red in scratch
-copies; the one deliberate survivor — dropping the inversion comparison —
-is disclosed in the PR as defense-in-depth.
+reviewer's first pass had named. Twelve guard mutations run red in scratch
+copies across the slice's two review rounds; the one deliberate survivor —
+dropping the inversion comparison — is disclosed in the PR as
+defense-in-depth.
 
 Slice 2 (the archiving PR): the 31 sections of 2026-07 (1,327 lines) moved
 to docs/history/2026-07.md by a one-off scripted manual move —
@@ -64,10 +65,11 @@ README.md, and one Go comment (internal/sandbox/k8s) — the wider net after
 the single-reviewer pass caught the quoted-grammar sweep missing every
 variant phrasing, the v0.2.0 lesson again. Citations inside archives stay as written
 (docs/changelog/ bytes are pinned by the inversion guard; a docs/history/
-file records its era) and resolve through this file's pointer paragraph. The split left
-HISTORY.md at 1,828 lines (`wc -l`), not the plan's ~1,000 estimate —
-2026-08 alone is the heaviest month yet, and the figure falls as it
-archives in turn.
+file records its era) and resolve through this file's pointer paragraph. The split kept
+1,823 of the file's 3,150 lines in place — far above the plan's ~1,000
+estimate, because 2026-08 alone is the heaviest month yet; the figure
+falls as it archives in turn.
+
 Rejected en route: a citation sweep at changelog-archive time (the stubs
 keep anchors resolvable — plan 28 decision 4), and a shipped
 HISTORY-split tool (speculative for a two-file split).
