@@ -52,8 +52,11 @@ managed-agents surface.
 
 - **`mcp_servers[]` entry** (betaagent.go:2628-2653): exactly `{type: "url", name, url}`.
   Not a union — no other variant exists, no `authorization_token`, no
-  `tool_configuration`. `name` 1–255 chars unique within the array, ≤20 servers, `url`
-  ≤2048 chars. **Both reference directions are rejected**: unreferenced servers *and*
+  `tool_configuration`. `name` 1–255 chars unique within the array, ≤20 servers; `url`
+  ≤2048 chars comes from the mcp-connector guide's field table only ("up to 2,048
+  characters") — the SDK's `URL` field documents no bound. Neither ceiling is enforced
+  here; both are recorded under #66 in docs/DIVERGENCES.md.
+  **Both reference directions are rejected**: unreferenced servers *and*
   dangling toolsets ("The API rejects agent definitions with unreferenced servers or
   dangling toolsets" — mcp-connector guide). Update/override/mid-session patch are all
   full-replacement (omit = preserve, `[]`/`null` = clear); `agent.mcp_servers` is one of

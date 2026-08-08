@@ -98,8 +98,9 @@ type Agent struct {
 
 // ResolvedAgent is the agent config actually applied to a session, after any
 // per-session overrides (BetaManagedAgentsSessionAgent). ID/Version still
-// reference the base agent. Stored verbatim in sessions.resolved_agent, so
-// rendering is a passthrough.
+// reference the base agent. Stored verbatim in sessions.resolved_agent;
+// rendering is a passthrough except for the toolset configuration inside
+// tools[], which the API resolves for the echo.
 type ResolvedAgent struct {
 	Type    string `json:"type"` // "agent"
 	ID      ID     `json:"id"`

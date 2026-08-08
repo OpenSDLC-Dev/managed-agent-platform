@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -57,8 +58,25 @@ func TestAgentDanglingMCPToolsetRejected(t *testing.T) {
 	}
 }
 
+// wantRejected asserts a 400 whose message carries frag. The fragment is the
+// point: these surfaces have many ways to answer 400, and a test that accepts
+// any of them stays green when the rung it is meant to cover is removed.
+func wantRejected(t *testing.T, status int, res map[string]any, frag string) {
+	t.Helper()
+	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	inner, _ := res["error"].(map[string]any)
+	if msg, _ := inner["message"].(string); !strings.Contains(msg, frag) {
+		t.Errorf("error message %q does not mention %q", msg, frag)
+	}
+}
+
 // TestSessionDanglingMCPToolsetRejected pins the same rung on the session
-// surfaces, which resolve the agent spec through the identical validator.
+// surfaces, which resolve the agent spec through the identical validator, in
+// both directions: a toolset naming a server the spec lacks, and the mirror
+// image — clearing mcp_servers while the toolset that referenced them stays.
+// The reference states both halves, and clearing one side of the pair was
+// already a 400 in the unreferenced-server direction before this slice, so a
+// client turning MCP off for one session replaces both sides or neither.
 func TestSessionDanglingMCPToolsetRejected(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -70,14 +88,97 @@ func TestSessionDanglingMCPToolsetRejected(t *testing.T) {
 		},
 		"environment_id": envID,
 	})
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	wantRejected(t, status, res, "ghost")
 
 	session := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
 	sid := session["id"].(string)
 	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
 		"agent": map[string]any{"tools": []any{mcpToolset("ghost")}},
 	})
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+	wantRejected(t, status, res, "ghost")
+
+	// The other direction, on both session surfaces: an agent whose pair is
+	// intact, overridden to drop the servers alone.
+	paired := createAgent(t, s, agentBody(map[string]any{
+		"mcp_servers": []any{mcpServer("srv")},
+		"tools":       []any{mcpToolset("srv")},
+	}))
+	pairedID := paired["id"].(string)
+	status, res = s.do(http.MethodPost, "/v1/sessions", map[string]any{
+		"agent": map[string]any{
+			"type": "agent_with_overrides", "id": pairedID, "mcp_servers": []any{},
+		},
+		"environment_id": envID,
+	})
+	wantRejected(t, status, res, "srv")
+
+	paired2 := createSession(t, s, map[string]any{"agent": pairedID, "environment_id": envID})
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+paired2["id"].(string), map[string]any{
+		"agent": map[string]any{"mcp_servers": []any{}},
+	})
+	wantRejected(t, status, res, "srv")
+
+	// Replacing both sides at once is accepted, which is how a client moves an
+	// MCP-configured session off one server and onto another.
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+paired2["id"].(string), map[string]any{
+		"agent": map[string]any{
+			"mcp_servers": []any{mcpServer("other")},
+			"tools":       []any{mcpToolset("other")},
+		},
+	}); status != http.StatusOK {
+		t.Fatalf("replacing both sides on a session: status %d, body %v", status, res)
+	}
+}
+
+// TestStoredSpecsAreRevalidatedOnResolve pins that both new rungs bind the
+// bytes in the store, not merely the request that wrote them. Only a row
+// written before this slice can be dangling or carry a misspelled nested key,
+// and there is no way to produce one through the API any more — so the rows
+// here are written straight to Postgres, which is also what makes the test
+// meaningful: it is the pre-existing-data case, and it is the case the API
+// surface cannot reach.
+//
+// The behavior is deliberate and matches how the agent caps already work (#66,
+// "a pre-#66 stored spec that violates a cap fails here too"): an agent whose
+// toolset cannot resolve fails loudly at session create rather than starting a
+// session whose brain would have no server to expand. The agent resource still
+// renders, so the message names what to repair.
+func TestStoredSpecsAreRevalidatedOnResolve(t *testing.T) {
+	s := newTestServer(t)
+	envID := createEnvironment(t, s, map[string]any{"name": "e"})["id"].(string)
+
+	for _, tc := range []struct {
+		name           string
+		servers, tools string
+		frag           string
+	}{{
+		name:    "a dangling toolset",
+		servers: `[]`,
+		tools:   `[{"type":"mcp_toolset","mcp_server_name":"ghost"}]`,
+		frag:    "ghost",
+	}, {
+		name:    "a misspelled key inside a stored configs entry",
+		servers: `[{"type":"url","name":"srv","url":"https://mcp.example/srv"}]`,
+		tools: `[{"type":"mcp_toolset","mcp_server_name":"srv","configs":` +
+			`[{"name":"t","permission_polciy":{"type":"always_ask"}}]}]`,
+		frag: "permission_polciy",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := createAgent(t, s, agentBody(map[string]any{
+				"mcp_servers": []any{mcpServer("srv")},
+				"tools":       []any{mcpToolset("srv")},
+			}))
+			id := agent["id"].(string)
+			if _, err := s.pool.Exec(context.Background(),
+				`UPDATE agents SET spec = jsonb_set(jsonb_set(spec, '{tools}', $2::jsonb),
+				 '{mcp_servers}', $3::jsonb) WHERE id = $1`, id, tc.tools, tc.servers); err != nil {
+				t.Fatalf("seed stored spec: %v", err)
+			}
+			status, res := s.do(http.MethodPost, "/v1/sessions",
+				map[string]any{"agent": id, "environment_id": envID})
+			wantRejected(t, status, res, tc.frag)
+		})
+	}
 }
 
 // TestMCPToolsetShapeValidated gives the MCP arm the create-time shape check
@@ -280,6 +381,53 @@ func TestSessionUpdatedEventCarriesResolvedAgent(t *testing.T) {
 	}
 	entry, _ := tools[0].(map[string]any)
 	wantConfig(t, "session.updated agent default_config", entry["default_config"], true, "always_allow")
+}
+
+// TestSessionUpdatedEventNormalizesAbsentTools covers the other half of "one
+// update, one shape": renderSession turns an absent tools list into [] before
+// resolving it, so the event has to as well, on a field the reference marks
+// required. Only a snapshot written outside the current create path can hold a
+// JSON null there, so the row is seeded directly.
+func TestSessionUpdatedEventNormalizesAbsentTools(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	session := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	sid := session["id"].(string)
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = jsonb_set(
+		   jsonb_set(resolved_agent, '{tools}', 'null'::jsonb),
+		   '{mcp_servers}', $2::jsonb) WHERE id = $1`, sid,
+		`[{"type":"url","name":"srv","url":"https://mcp.example/srv"}]`); err != nil {
+		t.Fatalf("seed null tools: %v", err)
+	}
+
+	// Clear the servers — the only other mutable agent field — so the update
+	// emits the snapshot without rewriting the tools list the seed just
+	// cleared. Nothing referenced them, which is why they can go.
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"mcp_servers": []any{}},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("update: %d %v", status, res)
+	}
+	if agent, _ := res["agent"].(map[string]any); agent["tools"] == nil {
+		t.Fatalf("response agent tools = null, want []: %v", res["agent"])
+	}
+
+	_, listed := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events", nil)
+	for _, ev := range listData(t, listed) {
+		if ev["type"] != "session.updated" {
+			continue
+		}
+		agent, ok := ev["agent"].(map[string]any)
+		if !ok {
+			t.Fatalf("session.updated carries no agent: %v", ev)
+		}
+		if _, ok := agent["tools"].([]any); !ok {
+			t.Fatalf("session.updated agent tools = %v, want an array — the same "+
+				"update answered %v over HTTP", agent["tools"], res["agent"].(map[string]any)["tools"])
+		}
+	}
 }
 
 // toolTypes lists the `type` of each entry of an echoed tools[], for the tests

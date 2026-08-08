@@ -348,7 +348,9 @@ func rawList(raw json.RawMessage, key string) ([]json.RawMessage, error) {
 
 // parseTools validates the tools[] union: each entry must carry a known type
 // discriminator and that variant's required fields. The full raw objects are
-// preserved for storage so configs round-trip byte-for-byte.
+// handed on for storage unchanged, so what an update merges against is what the
+// client sent; the response is rendered from them rather than being them, since
+// renderAgent resolves the toolset configuration first (toolset.Materialize).
 func parseTools(raw json.RawMessage) ([]json.RawMessage, error) {
 	items, err := rawList(raw, "tools")
 	if err != nil {
@@ -480,6 +482,17 @@ func validateAgentSpec(spec agentSpec) error {
 			if !seen[probe.MCPServerName] {
 				return errInvalid("mcp_toolset references mcp_server %q, which is not declared in mcp_servers",
 					probe.MCPServerName)
+			}
+			// Re-check the entry's shape here and not only in parseTools, so
+			// that a *stored* entry is held to it too. The agent_toolset arm
+			// below gets that for free — toolset.Policies re-runs the same
+			// unknown-key walk on every resolve — and without the same rung an
+			// mcp_toolset written before this validation existed would keep
+			// resolving a misspelled permission_polciy to the toolset default,
+			// which is the fail-open (#26) this slice closes for the one kind
+			// whose default is to stop and ask a human.
+			if err := toolset.ValidateMCPToolset(item); err != nil {
+				return errInvalid("%s", err)
 			}
 			referenced[probe.MCPServerName] = true
 			continue

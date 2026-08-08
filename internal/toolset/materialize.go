@@ -3,6 +3,7 @@ package toolset
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
@@ -21,28 +22,38 @@ import (
 // Unlike Validate it is eager about policies rather than lazy: an MCP entry has
 // no enumerable tool list, so "is this tool actually enabled" cannot be decided
 // here, and a policy that cannot be evaluated is a defect wherever it sits.
+// Every check walks the raw JSON rather than decoding into Go types. A typed
+// unmarshal would answer the leaf questions ("is enabled a boolean") for free,
+// but its error text is a dump of the receiving struct — unexported field names
+// and all — and this package's errors are the message of a 400, so they name
+// the field's path instead. A raw walk is also the only way to tell an explicit
+// null from an absent key, which a pointer field cannot.
 func ValidateMCPToolset(raw json.RawMessage) error {
-	// The typed unmarshal is the leaf type-check: it is what refuses an
-	// `enabled` that is not a boolean or a `configs` that is not an array. The
-	// raw walk below answers the questions a typed decode cannot — an explicit
-	// null is indistinguishable from an absent key once decoded into a pointer.
-	var e entry
-	if err := json.Unmarshal(raw, &e); err != nil {
-		return fmt.Errorf("%s: %w", mcpToolsetType, err)
-	}
-	if err := rejectUnknownToolsetKeys(mcpToolsetType, raw); err != nil {
-		return err
-	}
 	top, ok := jsonObject(raw)
 	if !ok {
 		return fmt.Errorf("%s: entry must be an object", mcpToolsetType)
 	}
-	if dc, ok := jsonObject(top["default_config"]); ok {
-		if err := checkMCPConfigFields(dc, "default_config"); err != nil {
+	if err := rejectUnknownToolsetKeys(mcpToolsetType, raw); err != nil {
+		return err
+	}
+	if dc, set := present(top["default_config"]); set {
+		obj, ok := jsonObject(dc)
+		if !ok {
+			return fmt.Errorf("%s: default_config must be an object", mcpToolsetType)
+		}
+		if err := checkMCPConfigFields(obj, "default_config"); err != nil {
 			return err
 		}
 	}
-	for i, item := range jsonArray(top["configs"]) {
+	cfgs, set := present(top["configs"])
+	if !set {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(cfgs, &items); err != nil {
+		return fmt.Errorf("%s: configs must be an array", mcpToolsetType)
+	}
+	for i, item := range items {
 		path := fmt.Sprintf("configs[%d]", i)
 		c, ok := jsonObject(item)
 		if !ok {
@@ -76,7 +87,17 @@ func checkMCPConfigFields(obj map[string]json.RawMessage, path string) error {
 				mcpToolsetType, path, field)
 		}
 	}
-	if pp, ok := jsonObject(obj["permission_policy"]); ok {
+	if raw, set := present(obj["enabled"]); set {
+		var b bool
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return fmt.Errorf("%s: %s.enabled must be a boolean", mcpToolsetType, path)
+		}
+	}
+	if raw, set := present(obj["permission_policy"]); set {
+		pp, ok := jsonObject(raw)
+		if !ok {
+			return fmt.Errorf("%s: %s.permission_policy must be an object", mcpToolsetType, path)
+		}
 		var typ string
 		_ = json.Unmarshal(pp["type"], &typ)
 		if _, err := policyType(mcpToolsetType, typ); err != nil {
@@ -126,13 +147,14 @@ func MaterializeTools(tools []json.RawMessage) []json.RawMessage {
 // echoed as stored, malformed or not. Rejecting malformed input is the API
 // boundary's job (Validate, ValidateMCPToolset), and a read of an older row
 // must not fail because of what a write once let through. One thing does not
-// survive: an unknown *key* nested inside default_config or a configs[] entry
-// is dropped, because those two objects are rebuilt from the three fields the
-// schema defines. Only a row written before that validation existed can carry
-// one, an unknown key at the toolset object's own level is preserved, and the
-// drop is toward the safe reading — a stored `permission_polciy` disappears
-// from the echo and the tool renders with the default policy it actually
-// resolves to.
+// survive: an unknown *key* nested inside default_config or a resolved
+// configs[] entry is dropped, because those objects are rebuilt from the three
+// fields the schema defines. Only a row written before that validation existed
+// can carry one, an unknown key at the toolset object's own level is preserved,
+// and the drop is toward the safe reading — a stored `permission_polciy`
+// disappears from the echo and the tool renders with the default policy it
+// actually resolves to. A configs[] entry that resolves to no tool at all is
+// not rebuilt, so it keeps every key it was stored with (materializeConfigs).
 func Materialize(raw json.RawMessage) json.RawMessage {
 	top, ok := jsonObject(raw)
 	if !ok {
@@ -156,7 +178,7 @@ func Materialize(raw json.RawMessage) json.RawMessage {
 	top["default_config"] = mustMarshal(map[string]json.RawMessage{
 		"enabled": defEnabled, "permission_policy": defPolicy,
 	})
-	top["configs"] = materializeConfigs(top["configs"], defEnabled, defPolicy)
+	top["configs"] = materializeConfigs(kind, top["configs"], defEnabled, defPolicy)
 	return mustMarshal(top)
 }
 
@@ -187,28 +209,48 @@ func resolveDefaultConfig(raw json.RawMessage, fallback domain.PermissionPolicyT
 // describes the configuration in effect, not the shape of the request that set
 // it. A configs[] that is absent, null, or not an array renders as [], which is
 // what the response type requires of it.
-func materializeConfigs(raw, defEnabled, defPolicy json.RawMessage) json.RawMessage {
+//
+// Only an entry that configures a tool this toolset actually has is resolved
+// (configurable). Anything else — a non-object element, an entry with no name,
+// a name no built-in answers to — is echoed exactly as supplied, in place. Both
+// arms of that rule matter. Resolving such an entry would state something
+// untrue: filling in `enabled` and `permission_policy` presents the entry as
+// effective configuration when resolveToolset ignores it entirely, and merging
+// every nameless entry under one "" key would collapse distinct entries into a
+// single fabricated one. Dropping it would be worse still — a client that GETs
+// an agent and re-POSTs the tools it was handed would silently lose entries the
+// API accepted. Echoing it unchanged is what this code did before the entry was
+// resolved at all, and it keeps every configs[] element accounted for.
+func materializeConfigs(kind string, raw, defEnabled, defPolicy json.RawMessage) json.RawMessage {
 	type merged struct {
 		name            json.RawMessage
 		enabled, policy json.RawMessage
 	}
-	var order []string
+	// A slot is one output element: either an entry echoed as supplied, or the
+	// name of a merge bucket resolved once the whole array has been read.
+	type slot struct {
+		verbatim json.RawMessage
+		name     string
+	}
+	var slots []slot
 	byName := map[string]*merged{}
 	for _, item := range jsonArray(raw) {
 		obj, ok := jsonObject(item)
 		if !ok {
+			slots = append(slots, slot{verbatim: item})
 			continue
 		}
-		// Group by the name as written: an unnamed entry configures nothing in
-		// particular, and grouping every one of them together under "" keeps
-		// the merge total rather than special-casing them out of the echo.
 		var name string
 		_ = json.Unmarshal(obj["name"], &name)
+		if !configurable(kind, name) {
+			slots = append(slots, slot{verbatim: item})
+			continue
+		}
 		m := byName[name]
 		if m == nil {
 			m = &merged{name: obj["name"]}
 			byName[name] = m
-			order = append(order, name)
+			slots = append(slots, slot{name: name})
 		}
 		if v, set := present(obj["enabled"]); set {
 			m.enabled = v
@@ -217,14 +259,15 @@ func materializeConfigs(raw, defEnabled, defPolicy json.RawMessage) json.RawMess
 			m.policy = v
 		}
 	}
-	out := make([]json.RawMessage, 0, len(order))
-	for _, name := range order {
-		m := byName[name]
-		entry := map[string]json.RawMessage{
-			"enabled": defEnabled, "permission_policy": defPolicy,
+	out := make([]json.RawMessage, 0, len(slots))
+	for _, s := range slots {
+		if s.verbatim != nil {
+			out = append(out, s.verbatim)
+			continue
 		}
-		if m.name != nil {
-			entry["name"] = m.name
+		m := byName[s.name]
+		entry := map[string]json.RawMessage{
+			"name": m.name, "enabled": defEnabled, "permission_policy": defPolicy,
 		}
 		if m.enabled != nil {
 			entry["enabled"] = m.enabled
@@ -235,6 +278,20 @@ func materializeConfigs(raw, defEnabled, defPolicy json.RawMessage) json.RawMess
 		out = append(out, mustMarshal(entry))
 	}
 	return mustMarshal(out)
+}
+
+// configurable reports whether a configs[] entry naming this tool resolves to
+// anything. The built-in toolset configures exactly its own definitions, so a
+// name outside them overrides nothing; an MCP server reports its own tools, so
+// any name it carries can be real and only an empty one is meaningless.
+func configurable(kind, name string) bool {
+	if name == "" {
+		return false
+	}
+	if kind != agentToolsetType {
+		return true
+	}
+	return slices.ContainsFunc(definitions, func(d toolDef) bool { return d.name == name })
 }
 
 // present reports whether a key carried a value worth echoing: an absent key

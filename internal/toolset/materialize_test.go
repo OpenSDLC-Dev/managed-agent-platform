@@ -78,6 +78,43 @@ func TestMaterializeResolvesBothToolsetKinds(t *testing.T) {
 			`"default_config":{"enabled":true,"permission_policy":{"type":"always_ask"}},` +
 			`"mcp_server_name":"s","stray":1,"type":"mcp_toolset"}`,
 	}, {
+		// The built-in toolset configures exactly its own definitions, so an
+		// entry naming anything else overrides nothing — resolveToolset never
+		// looks it up. Filling it in would present it as effective
+		// configuration, so it is echoed as supplied instead.
+		name: "an entry naming no built-in tool is echoed as supplied",
+		in:   `{"type":"agent_toolset_20260401","configs":[{"name":"nope"},{"name":"bash"}]}`,
+		want: `{"configs":[{"name":"nope"},{"enabled":true,"name":"bash",` +
+			`"permission_policy":{"type":"always_allow"}}],"default_config":{"enabled":true,` +
+			`"permission_policy":{"type":"always_allow"}},"type":"agent_toolset_20260401"}`,
+	}, {
+		// name is optional on this arm (it has been since #26), so a stored
+		// entry can omit it. Grouping every such entry under one "" key would
+		// merge unrelated entries into a single one neither of them wrote.
+		name: "nameless entries stay separate rather than merging under one key",
+		in: `{"type":"agent_toolset_20260401","configs":[{"enabled":false},` +
+			`{"permission_policy":{"type":"always_ask"}}]}`,
+		want: `{"configs":[{"enabled":false},{"permission_policy":{"type":"always_ask"}}],` +
+			`"default_config":{"enabled":true,"permission_policy":{"type":"always_allow"}},` +
+			`"type":"agent_toolset_20260401"}`,
+	}, {
+		// A client that GETs an agent and re-POSTs the tools it was handed must
+		// not lose entries the API accepted, so every element is accounted for
+		// even when it is not an object.
+		name: "a non-object configs element keeps its place",
+		in:   `{"type":"agent_toolset_20260401","configs":[null,{"name":"bash","enabled":false}]}`,
+		want: `{"configs":[null,{"enabled":false,"name":"bash",` +
+			`"permission_policy":{"type":"always_allow"}}],"default_config":{"enabled":true,` +
+			`"permission_policy":{"type":"always_allow"}},"type":"agent_toolset_20260401"}`,
+	}, {
+		// An MCP server names its own tools, so any non-empty name can be real
+		// and resolves; only a nameless entry configures nothing. Validation
+		// rejects one at write, so only a row older than it can carry one.
+		name: "an mcp entry with no name is echoed as supplied",
+		in:   `{"type":"mcp_toolset","mcp_server_name":"s","configs":[{"enabled":false}]}`,
+		want: `{"configs":[{"enabled":false}],"default_config":{"enabled":true,` +
+			`"permission_policy":{"type":"always_ask"}},"mcp_server_name":"s","type":"mcp_toolset"}`,
+	}, {
 		name: "a custom tool is not a toolset and passes through untouched",
 		in:   `{"type":"custom","name":"x","description":"d","input_schema":{"type":"object"}}`,
 		want: `{"type":"custom","name":"x","description":"d","input_schema":{"type":"object"}}`,
@@ -223,6 +260,27 @@ func TestValidateMCPToolset(t *testing.T) {
 		name:    "a null name is rejected",
 		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":[{"name":null}]}`,
 		wantErr: "configs[0] requires a non-empty name",
+	}, {
+		// The leaf type checks below used to be a typed json.Unmarshal, whose
+		// error text is a dump of the receiving struct — unexported field names,
+		// Go type syntax and all. That text is the message of a 400, so each of
+		// these names the field's path instead; the loop asserts it of every
+		// error this table produces.
+		name:    "configs must be an array",
+		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":{"a":1}}`,
+		wantErr: "configs must be an array",
+	}, {
+		name:    "default_config must be an object",
+		in:      `{"type":"mcp_toolset","mcp_server_name":"g","default_config":"on"}`,
+		wantErr: "default_config must be an object",
+	}, {
+		name:    "a non-boolean enabled is rejected",
+		in:      `{"type":"mcp_toolset","mcp_server_name":"g","default_config":{"enabled":"yes"}}`,
+		wantErr: "default_config.enabled must be a boolean",
+	}, {
+		name:    "a non-object permission_policy is rejected",
+		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":[{"name":"t","permission_policy":"always_ask"}]}`,
+		wantErr: "configs[0].permission_policy must be an object",
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -237,6 +295,13 @@ func TestValidateMCPToolset(t *testing.T) {
 			}
 			if tc.wantErr != "" && err != nil && !strings.Contains(err.Error(), "mcp_toolset") {
 				t.Fatalf("error should name the toolset kind, got %v", err)
+			}
+			// Every message here becomes the `message` of a 400, so none of
+			// them may leak Go internals the way a typed decode's error does.
+			for _, leak := range []string{"Go struct", "json:\"", "toolset."} {
+				if err != nil && strings.Contains(err.Error(), leak) {
+					t.Fatalf("error leaks %q to the client: %v", leak, err)
+				}
 			}
 		})
 	}

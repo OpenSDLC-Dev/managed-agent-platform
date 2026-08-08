@@ -25,8 +25,9 @@ import (
 )
 
 // sessionAgentJSON is the resolved-agent snapshot embedded in a session
-// (BetaManagedAgentsSessionAgent) — the domain wire shape, stored verbatim
-// in sessions.resolved_agent, so rendering is a passthrough.
+// (BetaManagedAgentsSessionAgent) — the domain wire shape, stored verbatim in
+// sessions.resolved_agent. Rendering it is a passthrough except for tools[],
+// whose toolset configuration renderSession resolves for the echo.
 type sessionAgentJSON = domain.ResolvedAgent
 
 // usageJSON is the session-level usage wire shape — the domain type (nested
@@ -112,6 +113,13 @@ func materializedAgentSnapshot(stored []byte) json.RawMessage {
 	var tools []json.RawMessage
 	if err := json.Unmarshal(obj["tools"], &tools); err != nil {
 		return json.RawMessage(stored)
+	}
+	// renderSession forces an absent list to [] before materializing, and this
+	// snapshot has to answer the same update in the same shape: a stored `null`
+	// would otherwise reach the event as `null` while the HTTP response of that
+	// very update carried `[]`, on a field the reference marks required.
+	if tools == nil {
+		tools = []json.RawMessage{}
 	}
 	resolved, err := json.Marshal(toolset.MaterializeTools(tools))
 	if err != nil {
