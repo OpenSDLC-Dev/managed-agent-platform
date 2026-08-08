@@ -88,10 +88,22 @@ func refused(ip net.IP) bool {
 // nothing but padding and suffix in the low 32, so a low-32 reader sees 8.8.8.8
 // and lets the metadata endpoint through. Trying all six costs a handful of
 // byte loads and cannot admit anything, since the caller refuses on any
-// candidate rather than on a chosen one. It can over-refuse — a public address
-// under one layout is arbitrary bytes under the other five, and those bytes
-// could land in a blocked class — which is the direction to be wrong in, and
-// rare enough in practice that no legitimate mapping in the tests hits it.
+// candidate rather than on a chosen one.
+//
+// It does over-refuse, and not rarely: a public address under one layout is
+// arbitrary bytes under the other five, and those bytes sometimes land in a
+// blocked class. Measured over the whole IPv4 space, on the RFC 8215 local-use
+// prefix, a legitimate target is refused for 12.8% of addresses under a /48
+// mapping (whenever octet 2 or 3 is 127 or in 224-239) and 6.6% under /56 and
+// /64. What makes that an acceptable price rather than a bug is where it
+// falls: under a /96 mapping, and under the well-known 64:ff9b::/96 prefix —
+// which is the only layout that prefix is allowed to use, and the case an
+// operator gets without choosing anything — the rate is **zero**, because
+// every speculative layout reads the zeroed prefix bytes and is skipped as
+// padding. The cost and the risk therefore coincide exactly: a deployment
+// where no layout ambiguity exists pays nothing, and a deployment where the
+// bypass is real is the one that pays. An operator debugging an inexplicably
+// refused NAT64 address on a local-use prefix is looking at this paragraph.
 //
 // IPv4-compatible is here because Go does not decode it for us and nothing else
 // catches it. ::ffff:127.0.0.1 (IPv4-*mapped*) is safe without any of this —

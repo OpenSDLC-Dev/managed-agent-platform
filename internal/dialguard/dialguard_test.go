@@ -60,6 +60,16 @@ func TestIPAllowed(t *testing.T) {
 		// it Google DNS and dials cloud metadata.
 		{name: "NAT64 /48 layout wrapping cloud metadata", ip: "64:ff9b:1:a9fe:a9:fe00:808:808", refused: true},
 		{name: "NAT64 /40 layout wrapping loopback", ip: "64:ff9b:7f:0:1::", refused: true},
+
+		// A deliberate false refusal, pinned so it stays a decision rather than
+		// a surprise. Under a /48 mapping this carries the public 8.127.8.8,
+		// but read as /56 the same bytes are 127.8.8.0 — loopback — and the
+		// guard cannot tell which layout the deployment meant. Measured over
+		// the whole address space this costs 12.8% of targets under a /48
+		// mapping on the local-use prefix and nothing at all under /96 or the
+		// well-known prefix; see the note on embeddedIPv4 for why that is the
+		// trade rather than an accident.
+		{name: "NAT64 /48 layout, public target, refused by the /56 reading", ip: "64:ff9b:1:87f:8:800::", refused: true},
 		{name: "6to4 wrapping loopback", ip: "2002:7f00:1::1", refused: true},
 		{name: "6to4 wrapping a public address", ip: "2002:5db8:d822::1"},
 		{name: "Teredo wrapping loopback", ip: "2001::5:0:0:80ff:fffe", refused: true},
