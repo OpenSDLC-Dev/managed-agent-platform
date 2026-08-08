@@ -148,9 +148,9 @@ func LimitedTransportForTest(base http.RoundTripper, limit int64) http.RoundTrip
 // net/http adds to it on the way to HTTP/2's SETTINGS_MAX_HEADER_LIST_SIZE.
 //
 // Both are exposed rather than only the first because the fixtures that matter
-// sit within a few dozen bytes of maxHeaderBytesPerResponse+http2HeaderListOverhead.
-// Rounder margins pass under any overhead value and so assert nothing about
-// net/http; these tie the constants to the framer's real boundary.
+// sit 128 bytes below the sum of the two and 64 above it. Rounder margins pass
+// under any overhead value and so assert nothing about net/http; these tie the
+// constants to the framer's real boundary.
 func HeaderBoundsForTest() (headerBytes, h2Overhead int64) {
 	return maxHeaderBytesPerResponse, http2HeaderListOverhead
 }

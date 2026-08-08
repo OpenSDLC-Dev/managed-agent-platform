@@ -155,8 +155,8 @@ type Conn struct {
 // folded continuation is joined, so the bytes are read, allocated, and then
 // unaccountable. Measured against a raw listener answering Content-Length and an
 // X-Pad value of one character followed by 200,000 spaces: 200,048 header bytes
-// on the wire, reconstructed to 49 — a factor of 4,083, which is a distortion no
-// arithmetic on the parsed map can correct. So
+// on the wire, reconstructed to 49 — a factor of 4,083, which is a distortion
+// no arithmetic on the parsed map can correct. So
 // the raw block is bounded here instead — 64 KiB rather than net/http's 10 MiB
 // default, per header block, which is a bound on the peak one block reaches and
 // deliberately not a total: how many blocks a connection answers is not this
@@ -626,42 +626,37 @@ func (c *Conn) Close() error { return c.session.Close() }
 // parsed map are outside it, held per block by maxHeaderBytesPerResponse
 // instead, and *per block* is where the arithmetic stops rather than continues.
 //
-// No cumulative bound on delivered header bytes is worth publishing. Successive
-// revisions of this comment published one anyway and every one was falsified —
-// by whitespace padding, by mistaking a block for a response, by claiming a
-// socket total that no header arithmetic can produce, by multiplying a per-block
-// cap by a response count, and finally by getting that multiplication wrong by
-// three orders of magnitude. An earlier revision enumerated them and miscounted
-// its own history twice, which is its own argument: the useful part is the
-// mechanism, and the mechanism is that every one of those figures needed a bound
-// on how many responses one connection answers, which go-sdk v1.7.0 does not
-// have. Counting the handshake, a hundred pages and the session-ending DELETE
-// reaches 104, and two paths walk past it. A server that answers the first
-// server/discover with CodeUnsupportedProtocolVersion and a supported-version
-// list is probed a second time (mcp/client.go, `for range 2`). And any response
-// delivered as text/event-stream may end carrying a fresh `id:` and no call
-// response, which sends handleSSE round its reconnect loop again — the
-// no-progress retry cap it grew for exactly this resets on every id that
+// No cumulative bound on delivered header bytes is worth publishing. Several
+// revisions of this comment published one anyway and every one was falsified: by
+// whitespace padding, by mistaking a block for a response, by claiming a socket
+// total that no header arithmetic can produce, and by multiplying a per-block cap
+// by a response count. That last is the one that matters, because it is what all
+// of them needed — a bound on how many responses one connection answers, which
+// go-sdk v1.7.0 does not have. Counting the handshake, a hundred pages and the
+// session-ending DELETE reaches 104, and two paths walk past it. A server that
+// answers the first server/discover with CodeUnsupportedProtocolVersion and a
+// supported-version list is probed a second time (mcp/client.go, `for range 2`).
+// And any response delivered as text/event-stream may end carrying a fresh `id:`
+// and no call response, which sends handleSSE round its reconnect loop again —
+// the no-progress retry cap it grew for exactly this resets on every id that
 // advances, the server picks the delay through the SSE `retry:` field, and the
-// SDK's own TODO beside it records that a limit on total attempts for one
-// logical request is still missing (mcp/streamable.go, handleSSE/connectSSE).
+// SDK's own TODO beside it records that a limit on total attempts for one logical
+// request is still missing (mcp/streamable.go, handleSSE/connectSSE).
 // TestAConnectionAnswersMoreResponsesThanItHasPages drives it: around two
 // thousand responses to a single listing in three seconds, in three of the 120
-// seconds ListTimeout allows, against the 104 the last revision multiplied by.
-// It is written to go red if that upstream limit ever lands, which is how this
+// seconds ListTimeout allows, against the 104 that arithmetic multiplied by. It
+// is written to go red if that upstream limit ever lands, which is how this
 // comment would learn it may tighten again. It counts responses and says nothing
 // about their bytes, deliberately — see the note there on the figure that came
 // of multiplying that count by a per-response size instead of measuring one.
 //
 // One thing here is bounded and worth saying: headerBytes charges every response
 // at least the twenty-odd bytes of its status line and terminator, so this budget
-// caps the response count too, at a few hundred thousand. The product of that
-// count with a maximal block is deliberately not written down. The revision
-// before this one did write it, as "tens of terabytes", inside the very sentence
-// explaining why it should not be written — and got it wrong by three orders of
-// magnitude, the arithmetic coming to some eighty gigabytes. The rule this
-// paragraph now keeps is the narrow one it kept failing: a figure stated here is
-// one that was measured, and a product of two measurements is not one.
+// caps the response count too, at a few hundred thousand. Its product with a
+// maximal block is left unstated on purpose, under the rule this comment kept
+// failing: a figure written here is one that was measured, and a product of two
+// measurements is not one. Every attempt to publish that product has been wrong,
+// including one that named the rule and broke it in the same sentence.
 //
 // What is bounded usefully is the peak and not the sum: one header block at a
 // time, plus this cumulative figure for everything that can be accounted. The
@@ -789,9 +784,10 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 //
 // Three routes miss this map. A 1xx informational block — 103 Early Hints, say
 // — never enters resp.Header at all, and a server may send many before the final
-// response; measured at 100 pages, 91.8 MB on the wire for 3,900 bytes charged —
-// measured under net/http's 10 MiB default, so it sizes the gap this package
-// then closes rather than one that survives the cap below.
+// response; a one-off probe under net/http's 10 MiB default, not a fixture the
+// suite retains, measured 91.8 MB on the wire across 100 pages for 3,900 bytes
+// charged, so it sizes the gap this package then closes rather than one that
+// survives the cap below.
 // Padding whitespace is the second. Trailers are the third: they arrive after
 // the body, so they are not in the map when this runs. All three are held by
 // maxHeaderBytesPerResponse, one block at a time — over HTTP/2 that cap applies

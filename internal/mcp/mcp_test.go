@@ -1495,11 +1495,11 @@ func TestAConnectionAnswersMoreResponsesThanItHasPages(t *testing.T) {
 	t.Parallel()
 	// This is the fixture behind a *negative* claim in MaxResponseBytes' doc:
 	// that no cumulative bound on delivered header bytes can be published,
-	// because nothing bounds how many responses one connection answers. Four
-	// revisions of that comment published one anyway, each arithmetic resting on
-	// a count of responses — the last on 104, being the handshake, maxToolPages
-	// pages and the session-ending DELETE. A count is only a ceiling if the SDK
-	// cannot be made to exceed it, and it can.
+	// because nothing bounds how many responses one connection answers. Earlier
+	// revisions of that comment published one anyway, resting on a count of
+	// responses — 104, being the handshake, maxToolPages pages and the
+	// session-ending DELETE. A count is only a ceiling if the SDK cannot be made
+	// to exceed it, and it can.
 	//
 	// The lever is stream resumption. A response delivered as text/event-stream
 	// may end carrying a priming event — an `id:` and no data, which SEP-1699
@@ -1518,7 +1518,7 @@ func TestAConnectionAnswersMoreResponsesThanItHasPages(t *testing.T) {
 	//
 	// A count and nothing more. An earlier revision padded each answer with a
 	// 50,000-byte header value and reported responses × 50,000 as bytes
-	// delivered — which was false by two orders of magnitude, and false in
+	// delivered — which was false by more than two orders of magnitude, and false in
 	// exactly the way this package keeps having to correct: a formula published
 	// as a measurement. net/http trims a header value in writeSubset
 	// (net/http/header.go, textproto.TrimString) *before writing it*, so against
