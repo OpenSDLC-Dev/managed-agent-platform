@@ -19,13 +19,15 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // sessionAgentJSON is the resolved-agent snapshot embedded in a session
-// (BetaManagedAgentsSessionAgent) — the domain wire shape, stored verbatim
-// in sessions.resolved_agent, so rendering is a passthrough.
+// (BetaManagedAgentsSessionAgent) — the domain wire shape, stored verbatim in
+// sessions.resolved_agent. Rendering it is a passthrough except for tools[],
+// whose toolset configuration renderSession resolves for the echo.
 type sessionAgentJSON = domain.ResolvedAgent
 
 // usageJSON is the session-level usage wire shape — the domain type (nested
@@ -91,6 +93,46 @@ func scanSession(row pgx.Row) (sessionRow, error) {
 	return r, err
 }
 
+// materializedAgentSnapshot resolves the toolset configuration inside a stored
+// resolved-agent snapshot, for the one place that ships that snapshot without
+// going through renderSession: the `agent` field of a `session.updated` event,
+// which the reference types as the same resolved session-agent object the
+// session response carries (SDK betasession.go, BetaManagedAgentsSessionUpdated
+// Event.Agent). Without it the same update answers twice in two shapes — a
+// resolved agent in the HTTP response and a sparse one in the event stream.
+//
+// It rewrites only the `tools` key and leaves every other byte of the snapshot
+// alone, and it never fails: a snapshot it cannot decode ships as stored,
+// because an event recording that the agent changed must be appended either
+// way. The store is untouched — the caller passes the bytes it already wrote.
+func materializedAgentSnapshot(stored []byte) json.RawMessage {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(stored, &obj); err != nil || obj == nil {
+		return json.RawMessage(stored)
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(obj["tools"], &tools); err != nil {
+		return json.RawMessage(stored)
+	}
+	// renderSession forces an absent list to [] before materializing, and this
+	// snapshot has to answer the same update in the same shape: a stored `null`
+	// would otherwise reach the event as `null` while the HTTP response of that
+	// very update carried `[]`, on a field the reference marks required.
+	if tools == nil {
+		tools = []json.RawMessage{}
+	}
+	resolved, err := json.Marshal(toolset.MaterializeTools(tools))
+	if err != nil {
+		return json.RawMessage(stored)
+	}
+	obj["tools"] = resolved
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return json.RawMessage(stored)
+	}
+	return out
+}
+
 func renderSession(r sessionRow) (sessionJSON, error) {
 	var agent sessionAgentJSON
 	if err := json.Unmarshal(r.agentJSON, &agent); err != nil {
@@ -99,6 +141,9 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	if agent.Tools == nil {
 		agent.Tools = []json.RawMessage{}
 	}
+	// The resolved-agent snapshot echoes resolved toolset configuration, the
+	// same rule renderAgent applies to the agent resource itself.
+	agent.Tools = toolset.MaterializeTools(agent.Tools)
 	if agent.MCPServers == nil {
 		agent.MCPServers = []json.RawMessage{}
 	}
@@ -868,7 +913,7 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		payload["metadata"] = metadata
 	}
 	if agentChanged {
-		payload["agent"] = json.RawMessage(row.agentJSON)
+		payload["agent"] = materializedAgentSnapshot(row.agentJSON)
 	}
 	changed := row.title != prevTitle || metaChanged || agentChanged
 	if changed {

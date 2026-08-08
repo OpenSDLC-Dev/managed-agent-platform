@@ -411,7 +411,7 @@ func TestSessionCreatePinsAgentVersionAndSupportsOverrides(t *testing.T) {
 	}
 
 	// agent_with_overrides overlays fields; id/version still reference the base.
-	tools := []any{map[string]any{"type": "agent_toolset_20260401"}}
+	tools := []any{map[string]any{"type": "agent_toolset_20260401"}, customTool("mine")}
 	over := createSession(t, s, map[string]any{
 		"agent": map[string]any{
 			"type": "agent_with_overrides", "id": agentID,
@@ -428,8 +428,16 @@ func TestSessionCreatePinsAgentVersionAndSupportsOverrides(t *testing.T) {
 	if m, _ := a["model"].(map[string]any); m["id"] != "claude-haiku-4-5" {
 		t.Errorf("override model = %v", a["model"])
 	}
-	if !reflect.DeepEqual(jsonNorm(t, a["tools"]), jsonNorm(t, tools)) {
+	// The override replaced the tool list. Materialization adds resolved config
+	// to the toolset entry (pinned by TestToolsetConfigsEchoResolved), so this
+	// cannot deep-compare the whole list any more — but every field an entry
+	// identifies itself by has to survive the render, so those are asserted.
+	if got := toolTypes(t, a["tools"]); !reflect.DeepEqual(got, []string{"agent_toolset_20260401", "custom"}) {
 		t.Errorf("override tools = %v", a["tools"])
+	}
+	if custom, _ := a["tools"].([]any)[1].(map[string]any); custom["name"] != "mine" ||
+		custom["description"] != "d" || custom["input_schema"] == nil {
+		t.Errorf("custom tool lost its own fields in the override snapshot: %v", custom)
 	}
 	// The base agent resource is untouched by overrides.
 	_, base := s.do(http.MethodGet, "/v1/agents/"+agentID, nil)
@@ -549,8 +557,15 @@ func TestSessionUpdate(t *testing.T) {
 		t.Errorf("metadata = %v", updated["metadata"])
 	}
 	a, _ := updated["agent"].(map[string]any)
-	if !reflect.DeepEqual(jsonNorm(t, a["tools"]), jsonNorm(t, tools)) {
+	if got := toolTypes(t, a["tools"]); !reflect.DeepEqual(got,
+		[]string{"agent_toolset_20260401", "mcp_toolset"}) {
 		t.Errorf("agent.tools = %v", a["tools"])
+	}
+	// mcp_server_name is the field the brain's MCP expansion reads to pick a
+	// server, and materialization rebuilds the entry around it, so the patched
+	// snapshot is asserted to still carry it rather than only its type.
+	if mcp, _ := a["tools"].([]any)[1].(map[string]any); mcp["mcp_server_name"] != "docs" {
+		t.Errorf("patched mcp_toolset lost mcp_server_name: %v", mcp)
 	}
 	if !reflect.DeepEqual(jsonNorm(t, a["mcp_servers"]), jsonNorm(t, mcp)) {
 		t.Errorf("agent.mcp_servers = %v", a["mcp_servers"])
