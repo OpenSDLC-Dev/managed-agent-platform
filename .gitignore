@@ -43,7 +43,19 @@ model-providers.json
 # Parallel-session worktrees live here; without this every worktree's checkout
 # shows up as untracked files in the main one. See .worktreeinclude.
 .claude/worktrees/
+
+# Build outputs at the repo root. `go build ./cmd/<name>` and `-o <name>` both
+# drop their binary here, and a `git add -A` then sweeps it in. Every cmd/ and
+# tools/ name is listed rather than just the one that bit us: /gate alone was
+# covered when #333 committed an 80 MB worker (#338), so a partial list is how
+# this recurs. Anchored to the root — cmd/brain/ and friends are directories
+# that must stay tracked.
+/brain
+/changelog
+/controlplane
+/executor
 /gate
+/worker
 
 # Terraform working directories, state and variable files. The provider plugins,
 # the state and the tfvars are machine-local; .terraform.lock.hcl is NOT ignored
