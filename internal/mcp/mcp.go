@@ -157,9 +157,9 @@ type Conn struct {
 // character followed by 200,000 spaces reconstructed to 75 bytes — a factor of
 // 2,670, which is a distortion no arithmetic on the parsed map can correct. So
 // the raw block is bounded here instead, per header block, and what a maximal
-// listing can hide is that constant times maxToolPages times
-// maxHeaderBlocksPerResponse — 18.75 MiB, against net/http's own default putting
-// it at nearly 3 GiB.
+// listing can hide is maxToolPages * maxHeaderBlocksPerResponse * (this constant
+// + http2HeaderListOverhead) — 18.84 MiB, against net/http's own default putting
+// it near 3 GiB.
 var DefaultClient = &http.Client{
 	Timeout: DialTimeout,
 	CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -188,9 +188,10 @@ var DefaultClient = &http.Client{
 // few hundred bytes to a few kilobytes; the heavy realistic cases — SSO
 // Set-Cookie chains, dense tracing and rate-limit headers — reach the low tens
 // of kilobytes. The referent worth naming is nginx's proxy_buffer_size, the cap
-// it puts on an *upstream's* response header block, which defaults to 4k or 8k:
-// 64 KiB is eight times that, and any MCP server behind a default reverse proxy
-// is already held below this limit by the proxy rather than by us. (Comparing
+// it puts on an *upstream's* response header block, which defaults to one memory
+// page — 4k or 8k depending on the platform, so this is eight to sixteen times
+// it — and any MCP server behind a default reverse proxy is already held below
+// this limit by the proxy rather than by us. (Comparing
 // it to what nginx *emits* of its own accord, a few hundred bytes, would make
 // this ~200x and is the wrong comparison; so is anything about cookie jars,
 // which govern outbound request headers and cannot affect the block a server
@@ -204,9 +205,9 @@ const maxHeaderBytesPerResponse = 64 << 10
 // The tempting reading is that MaxResponseHeaderBytes bounds a response. Over
 // HTTP/1.1 it very nearly does: net/http resets the read limit per 1xx block
 // only when a request carries an httptrace with Got1xxResponse set
-// (transport.go, readLoop), the SDK installs no httptrace, so informational
-// blocks and the final block draw on one limit and trailers are bounded
-// separately by the read buffer. Over HTTP/2 — which this client explicitly
+// (transport.go, persistConn.readResponse), the SDK installs no httptrace, so
+// informational blocks and the final block draw on one limit and trailers are
+// bounded separately by the read buffer. Over HTTP/2 — which this client explicitly
 // enables, so this is not a hypothetical path — the limit becomes the
 // connection's maxHeaderListSize and applies to each decoded block on its own.
 // Measured against a fixture: a single 80 KiB final block is refused, while two
@@ -217,10 +218,23 @@ const maxHeaderBytesPerResponse = 64 << 10
 // read.
 //
 // Three blocks, then: the informational blocks in aggregate, the final block,
-// and the trailers. maxToolPages of those is what the ceiling published on
-// MaxResponseBytes states, and the suite asserts the exact product so that
-// number cannot drift from these constants.
+// and the trailers. Each of the three is capped in aggregate rather than per
+// frame — 1xx blocks accumulate into one total that is never reset, and
+// CONTINUATION frames are bounded inside their own block — so three is a
+// ceiling and not a sample.
 const maxHeaderBlocksPerResponse = 3
+
+// http2HeaderListOverhead is the slack net/http adds when it turns
+// MaxResponseHeaderBytes into an HTTP/2 SETTINGS_MAX_HEADER_LIST_SIZE, and it
+// is here because the arithmetic is wrong without it.
+//
+// h2's limit counts len(name)+len(value)+32 per field rather than raw bytes, so
+// net/http pads the HTTP/1 figure by an assumed ten fields:
+// http2adjustHTTP1MaxHeaderSize adds typicalHeaders(10) * perFieldOverhead(32).
+// The framer therefore admits maxHeaderBytesPerResponse+320 per block, and a
+// single field can carry nearly all of it — measured against a fixture, a
+// trailer value of 65,821 bytes is accepted where the raw cap says 65,536.
+const http2HeaderListOverhead = 320
 
 // Connect opens a connection to one MCP server over Streamable HTTP.
 //
@@ -601,21 +615,30 @@ func (c *Conn) Close() error { return c.session.Close() }
 // depend on that; serving does.)
 //
 // What it covers is bodies in full and header blocks only as far as they can be
-// counted after parsing — see headerBytes. Header bytes that never reach the
-// parsed map are outside this bound and are held by maxHeaderBytesPerResponse
-// instead, per block. So the honest ceiling on what one listing reads is this
-// number plus maxToolPages * maxHeaderBlocksPerResponse * that constant:
-// 8 MiB accounted plus at most 18.75 MiB unaccountable, or 26.75 MiB in all.
+// counted after parsing — see headerBytes. Header fields that never reach the
+// parsed map are outside this bound and are held per block by
+// maxHeaderBytesPerResponse instead, so a listing's total is this number plus
+// maxToolPages * maxHeaderBlocksPerResponse * (that constant +
+// http2HeaderListOverhead): 8 MiB accounted plus at most 18.84 MiB of header
+// fields it cannot see, 26.84 MiB of headers and bodies in all.
 //
-// Stating it that way rather than as "8 MiB" is the point, and the first two
-// attempts at this sentence were both wrong in the direction of flattering the
-// bound. It said "header blocks included", which whitespace padding falsified;
-// then "8 MiB plus 6.4 MiB, under twice the stated bound", which assumed the
-// per-response cap covered a whole response — true over HTTP/1.1 and false over
-// HTTP/2, the protocol this client explicitly enables, where a measured listing
-// moved 18.50 MiB against a ceiling that claimed 14.25. The number below is what
-// the constants actually produce, and the suite asserts that product exactly so
-// it cannot drift from them again.
+// Headers and bodies, not bytes on the socket, and the distinction is the whole
+// correction. Three versions of this sentence were falsified in a row and the
+// first two were wrong about the mechanism — "header blocks included", which
+// whitespace padding falsified, then "8 MiB plus 6.4 MiB", which assumed the cap
+// covered a response rather than a block. The third had the mechanism right and
+// still overstated, by claiming a socket figure that a header arithmetic cannot
+// produce: a measured maximal listing read 26.898 MiB on the wire against a
+// ceiling saying 26.750, the excess being HPACK, frame headers and TLS records
+// that no count of header fields models.
+//
+// So this bounds what is *delivered* — body bytes and header fields — and does
+// not bound socket traffic, which nothing here does and which a hostile server
+// can inflate at will: DATA frames may carry one byte each, and PING or
+// WINDOW_UPDATE floods are outside every count in this package. What bounds a
+// hostile connection's cost in that direction is ListTimeout, not a byte
+// figure. These bounds are about memory, which is what an io.ReadAll of a
+// multi-gigabyte response actually threatens.
 //
 // 8 MiB is far above any real catalog — the whole point of a tool definition is
 // to fit in a model request, and a catalog that cannot be sent to a model is not

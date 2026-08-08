@@ -81,14 +81,24 @@ func tool(name, description string, required ...string) *sdk.Tool {
 //
 // That is not tidiness. httptest.Server.Close calls
 // http.DefaultTransport.CloseIdleConnections() as a convenience to its users
-// (httptest/server.go), so with the suite's tests running in parallel, one
-// test's server shutting down reaches into the pooled connection another test
-// is about to reuse. When the timing lands mid-flight the reused connection
-// dies as "http: CloseIdleConnections called", and the SDK's POST cannot be
-// retried, so the victim fails with an error naming a server it has nothing to
-// do with — which is how TestConnectOpensNoStandaloneStream failed in CI while
-// passing everywhere else. A transport per client removes the shared state the
-// race needs.
+// (httptest/server.go, Close), so with the suite's tests running in parallel,
+// every server shutting down reaches into a pool shared by every fixture. That
+// much is fact. What is *hypothesis* is the rest: that this is how
+// TestConnectOpensNoStandaloneStream failed in CI with "http:
+// CloseIdleConnections called" against a server it has nothing to do with.
+//
+// The hypothesis is recorded as one rather than asserted, because three
+// attempts to reproduce it all failed — two sequential, and one racing 174,152
+// non-replayable POSTs against a concurrent CloseIdleConnections loop, with
+// zero failures. CloseIdleConnections nils the idle map under its mutex before
+// closing anything, and queueForIdleConn skips a broken connection, so the
+// window may be narrower than the story needs or may not exist at all in this
+// shape.
+//
+// Sharing a mutable process-global between parallel tests is worth removing on
+// its own terms, so this stands whether or not the hypothesis is right — but it
+// is not a fix with a red-then-green behind it, and calling it one would be the
+// same overclaiming this package has had to correct elsewhere.
 func loopbackClient() *http.Client {
 	return &http.Client{Timeout: mcp.DialTimeout, Transport: &http.Transport{}}
 }
@@ -820,11 +830,14 @@ func TestBearerTokenDoesNotFollowARedirectToAnotherServer(t *testing.T) {
 	defer redirector.Close()
 
 	// A caller-supplied client that follows redirects, which is the default and
-	// therefore the case a caller falls into without choosing it.
+	// therefore the case a caller falls into without choosing it. It carries a
+	// transport of its own for the reason loopbackClient does: leaving it nil
+	// pools into http.DefaultTransport, which every httptest server in this
+	// package reaches into when it closes.
 	conn, err := mcp.Connect(context.Background(), mcp.Config{
 		URL:         redirector.URL,
 		BearerToken: "s3cret",
-		HTTPClient:  &http.Client{Timeout: mcp.DialTimeout},
+		HTTPClient:  &http.Client{Timeout: mcp.DialTimeout, Transport: &http.Transport{}},
 	})
 	if err == nil {
 		// Connecting through a redirector is not expected to work; what matters
@@ -1135,7 +1148,7 @@ func TestDefaultClientConfigurationIsDeliberate(t *testing.T) {
 	// can reconstruct from resp.Header, and normalization removes padding
 	// whitespace before resp.Header exists, so this is the only bound those
 	// bytes get. What makes it enough is its product with the page bound.
-	pages, blocks, hdr := mcp.PageAndHeaderBoundsForTest()
+	pages, blocks, hdr, h2Overhead := mcp.PageAndHeaderBoundsForTest()
 	if transport.MaxResponseHeaderBytes != hdr {
 		t.Errorf("DefaultClient allows %d bytes of response headers, want %d — the bound the page arithmetic below is done against",
 			transport.MaxResponseHeaderBytes, hdr)
@@ -1146,9 +1159,9 @@ func TestDefaultClientConfigurationIsDeliberate(t *testing.T) {
 	// also means the published ceiling cannot drift from the constants: whoever
 	// moves one has to come here, and the number they find here is the one the
 	// doc comments and docs/DIVERGENCES.md print.
-	const unaccountable = 19_660_800 // 18.75 MiB
-	if total := int64(pages) * int64(blocks) * hdr; total != unaccountable {
-		t.Errorf("a maximal listing may read %d bytes of headers the byte budget cannot see; the published ceiling says %d — update both or neither",
+	const unaccountable = 19_756_800 // 18.84 MiB
+	if total := int64(pages) * int64(blocks) * (hdr + h2Overhead); total != unaccountable {
+		t.Errorf("a maximal listing may carry %d bytes of header fields the byte budget cannot see; the published ceiling says %d — update both or neither",
 			total, int64(unaccountable))
 	}
 	// A whole-request cap. Without one, a server that trickles a response holds
@@ -1175,7 +1188,7 @@ func TestPaddedResponseHeadersAreRefusedBeforeTheyAreRead(t *testing.T) {
 	if !ok {
 		t.Fatalf("DefaultClient.Transport = %T, want *http.Transport", mcp.DefaultClient.Transport)
 	}
-	_, _, hdr := mcp.PageAndHeaderBoundsForTest()
+	_, _, hdr, _ := mcp.PageAndHeaderBoundsForTest()
 
 	for _, tc := range []struct {
 		name    string
@@ -1301,6 +1314,80 @@ type countingConn struct {
 func (c *countingConn) Close() error {
 	c.once.Do(c.onClose)
 	return c.Conn.Close()
+}
+
+func TestHTTP2CapsEachHeaderBlockSeparately(t *testing.T) {
+	t.Parallel()
+	// The arithmetic behind the published ceiling rests on two facts about
+	// HTTP/2 that no other test in this suite can fail on: the cap applies to
+	// each header block rather than to a response, and net/http inflates it by
+	// http2HeaderListOverhead on the way to SETTINGS_MAX_HEADER_LIST_SIZE. Both
+	// were got wrong in turn, each time with a green suite, because every other
+	// header test here runs over HTTP/1.1 through serveRaw and the invariant
+	// assertion only compares constants against a literal — a drift detector,
+	// not a check that the constants describe net/http.
+	_, _, hdr, h2Overhead := mcp.PageAndHeaderBoundsForTest()
+
+	// A single trailer field, sized either side of the real per-block ceiling.
+	// Trailers are the position the docs once called smallest; over HTTP/2 they
+	// take the same cap as any other block.
+	for _, tc := range []struct {
+		name    string
+		value   int64
+		refused bool
+	}{
+		// Comfortably inside: the raw cap less room for the field name and the
+		// 32-byte per-field accounting h2 adds.
+		{name: "a block within the per-block cap", value: hdr - 1024},
+		// Above the raw cap yet still admitted, which is the overhead being real
+		// rather than a rounding note: without it the published total is short
+		// by 320 bytes per block, three blocks a page, a hundred pages.
+		{name: "a block above the raw cap but inside h2's inflated one", value: hdr + h2Overhead - 128},
+		// Just past the inflated cap — and *just* past on purpose. A generous
+		// margin here would be refused under any value of the overhead, so the
+		// row would pass while the constant was wrong; these two straddle the
+		// real ceiling closely enough that setting the overhead to 0 or to
+		// double it turns one of them red.
+		{name: "a block just past h2's inflated cap", value: hdr + h2Overhead + 64, refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Trailer", "X-Tail")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+				w.Header().Set("X-Tail", strings.Repeat("t", int(tc.value)))
+			}))
+			ts.EnableHTTP2 = true
+			ts.StartTLS()
+			defer ts.Close()
+
+			base, ok := mcp.DefaultClient.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("DefaultClient.Transport = %T, want *http.Transport", mcp.DefaultClient.Transport)
+			}
+			transport := base.Clone()
+			transport.DialContext = (&net.Dialer{Timeout: mcp.DialTimeout}).DialContext
+			transport.TLSClientConfig = ts.Client().Transport.(*http.Transport).TLSClientConfig
+
+			resp, err := (&http.Client{Transport: transport, Timeout: mcp.DialTimeout}).Get(ts.URL)
+			if err == nil {
+				// The trailer only arrives once the body is drained, so the
+				// refusal for an oversized one surfaces on the read.
+				_, err = io.Copy(io.Discard, resp.Body)
+				if cerr := resp.Body.Close(); err == nil {
+					err = cerr
+				}
+				if resp.Proto != "HTTP/2.0" {
+					t.Fatalf("server was spoken to over %s, want HTTP/2.0 — this test asserts nothing otherwise", resp.Proto)
+				}
+			}
+			if tc.refused != (err != nil) {
+				t.Fatalf("a trailer field of %d bytes against a %d-byte cap: err = %v, want refused = %v",
+					tc.value, hdr, err, tc.refused)
+			}
+		})
+	}
 }
 
 // serveRaw answers every request on a fresh listener with a hand-written
