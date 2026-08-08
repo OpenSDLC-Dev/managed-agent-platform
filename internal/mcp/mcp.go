@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -34,6 +35,12 @@ import (
 // queue lease, so an unbounded wait would hold the lease rather than fail the
 // item.
 const DialTimeout = 30 * time.Second
+
+// ListTimeout bounds a whole listing rather than one request in it. Pagination
+// is server-driven, so without an aggregate budget a server that answers each
+// page just inside DialTimeout holds the work item — and the queue lease behind
+// it — for maxToolPages requests in a row.
+const ListTimeout = 2 * time.Minute
 
 // clientName identifies this platform to MCP servers. The protocol carries it
 // on every request's `_meta` (2026-07-28) so a server operator can see which
@@ -129,28 +136,62 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	if httpClient == nil {
 		httpClient = DefaultClient
 	}
+	httpClient = withResponseLimit(httpClient)
 	if cfg.BearerToken != "" {
 		httpClient = withBearer(httpClient, cfg.BearerToken, endpoint)
 	}
 
 	client := sdk.NewClient(&sdk.Implementation{Name: clientName}, nil)
-	session, connErr := client.Connect(ctx, &sdk.StreamableClientTransport{
+	// The SDK closes the session it built on most failure paths but not on all
+	// of them — an initialize answered with a protocol version it does not
+	// support returns before Close, where the two adjacent branches call it —
+	// and Connect hands back no session for the caller to close. Capturing the
+	// transport's connection is the only handle left: the wrapper returns the
+	// SDK's own Connection unchanged (the SDK type-asserts it to reach
+	// sessionUpdated, so substituting anything would break negotiation) and
+	// keeps a reference so a failed Connect does not leave the reader goroutine
+	// and its HTTP connection alive on a server that answers that way to every
+	// attempt.
+	transport := &capturingTransport{inner: &sdk.StreamableClientTransport{
 		Endpoint:             cfg.URL,
 		HTTPClient:           httpClient,
 		DisableStandaloneSSE: true,
-	}, nil)
+	}}
+	session, connErr := client.Connect(ctx, transport, nil)
 	if connErr != nil {
+		if conn := transport.conn; conn != nil {
+			_ = conn.Close()
+		}
 		return nil, fmt.Errorf("mcp: connect to %s: %w", cfg.URL, connErr)
 	}
 	return &Conn{session: session}, nil
 }
 
+// capturingTransport keeps the Connection its inner transport produced so a
+// failed Client.Connect can still close it. Connect is called exactly once by
+// the SDK, so a single field needs no synchronisation.
+type capturingTransport struct {
+	inner sdk.Transport
+	conn  sdk.Connection
+}
+
+func (t *capturingTransport) Connect(ctx context.Context) (sdk.Connection, error) {
+	conn, err := t.inner.Connect(ctx)
+	t.conn = conn
+	return conn, err
+}
+
 // maxToolPages bounds how many pages one listing will fetch. Pagination is
 // driven entirely by the server — it decides when to stop by omitting the next
 // cursor — so an unbounded loop here is a server-controlled loop, and it runs
-// inside a work item holding a queue lease. The bound is a safety valve, not a
-// product limit: no real catalog comes close, and a server that legitimately
-// needs more pages than this is one whose page size is the actual problem.
+// inside a work item holding a queue lease. It is a compatibility limit as well
+// as a safety valve, and calling it only the latter would understate it: a
+// spec-compliant server that genuinely paginates past 100 pages fails the
+// listing outright rather than being truncated. That is the right failure — a
+// silently short catalog is worse than a loud one — but it is a real ceiling,
+// reached by page size rather than by catalog size, since a server choosing a
+// page size of 10 hits it at 1,000 tools while one choosing 1,000 (the SDK's
+// own default) does not hit it until 100,000.
 const maxToolPages = 100
 
 // ListTools returns every tool the server reports, following pagination to the
@@ -167,6 +208,18 @@ const maxToolPages = 100
 // checked — this endpoint is customer-supplied, and the SDK decodes rather than
 // validates it.
 func (c *Conn) ListTools(ctx context.Context) ([]Tool, error) {
+	if c == nil || c.session == nil {
+		// Before the recover below, so this package's own misuse is not
+		// reported as a server that crashed the client library.
+		return nil, fmt.Errorf("mcp: list tools on a connection that was never opened")
+	}
+	// One budget for the whole listing, not one per request. A server that
+	// answers every page just inside DialTimeout would otherwise hold a work
+	// item — and its queue lease — for maxToolPages × DialTimeout, which is
+	// most of an hour.
+	ctx, cancel := context.WithTimeout(ctx, ListTimeout)
+	defer cancel()
+
 	out := []Tool{}
 	var cursor string
 	for page := 0; page < maxToolPages; page++ {
@@ -182,7 +235,7 @@ func (c *Conn) ListTools(ctx context.Context) ([]Tool, error) {
 			// starts handing nils through. It is deliberately kept: the cost
 			// is one condition, and the alternative is a nil dereference on
 			// data a customer-named server chose.
-			if tool == nil || tool.Name == "" {
+			if tool == nil || !usableName(tool.Name) {
 				continue
 			}
 			schema, ok := inputSchema(tool.InputSchema)
@@ -232,21 +285,58 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 	return c.session.ListTools(ctx, &sdk.ListToolsParams{Cursor: cursor})
 }
 
+// usableName reports whether a server's tool name can be offered to a model.
+//
+// The rule is the MCP SDK's own — non-empty, at most 128 bytes, and the runes
+// [a-zA-Z0-9_.-] — which it applies when a server registers a tool and, for
+// whatever reason, not when a client reads one back. A name that fails it
+// reaches the model as a tool definition the Messages API refuses, and refusing
+// one tool is better than a request that fails carrying every other tool with
+// it. Deliberately the SDK's rule and not a guessed-at Anthropic one: if the
+// reference is stricter, the place to enforce that is where the request is
+// assembled and the constraint can be checked against the reference, not here.
+func usableName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_', r == '-', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // inputSchema renders one tool's declared input schema as the JSON an Anthropic
 // tool definition carries, reporting false for a tool that cannot be offered to
 // a model at all.
 //
 // The SDK types this field as `any` and, client-side, fills it with whatever
-// the server's JSON decoded to. MCP requires an object; a server is free to
-// break that. An absent schema is read as its faithful equivalent — an object
-// with no declared parameters, which is what a no-argument tool means and what
-// most servers send explicitly — while a schema that is present and is not an
-// object is refused, because there is no honest translation of it and inventing
-// one would misdescribe the tool to the model.
+// the server's JSON decoded to. MCP requires an object whose `type` is
+// "object"; a server is free to break that, and what breaks is refused rather
+// than repaired. A schema that is absent, null, or not a JSON object has no
+// honest translation, and a `type` that is present and is something other than
+// "object" describes a tool this platform cannot call.
+//
+// Substituting {"type":"object"} for an absent schema was the first shape of
+// this and was wrong: it reads as "this tool takes no arguments", which is a
+// contract the server never offered, so a tool that in fact requires arguments
+// would be published to the model as one that takes none and called with none.
+// Fabricating a contract to keep a broken tool is worse than dropping it — the
+// SDK's own server refuses the same substitution for the same reason.
+//
+// Validation stops there. A full JSON Schema check is not this package's job
+// and inventing one would be guessing at what the reference accepts; what is
+// enforced here is only what MCP itself states.
 //
 // A refused tool is skipped rather than failing the listing: one malformed
 // entry must not deny an agent the rest of a server's tools, which matches the
-// reference's treatment of an unresolvable tool name as a warning.
+// reference's treatment of an unresolvable tool name as a warning. The entry
+// and the reason are lost — this signature has nowhere to put a warning — which
+// is the catalog slice's problem to give them somewhere.
 //
 // What comes back is the schema's meaning, not its bytes. The SDK hands over a
 // value already decoded into `any`, so re-marshaling sorts the object's keys
@@ -256,7 +346,7 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 // or on a 17-digit integer is not one this platform needs to carry.
 func inputSchema(declared any) (json.RawMessage, bool) {
 	if declared == nil {
-		return json.RawMessage(`{"type":"object"}`), true
+		return nil, false
 	}
 	raw, err := json.Marshal(declared)
 	if err != nil {
@@ -266,11 +356,76 @@ func inputSchema(declared any) (json.RawMessage, bool) {
 	if json.Unmarshal(raw, &obj) != nil || obj == nil {
 		return nil, false
 	}
+	if t, ok := obj["type"]; ok {
+		var kind string
+		if json.Unmarshal(t, &kind) != nil || kind != "object" {
+			return nil, false
+		}
+	}
 	return raw, true
 }
 
 // Close ends the connection. It is safe to call on a Conn whose work failed.
 func (c *Conn) Close() error { return c.session.Close() }
+
+// MaxResponseBytes bounds one MCP response body.
+//
+// The bound is not optional politeness: go-sdk v1.7.0 reads a response with
+// io.ReadAll before it decodes anything (mcp/streamable.go, handleJSON), so a
+// server that answers a tools/list with a chunked, multi-gigabyte description
+// grows the executor's heap until the process dies — and it takes every other
+// session on that host with it. Neither the request timeout nor the page bound
+// stops it, because both count requests rather than bytes, and no recover
+// catches an out-of-memory. The only place to refuse is before the SDK sees the
+// body.
+//
+// 8 MiB is far above any real catalog — the whole point of a tool definition is
+// to fit in a model request — and far below anything that threatens a process.
+const MaxResponseBytes = 8 << 20
+
+// withResponseLimit returns a copy of client whose responses stop at
+// MaxResponseBytes. It wraps whatever client the caller supplied, so the bound
+// does not depend on the caller having thought about it.
+func withResponseLimit(client *http.Client) *http.Client {
+	copied := *client
+	copied.Transport = &limitedTransport{base: client.Transport}
+	return &copied
+}
+
+type limitedTransport struct{ base http.RoundTripper }
+
+func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if err != nil || resp.Body == nil {
+		return resp, err
+	}
+	resp.Body = &limitedBody{ReadCloser: resp.Body, left: MaxResponseBytes}
+	return resp, nil
+}
+
+// limitedBody is io.LimitedReader with an error instead of a clean EOF: a
+// truncated JSON-RPC body that ended quietly would be reported as a parse
+// failure, which reads like a broken server rather than a refused one.
+type limitedBody struct {
+	io.ReadCloser
+	left int64
+}
+
+func (b *limitedBody) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		return 0, fmt.Errorf("mcp: server response exceeds %d bytes", MaxResponseBytes)
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.left -= int64(n)
+	return n, err
+}
 
 // withBearer returns a shallow copy of client that sends the Authorization
 // header to endpoint's origin and to nothing else.
@@ -313,6 +468,23 @@ func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Clie
 	return &copied
 }
 
+// sameHost compares two URL hosts the way DNS and IPv6 respectively require:
+// case-insensitively, except for a scoped address's zone identifier, which is
+// locally significant and may distinguish two interfaces that differ only in
+// case. Folding the whole string is the one way this comparison could match
+// two origins that are not the same one — the direction that leaks rather than
+// withholds — so the zone is split off and compared exactly.
+func sameHost(a, b string) bool {
+	az, bz := strings.IndexByte(a, '%'), strings.IndexByte(b, '%')
+	if az < 0 && bz < 0 {
+		return strings.EqualFold(a, b)
+	}
+	if az < 0 || bz < 0 {
+		return false
+	}
+	return strings.EqualFold(a[:az], b[:bz]) && a[az:] == b[bz:]
+}
+
 type bearerTransport struct {
 	base   http.RoundTripper
 	token  string
@@ -325,7 +497,7 @@ func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	if req.URL.Scheme != t.scheme || !strings.EqualFold(req.URL.Host, t.host) {
+	if req.URL.Scheme != t.scheme || !sameHost(req.URL.Host, t.host) {
 		return base.RoundTrip(req)
 	}
 	// RoundTrippers must not modify the request they are given.

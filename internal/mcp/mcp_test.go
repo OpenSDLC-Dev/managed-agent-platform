@@ -150,16 +150,20 @@ func TestListToolsContainsAPanicInsideTheClientLibrary(t *testing.T) {
 
 func TestListToolsSkipsEntriesThatCannotBeATool(t *testing.T) {
 	t.Parallel()
-	// Four entries a server is free to send and the SDK decodes without
-	// complaint. Two of them are tools; the other two are not, and neither may
-	// take the others down with it — the reference treats an unresolvable tool
-	// as a warning, so one malformed entry must not deny an agent the rest of
-	// a server's catalog.
+	// Eight entries a server is free to send and the SDK decodes without
+	// complaint. One of them is a tool; the other seven are not, and none may
+	// take it down with them — the reference treats an unresolvable tool as a
+	// warning, so a malformed entry must not deny an agent the rest of a
+	// server's catalog.
 	url, _ := serveToolsList(t, func(string) map[string]any {
 		return map[string]any{"tools": []any{
 			map[string]any{"name": "", "inputSchema": map[string]any{"type": "object"}},
+			map[string]any{"name": "bad name!", "inputSchema": map[string]any{"type": "object"}},
+			map[string]any{"name": strings.Repeat("x", 129), "inputSchema": map[string]any{"type": "object"}},
 			map[string]any{"name": "not_a_schema", "inputSchema": 42},
+			map[string]any{"name": "null_schema", "inputSchema": nil},
 			map[string]any{"name": "no_schema", "description": "takes nothing"},
+			map[string]any{"name": "wrong_type", "inputSchema": map[string]any{"type": 42}},
 			map[string]any{"name": "good", "inputSchema": map[string]any{
 				"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}},
 			}},
@@ -182,15 +186,13 @@ func TestListToolsSkipsEntriesThatCannotBeATool(t *testing.T) {
 		names = append(names, tl.Name)
 		byName[tl.Name] = tl
 	}
-	if len(tools) != 2 || byName["no_schema"].Name == "" || byName["good"].Name == "" {
-		t.Fatalf("got tools %v, want exactly [no_schema good]", names)
-	}
-
-	// An absent schema means a tool that takes no arguments, and Anthropic's
-	// input_schema must be an object regardless — so it is rendered as the
-	// empty object schema rather than as null, which the model API rejects.
-	if got := string(byName["no_schema"].InputSchema); got != `{"type":"object"}` {
-		t.Errorf("no_schema input_schema = %s, want an empty object schema", got)
+	// Only "good" survives. In particular "no_schema" and "null_schema" do not:
+	// substituting {"type":"object"} for a schema the server never sent would
+	// publish "this tool takes no arguments" as though the server had said so,
+	// and a tool that in fact requires arguments would then be called with
+	// none. A fabricated contract is worse than a dropped tool.
+	if len(tools) != 1 || byName["good"].Name == "" {
+		t.Fatalf("got tools %v, want exactly [good]", names)
 	}
 	if !strings.Contains(string(byName["good"].InputSchema), `"properties"`) {
 		t.Errorf("good input_schema = %s, want the server's own schema", byName["good"].InputSchema)
@@ -230,6 +232,111 @@ func TestListToolsCannotTellAnAbsentToolsFieldFromAnEmptyOne(t *testing.T) {
 	}
 	if len(tools) != 0 {
 		t.Fatalf("got %d tools from a result with no tools field", len(tools))
+	}
+}
+
+func TestListToolsRefusesAResponseTooLargeToRead(t *testing.T) {
+	t.Parallel()
+	// go-sdk v1.7.0 reads a response with io.ReadAll before decoding anything,
+	// so an unbounded body is an unbounded allocation in an executor shared by
+	// every session on the host. Neither the request timeout nor the page bound
+	// helps — both count requests, not bytes — and no recover catches an OOM.
+	//
+	// The fixture streams past the limit without ever finishing, and without a
+	// Content-Length, which is the shape that defeats any check made before the
+	// body is read.
+	var served atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		chunk := bytes.Repeat([]byte("x"), 1<<16)
+		for served.Load() < 4*mcp.MaxResponseBytes {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			served.Add(int64(len(chunk)))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := mcp.Connect(ctx, mcp.Config{URL: ts.URL, HTTPClient: loopbackClient()})
+	if err == nil {
+		defer conn.Close()
+		if _, err = conn.ListTools(ctx); err == nil {
+			t.Fatal("a response larger than the limit was accepted")
+		}
+	}
+	// The assertion that matters is that the read stopped: without the bound
+	// the handler runs until it has written everything it means to.
+	if got := served.Load(); got > 2*mcp.MaxResponseBytes {
+		t.Errorf("server streamed %d bytes past a %d-byte limit — the body was not bounded",
+			got, mcp.MaxResponseBytes)
+	}
+}
+
+func TestConnectClosesTheConnectionItCannotHandBack(t *testing.T) {
+	t.Parallel()
+	// The SDK returns unsupportedProtocolVersionError without closing the
+	// session it just built, and hands back no session for the caller to close
+	// — so this package keeps the transport's Connection in order to close it
+	// itself. A server that answers this way on every attempt would otherwise
+	// leak a reader goroutine and its connection per attempt.
+	//
+	// Asserted through the protocol rather than by counting goroutines: closing
+	// a streamable connection that has a session id sends an HTTP DELETE to the
+	// endpoint, so the fixture assigns one and then watches for the DELETE.
+	var initialized, deleted atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deleted.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read", http.StatusInternalServerError)
+			return
+		}
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if json.Unmarshal(body, &req) != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Mcp-Session-Id", "sesn-under-test")
+		w.Header().Set("Content-Type", "application/json")
+		enc := json.NewEncoder(w)
+		if req.Method == "initialize" {
+			initialized.Add(1)
+			_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{
+				"protocolVersion": "2099-01-01",
+				"capabilities":    map[string]any{},
+				"serverInfo":      map[string]any{"name": "from-the-future", "version": "1"},
+			}})
+			return
+		}
+		_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{
+			"code": -32601, "message": "method not found",
+		}})
+	}))
+	defer ts.Close()
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: ts.URL, HTTPClient: loopbackClient()})
+	if err == nil {
+		conn.Close()
+		t.Fatal("Connect accepted a protocol version no revision defines")
+	}
+	if initialized.Load() == 0 {
+		t.Fatal("the server was never asked to initialize, so there was nothing to leak")
+	}
+	if deleted.Load() == 0 {
+		t.Error("a failed Connect left the SDK's connection open — no DELETE reached the server")
 	}
 }
 
@@ -577,6 +684,53 @@ func TestConnectFailsOnAnUnsupportedProtocolVersion(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), ts.URL) {
 		t.Errorf("error %q does not name the server URL", err)
+	}
+}
+
+func TestBearerOriginComparison(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		a, b  string
+		same  bool
+		wrong string
+	}{
+		{name: "identical", a: "example.com:8080", b: "example.com:8080", same: true},
+		{name: "DNS names fold", a: "Example.COM:8080", b: "example.com:8080", same: true,
+			wrong: "a host name's case is not significant, so this withholds the credential from its own server"},
+		{name: "different host", a: "example.com:8080", b: "evil.example:8080"},
+		{name: "explicit port differs textually", a: "example.com", b: "example.com:443",
+			wrong: "fails closed: the credential is withheld and the request 401s rather than leaking"},
+
+		// A zone identifier names a local interface, and two interfaces can
+		// differ only in case. Folding it would call two different scoped
+		// addresses the same origin — the one direction that leaks.
+		{name: "same zone", a: "[fe80::1%eth0]:8080", b: "[fe80::1%eth0]:8080", same: true},
+		{name: "zone differing only in case", a: "[fe80::1%eth0]:8080", b: "[fe80::1%ETH0]:8080"},
+		{name: "zone against no zone", a: "[fe80::1%eth0]:8080", b: "[fe80::1]:8080"},
+		{name: "address folds, zone does not", a: "[FE80::1%eth0]:8080", b: "[fe80::1%eth0]:8080", same: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mcp.SameHostForTest(tc.a, tc.b); got != tc.same {
+				t.Errorf("sameHost(%q, %q) = %v, want %v — %s", tc.a, tc.b, got, tc.same, tc.wrong)
+			}
+		})
+	}
+}
+
+func TestListToolsOnAConnectionThatWasNeverOpened(t *testing.T) {
+	t.Parallel()
+	// Conn is exported and its zero value is constructible, so this package's
+	// own misuse reaches the same code path as a server response. It must not
+	// come back as "the client library panicked on this server's response",
+	// which would send someone debugging a nil pointer to look at a server.
+	tools, err := new(mcp.Conn).ListTools(context.Background())
+	if err == nil {
+		t.Fatalf("ListTools on a zero Conn returned %d tools, want an error", len(tools))
+	}
+	if strings.Contains(err.Error(), "panicked") {
+		t.Errorf("error %q blames the server for this package's own state", err)
 	}
 }
 
