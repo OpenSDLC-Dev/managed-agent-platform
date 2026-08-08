@@ -144,17 +144,15 @@ func LimitedTransportForTest(base http.RoundTripper, limit int64) http.RoundTrip
 	return newLimitedTransport(base, limit)
 }
 
-// PageAndHeaderBoundsForTest reports the three constants whose product is the
-// part of a listing's reads the cumulative byte budget cannot account for: the
-// page bound, the header blocks one response cycle can carry, and the raw cap on
-// each block.
+// HeaderBoundsForTest reports the raw cap on one header block and the slack
+// net/http adds to it on the way to HTTP/2's SETTINGS_MAX_HEADER_LIST_SIZE.
 //
-// The published ceiling is that product, so a test asserts it exactly rather
-// than as an inequality. An inequality bounds the cap from above and leaves it
-// free below, which let a mutant tighten it to 1 KiB — a value that would break
-// essentially every real server — with the whole suite green.
-func PageAndHeaderBoundsForTest() (responses, blocks int, headerBytes, h2Overhead int64) {
-	return maxResponsesPerConnection, maxHeaderBlocksPerResponse, maxHeaderBytesPerResponse, http2HeaderListOverhead
+// Both are exposed rather than only the first because the fixtures that matter
+// sit within a few dozen bytes of maxHeaderBytesPerResponse+http2HeaderListOverhead.
+// Rounder margins pass under any overhead value and so assert nothing about
+// net/http; these tie the constants to the framer's real boundary.
+func HeaderBoundsForTest() (headerBytes, h2Overhead int64) {
+	return maxHeaderBytesPerResponse, http2HeaderListOverhead
 }
 
 // Budget is a handle on one connection's shared byte budget.

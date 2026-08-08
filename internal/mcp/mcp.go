@@ -156,10 +156,10 @@ type Conn struct {
 // unaccountable. Measured, a 200,076-byte response whose X-Pad value was one
 // character followed by 200,000 spaces reconstructed to 75 bytes — a factor of
 // 2,670, which is a distortion no arithmetic on the parsed map can correct. So
-// the raw block is bounded here instead, per header block, and what a maximal
-// listing can hide is maxResponsesPerConnection * maxHeaderBlocksPerResponse *
-// (this constant + http2HeaderListOverhead) — 19.60 MiB, against net/http's own
-// default putting it past 3 GiB.
+// the raw block is bounded here instead — 64 KiB rather than net/http's 10 MiB
+// default, per header block, which is a bound on the peak one block reaches and
+// deliberately not a total: how many blocks a connection answers is not this
+// package's to know, and MaxResponseBytes says why.
 var DefaultClient = &http.Client{
 	Timeout: DialTimeout,
 	CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -182,6 +182,22 @@ var DefaultClient = &http.Client{
 // maxHeaderBytesPerResponse bounds a raw header block before net/http parses
 // it. See DefaultClient for why this is the only bound those bytes get.
 //
+// A *block*, not a response, and the difference is not pedantry. Over HTTP/1.1
+// the setting very nearly does bound a response: net/http resets the read limit
+// per 1xx block only when a request carries an httptrace with Got1xxResponse set
+// (transport.go, persistConn.readResponse), the SDK installs no httptrace, so
+// informational blocks and the final block draw on one limit and trailers are
+// bounded separately by the read buffer. Over HTTP/2 — which this client
+// explicitly enables, so this is not a hypothetical path — the limit becomes the
+// connection's maxHeaderListSize and applies to each decoded block on its own.
+// Measured against a fixture: a single 80 KiB final block is refused, while two
+// 30 KiB Early Hints plus a 60 KiB final block (~120 KiB) is accepted, and with
+// a 60 KiB trailer on top (~180 KiB) it is still accepted. One response cycle
+// therefore carries up to three separately-capped blocks — the informational
+// blocks in aggregate, the final block, and the trailers — of which only the
+// final block is ever charged, so what this constant bounds is the peak any one
+// block reaches and not what a connection delivers in total.
+//
 // 64 KiB is generous rather than tight, deliberately: it is a hard ceiling on
 // what a *legitimate* server may send, and the cost of setting it too low is a
 // working server this client cannot talk to. Real response header blocks run a
@@ -198,32 +214,6 @@ var DefaultClient = &http.Client{
 // sends.)
 const maxHeaderBytesPerResponse = 64 << 10
 
-// maxHeaderBlocksPerResponse is how many separately-capped header blocks one
-// response cycle can carry, and it is 3 rather than 1 because the arithmetic
-// above is only as good as this number.
-//
-// The tempting reading is that MaxResponseHeaderBytes bounds a response. Over
-// HTTP/1.1 it very nearly does: net/http resets the read limit per 1xx block
-// only when a request carries an httptrace with Got1xxResponse set
-// (transport.go, persistConn.readResponse), the SDK installs no httptrace, so
-// informational blocks and the final block draw on one limit and trailers are
-// bounded separately by the read buffer. Over HTTP/2 — which this client explicitly
-// enables, so this is not a hypothetical path — the limit becomes the
-// connection's maxHeaderListSize and applies to each decoded block on its own.
-// Measured against a fixture: a single 80 KiB final block is refused, while two
-// 30 KiB Early Hints plus a 60 KiB final block (~120 KiB) is accepted, and with
-// a 60 KiB trailer on top (~180 KiB) it is still accepted. Informational blocks
-// never enter resp.Header and trailers are not there when the charge runs, so
-// two of the three are invisible to the charge and all three are real bytes
-// read.
-//
-// Three blocks, then: the informational blocks in aggregate, the final block,
-// and the trailers. Each of the three is capped in aggregate rather than per
-// frame — 1xx blocks accumulate into one total that is never reset, and
-// CONTINUATION frames are bounded inside their own block — so three is a
-// ceiling and not a sample.
-const maxHeaderBlocksPerResponse = 3
-
 // http2HeaderListOverhead is the slack net/http adds when it turns
 // MaxResponseHeaderBytes into an HTTP/2 SETTINGS_MAX_HEADER_LIST_SIZE, and it
 // is here because the arithmetic is wrong without it.
@@ -233,26 +223,11 @@ const maxHeaderBlocksPerResponse = 3
 // http2adjustHTTP1MaxHeaderSize adds typicalHeaders(10) * perFieldOverhead(32).
 // The framer therefore admits maxHeaderBytesPerResponse+320 per block, and a
 // single field can carry nearly all of it — measured against a fixture, a
-// trailer value of 65,821 bytes is accepted where the raw cap says 65,536.
+// trailer value of 65,821 bytes is accepted where the raw cap says 65,536. It is
+// named here so the fixture either side of the cap can assert the real boundary
+// rather than a rounder one, which is the only way the constant above is known
+// to describe net/http and not just itself.
 const http2HeaderListOverhead = 320
-
-// maxResponsesPerConnection is what the header term is multiplied by, and it is
-// maxToolPages plus four rather than maxToolPages, because a listing is not the
-// only thing a connection answers.
-//
-// Counted rather than reasoned about — one Connect, a maximal ListTools and a
-// Close produce 104 responses: server/discover, then initialize and
-// notifications/initialized when that falls back to the legacy handshake, then
-// a hundred tools/list pages, then the session-ending DELETE. Every one of them
-// carries header blocks, so multiplying by the page bound alone understated the
-// term by four responses' worth. It was still under the published ceiling, but
-// only because a second approximation happened to point the other way — the
-// term counts the final block as unaccountable when over HTTP/2 that block is
-// charged, since h2 does not trim header values and the reconstruction is a
-// lower bound on what it delivered. Two errors cancelling is not an argument,
-// so the count is right here and the conservatism is stated rather than relied
-// on.
-const maxResponsesPerConnection = maxToolPages + 4
 
 // Connect opens a connection to one MCP server over Streamable HTTP.
 //
@@ -634,29 +609,46 @@ func (c *Conn) Close() error { return c.session.Close() }
 //
 // What it covers is bodies in full and header blocks only as far as they can be
 // counted after parsing — see headerBytes. Header fields that never reach the
-// parsed map are outside this bound and are held per block by
-// maxHeaderBytesPerResponse instead, so a listing's total is this number plus
-// maxResponsesPerConnection * maxHeaderBlocksPerResponse * (that constant +
-// http2HeaderListOverhead): 8 MiB accounted plus at most 19.60 MiB of header
-// fields it cannot see, 27.60 MiB of headers and bodies in all.
+// parsed map are outside it, held per block by maxHeaderBytesPerResponse
+// instead, and *per block* is where the arithmetic stops rather than continues.
 //
-// Headers and bodies, not bytes on the socket, and the distinction is the whole
-// correction. Three versions of this sentence were falsified in a row and the
-// first two were wrong about the mechanism — "header blocks included", which
-// whitespace padding falsified, then "8 MiB plus 6.4 MiB", which assumed the cap
-// covered a response rather than a block. The third had the mechanism right and
-// still overstated, by claiming a socket figure that a header arithmetic cannot
-// produce: a measured maximal listing read 26.898 MiB on the wire against a
-// ceiling saying 26.750, the excess being HPACK, frame headers and TLS records
-// that no count of header fields models.
+// There is no cumulative bound on the header bytes a connection delivers, and
+// four revisions of this comment published one regardless, each falsified in
+// turn: "header blocks included", which whitespace padding falsified; "8 MiB
+// plus 6.4 MiB", which assumed the cap covered a response rather than a block; a
+// figure whose mechanism was right and which still claimed a socket total no
+// header arithmetic can produce (a measured maximal listing read 26.898 MiB on
+// the wire against a ceiling of 26.750, the excess being HPACK, frame headers
+// and TLS records); and then a per-block figure multiplied by a response count.
+// Every one of them needed the same missing thing — a bound on how many
+// responses one connection answers — and go-sdk v1.7.0 does not have one.
+// Counting the handshake, a hundred pages and the session-ending DELETE reaches
+// 104, and two paths walk past it. A server that answers the first
+// server/discover with CodeUnsupportedProtocolVersion and a supported-version
+// list is probed a second time (mcp/client.go, `for range 2`). And any response
+// delivered as text/event-stream may end carrying a fresh `id:` and no call
+// response, which sends handleSSE round its reconnect loop again — the
+// no-progress retry cap it grew for exactly this resets on every id that
+// advances, the server picks the delay through the SSE `retry:` field, and the
+// SDK's own TODO beside it records that a limit on total attempts for one
+// logical request is still missing (mcp/streamable.go, handleSSE/connectSSE).
+// TestAConnectionAnswersMoreResponsesThanItHasPages drives it: 2,027 responses
+// to a single listing in three seconds, delivering 96.7 MiB of header padding
+// nothing here can charge — three of the 120 seconds ListTimeout allows, and
+// three and a half times over the ceiling the last revision published. It is
+// written to go red if that upstream limit ever lands, which is how this comment
+// would learn it may tighten again.
 //
-// So this bounds what is *delivered* — body bytes and header fields — and does
-// not bound socket traffic, which nothing here does and which a hostile server
-// can inflate at will: DATA frames may carry one byte each, and PING or
-// WINDOW_UPDATE floods are outside every count in this package. What bounds a
-// hostile connection's cost in that direction is ListTimeout, not a byte
-// figure. These bounds are about memory, which is what an io.ReadAll of a
-// multi-gigabyte response actually threatens.
+// What is bounded, then, is the peak and not the sum: one header block at a
+// time, plus this cumulative figure for everything that can be accounted. The
+// unaccounted blocks are parsed and dropped per response rather than retained,
+// so they cost bandwidth rather than memory, and the loop that produces them
+// ends on whichever of this budget or ListTimeout arrives first. Nothing here
+// bounds socket traffic either, which a hostile server inflates at will — DATA
+// frames may carry one byte each, and PING or WINDOW_UPDATE floods are outside
+// every count in this package. ListTimeout is what bounds a hostile
+// connection's cost in that direction. These bounds are about memory, which is
+// what an io.ReadAll of a multi-gigabyte response actually threatens.
 //
 // 8 MiB is far above any real catalog — the whole point of a tool definition is
 // to fit in a model request, and a catalog that cannot be sent to a model is not
@@ -773,9 +765,9 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // response; measured at 100 pages, 91.8 MB on the wire for 3,900 bytes charged.
 // Padding whitespace is the second. Trailers are the third: they arrive after
 // the body, so they are not in the map when this runs. All three are held by
-// maxHeaderBytesPerResponse, which is why maxHeaderBlocksPerResponse exists and
-// is 3 — over HTTP/2 that cap applies to each block separately, so a response
-// cycle's worth is three times it rather than one.
+// maxHeaderBytesPerResponse, one block at a time — over HTTP/2 that cap applies
+// to each block separately, so a response cycle admits three of them rather than
+// one, and no total follows from that.
 //
 // Charging what is visible is still worth doing: a server sending large
 // *legitimate* headers on every page is charged for them, and splitting one

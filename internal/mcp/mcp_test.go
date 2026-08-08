@@ -1144,26 +1144,28 @@ func TestDefaultClientConfigurationIsDeliberate(t *testing.T) {
 	if transport.Proxy != nil {
 		t.Error("DefaultClient dials through a proxy, which takes the dial off the address the guard vetted")
 	}
-	// The per-response header bound, and the invariant that sets it. It is not
-	// a second line behind the cumulative budget: that budget charges what it
-	// can reconstruct from resp.Header, and normalization removes padding
-	// whitespace before resp.Header exists, so this is the only bound those
-	// bytes get. What makes it enough is its product with the page bound.
-	responses, blocks, hdr, h2Overhead := mcp.PageAndHeaderBoundsForTest()
+	// The per-block header bound. It is not a second line behind the cumulative
+	// budget: that budget charges what it can reconstruct from resp.Header, and
+	// normalization removes padding whitespace before resp.Header exists, so
+	// this is the only bound those bytes get.
+	//
+	// Only that the transport carries the constant is asserted here. An earlier
+	// revision also asserted the constant's product with a response count, as
+	// the ceiling a maximal listing's unaccountable header bytes could reach —
+	// which was wrong, because no such count exists: see MaxResponseBytes, and
+	// TestAConnectionAnswersMoreResponsesThanItHasPages below, which drives the
+	// SDK past any of them. What pins the constant itself is not arithmetic but
+	// two fixtures with absolute margins, one either side of it: a 16 KiB block
+	// must be accepted (TestPaddedResponseHeadersAreRefusedBeforeTheyAreRead)
+	// and three 30,000-byte informational blocks must be refused
+	// (TestInformationalBlocksShareOneAllowance). Between them a mutant cannot
+	// move the cap in either direction and stay green — the 1 KiB tightening
+	// that survived an inequality, and which would break essentially every real
+	// server, dies on the first.
+	hdr, _ := mcp.HeaderBoundsForTest()
 	if transport.MaxResponseHeaderBytes != hdr {
-		t.Errorf("DefaultClient allows %d bytes of response headers, want %d — the bound the page arithmetic below is done against",
+		t.Errorf("DefaultClient allows %d bytes of response headers, want %d — the only bound padded header bytes get",
 			transport.MaxResponseHeaderBytes, hdr)
-	}
-	// Asserted as an exact figure, not an inequality. An inequality bounds the
-	// cap from above and leaves it free below, so tightening it to 1 KiB — which
-	// would break essentially every real server — stayed green. The exact form
-	// also means the published ceiling cannot drift from the constants: whoever
-	// moves one has to come here, and the number they find here is the one the
-	// doc comments and docs/DIVERGENCES.md print.
-	const unaccountable = 20_547_072 // 19.60 MiB
-	if total := int64(responses) * int64(blocks) * (hdr + h2Overhead); total != unaccountable {
-		t.Errorf("a maximal listing may carry %d bytes of header fields the byte budget cannot see; the published ceiling says %d — update both or neither",
-			total, int64(unaccountable))
 	}
 	// A whole-request cap. Without one, a server that trickles a response holds
 	// the work item — and its queue lease — for as long as it likes.
@@ -1189,7 +1191,7 @@ func TestPaddedResponseHeadersAreRefusedBeforeTheyAreRead(t *testing.T) {
 	if !ok {
 		t.Fatalf("DefaultClient.Transport = %T, want *http.Transport", mcp.DefaultClient.Transport)
 	}
-	_, _, hdr, _ := mcp.PageAndHeaderBoundsForTest()
+	hdr, _ := mcp.HeaderBoundsForTest()
 
 	for _, tc := range []struct {
 		name    string
@@ -1327,7 +1329,7 @@ func TestHTTP2CapsEachHeaderBlockSeparately(t *testing.T) {
 	// header test here runs over HTTP/1.1 through serveRaw and the invariant
 	// assertion only compares constants against a literal — a drift detector,
 	// not a check that the constants describe net/http.
-	_, _, hdr, h2Overhead := mcp.PageAndHeaderBoundsForTest()
+	hdr, h2Overhead := mcp.HeaderBoundsForTest()
 
 	// A single trailer field, sized either side of the real per-block ceiling.
 	// Trailers are the position the docs once called smallest; over HTTP/2 they
@@ -1400,14 +1402,15 @@ func TestHTTP2CapsEachHeaderBlockSeparately(t *testing.T) {
 
 func TestInformationalBlocksShareOneAllowance(t *testing.T) {
 	t.Parallel()
-	// maxHeaderBlocksPerResponse = 3 is a ceiling only if a server cannot buy a
-	// fresh allowance per informational block by sending more of them. It
-	// cannot: over HTTP/2 the client accumulates them into one total that is
-	// never reset, so any number of 1xx blocks is one position rather than N.
-	// Without this, nothing in the suite could fail on the difference between
-	// "three blocks" and "unbounded blocks" — the arithmetic assertion compares
-	// constants to a literal and would agree with either.
-	_, _, hdr, _ := mcp.PageAndHeaderBoundsForTest()
+	// Describing a response cycle as three capped blocks is only honest if a
+	// server cannot buy a fresh allowance per informational block by sending
+	// more of them. It cannot: over HTTP/2 the client accumulates 1xx blocks
+	// into one total that is never reset, so any number of them is one position
+	// rather than N, and the cap on a block is a cap on the whole informational
+	// phase. That is what this pins — the aggregation, not a count. Without it
+	// nothing in the suite would fail on the difference between "three blocks"
+	// and "unbounded blocks per response".
+	hdr, _ := mcp.HeaderBoundsForTest()
 	const hint = 30000
 
 	for _, tc := range []struct {
@@ -1423,7 +1426,15 @@ func TestInformationalBlocksShareOneAllowance(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// The protocol is recorded server-side rather than read from
+			// resp.Proto, because the rows that matter most have no response to
+			// read it from. Asserted only on the client's side, the two refused
+			// rows would pass over HTTP/1.1 as well — three 30,000-byte blocks
+			// also bust its combined 1xx-plus-final limit — leaving the claim
+			// this test exists for resting on the one row that succeeds.
+			var serverProto atomic.Value
+			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				serverProto.Store(r.Proto)
 				for i := range tc.hints {
 					key := fmt.Sprintf("X-Hint-%d", i)
 					w.Header().Set(key, strings.Repeat("h", hint))
@@ -1449,15 +1460,112 @@ func TestInformationalBlocksShareOneAllowance(t *testing.T) {
 			if err == nil {
 				_, _ = io.Copy(io.Discard, resp.Body)
 				_ = resp.Body.Close()
-				if resp.Proto != "HTTP/2.0" {
-					t.Fatalf("server was spoken to over %s, want HTTP/2.0", resp.Proto)
-				}
+			}
+			if got, _ := serverProto.Load().(string); got != "HTTP/2.0" {
+				t.Fatalf("server was spoken to over %q, want HTTP/2.0 — this row asserts nothing about h2 otherwise", got)
 			}
 			if tc.refused != (err != nil) {
 				t.Fatalf("%d informational blocks of %d bytes against a %d-byte allowance: err = %v, want refused = %v",
 					tc.hints, hint, hdr, err, tc.refused)
 			}
 		})
+	}
+}
+
+func TestAConnectionAnswersMoreResponsesThanItHasPages(t *testing.T) {
+	t.Parallel()
+	// This is the fixture behind a *negative* claim in MaxResponseBytes' doc:
+	// that no cumulative bound on delivered header bytes can be published,
+	// because nothing bounds how many responses one connection answers. Four
+	// revisions of that comment published one anyway, each arithmetic resting on
+	// a count of responses — the last on 104, being the handshake, maxToolPages
+	// pages and the session-ending DELETE. A count is only a ceiling if the SDK
+	// cannot be made to exceed it, and it can.
+	//
+	// The lever is stream resumption. A response delivered as text/event-stream
+	// may end carrying a priming event — an `id:` and no data, which SEP-1699
+	// makes legal and go-sdk explicitly supports (processStream: "events with an
+	// empty data buffer are allowed") — so the call it belongs to is still
+	// unanswered and handleSSE reconnects with Last-Event-ID to resume. The
+	// no-progress retry cap the SDK grew for this (#679) does not catch it: it
+	// resets on every id that advances, and each answer here advances one. The
+	// server also sets the pace, since the SSE `retry:` field overrides the
+	// backoff. The SDK's own TODO beside connectSSE records the gap — "we should
+	// consider also setting a limit on total attempts for one logical request".
+	//
+	// So this test goes red the day that limit lands, which is the point: it is
+	// how the doc comment learns it may tighten again. What it must never do is
+	// go quietly green while the comment claims a ceiling nobody enforces.
+	//
+	// Each answer carries a padded header too, so the count means bytes. The
+	// padding is trimmed by textproto before resp.Header exists, so the
+	// cumulative budget charges roughly a hundred bytes for a block of fifty
+	// thousand — the logged figure below is what one short listing delivered
+	// that no bound in this package can see.
+	const pad = 50000
+	var responses, events atomic.Int64
+	stream := func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Pad", "p"+strings.Repeat(" ", pad))
+		w.WriteHeader(http.StatusOK)
+		// retry: 1 keeps the reconnect delay at a millisecond; the id advances,
+		// which is what resets the SDK's no-progress counter.
+		_, _ = fmt.Fprintf(w, "retry: 1\nid: %d\n\n", events.Add(1))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return sdk.NewServer(&sdk.Implementation{Name: "resuming-server", Version: "1"}, nil)
+	}, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		responses.Add(1)
+		// A reconnect is a GET carrying the last id it saw. Answer it the same
+		// way, so the stream ends having made progress and is resumed again.
+		if r.Method == http.MethodGet {
+			stream(w)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read", http.StatusInternalServerError)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var req struct {
+			Method string `json:"method"`
+		}
+		if json.Unmarshal(body, &req) != nil || req.Method != "tools/list" {
+			inner.ServeHTTP(w, r)
+			return
+		}
+		stream(w)
+	}))
+	defer ts.Close()
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: ts.URL, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := conn.ListTools(ctx); err == nil {
+		t.Fatal("a listing that never receives a response returned no error")
+	}
+
+	// 104 is the count the superseded arithmetic multiplied by. Anything above
+	// it falsifies the ceiling, and the margin here is large: the measured rate
+	// is in the hundreds per second, so three seconds clears this by an order of
+	// magnitude even on a loaded runner.
+	const anyPageArithmetic = 104
+	got := responses.Load()
+	t.Logf("one listing answered by %d responses, delivering %d bytes of header padding the byte budget cannot charge",
+		got, got*pad)
+	if got <= anyPageArithmetic {
+		t.Errorf("one connection answered %d responses; the page arithmetic this test refutes assumed at most %d — if the SDK has grown a total-attempt limit, MaxResponseBytes' doc may publish a ceiling again",
+			got, anyPageArithmetic)
 	}
 }
 
