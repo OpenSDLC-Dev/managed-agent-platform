@@ -2,9 +2,13 @@
 // github.com/modelcontextprotocol/go-sdk exposing what the platform needs and
 // nothing else.
 //
-// Connections are per-work-item. A caller connects, does its work, and closes;
-// nothing is pooled and nothing is shared, so a crashed executor loses no state
-// a fresh one cannot rebuild. The 2026-07-28 revision of MCP is what makes that
+// Connections are per-work-item. A caller connects, does its work, and closes,
+// so a crashed executor loses no state a fresh one cannot rebuild. What is
+// per-work-item is the MCP session, not the socket: [DefaultClient] is
+// package-level and keeps an ordinary net/http connection pool, so two work
+// items reaching the same origin may well share a TCP connection, or multiplex
+// over one HTTP/2 connection. That is deliberate — the state worth not sharing
+// is protocol state, and there is none to share. The 2026-07-28 revision of MCP is what makes that
 // affordable: it removed protocol-level sessions, so nothing accumulates on the
 // server that a new connection has to re-establish, and there is no affinity
 // between discovering a server's tools and later calling one. Not free, though —
@@ -134,6 +138,12 @@ type Conn struct {
 // Idle-connection settings, because this Transport is package-level: it outlives
 // every connection made through it, and with the zero values an idle connection
 // to a server never reached again is held until the process ends.
+//
+// And MaxResponseHeaderBytes, because net/http's default is 10 MiB — larger than
+// the whole cumulative response budget below, and charged before this package
+// sees the response at all. The budget charges header blocks too, so the sum is
+// bounded either way; this bounds the single response, so no one page can spend
+// the whole connection's budget on headers alone.
 var DefaultClient = &http.Client{
 	Timeout: DialTimeout,
 	CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -144,11 +154,12 @@ var DefaultClient = &http.Client{
 			Timeout: DialTimeout,
 			Control: dialguard.Control(dialguard.IPAllowed),
 		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConnsPerHost:   2,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
+		ForceAttemptHTTP2:      true,
+		MaxIdleConnsPerHost:    2,
+		IdleConnTimeout:        90 * time.Second,
+		TLSHandshakeTimeout:    10 * time.Second,
+		ExpectContinueTimeout:  time.Second,
+		MaxResponseHeaderBytes: 1 << 20,
 	},
 }
 
@@ -275,6 +286,17 @@ const maxToolPages = 100
 // checked — this endpoint is customer-supplied, and the SDK decodes rather than
 // validates it.
 func (c *Conn) ListTools(ctx context.Context) ([]Tool, error) {
+	return c.listTools(ctx, ListTimeout)
+}
+
+// listTools takes the whole-listing budget as a parameter rather than reading
+// ListTimeout directly, so a test can drive one short enough to observe.
+//
+// That is the entire reason for the split, and it is worth stating: with the two
+// minutes inlined here, replacing the deadline with a plain cancel left the
+// whole suite green. A bound no suite can wait out is a bound that rests on
+// review, and this package has already shipped two guards no test could fail on.
+func (c *Conn) listTools(ctx context.Context, budget time.Duration) ([]Tool, error) {
 	if c == nil || c.session == nil {
 		// Before the recover below, so this package's own misuse is not
 		// reported as a server that crashed the client library.
@@ -284,7 +306,7 @@ func (c *Conn) ListTools(ctx context.Context) ([]Tool, error) {
 	// answers every page just inside DialTimeout would otherwise hold a work
 	// item — and its queue lease — for maxToolPages × DialTimeout, which is
 	// most of an hour.
-	ctx, cancel := context.WithTimeout(ctx, ListTimeout)
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	out := []Tool{}
@@ -314,8 +336,10 @@ func (c *Conn) ListTools(ctx context.Context) ([]Tool, error) {
 			// tool — it is an ambiguity, and one that would reach the model as
 			// two tool definitions sharing a name in a single request. First
 			// wins: the order is the server's own, so the first entry is the
-			// one it led with. Checked after the schema, so a malformed first
-			// entry does not consume the name a valid later one could use.
+			// one it led with. What matters for the ordering is where the name
+			// is *recorded* rather than where it is checked — the recording
+			// happens below, after the schema check, so a malformed first entry
+			// never consumes the name a valid later one could use.
 			if seenName[tool.Name] {
 				continue
 			}
@@ -336,15 +360,14 @@ func (c *Conn) ListTools(ctx context.Context) ([]Tool, error) {
 		// Every cursor, not just the one immediately before. A server that
 		// alternates between two cursors never repeats one in consecutive
 		// answers, so a check against `cursor` alone walks the full hundred
-		// pages — and under a 2026-07-28 negotiation those pages cost the server
-		// nothing after the first cycle, because the SDK serves an
-		// already-requested cursor from its own per-cursor cache with no
-		// request on the wire (mcp/client.go ListTools -> cachedListResult).
-		// Pages that never reach the wire never draw on the byte budget either,
-		// so the cumulative bound below does not bound them; this does. Catching
-		// it on the second sighting rather than the hundredth also keeps a
-		// wedged server from holding the queue lease for the round trips in
-		// between.
+		// pages, appending each page's tools again on every lap. A server can
+		// also make those laps free: under a 2026-07-28 negotiation the SDK
+		// serves an already-requested cursor out of its own per-cursor cache
+		// (mcp/client.go ListTools -> cachedListResult) whenever it sent a
+		// positive `ttlMs` with the page, and a page that never reaches the wire
+		// never draws on the cumulative byte budget either. Catching the repeat
+		// on its second sighting rather than the hundredth also keeps a wedged
+		// server from holding the queue lease for the round trips in between.
 		if seenCursor[res.NextCursor] {
 			return nil, fmt.Errorf("mcp: list tools: server repeated a pagination cursor")
 		}
@@ -500,15 +523,23 @@ func (c *Conn) Close() error { return c.session.Close() }
 //
 // It is cumulative because a per-response cap does not actually bound a listing.
 // maxToolPages responses of MaxResponseBytes each is 800 MiB, and both ends
-// retain it. Under a 2026-07-28 negotiation the SDK caches each tools/list
-// result under its cursor (mcp/client.go ListTools → toolsCache.put, gated on
-// usesNewProtocol) and drops an entry only when that cursor is asked for again,
-// or when the server sends notifications/tools/list_changed, which clears the
-// cache outright (mcp/cache.go invalidate) — neither of which a listing can
-// count on. This package retains its own copy alongside: names and descriptions
-// are shared string backings rather than second copies, but every accepted
-// schema exists twice, once as the SDK's decoded map and once as the bytes
-// re-marshaled here. Cumulative makes the bound mean what it says.
+// retain it. Under a 2026-07-28 negotiation the SDK puts every tools/list result
+// into a per-cursor cache unconditionally (mcp/client.go ListTools →
+// toolsCache.put, gated only on usesNewProtocol), and an entry stays there until
+// that cursor is asked for again or the server sends
+// notifications/tools/list_changed, which clears the cache outright
+// (mcp/cache.go invalidate). So a hundred unique cursors hold a hundred pages
+// live. This package retains its own copy alongside: names and descriptions are
+// shared string backings rather than second copies, but every accepted schema
+// exists twice, once as the SDK's decoded map and once as the bytes re-marshaled
+// here. Cumulative makes the bound mean what it says.
+//
+// (Whether a *read* of that cache avoids the wire is a separate question with a
+// different answer, and worth not conflating: mcp/cache.go get treats an entry
+// as a miss and deletes it unless the server sent a positive, unexpired `ttlMs`
+// hint, which nothing defaults — so a modern server that omits the field caches
+// nothing usefully and every repeat goes back on the wire. Retention does not
+// depend on that; serving does.)
 //
 // 8 MiB is far above any real catalog — the whole point of a tool definition is
 // to fit in a model request, and a catalog that cannot be sent to a model is not
@@ -583,11 +614,46 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		context.AfterFunc(ctx, cancel)
 	}
 	resp, err := base.RoundTrip(req)
-	if err != nil || resp.Body == nil {
+	if err != nil {
 		return resp, err
+	}
+	// Headers draw on the same budget as bodies. net/http has already read and
+	// allocated them by the time RoundTrip returns, so charging them cannot stop
+	// the first oversized response — what it stops is the hundredth. net/http
+	// bounds a *single* response's header block (MaxResponseHeaderBytes, 10 MiB
+	// by default) and nothing bounds their sum, so a server paginating 100 pages
+	// with a megabyte of headers on each moves a hundred megabytes past a budget
+	// that only ever looked at bodies. That is the same attack the cumulative
+	// body bound exists to stop, arriving through the other half of the response.
+	if n := headerBytes(resp); t.take(n) < n {
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, fmt.Errorf("mcp: server responses exceed %d bytes in total", t.limit)
+	}
+	if resp.Body == nil {
+		return resp, nil
 	}
 	resp.Body = &limitedBody{ReadCloser: resp.Body, transport: t}
 	return resp, nil
+}
+
+// headerBytes approximates what net/http read for a response's status line and
+// header block. The bytes themselves are gone by now — they have been parsed
+// into a map — so this reconstructs the size rather than measuring it: the
+// status line, then "Key: value\r\n" per value, then the blank line that ends
+// the block. Canonicalisation means a key's recorded length may differ from the
+// one on the wire, and a folded header arrives joined; both are bounded
+// distortions on a bound whose job is to stop a server sending megabytes of
+// them, not to account for every byte.
+func headerBytes(resp *http.Response) int64 {
+	n := int64(len(resp.Proto) + len(resp.Status) + 4)
+	for key, values := range resp.Header {
+		for _, value := range values {
+			n += int64(len(key) + len(value) + 4)
+		}
+	}
+	return n + 2
 }
 
 // take draws up to n bytes from the connection's budget, reporting how many are

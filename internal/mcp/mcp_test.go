@@ -184,6 +184,7 @@ func TestListToolsSkipsEntriesThatCannotBeATool(t *testing.T) {
 			map[string]any{"name": "array_type", "inputSchema": map[string]any{"type": "array"}},
 			map[string]any{"name": "empty_schema", "inputSchema": map[string]any{}},
 			map[string]any{"name": maxName, "inputSchema": map[string]any{"type": "object"}},
+			map[string]any{"name": "dotted.name", "inputSchema": map[string]any{"type": "object"}},
 			map[string]any{"name": "good", "inputSchema": map[string]any{
 				"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}},
 			}},
@@ -206,14 +207,21 @@ func TestListToolsSkipsEntriesThatCannotBeATool(t *testing.T) {
 		names = append(names, tl.Name)
 		byName[tl.Name] = tl
 	}
-	// "good" and the 128-byte name survive; nothing else does. In particular
-	// "no_schema", "null_schema" and "empty_schema" do not: substituting
-	// {"type":"object"} for a schema the server never sent — or reading {} as
-	// though it had said so — publishes "this tool takes no arguments" on the
-	// server's behalf, and a tool that in fact requires arguments would then be
-	// called with none. A fabricated contract is worse than a dropped tool.
-	if len(tools) != 2 || byName["good"].Name == "" || byName[maxName].Name == "" {
-		t.Fatalf("got tools %v, want exactly [%s good]", names, "<128-byte name>")
+	// "good", the 128-byte name and "dotted.name" survive; nothing else does.
+	// In particular "no_schema", "null_schema" and "empty_schema" do not:
+	// substituting {"type":"object"} for a schema the server never sent — or
+	// reading {} as though it had said so — publishes "this tool takes no
+	// arguments" on the server's behalf, and a tool that in fact requires
+	// arguments would then be called with none. A fabricated contract is worse
+	// than a dropped tool.
+	//
+	// "dotted.name" is asserted *accepted* on purpose. The rule here is the MCP
+	// SDK's, which allows `.`; the reference's own custom-tool charset does not,
+	// and that gap is recorded in docs/DIVERGENCES.md as a deliberate one. Left
+	// untested it is a divergence nothing can notice being closed by accident.
+	if len(tools) != 3 || byName["good"].Name == "" || byName[maxName].Name == "" ||
+		byName["dotted.name"].Name == "" {
+		t.Fatalf("got tools %v, want exactly [%s dotted.name good]", names, "<128-byte name>")
 	}
 	if !strings.Contains(string(byName["good"].InputSchema), `"properties"`) {
 		t.Errorf("good input_schema = %s, want the server's own schema", byName["good"].InputSchema)
@@ -461,6 +469,49 @@ func TestListToolsRefusesACursorItHasAlreadySeen(t *testing.T) {
 	// hundredth page.
 	if got := calls.Load(); got != 3 {
 		t.Errorf("server saw %d listing requests, want 3", got)
+	}
+}
+
+func TestListToolsStopsAtItsWholeListingBudget(t *testing.T) {
+	t.Parallel()
+	// The listing carries one budget for all its pages, because DialTimeout
+	// bounds a request and nothing bounds their sum: a server answering each
+	// page just inside the per-request cap holds the work item — and its queue
+	// lease — for maxToolPages requests in a row.
+	//
+	// In production that budget is ListTimeout, two minutes, which no suite can
+	// wait out; the budget is a parameter so this one can be short enough to
+	// observe. What the test pins is that a budget is applied at all: with the
+	// deadline replaced by a plain cancel, this server paginates until the page
+	// bound stops it instead, which is the failure the budget exists to prevent.
+	url, calls := serveToolsList(t, func(cursor string) map[string]any {
+		time.Sleep(120 * time.Millisecond)
+		return map[string]any{"tools": []any{}, "nextCursor": cursor + "x"}
+	})
+
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer conn.Close()
+
+	start := time.Now()
+	_, err = mcp.ListToolsWithinForTest(conn, context.Background(), 300*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("a listing that outran its budget reported success")
+	}
+	if !strings.Contains(err.Error(), "deadline") {
+		t.Errorf("error %q does not name the budget — the listing ended for some other reason", err)
+	}
+	// Generous, because a loaded machine can be slow: what must not happen is
+	// the listing running to the hundredth page, which at this fixture's pace
+	// takes twelve seconds.
+	if elapsed > 5*time.Second {
+		t.Errorf("listing took %v, want it bounded by the budget", elapsed)
+	}
+	if got := calls.Load(); got >= 100 {
+		t.Errorf("server saw %d listing requests, want the budget to have stopped it before the page bound", got)
 	}
 }
 
@@ -872,31 +923,38 @@ func TestBearerIsScopedToSchemeAsWellAsHost(t *testing.T) {
 
 func TestBearerOriginComparison(t *testing.T) {
 	t.Parallel()
+	// Driven through the production wrapper rather than through the host
+	// comparison it uses. Testing the helper directly was the third instance in
+	// this package of a seam that re-implements production wiring: it leaves the
+	// *call* unpinned, so replacing the comparison at the call site with a plain
+	// case-insensitive one kept the whole table green while the credential
+	// started crossing zone identifiers that differ only in case.
 	for _, tc := range []struct {
-		name  string
-		a, b  string
-		same  bool
-		wrong string
+		name             string
+		endpoint, target string
+		attach           bool
+		wrong            string
 	}{
-		{name: "identical", a: "example.com:8080", b: "example.com:8080", same: true},
-		{name: "DNS names fold", a: "Example.COM:8080", b: "example.com:8080", same: true,
+		{name: "identical", endpoint: "http://example.com:8080/rpc", target: "http://example.com:8080/rpc", attach: true},
+		{name: "DNS names fold", endpoint: "http://Example.COM:8080/rpc", target: "http://example.com:8080/rpc", attach: true,
 			wrong: "a host name's case is not significant, so this withholds the credential from its own server"},
-		{name: "different host", a: "example.com:8080", b: "evil.example:8080"},
-		{name: "explicit port differs textually", a: "example.com", b: "example.com:443",
+		{name: "different host", endpoint: "http://example.com:8080/rpc", target: "http://evil.example:8080/rpc"},
+		{name: "explicit port differs textually", endpoint: "http://example.com/rpc", target: "http://example.com:80/rpc",
 			wrong: "fails closed: the credential is withheld and the request 401s rather than leaking"},
 
 		// A zone identifier names a local interface, and two interfaces can
 		// differ only in case. Folding it would call two different scoped
 		// addresses the same origin — the one direction that leaks.
-		{name: "same zone", a: "[fe80::1%eth0]:8080", b: "[fe80::1%eth0]:8080", same: true},
-		{name: "zone differing only in case", a: "[fe80::1%eth0]:8080", b: "[fe80::1%ETH0]:8080"},
-		{name: "zone against no zone", a: "[fe80::1%eth0]:8080", b: "[fe80::1]:8080"},
-		{name: "address folds, zone does not", a: "[FE80::1%eth0]:8080", b: "[fe80::1%eth0]:8080", same: true},
+		{name: "same zone", endpoint: "http://[fe80::1%25eth0]:8080/rpc", target: "http://[fe80::1%25eth0]:8080/rpc", attach: true},
+		{name: "zone differing only in case", endpoint: "http://[fe80::1%25eth0]:8080/rpc", target: "http://[fe80::1%25ETH0]:8080/rpc"},
+		{name: "zone against no zone", endpoint: "http://[fe80::1%25eth0]:8080/rpc", target: "http://[fe80::1]:8080/rpc"},
+		{name: "address folds, zone does not", endpoint: "http://[FE80::1%25eth0]:8080/rpc", target: "http://[fe80::1%25eth0]:8080/rpc", attach: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := mcp.SameHostForTest(tc.a, tc.b); got != tc.same {
-				t.Errorf("sameHost(%q, %q) = %v, want %v — %s", tc.a, tc.b, got, tc.same, tc.wrong)
+			if got := mcp.BearerAttachesForTest(tc.endpoint, tc.target); got != tc.attach {
+				t.Errorf("token scoped to %s sent to %s: attached = %v, want %v — %s",
+					tc.endpoint, tc.target, got, tc.attach, tc.wrong)
 			}
 		})
 	}
@@ -1006,6 +1064,66 @@ func TestDefaultClientGuardsEveryDial(t *testing.T) {
 	_, err := transport.DialContext(ctx, "tcp", "192.0.2.1:9")
 	if err != nil && strings.Contains(err.Error(), "disallowed address") {
 		t.Errorf("guard refused a routable address: %v", err)
+	}
+}
+
+func TestResponseHeadersDrawOnTheSameBudget(t *testing.T) {
+	t.Parallel()
+	// net/http reads and allocates a response's header block before RoundTrip
+	// returns, and bounds only one response's worth — 10 MiB by default, with
+	// nothing bounding their sum. A budget that watched bodies alone therefore
+	// said "8 MiB across every response" while a server paginating 100 pages
+	// with a megabyte of headers on each moved a hundred megabytes past it.
+	const pad = 4096
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Pad", strings.Repeat("p", pad))
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer ts.Close()
+
+	// A budget smaller than the headers alone: refused before the body is read.
+	if _, err := mcp.RoundTripBodyForTest(context.Background(), ts.URL, pad/2); err == nil {
+		t.Error("a response whose headers alone exceed the budget was accepted")
+	}
+	// And one comfortably larger still succeeds, so this is a bound rather than
+	// a blanket refusal of anything with headers on it.
+	body, err := mcp.RoundTripBodyForTest(context.Background(), ts.URL, 4*pad)
+	if err != nil {
+		t.Fatalf("a response within the budget was refused: %v", err)
+	}
+	defer body.Close()
+	if got, err := io.ReadAll(body); err != nil || string(got) != "ok" {
+		t.Errorf("body = %q, %v; want the server's own body", got, err)
+	}
+}
+
+func TestDefaultClientConfigurationIsDeliberate(t *testing.T) {
+	t.Parallel()
+	// Three settings on the production transport whose absence is invisible:
+	// nothing in the suite can fail on them, because each governs a case a test
+	// either cannot reach or would have to spend megabytes to reach. They are
+	// asserted as decisions rather than left as defaults nobody chose — each
+	// mutant that removes one is otherwise green.
+	transport, ok := mcp.DefaultClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("DefaultClient.Transport = %T, want *http.Transport", mcp.DefaultClient.Transport)
+	}
+	// A proxy moves the dial off the target, so the address guard would be
+	// vetting the proxy while the proxy fetched whatever the URL named. That is
+	// the guard removed rather than satisfied.
+	if transport.Proxy != nil {
+		t.Error("DefaultClient dials through a proxy, which takes the dial off the address the guard vetted")
+	}
+	// net/http's default header limit is 10 MiB — larger than the whole
+	// cumulative response budget, and spent before this package sees a byte.
+	if transport.MaxResponseHeaderBytes == 0 || transport.MaxResponseHeaderBytes > mcp.MaxResponseBytes {
+		t.Errorf("DefaultClient allows %d bytes of response headers, want a bound at or under %d",
+			transport.MaxResponseHeaderBytes, mcp.MaxResponseBytes)
+	}
+	// A whole-request cap. Without one, a server that trickles a response holds
+	// the work item — and its queue lease — for as long as it likes.
+	if mcp.DefaultClient.Timeout == 0 {
+		t.Error("DefaultClient sets no whole-request timeout")
 	}
 }
 
@@ -1201,11 +1319,25 @@ func TestResponseBudgetToleratesAProbeThatYieldsNothing(t *testing.T) {
 	if err != nil || got != 8 {
 		t.Errorf("body of 8 at an 8-byte limit: got %d bytes, %v; want 8 and no error", got, err)
 	}
+
+	// The half above cannot fail on the wrong reading. A body that stalls and
+	// then ends is accepted whether the stall is read as "ask again" or as EOF,
+	// because there was nothing after it either way. This is the sequence that
+	// separates them: the budget's last byte, then a stall, then one byte more.
+	// Read as EOF, the excess is never seen and the response is accepted.
+	body, _ = mcp.LimitedBodyForTest(io.NopCloser(&stallingReader{left: 8, after: 1}), 8)
+	got, err = readAllWith(body, 4)
+	if err == nil || !strings.Contains(err.Error(), "exceed") {
+		t.Errorf("body of 9 at an 8-byte limit that stalls at the boundary: got %d bytes, %v; "+
+			"want the refusal — a stall read as EOF hides the excess", got, err)
+	}
 }
 
-// stallingReader delivers its bytes, then returns (0, nil) once before EOF.
+// stallingReader delivers `left` bytes, then returns (0, nil) once, then
+// `after` more bytes, then EOF.
 type stallingReader struct {
 	left    int
+	after   int
 	stalled bool
 }
 
@@ -1221,6 +1353,10 @@ func (r *stallingReader) Read(p []byte) (int, error) {
 	if !r.stalled {
 		r.stalled = true
 		return 0, nil
+	}
+	if r.after > 0 && len(p) > 0 {
+		r.after--
+		return 1, nil
 	}
 	return 0, io.EOF
 }

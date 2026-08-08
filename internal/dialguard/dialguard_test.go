@@ -145,6 +145,13 @@ func TestIPAllowed(t *testing.T) {
 		// this address carries 0xFF there. It has to match too, or every address
 		// whose bytes happen to sit in that position would be read as a tunnel.
 		{name: "ISATAP-shaped, right OUI but wrong 0xFE byte", ip: "2001:db8:1234:5678:0:5eff:7f00:1"},
+		// Also not ISATAP: the group bit is set, and an interface identifier of
+		// a unicast address does not set it. Only the u bit varies. Reading
+		// "u/g bits" as though both were free is the natural mistake and it
+		// over-refuses — this is an ordinary global-unicast address with no
+		// tunnel anywhere in it, and a mask that ignored the group bit would
+		// decode 127.0.0.1 from it and refuse a reachable endpoint.
+		{name: "ISATAP-shaped but the group bit is set", ip: "2606:4700:1234:5678:100:5efe:7f00:1"},
 
 		{name: "6to4 wrapping loopback", ip: "2002:7f00:1::1", refused: true},
 		{name: "6to4 wrapping a public address", ip: "2002:5db8:d822::1"},

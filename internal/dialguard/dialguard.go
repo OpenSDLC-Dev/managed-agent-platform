@@ -124,13 +124,24 @@ func refused(ip net.IP) bool {
 // covering both the well-known 64:ff9b::/96 and the RFC 8215 local-use
 // 64:ff9b:1::/48), and ISATAP (RFC 5214's 00-00-5E-FE interface identifier under
 // any prefix). That is not "every transition form", and saying so would be the
-// sort of claim this file exists to avoid — but what is left out is now of one
-// kind: 6rd carries an IPv4 address whose position depends on provider-assigned
-// parameters an address does not contain, and a NAT64 deployment using its own
-// Network-Specific Prefix is invisible for the same reason (see below). Both
+// sort of claim this file exists to avoid. Two kinds are left out. 6rd carries
+// an IPv4 address whose position depends on provider-assigned parameters an
+// address does not contain, and a NAT64 deployment using its own
+// Network-Specific Prefix is invisible for the same reason (see below); both
 // need the guard told its deployment's parameters, which nothing does today.
-// What is decoded is every form whose prefix or interface identifier a
-// specification fixes rather than a deployment assigns.
+//
+// RFC 2529 6over4 is the other kind, and it is left out by decision rather than
+// by blindness, so "every form a specification fixes" would be false. Its
+// identifier *is* fixed — 32 zero bits then the IPv4 address — but that pattern
+// is indistinguishable from the ordinary operator habit of writing a host part
+// as `prefix::a.b.c.d`, and decoding it would refuse 6.642% of the addresses
+// that habit produces (measured over the target space, the same order as the
+// NAT64 /56 cost below) for a mechanism that requires an IPv4-multicast-capable
+// link and is effectively extinct. RFC 2529 §5 also lets the actual link-layer
+// IPv4 address, learned through Neighbor Discovery, differ from the one in the
+// identifier — so the decode would not even be authoritative about where a
+// packet goes. Refused here is a cost paid by real addresses for a target that
+// may not be the real one.
 //
 // NAT64 returns six candidates because RFC 6052 §2.2 defines six prefix lengths
 // (/32 /40 /48 /56 /64 /96), each embedding the four IPv4 octets at different
@@ -165,9 +176,11 @@ func refused(ip net.IP) bool {
 // zero by definition, so the /32 through /56 layouts read padding and are
 // skipped. Saying *every* speculative layout is skipped would be the neat
 // version and is wrong: the /64 layout reads bytes 9-12, and byte 12 is the
-// target's own first octet, so it decodes to 0.0.0.x rather than to padding. It
-// costs nothing because no blocked class matches 0.0.0.x for any of its 256
-// values, not because it goes unread. That is the case an operator gets without
+// target's own first octet, so for 255 of its 256 values it decodes to 0.0.0.x
+// rather than to padding, and costs nothing because no blocked class matches
+// 0.0.0.x — not because it goes unread. (For the 256th, a target whose first
+// octet is zero, the reading *is* 0.0.0.0 and the skip does take it. Zero either
+// way; two different reasons.) That is the case an operator gets without
 // choosing anything, and RFC 6052 fixes that prefix at /96, so there is no
 // ambiguity there to pay for.
 //
@@ -178,6 +191,16 @@ func refused(ip net.IP) bool {
 // 12.843%; the remainder is 169.254 turning up in the /56 and /64 readings —
 // then 6.6% under /56 and /64, and 0% under /96, each measured exhaustively over
 // the octets the layout reads rather than sampled.
+//
+// RFC 8215 §5 is worth quoting against this decoding rather than only for it,
+// since it reserves the prefix the cost is paid on: nodes "must not make any
+// assumptions regarding the syntax or properties of those addresses (e.g., the
+// existence and location of embedded IPv4 addresses)". Lowercase, in Deployment
+// Considerations, so not RFC 2119 — but it is the sentence most directly
+// against what happens here, and the answer is not that it does not apply. It is
+// that a guard deciding whether to *refuse* a dial is not a node forwarding a
+// packet: assuming an embedded address that is not there costs a refusal, while
+// declining to assume one that is there costs the metadata endpoint.
 //
 // But an operator may carve an NSP whose own fixed bytes read as a
 // blocked class under a shorter layout, and then the refusal does not depend on
@@ -210,8 +233,11 @@ func refused(ip net.IP) bool {
 // IPv6 connectivity and fails immediately with ENETUNREACH where it has none —
 // so the SYN leaves the host and simply never arrives at 127.0.0.1. The
 // mechanism that would have delivered it to the embedded address is RFC 2893 §5
-// automatic tunneling, which RFC 4213 §8 removed — the same RFC whose §3.6
-// makes ::/96 an invalid tunnel source a decapsulator MUST silently discard.
+// automatic tunneling, which RFC 4213 §8 removed. Its §3.6 points the same way
+// without being as strong as it is tempting to make it: a decapsulator MUST
+// silently discard a packet whose inner IPv6 source is invalid, and the list of
+// invalid sources SHOULD include ::/96 — a MUST on the discard, a SHOULD on the
+// membership, and about the inner source rather than the outer tunnel endpoint.
 // Refusing these
 // costs nothing and does not depend on any of that staying true: a guard that
 // holds only because the kernel also says no is not a guard.
@@ -250,9 +276,18 @@ func embeddedIPv4(ip net.IP) []net.IP {
 	// identifier rather than in a prefix, so it is checked in addition to the
 	// cases above rather than as one of them: any /64 can carry one, including
 	// theirs. The identifier is the IANA OUI 00-00-5E, then 0xFE, then the IPv4
-	// address — with the u and g bits of the first octet free (u is set when the
-	// embedded address is globally unique), which is what the mask ignores.
-	if b[8]&0xfc == 0 && b[9] == 0x00 && b[10] == 0x5e && b[11] == 0xfe {
+	// address.
+	//
+	// Only the u bit of the first octet varies — it is set when the embedded
+	// address is globally unique — so the mask leaves 0x02 free and requires
+	// every other bit to be zero. Leaving the g bit free as well would be the
+	// natural-looking reading of "u/g bits" and is wrong: g is the group bit,
+	// and an interface identifier of a unicast address does not set it. The
+	// difference is not academic, because it points the over-refusing way: with
+	// g free, an ordinary global-unicast address whose identifier happens to
+	// read 0100:5efe or 0300:5efe — no tunnel involved — decodes as one and is
+	// refused.
+	if b[8]&0xfd == 0 && b[9] == 0x00 && b[10] == 0x5e && b[11] == 0xfe {
 		out = append(out, v4(b[12], b[13], b[14], b[15]))
 	}
 	return out

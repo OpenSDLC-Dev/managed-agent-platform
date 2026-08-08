@@ -9,13 +9,15 @@ import (
 	"time"
 )
 
-// SameHostForTest exposes the origin comparison the bearer-token transport
-// uses. It is reachable through Connect only via a redirect between two hosts
-// the caller's client will actually dial, which cannot express the case that
-// matters most here — a scoped IPv6 zone identifier, whose case is locally
-// significant and is the one way the comparison could match two origins that
-// are not the same one.
-var SameHostForTest = sameHost
+// ListToolsWithinForTest runs a listing under a caller-chosen whole-listing
+// budget, which is what ListTools does with ListTimeout.
+//
+// The budget is two minutes in production, and no suite waits that out — so with
+// it read directly inside the loop, replacing the deadline with a plain cancel
+// left every test green and the published bound rested on review alone.
+func ListToolsWithinForTest(c *Conn, ctx context.Context, budget time.Duration) ([]Tool, error) {
+	return c.listTools(ctx, budget)
+}
 
 // LimitedBodyForTest wraps body with a total budget of limit bytes, exactly as a
 // connection's response bodies are wrapped, and returns it along with the shared
