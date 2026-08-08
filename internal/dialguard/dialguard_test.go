@@ -1,0 +1,289 @@
+package dialguard_test
+
+import (
+	"net"
+	"strings"
+	"testing"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
+)
+
+func TestIPAllowed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		ip      string
+		refused bool
+	}{
+		{name: "IPv4 loopback", ip: "127.0.0.1", refused: true},
+		{name: "IPv4 loopback, not just .0.1", ip: "127.9.9.9", refused: true},
+		// ::1 is also load-bearing for the shape of the check: its low 32 bits
+		// decode to the IPv4 bytes 0.0.0.1, which no rule calls loopback, so a
+		// guard that replaced the address with its decoded target instead of
+		// checking both would admit it.
+		{name: "IPv6 loopback", ip: "::1", refused: true},
+		{name: "IPv4 link-local (cloud metadata)", ip: "169.254.169.254", refused: true},
+		{name: "IPv6 link-local", ip: "fe80::1", refused: true},
+		{name: "unspecified v4", ip: "0.0.0.0", refused: true},
+		{name: "unspecified v6", ip: "::", refused: true},
+		// The first two are link-local multicast (224.0.0.0/24 and ff02::/16),
+		// which the refusal list catches a clause earlier, so on their own they
+		// leave the general IsMulticast clause unpinned — deleting it kept the
+		// suite green. These two are multicast and nothing else: 239.0.0.0/8 is
+		// IPv4 administratively-scoped multicast and ff0e::/16 is IPv6
+		// global-scope multicast.
+		{name: "multicast v4", ip: "224.0.0.1", refused: true},
+		{name: "multicast v6", ip: "ff02::1", refused: true},
+		{name: "link-local multicast v4", ip: "224.0.0.251", refused: true},
+		{name: "multicast v4, not link-local", ip: "239.1.2.3", refused: true},
+		{name: "multicast v6, not link-local", ip: "ff0e::1", refused: true},
+
+		// RFC 1918 is deliberately allowed: the platform's premise is on-prem
+		// operation, where an MCP server legitimately lives on the operator's
+		// own private network. Refusing these would break the deployment model,
+		// not protect it — so they are asserted allowed, not left untested.
+		{name: "RFC 1918 ten", ip: "10.0.0.5"},
+		{name: "RFC 1918 172.16", ip: "172.16.31.9"},
+		{name: "RFC 1918 192.168", ip: "192.168.1.1"},
+		{name: "IPv6 unique local", ip: "fd00::1"},
+		{name: "public v4", ip: "93.184.216.34"},
+		{name: "public v6", ip: "2606:2800:220:1:248:1893:25c8:1946"},
+
+		// An IPv6 transition address forwards to an embedded IPv4 target
+		// through a translator, so the guard has to check the target a
+		// translator would actually reach rather than the v6 wrapper.
+		{name: "NAT64 well-known prefix wrapping loopback", ip: "64:ff9b::7f00:1", refused: true},
+		{name: "NAT64 local prefix wrapping link-local", ip: "64:ff9b:1::a9fe:a9fe", refused: true},
+		{name: "NAT64 wrapping a public address", ip: "64:ff9b::5db8:d822"},
+		// Trying six layouts can over-refuse, so the layouts a real deployment
+		// uses to reach a real address are asserted allowed, not assumed to be.
+		{name: "NAT64 local prefix, /96 layout, public address", ip: "64:ff9b:1::808:808"},
+		// The conformant /64-layout mapping of 8.8.8.8 under 64:ff9b:1:2::/64 —
+		// bytes 9-12 carry it exactly, and the /96 reading of the same address
+		// is the equally public 8.0.0.0.
+		{name: "NAT64 local prefix, /64 layout, public address", ip: "64:ff9b:1:2:8:808:800:0"},
+
+		// RFC 6052 embeds the four IPv4 octets at a different offset for each
+		// of its six prefix lengths, and an address does not say which its
+		// deployment uses. This one is the /48 layout: bytes 6,7,9,10 carry
+		// 169.254.169.254 while the low 32 bits — the only place a /96 reader
+		// looks — carry 8.8.8.8. A guard that reads just the low 32 bits calls
+		// it Google DNS and dials cloud metadata.
+		//
+		// One row per layout, because a layout with no row of its own is a line
+		// of the decoder no test can fail on: the /32 and /64 rows were both
+		// deletable while the suite stayed green. Each address below is refused
+		// by exactly one layout — the others read benign addresses from it — so
+		// each pins the row it names.
+		{name: "NAT64 /48 layout wrapping cloud metadata", ip: "64:ff9b:1:a9fe:a9:fe00:808:808", refused: true},
+		{name: "NAT64 /40 layout wrapping loopback", ip: "64:ff9b:7f:0:1::", refused: true},
+		// /32: bytes 4-7 are 127.0.0.1 and every other layout reads 0.0.1.0,
+		// 0.1.0.0, 1.0.0.0 or padding.
+		{name: "NAT64 /32 layout wrapping loopback", ip: "64:ff9b:7f00:1::", refused: true},
+		// /64: bytes 9-12 are 127.0.0.1 under the local-use prefix carved to a
+		// /64; the /96 reading of the same address is the public 1.0.0.0.
+		{name: "NAT64 /64 layout wrapping loopback", ip: "64:ff9b:1:2:7f:0:100:0", refused: true},
+		// The row above does not actually distinguish this guard from the low-32
+		// one it replaced — its own low 32 bits are zero, so the old code
+		// refused it too, as the unspecified address. This one does: the /40
+		// reading is 127.0.0.1 while the low 32 read as the public 8.8.8.8, so
+		// the old guard admitted it and only a real /40 decode refuses it.
+		{name: "NAT64 /40 layout wrapping loopback, non-zero suffix", ip: "64:ff9b:7f:0:1:0:808:808", refused: true},
+
+		// Two deliberate false refusals, pinned so they stay decisions rather
+		// than surprises. The first depends on the target: under a /48 mapping
+		// it carries the public 8.127.8.8, but read as /56 the same bytes are
+		// 127.8.8.0 — loopback — and the guard cannot tell which layout the
+		// deployment meant. That costs 12.8% of targets under a /48 mapping on
+		// the local-use prefix.
+		{name: "NAT64 /48 layout, public target, refused by the /56 reading", ip: "64:ff9b:1:87f:8:800::", refused: true},
+
+		// The second depends on nothing but the prefix, which is the worse
+		// case and the reason "a /96 mapping costs nothing" is false as a
+		// general claim: 64:ff9b:1:7f00::/96 is a legal NSP whose own bytes
+		// read as 127.0.0.0 under the /48 layout, so every address it can
+		// express is refused however innocent the target. See the note on
+		// embeddedIPv4 for why the guard cannot do better with an address
+		// alone, and what a deployment that hits this would need.
+		{name: "NAT64 /96 NSP whose prefix bytes read as loopback", ip: "64:ff9b:1:7f00::808:808", refused: true},
+
+		// The other direction of the same trade, pinned because it is the one
+		// that reads as a loosening. Skipping a candidate that decodes to the
+		// unspecified address is what lets these through, and the old low-32
+		// guard refused all of them: RFC 6052 puts the zero suffix in the low 32
+		// bits for every layout from /32 to /56, so reading only those bits saw
+		// 0.0.0.0 and refused every conformant /48 and /56 mapping — the two
+		// layouts a deployment can use under this prefix — which is the same
+		// misreading that admitted the metadata address above, pointing the
+		// other way. The first row is the ordinary case that restores. The next
+		// two are prefix base addresses, where the decode is padding all the way
+		// down and no host exists to reach. The general shape of what the skip
+		// admits is already above as the /96-layout row: 64:ff9b:1::808:808 has
+		// a /48 reading that is padding and a /96 reading that is 8.8.8.8, and
+		// nothing in it says which the deployment meant.
+		{name: "NAT64 /48 layout, ordinary public target", ip: "64:ff9b:1:808:8:800::"},
+		{name: "NAT64 well-known prefix base address", ip: "64:ff9b::"},
+		{name: "NAT64 local-use prefix base address", ip: "64:ff9b:1::"},
+
+		// RFC 6052 lets an operator assign a Network-Specific Prefix out of
+		// their own space, and nothing in an address marks it as one. Only
+		// 64:ff9b::/32 is decoded, so a deployment translating through its own
+		// NSP gets no NAT64 decoding at all and this reaches cloud metadata.
+		// Closing it needs the guard told its prefix — the same knob the
+		// over-refusal above would want, and equally not built.
+		{name: "NAT64 through an operator NSP is not decoded", ip: "2001:db8:122:344::a9fe:a9fe"},
+
+		// ISATAP lives in the interface identifier, so the prefix is arbitrary
+		// and a documentation-only prefix carries a real one here. The u bit is
+		// set when the embedded address is globally unique, so both 0:5efe and
+		// 200:5efe are the same form and both must decode.
+		{name: "ISATAP wrapping loopback", ip: "2001:db8:1234:5678:0:5efe:7f00:1", refused: true},
+		{name: "ISATAP wrapping cloud metadata, u bit set", ip: "2001:db8::200:5efe:a9fe:a9fe", refused: true},
+		{name: "ISATAP wrapping a public address", ip: "2001:db8:1234:5678:0:5efe:5db8:d822"},
+		// Not ISATAP, and the OUI is not what rules it out — 00-00-5E is right
+		// here. RFC 5214 §6.1 lists the 0xFE byte after the OUI separately, and
+		// this address carries 0xFF there. It has to match too, or every address
+		// whose bytes happen to sit in that position would be read as a tunnel.
+		{name: "ISATAP-shaped, right OUI but wrong 0xFE byte", ip: "2001:db8:1234:5678:0:5eff:7f00:1"},
+		// Also not ISATAP: the group bit is set, and an interface identifier of
+		// a unicast address does not set it. Only the u bit varies. Reading
+		// "u/g bits" as though both were free is the natural mistake and it
+		// over-refuses — this is an ordinary global-unicast address with no
+		// tunnel anywhere in it, and a mask that ignored the group bit would
+		// decode 127.0.0.1 from it and refuse a reachable endpoint.
+		{name: "ISATAP-shaped but the group bit is set", ip: "2606:4700:1234:5678:100:5efe:7f00:1"},
+		// The rest of the mask, which the g-bit row above does not reach. RFC
+		// 5214 §6.1 fixes the identifier's first two octets at 0x0000 apart from
+		// u and g, so a third bit set rules ISATAP out as surely as g does —
+		// these two say so, and each pins a mask that a green suite otherwise
+		// let drift wider. Both are ordinary addresses being *admitted*, which
+		// is the direction a loosened mask breaks: it decodes a tunnel that is
+		// not there and refuses a reachable endpoint.
+		{name: "ISATAP-shaped but a bit above u and g is set", ip: "2001:db8::400:5efe:7f00:1"},
+		{name: "ISATAP-shaped but the identifier's second octet is not zero", ip: "2001:db8::201:5efe:7f00:1"},
+
+		{name: "6to4 wrapping loopback", ip: "2002:7f00:1::1", refused: true},
+		{name: "6to4 wrapping a public address", ip: "2002:5db8:d822::1"},
+		{name: "Teredo wrapping loopback", ip: "2001::5:0:0:80ff:fffe", refused: true},
+
+		// IPv4-mapped (::ffff:a.b.c.d) is classified by net.IP itself, so these
+		// rows guard against a refactor that stopped it doing so rather than
+		// against the decoder.
+		{name: "IPv4-mapped loopback", ip: "::ffff:127.0.0.1", refused: true},
+		{name: "IPv4-mapped cloud metadata", ip: "::ffff:169.254.169.254", refused: true},
+		{name: "IPv4-mapped public address", ip: "::ffff:93.184.216.34"},
+
+		// IPv4-compatible (::a.b.c.d) and IPv4-translated (::ffff:0:a.b.c.d) are
+		// the two forms net.IP does not classify: To4 returns nil for both and
+		// every predicate in the refusal list answers false, so without an
+		// explicit decode the guard admits them. A kernel will not deliver
+		// either to the embedded address (see the note in dialguard.go), which is
+		// why these rows assert the guard's own answer rather than reachability —
+		// the guard must not depend on the kernel to be the thing that says no.
+		{name: "IPv4-compatible loopback", ip: "::127.0.0.1", refused: true},
+		{name: "IPv4-compatible cloud metadata", ip: "::169.254.169.254", refused: true},
+		{name: "IPv4-compatible multicast", ip: "::224.0.0.1", refused: true},
+		{name: "IPv4-compatible public address", ip: "::93.184.216.34"},
+		{name: "IPv4-translated loopback", ip: "::ffff:0:127.0.0.1", refused: true},
+		{name: "IPv4-translated cloud metadata", ip: "::ffff:0:169.254.169.254", refused: true},
+		{name: "IPv4-translated public address", ip: "::ffff:0:93.184.216.34"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ip := net.ParseIP(tc.ip)
+			if ip == nil {
+				t.Fatalf("test fixture %q is not an IP", tc.ip)
+			}
+			err := dialguard.IPAllowed(ip)
+			switch {
+			case tc.refused && err == nil:
+				t.Fatalf("IPAllowed(%s) = nil, want a refusal", tc.ip)
+			case !tc.refused && err != nil:
+				t.Fatalf("IPAllowed(%s) = %v, want nil", tc.ip, err)
+			}
+			// The refusal names the resolved address and says only that it is
+			// disallowed. It must not name the class that matched, and must
+			// read the same whether or not anything is listening — a caller
+			// surfacing it must not become an internal-host oracle.
+			if err != nil && !strings.Contains(err.Error(), "disallowed address") {
+				t.Errorf("refusal %q does not read as an address refusal", err)
+			}
+			for _, class := range []string{"loopback", "link-local", "multicast", "unspecified"} {
+				if err != nil && strings.Contains(err.Error(), class) {
+					t.Errorf("refusal %q names the class that matched", err)
+				}
+			}
+		})
+	}
+}
+
+func TestIPAllowedRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	// net.IP is a byte slice, so these are ordinary values of the type rather
+	// than compile errors, and every class predicate answers false for them —
+	// which is fail-open unless the guard refuses them itself. The nil case is
+	// the one a caller reaches by accident: net.ParseIP returns it for anything
+	// that is not an address, so IPAllowed(net.ParseIP(host)) would admit every
+	// host that is not one.
+	for _, tc := range []struct {
+		name string
+		ip   net.IP
+	}{
+		{name: "nil", ip: nil},
+		{name: "empty", ip: net.IP{}},
+		{name: "unparseable through ParseIP", ip: net.ParseIP("example.com")},
+		{name: "wrong length", ip: net.IP{10, 0, 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := dialguard.IPAllowed(tc.ip); err == nil {
+				t.Fatalf("IPAllowed(%#v) = nil, want a refusal", tc.ip)
+			}
+		})
+	}
+}
+
+func TestControlChecksTheResolvedAddress(t *testing.T) {
+	t.Parallel()
+	// The hook receives the dialer's "host:port", which is the resolved
+	// address rather than the name in the URL — that is the whole point, since
+	// a name that resolved innocently a moment ago can resolve to loopback on
+	// the next lookup.
+	var seen []net.IP
+	control := dialguard.Control(func(ip net.IP) error {
+		seen = append(seen, ip)
+		return dialguard.IPAllowed(ip)
+	})
+
+	if err := control("tcp", "127.0.0.1:8443", nil); err == nil {
+		t.Error("Control admitted loopback")
+	}
+	if err := control("tcp", "[fd00::1]:443", nil); err != nil {
+		t.Errorf("Control refused a private address: %v", err)
+	}
+	if len(seen) != 2 || !seen[0].IsLoopback() {
+		t.Fatalf("the hook saw %v, want the two resolved addresses", seen)
+	}
+}
+
+func TestControlRejectsWhatItCannotParse(t *testing.T) {
+	t.Parallel()
+	// A hook that cannot tell what it is dialing must refuse rather than pass:
+	// admitting an address it failed to parse would make the guard fail-open
+	// on exactly the inputs it does not understand.
+	called := false
+	control := dialguard.Control(func(net.IP) error {
+		called = true
+		return nil
+	})
+
+	if err := control("tcp", "not-an-address", nil); err == nil {
+		t.Error("Control admitted an address with no port")
+	}
+	if err := control("tcp", "example.com:443", nil); err == nil {
+		t.Error("Control admitted an unresolved host name")
+	}
+	if called {
+		t.Error("the allow predicate ran on an address the hook could not resolve")
+	}
+}
