@@ -681,6 +681,56 @@ jobs:
             || { echo "staging-values.yaml did not reach the executor as a sandbox toleration" >&2
                  echo "$out" | grep -A1 'name: SANDBOX_K8S_TOLERATIONS' >&2; exit 1; }
           echo "ok: CD values file renders with both halves of the sandbox pair"
+      - name: the CD job and the chart agree on the mode-2 Secret's keys
+        # Mode 2 splits one contract across two files nothing joins. The deploy
+        # job writes seven FILES into a temp dir and `kubectl create secret
+        # --from-file` turns each file NAME into a Secret key; the chart reads
+        # keys by name. Rename either side and nothing fails loudly: the keys
+        # `map.blobEnv` and `map.secretsEnv` emit are `optional: true`, so the
+        # pod starts and reads the chart's default instead — BLOB_BACKEND falls
+        # back to "s3" and the platform looks for an S3 endpoint that is not
+        # there, against a GCS bucket.
+        #
+        # The key list is read out of `deploy.yml` rather than restated here, so
+        # a key added to the job that nothing reads fails this step too.
+        run: |
+          set -euo pipefail
+          wrote="$(grep -oE -- '--from-file="\$d/[^"]+"' .github/workflows/deploy.yml \
+            | sed 's|.*/||; s|"$||' | sort -u)"
+          [ "$(echo "$wrote" | wc -l)" -eq 7 ] \
+            || { echo "expected 7 --from-file keys in deploy.yml, found:" >&2
+                 echo "$wrote" >&2; exit 1; }
+          rendered="$(helm template t "$CHART" -f deploy/gcp/staging-values.yaml)"
+          # Forward: every key the job writes is a key the render reads. The
+          # `- ` alternative is the brain's projected volume item, which is a
+          # list entry rather than a secretKeyRef.
+          for k in $wrote; do
+            echo "$rendered" | grep -qE "^[[:space:]]*(- )?key: ${k//./\\.}\$" \
+              || { echo "deploy.yml writes Secret key '$k' and nothing in the render reads it" >&2
+                   exit 1; }
+          done
+          # Back: every key the chart REQUIRES — a secretKeyRef without
+          # `optional: true`, the one whose absence wedges the pod in
+          # CreateContainerConfigError — is a key the job writes.
+          needs="$(echo "$rendered" | awk '
+            pend != "" { if ($1 != "optional:" || $2 != "true") print pend; pend = "" }
+            inref && $1 == "key:" { pend = $2 }
+            $1 == "secretKeyRef:" { inref = 1 }
+            END { if (pend != "") print pend }' | sort -u)"
+          for k in $needs; do
+            echo "$wrote" | grep -qxF "$k" \
+              || { echo "the chart requires Secret key '$k' and deploy.yml never writes it" >&2
+                   exit 1; }
+          done
+          # And all of it against the PRE-CREATED Secret, whose name is also the
+          # `K8S_SECRET` the deploy job applies. Dropping `existingSecret`
+          # entirely fails the render (secret.yaml's required-apiKey guard), but
+          # CHANGING it renders green while binding every reference above to a
+          # Secret nothing creates.
+          echo "$rendered" | grep -qE '^[[:space:]]*name: map-platform$' \
+            || { echo "the render does not bind to the pre-created Secret map-platform" >&2; exit 1; }
+          echo "ok: deploy.yml writes exactly the seven keys the render reads"
+          echo "required, so unset would wedge the pods: $(echo "$needs" | tr '\n' ' ')"
 
   # The GCP staging Terraform (docs/plan/20, Decision 9). fmt and validate need
   # no credentials, no state and no GCP project, which is what lets them run on

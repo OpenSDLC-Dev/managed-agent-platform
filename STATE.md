@@ -13,7 +13,8 @@ end of slice 4.
 **GCP continuous delivery** — plan-less, single PR. Build → push → deploy →
 smoke on every push to `main`, in **mode 2**. Infrastructure stays human-driven;
 CD runs no Terraform (plan 20, Decision 9). Proven by hand against the real
-project first, then the repo made to match what ran.
+project first, then the repo made to match what ran — the run, its numbers and
+what it does *not* cover: [docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks
 
@@ -37,10 +38,14 @@ project first, then the repo made to match what ran.
 - [ ] Slice 7 — evals, live tier, `ant` CLI acceptance, archive.
 - [x] **CD landed** — `cloudbuild.yaml` (`DOCKER_BUILDKIT=1`, a pre-existing bug
       the `FROM --platform=$BUILDPLATFORM` line needs, plus `CLOUD_LOGGING_ONLY`),
-      `deploy/gcp/staging-values.yaml`, `.github/workflows/deploy.yml`, a CI step
-      that renders the values file and asserts both halves of the sandbox pair,
-      and the runbook split in `deploy/gcp/README.md`.
+      `deploy/gcp/staging-values.yaml`, `.github/workflows/deploy.yml`, two CI
+      steps that render the values file (the sandbox pair, and the seven-key
+      Secret contract in both directions), and the runbook split in
+      `deploy/gcp/README.md`.
 - [ ] CD's first run **from the workflow itself**: every step is proven by hand,
       but no push to `main` has yet driven it end to end.
+- [ ] Close the WIF ref gap — the provider asserts `repository_owner` only, so a
+      dispatched branch is trusted. The workflow's guard stops the accident; the
+      `assertion.ref` condition (command in `deploy/gcp/README.md`) is unapplied.
 - [ ] Replace the `model-providers` placeholder (real endpoint, fake key) with a
       live route before anything runs a session.

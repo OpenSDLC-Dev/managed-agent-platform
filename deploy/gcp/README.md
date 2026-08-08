@@ -448,10 +448,32 @@ CD owns exactly **build → push → deploy → smoke**.
 **There is no GitHub secret in this repository, and adding one would be a regression.** The
 job mints an OIDC token, Workload Identity Federation exchanges it for a short-lived
 impersonation of `cd-deployer@`, and every credential is then read from Secret Manager at
-run time. So a rotation is `gcloud secrets versions add` and nothing else — no repository
-setting to update afterwards, and no long-lived key in a settings page to leak. The
-provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'`, and each repository
-is bound separately, so a fork cannot use it.
+run time. So a rotation is `gcloud secrets versions add` plus a re-run of the workflow — no
+repository setting to update afterwards, and no long-lived key in a settings page to leak.
+The provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'`, and each
+repository is bound separately, so a fork cannot use it.
+
+**Open gap: the provider does not assert the ref, so the branch a `workflow_dispatch`
+selects is trusted.** GitHub runs a dispatched workflow from the ref it was dispatched on,
+so anyone who can push a branch to this repository can push an edited `deploy.yml` and
+dispatch it, and the provider will hand that run the `cd-deployer@` identity — Secret
+Manager, Cloud Build and the cluster, around the review boundary `main` exists to be. The
+workflow's first step refuses a run whose `github.ref` is not `refs/heads/main`, which stops
+the accident; it cannot stop the attack, because the branch that edits the file deletes the
+step with it. The control has to be cloud-side, and it is one command — recorded here
+because **it has not been applied to this project yet**:
+
+```sh
+gcloud iam workload-identity-pools providers update-oidc github-oidc \
+  --project=hh-opensdlc-managed-agents --location=global --workload-identity-pool=github \
+  --attribute-condition="assertion.repository_owner == 'OpenSDLC-Dev' && assertion.ref == 'refs/heads/main'"
+```
+
+It applies to every repository bound to this provider, which is what is wanted: both this
+repository and `managed-agent-console` deploy from `main` and dispatch only to redeploy or
+to finish a rotation, both of which are dispatches *on* `main`. Verify it the way it will
+first be exercised — dispatch from a throwaway branch and confirm the auth step fails, not
+the guard.
 
 **Two IAM grants live outside Terraform, and the pipeline does not work without them.** They
 were made by hand against this project and are recorded here because nothing in the
@@ -460,7 +482,7 @@ repository would otherwise say they exist:
 | Grant | Scope | Why |
 | --- | --- | --- |
 | `roles/logging.logWriter` | the project | `cloudbuild.yaml` sets `options.logging: CLOUD_LOGGING_ONLY`, which is *mandatory* once a build names its own service account — with a user-specified identity the API refuses a build that would write to the default logs bucket |
-| `roles/storage.admin` | `gs://hh-opensdlc-managed-agents_cloudbuild` | `gcloud builds submit .` uploads the source tarball to that bucket, and the identity the build runs as has to read it back |
+| `roles/storage.admin` | `gs://hh-opensdlc-managed-agents_cloudbuild` | `gcloud builds submit .` **uploads** the source tarball to that bucket as the caller, and the build then **reads** it back as its `--service-account` — here the same identity for both, so a read-only role such as `roles/storage.objectViewer` fails the upload before the build starts. This is the grant that was made and proven; a narrower `roles/storage.objectAdmin` is plausible and untested |
 
 Both are on `cd-deployer@`, and the reason they are needed at all is the first line of the
 build step: `--service-account="projects/…/serviceAccounts/cd-deployer@…"`. **A project
@@ -502,6 +524,24 @@ transcribed from `environment/`, not generated from it, so diff them against
 still succeeds — it just names images that do not exist, and all three pods sit in
 `ImagePullBackOff`.
 
+**There is a third thing a rebuild moves, and it is not in either file: `database-url`.** A
+recreated Cloud SQL instance gets a **new private IP**, and the DSN below hard-codes the old
+one — so the pipeline would apply a Secret pointing at an address nothing answers on, and
+every pod would fail its first query. Re-compose it before the next deploy:
+
+```sh
+ip="$(terraform -chdir=deploy/gcp/environment output -raw sql_private_ip)"
+pw="$(gcloud secrets versions access latest --secret=map-db-password \
+        --project=hh-opensdlc-managed-agents)"
+printf '%s' "postgres://map:$pw@$ip:5432/map?sslmode=require" \
+  | gcloud secrets versions add database-url \
+      --project=hh-opensdlc-managed-agents --data-file=-
+```
+
+(Or stop hard-coding an address: the chart's `cloudSQLProxy.enabled` takes the instance
+*connection name*, which a rebuild does not change. That is the better shape and the reason
+the knob exists; this deployment has not moved to it.)
+
 **The `map-platform` Secret is assembled by the pipeline**, because nothing else can: the
 chart writes no Secret in this mode and Terraform holds no secret *values* by design. The
 workflow reads `controlplane-api-key`, `database-url` and `model-providers` out of Secret
@@ -511,6 +551,19 @@ and applies all seven with `kubectl create secret generic … --from-file=… --
 -o yaml | kubectl apply -f -`. `--from-file` and never `--from-literal`: a literal puts every
 credential on the process's argv. Rotating `controlplane-api-key` or `model-providers` is
 `gcloud secrets versions add` followed by a re-run of the workflow.
+
+**That re-run has to roll the pods, and it will not do so by itself.** Env from a
+`secretKeyRef` is read once, at process start; a `workflow_dispatch` after a rotation
+deploys the *same* commit, so `helm upgrade` produces a byte-identical pod template and
+Kubernetes correctly changes nothing. (The chart's `checksum/secret` annotation cannot help
+here — with `existingSecret` no Secret is rendered, so it hashes an empty template on every
+run, which is what the three deployment templates' comments say.) The pods would go on
+serving the *revoked* key, and `controlplane`'s rotation-by-restart semantics
+(`EnsureAPIKey`, `internal/api/auth.go`) mean the new key is not even registered until one
+restarts. So the workflow keeps the one word `kubectl apply` prints — created, configured or
+unchanged — and rolls every Deployment in the release when, and only when, the Secret
+actually changed. An ordinary push skips it: the seven values are identical and the rollout
+`helm upgrade` did for the new `image.tag` is the only one.
 
 `database-url` is the exception, because it is **derived** rather than primary: it is
 `postgres://map:<map-db-password>@10.136.0.3:5432/map?sslmode=require`, composed once by hand

@@ -38,6 +38,45 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## GCP continuous delivery — the mode-2 build → deploy → smoke sequence, by hand (run 2026-08-08) — ✅ passed
+
+Every step `.github/workflows/deploy.yml` performs was run by hand against the real
+project first, and the workflow then written to match what ran. Project
+`hh-opensdlc-managed-agents` (754963270337), zone `us-central1-a`, cluster
+`map-staging`, namespace `map`, release `map`, **mode 2** (Cloud SQL + GCS + Cloud
+KMS behind `existingSecret: map-platform`).
+
+- `gcloud builds submit --config deploy/gcp/cloudbuild.yaml --service-account=…cd-deployer@…`
+  built all four images — controlplane/brain/executor as three tags on one build,
+  plus `--target gate` — in **2m16s**, into
+  `us-central1-docker.pkg.dev/hh-opensdlc-managed-agents/map-images`. Two things
+  had to be fixed for it to run at all and are the `Fixed` half of this change:
+  `DOCKER_BUILDKIT=1` on both docker steps (the Dockerfile's
+  `FROM --platform=$BUILDPLATFORM` is BuildKit-only) and
+  `options.logging: CLOUD_LOGGING_ONLY` (mandatory once a build names its own
+  service account).
+- `helm upgrade --install map … -f deploy/gcp/staging-values.yaml --wait --atomic
+  --timeout 10m` returned 0; **all three Deployments** (controlplane, brain,
+  executor) reached Ready.
+- Smoke against the controlplane LoadBalancer `34.63.227.73:8080`:
+  `GET /v1/agents?limit=1` answered **200** with the management key and **401**
+  without one — the round trip that also proves Cloud SQL is reachable.
+- The console half (`managed-agent-console`) deployed to the same cluster:
+  rollout green, LoadBalancer `34.45.173.145`, in-pod `/api/health?deep=1` **200**
+  with `platform.reachable: true` against the in-cluster control plane
+  `http://map-managed-agent-platform-controlplane.map.svc.cluster.local:8080`,
+  anonymous `GET /` **307** to `/login`, public `/api/health` **200** with
+  `login_gate: true`.
+
+**Not covered by this record**, and the reason the STATE.md task stays open: the
+GitHub Actions workflow has not itself run. Nothing can drive `push: main` until
+the PR merges, and the `workflow_dispatch` path is deliberately refused from any
+other ref. Two further gaps are recorded rather than closed —
+`deploy/gcp/README.md`'s "Continuous delivery" section carries both: the WIF
+provider does not yet assert `assertion.ref`, and `model-providers` holds a
+placeholder (real endpoint, fake key) so the sequence could be proven without
+inventing a credential.
+
 ## Changelog and history slimming (plan 28) — archived 2026-08-08, both slices delivered
 
 Slice 1 (#337): the `archive` subcommand (`make changelog-archive`) moved

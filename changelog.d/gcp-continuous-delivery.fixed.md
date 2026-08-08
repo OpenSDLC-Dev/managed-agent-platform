@@ -13,8 +13,9 @@
   Compute Engine default service account, and that identity therefore cannot read
   the source tarball `gcloud builds submit` has just uploaded
   (`does not have storage.objects.get access to … <project>_cloudbuild`). The two
-  out-of-band IAM grants that follows from — `roles/logging.logWriter` on the
+  out-of-band IAM grants that follow from it — `roles/logging.logWriter` on the
   project and `roles/storage.admin` on the `_cloudbuild` bucket, both on the
-  deploy identity — are recorded in
+  deploy identity, which uploads that tarball as well as reading it back — are
+  recorded in
   [deploy/gcp/README.md](./deploy/gcp/README.md#continuous-delivery), since
   nothing in the repository would otherwise say they exist.

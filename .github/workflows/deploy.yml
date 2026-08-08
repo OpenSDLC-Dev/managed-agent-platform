@@ -33,11 +33,20 @@ name: deploy
 # There is no GitHub secret in this repository and there must not be one. The job
 # mints an OIDC token, Workload Identity Federation exchanges it for a short-lived
 # impersonation of `cd-deployer@`, and every credential the deploy needs is then
-# read from Secret Manager at run time. So rotating a credential is a
-# `gcloud secrets versions add` and nothing else — no repository setting to update
-# afterwards, and no long-lived key sitting in a settings page to leak. The
-# provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'` and each
-# repository is bound to the deploy identity separately, so a fork cannot use it.
+# read from Secret Manager at run time. So rotating a credential is
+# `gcloud secrets versions add` plus a re-run of this workflow — no repository
+# setting to update afterwards, and no long-lived key sitting in a settings page
+# to leak. The re-run is not a formality: env from a `secretKeyRef` is read once
+# at process start, so the "Roll the pods onto the rotated Secret" step below is
+# what actually retires the old value.
+#
+# The provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'` and
+# each repository is bound to the deploy identity separately, so a fork cannot use
+# it. It does NOT yet assert the ref, so the branch a `workflow_dispatch` selects
+# is currently trusted: the guard step below refuses one, but a branch carrying an
+# edited copy of this file would delete the guard along with it. Closing that
+# needs a cloud-side `assertion.ref` condition on the provider — recorded, with
+# the command, in deploy/gcp/README.md's "Continuous delivery" section.
 
 on:
   push:
@@ -60,9 +69,10 @@ concurrency:
   group: deploy-staging
   cancel-in-progress: false
 
-permissions:
-  id-token: write # mint the OIDC token WIF exchanges; the only reason this job can authenticate
-  contents: read
+# Nothing at the workflow level. `id-token: write` granted here would be inherited
+# by every job added later, including one with no reason to hold a cloud
+# impersonation; the one job that needs it asks for it itself.
+permissions: {}
 
 # None of these is a credential — they are project, cluster, bucket and identity
 # NAMES, and the WIF provider is public infrastructure locked by attribute
@@ -90,7 +100,23 @@ jobs:
   deploy:
     name: deploy
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # mint the OIDC token WIF exchanges; the only reason this job can authenticate
+      contents: read # actions/checkout
     steps:
+      # `workflow_dispatch` takes a ref and GitHub runs the workflow file FROM
+      # that ref, so without this a push to any branch is a deployment path that
+      # never passed review. This closes the accidental half — a dispatch from
+      # the wrong ref stops here, before the auth step mints a token. It is not
+      # the control: a branch that edits this file deletes this step too. The
+      # control is `assertion.ref` on the WIF provider, which is cloud-side; see
+      # the header and deploy/gcp/README.md's "Continuous delivery".
+      - name: Deploys run from main only
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::deploy runs only from refs/heads/main; this run is on $GITHUB_REF"
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes, so the token has no reason to outlive this step —
@@ -326,7 +352,12 @@ jobs:
           # runner and in any log that captured the command line. The file name is
           # the Secret key, which is why the fetch destinations above are named
           # after the keys rather than after the Secret Manager secrets.
-          kubectl create secret generic "$K8S_SECRET" \
+          #
+          # Its one line of output — "created", "configured" or "unchanged" — is
+          # kept, because it is the only thing in this job that knows whether a
+          # rotation actually landed. It names the object and never a value, so
+          # it is safe to hold in a variable, unlike the manifest on the pipe.
+          applied="$(kubectl create secret generic "$K8S_SECRET" \
             --namespace "$K8S_NAMESPACE" \
             --from-file="$d/controlplane-api-key" \
             --from-file="$d/database-url" \
@@ -336,9 +367,24 @@ jobs:
             --from-file="$d/secrets-backend" \
             --from-file="$d/gcpkms-key-name" \
             --dry-run=client -o yaml \
-            | kubectl apply -f - > /dev/null
+            | kubectl apply -f -)"
+          echo "$applied"
 
-          echo "secret/$K8S_SECRET applied in namespace $K8S_NAMESPACE"
+          # Nothing else can notice. Env from a `secretKeyRef` is read once, at
+          # process start; `helm upgrade` cannot see this Secret at all, because
+          # `existingSecret` means the chart renders none and its
+          # `checksum/secret` annotation therefore hashes an empty template on
+          # every run; and the case this matters in — a workflow_dispatch after a
+          # human rotated a Secret Manager value — deploys the same commit, so
+          # the pod template is byte-identical and Kubernetes correctly does
+          # nothing. The pods would go on serving the revoked key and the old
+          # DSN, and the smoke check below would fail with the *new* key against
+          # them. So record whether the Secret changed; the step after the
+          # upgrade rolls the pods when it did.
+          case "$applied" in
+            *unchanged) echo "SECRET_CHANGED=false" >> "$GITHUB_ENV" ;;
+            *) echo "SECRET_CHANGED=true" >> "$GITHUB_ENV" ;;
+          esac
 
       # --atomic is the whole reason this is one command and not a sequence: a
       # failed upgrade rolls the release back instead of leaving half the pods on
@@ -366,6 +412,36 @@ jobs:
             --set-string "image.tag=$GITHUB_SHA" \
             --set-string "executor.gateImage=$ARTIFACT_REGISTRY/gate:$GITHUB_SHA" \
             --wait --atomic --timeout 10m
+
+      # Only when the Secret really changed — see the note at the end of the
+      # assemble step. On an ordinary push the seven values are identical, this
+      # is skipped, and the rollout `helm upgrade` already performed for the new
+      # `image.tag` is the only one. On a rotation dispatch it is the only
+      # rollout there is.
+      #
+      # `--atomic` does not cover this: the release is complete before the
+      # restart begins, so a Secret the platform cannot use leaves the pods
+      # crash-looping rather than rolling the release back. That is the same
+      # state a bad Secret would produce anyway, and `rollout status` fails the
+      # job on it instead of leaving the smoke check to time out.
+      - name: Roll the pods onto the rotated Secret
+        if: env.SECRET_CHANGED == 'true'
+        run: |
+          set -euo pipefail
+          # By label, like the smoke step: the names come from the release.
+          deploys="$(kubectl get deployments --namespace "$K8S_NAMESPACE" \
+            --selector "app.kubernetes.io/instance=$HELM_RELEASE" -o name)"
+          if [ -z "$deploys" ]; then
+            echo "::error::no Deployment matched app.kubernetes.io/instance=$HELM_RELEASE"
+            kubectl get deployments --namespace "$K8S_NAMESPACE" >&2
+            exit 1
+          fi
+          for dep in $deploys; do
+            kubectl rollout restart --namespace "$K8S_NAMESPACE" "$dep"
+          done
+          for dep in $deploys; do
+            kubectl rollout status --namespace "$K8S_NAMESPACE" "$dep" --timeout=5m
+          done
 
       # Ready pods are not a working API. This is the only step that proves the
       # LoadBalancer exists, that the deployed key is the key Secret Manager holds,
@@ -443,12 +519,24 @@ jobs:
           fi
 
           # The other half, and the one that matters most for an address on the
-          # public internet: the same request WITHOUT the config file must not
-          # answer 200. A 200 here means the platform is unguarded, which no
-          # readiness check and no successful authenticated call would reveal.
-          open="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$url" || echo 000)"
-          if [ "$open" = "200" ]; then
-            echo "::error::$ip:8080 answered 200 with NO api key — the API is unguarded"
+          # public internet: the same request WITHOUT the config file must be
+          # REFUSED. Assigned exactly like the loop above and for the same
+          # reason — curl prints `000` on a connection failure AND exits
+          # non-zero, so `$(… || echo 000)` yields "000\n000" and every later
+          # comparison against a single status is then false. A check that
+          # cannot fail is worse than no check.
+          if ! open="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$url")"; then
+            open=000
+          fi
+          # 401, not merely "not 200": `requireAPIKey` (internal/api/auth.go)
+          # answers a missing x-api-key with 401 authentication_error, so that is
+          # the answer this proves. `000` — nothing answered — would say nothing
+          # at all about whether the API is guarded, and is exactly what a
+          # transient blip produces.
+          if [ "$open" != "401" ]; then
+            echo "::error::$ip:8080 answered $open with NO api key, wanted 401"
+            echo "200 means the API is unguarded. 000 means nothing answered, so" >&2
+            echo "this check proved nothing about authentication." >&2
             exit 1
           fi
 

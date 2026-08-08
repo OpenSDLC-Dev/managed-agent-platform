@@ -67,11 +67,15 @@ gcloud builds submit ...     # the component images
 helm install ...             # the platform
 ```
 
-The **last two lines are the only ones this project automates**. `.github/workflows/deploy.yml`
-runs them against its own staging environment — in **mode 2** — on every push to `main`,
-reading [`deploy/gcp/staging-values.yaml`](../deploy/gcp/staging-values.yaml), assembling the
-pre-created Secret from Secret Manager, and authenticating throughout by Workload Identity
-Federation rather than by any stored GitHub secret.
+The **last two lines are the only ones above that this project automates**.
+`.github/workflows/deploy.yml` runs them against its own staging environment — in **mode 2**
+— on every push to `main` and on `workflow_dispatch`, reading
+[`deploy/gcp/staging-values.yaml`](../deploy/gcp/staging-values.yaml), assembling the
+pre-created Secret from Secret Manager, rolling the pods when that Secret changed, ending
+with an authenticated smoke check against the LoadBalancer (200 with the management key, 401
+without), and authenticating throughout by Workload Identity Federation rather than by any
+stored GitHub secret. Dispatch is for what a push cannot express: redeploying an unchanged
+commit onto a rebuilt cluster, or finishing a rotation a human made in Secret Manager.
 
 **All four `make` targets above it stay human-driven, and all four are prerequisites of the
 pipeline rather than steps in it** — including `gcp-db-init`, which mode 2 genuinely depends
