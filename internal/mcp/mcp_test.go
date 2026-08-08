@@ -1518,16 +1518,16 @@ func TestAConnectionAnswersMoreResponsesThanItHasPages(t *testing.T) {
 	//
 	// A count and nothing more. An earlier revision padded each answer with a
 	// 50,000-byte header value and reported responses × 50,000 as bytes
-	// delivered — which was false by more than two orders of magnitude, and false in
-	// exactly the way this package keeps having to correct: a formula published
-	// as a measurement. net/http trims a header value in writeSubset
+	// delivered — which was false by more than two orders of magnitude, and
+	// false in exactly the way this package keeps having to correct: a formula
+	// published as a measurement. net/http trims a header value in writeSubset
 	// (net/http/header.go, textproto.TrimString) *before writing it*, so against
 	// an httptest server the padding never reaches the wire at all. That is why
-	// the fixture for padded blocks is serveRaw and not this one. What a
-	// hostile server can leave uncharged per response is measured by the tests
-	// that drive raw and HTTP/2 blocks; what this test contributes is that the
-	// number of responses those blocks arrive in has no bound. Multiplying the
-	// two here would be the same mistake in a third form.
+	// the fixture for padded blocks is serveRaw and not this one. What a hostile
+	// server can leave uncharged per response is measured by the tests that
+	// drive raw and HTTP/2 blocks; what this test contributes is that the number
+	// of responses those blocks arrive in has no bound. Multiplying the two here
+	// would be the same mistake in a third form.
 	var responses, events atomic.Int64
 	stream := func(w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "text/event-stream")

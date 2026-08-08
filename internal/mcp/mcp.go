@@ -155,8 +155,8 @@ type Conn struct {
 // folded continuation is joined, so the bytes are read, allocated, and then
 // unaccountable. Measured against a raw listener answering Content-Length and an
 // X-Pad value of one character followed by 200,000 spaces: 200,048 header bytes
-// on the wire, reconstructed to 49 — a factor of 4,083, which is a distortion
-// no arithmetic on the parsed map can correct. So
+// on the wire, reconstructed to 49 — a factor of 4,083, which is a distortion no
+// arithmetic on the parsed map can correct. So
 // the raw block is bounded here instead — 64 KiB rather than net/http's 10 MiB
 // default, per header block, which is a bound on the peak one block reaches and
 // deliberately not a total: how many blocks a connection answers is not this
@@ -191,13 +191,15 @@ var DefaultClient = &http.Client{
 // bounded separately by the read buffer. Over HTTP/2 — which this client
 // explicitly enables, so this is not a hypothetical path — the limit becomes the
 // connection's maxHeaderListSize and applies to each decoded block on its own.
-// Measured against a fixture: a single 80 KiB final block is refused, while two
-// 30 KiB Early Hints plus a 60 KiB final block (~120 KiB) is accepted, and with
-// a 60 KiB trailer on top (~180 KiB) it is still accepted. One response cycle
-// therefore carries up to three separately-capped blocks — the informational
-// blocks in aggregate, the final block, and the trailers — of which only the
-// final block is ever charged, so what this constant bounds is the peak any one
-// block reaches and not what a connection delivers in total.
+// Measured with a one-off probe rather than a retained fixture, though each
+// figure follows from the constants above: a single 80 KiB final block is
+// refused, while two 30 KiB Early Hints plus a 60 KiB final block (~120 KiB) is
+// accepted, and with a 60 KiB trailer on top (~180 KiB) it is still accepted.
+// What the suite does retain is the boundary itself, driven either side of it.
+// One response cycle therefore carries up to three separately-capped blocks — the
+// informational blocks in aggregate, the final block, and the trailers — of which
+// only the final block is ever charged, so what this constant bounds is the peak
+// any one block reaches and not what a connection delivers in total.
 //
 // Three is a ceiling on that cycle rather than a sample, because each of the
 // three is capped in aggregate rather than per frame: 1xx blocks accumulate into
@@ -654,9 +656,13 @@ func (c *Conn) Close() error { return c.session.Close() }
 // at least the twenty-odd bytes of its status line and terminator, so this budget
 // caps the response count too, at a few hundred thousand. Its product with a
 // maximal block is left unstated on purpose, under the rule this comment kept
-// failing: a figure written here is one that was measured, and a product of two
-// measurements is not one. Every attempt to publish that product has been wrong,
-// including one that named the rule and broke it in the same sentence.
+// failing: do not multiply by a quantity nothing bounds. Deriving a figure is
+// fine where both terms are enforced somewhere — 800 MiB above is maxToolPages
+// times MaxResponseBytes, and the few hundred thousand just above is this budget
+// over a floor headerBytes guarantees — and the withdrawn product was not that.
+// It multiplied an enforced per-block cap by a response count with no bound at
+// all, which is why every attempt to publish it has been wrong, including one
+// that named the rule and broke it in the same sentence.
 //
 // What is bounded usefully is the peak and not the sum: one header block at a
 // time, plus this cumulative figure for everything that can be accounted. The
