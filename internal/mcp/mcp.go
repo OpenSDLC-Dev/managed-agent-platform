@@ -40,11 +40,18 @@ import (
 // third-party endpoints reached from a work item that holds a queue lease, so an
 // unbounded wait would hold the lease rather than fail the item.
 //
-// It is a floor, not a per-request cap: a request made under ListTools carries
-// ListTimeout's deadline and keeps it. What the fallback catches is the request
-// that carries no deadline at all — see withResponseLimit for why the SDK makes
-// one of those, and why the caller's http.Client.Timeout cannot be relied on to
-// bound it.
+// The fallback catches the request that reaches the transport with no deadline
+// at all — see withResponseLimit for why the SDK makes one of those, and why the
+// caller's http.Client.Timeout cannot be relied on to bound it. A request that
+// already carries a deadline keeps it; the fallback never shortens one.
+//
+// That does not make DialTimeout a floor overall, and it would be easy to read
+// it that way: DefaultClient also sets it as its own Timeout, which is a
+// whole-request cap that beats a longer context deadline. So under the
+// production client every request is bounded at 30s, and ListTimeout's two
+// minutes bound the listing across its pages rather than any single one of them.
+// A caller supplying its own client sets that policy itself, and may set none —
+// which is the case the fallback exists for.
 const DialTimeout = 30 * time.Second
 
 // ListTimeout bounds a whole listing rather than one request in it. Pagination
@@ -506,7 +513,9 @@ func (t *limitedTransport) take(n int64) int64 {
 // apart is the whole difficulty: the reader that ends on the limit and the one
 // with a byte more look identical until someone asks for the next byte. So when
 // the budget runs out this asks — into a scratch byte of its own, never into the
-// caller's buffer, because a byte past the limit must not be delivered even once.
+// caller's buffer. (Reading into the caller's first byte would work too, since
+// the refusal returns n = 0 and nothing is delivered either way — the scratch
+// array is hygiene, not the thing enforcing the bound.)
 // Nothing arrives, the body ended on the limit and is accepted; a byte arrives,
 // the server had more and the response is refused.
 //
@@ -633,16 +642,16 @@ type bearerTransport struct {
 	host   string
 }
 
+// RoundTrip needs no nil-base fallback, unlike limitedTransport's: withBearer is
+// only ever applied to the client withResponseLimit has just returned, whose
+// Transport is the limitedTransport it set. A nil base here would be a
+// construction this package does not make.
 func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	base := t.base
-	if base == nil {
-		base = http.DefaultTransport
-	}
 	if req.URL.Scheme != t.scheme || !sameHost(req.URL.Host, t.host) {
-		return base.RoundTrip(req)
+		return t.base.RoundTrip(req)
 	}
 	// RoundTrippers must not modify the request they are given.
 	cloned := req.Clone(req.Context())
 	cloned.Header.Set("Authorization", "Bearer "+t.token)
-	return base.RoundTrip(cloned)
+	return t.base.RoundTrip(cloned)
 }

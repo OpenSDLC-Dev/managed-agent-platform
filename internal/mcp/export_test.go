@@ -53,6 +53,28 @@ func RequestDeadlineForTest(ctx context.Context) (time.Duration, bool) {
 	return spy.left, spy.had
 }
 
+// RoundTripBodyForTest sends a real request through the limiting transport and
+// hands the body back unread, so a test can read it after RoundTrip has already
+// returned.
+//
+// That ordering is the point: the fallback deadline has to outlive RoundTrip,
+// because the body is streamed after it returns. Cancelling on return instead
+// would pass every fixture whose body is small enough to arrive whole inside the
+// round trip, and fail only against a server that streams — which is every real
+// one.
+func RoundTripBodyForTest(ctx context.Context, url string, limit int64) (io.ReadCloser, error) {
+	tr := newLimitedTransport(nil, limit)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
 type deadlineSpy struct {
 	had  bool
 	left time.Duration
@@ -82,13 +104,16 @@ func BearerAttachesForTest(endpoint, target string) bool {
 	if err != nil {
 		panic(err)
 	}
+	// Through withBearer rather than by constructing a bearerTransport here: a
+	// seam that rebuilds production wiring is a seam a mutant of that wiring
+	// walks straight past, which this package has already been bitten by twice.
 	spy := &headerSpy{}
-	tr := &bearerTransport{base: spy, token: "probe", scheme: u.Scheme, host: u.Host}
+	client := withBearer(&http.Client{Transport: spy}, "probe", u)
 	req, err := http.NewRequest(http.MethodPost, target, nil)
 	if err != nil {
 		panic(err)
 	}
-	if _, err := tr.RoundTrip(req); err != nil {
+	if _, err := client.Transport.RoundTrip(req); err != nil {
 		panic(err)
 	}
 	return spy.auth != ""

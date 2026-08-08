@@ -1049,15 +1049,68 @@ func (r *stallingReader) Read(p []byte) (int, error) {
 
 func TestResponseBudgetStaysRefusedOnceExceeded(t *testing.T) {
 	t.Parallel()
-	// The refusal is sticky. A caller that reads past the error would otherwise
-	// see the budget reopen for the bytes the probe has already proven are over
-	// the limit.
-	body, _ := mcp.LimitedBodyForTest(io.NopCloser(strings.NewReader("0123456789")), 4)
+	// The refusal is sticky. A caller that reads past the error must not see the
+	// budget reopen for bytes the probe has already proven are over the limit.
+	//
+	// The body is exactly limit+1, and that is the whole point of the fixture
+	// rather than an arbitrary size. With a longer body every read past the
+	// refusal finds another byte and errors again, so the latch is invisible and
+	// a test built on one passes whether the latch is there or not. At limit+1
+	// the probe consumed the only excess byte, so without the latch the next
+	// read reaches EOF and the refusal turns back into a clean end of body —
+	// which is precisely what this test says cannot happen.
+	const limit = 4
+	body, _ := mcp.LimitedBodyForTest(io.NopCloser(strings.NewReader("01234")), limit)
 	if _, err := readAllWith(body, 3); err == nil {
-		t.Fatal("a 10-byte body was accepted at a 4-byte limit")
+		t.Fatalf("a %d-byte body was accepted at a %d-byte limit", limit+1, limit)
 	}
-	if n, err := body.Read(make([]byte, 3)); err == nil {
-		t.Errorf("reading again after the refusal returned (%d, nil), want the refusal again", n)
+	// Assert the refusal specifically, not merely "an error". Without the latch
+	// this read returns io.EOF — the probe already consumed the excess byte, so
+	// the body really is finished — and a test content with any non-nil error
+	// would call that a pass while the refusal had silently turned into a clean
+	// end of body, which is the failure it exists to catch.
+	n, err := body.Read(make([]byte, 3))
+	if err == nil || !strings.Contains(err.Error(), "exceed") {
+		t.Errorf("reading again after the refusal returned (%d, %v), want the refusal again", n, err)
+	}
+}
+
+func TestTheFallbackDeadlineOutlivesTheRoundTrip(t *testing.T) {
+	t.Parallel()
+	// The deadline the transport supplies has to survive past RoundTrip, because
+	// the body is streamed after it returns. Cancelling on return instead — the
+	// obvious shape — passes against any fixture whose body arrives whole inside
+	// the round trip, and fails against a server that streams, which is every
+	// real one. So this fixture deliberately streams: headers and a first chunk,
+	// then a pause, then the rest.
+	const first, second = "the first chunk", "and the rest of it"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("fixture cannot stream")
+			return
+		}
+		_, _ = io.WriteString(w, first)
+		fl.Flush()
+		time.Sleep(40 * time.Millisecond)
+		_, _ = io.WriteString(w, second)
+	}))
+	defer ts.Close()
+
+	// context.Background() carries no deadline, so the transport supplies one —
+	// the same shape as go-sdk's detached teardown context.
+	body, err := mcp.RoundTripBodyForTest(context.Background(), ts.URL, 1<<20)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("reading a streamed body after RoundTrip returned: %v "+
+			"(a deadline cancelled when RoundTrip returned would read exactly like this)", err)
+	}
+	if string(got) != first+second {
+		t.Errorf("body = %q, want %q", got, first+second)
 	}
 }
 
