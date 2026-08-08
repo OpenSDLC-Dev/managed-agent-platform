@@ -68,14 +68,26 @@ KMS behind `existingSecret: map-platform`).
   anonymous `GET /` **307** to `/login`, public `/api/health` **200** with
   `login_gate: true`.
 
-**Not covered by this record**, and the reason the STATE.md task stays open: the
-GitHub Actions workflow has not itself run. Nothing can drive `push: main` until
-the PR merges, and the `workflow_dispatch` path is deliberately refused from any
-other ref. Two further gaps are recorded rather than closed —
-`deploy/gcp/README.md`'s "Continuous delivery" section carries both: the WIF
-provider does not yet assert `assertion.ref`, and `model-providers` holds a
-placeholder (real endpoint, fake key) so the sequence could be proven without
-inventing a credential.
+**Not covered by this record:** the GitHub Actions workflow had not itself run.
+Nothing could drive `push: main` until the PR merged, and the `workflow_dispatch`
+path is deliberately refused from any other ref. Two further gaps were recorded
+rather than closed — `deploy/gcp/README.md`'s "Continuous delivery" section
+carries both: the WIF provider did not yet assert `assertion.ref`, and
+`model-providers` holds a placeholder (real endpoint, fake key) so the sequence
+could be proven without inventing a credential.
+
+**Since closed, in that order.** The WIF provider now asserts `ref` and
+`ref_type` alongside `repository_owner`. The workflow then ran on merge and
+failed in under a second at `gcloud builds submit` — which stages source as the
+*caller*, not as the build's `--service-account`, so every by-hand submission
+above (called by a human with Owner) had proven nothing about that path, and two
+rounds of granting the *build* identity more could not have fixed it. #349 drops
+Cloud Build from CD and builds on the runner, which needs only the
+`artifactregistry.writer` the job already held; `cloudbuild.yaml` stays as the
+manual path's definition. Run 31260884425 on `0c01e14` was green in 3m41s, build
+through smoke, and all three components run its images at `ready 1/1`. The
+`model-providers` placeholder is the one gap still open — no session will run
+until it is replaced.
 
 ## Changelog and history slimming (plan 28) — archived 2026-08-08, both slices delivered
 
