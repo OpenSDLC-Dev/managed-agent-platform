@@ -19,3 +19,14 @@ deploy/compose
 *.md
 coverage.out
 *.cov
+# Host build outputs at the repo root, the same set .gitignore now covers. Git
+# ignoring them keeps them out of commits; this keeps them out of the build
+# context, which is a separate path — a developer who runs `go build -o worker
+# ./cmd/worker` still has the file on disk, and COPY . . would ship ~80 MB of
+# host-arch binary into the image and its cache. Root-only, like coverage.out.
+/brain
+/changelog
+/controlplane
+/executor
+/gate
+/worker
