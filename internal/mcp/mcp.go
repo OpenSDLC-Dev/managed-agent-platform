@@ -139,11 +139,19 @@ type Conn struct {
 // every connection made through it, and with the zero values an idle connection
 // to a server never reached again is held until the process ends.
 //
-// And MaxResponseHeaderBytes, because net/http's default is 10 MiB — larger than
-// the whole cumulative response budget below, and charged before this package
-// sees the response at all. The budget charges header blocks too, so the sum is
-// bounded either way; this bounds the single response, so no one page can spend
-// the whole connection's budget on headers alone.
+// And MaxResponseHeaderBytes, which is the *only* bound on a response's header
+// bytes and not a second line behind the cumulative budget below. That budget
+// charges what it can reconstruct from resp.Header, and net/http normalizes the
+// block before handing it over: a value's padding whitespace is trimmed and a
+// folded continuation is joined, so the bytes are read, allocated, and then
+// unaccountable. Measured, a 200,076-byte response whose X-Pad value was one
+// character followed by 200,000 spaces reconstructed to 75 bytes — a factor of
+// 2,670, which is a distortion no arithmetic on the parsed map can correct. So
+// the raw block is bounded per response instead, and the constant is chosen
+// against the page bound rather than picked: maxToolPages of it is 6.4 MiB,
+// inside MaxResponseBytes, so a maximal listing's hidden header bytes stay
+// within the budget they cannot be charged to. net/http's own default would put
+// that product at a gigabyte.
 var DefaultClient = &http.Client{
 	Timeout: DialTimeout,
 	CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -159,9 +167,20 @@ var DefaultClient = &http.Client{
 		IdleConnTimeout:        90 * time.Second,
 		TLSHandshakeTimeout:    10 * time.Second,
 		ExpectContinueTimeout:  time.Second,
-		MaxResponseHeaderBytes: 1 << 20,
+		MaxResponseHeaderBytes: maxHeaderBytesPerResponse,
 	},
 }
+
+// maxHeaderBytesPerResponse bounds one response's raw header block, before
+// net/http parses it. See DefaultClient for why this is the only bound those
+// bytes get; the invariant that makes the number rather than merely constrains
+// it is maxToolPages * maxHeaderBytesPerResponse <= MaxResponseBytes, asserted
+// in the suite so neither side can move without the other.
+//
+// 64 KiB is roughly eight times what a server like nginx will emit in total by
+// default, and this client sets no cookie jar, so the header block it sees is
+// the server's own metadata and nothing accumulated across requests.
+const maxHeaderBytesPerResponse = 64 << 10
 
 // Connect opens a connection to one MCP server over Streamable HTTP.
 //
@@ -541,6 +560,13 @@ func (c *Conn) Close() error { return c.session.Close() }
 // nothing usefully and every repeat goes back on the wire. Retention does not
 // depend on that; serving does.)
 //
+// What it covers is bodies in full and header blocks only as far as they can be
+// counted after parsing — see headerBytes. Header bytes that normalization
+// removes are outside this bound and are held by maxHeaderBytesPerResponse
+// instead, whose product with maxToolPages is kept inside MaxResponseBytes. So
+// the honest ceiling on what one listing reads is under twice this number, not
+// this number: 8 MiB accounted plus at most 6.4 MiB unaccountable.
+//
 // 8 MiB is far above any real catalog — the whole point of a tool definition is
 // to fit in a model request, and a catalog that cannot be sent to a model is not
 // a catalog — and small enough that a host running many sessions is not one
@@ -617,14 +643,14 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if err != nil {
 		return resp, err
 	}
-	// Headers draw on the same budget as bodies. net/http has already read and
-	// allocated them by the time RoundTrip returns, so charging them cannot stop
-	// the first oversized response — what it stops is the hundredth. net/http
-	// bounds a *single* response's header block (MaxResponseHeaderBytes, 10 MiB
-	// by default) and nothing bounds their sum, so a server paginating 100 pages
-	// with a megabyte of headers on each moves a hundred megabytes past a budget
-	// that only ever looked at bodies. That is the same attack the cumulative
-	// body bound exists to stop, arriving through the other half of the response.
+	// Headers draw on the same budget as bodies, for the part of them that
+	// survives to be counted. net/http has already read and allocated the block
+	// by the time RoundTrip returns, so charging it cannot stop the first
+	// oversized response — what it stops is the hundredth, since net/http bounds
+	// a single response's block and nothing bounds their sum. What it does not
+	// stop is a block padded with whitespace, which normalization removes before
+	// resp.Header exists; those bytes are bounded by maxHeaderBytesPerResponse
+	// instead, and only on the client this package builds.
 	if n := headerBytes(resp); t.take(n) < n {
 		if resp.Body != nil {
 			_ = resp.Body.Close()
@@ -638,14 +664,20 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-// headerBytes approximates what net/http read for a response's status line and
-// header block. The bytes themselves are gone by now — they have been parsed
-// into a map — so this reconstructs the size rather than measuring it: the
-// status line, then "Key: value\r\n" per value, then the blank line that ends
-// the block. Canonicalisation means a key's recorded length may differ from the
-// one on the wire, and a folded header arrives joined; both are bounded
-// distortions on a bound whose job is to stop a server sending megabytes of
-// them, not to account for every byte.
+// headerBytes reconstructs, from the parsed map, a lower bound on what net/http
+// read for a response's status line and header block: the status line, then
+// "Key: value\r\n" per value, then the blank line that ends the block.
+//
+// A lower bound and not an approximation, which is the distinction that matters
+// and that an earlier comment here got wrong by calling the gap a "bounded
+// distortion". The bytes are gone by the time this runs, and normalization does
+// not merely perturb their count — textproto trims a value's leading and
+// trailing whitespace and joins an obsolete folded continuation, so a server
+// that pads deliberately spends header bytes this cannot see at all. Measured:
+// a value of one character followed by 200,000 spaces reconstructs to 75 bytes
+// against 200,076 on the wire. Charging what is visible is still worth doing —
+// a server sending large *legitimate* headers on every page is charged for them
+// — but the hostile case is held by maxHeaderBytesPerResponse, not here.
 func headerBytes(resp *http.Response) int64 {
 	n := int64(len(resp.Proto) + len(resp.Status) + 4)
 	for key, values := range resp.Header {

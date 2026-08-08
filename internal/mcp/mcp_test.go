@@ -1,6 +1,7 @@
 package mcp_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -1114,17 +1115,114 @@ func TestDefaultClientConfigurationIsDeliberate(t *testing.T) {
 	if transport.Proxy != nil {
 		t.Error("DefaultClient dials through a proxy, which takes the dial off the address the guard vetted")
 	}
-	// net/http's default header limit is 10 MiB — larger than the whole
-	// cumulative response budget, and spent before this package sees a byte.
-	if transport.MaxResponseHeaderBytes == 0 || transport.MaxResponseHeaderBytes > mcp.MaxResponseBytes {
-		t.Errorf("DefaultClient allows %d bytes of response headers, want a bound at or under %d",
-			transport.MaxResponseHeaderBytes, mcp.MaxResponseBytes)
+	// The per-response header bound, and the invariant that sets it. It is not
+	// a second line behind the cumulative budget: that budget charges what it
+	// can reconstruct from resp.Header, and normalization removes padding
+	// whitespace before resp.Header exists, so this is the only bound those
+	// bytes get. What makes it enough is its product with the page bound.
+	pages, hdr := mcp.PageAndHeaderBoundsForTest()
+	if transport.MaxResponseHeaderBytes != hdr {
+		t.Errorf("DefaultClient allows %d bytes of response headers, want %d — the bound the page arithmetic below is done against",
+			transport.MaxResponseHeaderBytes, hdr)
+	}
+	if total := int64(pages) * hdr; total > mcp.MaxResponseBytes {
+		t.Errorf("a maximal listing may read %d bytes of headers the byte budget cannot see, past its own %d",
+			total, int64(mcp.MaxResponseBytes))
 	}
 	// A whole-request cap. Without one, a server that trickles a response holds
 	// the work item — and its queue lease — for as long as it likes.
 	if mcp.DefaultClient.Timeout == 0 {
 		t.Error("DefaultClient sets no whole-request timeout")
 	}
+}
+
+func TestPaddedResponseHeadersAreRefusedBeforeTheyAreRead(t *testing.T) {
+	t.Parallel()
+	// The cumulative byte budget charges header blocks by reconstructing them
+	// from resp.Header, and that reconstruction is a lower bound rather than a
+	// measurement: textproto trims a value's padding whitespace before the map
+	// exists. A server that pads deliberately therefore spends bytes the budget
+	// cannot charge, and 100 pages of them is the same attack the cumulative
+	// bound was added to stop, arriving where it cannot see.
+	//
+	// So the guard is net/http's own per-response limit, and this drives it
+	// rather than asserting the constant twice: the production transport is
+	// cloned and only its dialer swapped, so what refuses the response is
+	// DefaultClient's configuration.
+	base, ok := mcp.DefaultClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("DefaultClient.Transport = %T, want *http.Transport", mcp.DefaultClient.Transport)
+	}
+	_, hdr := mcp.PageAndHeaderBoundsForTest()
+
+	for _, tc := range []struct {
+		name    string
+		pad     int
+		refused bool
+	}{
+		// Comfortably inside the bound: accepted, and charged almost nothing —
+		// which is the fact that makes the bound necessary rather than a nicety.
+		{name: "within the per-response bound", pad: int(hdr) / 2, refused: false},
+		// Past it. Under net/http's 10 MiB default this response is accepted and
+		// the budget charges it around 75 bytes, so a mutant restoring that
+		// default fails here.
+		{name: "past the per-response bound", pad: int(hdr) * 3, refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Pad: x" +
+				strings.Repeat(" ", tc.pad) + "\r\n\r\nok"
+			url := serveRaw(t, raw)
+
+			transport := base.Clone()
+			transport.DialContext = (&net.Dialer{Timeout: mcp.DialTimeout}).DialContext
+			resp, err := (&http.Client{Transport: transport, Timeout: mcp.DialTimeout}).Get(url)
+			if err == nil {
+				defer resp.Body.Close()
+			}
+			if tc.refused != (err != nil) {
+				t.Fatalf("a response carrying %d header bytes: err = %v, want refused = %v",
+					len(raw), err, tc.refused)
+			}
+			if err == nil && resp.Header.Get("X-Pad") != "x" {
+				t.Fatalf("X-Pad reached the client as %q — the padding was not trimmed, so this fixture no longer tests what it names",
+					resp.Header.Get("X-Pad"))
+			}
+		})
+	}
+}
+
+// serveRaw answers every request on a fresh listener with a hand-written
+// response, which httptest cannot do: net/http writes the header block itself
+// and trims what this test needs on the wire.
+func serveRaw(t *testing.T, response string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				br := bufio.NewReader(conn)
+				for {
+					if _, err := http.ReadRequest(br); err != nil {
+						return
+					}
+					if _, err := io.WriteString(conn, response); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return "http://" + ln.Addr().String() + "/rpc"
 }
 
 func TestDefaultClientSpeaksHTTP2(t *testing.T) {

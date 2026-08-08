@@ -128,6 +128,16 @@ func (s *headerSpy) RoundTrip(req *http.Request) (*http.Response, error) {
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}, nil
 }
 
+// PageAndHeaderBoundsForTest reports the page bound and the per-response raw
+// header bound. Their product is the part of a listing's reads the cumulative
+// byte budget cannot account for — net/http normalizes a header block before
+// this package can measure it — so keeping that product inside MaxResponseBytes
+// is what makes the published ceiling true, and it is an invariant across two
+// constants rather than a property of either.
+func PageAndHeaderBoundsForTest() (pages int, headerBytes int64) {
+	return maxToolPages, maxHeaderBytesPerResponse
+}
+
 // Budget is a handle on one connection's shared byte budget.
 type Budget struct{ t *limitedTransport }
 
