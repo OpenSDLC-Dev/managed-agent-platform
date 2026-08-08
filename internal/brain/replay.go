@@ -283,9 +283,10 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 // policy. A custom tool is client-executed (agent.custom_tool_use) and carries
 // no policy; an agent_toolset tool is platform-executed (agent.tool_use) and
 // carries a policy; mcp_toolset waits for the discovery driver that fills a
-// server's catalog, so its tools are not offered and never appear here. A name the model calls that is in neither map
-// falls back to custom at emission — the client can reject it — since the
-// platform only runs names it recognises as its own.
+// server's catalog, so its tools are not offered and never appear here. A name
+// the model calls that is in neither map falls back to custom at emission — the
+// client can reject it — since the platform only runs names it recognises as
+// its own.
 //
 // The built-in names come from toolset.Policies' keys (every enabled tool,
 // which is exactly what Tools offers), so classify resolves each entry once and

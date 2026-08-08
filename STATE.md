@@ -18,11 +18,10 @@ end of slice 4.
       [wire.go](./internal/api/wire.go),
       [mcptoolset_test.go](./internal/api/mcptoolset_test.go).
 - [ ] Slice 2 — `internal/mcp` client + `mcp_catalogs` + the discovery driver.
-      Client landed: streamable HTTP, bearer injection, self-driven paging, and a
-      listing that survives a hostile server. `internal/dialguard` is now one
-      guard under the MCP client and the vault probe, and closes the probe's
-      IPv4-compatible-IPv6 gap. Still open: `mcp_catalogs` migration + store, the
-      `mcp_exec` driver and its egress check, the HTTP+SSE fallback.
+      Client landed: streamable HTTP, bearer injection, self-driven paging, a
+      listing that survives a hostile server, and `internal/dialguard` extracted
+      as one guard under it and the vault probe. Still open: `mcp_catalogs`
+      migration + store, the `mcp_exec` driver and its egress check.
       Evidence: [mcp.go](./internal/mcp/mcp.go),
       [dialguard.go](./internal/dialguard/dialguard.go).
 - [ ] Slice 3 — MCP confirmation gating and denial synthesis.

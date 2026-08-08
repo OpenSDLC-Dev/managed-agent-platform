@@ -1,10 +1,12 @@
 package mcp
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // SameHostForTest exposes the origin comparison the bearer-token transport
@@ -26,8 +28,43 @@ var SameHostForTest = sameHost
 // the test's — so the test would be asserting something about net/http's
 // chunking rather than about this reader.
 func LimitedBodyForTest(body io.ReadCloser, limit int64) (io.ReadCloser, *Budget) {
-	t := &limitedTransport{limit: limit, budget: budgetFor(limit)}
+	t := newLimitedTransport(nil, limit)
 	return &limitedBody{ReadCloser: body, transport: t}, &Budget{t}
+}
+
+// RequestDeadlineForTest reports the deadline the transport gave an outbound
+// request, as observed by the round-tripper underneath it, and whether there was
+// one at all. Pass a context to make the request with.
+//
+// The path it exercises is only reachable from outside through go-sdk's own
+// connection teardown, which detaches its context deliberately, so driving the
+// transport directly is the only way to assert the fallback both fires when a
+// request carries no deadline and stays out of the way when it does.
+func RequestDeadlineForTest(ctx context.Context) (time.Duration, bool) {
+	spy := &deadlineSpy{}
+	tr := newLimitedTransport(spy, 1<<20)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, "http://example.invalid/rpc", nil)
+	if err != nil {
+		panic(err)
+	}
+	if _, err := tr.RoundTrip(req); err != nil {
+		panic(err)
+	}
+	return spy.left, spy.had
+}
+
+type deadlineSpy struct {
+	had  bool
+	left time.Duration
+}
+
+func (s *deadlineSpy) RoundTrip(req *http.Request) (*http.Response, error) {
+	var dl time.Time
+	dl, s.had = req.Context().Deadline()
+	if s.had {
+		s.left = time.Until(dl)
+	}
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}, nil
 }
 
 // BearerAttachesForTest reports whether a bearer transport scoped to endpoint

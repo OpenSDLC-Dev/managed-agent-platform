@@ -53,14 +53,15 @@ func IPAllowed(ip net.IP) error {
 	for _, target := range embeddedIPv4(ip) {
 		// A decode landing on the unspecified address is reading padding
 		// rather than a target, and must not refuse the address it was read
-		// from. RFC 6052 §2.2 puts the suffix — SHOULD-zero — in the low 32
-		// bits for every prefix length from /32 to /56, so a reader of those
-		// bits sees 0.0.0.0 rather than a target. For the layouts a deployment
-		// can actually use under this prefix that means /48 and /56, whose
-		// whole suffix lands there: the guard this package replaced refused
-		// *every* conformant mapping under both, 64:ff9b:1:808:8:800:: (a /48
-		// mapping of 8.8.8.8) as readily as it admitted the /48 mapping of
-		// cloud metadata below. One misreading, pointing both ways.
+		// from. RFC 6052 §2.2 makes the suffix SHOULD-zero and, for every prefix
+		// length from /32 to /56, that suffix covers all four of the low 32
+		// bits — so a reader of those bits sees 0.0.0.0 rather than a target.
+		// (It is the suffix that contains them, not the other way round: at /48
+		// the suffix is bytes 11-15.) For the layouts a deployment can actually
+		// use under this prefix that means /48 and /56: the guard this replaced
+		// refused *every* conformant mapping under both, 64:ff9b:1:808:8:800::
+		// (a /48 mapping of 8.8.8.8) as readily as it admitted the /48 mapping
+		// of cloud metadata below. One misreading, pointing both ways.
 		//
 		// (The /32 and /40 rows are arithmetic rather than deployments. RFC 6052
 		// fixes the well-known prefix at /96, and the only shorter prefix inside
@@ -150,7 +151,9 @@ func refused(ip net.IP) bool {
 // or 3 is 127 or in 224-239, which alone accounts for 12.840% of the measured
 // 12.843%; the remainder is 169.254 turning up in the /56 and /64 readings —
 // then 6.6% under /56 and /64, and 0% under /96, each measured exhaustively over
-// the octets the layout reads rather than sampled. But an operator may carve an NSP whose own fixed bytes read as a
+// the octets the layout reads rather than sampled.
+//
+// But an operator may carve an NSP whose own fixed bytes read as a
 // blocked class under a shorter layout, and then the refusal does not depend on
 // the target at all: under 64:ff9b:1:7f00::/96 the /48 reading of the prefix is
 // 127.0.0.0, so **every** address that prefix can express is refused. Nothing

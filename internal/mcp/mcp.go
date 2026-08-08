@@ -440,14 +440,18 @@ const MaxResponseBytes = 8 << 20
 // keeps it, so this never shortens ListTimeout.
 func withResponseLimit(client *http.Client) *http.Client {
 	copied := *client
-	copied.Transport = &limitedTransport{base: client.Transport, limit: MaxResponseBytes, budget: budgetFor(MaxResponseBytes)}
+	copied.Transport = newLimitedTransport(client.Transport, MaxResponseBytes)
 	return &copied
 }
 
-// budgetFor is the counter a limit of n bytes starts at: one byte more, the
-// headroom limitedBody needs to tell "ended exactly on the limit" from "had more
-// to send". It exists as a function so the test seam cannot drift from it.
-func budgetFor(n int64) int64 { return n + 1 }
+// newLimitedTransport is the one place a budget is funded. It exists as a
+// function so the test seam draws on the same wiring: with the two spelled out
+// separately, a mutant that funded the production budget with a spare byte —
+// reintroducing exactly the off-by-one this package already shipped once — left
+// the boundary tests green, because they were funding their own.
+func newLimitedTransport(base http.RoundTripper, limit int64) *limitedTransport {
+	return &limitedTransport{base: base, limit: limit, budget: limit}
+}
 
 // limitedTransport holds the connection's whole byte budget, so every response
 // it wraps draws from one counter. One connection is used by one work item at a
@@ -498,15 +502,20 @@ func (t *limitedTransport) take(n int64) int64 {
 // truncated JSON-RPC body that ended quietly would be reported as a parse
 // failure, which reads like a broken server rather than a refused one.
 //
-// A body that ends exactly on the budget is not over it, which is why the
-// transport is funded with one byte of headroom rather than exactly the limit.
-// Reaching the limit leaves that byte unspent, so the read that would have
-// returned it instead returns io.EOF and the response is accepted; only a server
-// with something to put in it spends the byte, and the read after that is the
-// one refused. Without the headroom, whether an exactly-MaxResponseBytes
-// response succeeded would depend on whether its final bytes arrived with
-// io.EOF attached or on the read after them — a property of the server's
-// chunking, not of the response.
+// A body that ends exactly on the budget is not over it, and telling those two
+// apart is the whole difficulty: the reader that ends on the limit and the one
+// with a byte more look identical until someone asks for the next byte. So when
+// the budget runs out this asks — into a scratch byte of its own, never into the
+// caller's buffer, because a byte past the limit must not be delivered even once.
+// Nothing arrives, the body ended on the limit and is accepted; a byte arrives,
+// the server had more and the response is refused.
+//
+// Funding the budget with a spare byte instead would be simpler and is wrong: it
+// makes the headroom byte *deliverable*, so a body of exactly limit+1 whose
+// final bytes arrive with io.EOF attached is accepted while the same body split
+// one byte earlier is refused. That is the chunking dependence this is here to
+// remove, moved one byte along rather than fixed — and net/http attaches EOF
+// exactly that way, so the permissive case is the common one, not the exotic one.
 type limitedBody struct {
 	io.ReadCloser
 	transport *limitedTransport
@@ -515,21 +524,40 @@ type limitedBody struct {
 
 func (b *limitedBody) Read(p []byte) (int, error) {
 	if b.spent {
-		return 0, fmt.Errorf("mcp: server responses exceed %d bytes in total", b.transport.limit)
+		return 0, b.tooBig()
 	}
+	// A zero-length read must not consult the budget: take(0) returns 0, which
+	// is indistinguishable from an exhausted budget and would latch this body
+	// spent forever over a read that asked for nothing.
 	if len(p) == 0 {
 		return 0, nil
 	}
 	room := b.transport.take(int64(len(p)))
 	if room == 0 {
-		b.spent = true
-		return 0, fmt.Errorf("mcp: server responses exceed %d bytes in total", b.transport.limit)
+		var probe [1]byte
+		n, err := b.ReadCloser.Read(probe[:])
+		switch {
+		case n > 0:
+			b.spent = true
+			return 0, b.tooBig()
+		case err != nil:
+			// EOF included: the body ended exactly on the budget, which is
+			// within it. Report what the server reported.
+			return 0, err
+		default:
+			// No byte and no error is legal and means "ask again".
+			return 0, nil
+		}
 	}
 	n, err := b.ReadCloser.Read(p[:room])
 	if unused := room - int64(n); unused > 0 {
 		b.transport.give(unused)
 	}
 	return n, err
+}
+
+func (b *limitedBody) tooBig() error {
+	return fmt.Errorf("mcp: server responses exceed %d bytes in total", b.transport.limit)
 }
 
 // give returns bytes drawn but not used, so a short read does not spend budget a

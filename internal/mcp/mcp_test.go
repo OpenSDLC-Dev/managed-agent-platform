@@ -933,28 +933,158 @@ func TestListToolsReportsATransportFailure(t *testing.T) {
 
 func TestResponseBudgetAllowsExactlyTheLimit(t *testing.T) {
 	t.Parallel()
-	// The bound must mean "at most MaxResponseBytes", not "fewer than". Whether
-	// a body ending exactly on it succeeds must also not depend on how the
-	// server chunked it — an underlying reader may hand back its final bytes
-	// with io.EOF attached or only on the read after them, and both are legal.
-	// Varying the read buffer exercises both shapes.
+	// The bound must mean "at most MaxResponseBytes", not "fewer than" and not
+	// "one more than". Whether a body is accepted must also not depend on how
+	// the server chunked it: a reader may hand back its final bytes with io.EOF
+	// attached or return them and only report EOF on the read after, and both
+	// are legal. bytes.Reader only ever does the second, so testing against it
+	// alone proved nothing about the first — and net/http does the first, which
+	// makes it the shape that matters in production rather than the exotic one.
+	// Both are exercised here, at four read sizes.
 	const limit = 64
-	for _, bufSize := range []int{1, 7, limit, limit * 2} {
-		for _, size := range []int{limit - 1, limit, limit + 1} {
-			body, _ := mcp.LimitedBodyForTest(io.NopCloser(bytes.NewReader(make([]byte, size))), limit)
-			got, err := readAllWith(body, bufSize)
-			switch {
-			case size <= limit && err != nil:
-				t.Errorf("body of %d read %d at a time: %v, want it accepted at a %d limit",
-					size, bufSize, err, limit)
-			case size <= limit && got != size:
-				t.Errorf("body of %d read %d at a time: got %d bytes, want %d",
-					size, bufSize, got, size)
-			case size > limit && err == nil:
-				t.Errorf("body of %d read %d at a time was accepted at a %d limit",
-					size, bufSize, limit)
+	for _, shape := range []struct {
+		name string
+		open func(int) io.ReadCloser
+	}{
+		{name: "EOF on the read after the last bytes", open: func(n int) io.ReadCloser {
+			return io.NopCloser(bytes.NewReader(make([]byte, n)))
+		}},
+		{name: "EOF attached to the last bytes", open: func(n int) io.ReadCloser {
+			return io.NopCloser(&eofAttachingReader{left: n})
+		}},
+	} {
+		for _, bufSize := range []int{1, 7, limit, limit * 2} {
+			for _, size := range []int{limit - 1, limit, limit + 1} {
+				body, _ := mcp.LimitedBodyForTest(shape.open(size), limit)
+				got, err := readAllWith(body, bufSize)
+				switch {
+				case size <= limit && err != nil:
+					t.Errorf("%s: body of %d read %d at a time: %v, want it accepted at a %d limit",
+						shape.name, size, bufSize, err, limit)
+				case size <= limit && got != size:
+					t.Errorf("%s: body of %d read %d at a time: got %d bytes, want %d",
+						shape.name, size, bufSize, got, size)
+				case size > limit && err == nil:
+					t.Errorf("%s: body of %d read %d at a time was accepted at a %d limit",
+						shape.name, size, bufSize, limit)
+				case size > limit && got > limit:
+					t.Errorf("%s: body of %d read %d at a time delivered %d bytes past a %d limit",
+						shape.name, size, bufSize, got, limit)
+				}
 			}
 		}
+	}
+}
+
+// eofAttachingReader returns io.EOF alongside its final bytes rather than on the
+// read after them — what net/http does, and what bytes.Reader never does.
+type eofAttachingReader struct{ left int }
+
+func (r *eofAttachingReader) Read(p []byte) (int, error) {
+	if r.left == 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if n > r.left {
+		n = r.left
+	}
+	r.left -= n
+	if r.left == 0 {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func TestResponseBudgetIgnoresAZeroLengthRead(t *testing.T) {
+	t.Parallel()
+	// A read asking for nothing must not consult the budget. take(0) returns 0,
+	// which is indistinguishable from an exhausted budget, so without the guard
+	// a zero-length read latches the body refused for good — and io.Copy and
+	// friends are entitled to make one.
+	body, _ := mcp.LimitedBodyForTest(io.NopCloser(strings.NewReader("hello")), 64)
+	if n, err := body.Read(nil); n != 0 || err != nil {
+		t.Fatalf("Read(nil) = (%d, %v), want (0, nil)", n, err)
+	}
+	got, err := io.ReadAll(body)
+	if err != nil || string(got) != "hello" {
+		t.Errorf("after a zero-length read: %q, %v; want \"hello\" and no error", got, err)
+	}
+}
+
+func TestResponseBudgetToleratesAProbeThatYieldsNothing(t *testing.T) {
+	t.Parallel()
+	// io.Reader may legally return (0, nil) — "nothing yet, ask again". The
+	// probe that decides whether a body ended on the budget or ran past it must
+	// read that as neither answer and let the caller retry, rather than as EOF
+	// (accepting a body that may still have bytes) or as a byte (refusing one
+	// that does not).
+	body, _ := mcp.LimitedBodyForTest(io.NopCloser(&stallingReader{left: 8}), 8)
+	got, err := readAllWith(body, 4)
+	if err != nil || got != 8 {
+		t.Errorf("body of 8 at an 8-byte limit: got %d bytes, %v; want 8 and no error", got, err)
+	}
+}
+
+// stallingReader delivers its bytes, then returns (0, nil) once before EOF.
+type stallingReader struct {
+	left    int
+	stalled bool
+}
+
+func (r *stallingReader) Read(p []byte) (int, error) {
+	if r.left > 0 {
+		n := len(p)
+		if n > r.left {
+			n = r.left
+		}
+		r.left -= n
+		return n, nil
+	}
+	if !r.stalled {
+		r.stalled = true
+		return 0, nil
+	}
+	return 0, io.EOF
+}
+
+func TestResponseBudgetStaysRefusedOnceExceeded(t *testing.T) {
+	t.Parallel()
+	// The refusal is sticky. A caller that reads past the error would otherwise
+	// see the budget reopen for the bytes the probe has already proven are over
+	// the limit.
+	body, _ := mcp.LimitedBodyForTest(io.NopCloser(strings.NewReader("0123456789")), 4)
+	if _, err := readAllWith(body, 3); err == nil {
+		t.Fatal("a 10-byte body was accepted at a 4-byte limit")
+	}
+	if n, err := body.Read(make([]byte, 3)); err == nil {
+		t.Errorf("reading again after the refusal returned (%d, nil), want the refusal again", n)
+	}
+}
+
+func TestDetachedRequestsGetADeadlineOfTheirOwn(t *testing.T) {
+	t.Parallel()
+	// go-sdk detaches a connection's lifecycle context deliberately
+	// (xcontext.Detach: no deadline, nil Done) and sends the session-ending
+	// DELETE on it, so neither the caller's context nor ListTimeout can bound
+	// that request. http.Client.Timeout would, but it belongs to the caller and
+	// a supplied client may leave it zero — so the transport supplies a floor.
+	if left, had := mcp.RequestDeadlineForTest(context.Background()); !had {
+		t.Error("a request with no deadline reached the round-tripper still without one")
+	} else if left <= 0 || left > mcp.DialTimeout {
+		t.Errorf("fallback deadline left %v, want (0, %v]", left, mcp.DialTimeout)
+	}
+
+	// And it is a floor, not a cap: a request that brought its own deadline
+	// keeps it, so this never shortens ListTimeout.
+	own := mcp.DialTimeout + 10*time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), own)
+	defer cancel()
+	left, had := mcp.RequestDeadlineForTest(ctx)
+	if !had {
+		t.Fatal("a request that carried a deadline arrived without one")
+	}
+	if left <= mcp.DialTimeout {
+		t.Errorf("a request carrying a %v deadline was cut to %v", own, left)
 	}
 }
 
