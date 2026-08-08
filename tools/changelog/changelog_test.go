@@ -609,10 +609,15 @@ func TestFirstEverReleaseLinkRef(t *testing.T) {
 // A fragment directory that cannot be modified must fail BEFORE the changelog
 // is written — never a released section with fragments left behind.
 func TestAssembleStagingFailureLeavesEverythingUntouched(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the write bit, so this proves nothing")
+	}
 	clPath, dir := writeFixture(t, steadyChangelog, map[string]string{"a.added.md": "- A.\n"})
 	// Pre-create .consumed so MkdirAll succeeds and the failure lands on the
 	// rename itself (removing a directory entry needs a writable parent).
-	// chmod-based denial assumes a non-root runner, which CI and local dev are.
+	// chmod-based denial needs a non-root runner: CAP_DAC_OVERRIDE makes the
+	// 0555 below inert, so the rename succeeds and the assertion is vacuous —
+	// hence the skip above, matching internal/sandbox's five prior instances.
 	if err := os.Mkdir(filepath.Join(dir, ".consumed"), 0o755); err != nil {
 		t.Fatal(err)
 	}
