@@ -4,9 +4,17 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
+Two unrelated things in flight.
+
 [Plan 29](./docs/plan/29_mcp-toolset.md) — the MCP client and `mcp_toolset`
 wired end to end (#45). Seven slices; #45's acceptance criterion is met at the
 end of slice 4.
+
+**GCP continuous delivery** — plan-less, single PR. Build → push → deploy →
+smoke on every push to `main`, in **mode 2**. Infrastructure stays human-driven;
+CD runs no Terraform (plan 20, Decision 9). Proven by hand against the real
+project first, then the repo made to match what ran — the run, its numbers and
+what it does *not* cover: [docs/HISTORY.md](./docs/HISTORY.md).
 
 ## Tasks
 
@@ -28,3 +36,18 @@ end of slice 4.
 - [ ] Slice 5 — vault credentials, injection, OAuth refresh.
 - [ ] Slice 6 — networking polish and retry semantics.
 - [ ] Slice 7 — evals, live tier, `ant` CLI acceptance, archive.
+- [x] **CD landed** — `cloudbuild.yaml` (`DOCKER_BUILDKIT=1`, a pre-existing bug
+      the `FROM --platform=$BUILDPLATFORM` line needs, plus `CLOUD_LOGGING_ONLY`),
+      `deploy/gcp/staging-values.yaml`, `.github/workflows/deploy.yml`, two CI
+      steps that render the values file (the sandbox pair, and the seven-key
+      Secret contract in both directions), and the runbook split in
+      `deploy/gcp/README.md`.
+- [ ] CD's first run **from the workflow itself**: every step is proven by hand,
+      but no push to `main` has yet driven it end to end.
+- [x] WIF ref gap closed — the provider now asserts `ref == refs/heads/main` and
+      `ref_type == branch` as well as `repository_owner`, so a dispatched branch
+      can no longer mint the deploy identity. Command and read-back in
+      `deploy/gcp/README.md`; unexercised until a dispatch from a throwaway
+      branch is seen to fail at auth rather than at the workflow's own guard.
+- [ ] Replace the `model-providers` placeholder (real endpoint, fake key) with a
+      live route before anything runs a session.

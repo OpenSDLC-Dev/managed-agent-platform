@@ -17,6 +17,12 @@
 steps:
   - name: gcr.io/cloud-builders/docker
     id: server
+    # The Dockerfile's first line is `FROM --platform=$BUILDPLATFORM`, and
+    # BUILDPLATFORM/TARGETOS/TARGETARCH are BuildKit-only variables. Under the
+    # classic builder they expand to the empty string and the daemon rejects the
+    # platform specifier outright — `"" is an invalid component of ""` — so this
+    # env var is what makes the build run at all, not a performance choice.
+    env: ["DOCKER_BUILDKIT=1"]
     args:
       - build
       - -t
@@ -29,6 +35,7 @@ steps:
   # Reuses the build stage's layers from the same daemon, so this is cheap.
   - name: gcr.io/cloud-builders/docker
     id: gate
+    env: ["DOCKER_BUILDKIT=1"] # same reason as the step above
     args: ["build", "--target", "gate", "-t", "${_IMAGE_PREFIX}/gate:${_TAG}", "."]
 images:
   - "${_IMAGE_PREFIX}/controlplane:${_TAG}"
@@ -42,3 +49,9 @@ images:
 timeout: 2400s
 options:
   machineType: E2_HIGHCPU_8
+  # Required as soon as the build runs as a service account of its own, which
+  # the delivery pipeline does: with a user-specified identity Cloud Build
+  # refuses to use its default logs bucket, and the alternative is granting that
+  # identity storage.admin on a bucket it did not create. Sending logs to Cloud
+  # Logging needs only roles/logging.logWriter.
+  logging: CLOUD_LOGGING_ONLY
