@@ -231,11 +231,13 @@ const maxHeaderBytesPerResponse = 64 << 10
 // net/http pads the HTTP/1 figure by an assumed ten fields:
 // http2adjustHTTP1MaxHeaderSize adds typicalHeaders(10) * perFieldOverhead(32).
 // The framer therefore admits maxHeaderBytesPerResponse+320 per block, and a
-// single field can carry nearly all of it — measured against a fixture, a
-// trailer value of 65,821 bytes is accepted where the raw cap says 65,536. It is
-// named here so the fixture either side of the cap can assert the real boundary
-// rather than a rounder one, which is the only way the constant above is known
-// to describe net/http and not just itself.
+// single field can carry nearly all of it. Bisected against a real HTTP/2
+// fixture rather than reasoned about: the largest trailer value accepted is
+// 65,856 bytes and the first refused is 65,857 — landing exactly on the sum,
+// which is what makes this constant a description of net/http rather than of
+// itself. The fixtures either side of the cap sit within a few dozen bytes of
+// that boundary for the same reason; rounder margins would pass under any
+// overhead value.
 const http2HeaderListOverhead = 320
 
 // Connect opens a connection to one MCP server over Streamable HTTP.
@@ -624,8 +626,9 @@ func (c *Conn) Close() error { return c.session.Close() }
 // instead, and *per block* is where the arithmetic stops rather than continues.
 //
 // No cumulative bound on delivered header bytes is worth publishing, and four
-// revisions of this comment published one regardless, each falsified in turn: "header blocks included", which whitespace padding falsified; "8 MiB
-// plus 6.4 MiB", which assumed the cap covered a response rather than a block; a
+// revisions of this comment published one regardless, each falsified in turn:
+// "header blocks included", which whitespace padding falsified; "8 MiB plus
+// 6.4 MiB", which assumed the cap covered a response rather than a block; a
 // figure whose mechanism was right and which still claimed a socket total no
 // header arithmetic can produce (a measured maximal listing read 26.898 MiB on
 // the wire against a ceiling of 26.750, the excess being HPACK, frame headers
@@ -651,12 +654,18 @@ func (c *Conn) Close() error { return c.session.Close() }
 // this package published, which came of multiplying that count by a per-response
 // size instead of measuring one.
 //
-// Strictly a cumulative bound does follow, and it is worth naming only to say
-// why it is not published: headerBytes charges every response at least the
-// twenty-odd bytes of its status line and terminator, so this budget does cap
-// the response count, at a few hundred thousand — and three maximal blocks on
-// each of those is a figure in the tens of terabytes. That is arithmetic, not a
-// bound, and publishing it would repeat the mistake in a sixth form.
+// One thing here is bounded and worth saying: headerBytes charges every response
+// at least the twenty-odd bytes of its status line and terminator, so this budget
+// caps the response count too, at a few hundred thousand. The product of that
+// count with a maximal block is not written down, and the omission is deliberate
+// rather than lazy. The revision before this one did write it, as "tens of
+// terabytes", and it was wrong by a factor of a thousand — the arithmetic comes
+// to some eighty gigabytes. That was the sixth wrong figure in this paragraph's
+// history, published inside the sentence explaining why a sixth must not be, one
+// file over from a test comment saying multiplying these two would be the same
+// mistake in a third form. The rule this paragraph now keeps is the narrow one
+// it kept failing: numbers here are measured, and a product of two of them is
+// not a measurement.
 //
 // What is bounded usefully is the peak and not the sum: one header block at a
 // time, plus this cumulative figure for everything that can be accounted. The
@@ -781,7 +790,9 @@ func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 //
 // Three routes miss this map. A 1xx informational block — 103 Early Hints, say
 // — never enters resp.Header at all, and a server may send many before the final
-// response; measured at 100 pages, 91.8 MB on the wire for 3,900 bytes charged.
+// response; measured at 100 pages, 91.8 MB on the wire for 3,900 bytes charged —
+// measured under net/http's 10 MiB default, so it sizes the gap this package
+// then closes rather than one that survives the cap below.
 // Padding whitespace is the second. Trailers are the third: they arrive after
 // the body, so they are not in the map when this runs. All three are held by
 // maxHeaderBytesPerResponse, one block at a time — over HTTP/2 that cap applies
