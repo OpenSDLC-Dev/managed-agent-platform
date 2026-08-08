@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1054,7 +1055,7 @@ func TestDefaultClientRefusesRedirects(t *testing.T) {
 	if mcp.DefaultClient.CheckRedirect == nil {
 		t.Fatal("DefaultClient follows redirects")
 	}
-	if err := mcp.DefaultClient.CheckRedirect(req, nil); err != http.ErrUseLastResponse {
+	if err := mcp.DefaultClient.CheckRedirect(req, nil); !errors.Is(err, http.ErrUseLastResponse) {
 		t.Errorf("CheckRedirect = %v, want ErrUseLastResponse", err)
 	}
 }
@@ -1148,7 +1149,7 @@ func TestDefaultClientConfigurationIsDeliberate(t *testing.T) {
 	// can reconstruct from resp.Header, and normalization removes padding
 	// whitespace before resp.Header exists, so this is the only bound those
 	// bytes get. What makes it enough is its product with the page bound.
-	pages, blocks, hdr, h2Overhead := mcp.PageAndHeaderBoundsForTest()
+	responses, blocks, hdr, h2Overhead := mcp.PageAndHeaderBoundsForTest()
 	if transport.MaxResponseHeaderBytes != hdr {
 		t.Errorf("DefaultClient allows %d bytes of response headers, want %d — the bound the page arithmetic below is done against",
 			transport.MaxResponseHeaderBytes, hdr)
@@ -1159,8 +1160,8 @@ func TestDefaultClientConfigurationIsDeliberate(t *testing.T) {
 	// also means the published ceiling cannot drift from the constants: whoever
 	// moves one has to come here, and the number they find here is the one the
 	// doc comments and docs/DIVERGENCES.md print.
-	const unaccountable = 19_756_800 // 18.84 MiB
-	if total := int64(pages) * int64(blocks) * (hdr + h2Overhead); total != unaccountable {
+	const unaccountable = 20_547_072 // 19.60 MiB
+	if total := int64(responses) * int64(blocks) * (hdr + h2Overhead); total != unaccountable {
 		t.Errorf("a maximal listing may carry %d bytes of header fields the byte budget cannot see; the published ceiling says %d — update both or neither",
 			total, int64(unaccountable))
 	}
@@ -1348,6 +1349,13 @@ func TestHTTP2CapsEachHeaderBlockSeparately(t *testing.T) {
 		// row would pass while the constant was wrong; these two straddle the
 		// real ceiling closely enough that setting the overhead to 0 or to
 		// double it turns one of them red.
+		//
+		// What refuses it is hpack's per-field string limit rather than the
+		// header-list limit, and the two are the same number by construction
+		// (maxHeaderStringLen is defined as maxHeaderListSize), so the row still
+		// moves with the constant. Naming the wrong one would matter if they
+		// ever diverged: an over-list-size trailer is *dropped* rather than
+		// refused, since processTrailers does not check the Truncated flag.
 		{name: "a block just past h2's inflated cap", value: hdr + h2Overhead + 64, refused: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1385,6 +1393,69 @@ func TestHTTP2CapsEachHeaderBlockSeparately(t *testing.T) {
 			if tc.refused != (err != nil) {
 				t.Fatalf("a trailer field of %d bytes against a %d-byte cap: err = %v, want refused = %v",
 					tc.value, hdr, err, tc.refused)
+			}
+		})
+	}
+}
+
+func TestInformationalBlocksShareOneAllowance(t *testing.T) {
+	t.Parallel()
+	// maxHeaderBlocksPerResponse = 3 is a ceiling only if a server cannot buy a
+	// fresh allowance per informational block by sending more of them. It
+	// cannot: over HTTP/2 the client accumulates them into one total that is
+	// never reset, so any number of 1xx blocks is one position rather than N.
+	// Without this, nothing in the suite could fail on the difference between
+	// "three blocks" and "unbounded blocks" — the arithmetic assertion compares
+	// constants to a literal and would agree with either.
+	_, _, hdr, _ := mcp.PageAndHeaderBoundsForTest()
+	const hint = 30000
+
+	for _, tc := range []struct {
+		name    string
+		hints   int
+		refused bool
+	}{
+		{name: "two hints inside one allowance", hints: 2},
+		// Three of the same size exceed it. If each block got its own
+		// allowance, every row here would be accepted.
+		{name: "three hints exceed the one allowance", hints: 3, refused: true},
+		{name: "ten hints exceed it by more", hints: 10, refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				for i := range tc.hints {
+					key := fmt.Sprintf("X-Hint-%d", i)
+					w.Header().Set(key, strings.Repeat("h", hint))
+					w.WriteHeader(http.StatusEarlyHints)
+					w.Header().Del(key)
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+			}))
+			ts.EnableHTTP2 = true
+			ts.StartTLS()
+			defer ts.Close()
+
+			base, ok := mcp.DefaultClient.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("DefaultClient.Transport = %T, want *http.Transport", mcp.DefaultClient.Transport)
+			}
+			transport := base.Clone()
+			transport.DialContext = (&net.Dialer{Timeout: mcp.DialTimeout}).DialContext
+			transport.TLSClientConfig = ts.Client().Transport.(*http.Transport).TLSClientConfig
+
+			resp, err := (&http.Client{Transport: transport, Timeout: mcp.DialTimeout}).Get(ts.URL)
+			if err == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+				if resp.Proto != "HTTP/2.0" {
+					t.Fatalf("server was spoken to over %s, want HTTP/2.0", resp.Proto)
+				}
+			}
+			if tc.refused != (err != nil) {
+				t.Fatalf("%d informational blocks of %d bytes against a %d-byte allowance: err = %v, want refused = %v",
+					tc.hints, hint, hdr, err, tc.refused)
 			}
 		})
 	}

@@ -153,8 +153,8 @@ func LimitedTransportForTest(base http.RoundTripper, limit int64) http.RoundTrip
 // than as an inequality. An inequality bounds the cap from above and leaves it
 // free below, which let a mutant tighten it to 1 KiB — a value that would break
 // essentially every real server — with the whole suite green.
-func PageAndHeaderBoundsForTest() (pages, blocks int, headerBytes, h2Overhead int64) {
-	return maxToolPages, maxHeaderBlocksPerResponse, maxHeaderBytesPerResponse, http2HeaderListOverhead
+func PageAndHeaderBoundsForTest() (responses, blocks int, headerBytes, h2Overhead int64) {
+	return maxResponsesPerConnection, maxHeaderBlocksPerResponse, maxHeaderBytesPerResponse, http2HeaderListOverhead
 }
 
 // Budget is a handle on one connection's shared byte budget.

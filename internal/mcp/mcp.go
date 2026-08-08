@@ -157,9 +157,9 @@ type Conn struct {
 // character followed by 200,000 spaces reconstructed to 75 bytes — a factor of
 // 2,670, which is a distortion no arithmetic on the parsed map can correct. So
 // the raw block is bounded here instead, per header block, and what a maximal
-// listing can hide is maxToolPages * maxHeaderBlocksPerResponse * (this constant
-// + http2HeaderListOverhead) — 18.84 MiB, against net/http's own default putting
-// it near 3 GiB.
+// listing can hide is maxResponsesPerConnection * maxHeaderBlocksPerResponse *
+// (this constant + http2HeaderListOverhead) — 19.60 MiB, against net/http's own
+// default putting it past 3 GiB.
 var DefaultClient = &http.Client{
 	Timeout: DialTimeout,
 	CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -235,6 +235,24 @@ const maxHeaderBlocksPerResponse = 3
 // single field can carry nearly all of it — measured against a fixture, a
 // trailer value of 65,821 bytes is accepted where the raw cap says 65,536.
 const http2HeaderListOverhead = 320
+
+// maxResponsesPerConnection is what the header term is multiplied by, and it is
+// maxToolPages plus four rather than maxToolPages, because a listing is not the
+// only thing a connection answers.
+//
+// Counted rather than reasoned about — one Connect, a maximal ListTools and a
+// Close produce 104 responses: server/discover, then initialize and
+// notifications/initialized when that falls back to the legacy handshake, then
+// a hundred tools/list pages, then the session-ending DELETE. Every one of them
+// carries header blocks, so multiplying by the page bound alone understated the
+// term by four responses' worth. It was still under the published ceiling, but
+// only because a second approximation happened to point the other way — the
+// term counts the final block as unaccountable when over HTTP/2 that block is
+// charged, since h2 does not trim header values and the reconstruction is a
+// lower bound on what it delivered. Two errors cancelling is not an argument,
+// so the count is right here and the conservatism is stated rather than relied
+// on.
+const maxResponsesPerConnection = maxToolPages + 4
 
 // Connect opens a connection to one MCP server over Streamable HTTP.
 //
@@ -618,9 +636,9 @@ func (c *Conn) Close() error { return c.session.Close() }
 // counted after parsing — see headerBytes. Header fields that never reach the
 // parsed map are outside this bound and are held per block by
 // maxHeaderBytesPerResponse instead, so a listing's total is this number plus
-// maxToolPages * maxHeaderBlocksPerResponse * (that constant +
-// http2HeaderListOverhead): 8 MiB accounted plus at most 18.84 MiB of header
-// fields it cannot see, 26.84 MiB of headers and bodies in all.
+// maxResponsesPerConnection * maxHeaderBlocksPerResponse * (that constant +
+// http2HeaderListOverhead): 8 MiB accounted plus at most 19.60 MiB of header
+// fields it cannot see, 27.60 MiB of headers and bodies in all.
 //
 // Headers and bodies, not bytes on the socket, and the distinction is the whole
 // correction. Three versions of this sentence were falsified in a row and the
