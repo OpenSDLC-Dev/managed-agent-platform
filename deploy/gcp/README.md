@@ -453,19 +453,22 @@ repository setting to update afterwards, and no long-lived key in a settings pag
 The provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'`, and each
 repository is bound separately, so a fork cannot use it.
 
-**Closed: the provider asserts the ref, so the branch a `workflow_dispatch` selects is no
-longer trusted.** GitHub runs a dispatched workflow from the ref it was dispatched on, so
-without that condition anyone who could push a branch to this repository could push an
-edited `deploy.yml` and dispatch it, and the provider would hand that run the `cd-deployer@`
+**Closed: the provider asserts the ref, so the ref a `workflow_dispatch` selects is no longer
+trusted.** A dispatch can name a tag as readily as a branch, which is why the condition tests
+both — see `ref_type` below. GitHub runs a dispatched workflow from the ref it was dispatched
+on, so without that condition anyone who could push a ref to this repository could push an
+edited `deploy.yml`, dispatch it, and have the provider hand that run the `cd-deployer@`
 identity — Secret Manager, Cloud Build and the cluster, around the review boundary `main`
-exists to be. There are two controls, and the order matters. The workflow's first step
-refuses a run whose `github.ref` is not `refs/heads/main`, and it runs *before* the auth
-action, so an ordinary dispatch from another branch stops there and never reaches a token
-exchange at all. That guard stops the accident but cannot stop the attack, because the
-branch that edits the file deletes the step with it — which is why the real control has to
-be cloud-side, where an edited workflow cannot reach it. It is one command — **applied to
-this project**, and recorded here because the provider is not in this repository's
-Terraform, so this is the only place the condition is written down:
+exists to be.
+
+There are two controls, and the order matters. The workflow's first step refuses a run whose
+`github.ref` is not `refs/heads/main`, and it runs *before* the auth action, so an ordinary
+dispatch from any other ref stops there and never reaches a token exchange at all. That guard
+stops the accident but cannot stop the attack, because the ref that edits the file deletes the
+step with it — which is why the real control has to be cloud-side, where an edited workflow
+cannot reach it. It is one command — **applied to this project**, and recorded here because
+the provider is not in this repository's Terraform, so this is the only place the command that
+sets it, and the read-back that checks it, are written down:
 
 ```sh
 gcloud iam workload-identity-pools providers update-oidc github-oidc \
