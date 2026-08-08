@@ -460,13 +460,24 @@ dispatch it, and the provider will hand that run the `cd-deployer@` identity —
 Manager, Cloud Build and the cluster, around the review boundary `main` exists to be. The
 workflow's first step refuses a run whose `github.ref` is not `refs/heads/main`, which stops
 the accident; it cannot stop the attack, because the branch that edits the file deletes the
-step with it. The control has to be cloud-side, and it is one command — recorded here
-because **it has not been applied to this project yet**:
+step with it. The control has to be cloud-side, and it is one command — **applied to this
+project**, and recorded here because the provider is not in this repository's Terraform, so
+this is the only place the condition is written down:
 
 ```sh
 gcloud iam workload-identity-pools providers update-oidc github-oidc \
   --project=hh-opensdlc-managed-agents --location=global --workload-identity-pool=github \
-  --attribute-condition="assertion.repository_owner == 'OpenSDLC-Dev' && assertion.ref == 'refs/heads/main'"
+  --attribute-condition="assertion.repository_owner == 'OpenSDLC-Dev' && assertion.ref == 'refs/heads/main' && assertion.ref_type == 'branch'"
+```
+
+`ref_type` rides along because a *tag* named `main` would present `refs/tags/main` — not
+equal, so the ref test already rejects it, but stating both makes the intent legible rather
+than incidental. Read the live condition back with:
+
+```sh
+gcloud iam workload-identity-pools providers describe github-oidc \
+  --project=hh-opensdlc-managed-agents --location=global --workload-identity-pool=github \
+  --format="value(attributeCondition,state)"
 ```
 
 It applies to every repository bound to this provider, which is what is wanted: both this

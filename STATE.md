@@ -44,8 +44,10 @@ what it does *not* cover: [docs/HISTORY.md](./docs/HISTORY.md).
       `deploy/gcp/README.md`.
 - [ ] CD's first run **from the workflow itself**: every step is proven by hand,
       but no push to `main` has yet driven it end to end.
-- [ ] Close the WIF ref gap — the provider asserts `repository_owner` only, so a
-      dispatched branch is trusted. The workflow's guard stops the accident; the
-      `assertion.ref` condition (command in `deploy/gcp/README.md`) is unapplied.
+- [x] WIF ref gap closed — the provider now asserts `ref == refs/heads/main` and
+      `ref_type == branch` as well as `repository_owner`, so a dispatched branch
+      can no longer mint the deploy identity. Command and read-back in
+      `deploy/gcp/README.md`; unexercised until a dispatch from a throwaway
+      branch is seen to fail at auth rather than at the workflow's own guard.
 - [ ] Replace the `model-providers` placeholder (real endpoint, fake key) with a
       live route before anything runs a session.
