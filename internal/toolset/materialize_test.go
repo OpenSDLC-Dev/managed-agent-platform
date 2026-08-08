@@ -281,6 +281,21 @@ func TestValidateMCPToolset(t *testing.T) {
 		name:    "a non-object permission_policy is rejected",
 		in:      `{"type":"mcp_toolset","mcp_server_name":"g","configs":[{"name":"t","permission_policy":"always_ask"}]}`,
 		wantErr: "configs[0].permission_policy must be an object",
+	}, {
+		// Decoding an object into a map keeps only the last value of a repeated
+		// member, so the walk above sees a well-formed entry here. encoding/json
+		// applies every occurrence, which is why the typed backstop stays: a
+		// client whose first `enabled` is a string is writing something this
+		// arm refused before the walk replaced the decode, and the built-in
+		// arm's resolveToolset still refuses it.
+		name: "a repeated field whose earlier value has the wrong type is rejected",
+		in: `{"type":"mcp_toolset","mcp_server_name":"g",` +
+			`"default_config":{"enabled":"yes","enabled":true}}`,
+		wantErr: "a field is repeated with values of different types",
+	}, {
+		name: "a repeated field of one type is accepted, last value winning",
+		in: `{"type":"mcp_toolset","mcp_server_name":"g",` +
+			`"default_config":{"enabled":false,"enabled":true}}`,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

@@ -27,7 +27,9 @@ import (
 // but its error text is a dump of the receiving struct — unexported field names
 // and all — and this package's errors are the message of a 400, so they name
 // the field's path instead. A raw walk is also the only way to tell an explicit
-// null from an absent key, which a pointer field cannot.
+// null from an absent key, which a pointer field cannot. One typed decode
+// survives at the end as a backstop, for the single question a raw walk cannot
+// answer; see there.
 func ValidateMCPToolset(raw json.RawMessage) error {
 	top, ok := jsonObject(raw)
 	if !ok {
@@ -45,30 +47,41 @@ func ValidateMCPToolset(raw json.RawMessage) error {
 			return err
 		}
 	}
-	cfgs, set := present(top["configs"])
-	if !set {
-		return nil
+	if cfgs, set := present(top["configs"]); set {
+		var items []json.RawMessage
+		if err := json.Unmarshal(cfgs, &items); err != nil {
+			return fmt.Errorf("%s: configs must be an array", mcpToolsetType)
+		}
+		for i, item := range items {
+			path := fmt.Sprintf("configs[%d]", i)
+			c, ok := jsonObject(item)
+			if !ok {
+				return fmt.Errorf("%s: %s must be an object", mcpToolsetType, path)
+			}
+			// name identifies the tool the entry configures and is required on
+			// the response type, so an entry without one both configures
+			// nothing and would render an echo the wire schema rejects.
+			var name string
+			if err := json.Unmarshal(c["name"], &name); err != nil || name == "" {
+				return fmt.Errorf("%s: %s requires a non-empty name", mcpToolsetType, path)
+			}
+			if err := checkMCPConfigFields(c, path); err != nil {
+				return err
+			}
+		}
 	}
-	var items []json.RawMessage
-	if err := json.Unmarshal(cfgs, &items); err != nil {
-		return fmt.Errorf("%s: configs must be an array", mcpToolsetType)
-	}
-	for i, item := range items {
-		path := fmt.Sprintf("configs[%d]", i)
-		c, ok := jsonObject(item)
-		if !ok {
-			return fmt.Errorf("%s: %s must be an object", mcpToolsetType, path)
-		}
-		// name identifies the tool the entry configures and is required on the
-		// response type, so an entry without one both configures nothing and
-		// would render an echo the wire schema rejects.
-		var name string
-		if err := json.Unmarshal(c["name"], &name); err != nil || name == "" {
-			return fmt.Errorf("%s: %s requires a non-empty name", mcpToolsetType, path)
-		}
-		if err := checkMCPConfigFields(c, path); err != nil {
-			return err
-		}
+	// The backstop. Decoding an object into a map keeps only the last value of
+	// a repeated member, so a bad value hidden behind a good duplicate —
+	// `{"enabled":"yes","enabled":true}` — passes every check above; the typed
+	// decode applies each occurrence in turn and still sees it. This is the one
+	// question the walk cannot answer, and dropping it would quietly widen what
+	// the MCP arm accepts relative to the built-in arm, whose resolveToolset
+	// decodes typed on every resolve. Its own message names Go types, so it is
+	// replaced: by construction nothing else reaches here, since every shape
+	// the walk understands it has already accepted or named.
+	var e entry
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return fmt.Errorf("%s: a field is repeated with values of different types", mcpToolsetType)
 	}
 	return nil
 }
