@@ -32,8 +32,8 @@ name: deploy
 #
 # There is no GitHub secret in this repository and there must not be one. The job
 # mints an OIDC token, Workload Identity Federation exchanges it for a short-lived
-# impersonation of `cd-deployer@`, and every credential the deploy needs is then
-# read from Secret Manager at run time. So rotating a credential is
+# impersonation of `DEPLOY_SERVICE_ACCOUNT`, and every credential the deploy needs
+# is then read from Secret Manager at run time. So rotating a credential is
 # `gcloud secrets versions add` plus a re-run of this workflow — no repository
 # setting to update afterwards, and no long-lived key sitting in a settings page
 # to leak. The re-run is not a formality: env from a `secretKeyRef` is read once
@@ -43,9 +43,10 @@ name: deploy
 # The provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'` and
 # each repository is bound to the deploy identity separately, so a fork cannot use
 # it. It also asserts `assertion.ref == 'refs/heads/main'` and
-# `assertion.ref_type == 'branch'`. Two controls, in this order: the guard step
-# below runs before the auth action, so an ordinary `workflow_dispatch` from
-# another branch stops there and never reaches a token exchange. The provider
+# `assertion.ref_type == 'branch'`. Two controls, in this order: the "Deploys run
+# from main only" step below runs before the auth action, so an ordinary
+# `workflow_dispatch` from another branch stops there and never reaches a token
+# exchange. The provider
 # condition is the backstop for the case the guard cannot cover — a branch
 # carrying an edited copy of this file, which would delete the guard along with
 # it, and which then fails at the exchange instead. The condition is cloud-side
@@ -79,27 +80,61 @@ concurrency:
 # impersonation; the one job that needs it asks for it itself.
 permissions: {}
 
-# None of these is a credential — they are project, cluster, bucket and identity
-# NAMES, and the WIF provider is public infrastructure locked by attribute
-# condition. They live here rather than in repository variables so the deployment
-# target is reviewable in the diff that changes it. Every one came from
+# Which deployment this is. None of these is a credential — they are project,
+# cluster, registry, bucket, key and identity NAMES, and the WIF provider is
+# public infrastructure locked by attribute condition. They are nonetheless
+# repository VARIABLES rather than literals, because this repository is PUBLIC:
+# one that names one operator's project, cluster, registry, buckets, KMS key and
+# service accounts hands a reader a target list, and — the part that matters for
+# an open-source project — ties the repository to a cluster nobody cloning it can
+# reach. `deploy/` here is a reference deployment, not a template.
+#
+# Set them under Settings → Secrets and variables → Actions → Variables; the list
+# with what each one names is in deploy/gcp/README.md, "The deployment's
+# coordinates". Every value came from
 # `terraform -chdir=deploy/gcp/environment output`.
+#
+# The cost is real and is accepted rather than hidden: the deployment target is
+# no longer reviewable in the diff that changes it, because a variable is edited
+# in a settings page and not in a PR. The "Require the deployment variables" step
+# below is what keeps that from being silent — it names every variable it needs
+# before anything authenticates.
 env:
-  GCP_PROJECT: hh-opensdlc-managed-agents
-  GCP_ZONE: us-central1-a
-  GKE_CLUSTER: map-staging
-  ARTIFACT_REGISTRY: us-central1-docker.pkg.dev/hh-opensdlc-managed-agents/map-images
-  WIF_PROVIDER: projects/754963270337/locations/global/workloadIdentityPools/github/providers/github-oidc
-  DEPLOY_SA: cd-deployer@hh-opensdlc-managed-agents.iam.gserviceaccount.com
-  K8S_NAMESPACE: map
-  K8S_SECRET: map-platform
-  HELM_RELEASE: map
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_ZONE: ${{ vars.GCP_ZONE }}
+  GKE_CLUSTER: ${{ vars.GKE_CLUSTER }}
+  # HOST/PROJECT/REPOSITORY, as ONE variable rather than a host and a path joined
+  # here. `${{ vars.A }}/${{ vars.B }}` with either half unset renders as `host/`
+  # or `/path` — non-empty, so it would pass the guard below and fail at the
+  # pull. The host, and the registry/repository split the chart wants, are taken
+  # back off this single value by parameter expansion where each is needed.
+  ARTIFACT_REGISTRY: ${{ vars.ARTIFACT_REGISTRY }}
+  WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+  DEPLOY_SERVICE_ACCOUNT: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
   # The two non-secret coordinates that go INTO the pre-created Secret. They are
   # not credentials — a bucket name and a KMS resource name — but the chart reads
   # them from that Secret in mode 2, because `existingSecret` means the chart
   # writes no Secret at all and so has nowhere else to put them.
-  BLOB_BUCKET: hh-opensdlc-managed-agents-map-blob
-  KMS_KEY_NAME: projects/hh-opensdlc-managed-agents/locations/us-central1/keyRings/map-keyring/cryptoKeys/map-credentials
+  BLOB_BUCKET: ${{ vars.BLOB_BUCKET }}
+  KMS_KEY_NAME: ${{ vars.KMS_KEY_NAME }}
+  # The three Workload-Identity-bound Google service accounts, one per component.
+  # They used to live in staging-values.yaml; that file now carries a NEUTRAL
+  # example of the same three keys and the `helm upgrade` below overrides all
+  # three from here. Both halves are needed and neither is optional: the IAM
+  # binding is applied by `environment/`, the KSA annotation comes from the chart
+  # values, and a missing annotation is an ADC failure at pod startup.
+  CONTROLPLANE_SERVICE_ACCOUNT: ${{ vars.CONTROLPLANE_SERVICE_ACCOUNT }}
+  BRAIN_SERVICE_ACCOUNT: ${{ vars.BRAIN_SERVICE_ACCOUNT }}
+  EXECUTOR_SERVICE_ACCOUNT: ${{ vars.EXECUTOR_SERVICE_ACCOUNT }}
+  # NOT variables, deliberately. These three name the CHART's own objects — the
+  # namespace it installs into, the pre-created Secret its `existingSecret` value
+  # names, the release — so they identify no operator and nothing here is hidden
+  # by moving them. `K8S_SECRET` in particular must equal `existingSecret` in
+  # staging-values.yaml, which is in git: a variable would let the two drift into
+  # a release bound to a Secret nothing creates, with no diff to notice it in.
+  K8S_NAMESPACE: map
+  K8S_SECRET: map-platform
+  HELM_RELEASE: map
 
 jobs:
   deploy:
@@ -122,6 +157,62 @@ jobs:
           echo "::error::deploy runs only from refs/heads/main; this run is on $GITHUB_REF"
           exit 1
 
+      # Second, not first, and the order is the point: the step above refuses an
+      # unauthorised ref while telling it nothing, and this one prints the
+      # deployment's configuration keys. Refuse, then diagnose. Both still run
+      # before checkout, auth and any build.
+      #
+      # An unset repository variable renders as the EMPTY STRING rather than
+      # failing, and every way that lands is late and confusing: `gcloud
+      # --project ""`, `gcloud container clusters get-credentials "" --zone ""`,
+      # a `docker push ":$GITHUB_SHA"` that is a tag with no repository, a
+      # ServiceAccount annotated with the empty identity. Asserting here costs a
+      # second and turns all of them into one line naming what is missing —
+      # which is also the error a fresh deployment of this repository gets,
+      # instead of a failure four steps in.
+      #
+      # Whitespace and commas are rejected, not merely emptiness. A value of one
+      # space is no configuration while passing a `-z` test; and five of these
+      # reach `helm --set-string`, whose assignment list is COMMA-separated, so a
+      # comma would silently split one value into two paths and set neither to
+      # what was meant. No GCP project id, zone, cluster name, registry path,
+      # bucket, KMS resource name or service-account email may contain either
+      # character, so this rejects nothing legitimate.
+      - name: Require the deployment variables
+        # ${!v} — indirect expansion — is bash, and this file already assumes
+        # bash elsewhere (`set -o pipefail`). Stated rather than inherited from
+        # the runner's default shell.
+        shell: bash
+        run: |
+          bad=""
+          for v in GCP_PROJECT_ID GCP_ZONE GKE_CLUSTER ARTIFACT_REGISTRY \
+                   WIF_PROVIDER DEPLOY_SERVICE_ACCOUNT BLOB_BUCKET KMS_KEY_NAME \
+                   CONTROLPLANE_SERVICE_ACCOUNT BRAIN_SERVICE_ACCOUNT \
+                   EXECUTOR_SERVICE_ACCOUNT; do
+            case "${!v}" in
+              "" | *[[:space:],]*) bad="$bad $v" ;;
+            esac
+          done
+          if [ -n "$bad" ]; then
+            echo "::error::unset, empty or malformed repository variables:$bad — set them under Settings → Secrets and variables → Actions → Variables. What each one names is listed in deploy/gcp/README.md, under The deployment's coordinates."
+            exit 1
+          fi
+
+          # The one composed value, checked for the shape the two expansions
+          # below assume. `${ARTIFACT_REGISTRY%%/*}` and `${ARTIFACT_REGISTRY#*/}`
+          # on a value with no slash both return the whole string, so `registry`
+          # and `repository` would be the same host and the chart would render
+          # `host/host/controlplane:sha` — a reference that is merely wrong
+          # rather than invalid, so the render succeeds and three pods sit in
+          # ImagePullBackOff.
+          case "$ARTIFACT_REGISTRY" in
+            */*/*) ;;
+            *)
+              echo "::error::ARTIFACT_REGISTRY must be HOST/PROJECT/REPOSITORY, e.g. us-central1-docker.pkg.dev/your-project/map-images — got '$ARTIFACT_REGISTRY'"
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes, so the token has no reason to outlive this step —
@@ -132,11 +223,11 @@ jobs:
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.DEPLOY_SA }}
+          service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
         with:
-          project_id: ${{ env.GCP_PROJECT }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
           # `kubectl` on the runner cannot talk to GKE without this: since
           # client-go 1.26 the in-tree GCP auth provider is gone, and
           # `get-credentials` writes a kubeconfig whose exec credential names the
@@ -160,9 +251,8 @@ jobs:
       # failed here, in under a second, before a byte was uploaded —
       #
       #   ERROR: (gcloud.builds.submit) The user is forbidden from accessing the
-      #   bucket [hh-opensdlc-managed-agents_cloudbuild]. Please check your
-      #   organization's policy or if the user has the
-      #   "serviceusage.services.use" permission.
+      #   bucket [PROJECT_cloudbuild]. Please check your organization's policy
+      #   or if the user has the "serviceusage.services.use" permission.
       #
       # — and it kept failing with roles/storage.admin on that bucket AND
       # roles/serviceusage.serviceUsageConsumer on the project, which is the
@@ -182,7 +272,11 @@ jobs:
       # classic builder is what `gcr.io/cloud-builders/docker` still runs.
       - name: Build and push the images
         run: |
-          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+          # The registry HOST, which is `ARTIFACT_REGISTRY` up to its first
+          # slash. Passing the whole HOST/PROJECT/REPOSITORY path here would
+          # register a credential helper for a "host" that does not resolve, and
+          # the push would then fail as an anonymous pull of a private registry.
+          gcloud auth configure-docker "${ARTIFACT_REGISTRY%%/*}" --quiet
 
           # One build, three tags — so controlplane, brain and executor resolve
           # to a single digest and cannot drift apart between components.
@@ -207,7 +301,7 @@ jobs:
       - name: Cluster credentials
         run: |
           gcloud container clusters get-credentials "$GKE_CLUSTER" \
-            --zone "$GCP_ZONE" --project "$GCP_PROJECT"
+            --zone "$GCP_ZONE" --project "$GCP_PROJECT_ID"
 
       # Mode 2's Secret, assembled here because nothing else can assemble it: the
       # chart renders no Secret when `existingSecret` is set, and Terraform holds
@@ -259,10 +353,10 @@ jobs:
           # bytes, which is what `--from-file` then hands to Kubernetes.
           fetch() {
             if ! gcloud secrets versions access latest \
-                   --secret="$1" --project="$GCP_PROJECT" --out-file="$d/$2"; then
-              echo "::error::cannot read Secret Manager secret '$1' in $GCP_PROJECT"
+                   --secret="$1" --project="$GCP_PROJECT_ID" --out-file="$d/$2"; then
+              echo "::error::cannot read Secret Manager secret '$1' in $GCP_PROJECT_ID"
               echo "The mode-2 deploy needs it. Check it exists and has an ENABLED version:" >&2
-              echo "  gcloud secrets versions list $1 --project=$GCP_PROJECT" >&2
+              echo "  gcloud secrets versions list $1 --project=$GCP_PROJECT_ID" >&2
               return 1
             fi
             # A zero-byte value is the failure worth catching here rather than at
@@ -297,7 +391,7 @@ jobs:
               echo "::error::Secret Manager secret '$f' contains a newline"
               echo "It is used verbatim, so a trailing newline is part of the value." >&2
               echo "Re-add it without one: printf '%s' \"\$value\" | gcloud secrets" >&2
-              echo "versions add $f --project=$GCP_PROJECT --data-file=-" >&2
+              echo "versions add $f --project=$GCP_PROJECT_ID --data-file=-" >&2
               exit 1
             fi
           done
@@ -317,9 +411,9 @@ jobs:
           # the truth about it. Replace it, in one line:
           #
           #   printf '%s' '[{"model":"*","protocol":"anthropic","base_url":"https://api.anthropic.com","api_key":"sk-ant-REAL"}]' \
-          #     | gcloud secrets versions add model-providers --project=hh-opensdlc-managed-agents --data-file=-
+          #     | gcloud secrets versions add model-providers --project="$GCP_PROJECT_ID" --data-file=-
           if ! gcloud secrets versions access latest \
-                 --secret=model-providers --project="$GCP_PROJECT" \
+                 --secret=model-providers --project="$GCP_PROJECT_ID" \
                  --out-file="$d/model-providers.json"; then
             echo "::error::the 'model-providers' secret has no readable version — a human must add one"
             cat >&2 <<EOF
@@ -331,7 +425,7 @@ jobs:
                 "api_key": "sk-..." } ]
 
             gcloud secrets versions add model-providers \\
-              --project=$GCP_PROJECT --data-file=/path/to/model-providers.json
+              --project=$GCP_PROJECT_ID --data-file=/path/to/model-providers.json
 
           The accepted keys are documented under brain.modelProviders in
           deploy/helm/managed-agent-platform/values.yaml. base_url is the API ROOT:
@@ -422,21 +516,51 @@ jobs:
       # There is not one credential on this command line, and that is a property of
       # mode 2 rather than a discipline applied to it: `existingSecret` in
       # staging-values.yaml means the chart writes no Secret, so it takes no
-      # credential VALUES at all. The step above put them in the cluster; this step
-      # only names the release, the values file and the two references that come
-      # from the build.
+      # credential VALUES at all. The step names the release, the values file, the
+      # two references that come from the build, and the five coordinates that
+      # identify this deployment.
       #
-      # --set-string, not --set, for both. Both values are strings by definition,
-      # and `--set` would infer the type instead of being told it — a question
-      # that does not need asking about a value whose answer is known. (A 40-char
-      # hex SHA is safe either way; the point is not to re-derive that for the
-      # next value someone adds here.)
+      # Those five are the other half of `deploy/gcp/staging-values.yaml` being a
+      # REFERENCE DEPLOYMENT rather than this cluster's values file: it carries a
+      # complete, self-rendering mode-2 example under a neutral project name, and
+      # every key in it that would name an operator is overridden here from a
+      # repository variable. The alternative — deleting those keys from the file —
+      # was rejected: `helm template -f staging-values.yaml` is exactly what CI
+      # runs on it, and a file missing `image.registry` renders against the
+      # chart's ghcr.io defaults while a file missing the annotations renders a
+      # KSA with no identity, so the example would document a deployment that
+      # cannot work. Dropping an override here fails closed either way: the
+      # neutral registry does not exist (ImagePullBackOff) and the neutral
+      # identity does not exist (ADC fails at pod startup), and `--wait --atomic`
+      # turns both into a rolled-back release and a red run rather than a
+      # half-configured cluster.
+      #
+      # --set-string throughout, not --set. Every one of these is a string by
+      # definition, and `--set` would infer the type instead of being told it — a
+      # question that does not need asking about a value whose answer is known.
+      # (A 40-char hex SHA is safe either way; the point is not to re-derive that
+      # for the next value someone adds here.)
+      #
+      # The annotation KEY contains dots that are not path separators, so they are
+      # escaped: unescaped, `iam.gke.io/gcp-service-account` would nest four
+      # levels of map under `annotations` and the KSA would carry no annotation
+      # the GKE metadata server looks for. The values are safe to interpolate
+      # because the guard step rejects a comma — `--set-string` splits on one.
       - name: Deploy the chart
         run: |
           set -euo pipefail
+          # The chart composes {registry}/{repository}/{component}:{tag}, so the
+          # split is at the FIRST slash of ARTIFACT_REGISTRY and nowhere else.
+          # Getting it wrong renders a reference that is merely wrong rather than
+          # invalid — the render succeeds, the pods never pull.
           helm upgrade --install "$HELM_RELEASE" deploy/helm/managed-agent-platform \
             --namespace "$K8S_NAMESPACE" --create-namespace \
             -f deploy/gcp/staging-values.yaml \
+            --set-string "image.registry=${ARTIFACT_REGISTRY%%/*}" \
+            --set-string "image.repository=${ARTIFACT_REGISTRY#*/}" \
+            --set-string "controlplane.serviceAccount.annotations.iam\.gke\.io/gcp-service-account=$CONTROLPLANE_SERVICE_ACCOUNT" \
+            --set-string "brain.serviceAccount.annotations.iam\.gke\.io/gcp-service-account=$BRAIN_SERVICE_ACCOUNT" \
+            --set-string "executor.serviceAccount.annotations.iam\.gke\.io/gcp-service-account=$EXECUTOR_SERVICE_ACCOUNT" \
             --set-string "image.tag=$GITHUB_SHA" \
             --set-string "executor.gateImage=$ARTIFACT_REGISTRY/gate:$GITHUB_SHA" \
             --wait --atomic --timeout 10m
