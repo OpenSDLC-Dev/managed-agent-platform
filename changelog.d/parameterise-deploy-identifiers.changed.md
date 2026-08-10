@@ -72,9 +72,12 @@
   reference parser rejects each of them a few steps later, this step promises to
   catch a malformed coordinate *before* the job authenticates. The annotation
   overrides escape the dots in `iam.gke.io/…`, which are
-  not path separators: unescaped, `--set-string` would nest four levels of map
-  under `annotations` and the ServiceAccount would carry no annotation the GKE
-  metadata server looks for. What this does **not** do is retroactive — the
+  not path separators: unescaped, `--set-string` reads the key as three nested
+  maps under `annotations` — `iam` → `gke` → `io/gcp-service-account` — which is
+  not the string map annotations are, so helm refuses the render with "cannot
+  unmarshal object into Go struct field .metadata.annotations of type string".
+  Dropping a backslash there therefore cannot deploy a ServiceAccount missing its
+  annotation; nothing reaches the cluster at all. What this does **not** do is retroactive — the
   literals remain in git history and in `docs/HISTORY.md`, which records what was
   actually run; rewriting the history of a repository that has cut releases is
   not worth it for identifiers, and the trust policy is what protects the

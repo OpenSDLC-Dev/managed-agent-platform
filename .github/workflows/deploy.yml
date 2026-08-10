@@ -569,10 +569,15 @@ jobs:
       # for the next value someone adds here.)
       #
       # The annotation KEY contains dots that are not path separators, so they are
-      # escaped: unescaped, `iam.gke.io/gcp-service-account` would nest four
-      # levels of map under `annotations` and the KSA would carry no annotation
-      # the GKE metadata server looks for. The values are safe to interpolate
-      # because the guard step rejects a comma — `--set-string` splits on one.
+      # escaped. Unescaped, `iam.gke.io/gcp-service-account` is read as three
+      # nested maps under `annotations` — `iam` → `gke` → `io/gcp-service-account`
+      # — which is not the string map a ServiceAccount's annotations are, so helm
+      # refuses the render outright: "cannot unmarshal object into Go struct field
+      # .metadata.annotations of type string". That is worth knowing in the
+      # reassuring direction: dropping a backslash here cannot deploy a KSA with a
+      # missing annotation, because nothing reaches the cluster at all. The values
+      # are safe to interpolate because the guard step rejects a comma —
+      # `--set-string` splits on one.
       - name: Deploy the chart
         run: |
           set -euo pipefail

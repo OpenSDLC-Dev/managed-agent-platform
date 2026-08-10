@@ -492,8 +492,9 @@ step that runs second — after the ref guard, which refuses an unauthorised ref
 it nothing. An unset variable renders as the empty string rather than failing, and
 `gcloud --project ""`, `get-credentials "" --zone ""` and an image tag with no repository all
 fail late and confusingly. Whitespace and commas are rejected as well as emptiness: a value
-of one space is no configuration while passing a `-z` test, and five of these reach
-`helm --set-string`, whose assignment list is comma-separated.
+of one space is no configuration while passing a `-z` test, and four of them —
+`ARTIFACT_REGISTRY` and the three service accounts — reach `helm --set-string`, whose
+assignment list is comma-separated.
 
 The cost of the move is that the deployment target is no longer reviewable in the diff that
 changes it — a variable is edited in a settings page, not in a PR. That is the trade, and

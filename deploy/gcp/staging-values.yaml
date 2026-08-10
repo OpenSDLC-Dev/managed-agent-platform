@@ -1,11 +1,16 @@
 # Helm values for the staging deployment `.github/workflows/deploy.yml` installs.
 #
 # This is **mode 2** — Cloud SQL, Cloud Storage and Cloud KMS behind a pre-created
-# Secret — and it is the file that was actually installed, not a plausible one:
-# `helm upgrade --install map … -f <this> --wait --atomic --timeout 10m` returned
-# 0 against the staging cluster, all three Deployments became Ready, and
-# `GET /v1/agents?limit=1` on the LoadBalancer answered 200 with a key and 401
-# without one.
+# Secret — and its shape is the one that was actually installed rather than a
+# plausible one: `helm upgrade --install map … -f <this> --wait --atomic
+# --timeout 10m` returned 0 against the staging cluster, all three Deployments
+# became Ready, and `GET /v1/agents?limit=1` on the LoadBalancer answered 200
+# with a key and 401 without one.
+#
+# That run used this file with its five identifying values still written out.
+# They are placeholders now (see below) and the workflow supplies the real ones,
+# so the acceptance record covers every line here EXCEPT those five, and those
+# five are re-proved on every deploy by the step that reads the annotations back.
 #
 # **It is a reference deployment, not this cluster's values file.** Every value
 # below that would name an operator — the image registry and repository, and the
