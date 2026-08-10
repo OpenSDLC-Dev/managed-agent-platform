@@ -5,21 +5,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 29](./docs/plan/29_mcp-toolset.md) — the MCP client and `mcp_toolset` wired
-end to end (#45). Seven slices; #45's acceptance criterion is met at the end of
-slice 4.
-
+end to end (#45); #45's acceptance criterion is met at the end of slice 4.
 [Plan 30](./docs/plan/30_environment-keys-console-issuance.md) — console-issued
-environment keys (#43): named, per-host, individually revocable. Slice 3 of 3
-remains; the UI half is managed-agent-console plan 07.
-
-**GCP continuous delivery** — plan-less, **delivered and green**; the record is
-in [docs/HISTORY.md](./docs/HISTORY.md). One task remains, and it blocks every
-session.
+environment keys (#43); the UI half is managed-agent-console plan 07.
+**GCP continuous delivery** — plan-less, delivered and green; the record is in
+[docs/HISTORY.md](./docs/HISTORY.md). One task remains and blocks every session.
 
 ## Tasks
 
-- [x] Plan 29 slice 1 — wire correctness for `mcp_toolset` on every
-      spec-resolving surface, plus the resolved-config echo.
+- [x] Plan 29 slice 1 — `mcp_toolset` wire correctness on every spec-resolving
+      surface, plus the resolved-config echo.
 - [ ] Plan 29 slice 2 — the `internal/mcp` client landed. Open: `mcp_catalogs`
       migration + store, `Conn.CallTool` (slice 4 needs it), the `mcp_exec`
       driver and its egress check.

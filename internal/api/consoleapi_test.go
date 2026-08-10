@@ -321,6 +321,24 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 		})
 	}
 
+	// Precedence, pinned so it cannot flip back silently: the body is validated
+	// before the environment is looked up, because the lookup holds a row lock
+	// and a slow client must not be able to hold it open across its own upload.
+	// So a request that is wrong in both ways answers on the body. This leaks
+	// nothing — a well-formed request already distinguishes an environment that
+	// exists from one that does not — and it applies only to issuance; list and
+	// revoke still resolve the environment first.
+	for name, path := range map[string]string{
+		"unknown environment": consoleTokens("env_0123456789abcdefghjkmnp"),
+		"cloud environment":   consoleTokens(cloud),
+		"archived":            consoleTokens(archived),
+	} {
+		t.Run("bad body wins over "+name, func(t *testing.T) {
+			status, body := s.do(http.MethodPost, path, map[string]any{"nope": 1})
+			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+		})
+	}
+
 	// Nothing above minted a key anywhere.
 	for _, env := range []string{selfHosted, cloud, archived} {
 		if ids, _ := consoleKeyIDs(t, s, env, ""); len(ids) != 0 {
