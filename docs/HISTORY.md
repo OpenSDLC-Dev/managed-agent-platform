@@ -60,19 +60,28 @@ afterwards; `docker ps -a` matched its start-of-run baseline exactly.
   `{total:1, limit:100, offset:0, has_more:false}` — **no secret, no hash**.
 - **The real CLI authenticates on that key alone.**
   `ant beta:worker poll --base-url http://127.0.0.1:18080 --environment-id … --environment-key …`
-  ran clean with no output (a long poll on an empty queue), and the platform's own
-  view confirmed it positively rather than by silence: `GET …/work/stats` reported
-  **`workers_polling: 2`** — and answered `401 "missing Authorization: Bearer
-  environment key"` to the *management* key, so the worker lane is the lane being
-  exercised.
+  ran clean with no output — a long poll on an empty queue — and the platform's
+  own view confirmed it positively rather than by silence: `GET …/work/stats`
+  reported a non-zero **`workers_polling`**, which is decisive because
+  `Queue.RecordPoll` fires only on the *authenticated* poll path
+  (`internal/queue/stats.go`). The same route answered
+  `401 "missing Authorization: Bearer environment key"` to the *management* key,
+  so the worker lane is demonstrably the lane being exercised. (The number read
+  `2` at that moment, not `1`: `workers_polling` counts distinct `worker_id`s
+  that polled inside a 30-second window, and an immediately preceding 25-second
+  `ant` run — launched without `--worker-id`, so the CLI minted a default one —
+  was still inside it. Only one worker was live. The count is evidence that a
+  real `ant` completed an authenticated poll, not a headcount.)
 - **Revocation reaches a running worker.**
   `POST …/tokens/{id}/revoke` → **204, 0 bytes**; the same key on
   `…/work/stats` immediately → **401 `invalid environment key`**; the running
   `ant` process printed that same `authentication_error` envelope and exited; the
   listing went empty.
 - **Per-host revocation — the property the old model could not offer.** Two keys
-  (`build-host-a`, `build-host-b`), two real `ant beta:worker poll` processes,
-  `workers_polling: 2`. Revoking **host-a alone** → 204. Host-a's process exited
+  (`build-host-a`, `build-host-b`), two real `ant beta:worker poll` processes
+  started with explicit `--worker-id host-a` / `host-b`, and here
+  `workers_polling: 2` *is* a headcount: the earlier ids had aged out of the
+  30-second window. Revoking **host-a alone** → 204. Host-a's process exited
   on the auth error; **host-b's kept running**, its log still 0 bytes, its key
   still **200** on `…/work/stats`, and the listing showed only `build-host-b`
   surviving. Under the retired rotate-on-mint invariant (migration 0013), issuing
