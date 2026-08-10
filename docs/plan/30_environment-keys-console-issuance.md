@@ -26,17 +26,28 @@ which consumes what lands here and must trail it.
    deliberately retires the one-live-key-per-environment invariant that
    migration 0013 introduced (`environment_keys_one_live`); 0013's own comment
    anticipated #43 would revisit issuance.
-2. **Issuance is console-only and off the wire.** The reference mints keys on
-   its console's private backend, not the public API (verified live, see Ground
-   truth). We mirror that architecture: the endpoints live under a
-   **`/console/v1/` namespace** that is not part of the wire-compatible `/v1`
-   surface, so a real `ant` CLI or Anthropic SDK pointed at this platform sees
-   no foreign endpoints, and no future reference claim on `/v1/environments/…`
-   can collide. The managed-agent-console's BFF (which injects the management
-   `x-api-key` server-side and never exposes it to the browser) is the intended
-   caller. With a single management key there is no way to cryptographically
-   restrict the namespace to the console alone; "console-only" means: off the
-   wire, designed for the console, documented as such.
+2. **Issuance is console-only, off the wire, and mirrors the reference
+   console's own API.** The reference mints keys on its console's private
+   backend, not the public API (verified live, see Ground truth). Rather than
+   inventing a namespace for our equivalent, the platform serves the observed
+   dialect **path-for-path and field-for-field**:
+
+   `/api/oauth/organizations/{organization_id}/environments/{environment_id}/tokens[...]`
+
+   This is a standing convention, not a one-off: any future console-facing
+   endpoint (queue stats, etc.) mirrors the reference console's observed path
+   the same way — no naming invented per feature. The `{organization_id}`
+   segment surfaces the reserved multi-tenant seam in the URL (v1 accepts only
+   the reserved org id `default`; anything else is 404). The `oauth` segment
+   and the RFC 6749-shaped create response keep the surface compatible with a
+   real OAuth flow later (console OIDC is its own effort, console plan 08 —
+   the reference's environment key *is* an OAuth access token in its own
+   infrastructure, see Ground truth). Today the namespace authenticates with
+   the management `x-api-key`, injected server-side by the console's BFF; the
+   wire-compatible `/v1` surface is untouched either way. With a single
+   management key there is no way to cryptographically restrict the namespace
+   to the console alone; "console-only" means: off the wire, designed for the
+   console, documented as such.
 3. **No CLI issuance mode.** No `controlplane -issue-env-key` run-once flag;
    the console page is the operator surface. (The endpoint is still an HTTP
    endpoint — a headless operator with the management key can curl it, and the
@@ -54,19 +65,22 @@ which consumes what lands here and must trail it.
 - Work-queue statistics in the console (above).
 - Key metadata beyond a name: no last-used tracking, no per-key worker
   attribution, no expiry notifications, no configurable TTL.
+- `authorization_details` in the create response (see Architecture — recorded,
+  deliberately not emitted in v1).
 - Automatic rotation, or any change to how workers *consume* keys — the Bearer
   lane's wire behavior is locked by the real `ant beta:worker` and stays
   byte-identical (the only consumer-visible change: an expired key now fails
   auth exactly like a revoked one).
-- Multi-tenant scoping: `org_id`/`workspace_id`/`project_id` stay reserved
-  single-tenant defaults on `environment_keys`.
+- Multi-tenant behavior behind the `{organization_id}` path segment: the
+  segment exists, but v1 recognizes only `default`.
 
 ## Ground truth (verified 2026-08-10)
 
 ### Reference console behavior — observed live on platform.claude.com
 
-Observed in a real workspace (environment detail → generate → reveal → revoke,
-network calls captured; the trial key was revoked immediately):
+Observed in a real workspace (environment detail → generate → reveal → revoke;
+network calls captured, then the full request/response bodies captured from
+the page session; every trial key was revoked immediately):
 
 - Self-hosted environment detail shows an **Environment keys** section: copy
   "An environment key lets a runner on your infrastructure connect to this
@@ -77,16 +91,23 @@ network calls captured; the trial key was revoked immediately):
   placeholder "e.g., Production Server") → success modal "Save your
   environment key": the full key rendered once with a copy button, and "Keep a
   record of the key below. **You won't be able to view it again.**"
-- Key format: `sk-ant-oat01-…` (the reference's console-OAuth token family,
-  ~100 chars). List columns: **Name | ID | Created | Expires**, with
-  **Expires = Created + 1 year** and the ID a truncated UUID. Per-row trash
-  icon → confirm dialog: "Are you sure you want to revoke this environment
-  key? Workers using this key will no longer be able to connect. This action
-  cannot be undone."
-- The backing API is the console's private BFF, **not** `api.anthropic.com/v1`:
-  `GET`/`POST https://platform.claude.com/api/oauth/organizations/{org-uuid}/environments/{env_id}/tokens`
-  and `POST …/tokens/{token-uuid}/revoke` → 204, authenticated by the console's
-  OAuth session. After revoke the key vanishes from the list.
+- List columns: **Name | ID | Created | Expires**, Expires = Created + 1 year,
+  ID a truncated UUID. Per-row trash icon → confirm dialog: "Are you sure you
+  want to revoke this environment key? Workers using this key will no longer
+  be able to connect. This action cannot be undone."
+- The backing API is the console's private BFF, **not** `api.anthropic.com/v1`
+  — observed shapes, all under
+  `https://platform.claude.com/api/oauth/organizations/{org-uuid}/environments/{env_id}`:
+
+  | Call | Observed shape |
+  |---|---|
+  | `GET …/tokens` | 200 `{"data":[{"id":"<uuid>","name":"…","created_at":"…Z","expires_at":"…Z"},…],"pagination":{"total":N,"limit":100,"offset":0,"has_more":false}}` — unrevoked tokens only, no `type` field on items |
+  | `POST …/tokens` body `{"name":"…"}` | 200 `{"access_token":"sk-ant-oat01-…","expires_in":31536000,"authorization_details":[{"type":"ccr_env","actions":["poll","list","stats"],"environment_id":"env_…"}]}` — an RFC 6749 token response with RFC 9396 rich-authorization details; **no id/name/created_at** — the console refreshes the list with a follow-up GET |
+  | `POST …/tokens/{uuid}/revoke` (empty body) | 204, empty body; the token then vanishes from the list |
+
+  So in the reference, an environment key literally **is an OAuth access
+  token** (`sk-ant-oat01-…`, the console-OAuth family), minted by its OAuth
+  infrastructure and scoped to one environment via `authorization_details`.
 - The **cloud** environment detail page has no Environment keys section, no
   setup panel, and no queue-stats Overview — those are self-hosted-only UI.
 - The setup panel ("Set up your self-hosted environment") walks: generate key →
@@ -107,7 +128,9 @@ network calls captured; the trial key was revoked immediately):
   deleted (lib/environments/poller.go:58–66, option/requestoption.go:612–618);
   canonical env var `ANTHROPIC_ENVIRONMENT_KEY` (worker.go:171–198). The key
   also authorizes environment-scoped session events, heartbeat/stop, and skill
-  download — already implemented here.
+  download — already implemented here. (Note the observed
+  `authorization_details.actions` list is coarser than what the key actually
+  authorizes per the SDK — one reason not to cargo-cult it; see Architecture.)
 - anthropic-cli: `ant beta:worker poll|run` takes `--environment-key`
   (required; env `ANTHROPIC_ENVIRONMENT_KEY`) (pkg/cmd/worker.go:39,58); no
   command creates or prints one; `ant auth login` mints console OAuth tokens,
@@ -169,19 +192,22 @@ DROP INDEX environment_keys_one_live;
   generates the secret server-side: `sk-map-env01-` + base64url of 32 CSPRNG
   bytes (43 chars). The silhouette follows the reference (`sk-ant-oat01-…`,
   per plan 01's "format modeled on") but the prefix is deliberately
-  platform-own so an issued key can never be mistaken for, or accidentally sent
-  as, an Anthropic credential. Nothing anywhere parses the format — it stays an
-  opaque Bearer token. Row: `domain.NewID("envkey")`, `expires_at = now() +
-  365 days`, SHA-256 hash only; the plaintext exists in memory for the duration
-  of the request and is returned exactly once.
-- `ListEnvironmentKeys(ctx, pool, envID)` — unrevoked keys, newest first:
-  `id, name, created_at, expires_at`. (Expired-but-unrevoked keys are included;
-  the console can badge them. Revoked keys vanish, as observed in the
-  reference.)
+  platform-own: our platform is not that OAuth infrastructure, and an issued
+  key must never be mistaken for, or accidentally sent as, an Anthropic
+  credential. Nothing anywhere parses the format — it stays an opaque Bearer
+  token. Row: `domain.NewID("envkey")`, `expires_at = now() + 365 days`
+  (matching the observed `expires_in: 31536000`), SHA-256 hash only; the
+  plaintext exists in memory for the duration of the request and is returned
+  exactly once.
+- `ListEnvironmentKeys(ctx, pool, envID, limit, offset)` — unrevoked keys,
+  newest first: `id, name, created_at, expires_at`, plus a total count.
+  (Expired-but-unrevoked keys are included; the console can badge them.
+  Revoked keys vanish, as observed in the reference.)
 - `RevokeEnvironmentKey(ctx, pool, envID, keyID)` — sets `revoked_at` where
   both ids match. Idempotent on an already-revoked key (mirrors archive's
-  idempotency); unknown key id — or a key id belonging to another environment —
-  is a uniform 404 (no cross-environment probing oracle).
+  idempotency; the dialect's own re-revoke behavior is unobserved); unknown
+  key id — or a key id belonging to another environment — is a uniform 404
+  (no cross-environment probing oracle).
 - `authenticateEnvironmentKey` gains expiry:
   `AND (expires_at IS NULL OR expires_at > now())`. An expired key fails with
   the same 401 "invalid environment key" as a revoked or unknown one — no
@@ -195,49 +221,75 @@ keyrotation_test.go's one-live race harness becomes a concurrent-issue harness
 cross-environment value binding keeps its test via the retained
 `key_hash UNIQUE`.
 
-### The console-API surface — `/console/v1`, management-authenticated
+### The console-API surface — the mirrored dialect, management-authenticated
+
+All under `/api/oauth/organizations/{organization_id}/environments/{environment_id}`,
+where v1 accepts only `organization_id == "default"` (the reserved org id;
+anything else 404s before the environment lookup):
 
 | Route | Behavior |
 |---|---|
-| `POST /console/v1/environments/{id}/keys` | Body `{"name": "…"}` (required, trimmed, 1–128 chars; unknown body keys rejected per house style). 200 → `{"id":"envkey_…","type":"environment_key","name":…,"created_at":…,"expires_at":…,"key":"sk-map-env01-…"}`. **`key` appears here and never again.** |
-| `GET /console/v1/environments/{id}/keys` | 200 → `{"data":[{id,type,name,created_at,expires_at},…],"has_more":false}` — the platform's list envelope so the console's existing `Page<T>` type fits; unpaginated (bounded by one-key-per-host issuance). |
-| `POST /console/v1/environments/{id}/keys/{key_id}/revoke` | 204. Idempotent when already revoked; 404 for unknown/foreign `key_id`. |
+| `POST …/tokens` | Body `{"name": "…"}` (required, trimmed, 1–128 chars — a local bound, the dialect's is unobserved; unknown body keys rejected per house style). 200 → `{"access_token":"sk-map-env01-…","expires_in":31536000}`. **The plaintext appears here and never again.** No id/name/created_at in the response — the caller refreshes the list, as the reference console does. |
+| `GET …/tokens` | 200 → `{"data":[{"id":"envkey_…","name":…,"created_at":…,"expires_at":…},…],"pagination":{"total":N,"limit":L,"offset":O,"has_more":B}}` — unrevoked keys, newest first; `?limit=` (default 100) and `?offset=` honored. |
+| `POST …/tokens/{token_id}/revoke` | 204, empty body. Idempotent when already revoked; 404 for an unknown or foreign `token_id`. |
 
-- **Auth**: all three routes take management `x-api-key` (`requireAPIKey`);
-  `dispatchAuth` gets a `/console/` classification arm ahead of its default so
+Deliberate divergences from the observed dialect (each recorded in
+DIVERGENCES.md):
+
+- **Key prefix** `sk-map-env01-`, not `sk-ant-oat01-` (rationale above).
+- **`id` format** `envkey_…`, not a bare UUID — the id is opaque to every
+  consumer, and house ID discipline (`domain.NewID`, `checkID`, one prefix
+  table) wins; `envkey` joins `domain.knownPrefixes`.
+- **`authorization_details` is not emitted** in v1. The observed value is
+  RFC 9396 rich-authorization metadata from the reference's OAuth
+  infrastructure, and its `actions` list is demonstrably coarser than what the
+  key actually authorizes (SDK ground truth above) — emitting a copied claim
+  we neither generate nor enforce would be a lie in a security-adjacent field.
+  Recorded verbatim; revisit if the platform ever grows real per-key scoping.
+- **Error envelope** is the house `{"type":"error",…}` shape (the dialect's
+  error bodies are unobserved).
+
+Auth and routing:
+
+- All three routes take management `x-api-key` (`requireAPIKey`);
+  `dispatchAuth` gets an `/api/` classification arm ahead of its default so
   the namespace can never fall into the environment-key or dual lanes; an
   environment key presented here is a 401. The console BFF already injects the
-  management key server-side; it never reaches a browser.
-- **Routing**: registered on the same mux with Go 1.22 method patterns, plus
-  the house 405-fallback entries and the JSON error envelope
-  (`errInvalid`/`errNotFound`/`errAuth`, internal/api/errors.go:31–45). `{id}`
-  and `{key_id}` are shape-checked via `checkID`; `envkey` joins
-  `domain.knownPrefixes`.
-- **Edge semantics** (local choices — the reference console's private API is
-  not a wire-compat obligation, but these mirror what it shows): unknown
-  environment → 404 `not_found_error`; **create on a `cloud` environment → 400
+  management key server-side; it never reaches a browser. (The BFF mirrors the
+  path too — the console's own `/api/oauth/…` URL proxies to this one; console
+  plan 07.)
+- Registered on the same mux with Go 1.22 method patterns, plus the house
+  405-fallback entries and JSON error envelope
+  (`errInvalid`/`errNotFound`/`errAuth`, internal/api/errors.go:31–45); `{id}`
+  and `{token_id}` are shape-checked via `checkID`.
+- **Edge semantics** (local choices, dialect-unobserved): unknown environment →
+  404 `not_found_error`; **create on a `cloud` environment → 400
   `invalid_request_error`** (the reference offers no key UI for cloud, and our
   cloud lane doesn't consume keys); create on an archived environment → 400;
   list/revoke work regardless of kind or archive state.
 - `/v1` is untouched: the wire-compat rung's surface diff must show zero new
-  `/v1` routes.
+  `/v1` routes. Future console-facing endpoints follow this same convention —
+  mirror the reference console's observed path under `/api/…`, record the
+  observation date and any divergence.
 
 ### Docs that move with the change
 
 - **docs/DIVERGENCES.md** — rewrite the line-53 CONFIRMED entry ("Environment
   worker keys — issuance"): the operator surface now exists as the off-wire
-  `/console/v1` namespace consumed by the managed-agent-console; the reference
-  keeps issuance on its console's private backend (evidence updated with the
-  2026-08-10 live observation: the `…/environments/{id}/tokens[/{id}/revoke]`
-  BFF calls, multi-key + named + 1-year-expiry model); one-live rotation
-  semantics retired with migration 0013's index. Add the expiry-401 note (local
-  behavior, consistent with reference UX, unobservable on the wire).
+  console-API dialect above, mirrored from the reference console's private
+  backend (2026-08-10 observation: paths, list/create/revoke shapes, the
+  OAuth-token nature of the reference's keys, multi-key + named + 1-year
+  expiry); one-live rotation semantics retired with migration 0013's index.
+  Add the four dialect divergences and the expiry-401 note (local behavior,
+  consistent with reference UX, unobservable on the wire).
 - **docs/self-hosted-security.md §6** — rewritten: issuance via the console
-  (or curl for headless operators), per-host keys, individual revocation,
-  the 1-year TTL replacing "no TTL", DB seeding gone.
-- **docs/ARCHITECTURE.md** — envauth/envkeys package rows, the `/console/v1`
-  namespace under the wire-compatibility model (explicitly: not wire surface),
-  migration row, security invariants (expiry added to the scoped-auth bullet).
+  (or curl for headless operators, example against `/api/oauth/organizations/default/…`),
+  per-host keys, individual revocation, the 1-year TTL replacing "no TTL", DB
+  seeding gone.
+- **docs/ARCHITECTURE.md** — envauth/envkeys package rows, the console-API
+  dialect under the wire-compatibility model (explicitly: not wire surface;
+  mirrored-from-observation convention stated), migration row, security
+  invariants (expiry added to the scoped-auth bullet).
 - STATE.md (Active work + Tasks) flips when slice 1's PR starts the work;
   changelog.d fragment per PR; README's development notes if operator workflow
   text changes; deploy/compose docs lose their DB-seeding instructions.
@@ -249,20 +301,22 @@ cross-environment value binding keeps its test via the retained
    `authenticateEnvironmentKey`; delete `EnsureEnvironmentKey`; rewrite the
    key-invariant/rotation/race tests as above. TDD: the many-live coexistence
    and expiry-401 tests land red first.
-2. **The `/console/v1` endpoints.** `dispatchAuth` arm, three routes, 405/404
-   fallbacks, `envkey` prefix; HTTP tests in house style (`s.do`/`s.doRaw`):
-   management auth required and environment key rejected on every route, every
+2. **The console-API endpoints.** `dispatchAuth` arm, the three `/api/oauth/…`
+   routes, 405/404 fallbacks, `envkey` prefix, org-segment gate; HTTP tests in
+   house style (`s.do`/`s.doRaw`): management auth required and environment
+   key rejected on every route, `organization_id != "default"` 404s, every
    error envelope pinned via `wantErr`, and the issued key proven end to end —
-   the plaintext from `POST …/keys` polls `GET /v1/environments/{id}/work/poll`
-   over real HTTP, then is revoked and polls again to a 401; direct SQL asserts
-   hash-only storage.
+   the `access_token` from `POST …/tokens` polls
+   `GET /v1/environments/{id}/work/poll` over real HTTP, then is revoked and
+   polls again to a 401; direct SQL asserts hash-only storage.
 3. **Docs + acceptance.** DIVERGENCES / self-hosted-security / ARCHITECTURE
    rewrites; compose-stack acceptance run recorded in docs/HISTORY.md: bring up
-   `deploy/compose`, issue a key with curl against `/console/v1`, run a real
+   `deploy/compose`, issue a key with curl against the dialect, run a real
    `ant beta:worker poll --environment-key … --base-url http://localhost:…`
    until it pulls a work item — the issue's acceptance, with zero DB edits.
 
-Console repo work (its plan 07: BFF prefix allow-list, zod schemas with
+Console repo work (its plan 07: an `/api/oauth/[...path]` BFF passthrough so
+the console's own URLs mirror the reference verbatim, zod schemas with
 platform file:line cites, `["environment-keys", envId]` hooks, the keys
 section + reveal-once dialog + setup panel on self-hosted detail pages, mock
 platform routes, e2e/fidelity) starts after slice 2 merges and is tracked
@@ -279,8 +333,11 @@ there, not here.
 
 ## New DIVERGENCES entries (to record as they land)
 
-- Rewritten CONFIRMED "Environment worker keys — issuance" (slice 2): off-wire
-  `/console/v1` issuance namespace; named multi-key model with 1-year expiry;
-  observed-console evidence; `environment_keys_one_live` retired.
+- Rewritten CONFIRMED "Environment worker keys — issuance" (slice 2): the
+  console-API dialect (`/api/oauth/organizations/{org}/environments/{id}/tokens[…]`)
+  mirrored from the reference console's observed private backend, dated
+  2026-08-10; named multi-key model with 1-year expiry;
+  `environment_keys_one_live` retired; the four deliberate dialect divergences
+  (key prefix, id format, no `authorization_details`, house error envelope).
 - CONFIRMED note (slice 1): expired keys 401 identically to revoked ones on the
   Bearer lane — reference-unobservable, chosen to avoid an auth oracle.
