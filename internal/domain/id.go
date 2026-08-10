@@ -32,6 +32,14 @@ const (
 	PrefixSkill         = "skill"
 	PrefixSkillVersion  = "skillver"
 	PrefixOutcome       = "outc"
+	// PrefixEnvironmentKey names an issued worker credential's row. It is
+	// internal-only — never on the /v1 wire, and the reference identifies its
+	// own environment keys by bare UUID on its console's private API — so it
+	// stays out of knownPrefixes, following the apikey_/gtk_ precedent. That
+	// set is what every /v1 path accepts as an id shape, and widening it for a
+	// private identifier would widen all of them (checkID validates shape, not
+	// which resource the prefix names).
+	PrefixEnvironmentKey = "envkey"
 )
 
 // altSessionPrefix is accepted on input for wire compatibility: some Anthropic

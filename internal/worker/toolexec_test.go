@@ -160,9 +160,10 @@ type harness struct {
 	serverURL string
 	sid       domain.ID
 	envID     domain.ID
+	// key is the environment key this harness issued; the platform generates
+	// the value, so a test that builds its own SDK client takes it from here.
+	key string
 }
-
-const workerKey = "ek-worker-test"
 
 // newHarness stands up a control plane over a fresh Dockerized Postgres, exposes
 // it over HTTP, and wires a worker SDK client to it — the same wire path a real
@@ -183,8 +184,9 @@ func newHarnessWrapped(t *testing.T, sb *fakeSandbox, wrap func(http.Handler) ht
 	if _, err := pool.Exec(ctx, `UPDATE sessions SET status = 'running' WHERE id = $1`, sid.String()); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.EnsureEnvironmentKey(ctx, pool, envID.String(), workerKey); err != nil {
-		t.Fatalf("ensure env key: %v", err)
+	workerKey, err := api.IssueEnvironmentKey(ctx, pool, envID.String(), "worker-test")
+	if err != nil {
+		t.Fatalf("issue env key: %v", err)
 	}
 	blobs := blobtest.Mem()
 	var handler http.Handler = api.NewHandler(pool, blobs, nil)
@@ -197,7 +199,7 @@ func newHarnessWrapped(t *testing.T, sb *fakeSandbox, wrap func(http.Handler) ht
 	prov := &fakeProvider{sb: sb}
 	client := NewClient(srv.URL, workerKey)
 	return &harness{
-		pool: pool, log: events.NewLog(pool), prov: prov, blobs: blobs, client: client, serverURL: srv.URL, sid: sid, envID: envID,
+		pool: pool, log: events.NewLog(pool), prov: prov, blobs: blobs, client: client, serverURL: srv.URL, sid: sid, envID: envID, key: workerKey,
 		run: func() error {
 			return RunSessionTools(ctx, client, prov, sid.String(), ToolExecConfig{})
 		},

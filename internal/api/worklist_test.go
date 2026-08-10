@@ -30,9 +30,8 @@ func enqueueToolExec(t *testing.T, s *tserver, agentID, envID string) string {
 // brain's queue) and not another environment's work.
 func TestWorkListReturnsScopedItems(t *testing.T) {
 	s := newTestServer(t)
-	const keyA, keyB = "ek-wl-a", "ek-wl-b"
-	envA, _ := selfHostedWorker(t, s, keyA)
-	envB, sessionB := selfHostedWorker(t, s, keyB)
+	envA, _, keyA := selfHostedWorker(t, s, "ek-wl-a")
+	envB, sessionB, _ := selfHostedWorker(t, s, "ek-wl-b")
 	agentA := createAgent(t, s, map[string]any{"name": "wl", "model": "claude-opus-4-8"})
 	bearerA := map[string]string{"Authorization": "Bearer " + keyA}
 
@@ -88,8 +87,7 @@ func TestWorkListReturnsScopedItems(t *testing.T) {
 // overlap and a null terminal cursor.
 func TestWorkListPaginates(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-wl-page"
-	env, _ := selfHostedWorker(t, s, key)
+	env, _, key := selfHostedWorker(t, s, "ek-wl-page")
 	agent := createAgent(t, s, map[string]any{"name": "wlp", "model": "claude-opus-4-8"})
 	bearer := map[string]string{"Authorization": "Bearer " + key}
 
@@ -139,9 +137,8 @@ func TestWorkListPaginates(t *testing.T) {
 // empty data array with a null cursor.
 func TestWorkListAuthAndEmpty(t *testing.T) {
 	s := newTestServer(t)
-	const keyA, keyB = "ek-wl-auth-a", "ek-wl-auth-b"
-	envA, _ := selfHostedWorker(t, s, keyA)
-	selfHostedWorker(t, s, keyB)
+	envA, _, keyA := selfHostedWorker(t, s, "ek-wl-auth-a")
+	_, _, keyB := selfHostedWorker(t, s, "ek-wl-auth-b")
 	listA := "/v1/environments/" + envA + "/work"
 
 	// Management key and a key for another environment are both rejected.
@@ -168,8 +165,7 @@ func TestWorkListAuthAndEmpty(t *testing.T) {
 // non-GET method is 405, and a malformed page cursor is a 400.
 func TestWorkListRejectsBadRequest(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-wl-bad"
-	envID, _ := selfHostedWorker(t, s, key)
+	envID, _, key := selfHostedWorker(t, s, "ek-wl-bad")
 	bearer := map[string]string{"Authorization": "Bearer " + key}
 	list := "/v1/environments/" + envID + "/work"
 

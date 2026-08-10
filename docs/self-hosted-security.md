@@ -30,7 +30,7 @@ deliberate divergences from the reference are in
 | **Sandbox egress** | `limited` = only `allowed_hosts`, through the per-session egress gate (both backends, executor opt-in); without the gate `limited` **fails closed** (no route out); default networking is unrestricted | Firewalling / `NetworkPolicy` for the default (non-`limited`) case |
 | **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
 | **Sandbox placement** | On **Kubernetes**, puts your `nodeSelector` and `tolerations` on every sandbox pod (`SANDBOX_K8S_NODE_SELECTOR` / `SANDBOX_K8S_TOLERATIONS`; the chart's `sandboxPlacement`), and refuses a malformed one at startup | Building the node pool, labelling and tainting it, and keeping the platform's own workloads off it |
-| **Environment-key lifecycle** | Hash-only storage, one live key per environment, revoke-on-re-mint, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
+| **Environment-key lifecycle** | Server-generated secrets, hash-only storage, one key per host with a one-year expiry, individual revocation, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
 | **Model / tool credentials** | Never enter the sandbox; redacted from error events | Securing the brain's provider config and any egress-time secrets |
 | **Auth transport** | Hashes `x-api-key` and environment keys at rest; scopes each | Terminating TLS; keeping keys off logs and out of images |
 | **Single-tenant daemon trust** | The `ours` label guards *accidents*, not a hostile co-tenant | Treating the Docker daemon / cluster as a single trust domain |
@@ -550,29 +550,46 @@ at the executor's own network, or by the backend endpoints you configure
 ([#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
 [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)).
 
-### 6. Environment-key rotation
+### 6. Environment-key lifecycle
 
-The platform owns the *primitive*; you own the *lifecycle*. `EnsureEnvironmentKey`
-makes a supplied value the one live worker credential for an environment: it
-stores only the hash, and registering a fresh value **revokes the prior one**
-(rotation-by-re-mint). A key value is bound to one environment for life; it is
-never silently re-pointed. The schema enforces the invariant rather than trusting
-the helper: `environment_keys_one_live` (migration 0013) admits one unrevoked row
-per environment, so a second live credential — from concurrent mints, or from a
-hand-written `INSERT` — is rejected outright. There is **no expiry or TTL** — a
-key is live until re-minted or revoked — and there is **no automatic rotation**.
+The platform owns the *primitive*; you own the *lifecycle*. `IssueEnvironmentKey`
+mints a worker credential for an environment: the platform **generates** the
+secret (256 bits of CSPRNG behind an `sk-map-env01-` prefix), returns it once,
+and stores only its SHA-256 hash — nothing can render the value again, so a lost
+key is reissued rather than recovered. Each key carries a **name** and expires
+**one year** after issue, and an environment holds as many live keys as it has
+hosts: issue one per host, and `RevokeEnvironmentKey` retires that host alone
+without disturbing the others. Revocation is immediate (it takes effect on the
+worker's next request), idempotent, and scoped to the owning environment — a key
+id cannot be revoked, or even confirmed to exist, through another environment.
+A key value is bound to one environment for life: `key_hash` is UNIQUE, so the
+same secret can never authenticate two queues.
+
+An **expired** key fails exactly as a revoked or unknown one does — the same 401
+with the same message — so the auth lane leaks nothing about which it was. Keys
+minted before expiries existed (before migration 0021) carry no expiry and stay
+live until revoked; the migration deliberately does not backfill one, which
+would have retro-expired credentials already in use. Treat those as a migration
+debt rather than a supported state: such a key is a value **you** chose, so it
+never had the platform's 256-bit generation guarantee, and it now never expires
+either. Issue a replacement for each host and revoke the old key — the list
+shows them with an empty name and no expiry, which is how you find them.
 
 What you own:
 
-- **Provisioning.** There is no operator wire endpoint that mints an environment
-  key yet; today a key is seeded into the `environment_keys` table directly (via
-  `EnsureEnvironmentKey`). Issuance UX is tracked in
-  [#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43). Treat
-  key creation as a privileged, audited operation on your control-plane database.
-- **Rotation cadence.** Because there is no TTL, rotation is a policy you enforce:
-  on a schedule, and immediately on suspected worker compromise, re-mint the key
-  (which revokes the old hash) and roll the new value out to the worker's
-  `ANTHROPIC_ENVIRONMENT_KEY`. Revocation takes effect on the next request.
+- **Provisioning.** Treat key creation as a privileged, audited operation. The
+  operator surface that calls the primitive is landing with
+  [#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43) (plan
+  30): issuance moves to the managed-agent-console's environment page, so the
+  key is generated, displayed once and copied without anyone touching the
+  control-plane database. Until that endpoint lands, issuing means calling
+  `IssueEnvironmentKey`.
+- **Rotation cadence.** The one-year expiry is a backstop, not a policy: rotate
+  on your own schedule, and immediately on suspected worker compromise, by
+  issuing a fresh key for that host, rolling it out to the worker's
+  `ANTHROPIC_ENVIRONMENT_KEY`, and revoking the old one. Because keys are
+  per-host, that is a rolling operation — the fleet's other workers keep running
+  throughout, which the previous rotate-on-mint model could not offer.
 - **Transport secrecy.** The key travels as a Bearer token — terminate TLS in
   front of the control plane, and keep the value out of images, logs, and shell
   history. (The management `x-api-key` follows the same model: hashed at rest,

@@ -1,12 +1,9 @@
 package api_test
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"testing"
-
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
 
 // TestSkillReadsEnvironmentKeyLane pins the dual-auth lane slice 4 adds: a
@@ -17,10 +14,7 @@ import (
 func TestSkillReadsEnvironmentKeyLane(t *testing.T) {
 	s := newTestServer(t)
 	_, envID := fixture(t, s)
-	const wkey = "wkey_skills_lane"
-	if err := api.EnsureEnvironmentKey(context.Background(), s.pool, envID, wkey); err != nil {
-		t.Fatalf("EnsureEnvironmentKey: %v", err)
-	}
+	wkey := issueKey(t, s.pool, envID, "skills-lane")
 	bearer := map[string]string{"Authorization": "Bearer " + wkey}
 
 	created := s.createSkill(t)

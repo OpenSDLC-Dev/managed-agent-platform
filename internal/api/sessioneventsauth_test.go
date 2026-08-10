@@ -29,9 +29,8 @@ func readJSON(t *testing.T, res *http.Response) (int, map[string]any) {
 // tool runner).
 func TestEnvironmentKeyAuthorizesSessionEvents(t *testing.T) {
 	s := newTestServer(t)
-	const keyA, keyB = "ek-sess-a", "ek-sess-b"
-	_, sessionA := selfHostedWorker(t, s, keyA)
-	_, sessionB := selfHostedWorker(t, s, keyB) // a second environment + session
+	_, sessionA, keyA := selfHostedWorker(t, s, "ek-sess-a")
+	_, sessionB, _ := selfHostedWorker(t, s, "ek-sess-b") // a second environment + session
 	bearerA := map[string]string{"Authorization": "Bearer " + keyA}
 	eventsA := "/v1/sessions/" + sessionA + "/events"
 
@@ -102,8 +101,7 @@ func TestEnvironmentKeyAuthorizesSessionEvents(t *testing.T) {
 // covered as authorized in TestEnvironmentKeyAuthorizesSessionEvents.
 func TestEnvironmentKeyDoesNotAuthorizeMutatingSessionCRUD(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-crud"
-	_, sessionID := selfHostedWorker(t, s, key)
+	_, sessionID, key := selfHostedWorker(t, s, "ek-crud")
 	bearer := map[string]string{"Authorization": "Bearer " + key}
 
 	for _, tc := range []struct{ method, path string }{
@@ -127,8 +125,7 @@ func TestEnvironmentKeyDoesNotAuthorizeMutatingSessionCRUD(t *testing.T) {
 // reach a management-only CRUD handler.
 func TestEnvironmentKeyEncodedSlashDoesNotForgeEventsPath(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-encoded"
-	_, sessionID := selfHostedWorker(t, s, key)
+	_, sessionID, key := selfHostedWorker(t, s, "ek-encoded")
 	bearer := map[string]string{"Authorization": "Bearer " + key}
 
 	path := "/v1/sessions/" + sessionID + "%2Fevents"
@@ -146,8 +143,7 @@ func TestEnvironmentKeyEncodedSlashDoesNotForgeEventsPath(t *testing.T) {
 // over-authorize the environment key onto an encoded path.
 func TestEnvironmentKeyEncodedLiteralSegmentFailsClosed(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-enc-literal"
-	_, sessionID := selfHostedWorker(t, s, key)
+	_, sessionID, key := selfHostedWorker(t, s, "ek-enc-literal")
 	bearer := map[string]string{"Authorization": "Bearer " + key}
 
 	path := "/v1/sessions/" + sessionID + "/%65vents" // %65 == 'e'

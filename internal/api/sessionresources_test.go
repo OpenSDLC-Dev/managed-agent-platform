@@ -1,7 +1,6 @@
 package api_test
 
 import (
-	"context"
 	"encoding/base64"
 	"io"
 	"net/http"
@@ -433,10 +432,7 @@ func TestSessionResourceEdgeCases(t *testing.T) {
 func TestSessionResourcesManagementOnlyLane(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	const wkey = "wkey_resources_lane"
-	if err := api.EnsureEnvironmentKey(context.Background(), s.pool, envID, wkey); err != nil {
-		t.Fatalf("EnsureEnvironmentKey: %v", err)
-	}
+	wkey := issueKey(t, s.pool, envID, "resources-lane")
 	bearer := map[string]string{"Authorization": "Bearer " + wkey}
 	fileA := uploadOneFile(t, s, "a.txt")
 	sess := createSession(t, s, map[string]any{

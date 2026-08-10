@@ -2,12 +2,9 @@ package api_test
 
 import (
 	"bytes"
-	"context"
 	"io"
 	"net/http"
 	"testing"
-
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
 
 // TestFileContentEnvironmentKeyLane pins slice 4's worker download lane: a BYOC
@@ -20,10 +17,7 @@ import (
 func TestFileContentEnvironmentKeyLane(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	const wkey = "wkey_files_lane"
-	if err := api.EnsureEnvironmentKey(context.Background(), s.pool, envID, wkey); err != nil {
-		t.Fatalf("EnsureEnvironmentKey: %v", err)
-	}
+	wkey := issueKey(t, s.pool, envID, "files-lane")
 	bearer := map[string]string{"Authorization": "Bearer " + wkey}
 	oct := "application/octet-stream"
 

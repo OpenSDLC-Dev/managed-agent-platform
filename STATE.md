@@ -4,18 +4,19 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-Two unrelated things in flight.
+Three unrelated things in flight.
 
 [Plan 29](./docs/plan/29_mcp-toolset.md) — the MCP client and `mcp_toolset`
 wired end to end (#45). Seven slices; #45's acceptance criterion is met at the
 end of slice 4.
 
-**GCP continuous delivery** — plan-less, delivered. Build → push → deploy →
-smoke on every push to `main`, in **mode 2**; infrastructure stays human-driven,
-CD runs no Terraform (plan 20, Decision 9). Green from the workflow itself and
-verified against the live cluster from outside the job; the by-hand proof, the
-run, and what it does *not* cover: [docs/HISTORY.md](./docs/HISTORY.md). One task
-remains, and it blocks every session.
+[Plan 30](./docs/plan/30_environment-keys-console-issuance.md) — console-issued
+environment keys (#43): named, per-host, individually revocable. Three slices;
+the UI half is managed-agent-console plan 07 and trails slice 2.
+
+**GCP continuous delivery** — plan-less, **delivered and green**; the record is
+in [docs/HISTORY.md](./docs/HISTORY.md). One task remains, and it blocks every
+session.
 
 ## Tasks
 
@@ -33,18 +34,18 @@ remains, and it blocks every session.
       migration + store, `Conn.CallTool` (needed by slice 4), the `mcp_exec`
       driver and its egress check. Evidence: [mcp.go](./internal/mcp/mcp.go),
       [dialguard.go](./internal/dialguard/dialguard.go).
-- [ ] Slice 3 — MCP confirmation gating and denial synthesis.
-- [ ] Slice 4 — brain expansion, execution driver, settlement chaining, spill.
-- [ ] Slice 5 — vault credentials, injection, OAuth refresh.
-- [ ] Slice 6 — networking polish and retry semantics.
-- [ ] Slice 7 — evals, live tier, `ant` CLI acceptance, archive.
-- [x] **CD delivered and green** — #347 landed it, #349 moved the build off Cloud
-      Build onto the runner after the caller-vs-build-identity trap, and the WIF
-      provider now asserts `ref`/`ref_type` as well as `repository_owner`. First
-      green run from the workflow itself: 31260884425 on `0c01e14`, 3m41s, build
-      through smoke, all three components on its images at `ready 1/1`. The
-      console's pipeline is green too; #355 then moved its eleven identifiers to
-      Actions variables. Detail in `deploy/gcp/README.md` and
-      [docs/HISTORY.md](./docs/HISTORY.md).
+- [ ] Slices 3–7 — confirmation gating and denial synthesis; brain expansion,
+      execution driver, settlement chaining, spill; vault credentials and OAuth
+      refresh; networking polish; evals, `ant` CLI acceptance, archive.
+- [x] **Plan 30 slice 1 — storage and primitives.** Migration 0021 adds `name` /
+      `expires_at` and retires `environment_keys_one_live`, so an environment
+      holds one key per host; `IssueEnvironmentKey` (server-generated secret,
+      hash-only, one-year expiry) / `List` / `Revoke` replace
+      `EnsureEnvironmentKey`, and an expired key 401s exactly as a revoked one.
+      Evidence: [envkeys.go](./internal/api/envkeys.go),
+      [envkeys_test.go](./internal/api/envkeys_test.go).
+- [ ] Plan 30 slices 2–3 — the off-wire `/api/oauth/…/tokens` issuance endpoints
+      mirroring the reference console's API, then a real `ant beta:worker`
+      acceptance run on a console-issued key, then archive.
 - [ ] Replace the `model-providers` placeholder (real endpoint, fake key) with a
       live route before anything runs a session.
