@@ -65,6 +65,10 @@ func TestStraysReapsTheAgedAndSparesEverythingElse(t *testing.T) {
 		"dddd " + at(-9*time.Hour) + " gcstest",           // another corpse
 		"eeee not-a-timestamp pgtest",                     // not ours to judge
 		"ffff " + at(-9*time.Hour),                        // no owner value: the same
+		// No start time, and an owner value whose first word parses as an
+		// ancient one. Collapsing the empty column would slide that word into
+		// the timestamp's place and destroy a container nothing here started.
+		"gggg  1700000000 manual",
 		"",
 	}, "\n") + "\n"
 
@@ -89,10 +93,10 @@ func TestSweepStraysRemovesAnAgedContainerAndSparesAFreshOne(t *testing.T) {
 
 	SweepStrays("dockertest")
 
-	if exists(t, aged) {
+	if !gone(aged) {
 		t.Errorf("aged container %s survived the sweep", aged)
 	}
-	if !exists(t, fresh) {
+	if gone(fresh) {
 		t.Errorf("fresh container %s was reaped; a concurrent suite's live fixture would have been too", fresh)
 	}
 }
@@ -114,16 +118,6 @@ func plant(t *testing.T, started time.Time) string {
 		t.Fatalf("this test requires Docker to plant a container: %v", err)
 	}
 	id := strings.TrimSpace(string(out))
-	t.Cleanup(func() { removeContainer(id) })
+	t.Cleanup(func() { removeContainer("dockertest", id) })
 	return id
-}
-
-func exists(t *testing.T, id string) bool {
-	t.Helper()
-	out, err := exec.Command("docker", "ps", "--all", "--quiet",
-		"--filter", "id="+id).Output()
-	if err != nil {
-		t.Fatalf("look up container %s: %v", id, err)
-	}
-	return strings.TrimSpace(string(out)) != ""
 }

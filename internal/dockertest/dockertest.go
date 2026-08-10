@@ -33,6 +33,16 @@ const ownerLabel = "dev.opensdlc.managed-agent-platform.test-fixture"
 // against. Asking the daemon for its own creation timestamp instead would
 // compare two clocks, and a Docker Desktop VM's clock drifts from its host's
 // across a laptop suspend, which is one of the ways a run gets killed.
+//
+// One clock is still one assumption: that it only moves forward smoothly. A
+// jump larger than strayAge — an NTP correction, or a resume from a suspend
+// that outlasted it — makes a live peer look ancient to a binary starting after
+// the jump. No label-based scheme escapes that. The reader is a different
+// process, so Go's monotonic clock cannot cross the two, and reading the
+// daemon's clock at both ends only moves the same discontinuity into the
+// daemon's VM. What bounds it is that the jump has to exceed strayAge, and that
+// a run already interrupted by a six-hour clock jump is not a run that was
+// going to pass.
 const startedLabel = ownerLabel + "-started"
 
 // strayAge is how long a fixture container must have been alive before a later
@@ -78,11 +88,10 @@ func RunArgs(harness string, rest ...string) []string {
 // fixture's strays whichever suite left them, since the age rule is the same
 // for all of them and the label is this repo's alone.
 //
-// Best effort throughout, and silent about its own failures: a stray this run
-// cannot reach is one the next run gets, concurrent TestMains racing to remove
-// the same corpse leave the loser a "No such container" that means the job is
-// already done, and a daemon that will not answer at all is about to be
-// reported far better by the caller's own `docker run`.
+// Listing is best effort and silent: a daemon that will not answer at all is
+// about to be reported far better by the caller's own `docker run`, and a stray
+// this run never sees is one the next run gets. Removal is not silent — see
+// removeContainer.
 func SweepStrays(harness string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -93,7 +102,7 @@ func SweepStrays(harness string) {
 		return
 	}
 	for _, s := range strays(string(out), time.Now()) {
-		if !removeContainer(s.id) {
+		if !removeContainer(harness, s.id) {
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "%s: reaped stray %s container %s left by a killed run (#346)\n",
@@ -102,12 +111,40 @@ func SweepStrays(harness string) {
 }
 
 // removeContainer force-removes one container and the anonymous volumes it
-// owns, reporting only whether it went. The timeout keeps a wedged daemon from
-// hanging the run inside TestMain, where go test's own alarm is not yet armed.
-func removeContainer(id string) bool {
+// owns, and reports whether it was this call that removed it. The timeout keeps
+// a wedged daemon from hanging the run inside TestMain, where go test's own
+// alarm is not yet armed.
+//
+// A failure is announced unless the container is simply gone, which is the
+// expected way to lose: `go test ./...` has eleven TestMains sweeping the same
+// corpse, and only one of them can win. Everything else — a daemon that refuses,
+// a volume that will not delete — is a container this run could not clear, and
+// swallowing that would leave a silent leak indistinguishable from a healthy
+// sweep, which is the failure mode this whole package exists to end (the rule
+// pgtest.removeContainer already states for the run's own container).
+func removeContainer(harness, id string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "docker", "rm", "-f", "-v", id).Run() == nil
+	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", "-v", id).CombinedOutput()
+	if err == nil {
+		return true
+	}
+	if !gone(id) {
+		fmt.Fprintf(os.Stderr, "%s: reaping stray container %s: %v: %s\n",
+			harness, id, err, strings.TrimSpace(string(out)))
+	}
+	return false
+}
+
+// gone reports whether the daemon no longer knows the container. A daemon that
+// will not answer counts as still there, so an unreachable daemon is reported as
+// the removal failure it is rather than mistaken for a lost race.
+func gone(id string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "ps", "--all", "--quiet",
+		"--filter", "id="+id).Output()
+	return err == nil && strings.TrimSpace(string(out)) == ""
 }
 
 // stray is one container the sweep decided to remove.
@@ -118,10 +155,18 @@ type stray struct{ id, owner string }
 // or carrying a timestamp that does not parse, is left alone: something other
 // than RunArgs wrote that label, and destroying a container this package cannot
 // account for is worse than leaving one behind.
+//
+// The split is positional (SplitN), not whitespace-collapsing (Fields), because
+// a missing label renders as an empty column rather than no column: Fields
+// closes the gap and slides the harness name into the timestamp's place, so a
+// container labelled by something else — with no start time and a value whose
+// first word happens to parse as a number — would be read as ancient and
+// removed. SplitN leaves the empty column empty, where ParseInt rejects it, and
+// keeps a harness name containing spaces intact for the message.
 func strays(psOutput string, now time.Time) []stray {
 	var found []stray
 	for _, line := range strings.Split(psOutput, "\n") {
-		fields := strings.Fields(line)
+		fields := strings.SplitN(strings.TrimSpace(line), " ", 3)
 		if len(fields) < 3 {
 			continue
 		}
