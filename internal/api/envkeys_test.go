@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,6 +12,16 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+const (
+	// uniqueViolation is SQLSTATE 23505. environmentKeysKeyHashKey is the name
+	// Postgres gives the inline `key_hash text NOT NULL UNIQUE` in
+	// migrations/0001_init.sql — naming it is the point, so that a refusal from
+	// some other constraint cannot stand in for this one.
+	uniqueViolation           = "23505"
+	environmentKeysKeyHashKey = "environment_keys_key_hash_key"
 )
 
 // spreadCreatedAt pushes each named key one further second into the past, oldest
@@ -25,6 +36,12 @@ import (
 // than the "newer" one and invert the very order this exists to fix — trading
 // one nondeterminism for another. Inside a single statement now() is one value,
 // so the offsets are exact.
+//
+// expires_at moves with created_at so the row stays self-consistent. It was
+// stamped at issuance as created_at + EnvironmentKeyTTL; shifting only the one
+// would silently grow the lifetime a caller of this helper measures a few lines
+// later, and today that is hidden by a ±1min tolerance rather than by anything
+// structural.
 func spreadCreatedAt(t *testing.T, s *tserver, envID string, newestFirst ...string) {
 	t.Helper()
 	ages := make([]float64, len(newestFirst))
@@ -33,7 +50,8 @@ func spreadCreatedAt(t *testing.T, s *tserver, envID string, newestFirst ...stri
 	}
 	tag, err := s.pool.Exec(context.Background(),
 		`UPDATE environment_keys k
-		    SET created_at = now() - make_interval(secs => n.age)
+		    SET created_at = now() - make_interval(secs => n.age),
+		        expires_at = k.expires_at - make_interval(secs => n.age)
 		   FROM unnest($1::text[], $2::float8[]) AS n(name, age)
 		  WHERE k.environment_id = $3 AND k.name = n.name`,
 		newestFirst, ages, envID)
@@ -324,10 +342,15 @@ func TestListEnvironmentKeysBreaksTimestampTiesByID(t *testing.T) {
 		issueKey(t, s.pool, envID, fmt.Sprintf("host-%d", i))
 	}
 	// One timestamp for every row: the tiebreak is the only thing left to order
-	// them by.
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE environment_keys SET created_at = now() WHERE environment_id = $1`, envID); err != nil {
+	// them by. Checked like spreadCreatedAt's, so a collapse that misses a row
+	// reports itself rather than surfacing as a confusing ordering failure.
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE environment_keys SET created_at = now() WHERE environment_id = $1`, envID)
+	if err != nil {
 		t.Fatalf("collapse created_at: %v", err)
+	}
+	if tag.RowsAffected() != keys {
+		t.Fatalf("collapse touched %d rows, want %d", tag.RowsAffected(), keys)
 	}
 
 	page, _, err := api.ListEnvironmentKeys(ctx, s.pool, envID, 100, 0)
@@ -346,20 +369,11 @@ func TestListEnvironmentKeysBreaksTimestampTiesByID(t *testing.T) {
 			t.Fatalf("ids are not strictly descending at %d: %v", i, ids)
 		}
 	}
-	// And the order is stable, which is the property offset paging actually
-	// needs: a second call must not shuffle rows between pages.
-	again, _, err := api.ListEnvironmentKeys(ctx, s.pool, envID, 100, 0)
-	if err != nil {
-		t.Fatalf("ListEnvironmentKeys (repeat): %v", err)
-	}
-	if len(again) != len(page) {
-		t.Fatalf("repeated listing returned %d keys, want %d", len(again), len(page))
-	}
-	for i := range page {
-		if again[i].ID != page[i].ID {
-			t.Fatalf("repeated listing reordered tied rows at %d: %s then %s", i, page[i].ID, again[i].ID)
-		}
-	}
+	// Deliberately no "call it twice and compare" check here. Two identical
+	// queries over eight unmodified rows return the same order whether or not
+	// `id DESC` is present, so such a check is green by construction — the exact
+	// defect this test exists to remove, and it would sit one line below the
+	// assertion that already covers stability by pinning a total order.
 }
 
 // TestEnvironmentKeyValueBindsToOneEnvironment: dropping environment_keys_one_live
@@ -367,21 +381,28 @@ func TestListEnvironmentKeysBreaksTimestampTiesByID(t *testing.T) {
 // single key value can never authenticate two environments — the property that
 // keeps a leaked-and-replayed value confined to the queue it was issued for.
 //
-// Both halves are asserted, because they fail independently. The schema half is
-// the UNIQUE constraint refusing the row; the auth half is what an attacker
-// would actually attempt.
-//
-// The scope-comparison the auth half exercises is not otherwise unpinned —
+// Two halves, and neither is the one a first draft reaches for. Polling env B
+// with a key issued for env A and expecting a 401 is already covered by
 // TestWorkPollRequiresEnvironmentKey/key_for_other_env and TestWorkListAuthAndEmpty
-// both go red if it is removed. What is unique here is the *two-row* premise
-// none of them can reach: they poll with a key whose single row belongs to
-// another environment, whereas this one drives one value toward two rows. The
-// INSERT above is a t.Error rather than a t.Fatal precisely so that stays true —
-// if key_hash's UNIQUE is ever relaxed or an ON CONFLICT path added, the row
-// lands, the test keeps going, and the HTTP half then runs in a world where the
-// lookup really does have two rows to choose between. That is the scenario slice
-// 1 stopped covering when it replaced envauth_test.go with a bare constraint
-// assertion.
+// — remove the scope comparison in workapi.go and both go red — so repeating it
+// here would buy a second HTTP round trip and no coverage.
+//
+// What no other test can construct is the *two-row* state, and that is what
+// #362 was actually about: one Bearer token resolving to two environment_ids.
+//
+//   - The schema half asserts key_hash's UNIQUE refuses the second row, and
+//     insists on that constraint by SQLSTATE and name. Any error would satisfy
+//     `err != nil`, including one from an unrelated schema change — and then the
+//     assertion passes while proving nothing, which is the failure mode this
+//     whole change is about.
+//   - The auth half then removes the constraint from this test's own database
+//     and builds the state anyway. authenticateEnvironmentKey (envauth.go)
+//     looks a token up by key_hash alone and takes a single row, so with two
+//     rows it resolves to whichever the planner returns first — meaning "poll A
+//     succeeds" is a coin flip and cannot be asserted. What holds whichever row
+//     wins is that the value authenticates *exactly one* of the two, which is
+//     the confinement property itself, and it is falsifiable: drop the scope
+//     comparison and both polls return 200.
 func TestEnvironmentKeyValueBindsToOneEnvironment(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -394,26 +415,52 @@ func TestEnvironmentKeyValueBindsToOneEnvironment(t *testing.T) {
 		`SELECT key_hash FROM environment_keys WHERE environment_id = $1`, envA).Scan(&hash); err != nil {
 		t.Fatalf("read A's key hash: %v", err)
 	}
-	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)`,
-		domain.NewID(domain.PrefixEnvironmentKey).String(), envB, hash); err == nil {
+	secondRow := `INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)`
+	_, err := s.pool.Exec(ctx, secondRow, domain.NewID(domain.PrefixEnvironmentKey).String(), envB, hash)
+	var pgErr *pgconn.PgError
+	switch {
+	case err == nil:
 		t.Error("one key value was accepted for two environments")
+	case !errors.As(err, &pgErr):
+		t.Errorf("the second row was refused by something other than Postgres: %v", err)
+	case pgErr.Code != uniqueViolation || pgErr.ConstraintName != environmentKeysKeyHashKey:
+		t.Errorf("the second row was refused for an unrelated reason: SQLSTATE %s on %q (%v)",
+			pgErr.Code, pgErr.ConstraintName, err)
 	}
 
-	// The auth half, over real HTTP: the value still polls the environment it was
-	// issued for, and is a 401 against the other — no cross-environment
-	// escalation, whatever the storage layer did.
-	auth := map[string]string{"Authorization": "Bearer " + key}
-	if res, raw := s.poll(t, envA, auth); res.StatusCode != http.StatusOK {
-		t.Errorf("the key stopped authenticating its own environment: status %d, body %q", res.StatusCode, raw)
+	// Now the auth half, in the world where the constraint above did not hold.
+	if _, err := s.pool.Exec(ctx,
+		`ALTER TABLE environment_keys DROP CONSTRAINT `+environmentKeysKeyHashKey); err != nil {
+		t.Fatalf("drop the key_hash constraint for the degraded case: %v", err)
 	}
-	res, raw := s.poll(t, envB, auth)
-	if res.StatusCode != http.StatusUnauthorized {
-		t.Errorf("A's key authenticated environment B (escalation): status %d, body %q", res.StatusCode, raw)
+	if _, err := s.pool.Exec(ctx, secondRow,
+		domain.NewID(domain.PrefixEnvironmentKey).String(), envB, hash); err != nil {
+		t.Fatalf("stage one key value across two environments: %v", err)
+	}
+
+	auth := map[string]string{"Authorization": "Bearer " + key}
+	resA, rawA := s.poll(t, envA, auth)
+	resB, rawB := s.poll(t, envB, auth)
+	authenticated := 0
+	for _, res := range []*http.Response{resA, resB} {
+		if res.StatusCode == http.StatusOK {
+			authenticated++
+		}
+	}
+	if authenticated != 1 {
+		t.Errorf("one key value authenticated %d of 2 environments, want exactly 1: A=%d %q, B=%d %q",
+			authenticated, resA.StatusCode, rawA, resB.StatusCode, rawB)
+	}
+	// And the environment it did not authenticate refused it as an auth failure,
+	// with the same envelope any unknown key gets — not a 403, not a leak of
+	// which of the two rows the lookup happened to pick.
+	refused, rawRefused := resA, rawA
+	if resA.StatusCode == http.StatusOK {
+		refused, rawRefused = resB, rawB
 	}
 	var body map[string]any
-	_ = json.Unmarshal([]byte(raw), &body)
-	wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
+	_ = json.Unmarshal([]byte(rawRefused), &body)
+	wantErr(t, refused.StatusCode, body, http.StatusUnauthorized, "authentication_error")
 }
 
 // TestSecondLiveEnvironmentKeyIsAccepted is the schema half of the model change,
