@@ -22,13 +22,19 @@
 # file, and a file with `image.registry` removed renders against the chart's
 # ghcr.io defaults while a file with the annotations removed renders a
 # ServiceAccount with no identity — so what is meant to be the worked example of
-# mode 2 would document a deployment that cannot start. Keeping them complete
-# costs nothing at deploy time, because both placeholders fail closed and neither
-# does so by luck: `registry.invalid` can never resolve (RFC 2606 reserves the
-# `.invalid` TLD precisely so a name cannot be registered), and impersonating
-# `…@your-project.iam.gserviceaccount.com` needs an IAM binding in a project this
-# deployment does not control. `--wait --atomic` turns either into a rolled-back
-# release rather than a half-configured cluster.
+# mode 2 would document a deployment that cannot start.
+#
+# The two halves do NOT fail the same way if an override is ever dropped, and
+# saying they do would be the more comfortable claim rather than the true one.
+# The IMAGE half fails closed by construction: `registry.invalid` can never
+# resolve, because RFC 2606 reserves the `.invalid` TLD precisely so no name
+# under it can be registered — so the pods cannot pull and `--wait --atomic`
+# rolls the release back. The IDENTITY half does not fail closed at all for the
+# brain: read the note on `brain.serviceAccount` below, and
+# internal/brain/grader.go, which downgrades a blob read it cannot make to a
+# warning and grades on. The pod starts, the release completes, and the run is
+# green. That is why the workflow reads the three annotations back out of the
+# cluster after the upgrade instead of trusting that it set them.
 #
 # The registry host is where that distinction is load-bearing. A plausible-looking
 # `us-central1-docker.pkg.dev/your-project/…` would be a real Artifact Registry

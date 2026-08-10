@@ -172,12 +172,13 @@ jobs:
       # instead of a failure four steps in.
       #
       # Whitespace and commas are rejected, not merely emptiness. A value of one
-      # space is no configuration while passing a `-z` test; and five of these
-      # reach `helm --set-string`, whose assignment list is COMMA-separated, so a
-      # comma would silently split one value into two paths and set neither to
-      # what was meant. No GCP project id, zone, cluster name, registry path,
-      # bucket, KMS resource name or service-account email may contain either
-      # character, so this rejects nothing legitimate.
+      # space is no configuration while passing a `-z` test; and four of these —
+      # `ARTIFACT_REGISTRY` and the three service accounts — reach
+      # `helm --set-string`, whose assignment list is COMMA-separated, so a comma
+      # would silently split one value into two paths and set neither to what was
+      # meant. No GCP project id, zone, cluster name, registry path, bucket, KMS
+      # resource name or service-account email may contain either character, so
+      # this rejects nothing legitimate.
       - name: Require the deployment variables
         # ${!v} — indirect expansion — is bash, and this file already assumes
         # bash elsewhere (`set -o pipefail`). Stated rather than inherited from
@@ -205,7 +206,21 @@ jobs:
           # `host/host/controlplane:sha` — a reference that is merely wrong
           # rather than invalid, so the render succeeds and three pods sit in
           # ImagePullBackOff.
+          #
+          # Counting slashes is NOT the check, and the malformed patterns come
+          # first because a `case` takes the first match: `/p/r`, `h/p/` and
+          # `h//r` all have slashes enough for `*/*/*` while having an EMPTY
+          # segment, and `https://h/p/r` is that same mistake with a scheme on
+          # the front. Docker's reference parser rejects every one of them, so
+          # they would die at `docker build` a few steps down — but this step
+          # promises to catch a malformed coordinate BEFORE the job
+          # authenticates, and a check that defers to a later failure does not
+          # keep that promise.
           case "$ARTIFACT_REGISTRY" in
+            /* | */ | *//*)
+              echo "::error::ARTIFACT_REGISTRY has an empty path segment — got '$ARTIFACT_REGISTRY'. It must be HOST/PROJECT/REPOSITORY with no leading or trailing slash, no doubled slash, and no https:// scheme."
+              exit 1
+              ;;
             */*/*) ;;
             *)
               echo "::error::ARTIFACT_REGISTRY must be HOST/PROJECT/REPOSITORY, e.g. us-central1-docker.pkg.dev/your-project/map-images — got '$ARTIFACT_REGISTRY'"
@@ -529,13 +544,21 @@ jobs:
       # runs on it, and a file missing `image.registry` renders against the
       # chart's ghcr.io defaults while a file missing the annotations renders a
       # KSA with no identity, so the example would document a deployment that
-      # cannot work. Dropping an override here fails closed, and by construction
-      # rather than by luck: the example registry host is `registry.invalid`,
-      # which RFC 2606 reserves so that it can never resolve (ImagePullBackOff),
-      # and impersonating an identity in a project this deployment does not
-      # control needs a binding it does not have (ADC fails at pod startup).
-      # `--wait --atomic` turns either into a rolled-back release and a red run
-      # rather than a half-configured cluster.
+      # cannot work.
+      #
+      # The two halves fail differently if an override here is ever dropped, and
+      # only ONE of them fails by itself. The IMAGE half is closed by
+      # construction: the example host is `registry.invalid`, which RFC 2606
+      # reserves so it can never resolve, so the pods cannot pull and
+      # `--wait --atomic` rolls the release back. The IDENTITY half is NOT — and
+      # the sharp case is the brain, which this repository already documents 130
+      # lines into staging-values.yaml and implements in
+      # internal/brain/grader.go: a blob read it cannot make degrades to grading
+      # against the outcome description alone, with a warning and no error. The
+      # pod starts, the release completes, the run is GREEN, and the deployment
+      # is quietly worse. That is why the step after this one reads the three
+      # annotations back out of the cluster rather than trusting that they were
+      # set.
       #
       # --set-string throughout, not --set. Every one of these is a string by
       # definition, and `--set` would infer the type instead of being told it — a
@@ -566,6 +589,48 @@ jobs:
             --set-string "image.tag=$GITHUB_SHA" \
             --set-string "executor.gateImage=$ARTIFACT_REGISTRY/gate:$GITHUB_SHA" \
             --wait --atomic --timeout 10m
+
+      # Read back what was actually deployed, because the identity half of the
+      # override above cannot be trusted to fail loudly on its own. If the
+      # brain's `--set-string` were dropped or misspelled, its ServiceAccount
+      # keeps the values file's neutral `…@your-project…`, Workload Identity
+      # mints nothing, and the brain's blob reads degrade silently
+      # (internal/brain/grader.go) while every pod stays Ready and this job goes
+      # green. Comparing the three annotations against the variables they came
+      # from turns that into a red run.
+      #
+      # This does NOT catch a human swapping two of the variables in the settings
+      # page — the deploy would then match its own inputs. Nothing here can:
+      # moving the values out of the diff is what bought the parameterisation,
+      # and this is the half of the cost that stays.
+      #
+      # The dots in the annotation key are escaped for the same reason as in the
+      # `--set-string` above, in the other syntax: unescaped, jsonpath reads
+      # `iam.gke.io/gcp-service-account` as four nested fields and finds nothing.
+      - name: The Workload Identity annotations are the ones this deploy meant
+        run: |
+          set -euo pipefail
+          bad=0
+          # check COMPONENT EXPECTED
+          check() {
+            got="$(kubectl get serviceaccount --namespace "$K8S_NAMESPACE" \
+              --selector "app.kubernetes.io/instance=$HELM_RELEASE,app.kubernetes.io/component=$1" \
+              -o jsonpath='{.items[*].metadata.annotations.iam\.gke\.io/gcp-service-account}')"
+            if [ "$got" != "$2" ]; then
+              echo "::error::the $1 ServiceAccount is annotated '$got', expected '$2'"
+              bad=1
+            fi
+          }
+          check controlplane "$CONTROLPLANE_SERVICE_ACCOUNT"
+          check brain        "$BRAIN_SERVICE_ACCOUNT"
+          check executor     "$EXECUTOR_SERVICE_ACCOUNT"
+          if [ "$bad" -ne 0 ]; then
+            echo "An empty value means the annotation is absent; a '@your-project'" >&2
+            echo "one means the values file's example survived, so an override in" >&2
+            echo "the deploy step did not reach the chart." >&2
+            exit 1
+          fi
+          echo "controlplane, brain and executor all carry the expected Workload Identity annotation"
 
       # Only when the Secret really changed — see the note at the end of the
       # assemble step. On an ordinary push the seven values are identical, this

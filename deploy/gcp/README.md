@@ -507,35 +507,36 @@ Commands below name the variables as the table does. `gh variable list` only pri
 and exports nothing, so load them into the shell first:
 
 ```bash
-exports="$(gh variable list --json name,value --jq '
-  .[] | select(.name | IN(
-    "GCP_PROJECT_ID", "GCP_ZONE", "GKE_CLUSTER", "ARTIFACT_REGISTRY",
-    "WIF_PROVIDER", "DEPLOY_SERVICE_ACCOUNT", "BLOB_BUCKET", "KMS_KEY_NAME",
-    "CONTROLPLANE_SERVICE_ACCOUNT", "BRAIN_SERVICE_ACCOUNT",
-    "EXECUTOR_SERVICE_ACCOUNT"))
-  | "export \(.name)=\(.value | @sh)"')"
-[ -n "$exports" ] && eval "$exports"
-: "${GCP_PROJECT_ID:?}" "${GCP_ZONE:?}" "${GKE_CLUSTER:?}" "${ARTIFACT_REGISTRY:?}" \
-  "${WIF_PROVIDER:?}" "${DEPLOY_SERVICE_ACCOUNT:?}" "${BLOB_BUCKET:?}" \
-  "${KMS_KEY_NAME:?}" "${CONTROLPLANE_SERVICE_ACCOUNT:?}" \
-  "${BRAIN_SERVICE_ACCOUNT:?}" "${EXECUTOR_SERVICE_ACCOUNT:?}"
+vars='GCP_PROJECT_ID GCP_ZONE GKE_CLUSTER ARTIFACT_REGISTRY WIF_PROVIDER
+      DEPLOY_SERVICE_ACCOUNT BLOB_BUCKET KMS_KEY_NAME
+      CONTROLPLANE_SERVICE_ACCOUNT BRAIN_SERVICE_ACCOUNT EXECUTOR_SERVICE_ACCOUNT'
+
+unset $vars                       # clear FIRST — see below
+for v in $vars; do
+  val="$(gh variable get "$v")" && [ -n "$val" ] && export "$v=$val"
+done
+for v in $vars; do eval ": \"\${$v:?did not load — see the table above}\""; done
 ```
 
-**It `eval`s a filtered list, not every variable the repository has.** This snippet is pasted
-into an interactive shell, and an unfiltered `eval` would export whatever else is configured
-there under whatever name it has — including names the rest of this file's commands read for
-a different purpose. `PROJECT` is the sharp one: the table above hands it to
-`make gcp-bootstrap` and `make gcp-db-init`, and a repository variable of that name would
-silently redirect both. `TF_VAR_*` is the same hazard aimed at Terraform. Filtering keeps the
-blast radius to the eleven names this section documents.
+**The `unset` is the load-bearing line, and it goes first.** A partial load is the dangerous
+state, not a failed one: if `gh` errors on one name — an expired token, a variable renamed,
+a network blip — and this shell already holds values from an earlier load or another
+environment, then the assertion below passes on **stale** coordinates and the `gcloud`
+commands further down operate on the wrong project or the wrong service account, saying
+nothing. Clearing every name before the load means a variable that does not arrive is
+absent rather than out of date, which is a state the assertion can see.
 
-The assertion is the point of the `eval` above it. `gh` reports a failure — an expired token,
-no permission on the repository — on stderr and through its exit status, and an `eval` of
-nothing at all succeeds; without that guard a recovery under pressure would continue into
-`gcloud --project ""`, which is the failure this arrangement exists to make loud. All eleven
-are asserted rather than the few any one command needs, because the commands below spend
-`$DEPLOY_SERVICE_ACCOUNT` as well as `$GCP_PROJECT_ID` and a half-loaded environment is
-exactly the state that turns a named stop into `--member="serviceAccount:"` and an argument
+**It reads the eleven by name rather than exporting the whole list.** `gh variable list`
+piped into an `eval` would export whatever else is configured on the repository, under
+whatever name it has — including names the rest of this file reads for a different purpose.
+`PROJECT` is the sharp one: the table above hands it to `make gcp-bootstrap` and
+`make gcp-db-init`, so a repository variable of that name would silently redirect both, and
+`TF_VAR_*` is the same hazard aimed at Terraform. Naming what you want keeps the blast
+radius to this section's eleven.
+
+All eleven are asserted, not the few any one command needs, because the commands below spend
+`$DEPLOY_SERVICE_ACCOUNT` as well as `$GCP_PROJECT_ID`, and a half-loaded environment is
+exactly what turns a promised named stop into `--member="serviceAccount:"` and an argument
 parse error. `:?` names the first variable that did not load and stops there, without closing
 an interactive shell.
 
@@ -665,16 +666,27 @@ rather than being deleted so that it remains a **worked example that renders on 
 annotations removed renders a ServiceAccount with no identity — an example documenting a
 deployment that cannot start.
 
-Nothing is weakened by keeping them, and the placeholders fail closed **by construction
-rather than by luck**. `registry.invalid` can never resolve, because RFC 2606 reserves the
-`.invalid` TLD so that no one can register a name under it; impersonating
-`…@your-project.iam.gserviceaccount.com` needs an IAM binding in a project this deployment
-does not control. `--wait --atomic` turns either into a rolled-back release and a red run.
-The registry host is where that distinction earns its keep: a plausible-looking
-`us-central1-docker.pkg.dev/your-project/…` would be a real Artifact Registry path in
-whichever project happens to own the globally unique id `your-project`, so a reader running
-this file verbatim — or an edit that dropped the `image.*` override — could silently pull a
-stranger's images rather than fail.
+**The two halves do not fail the same way, and the comfortable claim that they do is the one
+worth not making.** The image half fails closed **by construction**: `registry.invalid` can
+never resolve, because RFC 2606 reserves the `.invalid` TLD so that no one can register a
+name under it, so the pods cannot pull and `--wait --atomic` rolls the release back. That
+host is also why the placeholder is not a plausible `us-central1-docker.pkg.dev/your-project/…`
+— a GCP project id is a globally unique namespace anyone may register, so such a path would
+be a *real* Artifact Registry path in whichever project owns that id, and a reader running
+this file verbatim could silently pull a stranger's images rather than fail.
+
+The identity half is different, and for the **brain** it does not fail closed at all. The
+note on `brain.serviceAccount` in that same file says so — "omitting it does not fail; the
+render succeeds, the pod starts, and the brain's reads degrade" — and
+[`internal/brain/grader.go`](../../internal/brain/grader.go) implements it: a deliverable it
+cannot read becomes a warning and the grade proceeds against the outcome description alone.
+So a dropped brain override would deploy **green** and quietly grade worse. That is why the
+workflow does not stop at setting the annotations: the step after `helm upgrade` reads all
+three back out of the cluster and compares them against the variables they came from, so an
+override that never reached the chart is a red run rather than a silent downgrade. What that
+step cannot catch is a human swapping two of the variables in the settings page — the deploy
+would then agree with its own inputs. Nothing here can, and that is the half of the cost of
+moving values out of the diff that stays.
 
 Rebuilding `environment/` does not change any of this **unless a coordinate changes**, and
 the two places to check are no longer both files: the sandbox pair stays in

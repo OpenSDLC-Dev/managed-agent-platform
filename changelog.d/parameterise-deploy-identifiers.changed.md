@@ -28,33 +28,50 @@
   what CI runs against it, and a file missing `image.registry` renders against
   the chart's `ghcr.io` defaults while one missing the annotations renders a
   ServiceAccount with no identity, so the worked example of mode 2 would document
-  a deployment that cannot start. Nothing is weakened by keeping them, because a
-  dropped override fails closed **by construction rather than by luck**, which is
-  why the registry placeholder is an unresolvable host and not a plausible
-  `LOCATION-docker.pkg.dev` path: a GCP project id is a globally unique namespace
-  anyone may register, so `us-central1-docker.pkg.dev/your-project/…` would be a
-  real Artifact Registry path in whatever project owns that id, and a reader
-  running the file verbatim could silently pull a stranger's images instead of
-  failing. RFC 2606 reserves `.invalid` so that no such name can exist, and
-  impersonating `…@your-project.iam.gserviceaccount.com` needs an IAM binding in
-  a project this deployment does not control; `--wait --atomic` turns either into
-  a rolled-back release and a red run. The workflow gains a
+  a deployment that cannot start. The **image** half of that fails closed by
+  construction, which is why the registry placeholder is an unresolvable host and
+  not a plausible `LOCATION-docker.pkg.dev` path: a GCP project id is a globally
+  unique namespace anyone may register, so
+  `us-central1-docker.pkg.dev/your-project/…` would be a real Artifact Registry
+  path in whatever project owns that id, and a reader running the file verbatim
+  could silently pull a stranger's images instead of failing. RFC 2606 reserves
+  `.invalid` so no such name can exist, so the pods cannot pull and
+  `--wait --atomic` rolls the release back. The **identity** half does not fail
+  closed, and claiming it did would have been the comfortable answer rather than
+  the true one: this repository already documents, in that same values file and
+  in `internal/brain/grader.go`, that a brain which cannot read the blob bucket
+  downgrades to grading against the outcome description alone — a warning, not an
+  error — so a dropped brain override would deploy **green** and quietly grade
+  worse. The workflow therefore no longer trusts that it set what it set. A new
+  step after `helm upgrade` reads all three annotations back out of the cluster
+  and compares them against the variables they came from, turning that silent
+  downgrade into a red run; it was validated against a real API server, including
+  the dropped-override case. What it cannot catch — stated rather than implied —
+  is a human swapping two variables in the settings page, since the deploy would
+  then agree with its own inputs. That is the half of the cost of moving values
+  out of the diff that stays. The workflow also gains a
   **fail-fast guard** that asserts all eleven before it authenticates or builds
   anything, running *second* — after the ref guard, which refuses an unauthorised
   ref while telling it nothing, so the step that prints the deployment's
   configuration keys never runs for a ref that was already rejected. It rejects
   whitespace and commas as well as emptiness: a value of one space is no
-  configuration while passing a `-z` test, and five of these reach
-  `helm --set-string`, whose assignment list is comma-separated, so a comma would
-  split one value into two paths and set neither to what was meant. It also
-  asserts the one *composed* value's shape — `ARTIFACT_REGISTRY` is carried as a
-  single `HOST/PROJECT/REPOSITORY` string rather than a host and a path joined in
-  the `env:` block, because `${{ vars.A }}/${{ vars.B }}` with either half unset
-  renders as `host/` or `/path`, which is non-empty and would pass the guard; the
-  chart's `registry`/`repository` split is taken back off it at the first slash,
-  and a value with no slash would set both to the same host and render
+  configuration while passing a `-z` test, and four of them — `ARTIFACT_REGISTRY`
+  and the three service accounts — reach `helm --set-string`, whose assignment
+  list is comma-separated, so a comma would split one value into two paths and
+  set neither to what was meant. It also asserts the one *composed* value's shape
+  — `ARTIFACT_REGISTRY` is carried as a single `HOST/PROJECT/REPOSITORY` string
+  rather than a host and a path joined in the `env:` block, because
+  `${{ vars.A }}/${{ vars.B }}` with either half unset renders as `host/` or
+  `/path`, which is non-empty and would pass the guard; the chart's
+  `registry`/`repository` split is taken back off it at the first slash, and a
+  value with no slash would set both to the same host and render
   `host/host/controlplane:sha`, a reference that is merely wrong rather than
-  invalid. The annotation overrides escape the dots in `iam.gke.io/…`, which are
+  invalid. Counting slashes is not enough on its own, so empty segments are
+  rejected too — `/p/r`, `h/p/`, `h//r` and an `https://` prefix all satisfy a
+  naive three-segment test while being no registry path, and although Docker's
+  reference parser rejects each of them a few steps later, this step promises to
+  catch a malformed coordinate *before* the job authenticates. The annotation
+  overrides escape the dots in `iam.gke.io/…`, which are
   not path separators: unescaped, `--set-string` would nest four levels of map
   under `annotations` and the ServiceAccount would carry no annotation the GKE
   metadata server looks for. What this does **not** do is retroactive — the
@@ -70,3 +87,15 @@
   it inside every diagnostic that names it. What the move buys is what the issue
   asked for: a clone carries no operator's coordinates, and `deploy/` reads as a
   reference deployment rather than a half-edited template.
+  `deploy/gcp/README.md` describes every command by variable and opens with the
+  loader that puts them in an operator's shell, which is deliberately **not** the
+  `gh variable list | eval` one-liner the issue sketched. That form has two
+  failure modes an operator meets under pressure: it exports every variable the
+  repository happens to have — `PROJECT` would silently redirect
+  `make gcp-bootstrap` and `make gcp-db-init`, `TF_VAR_*` would redirect
+  Terraform — and, since `gh` reports failure on stderr while an `eval` of
+  nothing succeeds, a failed load leaves whatever the shell already held, so the
+  assertion then passes on a *previous* deployment's coordinates and the
+  `gcloud` commands below operate on the wrong project saying nothing. The
+  documented loader clears all eleven names first, reads them back one at a time
+  by name, and asserts all eleven rather than four.
