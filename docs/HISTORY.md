@@ -38,6 +38,59 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (run 2026-08-10) — ✅ passed, with one step deferred
+
+The issue's acceptance is that an operator can give a BYOC worker its credential
+without touching Postgres, and take one host off the fleet without disturbing the
+rest. Both were driven end to end against a real `ant` binary built from the
+read-only `anthropic-cli` checkout — **zero database access at any point**, every
+platform-side action a curl against the console API.
+
+The stack was deliberately **not** the shared `deploy/compose` one: an unrelated
+compose stack had been running on `:8080` for 45 hours and predates this work, so
+this run used its own throwaway `postgres:16-alpine` on an ephemeral port plus a
+`cmd/controlplane` built from the branch on `127.0.0.1:18080`. Both were removed
+afterwards; `docker ps -a` matched its start-of-run baseline exactly.
+
+- **Issue.** `POST /api/oauth/organizations/default/environments/{env}/tokens`
+  with `{"name":"laptop-01"}` → **200**, headers `Cache-Control: no-store` and
+  `Pragma: no-cache`, body `{"access_token":"sk-map-env01-…" (56 chars),
+  "expires_in":31536000}`. The matching `GET` rendered
+  `{id: envkey_…, name, created_at, expires_at (+1 year)}` with
+  `{total:1, limit:100, offset:0, has_more:false}` — **no secret, no hash**.
+- **The real CLI authenticates on that key alone.**
+  `ant beta:worker poll --base-url http://127.0.0.1:18080 --environment-id … --environment-key …`
+  ran clean with no output (a long poll on an empty queue), and the platform's own
+  view confirmed it positively rather than by silence: `GET …/work/stats` reported
+  **`workers_polling: 2`** — and answered `401 "missing Authorization: Bearer
+  environment key"` to the *management* key, so the worker lane is the lane being
+  exercised.
+- **Revocation reaches a running worker.**
+  `POST …/tokens/{id}/revoke` → **204, 0 bytes**; the same key on
+  `…/work/stats` immediately → **401 `invalid environment key`**; the running
+  `ant` process printed that same `authentication_error` envelope and exited; the
+  listing went empty.
+- **Per-host revocation — the property the old model could not offer.** Two keys
+  (`build-host-a`, `build-host-b`), two real `ant beta:worker poll` processes,
+  `workers_polling: 2`. Revoking **host-a alone** → 204. Host-a's process exited
+  on the auth error; **host-b's kept running**, its log still 0 bytes, its key
+  still **200** on `…/work/stats`, and the listing showed only `build-host-b`
+  surviving. Under the retired rotate-on-mint invariant (migration 0013), issuing
+  host-b's key would already have revoked host-a's.
+
+**Deferred, and why.** The plan's wording for this slice was "poll *until it pulls
+a work item*". That step was not run: `queue.Poll` serves `kind = 'tool_exec'`
+only (`internal/queue/queue.go:314`), and a `tool_exec` item is enqueued solely by
+the brain after a model turn emits `agent.tool_use` — the API's own enqueues at
+session-create and message-post are `model_turn`, which no worker polls. So
+pulling an item requires a live model endpoint, and this checkout has no
+`model-providers.json`; that is STATE.md's standing "blocks every session" task,
+not something this plan introduced. What the deferred step would add is coverage
+of the *queue* path, which is already pinned over real HTTP by
+`TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable`. What it would newly prove is
+that the real CLI's tool-runner half works on a console-issued key — worth doing
+when a live model route lands.
+
 ## GCP continuous delivery — the mode-2 build → deploy → smoke sequence, by hand (run 2026-08-08) — ✅ passed
 
 Every step `.github/workflows/deploy.yml` performs was run by hand against the real

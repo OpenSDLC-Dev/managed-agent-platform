@@ -1,7 +1,15 @@
 ---
-status: in-progress
+status: archived
 issue: "#43"
 ---
+
+> **Archived 2026-08-10** — all three slices delivered (#360, #361), #43's
+> acceptance met verbatim and recorded in
+> [docs/HISTORY.md](../HISTORY.md). One step of *this plan's* stronger slice-3
+> wording ("poll until it pulls a work item") is deferred, not skipped: a
+> `tool_exec` item needs a model turn, and no live model route is configured —
+> the reason, and what the step would newly prove, are in that record. The
+> managed-agent-console UI half is that repo's plan 07.
 
 # Environment keys: console-issued, named, revocable (plan 30)
 
