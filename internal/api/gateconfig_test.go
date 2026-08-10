@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gatetoken"
@@ -398,10 +397,8 @@ func TestGateConfigAuthLane(t *testing.T) {
 	wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
 
 	env := createEnvironment(t, s, map[string]any{"name": "worker-env"})
-	if err := api.EnsureEnvironmentKey(context.Background(), s.pool, env["id"].(string), "ek-reverse"); err != nil {
-		t.Fatalf("EnsureEnvironmentKey: %v", err)
-	}
-	res = s.doRaw(http.MethodGet, gateconfig.Path, nil, map[string]string{"Authorization": "Bearer ek-reverse"})
+	envKey := issueKey(t, s.pool, env["id"].(string), "ek-reverse")
+	res = s.doRaw(http.MethodGet, gateconfig.Path, nil, map[string]string{"Authorization": "Bearer " + envKey})
 	body = decodeBody(t, res)
 	wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
 

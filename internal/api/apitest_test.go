@@ -44,6 +44,18 @@ func newPoolWithKey(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// issueKey mints a live worker credential for an environment and returns the
+// plaintext. Tests can no longer choose the value: the platform generates it and
+// keeps only the hash, so the returned string is the single copy in existence.
+func issueKey(t *testing.T, pool *pgxpool.Pool, envID, name string) string {
+	t.Helper()
+	key, err := api.IssueEnvironmentKey(context.Background(), pool, envID, name)
+	if err != nil {
+		t.Fatalf("IssueEnvironmentKey(%s): %v", name, err)
+	}
+	return key
+}
+
 func newTestServer(t *testing.T) *tserver {
 	t.Helper()
 	// A real (local AES-GCM) cipher under a fixed test key, so the vault

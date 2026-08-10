@@ -160,8 +160,7 @@ func TestMetadataRejectsNUL(t *testing.T) {
 	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
 	sessID := sess["id"].(string)
 
-	const workKey = "ek-nul"
-	workEnvID, workSessionID := selfHostedWorker(t, s, workKey)
+	workEnvID, workSessionID, workKey := selfHostedWorker(t, s, "ek-nul")
 	workID := s.enqueueAndPoll(t, workEnvID, workSessionID, workKey)
 
 	var (
@@ -286,8 +285,7 @@ func TestPathAndQueryRejectNUL(t *testing.T) {
 	// unknown item gets at every work-item endpoint. Body validation still runs
 	// first, so the metadata patch reaches its malformed work_id (a 404) only with
 	// a valid body — the same order TestWorkPollRejectsWrongMethodAndPath pins.
-	const key = "ek-nul-idsweep"
-	workEnvID, _ := selfHostedWorker(t, s, key)
+	workEnvID, _, key := selfHostedWorker(t, s, "ek-nul-idsweep")
 	workNULID := "/v1/environments/" + workEnvID + "/work/work_" + nul
 	for name, tc := range map[string]struct {
 		method, path string

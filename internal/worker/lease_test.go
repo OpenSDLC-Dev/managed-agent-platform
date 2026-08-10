@@ -410,7 +410,7 @@ func TestWorkerAckFailureLeavesItemQueued(t *testing.T) {
 	noRetry := sdk.NewClient(
 		option.WithoutEnvironmentDefaults(),
 		option.WithBaseURL(h.serverURL),
-		option.WithAuthToken(workerKey),
+		option.WithAuthToken(h.key),
 		option.WithMaxRetries(0),
 	)
 	w := NewWorker(noRetry, h.prov, Config{EnvironmentID: h.envID.String(), EmptyPollSleep: 5 * time.Millisecond})
@@ -895,7 +895,7 @@ func TestWorkerTransientHeartbeatRecovers(t *testing.T) {
 	noRetry := sdk.NewClient(
 		option.WithoutEnvironmentDefaults(),
 		option.WithBaseURL(h.serverURL),
-		option.WithAuthToken(workerKey),
+		option.WithAuthToken(h.key),
 		option.WithMaxRetries(0),
 	)
 	w := NewWorker(noRetry, h.prov, Config{

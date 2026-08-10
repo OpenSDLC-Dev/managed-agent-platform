@@ -31,7 +31,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 20
+const wantMigrations = 21
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -316,6 +316,23 @@ func TestWorkItemsSessionIndexExists(t *testing.T) {
 	}
 }
 
+// TestEnvironmentKeysEnvironmentIndexExists: environment_keys.environment_id
+// cascades on environment delete and filters every per-environment key listing.
+// 0001 created no index for it and 0013's partial unique index had been serving
+// both; 0021 dropped that one, so its plain replacement is load-bearing rather
+// than incidental — without this pin a later migration could drop it silently.
+func TestEnvironmentKeysEnvironmentIndexExists(t *testing.T) {
+	pool := open(t, pgtest.FreshDB(t))
+	var exists bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = 'environment_keys' AND indexdef LIKE '%(environment_id)%')`).Scan(&exists); err != nil {
+		t.Fatalf("query pg_indexes: %v", err)
+	}
+	if !exists {
+		t.Errorf("no index on environment_keys(environment_id)")
+	}
+}
+
 // TestKeyRotationMigrationRepairsExistingDuplicates: 0013's one-live indexes
 // land on databases where the concurrent-mint race (#72) has already left a name
 // or an environment holding several live credentials. Migrate runs every pending
@@ -333,9 +350,13 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	}
 
 	// Rewind to the pre-0013 schema, then stage the state the race produced.
+	// Only api_keys_one_live is dropped: migration 0021 already retired the
+	// environment_keys half, so there is no index there to remove. Replaying 0013
+	// recreates it in this throwaway database — the repair, not the index, is what
+	// this test is about, and a fresh deployment's chain ends with 0021 dropping
+	// it again.
 	for _, q := range []string{
 		`DROP INDEX api_keys_one_live`,
-		`DROP INDEX environment_keys_one_live`,
 		`DELETE FROM schema_migrations WHERE version = '0013_key_rotation_one_live.sql'`,
 	} {
 		if _, err := pool.Exec(ctx, q); err != nil {

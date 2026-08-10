@@ -3,7 +3,6 @@ package api_test
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 
@@ -55,37 +54,46 @@ func raceMints(t *testing.T, racers int, mint func(i int) error) int {
 	return succeeded
 }
 
-// TestConcurrentEnvironmentKeyMintsLeaveOneLiveKey: two EnsureEnvironmentKey
-// calls for one environment race under READ COMMITTED. Each opens its own
-// transaction, and neither's revoke step can see the other's uncommitted insert,
-// so both revoke nothing and both commit — leaving the environment with two live
-// Authorization: Bearer credentials driving the same work queue, the second one
-// unknown to whoever minted the first.
-//
-// The invariant is one live key per environment at all times: a mint that cannot
-// hold that slot must fail its transaction instead of sharing it.
-func TestConcurrentEnvironmentKeyMintsLeaveOneLiveKey(t *testing.T) {
+// TestConcurrentEnvironmentKeyIssuesAllSurvive is the environment-key half of
+// #72's race, inverted by plan 30's model. Under rotate-on-mint, concurrent mints
+// for one environment were a hazard — each revoked what it could see and none saw
+// the others, leaving the queue with live credentials nobody knew about — and
+// environment_keys_one_live resolved it by failing the losers. Per-host issuance
+// has no shared slot to contend for: an operator provisioning a fleet in parallel
+// must get every key they asked for, and every one of them must authenticate.
+func TestConcurrentEnvironmentKeyIssuesAllSurvive(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
 	_, envID := pgtest.NewSession(t, pool, "self_hosted")
 
-	// Race against a live incumbent, not an empty slot: every racer then has a
-	// row to revoke, which is what makes the test fail if the two statements are
-	// ever reordered back to insert-then-revoke (the insert would meet the live
-	// incumbent and trip the index on the very first rotation).
-	if err := api.EnsureEnvironmentKey(ctx, pool, envID.String(), "ek-incumbent"); err != nil {
+	// An incumbent first, so the racers issue alongside a live key rather than
+	// into an empty environment — the exact shape that used to revoke it.
+	if _, err := api.IssueEnvironmentKey(ctx, pool, envID.String(), "incumbent"); err != nil {
 		t.Fatalf("seed incumbent: %v", err)
 	}
 
 	const racers = 8
-	raceMints(t, racers, func(i int) error {
-		return api.EnsureEnvironmentKey(ctx, pool, envID.String(), fmt.Sprintf("ek-racer-%d", i))
+	keys := make([]string, racers)
+	succeeded := raceMints(t, racers, func(i int) error {
+		key, err := api.IssueEnvironmentKey(ctx, pool, envID.String(), fmt.Sprintf("host-%d", i))
+		keys[i] = key
+		return err
 	})
-
+	if succeeded != racers {
+		t.Errorf("concurrent issues succeeded = %d/%d; provisioning a fleet must not drop a host", succeeded, racers)
+	}
 	if live := countLive(t, pool,
 		"SELECT count(*) FROM environment_keys WHERE environment_id = $1 AND revoked_at IS NULL",
-		envID.String()); live != 1 {
-		t.Fatalf("live environment_keys after %d concurrent mints = %d, want 1", racers, live)
+		envID.String()); live != racers+1 {
+		t.Fatalf("live environment_keys after %d concurrent issues = %d, want %d", racers, live, racers+1)
+	}
+	// Distinct values, so no two hosts were handed the same credential.
+	seen := map[string]bool{}
+	for i, key := range keys {
+		if key == "" || seen[key] {
+			t.Fatalf("racer %d got a duplicate or empty key", i)
+		}
+		seen[key] = true
 	}
 }
 
@@ -141,73 +149,6 @@ func TestConcurrentSameValueAPIKeyMintsAllSucceed(t *testing.T) {
 	}
 }
 
-// TestCrossEnvironmentReuseLeavesTheIncumbentAlone pins the rollback the revoke-
-// before-insert order made load-bearing: the rejected call has already revoked
-// the target environment's live key by the time it learns the value belongs to
-// another environment, so only the transaction rollback keeps that environment's
-// worker credential alive. The existing cross-environment test gives the target
-// environment no key, so it cannot see this.
-func TestCrossEnvironmentReuseLeavesTheIncumbentAlone(t *testing.T) {
-	ctx := context.Background()
-	pool := pgtest.NewPool(t)
-	_, envA := pgtest.NewSession(t, pool, "self_hosted")
-	_, envB := pgtest.NewSession(t, pool, "self_hosted")
-
-	// A has *rotated away* from shared-value: the value is bound to A but retired,
-	// and A holds a different live key. That is the corner where an unguarded
-	// conflict action would un-revoke A's retired row, hand A a second live key,
-	// and fail on environment_keys_one_live — losing the descriptive rejection to
-	// a raw constraint error. One ordinary rotation leaves exactly this state.
-	if err := api.EnsureEnvironmentKey(ctx, pool, envA.String(), "shared-value"); err != nil {
-		t.Fatalf("mint for A: %v", err)
-	}
-	if err := api.EnsureEnvironmentKey(ctx, pool, envA.String(), "ek-a-current"); err != nil {
-		t.Fatalf("rotate A: %v", err)
-	}
-	if err := api.EnsureEnvironmentKey(ctx, pool, envB.String(), "ek-b-incumbent"); err != nil {
-		t.Fatalf("mint for B: %v", err)
-	}
-	var before string
-	if err := pool.QueryRow(ctx,
-		`SELECT id FROM environment_keys WHERE environment_id = $1 AND revoked_at IS NULL`,
-		envB.String()).Scan(&before); err != nil {
-		t.Fatalf("read B's incumbent: %v", err)
-	}
-
-	if err := api.EnsureEnvironmentKey(ctx, pool, envB.String(), "shared-value"); err == nil {
-		t.Fatal("re-minting env A's key value for env B was accepted")
-	} else if !strings.Contains(err.Error(), "already bound to a different environment") {
-		t.Errorf("rejection surfaced as %v, want the bound-to-a-different-environment error", err)
-	}
-
-	// A's retired value must stay retired: the rejected mint may not resurrect it.
-	var revoked bool
-	if err := pool.QueryRow(ctx,
-		`SELECT revoked_at IS NOT NULL FROM environment_keys WHERE key_hash <> '' AND environment_id = $1
-		   AND id <> (SELECT id FROM environment_keys WHERE environment_id = $1 AND revoked_at IS NULL)`,
-		envA.String()).Scan(&revoked); err != nil {
-		t.Fatalf("read A's retired row: %v", err)
-	}
-	if !revoked {
-		t.Error("env A's retired key was un-revoked by a rejected cross-environment mint")
-	}
-
-	var after string
-	if err := pool.QueryRow(ctx,
-		`SELECT id FROM environment_keys WHERE environment_id = $1 AND revoked_at IS NULL`,
-		envB.String()).Scan(&after); err != nil {
-		t.Fatalf("B has no live key after a rejected mint: %v", err)
-	}
-	if after != before {
-		t.Errorf("B's live key changed from %s to %s across a rejected mint", before, after)
-	}
-	if live := countLive(t, pool,
-		"SELECT count(*) FROM environment_keys WHERE environment_id = $1 AND revoked_at IS NULL",
-		envA.String()); live != 1 {
-		t.Errorf("env A live keys = %d, want 1 (the rejected mint must not disturb A either)", live)
-	}
-}
-
 // TestAPIKeyValueRepointsToAnotherName pins EnsureAPIKey's documented
 // `name = EXCLUDED.name` behaviour now that the one-live index constrains it: a
 // key value moved to a second logical name takes that name's live slot and frees
@@ -236,24 +177,15 @@ func TestAPIKeyValueRepointsToAnotherName(t *testing.T) {
 	}
 }
 
-// TestSchemaForbidsASecondLiveKey pins the invariant in the schema rather than in
-// the rotation code, so it holds against any writer — a future operator issuance
-// surface (#43), a hand-run statement, or a code path that forgets to revoke
-// first. Racing transactions are how the duplicate arises; the index is what
-// makes it unrepresentable.
-func TestSchemaForbidsASecondLiveKey(t *testing.T) {
+// TestSchemaForbidsASecondLiveAPIKey pins the invariant in the schema rather than
+// in the rotation code, so it holds against any writer — a hand-run statement, or
+// a code path that forgets to revoke first. Racing transactions are how the
+// duplicate arises; the index is what makes it unrepresentable. Only api_keys is
+// covered here: migration 0021 retired the environment_keys half deliberately, and
+// its inverse is pinned by TestSecondLiveEnvironmentKeyIsAccepted.
+func TestSchemaForbidsASecondLiveAPIKey(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
-	_, envID := pgtest.NewSession(t, pool, "self_hosted")
-
-	if err := api.EnsureEnvironmentKey(ctx, pool, envID.String(), "ek-first"); err != nil {
-		t.Fatalf("EnsureEnvironmentKey: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)`,
-		"envkey_second", envID.String(), "second-hash"); err == nil {
-		t.Error("a second live environment key was accepted; one environment must have one live credential")
-	}
 
 	if err := api.EnsureAPIKey(ctx, pool, "boot", "ak-first"); err != nil {
 		t.Fatalf("EnsureAPIKey: %v", err)

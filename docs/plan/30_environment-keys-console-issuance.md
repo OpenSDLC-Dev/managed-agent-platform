@@ -1,5 +1,5 @@
 ---
-status: approved
+status: in-progress
 issue: "#43"
 ---
 
@@ -158,8 +158,11 @@ the page session; every trial key was revoked immediately):
   (internal/executor has no Bearer/EnvironmentKey reference — it consumes the
   queue in-process), so nothing in this plan touches cloud execution.
 - `envkey` (the row-id prefix `domain.NewID("envkey")` already assigns) is not
-  in `domain.knownPrefixes` (internal/domain/id.go:53–59) — required once key
-  ids appear in URL paths.
+  in `domain.knownPrefixes` (internal/domain/id.go:53–59), and stays out: that
+  set is what `checkID` validates every `/v1` path id against, without asking
+  which resource the prefix names, so admitting a private identifier there
+  would widen the shape all of them accept. The key ids appear only on the
+  off-wire `/api/oauth/…` namespace, which brings its own local check.
 
 ## Architecture
 
@@ -204,8 +207,11 @@ CREATE INDEX environment_keys_environment_idx ON environment_keys (environment_i
 `EnsureEnvironmentKey` and its rotate-on-mint semantics are **deleted**
 (no production caller exists), replaced by:
 
-- `IssueEnvironmentKey(ctx, pool, envID, name) (envKeyRow, plaintext string, error)` —
-  generates the secret server-side: `sk-map-env01-` + base64url of 32 CSPRNG
+- `IssueEnvironmentKey(ctx, pool, envID, name) (plaintext string, error)` —
+  returns the secret and nothing else, because the mirrored create response is
+  `{access_token, expires_in}` and carries no row metadata: a caller that wants
+  the new row's id or timestamps re-reads the list, exactly as the reference
+  console does. Generates the secret server-side: `sk-map-env01-` + base64url of 32 CSPRNG
   bytes (43 chars). The silhouette follows the reference (`sk-ant-oat01-…`,
   per plan 01's "format modeled on") but the prefix is deliberately
   platform-own: our platform is not that OAuth infrastructure, and an issued

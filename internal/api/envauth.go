@@ -3,77 +3,24 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// EnsureEnvironmentKey makes key the one live worker credential for an
-// environment: in one transaction it revokes every other unrevoked key for the
-// same environment_id, then inserts (or un-revokes) the hash. That gives one
-// live Authorization: Bearer credential per environment's work queue, with
-// rotation-by-re-mint semantics (registering a fresh value revokes the prior
-// one). Concurrent mints for one environment race, and
-// environment_keys_one_live resolves that by failing the loser's transaction
-// rather than leaving the queue with two live credentials. Only the hash is
-// stored.
-//
-// Issuance is a deliberate divergence: the reference mints environment keys in
-// its console with no public wire endpoint, so a self-hostable platform owns
-// this provisioning primitive. The consuming side — resolving a Bearer token to
-// its environment — stays wire-locked by the real `ant beta:worker` client.
-func EnsureEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, environmentID, key string) error {
-	hash := hashKey(key)
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	// Revoke before inserting: environment_keys_one_live admits one unrevoked
-	// row per environment and Postgres enforces it per statement, so registering
-	// the replacement while the incumbent is still live would fail every
-	// rotation.
-	if _, err := tx.Exec(ctx,
-		`UPDATE environment_keys SET revoked_at = now()
-		 WHERE environment_id = $1 AND key_hash <> $2 AND revoked_at IS NULL`,
-		environmentID, hash); err != nil {
-		return err
-	}
-	// Insert or un-revoke this value. A key value is bound to one environment for
-	// life: the conflict action never re-points it, and its WHERE confines the
-	// un-revoke to this environment's own row, so a value belonging to another
-	// environment is left entirely alone — updating no row, which is how the
-	// rejection is detected. (Without that guard the un-revoke could give the
-	// other environment a second live key and trip environment_keys_one_live,
-	// failing with a raw constraint error instead of this one.) The rollback also
-	// undoes the revoke above, so a rejected call leaves this environment's
-	// incumbent key untouched.
-	var boundEnv string
-	err = tx.QueryRow(ctx,
-		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)
-		 ON CONFLICT (key_hash) DO UPDATE SET revoked_at = NULL
-		   WHERE environment_keys.environment_id = EXCLUDED.environment_id
-		 RETURNING environment_id`,
-		domain.NewID("envkey").String(), environmentID, hash).Scan(&boundEnv)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && boundEnv != environmentID) {
-		return fmt.Errorf("api: environment key value is already bound to a different environment")
-	}
-	if err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
 // authenticateEnvironmentKey resolves a Bearer token to the environment it is
-// scoped to, or "" if the key is unknown or revoked.
+// scoped to, or "" if the key is unknown, revoked, or expired. Those three take
+// the same branch on purpose: the caller turns "" into one 401 with one message,
+// so a probing client learns nothing about which of them it hit. A key minted
+// before keys carried expiries has a NULL expires_at and never expires.
 func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key string) (string, error) {
 	var envID string
 	err := pool.QueryRow(ctx,
-		`SELECT environment_id FROM environment_keys WHERE key_hash = $1 AND revoked_at IS NULL`,
+		`SELECT environment_id FROM environment_keys
+		  WHERE key_hash = $1 AND revoked_at IS NULL
+		    AND (expires_at IS NULL OR expires_at > now())`,
 		hashKey(key)).Scan(&envID)
 	if err == pgx.ErrNoRows {
 		return "", nil

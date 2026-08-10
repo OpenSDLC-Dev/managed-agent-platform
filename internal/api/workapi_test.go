@@ -13,25 +13,23 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 // selfHostedWorker provisions a self-hosted environment with a session and a
 // live worker (Bearer) key, returning the environment id, the session id, and
-// the key value the worker authenticates with.
-func selfHostedWorker(t *testing.T, s *tserver, key string) (envID, sessionID string) {
+// the key value the worker authenticates with. name labels the key; the secret
+// itself is the platform's to generate, so callers take it from here rather than
+// choosing one.
+func selfHostedWorker(t *testing.T, s *tserver, name string) (envID, sessionID, key string) {
 	t.Helper()
 	agent := createAgent(t, s, map[string]any{"name": "w", "model": "claude-opus-4-8"})
 	env := createEnvironment(t, s, map[string]any{"name": "wh", "config": map[string]any{"type": "self_hosted"}})
 	envID = env["id"].(string)
 	sess := createSession(t, s, map[string]any{"agent": agent["id"], "environment_id": envID})
 	sessionID = sess["id"].(string)
-	if err := api.EnsureEnvironmentKey(context.Background(), s.pool, envID, key); err != nil {
-		t.Fatalf("EnsureEnvironmentKey: %v", err)
-	}
-	return envID, sessionID
+	return envID, sessionID, issueKey(t, s.pool, envID, name)
 }
 
 func (s *tserver) poll(t *testing.T, envID string, headers map[string]string) (*http.Response, string) {
@@ -53,9 +51,8 @@ func (s *tserver) pollQuery(t *testing.T, envID, query string, headers map[strin
 // x-api-key, and a key is scoped to exactly one environment.
 func TestWorkPollRequiresEnvironmentKey(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-worker-1"
-	envID, _ := selfHostedWorker(t, s, key)
-	otherEnv, _ := selfHostedWorker(t, s, "ek-worker-2")
+	envID, _, key := selfHostedWorker(t, s, "ek-worker-1")
+	otherEnv, _, _ := selfHostedWorker(t, s, "ek-worker-2")
 
 	cases := map[string]struct {
 		env     string
@@ -85,8 +82,7 @@ func TestWorkPollRequiresEnvironmentKey(t *testing.T) {
 // reads as "no work" and spaces with its own jitter sleep.
 func TestWorkPollEmptyQueueReturnsNull(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-empty"
-	envID, _ := selfHostedWorker(t, s, key)
+	envID, _, key := selfHostedWorker(t, s, "ek-empty")
 
 	res, raw := s.poll(t, envID, map[string]string{"Authorization": "Bearer " + key})
 	if res.StatusCode != http.StatusOK {
@@ -103,8 +99,7 @@ func TestWorkPollEmptyQueueReturnsNull(t *testing.T) {
 // (ack, not poll, transitions it).
 func TestWorkPollReturnsWireShape(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-shape"
-	envID, sessionID := selfHostedWorker(t, s, key)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-shape")
 
 	q := queue.New(s.pool)
 	if _, err := q.Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
@@ -166,8 +161,7 @@ func TestWorkPollReturnsWireShape(t *testing.T) {
 // rides a header and never leaks into the client-facing metadata namespace.
 func TestWorkPollEmitsTraceContextHeader(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-trace"
-	envID, sessionID := selfHostedWorker(t, s, key)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-trace")
 
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID:    trace.TraceID{0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19},
@@ -212,8 +206,7 @@ func TestWorkPollEmitsTraceContextHeader(t *testing.T) {
 // contract holds only for a valid patch.
 func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-route"
-	envID, _ := selfHostedWorker(t, s, key)
+	envID, _, key := selfHostedWorker(t, s, "ek-route")
 	auth := map[string]string{"Authorization": "Bearer " + key}
 
 	res := s.doRaw(http.MethodPut, "/v1/environments/"+envID+"/work/poll", nil, auth)
@@ -256,8 +249,7 @@ func TestWorkPollRejectsWrongMethodAndPath(t *testing.T) {
 // rest of the work API.
 func TestWorkUpdateMetadata(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-meta"
-	envID, sessionID := selfHostedWorker(t, s, key)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-meta")
 	workID := s.enqueueAndPoll(t, envID, sessionID, key)
 	path := "/v1/environments/" + envID + "/work/" + workID
 
@@ -337,8 +329,7 @@ func TestWorkUpdateMetadata(t *testing.T) {
 // (null), not re-hand it out.
 func TestWorkPollClampsHugeReclaim(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-clamp"
-	envID, sessionID := selfHostedWorker(t, s, key)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-clamp")
 	q := queue.New(s.pool)
 	if _, err := q.Enqueue(context.Background(), s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -370,8 +361,7 @@ func TestWorkPollClampsHugeReclaim(t *testing.T) {
 // immediate hit carries it.
 func TestWorkPollBlockMsWakesOnMidWaitEnqueue(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-block-wake"
-	envID, sessionID := selfHostedWorker(t, s, key)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-block-wake")
 
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID:    trace.TraceID{0xaa, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19},
@@ -421,8 +411,7 @@ func TestWorkPollBlockMsWakesOnMidWaitEnqueue(t *testing.T) {
 // minutes.
 func TestWorkPollBlockMsExpiresToNull(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-block-idle"
-	envID, _ := selfHostedWorker(t, s, key)
+	envID, _, key := selfHostedWorker(t, s, "ek-block-idle")
 	auth := map[string]string{"Authorization": "Bearer " + key}
 
 	// maxWait pins each case against the wrong window, not just against no
@@ -466,8 +455,7 @@ func TestWorkPollBlockMsExpiresToNull(t *testing.T) {
 // 400 here — unlike the non-validating reclaim knob.
 func TestWorkPollBlockMsRejectsNonPositive(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-block-bad"
-	envID, _ := selfHostedWorker(t, s, key)
+	envID, _, key := selfHostedWorker(t, s, "ek-block-bad")
 	auth := map[string]string{"Authorization": "Bearer " + key}
 
 	for _, q := range []string{
@@ -526,8 +514,7 @@ func (s *tserver) workReq(t *testing.T, method, path, key string, body any) (*ht
 // unknown id.
 func TestWorkGetReturnsItem(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-get"
-	envID, sessionID := selfHostedWorker(t, s, key)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-get")
 	workID := s.enqueueAndPoll(t, envID, sessionID, key)
 
 	res, body, raw := s.workReq(t, http.MethodGet, "/v1/environments/"+envID+"/work/"+workID, key, nil)
@@ -554,8 +541,7 @@ func TestWorkGetReturnsItem(t *testing.T) {
 // item.
 func TestWorkAckTransitionsToStarting(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-ack"
-	envID, sessionID := selfHostedWorker(t, s, key)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-ack")
 	workID := s.enqueueAndPoll(t, envID, sessionID, key)
 
 	res, body, raw := s.workReq(t, http.MethodPost, "/v1/environments/"+envID+"/work/"+workID+"/ack", key, nil)
@@ -579,8 +565,7 @@ func TestWorkAckTransitionsToStarting(t *testing.T) {
 // precondition (400), and a mismatch (412).
 func TestWorkHeartbeatClaimsLeaseAndExtends(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-hb"
-	envID, sessionID := selfHostedWorker(t, s, key)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-hb")
 	workID := s.enqueueAndPoll(t, envID, sessionID, key)
 	base := "/v1/environments/" + envID + "/work/" + workID + "/heartbeat"
 	if _, _, raw := s.workReq(t, http.MethodPost, "/v1/environments/"+envID+"/work/"+workID+"/ack", key, nil); raw == "" {
@@ -629,8 +614,7 @@ func TestWorkHeartbeatClaimsLeaseAndExtends(t *testing.T) {
 // stopping item is 409, and force escalates it to stopped.
 func TestWorkStopGracefulThenForce(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-stop"
-	envID, sessionID := selfHostedWorker(t, s, key)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-stop")
 	workID := s.enqueueAndPoll(t, envID, sessionID, key)
 	get := "/v1/environments/" + envID + "/work/" + workID
 	stop := get + "/stop"
@@ -688,9 +672,11 @@ func wantNoContent(t *testing.T, s *tserver, path, key string, reqBody map[strin
 // (401) — and that a known route reached with the wrong method is the wire 405.
 func TestWorkLifecycleRoutesScopeAndMethod(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-scope"
-	envID, sessionID := selfHostedWorker(t, s, key)
-	selfHostedWorker(t, s, "ek-scope-other") // a second env whose key must not reach envID
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-scope")
+	// A *live* key for a second environment — the point is that a valid
+	// credential is refused for someone else's work item, which an unknown token
+	// would not prove.
+	_, _, otherKey := selfHostedWorker(t, s, "ek-scope-other")
 	workID := s.enqueueAndPoll(t, envID, sessionID, key)
 	base := "/v1/environments/" + envID + "/work/" + workID
 
@@ -701,7 +687,7 @@ func TestWorkLifecycleRoutesScopeAndMethod(t *testing.T) {
 		{http.MethodPost, base + "/heartbeat?expected_last_heartbeat=NO_HEARTBEAT"},
 		{http.MethodPost, base + "/stop"},
 	} {
-		res, body, _ := s.workReq(t, tc.method, tc.path, "ek-scope-other", nil)
+		res, body, _ := s.workReq(t, tc.method, tc.path, otherKey, nil)
 		wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
 	}
 
@@ -751,8 +737,7 @@ func TestUnauthenticatedRequestsAreNotRedirectedBeforeAuth(t *testing.T) {
 // like the rest of the work API.
 func TestWorkStats(t *testing.T) {
 	s := newTestServer(t)
-	const key = "ek-stats"
-	envID, sessionID := selfHostedWorker(t, s, key)
+	envID, sessionID, key := selfHostedWorker(t, s, "ek-stats")
 	auth := map[string]string{"Authorization": "Bearer " + key}
 	statsPath := "/v1/environments/" + envID + "/work/stats"
 
@@ -827,7 +812,7 @@ func TestWorkStats(t *testing.T) {
 	}
 
 	// Scoping: a key for another environment cannot read this one's stats.
-	otherEnv, _ := selfHostedWorker(t, s, "ek-stats-other")
+	otherEnv, _, _ := selfHostedWorker(t, s, "ek-stats-other")
 	res = s.doRaw(http.MethodGet, "/v1/environments/"+otherEnv+"/work/stats", nil, auth)
 	res.Body.Close()
 	if res.StatusCode != http.StatusUnauthorized {
