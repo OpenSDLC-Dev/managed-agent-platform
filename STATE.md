@@ -43,7 +43,8 @@ remains, and it blocks every session.
       provider now asserts `ref`/`ref_type` as well as `repository_owner`. First
       green run from the workflow itself: 31260884425 on `0c01e14`, 3m41s, build
       through smoke, all three components on its images at `ready 1/1`. The
-      console's pipeline is green too. Detail in `deploy/gcp/README.md` and
+      console's pipeline is green too; #355 then moved its eleven identifiers to
+      Actions variables. Detail in `deploy/gcp/README.md` and
       [docs/HISTORY.md](./docs/HISTORY.md).
 - [ ] Replace the `model-providers` placeholder (real endpoint, fake key) with a
       live route before anything runs a session.

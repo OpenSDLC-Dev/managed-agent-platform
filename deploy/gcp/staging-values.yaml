@@ -1,11 +1,58 @@
 # Helm values for the staging deployment `.github/workflows/deploy.yml` installs.
 #
 # This is **mode 2** — Cloud SQL, Cloud Storage and Cloud KMS behind a pre-created
-# Secret — and it is the file that was actually installed, not a plausible one:
-# `helm upgrade --install map … -f <this> --wait --atomic --timeout 10m` returned
-# 0 against cluster `map-staging`, all three Deployments became Ready, and
-# `GET /v1/agents?limit=1` on the LoadBalancer answered 200 with a key and 401
-# without one.
+# Secret — and its shape is the one that was actually installed rather than a
+# plausible one: `helm upgrade --install map … -f <this> --wait --atomic
+# --timeout 10m` returned 0 against the staging cluster, all three Deployments
+# became Ready, and `GET /v1/agents?limit=1` on the LoadBalancer answered 200
+# with a key and 401 without one.
+#
+# That run used this file with its five identifying values still written out.
+# They are placeholders now (see below) and the workflow supplies the real ones,
+# so the acceptance record covers every line here EXCEPT those five — and the
+# five are re-proved on every deploy, by two different means rather than one.
+# The three IDENTITIES are read back out of the cluster by the step after
+# `helm upgrade`, which compares each ServiceAccount's annotation against the
+# variable it came from. The two IMAGE halves are not read back and do not need
+# to be: an override that failed to land leaves `registry.invalid`, the pods
+# cannot pull, and `--wait --atomic` rolls the release back before that step is
+# reached.
+#
+# **It is a reference deployment, not this cluster's values file.** Every value
+# below that would name an operator — the image registry and repository, and the
+# three Workload-Identity service accounts — is written here against the neutral
+# project `your-project`, and the workflow overrides all five with `--set-string`
+# from repository variables (`ARTIFACT_REGISTRY`, `CONTROLPLANE_SERVICE_ACCOUNT`,
+# `BRAIN_SERVICE_ACCOUNT`, `EXECUTOR_SERVICE_ACCOUNT`). This repository is public,
+# and one that names one operator's project, registry and identities hands a
+# reader a target list and ties the project to a cluster nobody cloning it can
+# reach.
+#
+# The keys stay here rather than being deleted, and that is the deliberate half
+# of the choice: `helm template -f <this>` on its own is what CI runs against this
+# file, and a file with `image.registry` removed renders against the chart's
+# ghcr.io defaults while a file with the annotations removed renders a
+# ServiceAccount with no identity — so what is meant to be the worked example of
+# mode 2 would document a deployment that cannot start.
+#
+# The two halves do NOT fail the same way if an override is ever dropped, and
+# saying they do would be the more comfortable claim rather than the true one.
+# The IMAGE half fails closed by construction: `registry.invalid` can never
+# resolve, because RFC 2606 reserves the `.invalid` TLD precisely so no name
+# under it can be registered — so the pods cannot pull and `--wait --atomic`
+# rolls the release back. The IDENTITY half does not fail closed at all for the
+# brain: read the note on `brain.serviceAccount` below, and
+# internal/brain/grader.go, which downgrades a blob read it cannot make to a
+# warning and grades on. The pod starts, the release completes, and the run is
+# green. That is why the workflow reads the three annotations back out of the
+# cluster after the upgrade instead of trusting that it set them.
+#
+# The registry host is where that distinction is load-bearing. A plausible-looking
+# `us-central1-docker.pkg.dev/your-project/…` would be a real Artifact Registry
+# path in whatever project happens to own the id `your-project` — a globally
+# unique namespace anyone may register — so a reader who ran this file verbatim,
+# or an edit that dropped the `image.*` override, could silently pull and run a
+# stranger's images instead of failing. An unresolvable host cannot do that.
 #
 # Mode 1 (bundled Postgres/MinIO/OpenBao) is not what this environment runs. It is
 # the fewest moving parts and the right first proof, but a pipeline that installs
@@ -15,8 +62,11 @@
 # already prepared — sitting unused.
 #
 # Every coordinate below came from `terraform -chdir=deploy/gcp/environment
-# output`, transcribed rather than generated. If `main.tf` changes the taint, the
-# registry, or a service account, this file is the second place to change.
+# output`, transcribed rather than generated — the identifying five as the
+# repository variables the workflow overrides them from, the rest as the literals
+# here. If `main.tf` changes the taint, the registry, or a service account, there
+# are two places to change: this file for what a rebuild does not identify, and
+# the repository variables for what it does.
 #
 # What is deliberately NOT here:
 #
@@ -33,14 +83,22 @@
 #     the line was last edited.
 
 # The chart composes each component's image as {registry}/{repository}/{component}:{tag}
-# (templates/_helpers.tpl, "map.image"), so the Artifact Registry prefix
-# `us-central1-docker.pkg.dev/hh-opensdlc-managed-agents/map-images` splits at the
-# FIRST slash and not anywhere else. Get the split wrong — put the project into
-# `registry`, say — and Helm renders a reference that is merely wrong rather than
-# invalid, so the render succeeds and the pods fail to pull.
+# (templates/_helpers.tpl, "map.image"), so an Artifact Registry prefix splits at
+# the FIRST slash and not anywhere else: a real one reads
+# `LOCATION-docker.pkg.dev` / `PROJECT/REPOSITORY`. Get the split wrong — put the
+# project into `registry`, say — and Helm renders a reference that is merely wrong
+# rather than invalid, so the render succeeds and the pods fail to pull. That is
+# why the workflow derives both halves from the one `ARTIFACT_REGISTRY` variable
+# with `${…%%/*}` and `${…#*/}` rather than carrying two variables that could
+# disagree.
+#
+# `registry.invalid` rather than a plausible `LOCATION-docker.pkg.dev`, and that
+# is the placeholder doing work rather than standing in: see the header. The
+# repository half keeps the real two-segment shape, because that is the half the
+# split lesson above is about.
 image:
-  registry: us-central1-docker.pkg.dev
-  repository: hh-opensdlc-managed-agents/map-images
+  registry: registry.invalid
+  repository: your-project/map-images
 
 # The switch that selects mode 2. Set, the chart renders NO Secret of its own and
 # every process reads its configuration from this one instead. The workflow's
@@ -51,7 +109,7 @@ image:
 #   database-url           the Cloud SQL DSN, sslmode=require (Secret Manager)
 #   model-providers.json   the model routes, a JSON array   (Secret Manager)
 #   blob-backend           gcs                              (literal)
-#   blob-bucket            hh-opensdlc-managed-agents-map-blob (literal)
+#   blob-bucket            the GCS bucket, from BLOB_BUCKET (literal)
 #   secrets-backend        gcpkms                           (literal)
 #   gcpkms-key-name        the full CryptoKey resource name (literal)
 #
@@ -92,9 +150,14 @@ controlplane:
   # creates the IAM binding that lets this release's Kubernetes ServiceAccount
   # impersonate the Google one. The annotation is the other half, and it lives
   # here. Missing, ADC fails at pod startup rather than denying a permission later.
+  #
+  # The value is an EXAMPLE — the workflow overrides it from the
+  # `CONTROLPLANE_SERVICE_ACCOUNT` repository variable. Left as written it names
+  # an account that does not exist, which is a pod that never starts, not a pod
+  # that starts with the wrong identity.
   serviceAccount:
     annotations:
-      iam.gke.io/gcp-service-account: map-controlplane@hh-opensdlc-managed-agents.iam.gserviceaccount.com
+      iam.gke.io/gcp-service-account: map-controlplane@your-project.iam.gserviceaccount.com
   # A request, not a limit. The request is what the scheduler reads, and a
   # container with none is BestEffort: it costs the scheduler nothing and the
   # kubelet evicts it first under node pressure. The numbers are floors that make
@@ -114,9 +177,10 @@ brain:
   # there. Omitting it does not fail — the render succeeds, the pod starts, and the
   # brain's reads degrade to grading against the outcome description alone. Silent
   # is the reason to set it now rather than to discover it from a grade.
+  # Example value; the workflow overrides it from `BRAIN_SERVICE_ACCOUNT`.
   serviceAccount:
     annotations:
-      iam.gke.io/gcp-service-account: map-brain@hh-opensdlc-managed-agents.iam.gserviceaccount.com
+      iam.gke.io/gcp-service-account: map-brain@your-project.iam.gserviceaccount.com
   resources:
     requests:
       cpu: 100m
@@ -125,9 +189,10 @@ brain:
 executor:
   # This identity is what the sandbox path and the executor's own blob access
   # authenticate as; the IAM binding for it is already applied by `environment/`.
+  # Example value; the workflow overrides it from `EXECUTOR_SERVICE_ACCOUNT`.
   serviceAccount:
     annotations:
-      iam.gke.io/gcp-service-account: map-executor@hh-opensdlc-managed-agents.iam.gserviceaccount.com
+      iam.gke.io/gcp-service-account: map-executor@your-project.iam.gserviceaccount.com
   # No memory limit here either, and the reason is more than the one above: this
   # is the process that moves the big payloads, but a checkpoint restore spools to
   # a temp FILE (internal/executor/checkpoint.go) and a repository clone to a temp

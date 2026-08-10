@@ -417,6 +417,7 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
 | creating `controlplane-api-key`, `database-url` and `model-providers` | a human, once — `bootstrap.sh` does not create these |
 | replacing the `model-providers` placeholder | a human, once |
+| setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment |
 | build and push the four images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
@@ -445,21 +446,140 @@ is built to allow, because a staging rebuild has to be one command. So the pipel
 the environment exists: Terraform, `gcp-bootstrap` and `gcp-db-init` stay human-driven, and
 CD owns exactly **build → push → deploy → smoke**.
 
+### The deployment's coordinates
+
+**Nothing in this repository names them.** `deploy/` here is a **reference deployment, not a
+template**: it demonstrates a shape that works, and the one deployment it was proven against
+is described by variable rather than by name, because this repository is public. Each is a
+GitHub Actions **variable** (Settings → Secrets and variables → Actions → Variables), not a
+secret — none of them grants anything, the credentials are in Secret Manager, and the
+Workload Identity Federation trust policy is what actually protects the deployment. They are
+held outside the repository because naming one operator's project, cluster, registry,
+buckets, key and identities hands a reader a target list, and ties an open-source project to
+a cluster nobody cloning it can reach.
+
+**Where each value comes from**, because "read them off `terraform output`" is true of most
+of them and not of all — and the three exceptions are exactly the ones a new deployment would
+be left hunting for. `E` is `terraform -chdir=deploy/gcp/environment output -raw`, `F` is the
+same against `foundation/`:
+
+| Variable | What it names | Where to get it |
+| --- | --- | --- |
+| `GCP_PROJECT_ID` | the project everything else lives in | **not an output** — it is the `project_id` you set in `terraform.tfvars` |
+| `GKE_CLUSTER`, `GCP_ZONE` | the cluster and its zone | `E cluster_name`, `E zone` |
+| `ARTIFACT_REGISTRY` | `HOST/PROJECT/REPOSITORY` — the image prefix. The tag is always the commit SHA, and the chart's `registry`/`repository` split is taken off this one value at its first slash | `E artifact_registry` |
+| `WIF_PROVIDER` | the Workload Identity Federation provider the job's OIDC token is exchanged at | **not in this repository's Terraform** — the pool and provider are created by hand; read the full resource name back with `gcloud iam workload-identity-pools providers describe POOL_PROVIDER … --format="value(name)"` |
+| `DEPLOY_SERVICE_ACCOUNT` | the identity that provider lets this repository impersonate | **not in this repository's Terraform** — created by hand alongside the provider, and bound to this repository separately |
+| `BLOB_BUCKET` | the GCS bucket, written into the mode-2 Secret as `blob-bucket` | `E blob_bucket` |
+| `KMS_KEY_NAME` | the CryptoKey resource name, written in as `gcpkms-key-name` | `E kms_key_name` (`F kms_key_name` is the same key) |
+| `CONTROLPLANE_SERVICE_ACCOUNT`, `BRAIN_SERVICE_ACCOUNT`, `EXECUTOR_SERVICE_ACCOUNT` | the three Workload-Identity Google service accounts the chart annotates each component's ServiceAccount with | `F controlplane_service_account`, `F brain_service_account`, `F executor_service_account` — bare emails. (`environment/`'s `*_service_account_annotation` outputs hold the same emails wrapped in the chart's annotation map, which is the wrong shape for a variable.) |
+
+The two "not in Terraform" rows are not an oversight to be tidied away: the WIF provider is
+deliberately outside this configuration — see the attribute-condition command below, which
+exists here precisely because nothing in the repository would otherwise record it — and the
+deploy identity is created with it. They are named here so that setting up a fresh deployment
+is a list to work through rather than a guess, since the workflow's guard refuses to run
+until all eleven exist.
+
+Three names are deliberately **not** variables — `K8S_NAMESPACE`, `K8S_SECRET` and
+`HELM_RELEASE` stay literals in the workflow, because they name the *chart's* own objects
+rather than an operator, and `K8S_SECRET` in particular has to equal `existingSecret` in
+[`staging-values.yaml`](./staging-values.yaml), which is in git: a variable would let the two
+drift into a release bound to a Secret nothing creates, with no diff to notice it in.
+
+The workflow **asserts every one of them** before it authenticates or builds anything, in a
+step that runs second — after the ref guard, which refuses an unauthorised ref while telling
+it nothing. An unset variable renders as the empty string rather than failing, and
+`gcloud --project ""`, `get-credentials "" --zone ""` and an image tag with no repository all
+fail late and confusingly. Whitespace and commas are rejected as well as emptiness: a value
+of one space is no configuration while passing a `-z` test, and four of them —
+`ARTIFACT_REGISTRY` and the three service accounts — reach `helm --set-string`, whose
+assignment list is comma-separated.
+
+The cost of the move is that the deployment target is no longer reviewable in the diff that
+changes it — a variable is edited in a settings page, not in a PR. That is the trade, and
+that assertion step is what keeps it from being silent.
+
+**What this is not is concealment, and the distinction matters because the weaker claim is
+the one people act on.** A run's logs are public on a public repository, and several of these
+values appear in them by the ordinary operation of the tools: `docker push` prints the
+repository it is pushing to, `gcloud container clusters get-credentials` prints the cluster
+it wrote a kubeconfig entry for, and the smoke step prints the LoadBalancer's external
+address on purpose. Registering them as `::add-mask::` would close that and was rejected: a
+mask is a literal string replacement across the whole log, so the same substitution that
+hides the project id also hides it inside every diagnostic that names it — `cannot read
+Secret Manager secret 'x' in ***` is a worse error message than the one it replaces, and the
+same reasoning already keeps short values unmasked in the Secret step. What the move actually
+buys is the two things the issue asked for: a clone's **deployment configuration** — this
+workflow, this values file, the commands in this runbook — names no operator, and `deploy/`
+reads as a reference deployment instead of a half-edited template. Anyone determined to read
+a public build log was never the threat model.
+
+Note the width of that claim, because the stronger one is not true: a clone **does** still
+carry the identifiers, in [docs/HISTORY.md](../../docs/HISTORY.md) and in git history, both
+of which this change leaves alone on purpose — the first is the record of what was actually
+run, and rewriting the second is not worth it for identifiers that are not credentials. What
+changed is that nothing you would *configure or execute* names them.
+
+Commands below name the variables as the table does. Load them into the shell first —
+`gh variable list` only prints a table and exports nothing:
+
+```bash
+vars='GCP_PROJECT_ID GCP_ZONE GKE_CLUSTER ARTIFACT_REGISTRY WIF_PROVIDER
+      DEPLOY_SERVICE_ACCOUNT BLOB_BUCKET KMS_KEY_NAME
+      CONTROLPLANE_SERVICE_ACCOUNT BRAIN_SERVICE_ACCOUNT EXECUTOR_SERVICE_ACCOUNT'
+
+unset $vars                       # clear FIRST — see below
+for v in $vars; do
+  val="$(gh variable get "$v")" && [ -n "$val" ] && export "$v=$val"
+done
+for v in $vars; do eval ": \"\${$v:?did not load — see the table above}\""; done
+```
+
+**`gh` reads whichever repository the current checkout points at**, which is the behaviour
+you want and the reason no `--repo` is written here: a fork's operator gets the fork's
+variables, and pinning `OpenSDLC-Dev/managed-agent-platform` into a public runbook would put
+back one of the coordinates this whole section exists to remove. The consequence is that this
+block belongs in a checkout of the repository you are deploying — run it somewhere else and
+it loads that repository's values, which will pass the assertion below while being the wrong
+deployment. `gh repo view --json nameWithOwner -q .nameWithOwner` is the one-line check.
+
+**The `unset` is the load-bearing line, and it goes first.** A partial load is the dangerous
+state, not a failed one: if `gh` errors on one name — an expired token, a variable renamed,
+a network blip — and this shell already holds values from an earlier load or another
+environment, then the assertion below passes on **stale** coordinates and the `gcloud`
+commands further down operate on the wrong project or the wrong service account, saying
+nothing. Clearing every name before the load means a variable that does not arrive is
+absent rather than out of date, which is a state the assertion can see.
+
+**It reads the eleven by name rather than exporting the whole list.** `gh variable list`
+piped into an `eval` would export whatever else is configured on the repository, under
+whatever name it has — including names the rest of this file reads for a different purpose.
+`PROJECT` is the sharp one: the table above hands it to `make gcp-bootstrap` and
+`make gcp-db-init`, so a repository variable of that name would silently redirect both, and
+`TF_VAR_*` is the same hazard aimed at Terraform. Naming what you want keeps the blast
+radius to this section's eleven.
+
+All eleven are asserted, not the few any one command needs, because the commands below spend
+`$DEPLOY_SERVICE_ACCOUNT` as well as `$GCP_PROJECT_ID`, and a half-loaded environment is
+exactly what turns a promised named stop into `--member="serviceAccount:"` and an argument
+parse error. `:?` names the first variable that did not load and stops there, without closing
+an interactive shell.
+
 **There is no GitHub secret in this repository, and adding one would be a regression.** The
 job mints an OIDC token, Workload Identity Federation exchanges it for a short-lived
-impersonation of `cd-deployer@`, and every credential is then read from Secret Manager at
-run time. So a rotation is `gcloud secrets versions add` plus a re-run of the workflow — no
-repository setting to update afterwards, and no long-lived key in a settings page to leak.
-The provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'`, and each
-repository is bound separately, so a fork cannot use it.
+impersonation of `DEPLOY_SERVICE_ACCOUNT`, and every credential is then read from Secret
+Manager at run time. So a rotation is `gcloud secrets versions add` plus a re-run of the
+workflow — no repository setting to update afterwards, and no long-lived key in a settings
+page to leak. The provider is locked to `assertion.repository_owner == 'OpenSDLC-Dev'`, and
+each repository is bound separately, so a fork cannot use it.
 
 **Closed: the provider asserts the ref, so the ref a `workflow_dispatch` selects is no longer
 trusted.** A dispatch can name a tag as readily as a branch, which is why the condition tests
 both — see `ref_type` below. GitHub runs a dispatched workflow from the ref it was dispatched
 on, so without that condition anyone who could push a ref to this repository could push an
-edited `deploy.yml`, dispatch it, and have the provider hand that run the `cd-deployer@`
-identity — Secret Manager, Cloud Build and the cluster, around the review boundary `main`
-exists to be.
+edited `deploy.yml`, dispatch it, and have the provider hand that run the deploy identity —
+Secret Manager, Cloud Build and the cluster, around the review boundary `main` exists to be.
 
 There are two controls, and the order matters. The workflow's first step refuses a run whose
 `github.ref` is not `refs/heads/main`, and it runs *before* the auth action, so an ordinary
@@ -470,19 +590,37 @@ cannot reach it. It is one command — **applied to this project**, and recorded
 the provider is not in this repository's Terraform, so this is the only place the command that
 sets it, and the read-back that checks it, are written down:
 
+Every coordinate is taken **out of `$WIF_PROVIDER` itself**, and that is not tidiness. This
+condition is the control that survives a branch deleting the workflow's own guard, so a
+command that configured a *different* provider than the one the job exchanges its token at
+would leave the real one unconditioned while reading as though the work were done. A
+hard-coded `github-oidc` in pool `github` does exactly that on any deployment whose
+`WIF_PROVIDER` names another pool or provider — which is now every deployment but this one:
+
 ```sh
-gcloud iam workload-identity-pools providers update-oidc github-oidc \
-  --project=hh-opensdlc-managed-agents --location=global --workload-identity-pool=github \
+wif_project="${WIF_PROVIDER#projects/}";                  wif_project="${wif_project%%/*}"
+wif_location="${WIF_PROVIDER#*/locations/}";              wif_location="${wif_location%%/*}"
+wif_pool="${WIF_PROVIDER#*/workloadIdentityPools/}";      wif_pool="${wif_pool%%/*}"
+wif_name="${WIF_PROVIDER##*/providers/}"
+
+gcloud iam workload-identity-pools providers update-oidc "$wif_name" \
+  --project="$wif_project" --location="$wif_location" \
+  --workload-identity-pool="$wif_pool" \
   --attribute-condition="assertion.repository_owner == 'OpenSDLC-Dev' && assertion.ref == 'refs/heads/main' && assertion.ref_type == 'branch'"
 ```
+
+`--project` gets the project **number** the resource name carries rather than
+`$GCP_PROJECT_ID`; `gcloud` accepts either, and the number is the one that is guaranteed to
+name the project the pool is in — a provider may live beside the workload rather than in it.
 
 `ref_type` rides along because a *tag* named `main` would present `refs/tags/main` — not
 equal, so the ref test already rejects it, but stating both makes the intent legible rather
 than incidental. Read the live condition back with:
 
 ```sh
-gcloud iam workload-identity-pools providers describe github-oidc \
-  --project=hh-opensdlc-managed-agents --location=global --workload-identity-pool=github \
+gcloud iam workload-identity-pools providers describe "$wif_name" \
+  --project="$wif_project" --location="$wif_location" \
+  --workload-identity-pool="$wif_pool" \
   --format="value(attributeCondition,state)"
 ```
 
@@ -497,7 +635,7 @@ run failed at the build step in under a second, before a byte was uploaded:
 
 ```text
 ERROR: (gcloud.builds.submit) The user is forbidden from accessing the bucket
-[hh-opensdlc-managed-agents_cloudbuild]. Please check your organization's policy
+[PROJECT_cloudbuild]. Please check your organization's policy
 or if the user has the "serviceusage.services.use" permission.
 ```
 
@@ -522,32 +660,34 @@ would otherwise say it exists:
 | --- | --- | --- |
 | `roles/logging.logWriter` | the project | `cloudbuild.yaml` sets `options.logging: CLOUD_LOGGING_ONLY`, which is *mandatory* once a build names its own service account — with a user-specified identity the API refuses a build that would write to the default logs bucket |
 
-`roles/storage.admin` on `gs://hh-opensdlc-managed-agents_cloudbuild` and
-`roles/serviceusage.serviceUsageConsumer` on the project were also granted to `cd-deployer@`
-while diagnosing the above. Neither is needed by CD anymore. They are left in place because
-the manual `gcloud builds submit` path still uses that bucket, and are named here so that a
-later tidy-up knows what they were for.
+`roles/storage.admin` on the project's `_cloudbuild` staging bucket and
+`roles/serviceusage.serviceUsageConsumer` on the project were also granted to the deploy
+service account while diagnosing the above. Neither is needed by CD anymore. They are left in
+place because the manual `gcloud builds submit` path still uses that bucket, and are named
+here so that a later tidy-up knows what they were for.
 
-They are on `cd-deployer@`, and what makes them necessary is naming a build service account
-at all — `--service-account="projects/…/serviceAccounts/cd-deployer@…"`, which the manual
+They are on the deploy service account, and what makes them necessary is naming a build
+service account at all — `--service-account="projects/…/serviceAccounts/…"`, which the manual
 path must pass here. **A project created under an organisation no longer gets the automatic
 Editor grant on the Compute Engine default service account**, so the identity Cloud Build
 would otherwise pick cannot read its own source upload. That is not a hypothetical — it is
 how the first submission failed:
 
 ```text
-754963270337-compute@developer.gserviceaccount.com does not have storage.objects.get
-access to the Google Cloud Storage object. ... hh-opensdlc-managed-agents_cloudbuild
+PROJECT_NUMBER-compute@developer.gserviceaccount.com does not have storage.objects.get
+access to the Google Cloud Storage object. ... PROJECT_cloudbuild
 ```
 
-Reproduce the grants with:
+Reproduce the grants with (the variables come from the loader in "The deployment's
+coordinates" above; `${GCP_PROJECT_ID}` is braced in the bucket name because
+`$GCP_PROJECT_ID_cloudbuild` would be read as one variable name that does not exist, and
+would silently address `gs://_cloudbuild`):
 
 ```sh
-sa=cd-deployer@hh-opensdlc-managed-agents.iam.gserviceaccount.com
-gcloud projects add-iam-policy-binding hh-opensdlc-managed-agents \
-  --member="serviceAccount:$sa" --role=roles/logging.logWriter
-gcloud storage buckets add-iam-policy-binding gs://hh-opensdlc-managed-agents_cloudbuild \
-  --member="serviceAccount:$sa" --role=roles/storage.admin
+gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
+  --member="serviceAccount:$DEPLOY_SERVICE_ACCOUNT" --role=roles/logging.logWriter
+gcloud storage buckets add-iam-policy-binding "gs://${GCP_PROJECT_ID}_cloudbuild" \
+  --member="serviceAccount:$DEPLOY_SERVICE_ACCOUNT" --role=roles/storage.admin
 ```
 
 [`staging-values.yaml`](./staging-values.yaml) is the versioned input the pipeline reads, and
@@ -559,14 +699,47 @@ withheld from it — in mode 2 the chart renders no Secret at all, so it takes n
 values; and `image.tag` must come from the same commit SHA the build used, which is the whole
 reason it is not a line in a file someone edits.
 
+**It names no operator either, and that is the shape rather than a redaction.** The five
+values in it that would — the image `registry`/`repository` split and the three
+service-account emails — are written against `registry.invalid` and the neutral project
+`your-project`, and the workflow overrides all five with `--set-string` from
+`ARTIFACT_REGISTRY` and the three `*_SERVICE_ACCOUNT` variables. The keys stay in the file
+rather than being deleted so that it remains a **worked example that renders on its own**:
+`helm template -f staging-values.yaml` is what CI runs against it, and a file with
+`image.registry` removed renders against the chart's `ghcr.io` defaults while one with the
+annotations removed renders a ServiceAccount with no identity — an example documenting a
+deployment that cannot start.
+
+**The two halves do not fail the same way, and the comfortable claim that they do is the one
+worth not making.** The image half fails closed **by construction**: `registry.invalid` can
+never resolve, because RFC 2606 reserves the `.invalid` TLD so that no one can register a
+name under it, so the pods cannot pull and `--wait --atomic` rolls the release back. That
+host is also why the placeholder is not a plausible `us-central1-docker.pkg.dev/your-project/…`
+— a GCP project id is a globally unique namespace anyone may register, so such a path would
+be a *real* Artifact Registry path in whichever project owns that id, and a reader running
+this file verbatim could silently pull a stranger's images rather than fail.
+
+The identity half is different, and for the **brain** it does not fail closed at all. The
+note on `brain.serviceAccount` in that same file says so — "omitting it does not fail; the
+render succeeds, the pod starts, and the brain's reads degrade" — and
+[`internal/brain/grader.go`](../../internal/brain/grader.go) implements it: a deliverable it
+cannot read becomes a warning and the grade proceeds against the outcome description alone.
+So a dropped brain override would deploy **green** and quietly grade worse. That is why the
+workflow does not stop at setting the annotations: the step after `helm upgrade` reads all
+three back out of the cluster and compares them against the variables they came from, so an
+override that never reached the chart is a red run rather than a silent downgrade. What that
+step cannot catch is a human swapping two of the variables in the settings page — the deploy
+would then agree with its own inputs. Nothing here can, and that is the half of the cost of
+moving values out of the diff that stays.
+
 Rebuilding `environment/` does not change any of this **unless a coordinate changes**, and
-there are now two files to check rather than one: the sandbox pair, the image
-`registry`/`repository` split and the three service-account emails in `staging-values.yaml`,
-and `BLOB_BUCKET` plus `KMS_KEY_NAME` in the workflow's `env:` block. All of them are
-transcribed from `environment/`, not generated from it, so diff them against
-`terraform output` after a change to `main.tf`. Get the registry split wrong and the render
-still succeeds — it just names images that do not exist, and all three pods sit in
-`ImagePullBackOff`.
+the two places to check are no longer both files: the sandbox pair stays in
+`staging-values.yaml`, while the image prefix, the three service-account emails,
+`BLOB_BUCKET` and `KMS_KEY_NAME` are now repository variables. All of them are transcribed
+from `environment/`, not generated from it, so diff them against `terraform output` after a
+change to `main.tf` — `gh variable list` for the variables, the file for the rest. Get the
+registry prefix wrong and the render still succeeds; it just names images that do not exist,
+and all three pods sit in `ImagePullBackOff`.
 
 **There is a third thing a rebuild moves, and it is not in either file: `database-url`.** A
 recreated Cloud SQL instance gets a **new private IP**, and the DSN below hard-codes the old
@@ -576,10 +749,10 @@ every pod would fail its first query. Re-compose it before the next deploy:
 ```sh
 ip="$(terraform -chdir=deploy/gcp/environment output -raw sql_private_ip)"
 pw="$(gcloud secrets versions access latest --secret=map-db-password \
-        --project=hh-opensdlc-managed-agents)"
+        --project="$GCP_PROJECT_ID")"
 printf '%s' "postgres://map:$pw@$ip:5432/map?sslmode=require" \
   | gcloud secrets versions add database-url \
-      --project=hh-opensdlc-managed-agents --data-file=-
+      --project="$GCP_PROJECT_ID" --data-file=-
 ```
 
 (Or stop hard-coding an address: the chart's `cloudSQLProxy.enabled` takes the instance
@@ -633,7 +806,7 @@ session that calls a model fails with an auth error. Replace it in one line:
 
 ```sh
 printf '%s' '[{"model":"*","protocol":"anthropic","base_url":"https://api.anthropic.com","api_key":"sk-ant-REAL"}]' \
-  | gcloud secrets versions add model-providers --project=hh-opensdlc-managed-agents --data-file=-
+  | gcloud secrets versions add model-providers --project="$GCP_PROJECT_ID" --data-file=-
 ```
 
 The workflow still fails **by name** if that secret ever has no readable version — no
