@@ -368,13 +368,20 @@ func TestListEnvironmentKeysBreaksTimestampTiesByID(t *testing.T) {
 // keeps a leaked-and-replayed value confined to the queue it was issued for.
 //
 // Both halves are asserted, because they fail independently. The schema half is
-// the UNIQUE constraint refusing the row. The auth half is what an attacker
-// would actually attempt, and it is the one that matters: a value that somehow
-// reached two rows must still authenticate only the environment it was issued
-// for. Asserting the constraint alone would leave the escalation itself unpinned
-// at the HTTP layer if a future change ever relaxed key_hash or added an
-// ON CONFLICT path — which is how this assertion went missing in the first place
-// (plan 30 slice 1 replaced the envauth_test.go test that carried it).
+// the UNIQUE constraint refusing the row; the auth half is what an attacker
+// would actually attempt.
+//
+// The scope-comparison the auth half exercises is not otherwise unpinned —
+// TestWorkPollRequiresEnvironmentKey/key_for_other_env and TestWorkListAuthAndEmpty
+// both go red if it is removed. What is unique here is the *two-row* premise
+// none of them can reach: they poll with a key whose single row belongs to
+// another environment, whereas this one drives one value toward two rows. The
+// INSERT above is a t.Error rather than a t.Fatal precisely so that stays true —
+// if key_hash's UNIQUE is ever relaxed or an ON CONFLICT path added, the row
+// lands, the test keeps going, and the HTTP half then runs in a world where the
+// lookup really does have two rows to choose between. That is the scenario slice
+// 1 stopped covering when it replaced envauth_test.go with a bare constraint
+// assertion.
 func TestEnvironmentKeyValueBindsToOneEnvironment(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -421,7 +428,7 @@ func TestSecondLiveEnvironmentKeyIsAccepted(t *testing.T) {
 
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)`,
-		"envkey_second", envID, "a-second-live-hash"); err != nil {
+		domain.NewID(domain.PrefixEnvironmentKey).String(), envID, "a-second-live-hash"); err != nil {
 		t.Errorf("a second live environment key was rejected: %v", err)
 	}
 	var index string
