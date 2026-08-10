@@ -328,18 +328,28 @@ func TestWorkItemsSessionIndexExists(t *testing.T) {
 // where 0021 created nothing and dropped nothing still passed it — the one state
 // this pin exists to catch. The definition is checked as well, so the name alone
 // cannot be reused for an index on some other column.
+//
+// `indpred IS NULL` rejects a **partial** index, which is the subtler way to
+// satisfy the name and column while missing the point: an index carrying
+// `WHERE revoked_at IS NULL` covers the live-key listing but not the cascade, so
+// deleting an environment would still scan its revoked history — the load the
+// comment above says this index carries.
 func TestEnvironmentKeysEnvironmentIndexExists(t *testing.T) {
 	pool := open(t, pgtest.FreshDB(t))
 	var exists bool
 	if err := pool.QueryRow(context.Background(),
-		`SELECT EXISTS (SELECT 1 FROM pg_indexes
-		   WHERE tablename = 'environment_keys'
-		     AND indexname = 'environment_keys_environment_idx'
-		     AND indexdef LIKE '%(environment_id)%')`).Scan(&exists); err != nil {
-		t.Fatalf("query pg_indexes: %v", err)
+		`SELECT EXISTS (
+		   SELECT 1 FROM pg_index i
+		     JOIN pg_class c ON c.oid = i.indexrelid
+		     JOIN pg_class tbl ON tbl.oid = i.indrelid
+		    WHERE tbl.relname = 'environment_keys'
+		      AND c.relname = 'environment_keys_environment_idx'
+		      AND i.indpred IS NULL
+		      AND pg_get_indexdef(i.indexrelid) LIKE '%(environment_id)%')`).Scan(&exists); err != nil {
+		t.Fatalf("query pg_index: %v", err)
 	}
 	if !exists {
-		t.Errorf("no environment_keys_environment_idx on environment_keys(environment_id)")
+		t.Errorf("no unconditional environment_keys_environment_idx on environment_keys(environment_id)")
 	}
 	// And the invariant it replaced is gone: several live keys per environment is
 	// the model now, so a database still carrying 0013's partial unique index

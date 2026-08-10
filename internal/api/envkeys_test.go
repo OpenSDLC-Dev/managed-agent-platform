@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -12,26 +13,36 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
-// spreadCreatedAt pushes each named key's created_at one further second into the
-// past, oldest name last, so that a newest-first assertion tests
-// `ORDER BY created_at DESC` rather than the microsecond resolution of two
-// consecutive now() calls. Without it a tie falls through to `id DESC` over 120
-// random bits and the assertion flips at random — rare, but a test that is right
-// by luck is not a test. Names are given newest-first, matching the order the
-// listing must return.
+// spreadCreatedAt pushes each named key one further second into the past, oldest
+// name last, so that a newest-first assertion tests `ORDER BY created_at DESC`
+// rather than the microsecond resolution of two consecutive now() calls. Without
+// it a tie falls through to `id DESC` over 120 random bits and the assertion
+// flips at random — rare, but a test that is right by luck is not a test. Names
+// are given newest-first, matching the order the listing must return.
+//
+// One statement, deliberately. A per-row UPDATE loop would take a fresh now()
+// each time, so a slow round trip could hand the "older" row a later timestamp
+// than the "newer" one and invert the very order this exists to fix — trading
+// one nondeterminism for another. Inside a single statement now() is one value,
+// so the offsets are exact.
 func spreadCreatedAt(t *testing.T, s *tserver, envID string, newestFirst ...string) {
 	t.Helper()
-	for age, name := range newestFirst {
-		tag, err := s.pool.Exec(context.Background(),
-			`UPDATE environment_keys SET created_at = now() - make_interval(secs => $1)
-			  WHERE environment_id = $2 AND name = $3`,
-			float64(age), envID, name)
-		if err != nil {
-			t.Fatalf("spread created_at for %q: %v", name, err)
-		}
-		if tag.RowsAffected() != 1 {
-			t.Fatalf("spread created_at for %q touched %d rows, want 1", name, tag.RowsAffected())
-		}
+	ages := make([]float64, len(newestFirst))
+	for i := range newestFirst {
+		ages[i] = float64(i)
+	}
+	tag, err := s.pool.Exec(context.Background(),
+		`UPDATE environment_keys k
+		    SET created_at = now() - make_interval(secs => n.age)
+		   FROM unnest($1::text[], $2::float8[]) AS n(name, age)
+		  WHERE k.environment_id = $3 AND k.name = n.name`,
+		newestFirst, ages, envID)
+	if err != nil {
+		t.Fatalf("spread created_at over %v: %v", newestFirst, err)
+	}
+	if tag.RowsAffected() != int64(len(newestFirst)) {
+		t.Fatalf("spread created_at touched %d rows, want %d (names %v)",
+			tag.RowsAffected(), len(newestFirst), newestFirst)
 	}
 }
 
@@ -293,6 +304,58 @@ func TestListEnvironmentKeysPages(t *testing.T) {
 	empty, total, err := api.ListEnvironmentKeys(ctx, s.pool, selfHostedEnv(t, s, "bare"), 100, 0)
 	if err != nil || empty == nil || len(empty) != 0 || total != 0 {
 		t.Errorf("empty environment = %#v of total %d (err %v), want an empty non-nil page", empty, total, err)
+	}
+}
+
+// TestListEnvironmentKeysBreaksTimestampTiesByID pins the second half of the
+// listing's ORDER BY, which spreading the timestamps elsewhere deliberately
+// keeps out of the way. `created_at DESC` alone is a partial order: rows sharing
+// a timestamp could come back in any order, and under offset paging an unstable
+// order can show one key twice and skip another across two pages. `, id DESC`
+// is what makes it total, and nothing exercised it — every other ordering test
+// now has distinct timestamps by construction, so deleting the tiebreak left
+// them all green.
+func TestListEnvironmentKeysBreaksTimestampTiesByID(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	envID := selfHostedEnv(t, s, "ties")
+	const keys = 8
+	for i := range keys {
+		issueKey(t, s.pool, envID, fmt.Sprintf("host-%d", i))
+	}
+	// One timestamp for every row: the tiebreak is the only thing left to order
+	// them by.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE environment_keys SET created_at = now() WHERE environment_id = $1`, envID); err != nil {
+		t.Fatalf("collapse created_at: %v", err)
+	}
+
+	page, _, err := api.ListEnvironmentKeys(ctx, s.pool, envID, 100, 0)
+	if err != nil {
+		t.Fatalf("ListEnvironmentKeys: %v", err)
+	}
+	if len(page) != keys {
+		t.Fatalf("listed %d keys, want %d", len(page), keys)
+	}
+	for i := 1; i < len(page); i++ {
+		if page[i-1].ID <= page[i].ID {
+			ids := make([]string, len(page))
+			for j, k := range page {
+				ids[j] = k.ID
+			}
+			t.Fatalf("ids are not strictly descending at %d: %v", i, ids)
+		}
+	}
+	// And the order is stable, which is the property offset paging actually
+	// needs: a second call must not shuffle rows between pages.
+	again, _, err := api.ListEnvironmentKeys(ctx, s.pool, envID, 100, 0)
+	if err != nil {
+		t.Fatalf("ListEnvironmentKeys (repeat): %v", err)
+	}
+	for i := range page {
+		if again[i].ID != page[i].ID {
+			t.Fatalf("repeated listing reordered tied rows at %d: %s then %s", i, page[i].ID, again[i].ID)
+		}
 	}
 }
 
