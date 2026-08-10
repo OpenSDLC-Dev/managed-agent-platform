@@ -38,13 +38,17 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
-## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (run 2026-08-10) — ✅ passed, with one step deferred
+## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (run 2026-08-10) — ✅ #43 passed; one plan criterion superseded by #363
 
-The issue's acceptance is that an operator can give a BYOC worker its credential
-without touching Postgres, and take one host off the fleet without disturbing the
-rest. Both were driven end to end against a real `ant` binary built from the
-read-only `anthropic-cli` checkout — **zero database access at any point**, every
-platform-side action a curl against the console API.
+#43's acceptance criterion, quoted rather than paraphrased: *"An operator can
+issue and rotate an environment key, and a real `ant beta:worker` authenticates
+with it end to end (no manual DB edits)."* That was driven against a real `ant`
+binary built from the read-only `anthropic-cli` checkout, with **no manual
+database access or edits** — every operator action a curl against the console
+API, and the only process touching Postgres the control plane itself. Per-host
+revocation, below, is stronger evidence than the criterion asks for; it is
+recorded because it is the property the whole plan exists for, not because #43
+required it.
 
 The stack was deliberately **not** the shared `deploy/compose` one: an unrelated
 compose stack had been running on `:8080` for 45 hours and predates this work, so
@@ -87,18 +91,31 @@ afterwards; `docker ps -a` matched its start-of-run baseline exactly.
   surviving. Under the retired rotate-on-mint invariant (migration 0013), issuing
   host-b's key would already have revoked host-a's.
 
-**Deferred, and why.** The plan's wording for this slice was "poll *until it pulls
-a work item*". That step was not run: `queue.Poll` serves `kind = 'tool_exec'`
-only (`internal/queue/queue.go:314`), and a `tool_exec` item is enqueued solely by
-the brain after a model turn emits `agent.tool_use` — the API's own enqueues at
-session-create and message-post are `model_turn`, which no worker polls. So
-pulling an item requires a live model endpoint, and this checkout has no
-`model-providers.json`; that is STATE.md's standing "blocks every session" task,
-not something this plan introduced. What the deferred step would add is coverage
-of the *queue* path, which is already pinned over real HTTP by
-`TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable`. What it would newly prove is
-that the real CLI's tool-runner half works on a console-issued key — worth doing
-when a live model route lands.
+**Deferred, and why — this plan's exit criterion, not #43's.** The plan's slice-3
+wording was stronger than the issue's: "poll *until it pulls a work item*". That
+step was **not run**, so plan 30 archives with one of its own criteria carried to
+[#363](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/363) rather
+than met.
+
+The blocker is causal, not procedural. `queue.Poll` serves `kind = 'tool_exec'`
+only (`internal/queue/queue.go:314`), and while three production sites enqueue
+that kind — the brain after a model turn emits `agent.tool_use`
+(`internal/brain/brain.go`), the API after a client confirmation releases a
+pending platform tool (`internal/api/events.go`), and the executor when web-tool
+settlement chains remaining sandbox work (`internal/executor/webwork.go`) — **none
+can manufacture one without a pre-existing `agent.tool_use`**, and a client cannot
+post that event itself (`internal/events/inbound.go` rejects it; confirmations and
+results are cross-checked against outstanding uses). The API's own enqueues at
+session-create and message-post are `model_turn`, which no worker polls. So an
+item needs a model turn, and this checkout has no `model-providers.json` — STATE.md's
+standing "blocks every session" task, not something this plan introduced.
+
+Scope of what is still unproven, stated precisely rather than minimised:
+`TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable` pins the issued-key
+authentication boundary, the empty-poll route and revocation over real HTTP — it
+does **not** pin queue delivery, work serialisation, or the tool runner. Those
+three, plus the real CLI's ability to claim an item, execute the tool in-process
+and settle it back on a console-issued key, are what #363 remains to prove.
 
 ## GCP continuous delivery — the mode-2 build → deploy → smoke sequence, by hand (run 2026-08-08) — ✅ passed
 

@@ -8,8 +8,6 @@ What is being worked on right now, and how far along it is — nothing else. **S
 end to end (#45); #45's acceptance criterion is met at the end of slice 4.
 **GCP continuous delivery** — plan-less, delivered and green; the record is in
 [docs/HISTORY.md](./docs/HISTORY.md). One task remains and blocks every session.
-(Plan 30 archived 2026-08-10, #43 closed; the console UI half is that repo's
-plan 07.)
 
 ## Tasks
 
