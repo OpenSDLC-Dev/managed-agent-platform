@@ -108,6 +108,19 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) htt
 	mux.HandleFunc("DELETE /v1/files/{id}", s.handle(s.deleteFile))
 	mux.HandleFunc("GET /v1/files/{id}/content", s.downloadFile) // streams the object; not a typed handler
 
+	// The console API — off the /v1 wire, mirroring the reference console's own
+	// private path so a console-facing endpoint has a convention rather than an
+	// invented namespace (internal/api/consoleapi.go). Management x-api-key, via
+	// dispatchAuth's default lane: every other lane's predicate keys on /v1/.
+	mux.HandleFunc("POST "+consoleTokensPath, s.handle(s.createEnvironmentKey))
+	mux.HandleFunc("GET "+consoleTokensPath, s.handle(s.listEnvironmentKeys))
+	mux.HandleFunc("POST "+consoleRevokePath, s.handleNoContent(s.revokeEnvironmentKey))
+	for _, pattern := range []string{consoleTokensPath, consoleRevokePath} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, r, methodNotAllowed(r))
+		})
+	}
+
 	// Internal gate-config endpoint — not on the public /v1 wire. A session's
 	// egress gate authenticates with its per-session gtk_ token (its own auth
 	// lane in dispatchAuth) and fetches its networking policy + resolved

@@ -578,12 +578,32 @@ shows them with an empty name and no expiry, which is how you find them.
 What you own:
 
 - **Provisioning.** Treat key creation as a privileged, audited operation. The
-  operator surface that calls the primitive is landing with
-  [#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43) (plan
-  30): issuance moves to the managed-agent-console's environment page, so the
-  key is generated, displayed once and copied without anyone touching the
-  control-plane database. Until that endpoint lands, issuing means calling
-  `IssueEnvironmentKey`.
+  operator surface is the console API — off the `/v1` wire, under
+  `/api/oauth/organizations/default/environments/{environment_id}/tokens`, and
+  authenticated with the management `x-api-key` like any other management call.
+  The managed-agent-console drives it from an environment's page, so a key is
+  generated, shown once and copied without anyone touching the control-plane
+  database; a headless operator calls it directly:
+
+  ```sh
+  # issue — the access_token is the only copy that will ever exist
+  curl -sX POST "$CONTROLPLANE/api/oauth/organizations/default/environments/$ENV/tokens" \
+    -H "x-api-key: $MANAGEMENT_KEY" -H 'content-type: application/json' \
+    -d '{"name":"build-host-1"}'
+  # list (never shows a secret) and revoke one host's key
+  curl -s "$CONTROLPLANE/api/oauth/organizations/default/environments/$ENV/tokens" \
+    -H "x-api-key: $MANAGEMENT_KEY"
+  curl -sX POST "$CONTROLPLANE/api/oauth/organizations/default/environments/$ENV/tokens/$KEY_ID/revoke" \
+    -H "x-api-key: $MANAGEMENT_KEY"
+  ```
+
+  Only a `self_hosted` environment gets a key: a cloud environment's work is run
+  by the platform's own executor, which holds no environment key, so issuing one
+  there is refused rather than handing you a credential nothing can use. **This
+  is a management-credential surface, not a separate permission tier** — anyone holding
+  the management `x-api-key` can mint worker keys, so guard that key
+  accordingly, and let the console's BFF hold it server-side rather than
+  shipping it to a browser.
 - **Rotation cadence.** The one-year expiry is a backstop, not a policy: rotate
   on your own schedule, and immediately on suspected worker compromise, by
   issuing a fresh key for that host, rolling it out to the worker's
@@ -742,8 +762,12 @@ with tracking issues, not silent omissions:
   remain the hard boundary.
   [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
   [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)
-- **Environment-key issuance UX** — no operator wire endpoint yet; keys are seeded
-  directly.
+- **Environment-key issuance UX** — **closed (#43).** Keys are issued, listed and
+  revoked through the console API (§6 above) — off the `/v1` wire, management-
+  authenticated, one key per host — instead of being seeded into the database.
+  One limit is stated rather than papered over: it is a management-credential
+  surface, so it delegates no authority the management `x-api-key` did not
+  already carry, and there is no separate "can mint worker keys" role.
   [#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)
 - **Sandbox `securityContext` / `runtimeClassName`** — **closed (#65).** The
   platform now sets cgroup limits and capability drops on every sandbox by

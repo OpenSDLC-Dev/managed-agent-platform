@@ -141,6 +141,20 @@ deliberately diverge — or infer behavior the references don't pin down —
 [DIVERGENCES.md](./DIVERGENCES.md) is the single registry; the verifier resolves
 wire-compat findings against it.
 
+Not everything an operator needs is on that wire. The reference mints environment
+keys from its **console**, on a private backend no SDK or CLI route touches, so a
+self-hostable platform has to own that surface — and it lives under `/api/`,
+deliberately outside `/v1`, where nothing can be mistaken for or collide with what
+the real `ant` CLI speaks. The convention for such a surface is **mirror, don't
+invent**: its paths copy the reference console's own segment-for-segment
+(`/api/oauth/organizations/{organization_id}/environments/{environment_id}/tokens…`,
+observed live 2026-08-10), the observation is dated in the plan, and every
+departure from what was seen is registered in DIVERGENCES.md like any other. Auth
+is the management `x-api-key` through the same `dispatchAuth` default lane — the
+namespace is off-wire and console-shaped, not a separate permission tier. Future
+console-facing endpoints follow the same rule rather than opening a naming
+argument.
+
 Model access is **config-driven**: a provider is constructed from `protocol`
 (`anthropic` | `openai`) + `model` + `base_url` + `api_key` (+ optional headers), and a
 `model_providers` routing table maps an agent's model string to a provider instance.
@@ -183,6 +197,7 @@ state-machine triggers, auth, and the work API.
 | `auth.go` | `x-api-key` middleware against `api_keys` (SHA-256 hash only); `EnsureAPIKey` gives **rotation-by-restart** semantics: ensuring a new key under a name revokes the previous ones (revoke-before-insert), so a leaked `CONTROLPLANE_API_KEY` dies on rotation. `api_keys_one_live` makes "one live key per name" a schema invariant, so concurrent mints fail the loser rather than sharing the name. Authenticated key ID becomes the audit-only `sessions.created_by`. |
 | `envauth.go` | Environment-key auth: the `Authorization: Bearer` resolution and the session-scope middlewares that confine a worker to its own environment. Resolution rejects revoked, expired and unknown keys through one branch, so the 401 is identical for all three. |
 | `envkeys.go` | Environment-key issuance (plan 30, #43): `IssueEnvironmentKey` generates the secret server-side (256 CSPRNG bits behind an `sk-map-env01-` prefix), returns it once and stores only its SHA-256 hash, with a name and a one-year `expires_at`; `ListEnvironmentKeys` pages an environment's live keys newest-first; `RevokeEnvironmentKey` retires one — idempotent, and scoped to the owning environment so a key id is neither revocable nor confirmable from another. Many live keys per environment is the model: one per host, revoked individually. |
+| `consoleapi.go` | The **console API** (plan 30 slice 2, #43) — the off-wire operator surface over `envkeys.go`, under `/api/oauth/organizations/{org}/environments/{id}/tokens…` mirrored from the reference console's private backend: `POST …/tokens` issues (200, RFC 6749 `{access_token, expires_in}` — the plaintext's only appearance, and refused on a `cloud` or archived environment), `GET …/tokens` lists under the dialect's offset-paginated `{data, pagination}` envelope with a nullable `expires_at`, `POST …/tokens/{token_id}/revoke` retires one (204, idempotent). `{org}` accepts only the reserved `"default"`; `{token_id}` is shape-checked by `domain.ValidWithPrefix` rather than `checkID`, because `envkey_` stays out of `domain.knownPrefixes` — that set is what every `/v1` path validates an id against, and admitting a private prefix would widen all of them. No `dispatchAuth` arm: every other lane keys on `/v1/`, so `/api/` falls to the management `x-api-key` by construction. |
 | `errors.go` | Wire error envelope `{"type":"error","request_id":…,"error":{type,message}}` + `request-id` header on every response. Version conflicts are `invalid_request_error` with HTTP 409 (the reference SDK has no dedicated conflict type); oversize bodies (>4 MiB) are 413 `request_too_large`. |
 | `page.go` | Cursor pagination: `{"data":[…],"next_page":…}` (+ `prev_page` on sessions), opaque **keyset** cursors via `?page=` — positions on `(created_at, id)` (version number for agent versions), so concurrent writes never duplicate or skip rows — `limit` default 20 / max 100, except the session-events list, whose cap is 1000 (`maxEventLimit`): the reference worker reconciles with `limit=1000`, and a 100-cap 400ed it — the slice-8 acceptance's one bug (docs/history/2026-07.md's acceptance record). The `/v1/files` list is the exception to this cursor convention: it uses the reference's classic `Page` envelope `{data, has_more, first_id, last_id}` (`filePageJSON`), paginating by bare `after_id`/`before_id` object id (limit ≤1000) to match the SDK's `pagination.Page[FileMetadata]`. |
 | `wire.go` | Body parsing with omitted/null/value distinction (reference updates are patches), **strict unknown-field rejection** (typos error instead of silently vanishing, matching the reference's extra-inputs behavior), tools/mcp_servers union validation (raw bodies preserved so the store holds the client's own bytes — the resolved echo is a render-time transform, not a stored one; skills are re-normalized to `{type, skill_id, version}`) — including each toolset entry's nested shape, `toolset.Validate` for the built-in kind and `toolset.ValidateMCPToolset` for the MCP one (unknown keys and unevaluable `permission_policy` types, the #26 fail-open class, closed on both arms) — the whole-spec agent caps (`validateAgentSpec`: ≤128 tools, ≤20 uniquely-named mcp_servers, **referenced in both directions** — an unreferenced server and a dangling `mcp_toolset` alike are 400s, the public MCP-connector guide pinning both (plan 29 slice 1, superseding #66's one-way reading) — expanded tool-name uniqueness — agents #66, session resolved agents #287) and the shared metadata caps (`validateMetadataCaps`, 16/64/512 — agents #66, sessions #289), UTC-normalized timestamps (`Z`, never a local offset). Rejects U+0000 anywhere in a request body (`rejectNULBody`) and validates path/query ids on shape (`checkID` / `checkWorkID`, plus `storableText` for the free-form `types[]` filter) so an unstorable byte is a 404/400, never a 500. |
@@ -790,7 +805,11 @@ executes without complaint and that instance would have refused.
   environment's work queue — a worker can neither read nor write another environment's
   sessions. Environment keys are hashed at rest too, issued one per host so a
   compromised host is revoked alone, and expire a year after issue; revoked,
-  expired and unknown are one indistinguishable 401.
+  expired and unknown are one indistinguishable 401. Issuing and revoking them is
+  a **management** operation on the off-wire console API, so an environment key
+  can never mint or retire another — but equally, that surface delegates no
+  authority the management key did not already hold, and is not a separate
+  permission tier.
 - **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
   (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.
