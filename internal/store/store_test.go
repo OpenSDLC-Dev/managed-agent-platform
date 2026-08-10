@@ -321,15 +321,36 @@ func TestWorkItemsSessionIndexExists(t *testing.T) {
 // 0001 created no index for it and 0013's partial unique index had been serving
 // both; 0021 dropped that one, so its plain replacement is load-bearing rather
 // than incidental — without this pin a later migration could drop it silently.
+//
+// It matches on the index's NAME, not on `indexdef LIKE '%(environment_id)%'`.
+// The dropped environment_keys_one_live satisfied that pattern too
+// (`… USING btree (environment_id) WHERE (revoked_at IS NULL)`), so a database
+// where 0021 created nothing and dropped nothing still passed it — the one state
+// this pin exists to catch. The definition is checked as well, so the name alone
+// cannot be reused for an index on some other column.
 func TestEnvironmentKeysEnvironmentIndexExists(t *testing.T) {
 	pool := open(t, pgtest.FreshDB(t))
 	var exists bool
 	if err := pool.QueryRow(context.Background(),
-		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = 'environment_keys' AND indexdef LIKE '%(environment_id)%')`).Scan(&exists); err != nil {
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes
+		   WHERE tablename = 'environment_keys'
+		     AND indexname = 'environment_keys_environment_idx'
+		     AND indexdef LIKE '%(environment_id)%')`).Scan(&exists); err != nil {
 		t.Fatalf("query pg_indexes: %v", err)
 	}
 	if !exists {
-		t.Errorf("no index on environment_keys(environment_id)")
+		t.Errorf("no environment_keys_environment_idx on environment_keys(environment_id)")
+	}
+	// And the invariant it replaced is gone: several live keys per environment is
+	// the model now, so a database still carrying 0013's partial unique index
+	// would reject the second host's key at insert time.
+	var oneLive bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'environment_keys_one_live')`).Scan(&oneLive); err != nil {
+		t.Fatalf("query pg_indexes: %v", err)
+	}
+	if oneLive {
+		t.Errorf("environment_keys_one_live survived 0021; per-host keys cannot exist under it")
 	}
 }
 

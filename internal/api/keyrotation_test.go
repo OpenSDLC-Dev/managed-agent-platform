@@ -23,9 +23,18 @@ func countLive(t *testing.T, pool *pgxpool.Pool, query string, arg any) int {
 }
 
 // raceMints runs mint concurrently from a standing start and returns how many
-// calls succeeded, failing the test if none did. A mint that loses the race must
-// fail its own transaction rather than share the credential slot, so some errors
-// are expected — but a rotation path where *every* caller fails is broken too.
+// calls succeeded, failing the test only if none did — a credential path where
+// *every* caller fails is broken whatever its concurrency contract.
+//
+// How many *should* succeed is the caller's to assert, and the callers disagree
+// on purpose. Both all-must-succeed cases are the majority now:
+// TestConcurrentEnvironmentKeyIssuesAllSurvive (per-host keys — provisioning a
+// fleet must not drop a host, which is exactly what migration 0021's retirement
+// of environment_keys_one_live bought) and TestConcurrentSameValueAPIKeyMintsAllSucceed
+// (replicas booting with one shared bootstrap value converge on one row). Only
+// TestConcurrentAPIKeyMintsLeaveOneLiveKey still expects losers: distinct values
+// under one name genuinely contend for a single live slot, so a loser must fail
+// its own transaction rather than share it.
 func raceMints(t *testing.T, racers int, mint func(i int) error) int {
 	t.Helper()
 	start := make(chan struct{})

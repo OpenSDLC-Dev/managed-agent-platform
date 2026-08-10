@@ -2,13 +2,38 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
+
+// spreadCreatedAt pushes each named key's created_at one further second into the
+// past, oldest name last, so that a newest-first assertion tests
+// `ORDER BY created_at DESC` rather than the microsecond resolution of two
+// consecutive now() calls. Without it a tie falls through to `id DESC` over 120
+// random bits and the assertion flips at random — rare, but a test that is right
+// by luck is not a test. Names are given newest-first, matching the order the
+// listing must return.
+func spreadCreatedAt(t *testing.T, s *tserver, envID string, newestFirst ...string) {
+	t.Helper()
+	for age, name := range newestFirst {
+		tag, err := s.pool.Exec(context.Background(),
+			`UPDATE environment_keys SET created_at = now() - make_interval(secs => $1)
+			  WHERE environment_id = $2 AND name = $3`,
+			float64(age), envID, name)
+		if err != nil {
+			t.Fatalf("spread created_at for %q: %v", name, err)
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("spread created_at for %q touched %d rows, want 1", name, tag.RowsAffected())
+		}
+	}
+}
 
 // selfHostedEnv creates a self-hosted environment and returns its id — the only
 // environment kind whose work queue a BYOC worker polls, and so the only one
@@ -47,7 +72,9 @@ func TestIssueEnvironmentKeyGivesEachHostItsOwnCredential(t *testing.T) {
 	}
 
 	// Both are listed, newest first, each carrying the name it was issued under
-	// and an expiry a year out.
+	// and an expiry a year out. The timestamps are spread first so "newest first"
+	// is what is being tested, not the clock's resolution.
+	spreadCreatedAt(t, s, envID, "host-b", "host-a")
 	keys, total, err := api.ListEnvironmentKeys(ctx, s.pool, envID, 100, 0)
 	if err != nil {
 		t.Fatalf("ListEnvironmentKeys: %v", err)
@@ -232,6 +259,9 @@ func TestListEnvironmentKeysPages(t *testing.T) {
 	for _, name := range []string{"one", "two", "three"} {
 		issueKey(t, s.pool, envID, name)
 	}
+	// Spread the timestamps so the window below is a window over a *known* order
+	// rather than over whatever three consecutive now() calls happened to produce.
+	spreadCreatedAt(t, s, envID, "three", "two", "one")
 
 	page, total, err := api.ListEnvironmentKeys(ctx, s.pool, envID, 2, 0)
 	if err != nil {
@@ -239,6 +269,10 @@ func TestListEnvironmentKeysPages(t *testing.T) {
 	}
 	if total != 3 || len(page) != 2 {
 		t.Fatalf("first page = %d keys of total %d, want 2 of 3", len(page), total)
+	}
+	if page[0].Name != "three" || page[1].Name != "two" {
+		t.Errorf("first page = %q, %q; want the two newest, %q then %q",
+			page[0].Name, page[1].Name, "three", "two")
 	}
 	rest, total, err := api.ListEnvironmentKeys(ctx, s.pool, envID, 2, 2)
 	if err != nil {
@@ -266,12 +300,21 @@ func TestListEnvironmentKeysPages(t *testing.T) {
 // retired the *count* invariant, not the binding one. key_hash stays UNIQUE, so a
 // single key value can never authenticate two environments — the property that
 // keeps a leaked-and-replayed value confined to the queue it was issued for.
+//
+// Both halves are asserted, because they fail independently. The schema half is
+// the UNIQUE constraint refusing the row. The auth half is what an attacker
+// would actually attempt, and it is the one that matters: a value that somehow
+// reached two rows must still authenticate only the environment it was issued
+// for. Asserting the constraint alone would leave the escalation itself unpinned
+// at the HTTP layer if a future change ever relaxed key_hash or added an
+// ON CONFLICT path — which is how this assertion went missing in the first place
+// (plan 30 slice 1 replaced the envauth_test.go test that carried it).
 func TestEnvironmentKeyValueBindsToOneEnvironment(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
 	envA := selfHostedEnv(t, s, "a")
 	envB := selfHostedEnv(t, s, "b")
-	issueKey(t, s.pool, envA, "host")
+	key := issueKey(t, s.pool, envA, "host")
 
 	var hash string
 	if err := s.pool.QueryRow(ctx,
@@ -280,9 +323,24 @@ func TestEnvironmentKeyValueBindsToOneEnvironment(t *testing.T) {
 	}
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO environment_keys (id, environment_id, key_hash) VALUES ($1, $2, $3)`,
-		"envkey_replay", envB, hash); err == nil {
+		domain.NewID(domain.PrefixEnvironmentKey).String(), envB, hash); err == nil {
 		t.Error("one key value was accepted for two environments")
 	}
+
+	// The auth half, over real HTTP: the value still polls the environment it was
+	// issued for, and is a 401 against the other — no cross-environment
+	// escalation, whatever the storage layer did.
+	auth := map[string]string{"Authorization": "Bearer " + key}
+	if res, raw := s.poll(t, envA, auth); res.StatusCode != http.StatusOK {
+		t.Errorf("the key stopped authenticating its own environment: status %d, body %q", res.StatusCode, raw)
+	}
+	res, raw := s.poll(t, envB, auth)
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("A's key authenticated environment B (escalation): status %d, body %q", res.StatusCode, raw)
+	}
+	var body map[string]any
+	_ = json.Unmarshal([]byte(raw), &body)
+	wantErr(t, res.StatusCode, body, http.StatusUnauthorized, "authentication_error")
 }
 
 // TestSecondLiveEnvironmentKeyIsAccepted is the schema half of the model change,
