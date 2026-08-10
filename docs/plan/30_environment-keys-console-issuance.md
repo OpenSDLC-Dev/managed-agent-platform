@@ -30,7 +30,8 @@ which consumes what lands here and must trail it.
    console's own API.** The reference mints keys on its console's private
    backend, not the public API (verified live, see Ground truth). Rather than
    inventing a namespace for our equivalent, the platform serves the observed
-   dialect **path-for-path and field-for-field**:
+   dialect **path-for-path, and field-for-field except where a divergence is
+   declared** (four of them, each reasoned in Architecture):
 
    `/api/oauth/organizations/{organization_id}/environments/{environment_id}/tokens[...]`
 
@@ -170,15 +171,30 @@ migration lands first.)
 ```sql
 ALTER TABLE environment_keys ADD COLUMN name text NOT NULL DEFAULT '';
 ALTER TABLE environment_keys ADD COLUMN expires_at timestamptz;
-DROP INDEX environment_keys_one_live;
+DROP INDEX IF EXISTS environment_keys_one_live;
+CREATE INDEX environment_keys_environment_idx ON environment_keys (environment_id);
 ```
 
 - Many live keys per environment become legal. `key_hash UNIQUE` stays — a key
   value still binds to one environment for life (with server-side CSPRNG
   generation, a conflict is a cryptographic impossibility and is treated as an
   error, never an un-revoke).
+- The replacement index is not optional bookkeeping: `environment_keys_one_live`
+  was the table's **only** index on `environment_id` (0001 created none), so it
+  had been serving the per-environment lookup and the `ON DELETE CASCADE` from
+  `environments` as well as the invariant. 0013 declined a companion index
+  because the table then held one row per *rotation*; it now holds one per host
+  plus revocation history, so take the companion after all
+  (`session_gate_tokens_session_idx`, 0012, is the precedent).
 - Pre-existing rows are grandfathered: `name = ''` (the console renders "—"),
-  `expires_at = NULL` (never expires). Newly issued keys always get both.
+  `expires_at = NULL` (never expires, and rendered `null` on the wire — see the
+  list route below). Newly issued keys always get both. The alternative,
+  backfilling an expiry from `created_at`, would retro-expire credentials a
+  running worker is authenticating with — a migration must not revoke a live key
+  on its way past. The cost is stated rather than hidden: a grandfathered key is
+  a caller-supplied value that never had the 256-bit generation guarantee and
+  now never expires either, so docs/self-hosted-security.md §6 tells operators
+  to reissue and revoke them.
 - `internal/store/store_test.go:330–380` currently proves the one-live index
   exists and repairs; those pins are replaced by pins on the new columns and on
   many-live coexistence.
@@ -230,7 +246,7 @@ anything else 404s before the environment lookup):
 | Route | Behavior |
 |---|---|
 | `POST …/tokens` | Body `{"name": "…"}` (required, trimmed, 1–128 chars — a local bound, the dialect's is unobserved; unknown body keys rejected per house style). 200 → `{"access_token":"sk-map-env01-…","expires_in":31536000}`. **The plaintext appears here and never again.** No id/name/created_at in the response — the caller refreshes the list, as the reference console does. |
-| `GET …/tokens` | 200 → `{"data":[{"id":"envkey_…","name":…,"created_at":…,"expires_at":…},…],"pagination":{"total":N,"limit":L,"offset":O,"has_more":B}}` — unrevoked keys, newest first; `?limit=` (default 100) and `?offset=` honored. |
+| `GET …/tokens` | 200 → `{"data":[{"id":"envkey_…","name":…,"created_at":…,"expires_at":…},…],"pagination":{"total":N,"limit":L,"offset":O,"has_more":B}}` — unrevoked keys, newest first; `?limit=` (default 100) and `?offset=` honored. `expires_at` is **nullable**: a grandfathered key renders `null` there, and the console must render that as "never" rather than assume a timestamp. |
 | `POST …/tokens/{token_id}/revoke` | 204, empty body. Idempotent when already revoked; 404 for an unknown or foreign `token_id`. |
 
 Deliberate divergences from the observed dialect (each recorded in
@@ -238,8 +254,9 @@ DIVERGENCES.md):
 
 - **Key prefix** `sk-map-env01-`, not `sk-ant-oat01-` (rationale above).
 - **`id` format** `envkey_…`, not a bare UUID — the id is opaque to every
-  consumer, and house ID discipline (`domain.NewID`, `checkID`, one prefix
-  table) wins; `envkey` joins `domain.knownPrefixes`.
+  consumer, and house ID discipline (`domain.NewID`) wins. It does **not** join
+  `domain.knownPrefixes`: that set is the wire-compatible prefix list every
+  `/v1` path validates against, and this identifier never appears there.
 - **`authorization_details` is not emitted** in v1. The observed value is
   RFC 9396 rich-authorization metadata from the reference's OAuth
   infrastructure, and its `actions` list is demonstrably coarser than what the
@@ -251,17 +268,25 @@ DIVERGENCES.md):
 
 Auth and routing:
 
-- All three routes take management `x-api-key` (`requireAPIKey`);
-  `dispatchAuth` gets an `/api/` classification arm ahead of its default so
-  the namespace can never fall into the environment-key or dual lanes; an
-  environment key presented here is a 401. The console BFF already injects the
-  management key server-side; it never reaches a browser. (The BFF mirrors the
-  path too — the console's own `/api/oauth/…` URL proxies to this one; console
-  plan 07.)
+- All three routes take management `x-api-key` — with **no** change to
+  `dispatchAuth`: every worker/gate/dual-auth predicate keys on a `/v1/…`
+  prefix, so an `/api/…` path already falls to the `default:` management lane
+  (internal/api/server.go:213–227). Adding an explicit `/api/` arm would be a
+  branch for an unreachable state; a test pins that an environment key
+  presented on these routes is a 401 instead. The console BFF already injects
+  the management key server-side; it never reaches a browser. (The BFF mirrors
+  the path too — the console's own `/api/oauth/…` URL proxies to this one;
+  console plan 07.)
 - Registered on the same mux with Go 1.22 method patterns, plus the house
   405-fallback entries and JSON error envelope
-  (`errInvalid`/`errNotFound`/`errAuth`, internal/api/errors.go:31–45); `{id}`
-  and `{token_id}` are shape-checked via `checkID`.
+  (`errInvalid`/`errNotFound`/`errAuth`, internal/api/errors.go:31–45). `{id}`
+  is shape-checked via `checkID`; `{token_id}` gets a **local** check in
+  `internal/api` instead, because `checkID` validates shape against
+  `domain.knownPrefixes` without asking which resource the prefix names — so
+  admitting `envkey` there would widen the id shape every `/v1` path accepts
+  for a private identifier. `envkey_` stays out of the wire-prefix set,
+  following the `apikey_`/`gtk_` precedent (docs/ARCHITECTURE.md §
+  internal/gatetoken).
 - **Edge semantics** (local choices, dialect-unobserved): unknown environment →
   404 `not_found_error`; **create on a `cloud` environment → 400
   `invalid_request_error`** (the reference offers no key UI for cloud, and our
@@ -305,19 +330,24 @@ Auth and routing:
    `authenticateEnvironmentKey`; delete `EnsureEnvironmentKey`; rewrite the
    key-invariant/rotation/race tests as above. TDD: the many-live coexistence
    and expiry-401 tests land red first.
-2. **The console-API endpoints.** `dispatchAuth` arm, the three `/api/oauth/…`
-   routes, 405/404 fallbacks, `envkey` prefix, org-segment gate; HTTP tests in
-   house style (`s.do`/`s.doRaw`): management auth required and environment
-   key rejected on every route, `organization_id != "default"` 404s, every
-   error envelope pinned via `wantErr`, and the issued key proven end to end —
-   the `access_token` from `POST …/tokens` polls
+2. **The console-API endpoints.** The three `/api/oauth/…` routes, their
+   405/404 fallbacks, the local key-id check and the org-segment gate; HTTP
+   tests in house style (`s.do`/`s.doRaw`): management auth required and an
+   environment key rejected on every route, `organization_id != "default"`
+   404s, every error envelope pinned via `wantErr`, a grandfathered row's
+   `expires_at` rendering `null`, and the issued key proven end to end — the
+   `access_token` from `POST …/tokens` polls
    `GET /v1/environments/{id}/work/poll` over real HTTP, then is revoked and
-   polls again to a 401; direct SQL asserts hash-only storage.
-3. **Docs + acceptance.** DIVERGENCES / self-hosted-security / ARCHITECTURE
-   rewrites; compose-stack acceptance run recorded in docs/HISTORY.md: bring up
-   `deploy/compose`, issue a key with curl against the dialect, run a real
-   `ant beta:worker poll --environment-key … --base-url http://localhost:…`
-   until it pulls a work item — the issue's acceptance, with zero DB edits.
+   polls again to a 401; direct SQL asserts hash-only storage. Its own doc
+   updates ride with it (the DIVERGENCES entry for the dialect, the endpoint in
+   ARCHITECTURE and self-hosted-security).
+3. **Acceptance + archive.** The compose-stack acceptance run recorded in
+   docs/HISTORY.md: bring up `deploy/compose`, issue a key with curl against
+   the dialect, run a real `ant beta:worker poll --environment-key …
+   --base-url http://localhost:…` until it pulls a work item — the issue's
+   acceptance, with zero DB edits — then flip this plan to `archived`. Slices 1
+   and 2 each carry the doc rewrites their own code invalidates, so nothing
+   doc-shaped waits for this slice.
 
 Console repo work (its plan 07: an `/api/oauth/[...path]` BFF passthrough so
 the console's own URLs mirror the reference verbatim, zod schemas with
@@ -337,11 +367,22 @@ there, not here.
 
 ## New DIVERGENCES entries (to record as they land)
 
-- Rewritten CONFIRMED "Environment worker keys — issuance" (slice 2): the
-  console-API dialect (`/api/oauth/organizations/{org}/environments/{id}/tokens[…]`)
-  mirrored from the reference console's observed private backend, dated
-  2026-08-10; named multi-key model with 1-year expiry;
-  `environment_keys_one_live` retired; the four deliberate dialect divergences
-  (key prefix, id format, no `authorization_details`, house error envelope).
+- Rewritten CONFIRMED "Environment worker keys — issuance" (slice 1, extended
+  in slice 2): the named multi-key model with its 1-year expiry and per-key
+  revoke; `environment_keys_one_live` retired; then the console-API dialect
+  (`/api/oauth/organizations/{org}/environments/{id}/tokens[…]`) mirrored from
+  the reference console's observed private backend, dated 2026-08-10, with the
+  four deliberate dialect divergences (key prefix, id format, no
+  `authorization_details`, house error envelope).
 - CONFIRMED note (slice 1): expired keys 401 identically to revoked ones on the
-  Bearer lane — reference-unobservable, chosen to avoid an auth oracle.
+  Bearer lane — reference-unobservable, chosen to avoid an auth oracle — plus
+  the grandfathered NULL expiry the migration deliberately does not backfill.
+- INFERRED entry (slice 2), tracked on #43's follow-up: the dialect's edges the
+  live observation could not reach, each answered locally and each a guess
+  about the reference until a recording says otherwise — whether an
+  expired-but-unrevoked key stays listed, whether a repeated revoke is
+  idempotent or 404s, the name's length bounds and unknown-body-key rejection,
+  what a `cloud` or archived environment answers, and the error-body shape.
+  Registered together rather than left implicit: an unrecorded divergence is a
+  finding, and "we chose this because nothing was observed" is exactly what the
+  INFERRED section exists to hold.
