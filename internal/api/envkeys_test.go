@@ -352,6 +352,9 @@ func TestListEnvironmentKeysBreaksTimestampTiesByID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEnvironmentKeys (repeat): %v", err)
 	}
+	if len(again) != len(page) {
+		t.Fatalf("repeated listing returned %d keys, want %d", len(again), len(page))
+	}
 	for i := range page {
 		if again[i].ID != page[i].ID {
 			t.Fatalf("repeated listing reordered tied rows at %d: %s then %s", i, page[i].ID, again[i].ID)
