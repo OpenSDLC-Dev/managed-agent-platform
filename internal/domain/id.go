@@ -107,7 +107,25 @@ func (id ID) HasPrefix(prefix string) bool {
 // (Postgres SQLSTATE 22021) rather than the status the wire expects.
 func (id ID) Valid() bool {
 	prefix, token, ok := strings.Cut(string(id), "_")
-	if !ok || token == "" || !knownPrefixes[prefix] {
+	return ok && knownPrefixes[prefix] && validToken(token)
+}
+
+// ValidWithPrefix is Valid for an identifier this platform mints but never puts
+// on the /v1 wire — envkey_ and its kin, which stay out of knownPrefixes so that
+// admitting one cannot widen the id shape every wire path accepts. It answers
+// the same question against a prefix the caller names: the exact shape NewID
+// emits. Callers off the wire use it to reject a malformed id before it binds
+// into a query, which is the whole reason Valid exists.
+func ValidWithPrefix(id, prefix string) bool {
+	p, token, ok := strings.Cut(id, "_")
+	return ok && p == prefix && validToken(token)
+}
+
+// validToken holds the rule both spellings share: a non-empty token drawn only
+// from idAlphabet. One copy, so the two entry points cannot drift on what an
+// acceptable id body is.
+func validToken(token string) bool {
+	if token == "" {
 		return false
 	}
 	for i := 0; i < len(token); i++ {

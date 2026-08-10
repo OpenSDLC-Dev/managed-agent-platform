@@ -275,11 +275,18 @@ DIVERGENCES.md):
 Auth and routing:
 
 - All three routes take management `x-api-key` — with **no** change to
-  `dispatchAuth`: every worker/gate/dual-auth predicate keys on a `/v1/…`
-  prefix, so an `/api/…` path already falls to the `default:` management lane
-  (internal/api/server.go:213–227). Adding an explicit `/api/` arm would be a
-  branch for an unreachable state; a test pins that an environment key
-  presented on these routes is a 401 instead. The console BFF already injects
+  `dispatchAuth`. The reason needs stating precisely, because it *is* the
+  argument for omitting an `/api/` arm: every non-management predicate is either
+  a `/v1/…` prefix or segment test (worker, session-events, skill-read,
+  file-read) or — the gate's single case — exact equality against the fixed
+  `/internal/v1/gate/config` (`isGateConfigPath`), which is neither under `/v1/`
+  nor a prefix test. No `/api/…` path satisfies either form, so it falls to the
+  `default:` management lane (internal/api/server.go). *(Corrected during slice
+  2's review: the original wording here claimed a blanket `/v1/` prefix rule,
+  which the gate lane falsifies — the conclusion held, the stated reason did
+  not. A future off-`/v1` lane must re-derive this.)* Adding an explicit `/api/`
+  arm would be a branch for an unreachable state; a test pins that an
+  environment key presented on these routes is a 401 instead. The console BFF already injects
   the management key server-side; it never reaches a browser. (The BFF mirrors
   the path too — the console's own `/api/oauth/…` URL proxies to this one;
   console plan 07.)
