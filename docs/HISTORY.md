@@ -38,6 +38,85 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (run 2026-08-10) — ✅ #43 passed; one plan criterion superseded by #363
+
+#43's acceptance criterion, quoted rather than paraphrased: *"An operator can
+issue and rotate an environment key, and a real `ant beta:worker` authenticates
+with it end to end (no manual DB edits)."* That was driven against a real `ant`
+binary built from the read-only `anthropic-cli` checkout, with **no manual
+database access or edits** — every operator action a curl against the console
+API, and the only process touching Postgres the control plane itself. Per-host
+revocation, below, is stronger evidence than the criterion asks for; it is
+recorded because it is the property the whole plan exists for, not because #43
+required it.
+
+The stack was deliberately **not** the shared `deploy/compose` one: an unrelated
+compose stack had been running on `:8080` for 45 hours and predates this work, so
+this run used its own throwaway `postgres:16-alpine` on an ephemeral port plus a
+`cmd/controlplane` built from the branch on `127.0.0.1:18080`. Both were removed
+afterwards; `docker ps -a` matched its start-of-run baseline exactly.
+
+- **Issue.** `POST /api/oauth/organizations/default/environments/{env}/tokens`
+  with `{"name":"laptop-01"}` → **200**, headers `Cache-Control: no-store` and
+  `Pragma: no-cache`, body `{"access_token":"sk-map-env01-…" (56 chars),
+  "expires_in":31536000}`. The matching `GET` rendered
+  `{id: envkey_…, name, created_at, expires_at (+1 year)}` with
+  `{total:1, limit:100, offset:0, has_more:false}` — **no secret, no hash**.
+- **The real CLI authenticates on that key alone.**
+  `ant beta:worker poll --base-url http://127.0.0.1:18080 --environment-id … --environment-key …`
+  ran clean with no output — a long poll on an empty queue — and the platform's
+  own view confirmed it positively rather than by silence: `GET …/work/stats`
+  reported a non-zero **`workers_polling`**, which is decisive because
+  `Queue.RecordPoll` fires only on the *authenticated* poll path
+  (`internal/queue/stats.go`). The same route answered
+  `401 "missing Authorization: Bearer environment key"` to the *management* key,
+  so the worker lane is demonstrably the lane being exercised. (The number read
+  `2` at that moment, not `1`: `workers_polling` counts distinct `worker_id`s
+  that polled inside a 30-second window, and an immediately preceding 25-second
+  `ant` run — launched without `--worker-id`, so the CLI minted a default one —
+  was still inside it. Only one worker was live. The count is evidence that a
+  real `ant` completed an authenticated poll, not a headcount.)
+- **Revocation reaches a running worker.**
+  `POST …/tokens/{id}/revoke` → **204, 0 bytes**; the same key on
+  `…/work/stats` immediately → **401 `invalid environment key`**; the running
+  `ant` process printed that same `authentication_error` envelope and exited; the
+  listing went empty.
+- **Per-host revocation — the property the old model could not offer.** Two keys
+  (`build-host-a`, `build-host-b`), two real `ant beta:worker poll` processes
+  started with explicit `--worker-id host-a` / `host-b`, and here
+  `workers_polling: 2` *is* a headcount: the earlier ids had aged out of the
+  30-second window. Revoking **host-a alone** → 204. Host-a's process exited
+  on the auth error; **host-b's kept running**, its log still 0 bytes, its key
+  still **200** on `…/work/stats`, and the listing showed only `build-host-b`
+  surviving. Under the retired rotate-on-mint invariant (migration 0013), issuing
+  host-b's key would already have revoked host-a's.
+
+**Deferred, and why — this plan's exit criterion, not #43's.** The plan's slice-3
+wording was stronger than the issue's: "poll *until it pulls a work item*". That
+step was **not run**, so plan 30 archives with one of its own criteria carried to
+[#363](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/363) rather
+than met.
+
+The blocker is causal, not procedural. `queue.Poll` serves `kind = 'tool_exec'`
+only (`internal/queue/queue.go:314`), and while three production sites enqueue
+that kind — the brain after a model turn emits `agent.tool_use`
+(`internal/brain/brain.go`), the API after a client confirmation releases a
+pending platform tool (`internal/api/events.go`), and the executor when web-tool
+settlement chains remaining sandbox work (`internal/executor/webwork.go`) — **none
+can manufacture one without a pre-existing `agent.tool_use`**, and a client cannot
+post that event itself (`internal/events/inbound.go` rejects it; confirmations and
+results are cross-checked against outstanding uses). The API's own enqueues at
+session-create and message-post are `model_turn`, which no worker polls. So an
+item needs a model turn, and this checkout has no `model-providers.json` — STATE.md's
+standing "blocks every session" task, not something this plan introduced.
+
+Scope of what is still unproven, stated precisely rather than minimised:
+`TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable` pins the issued-key
+authentication boundary, the empty-poll route and revocation over real HTTP — it
+does **not** pin queue delivery, work serialisation, or the tool runner. Those
+three, plus the real CLI's ability to claim an item, execute the tool in-process
+and settle it back on a console-issued key, are what #363 remains to prove.
+
 ## GCP continuous delivery — the mode-2 build → deploy → smoke sequence, by hand (run 2026-08-08) — ✅ passed
 
 Every step `.github/workflows/deploy.yml` performs was run by hand against the real

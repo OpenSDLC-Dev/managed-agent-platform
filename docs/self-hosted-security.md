@@ -762,18 +762,22 @@ with tracking issues, not silent omissions:
   remain the hard boundary.
   [#47](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/47),
   [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)
-- **Environment-key issuance UX** — **endpoint landed; the UX itself is still
-  in flight.** Keys are issued, listed and revoked through the console API (§6
-  above) — off the `/v1` wire, management-authenticated, one key per host — so
-  no operator has to seed a key into the database any more, and the curl
-  workflow above is the whole story for a headless deployment. What has not
-  landed is the "UX" half of this gap: the managed-agent-console screens that
-  drive those routes (its plan 07), and the end-to-end acceptance run with a
-  real `ant beta:worker` on a console-issued key (plan 30 slice 3). Two limits
-  are stated rather than papered over: this is a management-credential surface,
-  so it delegates no authority the management `x-api-key` did not already carry
-  and there is no separate "can mint worker keys" role; and a key still cannot
-  be scoped to less than its whole environment.
+- **Environment-key issuance UX** — **closed (#43); the console screens remain.**
+  Keys are issued, listed and revoked through the console API (§6 above) — off
+  the `/v1` wire, management-authenticated, one key per host — so no operator has
+  to seed a key into the database any more, and the curl workflow above is the
+  whole story for a headless deployment. Accepted end to end on 2026-08-10
+  against a real `ant beta:worker` on a console-issued key, including per-host
+  revocation taking one worker down while another kept polling
+  ([docs/HISTORY.md](./HISTORY.md)). What remains is presentation, not
+  capability: the managed-agent-console screens that drive those routes are that
+  repo's plan 07. Three limits are stated rather than papered over: this is a
+  management-credential surface, so it delegates no authority the management
+  `x-api-key` did not already carry and there is no separate "can mint worker
+  keys" role; a key still cannot be scoped to less than its whole environment;
+  and the acceptance did not cover a worker *executing* a pulled tool call on
+  such a key, which needs a live model route
+  ([#363](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/363)).
   [#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)
 - **Sandbox `securityContext` / `runtimeClassName`** — **closed (#65).** The
   platform now sets cgroup limits and capability drops on every sandbox by

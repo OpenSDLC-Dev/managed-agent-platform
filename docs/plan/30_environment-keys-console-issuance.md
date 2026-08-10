@@ -1,7 +1,12 @@
 ---
-status: in-progress
+status: archived
 issue: "#43"
 ---
+
+> **Archived 2026-08-10.** #43 is met and closed. One criterion of this plan —
+> slice 3's "poll until it pulls a work item" — was **not** met, and is
+> superseded by [#363](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/363).
+> The delivery record is [docs/HISTORY.md](../HISTORY.md) and CHANGELOG.md.
 
 # Environment keys: console-issued, named, revocable (plan 30)
 
