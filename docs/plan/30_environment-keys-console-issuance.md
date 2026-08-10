@@ -292,7 +292,11 @@ Auth and routing:
   invariants (expiry added to the scoped-auth bullet).
 - STATE.md (Active work + Tasks) flips when slice 1's PR starts the work;
   changelog.d fragment per PR; README's development notes if operator workflow
-  text changes; deploy/compose docs lose their DB-seeding instructions.
+  text changes. Each doc moves in the slice whose code invalidates it, not in a
+  batch at the end (CLAUDE.md's docs-move-with-code rule): slice 1 rewrites the
+  rotation semantics everywhere they are claimed, slice 2 adds the endpoint.
+  The DB-seeding instructions live only in docs/self-hosted-security.md — there
+  are none under deploy/ to remove.
 
 ## Slices
 
