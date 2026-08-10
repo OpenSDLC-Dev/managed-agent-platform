@@ -25,12 +25,22 @@ var fib20 = []string{
 	"55", "89", "144", "233", "377", "610", "987", "1597", "2584", "4181",
 }
 
+// tasks is the registered set, and repo-answer is deliberately not in it: that
+// trial needs a private GitHub fixture repository and a token only an operator
+// can mint, and neither exists. Registered, it was mandatory rather than opt-in
+// — the scheduled job runs `make eval`, which sets RUN_EVALS=1, and repoConfig
+// fails rather than skips — so on every nightly since it landed it aborted
+// before creating its session and reddened the run. A nightly that reds every
+// night for a reason nobody can act on is one people stop reading. The trial,
+// its two repo-specific graders and its clone oracle stay untouched in
+// repo_test.go (its third grader, ReadsFile, lives in grade_test.go and is
+// shared with file-answer); restoring it is putting it back in this list. #358.
 func tasks() []Task {
 	return []Task{
 		fibQuickstart(), echoNoTool(), shellState(),
 		editConfig(), needleSearch(), permAllow(), permDeny(),
 		exitCode(), journalMultiturn(), viewRange(), skillAnswer(),
-		fileAnswer(), repoAnswer(), outcomeSatisfy(), outcomeRevise(),
+		fileAnswer(), outcomeSatisfy(), outcomeRevise(),
 	}
 }
 

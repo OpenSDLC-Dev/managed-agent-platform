@@ -73,8 +73,10 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 	blobs := blobtest.Mem()
 	// One local (AES-GCM) cipher shared by the API, which seals a
 	// github_repository resource's authorization token at create, and the
-	// executor, which opens it to clone — so a repo-mounting eval exercises
-	// the whole sealed-token chain rather than a stubbed half of it.
+	// executor, which opens it to clone. No registered trial walks that chain
+	// today — repo-answer is parked (#358) — so this is here for the restore
+	// rather than for live coverage; a nil cipher would compile and stay green
+	// right up until the trial comes back.
 	cipher, err := local.New(local.Config{KeyID: "evals-1", Key: bytes.Repeat([]byte{9}, 32)})
 	if err != nil {
 		t.Fatalf("local.New: %v", err)
