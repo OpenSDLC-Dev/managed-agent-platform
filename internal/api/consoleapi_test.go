@@ -384,40 +384,77 @@ func TestConsoleKeyIssueLocksTheEnvironmentRow(t *testing.T) {
 				t.Fatalf("racing write: %v", err)
 			}
 
+			// The goroutine speaks plain net/http: tserver.do fatals on transport
+			// errors, and t.Fatalf must not run outside the test goroutine —
+			// FailNow would end only the goroutine, leaving the receive below to
+			// hang forever. An error is sent back instead (the same pattern
+			// sessions_test.go's archive race uses), so every path sends exactly
+			// once.
 			type result struct {
 				status int
 				body   map[string]any
+				err    error
 			}
 			done := make(chan result, 1)
 			go func() {
-				status, body := s.do(http.MethodPost, consoleTokens(envID), map[string]any{"name": "host"})
-				done <- result{status, body}
+				req, err := http.NewRequest(http.MethodPost, s.url+consoleTokens(envID),
+					strings.NewReader(`{"name":"host"}`))
+				if err != nil {
+					done <- result{err: err}
+					return
+				}
+				req.Header.Set("x-api-key", testKey)
+				res, err := http.DefaultClient.Do(req)
+				if err != nil {
+					done <- result{err: err}
+					return
+				}
+				defer res.Body.Close()
+				var body map[string]any
+				if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+					done <- result{err: err}
+					return
+				}
+				done <- result{status: res.StatusCode, body: body}
 			}()
 
-			// Wait for the issuing request to actually block on the row lock. This
-			// is what makes the test falsifiable: drop FOR SHARE and the read never
-			// blocks, so this poll times out rather than the assertion merely
-			// passing for the wrong reason.
-			blocked := false
-			for i := 0; i < 300 && !blocked; i++ {
-				if err := s.pool.QueryRow(ctx,
-					`SELECT count(*) > 0 FROM pg_stat_activity
-					  WHERE datname = current_database() AND wait_event_type = 'Lock'
-					    AND query ILIKE '%FOR SHARE%'`).Scan(&blocked); err != nil {
-					t.Fatalf("poll for the blocked read: %v", err)
+			// Commit only once the issuing request is observably waiting on the
+			// held row lock. A fixed sleep would leave a scheduling window in which
+			// a lockless read sees the post-commit row and answers correctly for
+			// the wrong reason; without FOR SHARE the read never waits, so this
+			// poll timing out is exactly how that mutant fails. (The poll's own
+			// query never matches: its wait_event_type is null, not Lock.)
+			waitSQL := `SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity
+				WHERE datname = current_database()
+				  AND wait_event_type = 'Lock'
+				  AND query LIKE '%FROM environments%FOR SHARE%')`
+			for deadline := time.Now().Add(10 * time.Second); ; {
+				select {
+				case r := <-done:
+					t.Fatalf("issuance answered (%d, err %v) before the racing write committed", r.status, r.err)
+				default:
 				}
-				if !blocked {
-					time.Sleep(10 * time.Millisecond)
+				var waiting bool
+				if err := s.pool.QueryRow(ctx, waitSQL).Scan(&waiting); err != nil {
+					t.Fatalf("poll pg_stat_activity: %v", err)
 				}
-			}
-			if !blocked {
-				t.Fatal("the issuing request never blocked on the environment row lock")
+				if waiting {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the issuing request never blocked on the environment row lock")
+				}
+				time.Sleep(10 * time.Millisecond)
 			}
 			if err := tx.Commit(ctx); err != nil {
 				t.Fatalf("commit the racing write: %v", err)
 			}
 
 			got := <-done
+			if got.err != nil {
+				t.Fatalf("issuance request: %v", got.err)
+			}
 			wantErr(t, got.status, got.body, tc.wantStatus, tc.wantType)
 			var keys int
 			if err := s.pool.QueryRow(ctx,
