@@ -458,21 +458,32 @@ held outside the repository because naming one operator's project, cluster, regi
 buckets, key and identities hands a reader a target list, and ties an open-source project to
 a cluster nobody cloning it can reach.
 
-| Variable | What it names |
-| --- | --- |
-| `GCP_PROJECT_ID` | the project everything else lives in |
-| `GKE_CLUSTER`, `GCP_ZONE` | the cluster and its zone |
-| `ARTIFACT_REGISTRY` | `HOST/PROJECT/REPOSITORY` — the image prefix. The tag is always the commit SHA, and the chart's `registry`/`repository` split is taken off this one value at its first slash |
-| `WIF_PROVIDER` | the Workload Identity Federation provider the job's OIDC token is exchanged at |
-| `DEPLOY_SERVICE_ACCOUNT` | the identity that provider lets this repository impersonate |
-| `BLOB_BUCKET` | the GCS bucket, written into the mode-2 Secret as `blob-bucket` |
-| `KMS_KEY_NAME` | the CryptoKey resource name, written in as `gcpkms-key-name` |
-| `CONTROLPLANE_SERVICE_ACCOUNT`, `BRAIN_SERVICE_ACCOUNT`, `EXECUTOR_SERVICE_ACCOUNT` | the three Workload-Identity Google service accounts the chart annotates each component's ServiceAccount with |
+**Where each value comes from**, because "read them off `terraform output`" is true of most
+of them and not of all — and the three exceptions are exactly the ones a new deployment would
+be left hunting for. `E` is `terraform -chdir=deploy/gcp/environment output -raw`, `F` is the
+same against `foundation/`:
 
-Every value comes from `terraform -chdir=deploy/gcp/environment output`. Three names are
-deliberately **not** variables — `K8S_NAMESPACE`, `K8S_SECRET` and `HELM_RELEASE` stay
-literals in the workflow, because they name the *chart's* own objects rather than an
-operator, and `K8S_SECRET` in particular has to equal `existingSecret` in
+| Variable | What it names | Where to get it |
+| --- | --- | --- |
+| `GCP_PROJECT_ID` | the project everything else lives in | **not an output** — it is the `project_id` you set in `terraform.tfvars` |
+| `GKE_CLUSTER`, `GCP_ZONE` | the cluster and its zone | `E cluster_name`, `E zone` |
+| `ARTIFACT_REGISTRY` | `HOST/PROJECT/REPOSITORY` — the image prefix. The tag is always the commit SHA, and the chart's `registry`/`repository` split is taken off this one value at its first slash | `E artifact_registry` |
+| `WIF_PROVIDER` | the Workload Identity Federation provider the job's OIDC token is exchanged at | **not in this repository's Terraform** — the pool and provider are created by hand; read the full resource name back with `gcloud iam workload-identity-pools providers describe POOL_PROVIDER … --format="value(name)"` |
+| `DEPLOY_SERVICE_ACCOUNT` | the identity that provider lets this repository impersonate | **not in this repository's Terraform** — created by hand alongside the provider, and bound to this repository separately |
+| `BLOB_BUCKET` | the GCS bucket, written into the mode-2 Secret as `blob-bucket` | `E blob_bucket` |
+| `KMS_KEY_NAME` | the CryptoKey resource name, written in as `gcpkms-key-name` | `E kms_key_name` (`F kms_key_name` is the same key) |
+| `CONTROLPLANE_SERVICE_ACCOUNT`, `BRAIN_SERVICE_ACCOUNT`, `EXECUTOR_SERVICE_ACCOUNT` | the three Workload-Identity Google service accounts the chart annotates each component's ServiceAccount with | `F controlplane_service_account`, `F brain_service_account`, `F executor_service_account` — bare emails. (`environment/`'s `*_service_account_annotation` outputs hold the same emails wrapped in the chart's annotation map, which is the wrong shape for a variable.) |
+
+The two "not in Terraform" rows are not an oversight to be tidied away: the WIF provider is
+deliberately outside this configuration — see the attribute-condition command below, which
+exists here precisely because nothing in the repository would otherwise record it — and the
+deploy identity is created with it. They are named here so that setting up a fresh deployment
+is a list to work through rather than a guess, since the workflow's guard refuses to run
+until all eleven exist.
+
+Three names are deliberately **not** variables — `K8S_NAMESPACE`, `K8S_SECRET` and
+`HELM_RELEASE` stay literals in the workflow, because they name the *chart's* own objects
+rather than an operator, and `K8S_SECRET` in particular has to equal `existingSecret` in
 [`staging-values.yaml`](./staging-values.yaml), which is in git: a variable would let the two
 drift into a release bound to a Secret nothing creates, with no diff to notice it in.
 
@@ -564,19 +575,37 @@ cannot reach it. It is one command — **applied to this project**, and recorded
 the provider is not in this repository's Terraform, so this is the only place the command that
 sets it, and the read-back that checks it, are written down:
 
+Every coordinate is taken **out of `$WIF_PROVIDER` itself**, and that is not tidiness. This
+condition is the control that survives a branch deleting the workflow's own guard, so a
+command that configured a *different* provider than the one the job exchanges its token at
+would leave the real one unconditioned while reading as though the work were done. A
+hard-coded `github-oidc` in pool `github` does exactly that on any deployment whose
+`WIF_PROVIDER` names another pool or provider — which is now every deployment but this one:
+
 ```sh
-gcloud iam workload-identity-pools providers update-oidc github-oidc \
-  --project="$GCP_PROJECT_ID" --location=global --workload-identity-pool=github \
+wif_project="${WIF_PROVIDER#projects/}";                  wif_project="${wif_project%%/*}"
+wif_location="${WIF_PROVIDER#*/locations/}";              wif_location="${wif_location%%/*}"
+wif_pool="${WIF_PROVIDER#*/workloadIdentityPools/}";      wif_pool="${wif_pool%%/*}"
+wif_name="${WIF_PROVIDER##*/providers/}"
+
+gcloud iam workload-identity-pools providers update-oidc "$wif_name" \
+  --project="$wif_project" --location="$wif_location" \
+  --workload-identity-pool="$wif_pool" \
   --attribute-condition="assertion.repository_owner == 'OpenSDLC-Dev' && assertion.ref == 'refs/heads/main' && assertion.ref_type == 'branch'"
 ```
+
+`--project` gets the project **number** the resource name carries rather than
+`$GCP_PROJECT_ID`; `gcloud` accepts either, and the number is the one that is guaranteed to
+name the project the pool is in — a provider may live beside the workload rather than in it.
 
 `ref_type` rides along because a *tag* named `main` would present `refs/tags/main` — not
 equal, so the ref test already rejects it, but stating both makes the intent legible rather
 than incidental. Read the live condition back with:
 
 ```sh
-gcloud iam workload-identity-pools providers describe github-oidc \
-  --project="$GCP_PROJECT_ID" --location=global --workload-identity-pool=github \
+gcloud iam workload-identity-pools providers describe "$wif_name" \
+  --project="$wif_project" --location="$wif_location" \
+  --workload-identity-pool="$wif_pool" \
   --format="value(attributeCondition,state)"
 ```
 

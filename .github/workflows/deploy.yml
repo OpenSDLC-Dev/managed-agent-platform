@@ -89,10 +89,12 @@ permissions: {}
 # an open-source project — ties the repository to a cluster nobody cloning it can
 # reach. `deploy/` here is a reference deployment, not a template.
 #
-# Set them under Settings → Secrets and variables → Actions → Variables; the list
-# with what each one names is in deploy/gcp/README.md, "The deployment's
-# coordinates". Every value came from
-# `terraform -chdir=deploy/gcp/environment output`.
+# Set them under Settings → Secrets and variables → Actions → Variables. What
+# each one names AND where to read its value from is in deploy/gcp/README.md,
+# "The deployment's coordinates" — most are a `terraform output`, but three are
+# not and the table says which: GCP_PROJECT_ID is a tfvars input rather than an
+# output, and WIF_PROVIDER and DEPLOY_SERVICE_ACCOUNT are created by hand
+# because the provider is deliberately outside this repository's Terraform.
 #
 # The cost is real and is accepted rather than hidden: the deployment target is
 # no longer reviewable in the diff that changes it, because a variable is edited
