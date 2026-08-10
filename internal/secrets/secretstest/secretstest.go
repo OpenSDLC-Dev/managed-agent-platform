@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 )
 
 // Image is the pinned OpenBao the harness runs — the same release
@@ -43,8 +45,11 @@ const readyTimeout = 150 * time.Second
 // engine mounted), runs the suite, and tears the container down. Use from
 // TestMain: os.Exit(secretstest.Main(m)). The start is attempted twice, with
 // a fresh container in between (#265; the retry's rationale is on
-// pgtest.Main, whose rule this follows).
+// pgtest.Main, whose rule this follows). It opens by reaping what an earlier
+// killed run left behind, the defer below being unreachable to one (#346; the
+// rationale is in dockertest).
 func Main(m *testing.M) int {
+	dockertest.SweepStrays("secretstest")
 	containerID, err := startReady()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "secretstest: %v; retrying\n", err)
@@ -67,9 +72,9 @@ func startReady() (string, error) {
 	// No --rm: a container whose entrypoint crashes would be auto-removed by
 	// the daemon before containerDiag could read its state and logs — the one
 	// forensic a dead start leaves. Removal is wholly removeContainer's job.
-	out, err := exec.Command("docker", "run", "-d",
+	out, err := exec.Command("docker", dockertest.RunArgs("secretstest",
 		"-e", "BAO_DEV_ROOT_TOKEN_ID="+RootToken,
-		"-p", "127.0.0.1:0:8200", Image).Output()
+		"-p", "127.0.0.1:0:8200", Image)...).Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
