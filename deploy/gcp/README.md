@@ -417,6 +417,7 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
 | creating `controlplane-api-key`, `database-url` and `model-providers` | a human, once — `bootstrap.sh` does not create these |
 | replacing the `model-providers` placeholder | a human, once |
+| setting the eleven Actions **variables** below | a human, once — and **before** the first run, not after: the workflow's second step refuses to go on without them, which is the good outcome; the bad one is setting them afterwards and having every push in between deploy with `--project ""` |
 | build and push the four images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
@@ -487,21 +488,56 @@ The cost of the move is that the deployment target is no longer reviewable in th
 changes it — a variable is edited in a settings page, not in a PR. That is the trade, and
 that assertion step is what keeps it from being silent.
 
+**What this is not is concealment, and the distinction matters because the weaker claim is
+the one people act on.** A run's logs are public on a public repository, and several of these
+values appear in them by the ordinary operation of the tools: `docker push` prints the
+repository it is pushing to, `gcloud container clusters get-credentials` prints the cluster
+it wrote a kubeconfig entry for, and the smoke step prints the LoadBalancer's external
+address on purpose. Registering them as `::add-mask::` would close that and was rejected: a
+mask is a literal string replacement across the whole log, so the same substitution that
+hides the project id also hides it inside every diagnostic that names it — `cannot read
+Secret Manager secret 'x' in ***` is a worse error message than the one it replaces, and the
+same reasoning already keeps short values unmasked in the Secret step. What the move actually
+buys is the two things the issue asked for: a **clone** of this repository does not carry one
+operator's coordinates, and `deploy/` reads as a reference deployment instead of a
+half-edited template. Anyone determined to read a public build log was never the threat
+model.
+
 Commands below name the variables as the table does. `gh variable list` only prints a table
 and exports nothing, so load them into the shell first:
 
 ```bash
-exports="$(gh variable list --json name,value \
-  --jq '.[] | "export \(.name)=\(.value | @sh)"')"
+exports="$(gh variable list --json name,value --jq '
+  .[] | select(.name | IN(
+    "GCP_PROJECT_ID", "GCP_ZONE", "GKE_CLUSTER", "ARTIFACT_REGISTRY",
+    "WIF_PROVIDER", "DEPLOY_SERVICE_ACCOUNT", "BLOB_BUCKET", "KMS_KEY_NAME",
+    "CONTROLPLANE_SERVICE_ACCOUNT", "BRAIN_SERVICE_ACCOUNT",
+    "EXECUTOR_SERVICE_ACCOUNT"))
+  | "export \(.name)=\(.value | @sh)"')"
 [ -n "$exports" ] && eval "$exports"
-: "${GCP_PROJECT_ID:?}" "${GCP_ZONE:?}" "${GKE_CLUSTER:?}" "${ARTIFACT_REGISTRY:?}"
+: "${GCP_PROJECT_ID:?}" "${GCP_ZONE:?}" "${GKE_CLUSTER:?}" "${ARTIFACT_REGISTRY:?}" \
+  "${WIF_PROVIDER:?}" "${DEPLOY_SERVICE_ACCOUNT:?}" "${BLOB_BUCKET:?}" \
+  "${KMS_KEY_NAME:?}" "${CONTROLPLANE_SERVICE_ACCOUNT:?}" \
+  "${BRAIN_SERVICE_ACCOUNT:?}" "${EXECUTOR_SERVICE_ACCOUNT:?}"
 ```
 
-The last line is the point of the first three. `gh` reports a failure — an expired token, no
-permission on the repository — on stderr and through its exit status, and an `eval` of
+**It `eval`s a filtered list, not every variable the repository has.** This snippet is pasted
+into an interactive shell, and an unfiltered `eval` would export whatever else is configured
+there under whatever name it has — including names the rest of this file's commands read for
+a different purpose. `PROJECT` is the sharp one: the table above hands it to
+`make gcp-bootstrap` and `make gcp-db-init`, and a repository variable of that name would
+silently redirect both. `TF_VAR_*` is the same hazard aimed at Terraform. Filtering keeps the
+blast radius to the eleven names this section documents.
+
+The assertion is the point of the `eval` above it. `gh` reports a failure — an expired token,
+no permission on the repository — on stderr and through its exit status, and an `eval` of
 nothing at all succeeds; without that guard a recovery under pressure would continue into
-`gcloud --project ""`, which is the failure this arrangement exists to make loud. `:?` names
-the first variable that did not load and stops there, without closing an interactive shell.
+`gcloud --project ""`, which is the failure this arrangement exists to make loud. All eleven
+are asserted rather than the few any one command needs, because the commands below spend
+`$DEPLOY_SERVICE_ACCOUNT` as well as `$GCP_PROJECT_ID` and a half-loaded environment is
+exactly the state that turns a named stop into `--member="serviceAccount:"` and an argument
+parse error. `:?` names the first variable that did not load and stops there, without closing
+an interactive shell.
 
 **There is no GitHub secret in this repository, and adding one would be a regression.** The
 job mints an OIDC token, Workload Identity Federation exchanges it for a short-lived
@@ -620,16 +656,25 @@ reason it is not a line in a file someone edits.
 
 **It names no operator either, and that is the shape rather than a redaction.** The five
 values in it that would — the image `registry`/`repository` split and the three
-service-account emails — are written against the neutral project `your-project`, and the
-workflow overrides all five with `--set-string` from `ARTIFACT_REGISTRY` and the three
-`*_SERVICE_ACCOUNT` variables. The keys stay in the file rather than being deleted so that it
-remains a **worked example that renders on its own**: `helm template -f staging-values.yaml`
-is what CI runs against it, and a file with `image.registry` removed renders against the
-chart's `ghcr.io` defaults while one with the annotations removed renders a ServiceAccount
-with no identity — an example documenting a deployment that cannot start. Nothing is
-weakened by keeping them: a dropped override fails closed, because `your-project`'s registry
-does not exist (`ImagePullBackOff`) and its service accounts do not exist (ADC fails at pod
-startup), and `--wait --atomic` turns either into a rolled-back release and a red run.
+service-account emails — are written against `registry.invalid` and the neutral project
+`your-project`, and the workflow overrides all five with `--set-string` from
+`ARTIFACT_REGISTRY` and the three `*_SERVICE_ACCOUNT` variables. The keys stay in the file
+rather than being deleted so that it remains a **worked example that renders on its own**:
+`helm template -f staging-values.yaml` is what CI runs against it, and a file with
+`image.registry` removed renders against the chart's `ghcr.io` defaults while one with the
+annotations removed renders a ServiceAccount with no identity — an example documenting a
+deployment that cannot start.
+
+Nothing is weakened by keeping them, and the placeholders fail closed **by construction
+rather than by luck**. `registry.invalid` can never resolve, because RFC 2606 reserves the
+`.invalid` TLD so that no one can register a name under it; impersonating
+`…@your-project.iam.gserviceaccount.com` needs an IAM binding in a project this deployment
+does not control. `--wait --atomic` turns either into a rolled-back release and a red run.
+The registry host is where that distinction earns its keep: a plausible-looking
+`us-central1-docker.pkg.dev/your-project/…` would be a real Artifact Registry path in
+whichever project happens to own the globally unique id `your-project`, so a reader running
+this file verbatim — or an edit that dropped the `image.*` override — could silently pull a
+stranger's images rather than fail.
 
 Rebuilding `environment/` does not change any of this **unless a coordinate changes**, and
 the two places to check are no longer both files: the sandbox pair stays in

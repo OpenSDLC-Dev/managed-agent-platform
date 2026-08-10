@@ -43,13 +43,10 @@ remains, and it blocks every session.
       provider now asserts `ref`/`ref_type` as well as `repository_owner`. First
       green run from the workflow itself: 31260884425 on `0c01e14`, 3m41s, build
       through smoke, all three components on its images at `ready 1/1`. The
-      console's pipeline is green too. Detail in `deploy/gcp/README.md` and
+      console's pipeline is green too. #355 then moved the eleven identifiers it
+      names into Actions variables — created first, since an unset one renders
+      empty — leaving `staging-values.yaml` a neutral, self-rendering reference
+      deployment. Detail in `deploy/gcp/README.md` and
       [docs/HISTORY.md](./docs/HISTORY.md).
-- [x] **[#355](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/355)
-      — the deployment's identifiers are Actions variables**, not literals in a
-      public repository; `staging-values.yaml` is now a neutral, self-rendering
-      reference deployment the workflow overrides. The eleven variables were
-      created first, on purpose: an unset one renders empty and would deploy with
-      no project.
 - [ ] Replace the `model-providers` placeholder (real endpoint, fake key) with a
       live route before anything runs a session.

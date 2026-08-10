@@ -23,10 +23,19 @@
 # ghcr.io defaults while a file with the annotations removed renders a
 # ServiceAccount with no identity — so what is meant to be the worked example of
 # mode 2 would document a deployment that cannot start. Keeping them complete
-# costs nothing at deploy time: a dropped override fails closed, because
-# `your-project`'s registry does not exist (ImagePullBackOff) and its service
-# accounts do not exist (ADC fails at pod startup), and `--wait --atomic` turns
-# either into a rolled-back release rather than a half-configured cluster.
+# costs nothing at deploy time, because both placeholders fail closed and neither
+# does so by luck: `registry.invalid` can never resolve (RFC 2606 reserves the
+# `.invalid` TLD precisely so a name cannot be registered), and impersonating
+# `…@your-project.iam.gserviceaccount.com` needs an IAM binding in a project this
+# deployment does not control. `--wait --atomic` turns either into a rolled-back
+# release rather than a half-configured cluster.
+#
+# The registry host is where that distinction is load-bearing. A plausible-looking
+# `us-central1-docker.pkg.dev/your-project/…` would be a real Artifact Registry
+# path in whatever project happens to own the id `your-project` — a globally
+# unique namespace anyone may register — so a reader who ran this file verbatim,
+# or an edit that dropped the `image.*` override, could silently pull and run a
+# stranger's images instead of failing. An unresolvable host cannot do that.
 #
 # Mode 1 (bundled Postgres/MinIO/OpenBao) is not what this environment runs. It is
 # the fewest moving parts and the right first proof, but a pipeline that installs
@@ -57,15 +66,21 @@
 #     the line was last edited.
 
 # The chart composes each component's image as {registry}/{repository}/{component}:{tag}
-# (templates/_helpers.tpl, "map.image"), so an Artifact Registry prefix such as
-# `us-central1-docker.pkg.dev/your-project/map-images` splits at the FIRST slash
-# and not anywhere else. Get the split wrong — put the project into `registry`,
-# say — and Helm renders a reference that is merely wrong rather than invalid, so
-# the render succeeds and the pods fail to pull. That is why the workflow derives
-# both halves from the one `ARTIFACT_REGISTRY` variable with `${…%%/*}` and
-# `${…#*/}` rather than carrying two variables that could disagree.
+# (templates/_helpers.tpl, "map.image"), so an Artifact Registry prefix splits at
+# the FIRST slash and not anywhere else: a real one reads
+# `LOCATION-docker.pkg.dev` / `PROJECT/REPOSITORY`. Get the split wrong — put the
+# project into `registry`, say — and Helm renders a reference that is merely wrong
+# rather than invalid, so the render succeeds and the pods fail to pull. That is
+# why the workflow derives both halves from the one `ARTIFACT_REGISTRY` variable
+# with `${…%%/*}` and `${…#*/}` rather than carrying two variables that could
+# disagree.
+#
+# `registry.invalid` rather than a plausible `LOCATION-docker.pkg.dev`, and that
+# is the placeholder doing work rather than standing in: see the header. The
+# repository half keeps the real two-segment shape, because that is the half the
+# split lesson above is about.
 image:
-  registry: us-central1-docker.pkg.dev
+  registry: registry.invalid
   repository: your-project/map-images
 
 # The switch that selects mode 2. Set, the chart renders NO Secret of its own and

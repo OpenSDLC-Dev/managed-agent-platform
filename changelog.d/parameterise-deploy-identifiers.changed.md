@@ -21,17 +21,24 @@
   git, so a variable would let the two drift into a release bound to a Secret
   nothing creates, with no diff to notice it in. **`staging-values.yaml` becomes
   a reference deployment rather than this cluster's values file**, and keeps
-  every key: the five that would name an operator are written against the neutral
-  project `your-project` and overridden by the workflow with `--set-string`. The
-  alternative — deleting those keys — was rejected because `helm template -f
-  staging-values.yaml` on its own is exactly what CI runs against it, and a file
-  missing `image.registry` renders against the chart's `ghcr.io` defaults while
-  one missing the annotations renders a ServiceAccount with no identity, so the
-  worked example of mode 2 would document a deployment that cannot start. Nothing
-  is weakened by keeping them, because a dropped override fails closed:
-  `your-project`'s registry does not exist (`ImagePullBackOff`) and its service
-  accounts do not exist (ADC fails at pod startup), and `--wait --atomic` turns
-  either into a rolled-back release and a red run. The workflow gains a
+  every key: the five that would name an operator are written against
+  `registry.invalid` and the neutral project `your-project`, and overridden by
+  the workflow with `--set-string`. The alternative — deleting those keys — was
+  rejected because `helm template -f staging-values.yaml` on its own is exactly
+  what CI runs against it, and a file missing `image.registry` renders against
+  the chart's `ghcr.io` defaults while one missing the annotations renders a
+  ServiceAccount with no identity, so the worked example of mode 2 would document
+  a deployment that cannot start. Nothing is weakened by keeping them, because a
+  dropped override fails closed **by construction rather than by luck**, which is
+  why the registry placeholder is an unresolvable host and not a plausible
+  `LOCATION-docker.pkg.dev` path: a GCP project id is a globally unique namespace
+  anyone may register, so `us-central1-docker.pkg.dev/your-project/…` would be a
+  real Artifact Registry path in whatever project owns that id, and a reader
+  running the file verbatim could silently pull a stranger's images instead of
+  failing. RFC 2606 reserves `.invalid` so that no such name can exist, and
+  impersonating `…@your-project.iam.gserviceaccount.com` needs an IAM binding in
+  a project this deployment does not control; `--wait --atomic` turns either into
+  a rolled-back release and a red run. The workflow gains a
   **fail-fast guard** that asserts all eleven before it authenticates or builds
   anything, running *second* — after the ref guard, which refuses an unauthorised
   ref while telling it nothing, so the step that prints the deployment's
@@ -54,4 +61,12 @@
   literals remain in git history and in `docs/HISTORY.md`, which records what was
   actually run; rewriting the history of a repository that has cut releases is
   not worth it for identifiers, and the trust policy is what protects the
-  deployment.
+  deployment. Nor is it concealment, and `deploy/gcp/README.md` now says so
+  rather than leaving the stronger reading available: a run's logs are public on
+  a public repository, and `docker push`, `get-credentials` and the smoke check
+  print the registry, the cluster and the external address in the ordinary course
+  of working. Masking them was rejected — a mask is a literal string replacement
+  across the whole log, so the substitution that hides the project id also hides
+  it inside every diagnostic that names it. What the move buys is what the issue
+  asked for: a clone carries no operator's coordinates, and `deploy/` reads as a
+  reference deployment rather than a half-edited template.

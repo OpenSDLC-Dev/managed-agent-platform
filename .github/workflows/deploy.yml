@@ -529,11 +529,13 @@ jobs:
       # runs on it, and a file missing `image.registry` renders against the
       # chart's ghcr.io defaults while a file missing the annotations renders a
       # KSA with no identity, so the example would document a deployment that
-      # cannot work. Dropping an override here fails closed either way: the
-      # neutral registry does not exist (ImagePullBackOff) and the neutral
-      # identity does not exist (ADC fails at pod startup), and `--wait --atomic`
-      # turns both into a rolled-back release and a red run rather than a
-      # half-configured cluster.
+      # cannot work. Dropping an override here fails closed, and by construction
+      # rather than by luck: the example registry host is `registry.invalid`,
+      # which RFC 2606 reserves so that it can never resolve (ImagePullBackOff),
+      # and impersonating an identity in a project this deployment does not
+      # control needs a binding it does not have (ADC fails at pod startup).
+      # `--wait --atomic` turns either into a rolled-back release and a red run
+      # rather than a half-configured cluster.
       #
       # --set-string throughout, not --set. Every one of these is a string by
       # definition, and `--set` would infer the type instead of being told it — a
