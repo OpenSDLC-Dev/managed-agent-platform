@@ -106,11 +106,8 @@ func (id ID) HasPrefix(prefix string) bool {
 // invalid UTF-8) — or any non-alphabet byte — would otherwise fail as a 500
 // (Postgres SQLSTATE 22021) rather than the status the wire expects.
 func (id ID) Valid() bool {
-	prefix, _, ok := strings.Cut(string(id), "_")
-	if !ok || !knownPrefixes[prefix] {
-		return false
-	}
-	return ValidWithPrefix(string(id), prefix)
+	prefix, token, ok := strings.Cut(string(id), "_")
+	return ok && knownPrefixes[prefix] && validToken(token)
 }
 
 // ValidWithPrefix is Valid for an identifier this platform mints but never puts
@@ -121,7 +118,14 @@ func (id ID) Valid() bool {
 // into a query, which is the whole reason Valid exists.
 func ValidWithPrefix(id, prefix string) bool {
 	p, token, ok := strings.Cut(id, "_")
-	if !ok || p != prefix || token == "" {
+	return ok && p == prefix && validToken(token)
+}
+
+// validToken holds the rule both spellings share: a non-empty token drawn only
+// from idAlphabet. One copy, so the two entry points cannot drift on what an
+// acceptable id body is.
+func validToken(token string) bool {
+	if token == "" {
 		return false
 	}
 	for i := 0; i < len(token); i++ {

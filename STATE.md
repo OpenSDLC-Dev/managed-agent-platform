@@ -18,20 +18,16 @@ session.
 
 ## Tasks
 
-- [x] Plan 29 slice 1 — wire correctness: dangling/nested `mcp_toolset`
-      rejection on every spec-resolving surface, resolved-config echo.
-- [ ] Plan 29 slice 2 — `internal/mcp` client landed (streamable HTTP, bearer
-      injection, self-driven paging, `internal/dialguard` extracted). Open:
-      `mcp_catalogs` migration + store, `Conn.CallTool` (slice 4 needs it), the
-      `mcp_exec` driver and its egress check.
-- [ ] Plan 29 slices 3–7 — confirmation gating and denial synthesis; brain
-      expansion, execution driver, settlement chaining, spill; vault credentials
-      and OAuth refresh; networking polish; evals, `ant` acceptance, archive.
-- [x] Plan 30 slice 1 — storage and primitives: migration 0021, `Issue`/`List`/
-      `RevokeEnvironmentKey`, expiry-aware auth. [envkeys.go](./internal/api/envkeys.go)
-- [x] Plan 30 slice 2 — the off-wire console API: `POST`/`GET …/tokens` and
-      `POST …/tokens/{token_id}/revoke` under `/api/oauth/organizations/…`,
-      mirrored from the reference console, management-auth only, `/v1` untouched.
+- [x] Plan 29 slice 1 — wire correctness for `mcp_toolset` on every
+      spec-resolving surface, plus the resolved-config echo.
+- [ ] Plan 29 slice 2 — the `internal/mcp` client landed. Open: `mcp_catalogs`
+      migration + store, `Conn.CallTool` (slice 4 needs it), the `mcp_exec`
+      driver and its egress check.
+- [ ] Plan 29 slices 3–7 — confirmation gating; brain expansion and execution;
+      vault credentials; networking; evals, `ant` acceptance, archive.
+- [x] Plan 30 slices 1–2 — migration 0021 and the key primitives, then the
+      off-wire console API over them.
+      [envkeys.go](./internal/api/envkeys.go) ·
       [consoleapi.go](./internal/api/consoleapi.go)
 - [ ] Plan 30 slice 3 — a real `ant beta:worker` acceptance run on a
       console-issued key against the compose stack, then archive.

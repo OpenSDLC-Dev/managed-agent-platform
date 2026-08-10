@@ -118,3 +118,46 @@ func TestIDValid(t *testing.T) {
 		}
 	}
 }
+
+// TestValidWithPrefix pins the off-wire spelling directly. It exists because
+// PrefixEnvironmentKey is deliberately absent from knownPrefixes — so Valid can
+// never answer for an envkey_ id, and the only thing standing between a
+// malformed one and a bind parameter is this function.
+func TestValidWithPrefix(t *testing.T) {
+	if id := NewID(PrefixEnvironmentKey).String(); !ValidWithPrefix(id, PrefixEnvironmentKey) {
+		t.Errorf("NewID(%q) = %q must satisfy ValidWithPrefix", PrefixEnvironmentKey, id)
+	}
+	// The whole point of keeping envkey_ out of knownPrefixes: the wire's own
+	// validator must keep rejecting it, so admitting it here widens nothing.
+	if ID(NewID(PrefixEnvironmentKey)).Valid() {
+		t.Error("an envkey_ id must not be Valid on the wire's prefix set")
+	}
+
+	good := "envkey_0123456789abcdefghjkmnp"
+	invalid := map[string]string{
+		"empty":            "",
+		"prefix only":      "envkey",
+		"empty token":      "envkey_",
+		"just underscore":  "_",
+		"wrong prefix":     "env_0123456789abcdefghjkmnp",
+		"prefix is a pre":  "envkeys_0123456789",
+		"out-of-alphabet":  "envkey_illo",
+		"uppercase":        "envkey_ABCDE",
+		"underscore token": "envkey_ab_cd",
+		"nul byte":         "envkey_\x00",
+		"nul mid-token":    "envkey_ab\x00cd",
+		"invalid utf-8":    "envkey_\x80",
+		"leading space":    " envkey_abcde",
+		"trailing space":   "envkey_abcde ",
+	}
+	for name, id := range invalid {
+		if ValidWithPrefix(id, PrefixEnvironmentKey) {
+			t.Errorf("%s: %q should be invalid under %q", name, id, PrefixEnvironmentKey)
+		}
+	}
+	// The prefix is the caller's to name, and naming a different one rejects an
+	// otherwise well-formed id — which is what makes this safe to reuse.
+	if ValidWithPrefix(good, PrefixAgent) {
+		t.Errorf("%q must not validate under the agent prefix", good)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
@@ -36,6 +37,26 @@ func issueViaConsole(t *testing.T, s *tserver, envID, name string) string {
 		t.Fatalf("issue %q returned no access_token: %v", name, body)
 	}
 	return tok
+}
+
+// wantExactFields asserts an object's key set is exactly keys. It is stronger
+// than wantFields, which requires the named keys but tolerates extras — and the
+// two claims this surface makes loudest are about what a response does *not*
+// carry: a listing never renders a secret or its hash, and the issuance response
+// carries the token and nothing else. An extras-tolerant assertion cannot catch
+// a `key_hash` that someone later adds to the row struct.
+func wantExactFields(t *testing.T, obj map[string]any, keys ...string) {
+	t.Helper()
+	got := make([]string, 0, len(obj))
+	for k := range obj {
+		got = append(got, k)
+	}
+	want := slices.Clone(keys)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("response fields = %v, want exactly %v", got, want)
+	}
 }
 
 // consoleKeyIDs lists an environment's keys over HTTP and returns their ids in
@@ -68,11 +89,28 @@ func TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable(t *testing.T) {
 	ctx := context.Background()
 	envID := selfHostedEnv(t, s, "console-e2e")
 
-	status, body := s.do(http.MethodPost, consoleTokens(envID), map[string]any{"name": "build-host-1"})
+	issueRes := s.doRaw(http.MethodPost, consoleTokens(envID),
+		map[string]any{"name": "build-host-1"}, map[string]string{"x-api-key": testKey})
+	issueRaw, _ := io.ReadAll(issueRes.Body)
+	issueRes.Body.Close()
+	status := issueRes.StatusCode
+	var body map[string]any
+	_ = json.Unmarshal(issueRaw, &body)
 	if status != http.StatusOK {
-		t.Fatalf("issue: status %d, body %v", status, body)
+		t.Fatalf("issue: status %d, body %s", status, issueRaw)
 	}
-	wantFields(t, body, "access_token", "expires_in")
+	// RFC 6749 §5.1: a token response forbids caching. This body is the
+	// plaintext's only appearance, so a proxy or BFF that retains responses must
+	// be told not to keep the second copy.
+	if got := issueRes.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := issueRes.Header.Get("Pragma"); got != "no-cache" {
+		t.Errorf("Pragma = %q, want no-cache", got)
+	}
+	// Exactly the two token-response fields — no id, no name, no timestamps, and
+	// above all no second rendering of anything secret-adjacent.
+	wantExactFields(t, body, "access_token", "expires_in")
 	token, _ := body["access_token"].(string)
 	if !strings.HasPrefix(token, "sk-map-env01-") {
 		t.Errorf("access_token = %q, want the sk-map-env01- prefix", token)
@@ -105,9 +143,13 @@ func TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable(t *testing.T) {
 	}
 
 	// It is listed with the name it was issued under and a real expiry.
-	listStatus, listBody := s.do(http.MethodGet, consoleTokens(envID), nil)
-	if listStatus != http.StatusOK {
-		t.Fatalf("list: status %d, body %v", listStatus, listBody)
+	listRes := s.doRaw(http.MethodGet, consoleTokens(envID), nil, map[string]string{"x-api-key": testKey})
+	listRaw, _ := io.ReadAll(listRes.Body)
+	listRes.Body.Close()
+	var listBody map[string]any
+	_ = json.Unmarshal(listRaw, &listBody)
+	if listRes.StatusCode != http.StatusOK {
+		t.Fatalf("list: status %d, body %s", listRes.StatusCode, listRaw)
 	}
 	rows := listData(t, listBody)
 	if len(rows) != 1 {
@@ -116,7 +158,13 @@ func TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable(t *testing.T) {
 	row := rows[0]
 	page, _ := listBody["pagination"].(map[string]any)
 	keyID, _ := row["id"].(string)
-	wantFields(t, row, "id", "name", "created_at", "expires_at")
+	// Exactly these four — a listing that grew a key_hash or an access_token
+	// would satisfy a presence-only assertion.
+	wantExactFields(t, row, "id", "name", "created_at", "expires_at")
+	wantExactFields(t, page, "total", "limit", "offset", "has_more")
+	if s := string(listRaw); strings.Contains(s, token) || strings.Contains(s, stored) {
+		t.Error("the listing rendered the secret or its hash")
+	}
 	if row["name"] != "build-host-1" {
 		t.Errorf("name = %v, want build-host-1", row["name"])
 	}
@@ -287,6 +335,100 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 	if got := listData(t, listBody)[0]["name"]; got != name {
 		t.Errorf("stored name = %v, want the trimmed 128-char label", got)
 	}
+
+	// The bound is characters, as the message and the docs say — not bytes. A
+	// host labelled in Chinese gets the same 128 an ASCII label does; counting
+	// bytes would cut it to 42 and tell the operator it was over "128
+	// characters", which would be false.
+	cjk := strings.Repeat("主", 128)
+	if len(cjk) != 384 {
+		t.Fatalf("fixture is %d bytes, want 384 — the point is that it exceeds 128 bytes", len(cjk))
+	}
+	issueViaConsole(t, s, selfHosted, cjk)
+	if status, body := s.do(http.MethodPost, consoleTokens(selfHosted),
+		map[string]any{"name": strings.Repeat("主", 129)}); status != http.StatusBadRequest {
+		t.Errorf("a 129-character name: status %d, body %v; want 400", status, body)
+	}
+}
+
+// TestConsoleKeyIssueLocksTheEnvironmentRow pins the window between reading an
+// environment's kind and inserting the key. Both halves are held open
+// deliberately: an uncommitted write on the environments row must block the
+// issuing request at its FOR SHARE read, so that when the write lands the
+// request sees the environment as it now is. Without the lock an archive
+// slipping into that window mints a live credential on an archived environment —
+// the 400 silently unenforced — and a delete turns the insert's foreign key into
+// a 500 where this route's own 404 is the answer.
+func TestConsoleKeyIssueLocksTheEnvironmentRow(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql  string
+		wantStatus int
+		wantType   string
+	}{
+		{"concurrent archive", `UPDATE environments SET archived_at = now() WHERE id = $1`,
+			http.StatusBadRequest, "invalid_request_error"},
+		{"concurrent delete", `DELETE FROM environments WHERE id = $1`,
+			http.StatusNotFound, "not_found_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			ctx := context.Background()
+			envID := selfHostedEnv(t, s, "raced")
+
+			tx, err := s.pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin the racing transaction: %v", err)
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+			if _, err := tx.Exec(ctx, tc.sql, envID); err != nil {
+				t.Fatalf("racing write: %v", err)
+			}
+
+			type result struct {
+				status int
+				body   map[string]any
+			}
+			done := make(chan result, 1)
+			go func() {
+				status, body := s.do(http.MethodPost, consoleTokens(envID), map[string]any{"name": "host"})
+				done <- result{status, body}
+			}()
+
+			// Wait for the issuing request to actually block on the row lock. This
+			// is what makes the test falsifiable: drop FOR SHARE and the read never
+			// blocks, so this poll times out rather than the assertion merely
+			// passing for the wrong reason.
+			blocked := false
+			for i := 0; i < 300 && !blocked; i++ {
+				if err := s.pool.QueryRow(ctx,
+					`SELECT count(*) > 0 FROM pg_stat_activity
+					  WHERE datname = current_database() AND wait_event_type = 'Lock'
+					    AND query ILIKE '%FOR SHARE%'`).Scan(&blocked); err != nil {
+					t.Fatalf("poll for the blocked read: %v", err)
+				}
+				if !blocked {
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			if !blocked {
+				t.Fatal("the issuing request never blocked on the environment row lock")
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("commit the racing write: %v", err)
+			}
+
+			got := <-done
+			wantErr(t, got.status, got.body, tc.wantStatus, tc.wantType)
+			var keys int
+			if err := s.pool.QueryRow(ctx,
+				`SELECT count(*) FROM environment_keys WHERE environment_id = $1`, envID).Scan(&keys); err != nil {
+				t.Fatalf("count keys: %v", err)
+			}
+			if keys != 0 {
+				t.Errorf("%d key rows survived the race, want none", keys)
+			}
+		})
+	}
 }
 
 // TestConsoleKeyListPagesAndRendersNullExpiry pins the listing dialect: the
@@ -346,7 +488,14 @@ func TestConsoleKeyListPagesAndRendersNullExpiry(t *testing.T) {
 		t.Fatalf("rewind the rows to their pre-0021 shape: %v", err)
 	}
 	_, listBody := s.do(http.MethodGet, consoleTokens(envID), nil)
-	for _, row := range listData(t, listBody) {
+	rewound := listData(t, listBody)
+	// Assert the count first: without it a regression returning an empty data
+	// array would satisfy every assertion in the loop below without ever
+	// rendering a grandfathered row.
+	if len(rewound) != 3 {
+		t.Fatalf("listed %d rows after the rewind, want the same 3", len(rewound))
+	}
+	for _, row := range rewound {
 		raw, ok := row["expires_at"]
 		if !ok {
 			t.Fatalf("expires_at is absent, not null: %v", row)
@@ -379,11 +528,28 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 		"no prefix":          "envkey",
 		"another env's key":  theirID,
 	}
+	messages := map[string]string{}
 	for name, id := range cases {
 		t.Run(name, func(t *testing.T) {
 			status, body := s.do(http.MethodPost, consoleRevoke(mine, id), nil)
 			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
+			inner, _ := body["error"].(map[string]any)
+			msg, _ := inner["message"].(string)
+			messages[name] = msg
 		})
+	}
+	// One branch means one message. Status and type alone would stay green if a
+	// regression said "key belongs to environment X" for the foreign id and "not
+	// found" for the unknown one — which is exactly the distinction this route
+	// exists not to make.
+	for name, msg := range messages {
+		if msg != messages["unknown id"] {
+			t.Errorf("%s answered %q, want the same message as an unknown id (%q)",
+				name, msg, messages["unknown id"])
+		}
+	}
+	if !strings.Contains(messages["unknown id"], "environment key not found") {
+		t.Errorf("message = %q, want the id-free not-found wording", messages["unknown id"])
 	}
 	// The foreign key is untouched by the attempt to revoke it from elsewhere.
 	if res, raw := s.poll(t, theirs, map[string]string{"Authorization": "Bearer " + theirKey}); res.StatusCode != http.StatusOK {

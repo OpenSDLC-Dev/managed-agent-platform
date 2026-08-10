@@ -9,6 +9,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -64,6 +65,18 @@ type EnvironmentKey struct {
 // Bearer token to its environment — stays wire-locked by the real
 // `ant beta:worker`.
 func IssueEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, environmentID, name string) (string, error) {
+	return issueEnvironmentKey(ctx, pool, environmentID, name)
+}
+
+// execer is the one method issuing needs, so the insert can run either on the
+// pool (seeding, and the tests that do it) or inside a caller's transaction —
+// which is how the HTTP route issues, holding FOR SHARE on the environment row
+// across the check and the insert.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func issueEnvironmentKey(ctx context.Context, db execer, environmentID, name string) (string, error) {
 	buf := make([]byte, environmentKeySecretBytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("api: generate environment key: %w", err)
@@ -76,7 +89,7 @@ func IssueEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, environmentID,
 	//
 	// Both timestamps come from the database clock (created_at defaults to now()),
 	// so an expiry can never be minted already-past by a skewed application host.
-	if _, err := pool.Exec(ctx,
+	if _, err := db.Exec(ctx,
 		`INSERT INTO environment_keys (id, environment_id, name, key_hash, expires_at)
 		 VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))`,
 		domain.NewID(domain.PrefixEnvironmentKey).String(), environmentID, name, hashKey(key),

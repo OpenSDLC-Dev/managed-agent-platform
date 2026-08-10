@@ -111,8 +111,10 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) htt
 	// The console API — off the /v1 wire, mirroring the reference console's own
 	// private path so a console-facing endpoint has a convention rather than an
 	// invented namespace (internal/api/consoleapi.go). Management x-api-key, via
-	// dispatchAuth's default lane: every other lane's predicate keys on /v1/.
-	mux.HandleFunc("POST "+consoleTokensPath, s.handle(s.createEnvironmentKey))
+	// dispatchAuth's default lane: no other lane's predicate can match an /api/
+	// path — they test a /v1/ prefix, or (the gate's) exact equality against
+	// "/internal/v1/gate/config". consoleapi.go states the reasoning in full.
+	mux.HandleFunc("POST "+consoleTokensPath, noStore(s.handle(s.createEnvironmentKey)))
 	mux.HandleFunc("GET "+consoleTokensPath, s.handle(s.listEnvironmentKeys))
 	mux.HandleFunc("POST "+consoleRevokePath, s.handleNoContent(s.revokeEnvironmentKey))
 	for _, pattern := range []string{consoleTokensPath, consoleRevokePath} {
