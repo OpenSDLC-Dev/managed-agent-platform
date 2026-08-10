@@ -62,6 +62,14 @@ const startedLabel = ownerLabel + "-started"
 // happens six hours later; disk is reclaimed late, but never by hand.
 const strayAge = 6 * time.Hour
 
+// sweepBudget bounds one whole sweep — the listing and every removal under it.
+// Housekeeping is not what a test run is for, and this one happens before
+// go test's own alarm exists, so it gets a wall-clock allowance rather than the
+// right to take as long as the daemon does. A minute clears a realistic backlog
+// several times over (a `docker rm -f` of a fixture is well under a second),
+// and a backlog it cannot clear is one the next run continues.
+const sweepBudget = time.Minute
+
 // RunArgs builds the `docker run` argument list for a detached fixture
 // container of the named harness, labelled so SweepStrays can find it once the
 // process that started it is gone:
@@ -92,8 +100,15 @@ func RunArgs(harness string, rest ...string) []string {
 // about to be reported far better by the caller's own `docker run`, and a stray
 // this run never sees is one the next run gets. Removal is not silent — see
 // removeContainer.
+//
+// The whole sweep shares one deadline, rather than each docker call carrying
+// its own. This runs inside TestMain, before m.Run, where `go test -timeout`'s
+// alarm is not yet armed and nothing will interrupt a wedged daemon: with a
+// per-call bound only, the twenty strays #346 reported could hold a test binary
+// for a quarter of an hour and look like a hang rather than a leak. Giving up
+// with strays left costs nothing, because every later run sweeps again.
 func SweepStrays(harness string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), sweepBudget)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "docker", "ps", "--all",
 		"--filter", "label="+ownerLabel,
@@ -102,7 +117,12 @@ func SweepStrays(harness string) {
 		return
 	}
 	for _, s := range strays(string(out), time.Now()) {
-		if !removeContainer(harness, s.id) {
+		if ctx.Err() != nil {
+			fmt.Fprintf(os.Stderr, "%s: stray sweep ran out of its %s budget; the next run retries (#346)\n",
+				harness, sweepBudget)
+			return
+		}
+		if !removeContainer(ctx, harness, s.id) {
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "%s: reaped stray %s container %s left by a killed run (#346)\n",
@@ -111,25 +131,29 @@ func SweepStrays(harness string) {
 }
 
 // removeContainer force-removes one container and the anonymous volumes it
-// owns, and reports whether it was this call that removed it. The timeout keeps
-// a wedged daemon from hanging the run inside TestMain, where go test's own
-// alarm is not yet armed.
+// owns, and reports whether it was this call that removed it. Its own bound sits
+// under the sweep's, so one wedged call cannot starve the strays behind it and
+// the sweep as a whole still ends when its budget does.
 //
 // A failure is announced unless the container is simply gone, which is the
 // expected way to lose: `go test ./...` has eleven TestMains sweeping the same
 // corpse, and only one of them can win. Everything else — a daemon that refuses,
-// a volume that will not delete — is a container this run could not clear, and
-// swallowing that would leave a silent leak indistinguishable from a healthy
-// sweep, which is the failure mode this whole package exists to end (the rule
-// pgtest.removeContainer already states for the run's own container).
-func removeContainer(harness, id string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// a volume that will not delete — is a container this run could not clear.
+//
+// That announcement reaches a terminal only when the package fails or the suite
+// runs under -v, since `go test ./...` buffers a passing package's output and
+// prints just its ok line. So it is a breadcrumb for whoever is already looking
+// rather than an alarm, and it is deliberately not made one: a stray this run
+// could not clear is not a reason to redden a suite that otherwise passed. What
+// actually bounds the leak is that every later run sweeps again.
+func removeContainer(ctx context.Context, harness, id string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", "-v", id).CombinedOutput()
 	if err == nil {
 		return true
 	}
-	if !gone(id) {
+	if !gone(ctx, id) {
 		fmt.Fprintf(os.Stderr, "%s: reaping stray container %s: %v: %s\n",
 			harness, id, err, strings.TrimSpace(string(out)))
 	}
@@ -139,8 +163,8 @@ func removeContainer(harness, id string) bool {
 // gone reports whether the daemon no longer knows the container. A daemon that
 // will not answer counts as still there, so an unreachable daemon is reported as
 // the removal failure it is rather than mistaken for a lost race.
-func gone(id string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func gone(ctx context.Context, id string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "docker", "ps", "--all", "--quiet",
 		"--filter", "id="+id).Output()

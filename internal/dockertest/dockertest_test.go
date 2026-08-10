@@ -1,6 +1,7 @@
 package dockertest
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -93,10 +94,10 @@ func TestSweepStraysRemovesAnAgedContainerAndSparesAFreshOne(t *testing.T) {
 
 	SweepStrays("dockertest")
 
-	if !gone(aged) {
+	if !gone(context.Background(), aged) {
 		t.Errorf("aged container %s survived the sweep", aged)
 	}
-	if gone(fresh) {
+	if gone(context.Background(), fresh) {
 		t.Errorf("fresh container %s was reaped; a concurrent suite's live fixture would have been too", fresh)
 	}
 }
@@ -118,6 +119,6 @@ func plant(t *testing.T, started time.Time) string {
 		t.Fatalf("this test requires Docker to plant a container: %v", err)
 	}
 	id := strings.TrimSpace(string(out))
-	t.Cleanup(func() { removeContainer("dockertest", id) })
+	t.Cleanup(func() { removeContainer(context.Background(), "dockertest", id) })
 	return id
 }
