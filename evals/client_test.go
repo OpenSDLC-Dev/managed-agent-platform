@@ -214,7 +214,9 @@ func (s *stack) createSession(t *testing.T, agentID, envID string, resources []a
 	t.Helper()
 	body := map[string]any{"agent": agentID, "environment_id": envID}
 	// Omitted rather than sent empty: an absent resources[] is the shape every
-	// other trial creates with, and the two must not diverge here.
+	// trial creates with. Only a repository can be attached at create, so with
+	// repo-answer parked (#358) nothing reaches the branch below — keep it, or
+	// restoring the trial stops being a one-line change to tasks().
 	if len(resources) > 0 {
 		body["resources"] = resources
 	}

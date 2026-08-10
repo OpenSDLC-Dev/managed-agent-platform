@@ -893,7 +893,7 @@ secrets of the `evals` deployment environment — which admits only the default 
 dispatch cannot borrow the credential onto an unreviewed ref — and a break in the
 whole-session path therefore surfaces on the next scheduled run instead of at whoever's next
 manual one. That job carries the same fail-not-skip rule: with the secrets unset it is red,
-never green-and-silent, so it is red until a maintainer configures them.
+never green-and-silent — a green job means the suite ran and passed, never that it was skipped.
 
 Beside the evals sits the top-level `acceptance/` suite (plan 21): the define-outcomes
 doc example driven end-to-end through the latest Go SDK. Its deterministic rehearsal —

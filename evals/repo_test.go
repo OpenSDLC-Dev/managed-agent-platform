@@ -21,6 +21,12 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modeltest"
 )
 
+// PARKED: repoAnswer is not registered in tasks() — the fixture repository and
+// token this file needs have never existed, so the trial only ever reddened the
+// nightly. Everything below is kept intact for the restore; what that needs is
+// in #358. Read the rest of this file in that light: it describes the tier as it
+// will work again, not as anything that runs today.
+//
 // The e-repo-answer tier (docs/plan/25_git-repo-mounting.md, "Unit E"): the
 // github_repository chain against a real GitHub repository. Consent is the
 // suite's own RUN_EVALS, because this task costs what every other task costs —
