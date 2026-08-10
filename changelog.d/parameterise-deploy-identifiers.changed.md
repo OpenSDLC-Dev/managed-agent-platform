@@ -13,9 +13,12 @@
   and identities hands a reader a target list, and — the part that matters for an
   open-source project — ties the repository to a cluster nobody cloning it can
   reach. All eleven coordinates are now GitHub Actions **variables** (not
-  secrets, because they are not secret), created **before** this landed: the
-  reverse order lets any push to `main` deploy with `--project ""` and an image
-  tag with no repository. Three names deliberately stay literals —
+  secrets, because they are not secret), created **before** this landed. The
+  ordering matters, though not for the reason the pre-guard version of this
+  change would have had: the fail-fast step below ships in the same commit, so a
+  repository whose variables do not exist yet gets a red run at step two rather
+  than a deployment with `--project ""` — the ordering buys an unbroken `main`,
+  and the guard is what makes the broken case loud instead of silent. Three names deliberately stay literals —
   `K8S_NAMESPACE`, `K8S_SECRET` and `HELM_RELEASE` name the *chart's* own
   objects, and `K8S_SECRET` has to equal `existingSecret` in a file that is in
   git, so a variable would let the two drift into a release bound to a Secret
@@ -88,8 +91,12 @@
   of working. Masking them was rejected — a mask is a literal string replacement
   across the whole log, so the substitution that hides the project id also hides
   it inside every diagnostic that names it. What the move buys is what the issue
-  asked for: a clone carries no operator's coordinates, and `deploy/` reads as a
-  reference deployment rather than a half-edited template.
+  asked for, stated at the width it actually holds: a clone's **deployment
+  configuration** — the workflow, the values file, the runbook's commands — names
+  no operator, so `deploy/` reads as a reference deployment rather than a
+  half-edited template. A clone still carries the identifiers in
+  `docs/HISTORY.md`, which is tracked and which this change deliberately leaves
+  alone, because it is the record of what was actually run.
   `deploy/gcp/README.md` describes every command by variable and opens with the
   loader that puts them in an operator's shell, which is deliberately **not** the
   `gh variable list | eval` one-liner the issue sketched. That form has two

@@ -417,7 +417,7 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
 | creating `controlplane-api-key`, `database-url` and `model-providers` | a human, once — `bootstrap.sh` does not create these |
 | replacing the `model-providers` placeholder | a human, once |
-| setting the eleven Actions **variables** below | a human, once — and **before** the first run, not after: the workflow's second step refuses to go on without them, which is the good outcome; the bad one is setting them afterwards and having every push in between deploy with `--project ""` |
+| setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment |
 | build and push the four images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 
 **Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
@@ -510,13 +510,19 @@ mask is a literal string replacement across the whole log, so the same substitut
 hides the project id also hides it inside every diagnostic that names it — `cannot read
 Secret Manager secret 'x' in ***` is a worse error message than the one it replaces, and the
 same reasoning already keeps short values unmasked in the Secret step. What the move actually
-buys is the two things the issue asked for: a **clone** of this repository does not carry one
-operator's coordinates, and `deploy/` reads as a reference deployment instead of a
-half-edited template. Anyone determined to read a public build log was never the threat
-model.
+buys is the two things the issue asked for: a clone's **deployment configuration** — this
+workflow, this values file, the commands in this runbook — names no operator, and `deploy/`
+reads as a reference deployment instead of a half-edited template. Anyone determined to read
+a public build log was never the threat model.
 
-Commands below name the variables as the table does. `gh variable list` only prints a table
-and exports nothing, so load them into the shell first:
+Note the width of that claim, because the stronger one is not true: a clone **does** still
+carry the identifiers, in [docs/HISTORY.md](../../docs/HISTORY.md) and in git history, both
+of which this change leaves alone on purpose — the first is the record of what was actually
+run, and rewriting the second is not worth it for identifiers that are not credentials. What
+changed is that nothing you would *configure or execute* names them.
+
+Commands below name the variables as the table does. Load them into the shell first —
+`gh variable list` only prints a table and exports nothing:
 
 ```bash
 vars='GCP_PROJECT_ID GCP_ZONE GKE_CLUSTER ARTIFACT_REGISTRY WIF_PROVIDER
@@ -529,6 +535,14 @@ for v in $vars; do
 done
 for v in $vars; do eval ": \"\${$v:?did not load — see the table above}\""; done
 ```
+
+**`gh` reads whichever repository the current checkout points at**, which is the behaviour
+you want and the reason no `--repo` is written here: a fork's operator gets the fork's
+variables, and pinning `OpenSDLC-Dev/managed-agent-platform` into a public runbook would put
+back one of the coordinates this whole section exists to remove. The consequence is that this
+block belongs in a checkout of the repository you are deploying — run it somewhere else and
+it loads that repository's values, which will pass the assertion below while being the wrong
+deployment. `gh repo view --json nameWithOwner -q .nameWithOwner` is the one-line check.
 
 **The `unset` is the load-bearing line, and it goes first.** A partial load is the dangerous
 state, not a failed one: if `gh` errors on one name — an expired token, a variable renamed,

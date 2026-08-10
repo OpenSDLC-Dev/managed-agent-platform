@@ -9,8 +9,14 @@
 #
 # That run used this file with its five identifying values still written out.
 # They are placeholders now (see below) and the workflow supplies the real ones,
-# so the acceptance record covers every line here EXCEPT those five, and those
-# five are re-proved on every deploy by the step that reads the annotations back.
+# so the acceptance record covers every line here EXCEPT those five — and the
+# five are re-proved on every deploy, by two different means rather than one.
+# The three IDENTITIES are read back out of the cluster by the step after
+# `helm upgrade`, which compares each ServiceAccount's annotation against the
+# variable it came from. The two IMAGE halves are not read back and do not need
+# to be: an override that failed to land leaves `registry.invalid`, the pods
+# cannot pull, and `--wait --atomic` rolls the release back before that step is
+# reached.
 #
 # **It is a reference deployment, not this cluster's values file.** Every value
 # below that would name an operator — the image registry and repository, and the

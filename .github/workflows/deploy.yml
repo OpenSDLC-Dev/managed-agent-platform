@@ -218,6 +218,14 @@ jobs:
           # promises to catch a malformed coordinate BEFORE the job
           # authenticates, and a check that defers to a later failure does not
           # keep that promise.
+          #
+          # More than three segments is ACCEPTED, deliberately. Artifact Registry
+          # allows a path under a repository, so
+          # `LOCATION-docker.pkg.dev/PROJECT/REPOSITORY/team` is a real prefix
+          # somebody may configure; the chart's split takes the host off the
+          # front and hands the rest to `repository`, and the build below
+          # composes the same string, so the two cannot disagree about it. The
+          # check is "at least three, none of them empty", not "exactly three".
           case "$ARTIFACT_REGISTRY" in
             /* | */ | *//*)
               echo "::error::ARTIFACT_REGISTRY has an empty path segment — got '$ARTIFACT_REGISTRY'. It must be HOST/PROJECT/REPOSITORY with no leading or trailing slash, no doubled slash, and no https:// scheme."
