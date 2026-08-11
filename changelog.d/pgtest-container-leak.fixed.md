@@ -20,6 +20,9 @@
   suite's live database mid-run — a disk-space annoyance traded for a flaky suite. Six
   hours is three times the longest run the repo sanctions (`make eval` gives its binaries
   `-timeout 120m`, and they use `pgtest`); the price is that a stray outlives the run that
-  killed it, but it is reclaimed by a later run rather than by hand. The two properties
-  the fixtures deliberately had are preserved: no `--rm`, so a crashed container still
-  yields `containerDiag`'s state and logs, and `-v` on removal.
+  killed it, but it is reclaimed by a later run rather than by hand. Both properties the
+  fixtures deliberately had are preserved: `pgtest`, `blobtest` and `secretstest` still
+  refuse `--rm`, so a crashed container still yields `containerDiag`'s state and logs, and
+  every removal still passes `-v`. `gcstest` keeps the `--rm` it always had, which was
+  never cover for this: `--rm` removes a container that exits, and an abandoned fake
+  never does.
