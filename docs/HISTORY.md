@@ -38,7 +38,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
-## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (run 2026-08-10) — ✅ #43 passed; one plan criterion superseded by #363
+## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (runs 2026-08-10 and 2026-08-11) — ✅ #43 passed; the deferred work-item-pull criterion passed too (#363 closed)
 
 #43's acceptance criterion, quoted rather than paraphrased: *"An operator can
 issue and rotate an environment key, and a real `ant beta:worker` authenticates
@@ -91,11 +91,13 @@ afterwards; `docker ps -a` matched its start-of-run baseline exactly.
   surviving. Under the retired rotate-on-mint invariant (migration 0013), issuing
   host-b's key would already have revoked host-a's.
 
-**Deferred, and why — this plan's exit criterion, not #43's.** The plan's slice-3
-wording was stronger than the issue's: "poll *until it pulls a work item*". That
-step was **not run**, so plan 30 archives with one of its own criteria carried to
-[#363](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/363) rather
-than met.
+**Deferred on 2026-08-10, met on 2026-08-11 — this plan's exit criterion, not
+#43's.** The plan's slice-3 wording was stronger than the issue's: "poll *until
+it pulls a work item*". That step was not run on 2026-08-10, so plan 30 archived
+with one of its own criteria carried to
+[#363](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/363). The
+run below closes it. The paragraph that follows records why it could not run at
+the time, kept as written rather than rewritten in hindsight.
 
 The blocker is causal, not procedural. `queue.Poll` serves `kind = 'tool_exec'`
 only (`internal/queue/queue.go:314`), and while three production sites enqueue
@@ -110,12 +112,98 @@ session-create and message-post are `model_turn`, which no worker polls. So an
 item needs a model turn, and this checkout has no `model-providers.json` — STATE.md's
 standing "blocks every session" task, not something this plan introduced.
 
-Scope of what is still unproven, stated precisely rather than minimised:
-`TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable` pins the issued-key
+Scope of what was still unproven on 2026-08-10, stated precisely rather than
+minimised: `TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable` pins the issued-key
 authentication boundary, the empty-poll route and revocation over real HTTP — it
 does **not** pin queue delivery, work serialisation, or the tool runner. Those
 three, plus the real CLI's ability to claim an item, execute the tool in-process
-and settle it back on a console-issued key, are what #363 remains to prove.
+and settle it back on a console-issued key, were what #363 remained to prove.
+
+### The deferred step, run (2026-08-11) — ✅ #363 closed
+
+**The premise the deferral rested on was wrong, and checking it was the first
+step.** The 2026-08-10 note gave the blocker as "this checkout has no
+`model-providers.json`". **That statement was incorrect when it was written**, and
+it is recorded as such rather than reconciled: `.worktreeinclude` has listed
+`.env` and an unrooted `model-providers.json` since `d3b5b0d`, the unrooted
+pattern matches `deploy/compose/model-providers.json`, and this worktree was
+created on 2026-08-10 at 22:16:48 with both files already in it — before the run
+that said they were absent. Only a repo-*root* `model-providers.json` was ever
+missing, and nothing reads one: the brain takes `MODEL_PROVIDERS_PATH`, compose
+mounts the `deploy/compose/` copy. So the deferral's stated cause did not hold;
+the model route was configured the whole time, `.env` carrying a live
+`anthropic`-protocol route (`https://api.minimaxi.com/anthropic`, `MiniMax-M3`)
+and `deploy/compose/model-providers.json` the same endpoint and key.
+
+A read of the files still could not settle whether the credential worked, so the
+live tier was opted into for one turn: `RUN_LIVE_MODEL_TESTS=1 go test
+./internal/provider/anthropic/ -run TestIntegrationRealEndpoint` → **PASS in
+2.17s**, `real turn ok: 2 output tokens, stop_reason=end_turn, text="OK"`. (The
+"placeholder (real endpoint, fake key)" STATE.md task, which the 2026-08-10 note
+cited as the blocker, was introduced by `61d947d` and names the **GCP staging**
+Secret Manager version — `deploy/gcp/README.md` says so explicitly. #363 needs no
+GCP.)
+
+Same discipline as the first run: **not** the shared `deploy/compose` stack —
+that one had been up for three days — but a throwaway `postgres:16-alpine` on an
+ephemeral port, plus `cmd/controlplane` on `127.0.0.1:18081` and `cmd/brain`,
+both built from the branch, with the real `model-providers.json` handed to the
+brain by `MODEL_PROVIDERS_PATH`. `ant 1.21.0` was built from the read-only
+`anthropic-cli` checkout. Everything was torn down afterwards and `docker ps -a`
+diffed **identical** to its start-of-run baseline.
+
+- **Issue, again over the console API.**
+  `POST /api/oauth/organizations/default/environments/{env}/tokens` with
+  `{"name":"worker-01"}` → **200**, `Cache-Control: no-store`, `Pragma: no-cache`,
+  `{"access_token":"sk-map-env01-…" (56 chars), "expires_in":31536000}`. The `GET`
+  rendered `envkey_axrn…` / `worker-01` / `created_at` / `expires_at` (+1 year)
+  with `{total:1, limit:100, offset:0, has_more:false}` — no secret, no hash.
+- **A model turn produced the `agent.tool_use` no client can create from
+  scratch.** (The precise claim, since the paragraph above states it correctly
+  and an earlier draft of this line did not: a client confirmation *is* a wire
+  path that enqueues `tool_exec` — `internal/api/events.go` — but only by
+  releasing a tool use the brain already emitted.) A
+  `self_hosted` session created with an `initial_events` `user.message` ("Run the
+  shell command: `echo a363-worker-pull-ok`") was born `running`; four seconds
+  later the event log read
+  `user.message → session.status_running → span.model_request_start →
+  agent.tool_use → span.model_request_end`, the `agent.tool_use` carrying
+  `{"name":"bash","input":{"command":"echo a363-worker-pull-ok"},
+  "evaluated_permission":"allow"}`. That is the causal step the deferral was
+  about: the brain emitting it is what enqueues a `tool_exec` a worker can poll.
+- **The real CLI claimed, executed and settled it — on the console-issued key
+  alone.** `ant beta:worker poll --base-url … --environment-id …
+  --environment-key … --worker-id a363-host`, verbatim from its log:
+
+  ```
+  claimed work    component=work-poller work_id=work_744trc3xef9k5jd5mdvw0nek work_type=session
+  executing tool  component=session-tool-runner tool=bash tool_use_id=sevt_1t0v2wxqk8ycrhr01m3smr65 custom=false
+  dispatched tool tool=bash is_error=false posted=true
+  session idle after end_turn; stopping   max_idle=1m0s
+  ```
+
+  The queue item's own row shows the full lease lifecycle — `acknowledged_at`,
+  `started_at`, a `latest_heartbeat_at` a minute later, then
+  `stop_requested_at`/`stopped_at` and `state: "stopped"`.
+- **The result came back through the same credential, and the model read it.**
+  `user.tool_result` carried `text: "a363-worker-pull-ok\n\n"`, `is_error: false`,
+  and a `tool_use_id` equal to the `agent.tool_use` id above; the following
+  `agent.message` answered *"It printed: `a363-worker-pull-ok`"*. Session ended
+  `idle`, usage 1171 in / 45 out.
+
+So all three of the previously unproven properties — queue delivery, work
+serialisation, and the tool runner — are now driven end to end by a real `ant`
+binary authenticating with nothing but a console-issued key. **No *manual*
+database edits were made**, which is the issue's criterion: the platform wrote
+the session, event and work-item rows described above, as it must, and the only
+manual database access in the whole run was a read-only `pg_stat_activity` query
+issued *after* the acceptance, to check what had connected.
+
+**What this run does not cover.** Plan 30's slice 3 says "bring up
+`deploy/compose`", and neither run did — both stood up throwaway infrastructure
+instead, deliberately, to leave a long-running stack alone. The behavioural
+criterion is met; the stated procedure was substituted, and that substitution is
+recorded here rather than smoothed over.
 
 ## GCP continuous delivery — the mode-2 build → deploy → smoke sequence, by hand (run 2026-08-08) — ✅ passed
 

@@ -18,6 +18,5 @@ end to end (#45); #45's acceptance criterion is met at the end of slice 4.
       driver and its egress check.
 - [ ] Plan 29 slices 3–7 — confirmation gating; brain expansion and execution;
       vault credentials; networking; evals, `ant` acceptance, archive.
-- [ ] Replace the `model-providers` placeholder (real endpoint, fake key) with a
-      live route before anything runs a session. It also gates the one deferred
-      step of plan 30's acceptance (#363).
+- [ ] Replace the GCP staging `model-providers` placeholder (real endpoint, fake
+      key) with a live route before a session runs there (`deploy/gcp/README.md`).
