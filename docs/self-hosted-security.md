@@ -774,9 +774,11 @@ with tracking issues, not silent omissions:
   repo's plan 07. Three limits are stated rather than papered over: this is a
   management-credential surface, so it delegates no authority the management
   `x-api-key` did not already carry and there is no separate "can mint worker
-  keys" role; a key still cannot be scoped to less than its whole environment;
-  and the acceptance did not cover a worker *executing* a pulled tool call on
-  such a key, which needs a live model route
+  keys" role; and a key still cannot be scoped to less than its whole
+  environment. A third limit was lifted on 2026-08-11: the acceptance now also
+  covers a worker *executing* a pulled tool call on such a key — a real
+  `ant beta:worker` claimed a `tool_exec` item, ran `bash` in-process and settled
+  the result back, closing
   ([#363](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/363)).
   [#43](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/43)
 - **Sandbox `securityContext` / `runtimeClassName`** — **closed (#65).** The
