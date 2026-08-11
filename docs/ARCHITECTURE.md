@@ -674,8 +674,17 @@ repo-root `.env` under modeltest's consent rules — restated rather than import
 modeltest's MODEL_*-only contract stays closed.
 `internal/modeltest` owns the live-tier opt-in contract: `.env` supplies configuration,
 `RUN_LIVE_MODEL_TESTS`/`RUN_EVALS` supply consent, and opted-in-but-misconfigured fails
-rather than skips (`TierEnabled` serves `TestMain` callers). All of them are deliberately
-outside the coverage-gate denominator, as is `cmd/`.
+rather than skips (`TierEnabled` serves `TestMain` callers).
+`internal/dockertest` is the shared half of the four Dockerized fixtures above: `RunArgs`
+labels every container they start with its owning harness and its start time, and
+`SweepStrays` — called at the top of each `TestMain` — force-removes labelled containers
+older than six hours, with `-v`. Their own teardown is a `defer`, which a killed process
+never reaches, so without it a Ctrl-C or a `go test` timeout panic stranded a running
+container and its growing anonymous volume permanently (#346). Age is what distinguishes
+a corpse from a peer, since `go test ./...` runs those binaries concurrently and reaping
+on sight would take out a sibling suite's live database; six hours clears `make eval`'s
+`-timeout 120m` threefold, and needs no cooperation from a wrapper or an external reaper.
+All of them are deliberately outside the coverage-gate denominator, as is `cmd/`.
 
 The four `cmd/` binaries are env-config plus wiring: `controlplane` (serves the REST API;
 `CONTROLPLANE_ADDR` / `DATABASE_URL` / `CONTROLPLANE_API_KEY` + optional `BLOB_*` object

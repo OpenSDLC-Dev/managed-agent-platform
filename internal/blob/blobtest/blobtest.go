@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -56,8 +57,11 @@ const readyTimeout = 150 * time.Second
 // Main wraps testing.M: it starts the shared MinIO container, runs the suite,
 // and tears the container down. Use from TestMain: os.Exit(blobtest.Main(m)).
 // The start is attempted twice, with a fresh container in between (#265; the
-// retry's rationale is on pgtest.Main, whose rule this follows).
+// retry's rationale is on pgtest.Main, whose rule this follows). It opens by
+// reaping what an earlier killed run left behind, the defer below being
+// unreachable to one (#346; the rationale is in dockertest).
 func Main(m *testing.M) int {
+	dockertest.SweepStrays("blobtest")
 	containerID, err := startReady()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "blobtest: %v; retrying\n", err)
@@ -78,10 +82,10 @@ func startReady() (string, error) {
 	// No --rm: a container whose entrypoint crashes would be auto-removed by
 	// the daemon before containerDiag could read its state and logs — the one
 	// forensic a dead start leaves. Removal is wholly removeContainer's job.
-	out, err := exec.Command("docker", "run", "-d",
+	out, err := exec.Command("docker", dockertest.RunArgs("blobtest",
 		"-e", "MINIO_ROOT_USER="+RootUser,
 		"-e", "MINIO_ROOT_PASSWORD="+RootPassword,
-		"-p", "127.0.0.1:0:9000", Image, "server", "/data").Output()
+		"-p", "127.0.0.1:0:9000", Image, "server", "/data")...).Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

@@ -52,7 +52,7 @@ fmt-check:
 		exit 1; \
 	fi
 
-# Coverage denominator: logic packages only. internal/pgtest,
+# Coverage denominator: logic packages only. internal/pgtest, internal/dockertest,
 # internal/sandbox/sandboxtest, internal/modeltest, internal/blob/blobtest,
 # internal/blob/gcs/gcstest, internal/provider/providertest, internal/secrets/secretstest,
 # internal/secrets/gcpkms/gcpkmstest and internal/webtool/webtooltest are test support —
@@ -63,7 +63,7 @@ fmt-check:
 # gate, exactly as cmd/ main glue would.
 test:
 	@set -euo pipefail; \
-	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|sandboxtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest)$$' | paste -sd, -)"; \
+	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest)$$' | paste -sd, -)"; \
 	set -x; \
 	go test -count=1 -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
 

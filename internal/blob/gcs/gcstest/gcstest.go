@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
@@ -45,11 +46,15 @@ var (
 )
 
 // Main wraps testing.M: it starts the shared fake, runs the suite, and tears the
-// container down. Use from TestMain: os.Exit(gcstest.Main(m)).
+// container down. Use from TestMain: os.Exit(gcstest.Main(m)). It opens by
+// reaping what an earlier killed run left behind: the defer below is
+// unreachable to one, and --rm only removes a container that has exited, which
+// an abandoned fake never does (#346; the rationale is in dockertest).
 func Main(m *testing.M) int {
-	out, err := exec.Command("docker", "run", "--rm", "-d",
+	dockertest.SweepStrays("gcstest")
+	out, err := exec.Command("docker", dockertest.RunArgs("gcstest", "--rm",
 		"-p", "127.0.0.1:0:4443", Image,
-		"-scheme", "http", "-port", "4443").Output()
+		"-scheme", "http", "-port", "4443")...).Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

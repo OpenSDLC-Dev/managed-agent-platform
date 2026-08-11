@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
@@ -45,7 +46,13 @@ const readyTimeout = 150 * time.Second
 // a failed `docker run` can be load-induced (port programming races under a
 // crowded daemon); when the daemon is simply absent, the second attempt fails
 // in milliseconds and costs nothing.
+//
+// Teardown below is a defer, which a killed process never reaches, so the run
+// opens by reaping what an earlier killed run left (#346; dockertest holds the
+// whole rationale, including why a container young enough to be a peer's is
+// never touched).
 func Main(m *testing.M) int {
+	dockertest.SweepStrays("pgtest")
 	containerID, err := startReady()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pgtest: %v; retrying\n", err)
@@ -66,9 +73,9 @@ func startReady() (string, error) {
 	// No --rm: a container whose entrypoint crashes would be auto-removed by
 	// the daemon before containerDiag could read its state and logs — the one
 	// forensic a dead start leaves. Removal is wholly removeContainer's job.
-	out, err := exec.Command("docker", "run", "-d",
+	out, err := exec.Command("docker", dockertest.RunArgs("pgtest",
 		"-e", "POSTGRES_PASSWORD=test",
-		"-p", "127.0.0.1:0:5432", pgImage).Output()
+		"-p", "127.0.0.1:0:5432", pgImage)...).Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
