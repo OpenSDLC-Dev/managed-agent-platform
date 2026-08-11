@@ -353,6 +353,12 @@ func TestWorkItemsSessionIndexExists(t *testing.T) {
 //     where environment_id is payload the cascade cannot seek on.
 //   - `indrelid = to_regclass('environment_keys')` resolves the table through
 //     search_path, so a same-named table in another schema cannot stand in.
+//
+// The list is not exhaustive, and does not try to be. `USING hash
+// (environment_id)` satisfies every clause above and is accepted on purpose: a
+// hash index still serves the equality seeks this index exists for. What the
+// clauses enumerate is the shapes that carry the right name while failing the
+// job, not every shape the DDL could take.
 func TestEnvironmentKeysEnvironmentIndexExists(t *testing.T) {
 	pool := open(t, pgtest.FreshDB(t))
 	var exists bool
