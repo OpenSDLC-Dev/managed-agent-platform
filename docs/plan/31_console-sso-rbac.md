@@ -197,10 +197,9 @@ which consumes what lands here and must trail it.
   124) via `EnsureAPIKey` (auth.go:29–52).
 - One valid `x-api-key` is full management authority — the console API
   "delegates no authority the management key did not already hold, and is
-  not a separate permission tier" (docs/ARCHITECTURE.md:821–824). There is no
-  403 in the house error set: `errors.go` defines
-  `errInvalid`/`errNotFound`/`errAuth` only — a `permission_error` shape is
-  new with this plan.
+  not a separate permission tier" (docs/ARCHITECTURE.md:821–824). The house
+  error set (`errInvalid`/`errConflict`/`errNotFound`/`errAuth`) has no 403 —
+  a `permission_error` shape is new with this plan.
 - The authenticated principal is the `api_keys` row id, stored in context
   (`ctxKeyPrincipal`, errors.go:49–53) and consumed at exactly one site —
   `sessions.created_by` (sessions.go:596–600, 614–619; audit-only,
@@ -212,7 +211,8 @@ which consumes what lands here and must trail it.
   — consoleapi.go:31–32 explicitly warns a future off-`/v1` lane must
   re-derive that reasoning. Plan 30 shaped the namespace for this moment:
   the `oauth` segment and RFC 6749 responses were kept "compatible with a
-  real OAuth flow later (console OIDC is its own effort, console plan 08)".
+  real OAuth flow later (console OIDC is its own effort, console plan 08 —
+  …)".
 - `principal` has no table; `api_keys` has no owner column; nothing issues a
   management key at runtime (bootstrap env var only).
 
@@ -351,8 +351,8 @@ is defined). The matrix:
 
 Checks apply **only to the identity lane** (the key lane has no roles to
 check). Denial is the new house 403 — `{"type":"error","error":{"type":
-"permission_error","message":"…"}}` — joining `errInvalid`/`errNotFound`/
-`errAuth` in errors.go, mirroring the reference's error taxonomy (its scope
+"permission_error","message":"…"}}` — joining the house error set in
+errors.go, mirroring the reference's error taxonomy (its scope
 failures are 403 `permission_error`). Uniform per lane: the message names the
 required role, never the caller's.
 
