@@ -9,8 +9,11 @@ issue: "#43"
 > [#363](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/363),
 > which ran it on 2026-08-11: a real `ant beta:worker` claimed a `tool_exec`
 > item, executed `bash` in-process and settled the result back, on a
-> console-issued key. **Every criterion of this plan is now met.** The delivery
-> record is [docs/HISTORY.md](../HISTORY.md) and CHANGELOG.md.
+> console-issued key. **That deferred criterion is now met** — with one
+> substitution recorded in HISTORY: slice 3 below says "bring up
+> `deploy/compose`", and both acceptance runs used throwaway infrastructure
+> instead, to leave a long-running stack alone. The delivery record is
+> [docs/HISTORY.md](../HISTORY.md) and CHANGELOG.md.
 
 # Environment keys: console-issued, named, revocable (plan 30)
 

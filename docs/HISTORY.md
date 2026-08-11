@@ -38,7 +38,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
-## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (runs 2026-08-10 and 2026-08-11) — ✅ #43 and every plan criterion passed (#363 closed)
+## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (runs 2026-08-10 and 2026-08-11) — ✅ #43 passed; the deferred work-item-pull criterion passed too (#363 closed)
 
 #43's acceptance criterion, quoted rather than paraphrased: *"An operator can
 issue and rotate an environment key, and a real `ant beta:worker` authenticates
@@ -121,15 +121,22 @@ and settle it back on a console-issued key, were what #363 remained to prove.
 
 ### The deferred step, run (2026-08-11) — ✅ #363 closed
 
-**The premise the deferral rested on had expired, and checking it was the first
-step.** The 2026-08-10 note said "this checkout has no `model-providers.json`".
-That was true of the checkout that run used; it is not a property of the repo.
-`.worktreeinclude` copies both `.env` and `model-providers.json` into every
-worktree, and both were present here — `.env` carrying a live
-`anthropic`-protocol route (`https://api.minimaxi.com/anthropic`, `MiniMax-M3`),
-`deploy/compose/model-providers.json` the same endpoint and key. A read of the
-files could not settle whether the credential still worked, so the live tier was
-opted into for one turn: `RUN_LIVE_MODEL_TESTS=1 go test
+**The premise the deferral rested on was wrong, and checking it was the first
+step.** The 2026-08-10 note gave the blocker as "this checkout has no
+`model-providers.json`". **That statement was incorrect when it was written**, and
+it is recorded as such rather than reconciled: `.worktreeinclude` has listed
+`.env` and an unrooted `model-providers.json` since `d3b5b0d`, the unrooted
+pattern matches `deploy/compose/model-providers.json`, and this worktree was
+created on 2026-08-10 at 22:16:48 with both files already in it — before the run
+that said they were absent. Only a repo-*root* `model-providers.json` was ever
+missing, and nothing reads one: the brain takes `MODEL_PROVIDERS_PATH`, compose
+mounts the `deploy/compose/` copy. So the deferral's stated cause did not hold;
+the model route was configured the whole time, `.env` carrying a live
+`anthropic`-protocol route (`https://api.minimaxi.com/anthropic`, `MiniMax-M3`)
+and `deploy/compose/model-providers.json` the same endpoint and key.
+
+A read of the files still could not settle whether the credential worked, so the
+live tier was opted into for one turn: `RUN_LIVE_MODEL_TESTS=1 go test
 ./internal/provider/anthropic/ -run TestIntegrationRealEndpoint` → **PASS in
 2.17s**, `real turn ok: 2 output tokens, stop_reason=end_turn, text="OK"`. (The
 "placeholder (real endpoint, fake key)" STATE.md task, which the 2026-08-10 note
@@ -151,7 +158,11 @@ diffed **identical** to its start-of-run baseline.
   `{"access_token":"sk-map-env01-…" (56 chars), "expires_in":31536000}`. The `GET`
   rendered `envkey_axrn…` / `worker-01` / `created_at` / `expires_at` (+1 year)
   with `{total:1, limit:100, offset:0, has_more:false}` — no secret, no hash.
-- **A model turn produced the item no wire path can manufacture.** A
+- **A model turn produced the `agent.tool_use` no client can create from
+  scratch.** (The precise claim, since the paragraph above states it correctly
+  and an earlier draft of this line did not: a client confirmation *is* a wire
+  path that enqueues `tool_exec` — `internal/api/events.go` — but only by
+  releasing a tool use the brain already emitted.) A
   `self_hosted` session created with an `initial_events` `user.message` ("Run the
   shell command: `echo a363-worker-pull-ok`") was born `running`; four seconds
   later the event log read
@@ -182,10 +193,17 @@ diffed **identical** to its start-of-run baseline.
 
 So all three of the previously unproven properties — queue delivery, work
 serialisation, and the tool runner — are now driven end to end by a real `ant`
-binary authenticating with nothing but a console-issued key. **No database edits
-were made at any point**; the only manual database access in the whole run was a
-read-only `pg_stat_activity` query issued *after* the acceptance, to check what
-had connected.
+binary authenticating with nothing but a console-issued key. **No *manual*
+database edits were made**, which is the issue's criterion: the platform wrote
+the session, event and work-item rows described above, as it must, and the only
+manual database access in the whole run was a read-only `pg_stat_activity` query
+issued *after* the acceptance, to check what had connected.
+
+**What this run does not cover.** Plan 30's slice 3 says "bring up
+`deploy/compose`", and neither run did — both stood up throwaway infrastructure
+instead, deliberately, to leave a long-running stack alone. The behavioural
+criterion is met; the stated procedure was substituted, and that substitution is
+recorded here rather than smoothed over.
 
 ## GCP continuous delivery — the mode-2 build → deploy → smoke sequence, by hand (run 2026-08-08) — ✅ passed
 
