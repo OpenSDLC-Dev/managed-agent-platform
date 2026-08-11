@@ -3,10 +3,14 @@ status: archived
 issue: "#43"
 ---
 
-> **Archived 2026-08-10.** #43 is met and closed. One criterion of this plan —
-> slice 3's "poll until it pulls a work item" — was **not** met, and is
-> superseded by [#363](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/363).
-> The delivery record is [docs/HISTORY.md](../HISTORY.md) and CHANGELOG.md.
+> **Archived 2026-08-10; completed 2026-08-11.** #43 is met and closed. One
+> criterion of this plan — slice 3's "poll until it pulls a work item" — was not
+> met at archive time and was carried to
+> [#363](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/363),
+> which ran it on 2026-08-11: a real `ant beta:worker` claimed a `tool_exec`
+> item, executed `bash` in-process and settled the result back, on a
+> console-issued key. **Every criterion of this plan is now met.** The delivery
+> record is [docs/HISTORY.md](../HISTORY.md) and CHANGELOG.md.
 
 # Environment keys: console-issued, named, revocable (plan 30)
 
