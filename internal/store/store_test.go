@@ -321,15 +321,76 @@ func TestWorkItemsSessionIndexExists(t *testing.T) {
 // 0001 created no index for it and 0013's partial unique index had been serving
 // both; 0021 dropped that one, so its plain replacement is load-bearing rather
 // than incidental — without this pin a later migration could drop it silently.
+//
+// It matches on the index's NAME, not on `indexdef LIKE '%(environment_id)%'`.
+// The dropped environment_keys_one_live satisfied that pattern too
+// (`… USING btree (environment_id) WHERE (revoked_at IS NULL)`), so a database
+// where 0021 created nothing and dropped nothing still passed it — the one state
+// this pin exists to catch.
+//
+// The name alone is not enough either, so the shape is read out of the catalog
+// rather than pattern-matched out of pg_get_indexdef, and every clause below
+// names a way the pin would otherwise pass over an index that breaks something:
+//
+//   - `indisunique = false` — a plain UNIQUE index on (environment_id) is not
+//     partial and carries the right name and column, yet admits one row per
+//     environment at all, live or revoked. That is stricter than the constraint
+//     0021 retired and would make per-host keys impossible.
+//   - `indpred IS NULL` — a **partial** index is the subtler variant. It imposes
+//     no cardinality limit of its own (that took 0013's UNIQUE), so nothing
+//     would break at insert time; it simply fails to cover the rows it excludes.
+//     One carrying `WHERE revoked_at IS NULL` serves the live-key listing but
+//     not the cascade, so deleting an environment would still scan its revoked
+//     history — the load this index is here to carry.
+//   - `indisvalid AND indisready` — a `CREATE INDEX CONCURRENTLY` that fails
+//     partway leaves a catalog row with the right name, columns and predicate
+//     that the planner will not use. An unusable index is the no-index case
+//     wearing the right label.
+//   - `indnatts = 1 AND indnkeyatts = 1`, and indkey[0] resolved through
+//     pg_attribute — exactly one column, a real column rather than an expression
+//     (an expression has attnum 0 and matches nothing), and that column is
+//     environment_id. This is what rejects `(name) INCLUDE (environment_id)`,
+//     where environment_id is payload the cascade cannot seek on.
+//   - `indrelid = to_regclass('environment_keys')` resolves the table through
+//     search_path, so a same-named table in another schema cannot stand in.
+//
+// The list is not exhaustive, and does not try to be. `USING hash
+// (environment_id)` satisfies every clause above and is accepted on purpose: a
+// hash index still serves the equality seeks this index exists for. What the
+// clauses enumerate is the shapes that carry the right name while failing the
+// job, not every shape the DDL could take.
 func TestEnvironmentKeysEnvironmentIndexExists(t *testing.T) {
 	pool := open(t, pgtest.FreshDB(t))
 	var exists bool
 	if err := pool.QueryRow(context.Background(),
-		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = 'environment_keys' AND indexdef LIKE '%(environment_id)%')`).Scan(&exists); err != nil {
-		t.Fatalf("query pg_indexes: %v", err)
+		`SELECT EXISTS (
+		   SELECT 1 FROM pg_index i
+		     JOIN pg_class c ON c.oid = i.indexrelid
+		    WHERE i.indrelid = to_regclass('environment_keys')
+		      AND c.relname = 'environment_keys_environment_idx'
+		      AND i.indisunique = false
+		      AND i.indisvalid AND i.indisready
+		      AND i.indpred IS NULL
+		      AND i.indnatts = 1
+		      AND i.indnkeyatts = 1
+		      AND i.indkey[0] = (SELECT a.attnum FROM pg_attribute a
+		                          WHERE a.attrelid = i.indrelid AND a.attname = 'environment_id'))`).Scan(&exists); err != nil {
+		t.Fatalf("query pg_index: %v", err)
 	}
 	if !exists {
-		t.Errorf("no index on environment_keys(environment_id)")
+		t.Errorf("no valid, non-unique, single-column environment_keys_environment_idx on environment_keys(environment_id)")
+	}
+	// And the invariant it replaced is gone: several live keys per environment is
+	// the model now, so a database still carrying 0013's partial unique index
+	// would reject the second host's key at insert time.
+	var oneLive bool
+	if err := pool.QueryRow(context.Background(),
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes
+		    WHERE tablename = 'environment_keys' AND indexname = 'environment_keys_one_live')`).Scan(&oneLive); err != nil {
+		t.Fatalf("query pg_indexes: %v", err)
+	}
+	if oneLive {
+		t.Errorf("environment_keys_one_live survived 0021; per-host keys cannot exist under it")
 	}
 }
 
