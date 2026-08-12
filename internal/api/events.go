@@ -333,9 +333,16 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		// resume into no work at all: UnansweredPlatformToolNames counts only
 		// agent.tool_use, so it schedules nothing, while HasUnansweredToolUse
 		// below counts the MCP call and so declines to wake the brain either.
-		// Unreachable today — nothing stamps a permission on an MCP call, so
-		// none can be gated — and it is the mcp_exec arm of the four-way
-		// settlement that closes it, in the slice that first emits one. If the only
+		// The session is left running rather than idle, which is the worse of
+		// the two — a running session also refuses archive and delete — and only
+		// a user.interrupt gets out of it.
+		//
+		// Unreachable today: the brain stamps evaluated_permission inside its
+		// agent.tool_use branch alone, classify() resolves no name to the MCP
+		// event type, and a client may not post one, so no MCP call can be
+		// gated. The mcp_exec arm of the four-way settlement closes it, and has
+		// to land in the same change that first stamps a permission on an MCP
+		// call — not merely before one is stamped. If the only
 		// remaining unanswered tools are client-executed custom tools, enqueue
 		// nothing — the client's user.custom_tool_result resumes the turn
 		// (mirroring the non-ask suspend, which never runs an executor for a
