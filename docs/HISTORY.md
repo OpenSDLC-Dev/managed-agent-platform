@@ -313,6 +313,83 @@ the defect, not the hardening.
 
 ---
 
+## Console SSO and RBAC (plan 31, #56) — acceptance against a real Casdoor token and the real `ant` CLI (run 2026-08-12) — ✅ passed; slice 5 moved to #378
+
+Plan 31's slice 6 criterion, quoted rather than paraphrased: *"Compose stack with
+the `iam` profile up; a real token minted from the bundled Casdoor (scripted
+code+PKCE against its OP endpoints); the chain proven end to end: viewer token
+403s a mutation → admin token issues an environment key over the console API → a
+real `ant beta:worker poll --environment-key …` authenticates with it."* Every
+step below is that chain, driven over real HTTP against the shipped
+`deploy/compose` stack with `--profile iam`, on a database Casdoor had never
+seeded. No manual database edits: every operator action is an HTTP call, and the
+only processes touching Postgres are the control plane and Casdoor themselves.
+
+**Tokens are real, and minted the way a console would.** The seeded application
+carries `authorization_code` and `refresh_token` and no password grant, on
+purpose, so there is no shortcut to a token — the run scripts the full
+authorization-code + PKCE exchange (S256 challenge, verifier held back until the
+code exchange) against Casdoor's own OP endpoints. One mechanic is worth
+recording because it cost a cycle and no struct would have revealed it: Casdoor's
+login handler reads the OAuth parameters from the **query string** (Beego's
+`c.Input()`, which merges query and form values but not a JSON body) while the
+credentials ride the JSON body. Sending everything in the body answers
+`Grant_type:  is not supported in this application` — an empty grant type read
+from a query string that carried nothing, which reads like a misconfigured
+application and is not one.
+
+Both minted tokens decode exactly as the platform requires:
+`iss=http://localhost:8000` (byte-equal to `IDENTITY_OIDC_ISSUER`),
+`aud=["map-console-dev"]` (the application's client id), and
+`groups=["map/platform-admins"]` / `["map/platform-read"]` — strings spelled
+`organization/name`, which is what `IDENTITY_ROLE_MAP` keys on and the reason the
+`groups` claim is mapped rather than `roles`.
+
+- **The machine lane is untouched.** `x-api-key` on `GET /v1/agents` → **200**,
+  with the identity lane fully configured. This is the property every slice of
+  this plan promised and the one a regression would be quietest about.
+- **Admin does what an admin does.** `POST /v1/agents` → **200**
+  (`agent_hx6dxtf16m43369mpmpmqzta`); `POST /v1/environments` → **200**
+  (`env_rkjmgx2tdf1k7v7ta89jbsan`), both authenticated by nothing but the Casdoor
+  token.
+- **Viewer is refused the same mutations.** `POST /v1/agents` → **403**, body
+  `{"type":"permission_error","message":"this route requires the developer role"}`;
+  `POST /v1/environments` → **403**. The same token reads: `GET /v1/agents` →
+  **200**. Role, not authentication, is what separates the two.
+- **The console key surface is admin-only.** Viewer on
+  `GET /api/oauth/organizations/default/environments/{env}/tokens` → **403**.
+- **Admin issues an environment key over that surface** → **200**, an
+  `sk-map-env01-…` of 56 characters, and the list then shows it.
+- **A real `ant` authenticates with it.** `ant` 1.21.0, built from the read-only
+  `anthropic-cli` checkout, run as
+  `ant beta:worker poll --base-url http://127.0.0.1:8080 --environment-id … --environment-key …`:
+  no error, no output, and exit **124** — the timeout killing a poller that was
+  still long-polling, which is what an idle environment looks like from the
+  worker side. The control plane logged no 401 in that window. Because silence is
+  weak evidence, the same lane was then called directly:
+  `GET /v1/environments/{env}/work/poll?beta=true&block_ms=500` with that key →
+  **200**, body `null` (no work, correct for an idle environment).
+- **Forged and revoked keys are refused, through the real CLI and directly.** A
+  forged key → `ant` stops with `401 … {"message":"invalid environment key",
+  "type":"authentication_error"}`; the direct call agrees, **401**. Revoking the
+  real key (`POST …/{token_id}/revoke` → **204**, list drops to zero) then makes
+  that same key **401** on both paths. Per-host revocation works against a
+  credential a human minted with a token from the bundled IdP.
+
+**Slice 5 did not ship and was not faked.** The api-key issuance surface is gated
+in the plan on a live observation of the reference console's key-management
+dialect, which needs an authenticated Anthropic console account and creates real
+credentials in it. The observation could not be made in this session, so the
+plan's own provision applied — the slice moved to **#378** with the recording it
+needs written down, rather than shipping an invented dialect. Plan 31 archives on
+what it shipped: slices 1–4 and this acceptance.
+
+Machine state: the stack was brought up and torn down with `--profile iam down -v`;
+the containers predating the run (`managed-agent-console`, `kind-control-plane`,
+an exited jaeger, and one created-but-not-started container) were left untouched.
+
+---
+
 ## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (runs 2026-08-10 and 2026-08-11) — ✅ #43 passed; the deferred work-item-pull criterion passed too (#363 closed)
 
 #43's acceptance criterion, quoted rather than paraphrased: *"An operator can
