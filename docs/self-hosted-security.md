@@ -663,6 +663,36 @@ restore-ordering constraint you own:
   bytes for a software-protected key and 8192 for an HSM one — and the platform
   reads it from the key at startup.
 
+### 8. Principal retention
+
+Human sign-in ([#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56),
+docs/plan/31_console-sso-rbac.md — landing incrementally, off unless you set
+`IDENTITY_MODE`) records each person who has authenticated in a `principals` row:
+their issuer, subject, email, display name, first-seen and `last_seen_at`. It holds
+**no roles and no tokens** — authorization is re-read from the provider's claims on
+every request — so the row is a record that someone appeared, never a grant. Deleting
+one revokes nothing and creating one grants nothing; revoking the person at your IdP
+is what ends their access, as soon as the token they hold expires.
+
+**No retention timer ships, and that is deliberate.** An erasure regime wants the row
+gone quickly; an audit regime wants it stable for as long as a `sessions.created_by`
+value still needs to resolve to a name. Either default is silently wrong for the
+other, so the schedule is yours:
+
+```sql
+-- Everyone who has not signed in for 180 days. Pick your own interval.
+DELETE FROM principals WHERE last_seen_at < now() - interval '180 days';
+```
+
+Two things to know before you run it. `sessions.created_by` is **plain text, not a
+foreign key**, so deleting a principal never cascades into session history — the
+audit trail survives, with the creator as an opaque `principal_…` id that no longer
+resolves to a person, which is usually exactly what an erasure request wants.
+And a deleted person who signs in again is simply provisioned afresh, with a **new**
+id: older sessions keep pointing at the old one. If your audit obligations need
+`created_by` to stay resolvable, retain rows at least as long as you retain sessions,
+and delete the sessions first.
+
 ### Host and runtime isolation
 
 The sandbox runs untrusted, model-directed commands, so the strength of the

@@ -110,7 +110,7 @@ func newStack(t *testing.T, scripts [][]provider.Chunk) *stack {
 	// the brain (rubric snapshots) and the executor (deliverable harvest) —
 	// the same sharing the compose stack gets from MinIO.
 	blobs := blobtest.Mem()
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, nil))
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, nil, nil))
 	t.Cleanup(srv.Close)
 
 	scripted := &scriptedModel{scripts: scripts}

@@ -66,6 +66,16 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 	case cfg.Mode == ModeOIDC && cfg.AssertionHeader != "":
 		return nil, fmt.Errorf("identity: mode %s takes no assertion header, got %q",
 			ModeOIDC, cfg.AssertionHeader)
+	case cfg.Mode == ModeTrustedProxy &&
+		(strings.EqualFold(cfg.AssertionHeader, "authorization") ||
+			strings.EqualFold(cfg.AssertionHeader, "x-api-key")):
+		// Checked here as well as in ConfigFromEnv, for the reason the role map is:
+		// New is the package boundary and a Config can be built literally. Naming a
+		// machine credential's header would invert this mode's own discipline —
+		// Authorization is never a human credential here — and hand a worker's
+		// Bearer key to the verifier.
+		return nil, fmt.Errorf("identity: assertion header must not be %q; that header carries a machine credential",
+			cfg.AssertionHeader)
 	}
 	if len(cfg.RoleMap) == 0 {
 		return nil, errors.New("identity: a role map is required")
@@ -305,6 +315,22 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	if std.Subject == "" {
 		return Identity{}, reject("missing sub")
 	}
+	// A 255-BYTE bound, from OIDC Core §2's "MUST NOT exceed 255 ASCII characters
+	// in length". The two coincide for any conforming subject, since ASCII is one
+	// byte per character, and the byte form is the stricter of the two for a
+	// non-conforming one — which is the direction to err in, and cheaper than
+	// counting runes. A non-ASCII sub is deliberately NOT refused outright: the
+	// spec says it should not happen, but denying every human on a provider that
+	// emits one would be a large penalty for a producer's conformance bug that
+	// costs this package nothing. Refused rather than truncated —
+	// the sub is half the key a principal row is stored under, so shortening one
+	// would merge two humans who share a prefix. Refusing costs nothing real: no
+	// conforming provider mints a longer one, while an unbounded sub rides inside
+	// the 16 KiB token cap and past PostgreSQL's B-tree tuple limit, which would
+	// turn every request for that identity into a 500 at provisioning time.
+	if len(std.Subject) > maxSubjectBytes {
+		return Identity{}, reject("subject exceeds the size limit")
+	}
 	if std.Expiry == nil {
 		return Identity{}, reject("missing exp")
 	}
@@ -322,7 +348,15 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	}
 
 	return Identity{
-		Issuer:  std.Issuer,
+		// The CONFIGURED issuer, not the one the token carried. For every provider
+		// but one they are the same string — acceptedIssuers returns a single value
+		// and the check above is an equality. For Google they are not: it mints two
+		// spellings of one issuer identity, and returning whichever arrived would
+		// make a consumer that keys on (issuer, subject) — internal/api's principals
+		// row does exactly that — store one human twice and hand them a different
+		// principal id depending on the spelling. One issuer identity, one
+		// canonical value: the operator's.
+		Issuer:  v.issuer,
 		Subject: std.Subject,
 		// Bounded, because these two are the only fields whose length the token
 		// alone decides, and a later slice persists them. Under maxTokenBytes a

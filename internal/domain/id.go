@@ -40,6 +40,13 @@ const (
 	// private identifier would widen all of them (checkID validates shape, not
 	// which resource the prefix names).
 	PrefixEnvironmentKey = "envkey"
+	// PrefixPrincipal names an authenticated human's identity-bookkeeping row
+	// (#56, plan 31). It joins the same private family for the same reason:
+	// a principal id never appears on a /v1 path — it is written to
+	// sessions.created_by for audit and never rendered — so admitting it to
+	// knownPrefixes would widen the id shape every wire path accepts in order
+	// to validate something no wire path ever receives.
+	PrefixPrincipal = "principal"
 )
 
 // altSessionPrefix is accepted on input for wire compatibility: some Anthropic

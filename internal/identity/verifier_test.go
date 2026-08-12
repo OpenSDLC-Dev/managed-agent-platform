@@ -1717,8 +1717,13 @@ func TestVerifyAcceptsGooglesLegacyIssuerForm(t *testing.T) {
 			t.Errorf("Verify with iss %q: %v — Google mints both forms", iss, err)
 			continue
 		}
-		if got.Issuer != iss {
-			t.Errorf("Issuer = %q, want the value the token carried, %q", got.Issuer, iss)
+		// Both spellings collapse to the CONFIGURED one. They are one issuer
+		// identity, and a consumer keying on (issuer, subject) — internal/api's
+		// principals row — would otherwise store this human twice and hand them a
+		// different id depending on which spelling their token happened to carry.
+		if got.Issuer != google {
+			t.Errorf("Issuer = %q for a token carrying %q, want the configured %q",
+				got.Issuer, iss, google)
 		}
 	}
 
@@ -1732,6 +1737,62 @@ func TestVerifyAcceptsGooglesLegacyIssuerForm(t *testing.T) {
 		if _, err := other.Verify(context.Background(), idp.Mint(t, claims)); err == nil {
 			t.Errorf("iss %q verified against a verifier configured for %q", iss, idp.Issuer())
 		}
+	}
+}
+
+// TestVerifyRefusesAnOversizedSubject pins OIDC Core §2's own bound, and pins
+// that it REFUSES rather than truncates. The sub is half the key a principal row
+// is stored under, so a shortened one would merge two humans sharing a prefix;
+// an unbounded one rides inside the token cap and past PostgreSQL's B-tree tuple
+// limit, turning every request for that identity into a 500 at provisioning.
+func TestVerifyRefusesAnOversizedSubject(t *testing.T) {
+	t.Parallel()
+	idp, clock, v := verifierXFixture(t)
+
+	claims := verifierXClaims(idp, clock)
+	claims["sub"] = strings.Repeat("s", identity.MaxSubjectBytesForTest+1)
+	if _, err := v.Verify(context.Background(), idp.Mint(t, claims)); err == nil {
+		t.Error("Verify accepted a subject over the OIDC bound")
+	}
+
+	// Exactly at the bound is fine, and arrives whole — the refusal is a ceiling,
+	// not a licence to shorten.
+	at := strings.Repeat("s", identity.MaxSubjectBytesForTest)
+	claims["sub"] = at
+	got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+	if err != nil {
+		t.Fatalf("Verify at the bound: %v", err)
+	}
+	if got.Subject != at {
+		t.Errorf("Subject was altered: len %d, want %d", len(got.Subject), len(at))
+	}
+}
+
+// TestNewRefusesAMachineCredentialsHeader pins trusted_proxy mode's discipline at
+// construction. Naming Authorization as the assertion header would invert the
+// mode's own rule — that Authorization is never a human credential — and hand a
+// worker's Bearer environment key to the verifier.
+func TestNewRefusesAMachineCredentialsHeader(t *testing.T) {
+	t.Parallel()
+	idp, clock := verifierXIdP(t)
+
+	for _, header := range []string{"Authorization", "authorization", "X-Api-Key", "x-api-key"} {
+		cfg := verifierXConfig(idp, clock, func(c *identity.Config) {
+			c.Mode = identity.ModeTrustedProxy
+			c.AssertionHeader = header
+		})
+		if _, err := identity.New(context.Background(), cfg); err == nil {
+			t.Errorf("New accepted %q as the assertion header", header)
+		}
+	}
+
+	// A real proxy header still works, so the check refuses only the two names.
+	cfg := verifierXConfig(idp, clock, func(c *identity.Config) {
+		c.Mode = identity.ModeTrustedProxy
+		c.AssertionHeader = "x-goog-iap-jwt-assertion"
+	})
+	if _, err := identity.New(context.Background(), cfg); err != nil {
+		t.Errorf("New refused a legitimate assertion header: %v", err)
 	}
 }
 

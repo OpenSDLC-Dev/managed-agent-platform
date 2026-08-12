@@ -81,7 +81,7 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 	if err != nil {
 		t.Fatalf("local.New: %v", err)
 	}
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher))
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, nil))
 	t.Cleanup(srv.Close)
 
 	// One default route. Config.Model is the id the *endpoint* receives, so it

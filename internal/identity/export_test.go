@@ -13,6 +13,7 @@ const (
 	MaxIdPBytesForTest     = maxIdPBytes
 	MaxKeysForTest         = maxKeys
 	MaxTokenBytesForTest   = maxTokenBytes
+	MaxSubjectBytesForTest = maxSubjectBytes
 	ClockSkewLeewayForTest = clockSkewLeeway
 	MaxRoleValuesForTest   = maxRoleValues
 	MaxClaimDepthForTest   = maxClaimDepth

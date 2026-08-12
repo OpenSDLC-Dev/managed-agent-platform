@@ -253,6 +253,64 @@ what the two kinds of assertion are, and each presence check is qualified by the
 fixture's own key-set host, so the guard no longer depends on a scheduling
 property a later `t.Parallel()` could quietly remove.
 
+## Console SSO and RBAC (plan 31, #56) — slice 2's review: the lane leak, and one finding refuted, 2026-08-12
+
+The Codex pass over the identity lane returned five findings. Four were confirmed
+against the source and fixed in the same PR; the changelog carries the behaviour.
+Recorded here is what a changelog cannot hold.
+
+**The machine-first rule leaked through a repeated header field.** Both
+dispatchers asked "is an x-api-key offered?" with `Header.Get`, which returns
+only the first value of a field HTTP permits to repeat. A request carrying an
+empty `x-api-key` ahead of a wrong one, plus a valid admin token, therefore read
+as offering no key and was served through the **human** lane — proven rather than
+argued: with the old predicate restored,
+`TestARepeatedAPIKeyHeaderCannotChangeLanes` reports 200 where the invariant says
+401. It is not a privilege escalation (the human lane still verifies the token
+and still checks the role), but it is precisely the lane confusion the ordering
+exists to prevent, and it would also deny a legitimate machine caller whose proxy
+prepended an empty field. The fix pairs a predicate that reads every value with a
+`requireAPIKey` that refuses a duplicate outright, because the bug's real cause
+was answering "which value wins" in two places with two different rules.
+
+**A fix from the previous round created a defect one layer down.** Accepting
+Google's two issuer spellings (third round, slice 1) made `Verify` treat them as
+one issuer while `principals` — keyed `(issuer, subject)` — treated them as two,
+so one human could hold two rows and two ids depending on which spelling their
+token carried. `Identity.Issuer` now reports the configured value. Worth stating
+because the second defect was invisible while slice 1 stood alone: nothing
+persisted the field until slice 2 existed.
+
+**Refuted: a grandfathered environment key shaped like a JWT is a defect.** The
+reviewer noted that a pre-0021 key whose operator-chosen value happens to carry
+two dots is routed to human verification and denied there. That is the
+documented, accepted residual — `dualAuth`'s own comment, the changelog entry,
+and docs/self-hosted-security.md §6's instruction to reissue those keys all
+describe it, and the outcome is a 401, fail-closed, never an over-authorization.
+The reviewer's extension — that such a value might *also* be a currently valid
+token from the deployment's IdP — requires an operator to have set an environment
+key to a real JWT, and would grant only that human's own authority.
+
+**The verifier then caught the fix's own documentation overclaiming.** Running two
+control-plane binaries side by side — `origin/main` and the branch — against the
+same Postgres, it measured the one request shape where "with identity disabled the
+platform is byte-for-byte what it was" is false: a repeated `x-api-key` field. The
+refusal above lives in `requireAPIKey` and is **not** conditional on a verifier, so
+`valid` + a second empty field went from 200 to 401, and `empty` + `valid` changed
+its message, in a deployment that never configures identity. Four documents and two
+code comments asserted the unqualified promise; one of them —
+docs/ARCHITECTURE.md's `server.go` row — described the duplicate refusal in detail
+and then contradicted itself two sentences later. The check was left unconditional
+and the claims were scoped instead: gating it on the verifier would leave the same
+malformed request answered differently in two deployments, and would re-open the
+gap between "which value selects the lane" and "which value authenticates" that
+the round's first finding was about. `TestIdentityDisabledIsUnchanged` now pins the
+exception with no verifier present — red on a copy with the refusal removed
+("message = \"missing x-api-key header\", want the ambiguous-credential refusal").
+The general lesson is the one the round keeps repeating: a hardening that can only
+deny still changes behaviour, and a doc that rounds it off to "nothing changed" is
+the defect, not the hardening.
+
 ---
 
 ## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (runs 2026-08-10 and 2026-08-11) — ✅ #43 passed; the deferred work-item-pull criterion passed too (#363 closed)

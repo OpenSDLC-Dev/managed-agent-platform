@@ -15,6 +15,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
@@ -43,70 +44,74 @@ type server struct {
 // secrets; nil deploys without one — vault metadata CRUD serves, while the
 // secret-bearing paths (credential create/update with secret fields, the
 // validate probe) answer with a configuration error (fails closed, plan 12 D1).
-func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) http.Handler {
+// verifier authenticates humans; nil is IDENTITY_MODE=disabled, and the surface
+// is then what it was before plan 31 — no lane, no role check — on every
+// request shape but one: requireAPIKey refuses a repeated x-api-key field in
+// every mode, deliberately (see dispatchManagementAuth).
+func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, verifier *identity.Verifier) http.Handler {
 	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs, cipher: cipher}
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /v1/agents", s.handle(s.createAgent))
-	mux.HandleFunc("GET /v1/agents", s.handle(s.listAgents))
-	mux.HandleFunc("GET /v1/agents/{id}", s.handle(s.getAgent))
-	mux.HandleFunc("POST /v1/agents/{id}", s.handle(s.updateAgent)) // update is POST on the wire, not PATCH
-	mux.HandleFunc("GET /v1/agents/{id}/versions", s.handle(s.listAgentVersions))
-	mux.HandleFunc("POST /v1/agents/{id}/archive", s.handle(s.archiveAgent))
+	mux.HandleFunc("POST /v1/agents", s.handle(identity.RoleNone, s.createAgent))
+	mux.HandleFunc("GET /v1/agents", s.handle(identity.RoleNone, s.listAgents))
+	mux.HandleFunc("GET /v1/agents/{id}", s.handle(identity.RoleNone, s.getAgent))
+	mux.HandleFunc("POST /v1/agents/{id}", s.handle(identity.RoleNone, s.updateAgent)) // update is POST on the wire, not PATCH
+	mux.HandleFunc("GET /v1/agents/{id}/versions", s.handle(identity.RoleNone, s.listAgentVersions))
+	mux.HandleFunc("POST /v1/agents/{id}/archive", s.handle(identity.RoleNone, s.archiveAgent))
 
-	mux.HandleFunc("POST /v1/environments", s.handle(s.createEnvironment))
-	mux.HandleFunc("GET /v1/environments", s.handle(s.listEnvironments))
-	mux.HandleFunc("GET /v1/environments/{id}", s.handle(s.getEnvironment))
-	mux.HandleFunc("POST /v1/environments/{id}", s.handle(s.updateEnvironment))
-	mux.HandleFunc("DELETE /v1/environments/{id}", s.handle(s.deleteEnvironment))
-	mux.HandleFunc("POST /v1/environments/{id}/archive", s.handle(s.archiveEnvironment))
+	mux.HandleFunc("POST /v1/environments", s.handle(identity.RoleNone, s.createEnvironment))
+	mux.HandleFunc("GET /v1/environments", s.handle(identity.RoleNone, s.listEnvironments))
+	mux.HandleFunc("GET /v1/environments/{id}", s.handle(identity.RoleNone, s.getEnvironment))
+	mux.HandleFunc("POST /v1/environments/{id}", s.handle(identity.RoleNone, s.updateEnvironment))
+	mux.HandleFunc("DELETE /v1/environments/{id}", s.handle(identity.RoleNone, s.deleteEnvironment))
+	mux.HandleFunc("POST /v1/environments/{id}/archive", s.handle(identity.RoleNone, s.archiveEnvironment))
 
-	mux.HandleFunc("POST /v1/sessions", s.handle(s.createSession))
-	mux.HandleFunc("GET /v1/sessions", s.handle(s.listSessions))
-	mux.HandleFunc("GET /v1/sessions/{id}", s.handle(s.getSession))
-	mux.HandleFunc("POST /v1/sessions/{id}", s.handle(s.updateSession))
-	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handle(s.deleteSession))
-	mux.HandleFunc("POST /v1/sessions/{id}/archive", s.handle(s.archiveSession))
+	mux.HandleFunc("POST /v1/sessions", s.handle(identity.RoleNone, s.createSession))
+	mux.HandleFunc("GET /v1/sessions", s.handle(identity.RoleNone, s.listSessions))
+	mux.HandleFunc("GET /v1/sessions/{id}", s.handle(identity.RoleNone, s.getSession))
+	mux.HandleFunc("POST /v1/sessions/{id}", s.handle(identity.RoleNone, s.updateSession))
+	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handle(identity.RoleNone, s.deleteSession))
+	mux.HandleFunc("POST /v1/sessions/{id}/archive", s.handle(identity.RoleNone, s.archiveSession))
 
-	mux.HandleFunc("POST /v1/sessions/{id}/events", s.handle(s.sendSessionEvents))
-	mux.HandleFunc("GET /v1/sessions/{id}/events", s.handle(s.listSessionEvents))
-	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", s.streamSessionEvents)
+	mux.HandleFunc("POST /v1/sessions/{id}/events", s.handle(identity.RoleNone, s.sendSessionEvents))
+	mux.HandleFunc("GET /v1/sessions/{id}/events", s.handle(identity.RoleNone, s.listSessionEvents))
+	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", roleGate(identity.RoleNone, s.streamSessionEvents))
 
-	mux.HandleFunc("GET /v1/sessions/{id}/resources", s.handle(s.listSessionResources))
-	mux.HandleFunc("POST /v1/sessions/{id}/resources", s.handle(s.addSessionResource))
-	mux.HandleFunc("GET /v1/sessions/{id}/resources/{rid}", s.handle(s.getSessionResource))
-	mux.HandleFunc("POST /v1/sessions/{id}/resources/{rid}", s.handle(s.updateSessionResource))
-	mux.HandleFunc("DELETE /v1/sessions/{id}/resources/{rid}", s.handle(s.deleteSessionResource))
+	mux.HandleFunc("GET /v1/sessions/{id}/resources", s.handle(identity.RoleNone, s.listSessionResources))
+	mux.HandleFunc("POST /v1/sessions/{id}/resources", s.handle(identity.RoleNone, s.addSessionResource))
+	mux.HandleFunc("GET /v1/sessions/{id}/resources/{rid}", s.handle(identity.RoleNone, s.getSessionResource))
+	mux.HandleFunc("POST /v1/sessions/{id}/resources/{rid}", s.handle(identity.RoleNone, s.updateSessionResource))
+	mux.HandleFunc("DELETE /v1/sessions/{id}/resources/{rid}", s.handle(identity.RoleNone, s.deleteSessionResource))
 
-	mux.HandleFunc("POST /v1/vaults", s.handle(s.createVault))
-	mux.HandleFunc("GET /v1/vaults", s.handle(s.listVaults))
-	mux.HandleFunc("GET /v1/vaults/{id}", s.handle(s.getVault))
-	mux.HandleFunc("POST /v1/vaults/{id}", s.handle(s.updateVault))
-	mux.HandleFunc("DELETE /v1/vaults/{id}", s.handle(s.deleteVault))
-	mux.HandleFunc("POST /v1/vaults/{id}/archive", s.handle(s.archiveVault))
-	mux.HandleFunc("POST /v1/vaults/{id}/credentials", s.handle(s.createVaultCredential))
-	mux.HandleFunc("GET /v1/vaults/{id}/credentials", s.handle(s.listVaultCredentials))
-	mux.HandleFunc("GET /v1/vaults/{id}/credentials/{cid}", s.handle(s.getVaultCredential))
-	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}", s.handle(s.updateVaultCredential))
-	mux.HandleFunc("DELETE /v1/vaults/{id}/credentials/{cid}", s.handle(s.deleteVaultCredential))
-	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}/archive", s.handle(s.archiveVaultCredential))
-	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}/mcp_oauth_validate", s.handle(s.validateVaultCredential))
+	mux.HandleFunc("POST /v1/vaults", s.handle(identity.RoleNone, s.createVault))
+	mux.HandleFunc("GET /v1/vaults", s.handle(identity.RoleNone, s.listVaults))
+	mux.HandleFunc("GET /v1/vaults/{id}", s.handle(identity.RoleNone, s.getVault))
+	mux.HandleFunc("POST /v1/vaults/{id}", s.handle(identity.RoleNone, s.updateVault))
+	mux.HandleFunc("DELETE /v1/vaults/{id}", s.handle(identity.RoleNone, s.deleteVault))
+	mux.HandleFunc("POST /v1/vaults/{id}/archive", s.handle(identity.RoleNone, s.archiveVault))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials", s.handle(identity.RoleNone, s.createVaultCredential))
+	mux.HandleFunc("GET /v1/vaults/{id}/credentials", s.handle(identity.RoleNone, s.listVaultCredentials))
+	mux.HandleFunc("GET /v1/vaults/{id}/credentials/{cid}", s.handle(identity.RoleNone, s.getVaultCredential))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}", s.handle(identity.RoleNone, s.updateVaultCredential))
+	mux.HandleFunc("DELETE /v1/vaults/{id}/credentials/{cid}", s.handle(identity.RoleNone, s.deleteVaultCredential))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}/archive", s.handle(identity.RoleNone, s.archiveVaultCredential))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}/mcp_oauth_validate", s.handle(identity.RoleNone, s.validateVaultCredential))
 
-	mux.HandleFunc("POST /v1/skills", s.handle(s.createSkill))
-	mux.HandleFunc("GET /v1/skills", s.handle(s.listSkills))
-	mux.HandleFunc("GET /v1/skills/{id}", s.handle(s.getSkill))
-	mux.HandleFunc("DELETE /v1/skills/{id}", s.handle(s.deleteSkill))
-	mux.HandleFunc("POST /v1/skills/{id}/versions", s.handle(s.createSkillVersion))
-	mux.HandleFunc("GET /v1/skills/{id}/versions", s.handle(s.listSkillVersions))
-	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}", s.handle(s.getSkillVersion))
-	mux.HandleFunc("DELETE /v1/skills/{id}/versions/{version}", s.handle(s.deleteSkillVersion))
-	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}/content", s.downloadSkillVersion) // streams the archive; not a typed handler
+	mux.HandleFunc("POST /v1/skills", s.handle(identity.RoleNone, s.createSkill))
+	mux.HandleFunc("GET /v1/skills", s.handle(identity.RoleNone, s.listSkills))
+	mux.HandleFunc("GET /v1/skills/{id}", s.handle(identity.RoleNone, s.getSkill))
+	mux.HandleFunc("DELETE /v1/skills/{id}", s.handle(identity.RoleNone, s.deleteSkill))
+	mux.HandleFunc("POST /v1/skills/{id}/versions", s.handle(identity.RoleNone, s.createSkillVersion))
+	mux.HandleFunc("GET /v1/skills/{id}/versions", s.handle(identity.RoleNone, s.listSkillVersions))
+	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}", s.handle(identity.RoleNone, s.getSkillVersion))
+	mux.HandleFunc("DELETE /v1/skills/{id}/versions/{version}", s.handle(identity.RoleNone, s.deleteSkillVersion))
+	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}/content", roleGate(identity.RoleNone, s.downloadSkillVersion)) // streams the archive; not a typed handler
 
-	mux.HandleFunc("POST /v1/files", s.handle(s.createFile))
-	mux.HandleFunc("GET /v1/files", s.handle(s.listFiles))
-	mux.HandleFunc("GET /v1/files/{id}", s.handle(s.getFile))
-	mux.HandleFunc("DELETE /v1/files/{id}", s.handle(s.deleteFile))
-	mux.HandleFunc("GET /v1/files/{id}/content", s.downloadFile) // streams the object; not a typed handler
+	mux.HandleFunc("POST /v1/files", s.handle(identity.RoleNone, s.createFile))
+	mux.HandleFunc("GET /v1/files", s.handle(identity.RoleNone, s.listFiles))
+	mux.HandleFunc("GET /v1/files/{id}", s.handle(identity.RoleNone, s.getFile))
+	mux.HandleFunc("DELETE /v1/files/{id}", s.handle(identity.RoleNone, s.deleteFile))
+	mux.HandleFunc("GET /v1/files/{id}/content", roleGate(identity.RoleNone, s.downloadFile)) // streams the object; not a typed handler
 
 	// The console API — off the /v1 wire, mirroring the reference console's own
 	// private path so a console-facing endpoint has a convention rather than an
@@ -114,9 +119,17 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) htt
 	// dispatchAuth's default lane: no other lane's predicate can match an /api/
 	// path — they test a /v1/ prefix, or (the gate's) exact equality against
 	// "/internal/v1/gate/config". consoleapi.go states the reasoning in full.
-	mux.HandleFunc("POST "+consoleTokensPath, noStore(s.handle(s.createEnvironmentKey)))
-	mux.HandleFunc("GET "+consoleTokensPath, s.handle(s.listEnvironmentKeys))
-	mux.HandleFunc("POST "+consoleRevokePath, s.handleNoContent(s.revokeEnvironmentKey))
+	// The role mechanism's first real use, and the only annotated routes in
+	// slice 2: issuing a worker credential is the credential surface the
+	// reference gates behind console roles, and the whole SECTION is gated —
+	// list included — because knowing which hosts hold keys, and their names, is
+	// itself the inventory an attacker would want. `admin` rather than
+	// `developer` is a local judgment recorded as INFERRED in docs/DIVERGENCES.md:
+	// the reference's Developer role can manage API keys, so a future recording
+	// may justify relaxing this.
+	mux.HandleFunc("POST "+consoleTokensPath, noStore(s.handle(identity.RoleAdmin, s.createEnvironmentKey)))
+	mux.HandleFunc("GET "+consoleTokensPath, s.handle(identity.RoleAdmin, s.listEnvironmentKeys))
+	mux.HandleFunc("POST "+consoleRevokePath, s.handleNoContent(identity.RoleAdmin, s.revokeEnvironmentKey))
 	for _, pattern := range []string{consoleTokensPath, consoleRevokePath} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, methodNotAllowed(r))
@@ -128,7 +141,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) htt
 	// lane in dispatchAuth) and fetches its networking policy + resolved
 	// credentials. The method-less pattern keeps the wire error envelope on a
 	// non-GET.
-	mux.HandleFunc("GET "+gateconfig.Path, s.handle(s.getGateConfig))
+	mux.HandleFunc("GET "+gateconfig.Path, s.handle(identity.RoleNone, s.getGateConfig))
 	mux.HandleFunc(gateconfig.Path, func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, methodNotAllowed(r))
 	})
@@ -164,14 +177,14 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) htt
 	// per path below) runs before any ServeMux path-cleaning or subtree-slash
 	// redirect. Splitting the routes across nested muxes let those redirects
 	// answer an unauthenticated request before auth ran.
-	mux.HandleFunc("GET /v1/environments/{id}/work", s.handle(s.listWork))
-	mux.HandleFunc("GET /v1/environments/{id}/work/poll", s.pollWork)             // emits trace headers; not a typed handler
-	mux.HandleFunc("GET /v1/environments/{id}/work/stats", s.handle(s.statsWork)) // literal segment beats {work_id}
-	mux.HandleFunc("GET /v1/environments/{id}/work/{work_id}", s.handle(s.getWork))
-	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}", s.handle(s.updateWork)) // metadata patch
-	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/ack", s.handle(s.ackWork))
-	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/heartbeat", s.handle(s.heartbeatWork))
-	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/stop", s.handleNoContent(s.stopWork))
+	mux.HandleFunc("GET /v1/environments/{id}/work", s.handle(identity.RoleNone, s.listWork))
+	mux.HandleFunc("GET /v1/environments/{id}/work/poll", roleGate(identity.RoleNone, s.pollWork))   // emits trace headers; not a typed handler
+	mux.HandleFunc("GET /v1/environments/{id}/work/stats", s.handle(identity.RoleNone, s.statsWork)) // literal segment beats {work_id}
+	mux.HandleFunc("GET /v1/environments/{id}/work/{work_id}", s.handle(identity.RoleNone, s.getWork))
+	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}", s.handle(identity.RoleNone, s.updateWork)) // metadata patch
+	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/ack", s.handle(identity.RoleNone, s.ackWork))
+	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/heartbeat", s.handle(identity.RoleNone, s.heartbeatWork))
+	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}/stop", s.handleNoContent(identity.RoleNone, s.stopWork))
 	// Method-less 405 fallbacks. No explicit ".../work/poll" or ".../work/stats"
 	// entry: it would be ambiguous against "GET .../work/{work_id}" (more specific
 	// in path, less in method — neither dominates, so the mux panics). The
@@ -195,7 +208,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) htt
 		writeError(w, r, errNotFound("no such endpoint: %s", r.URL.Path))
 	})
 
-	return withRequestID(withTracing(dispatchAuth(pool, mux)))
+	return withRequestID(withTracing(dispatchAuth(pool, verifier, mux)))
 }
 
 // dispatchAuth picks the auth scheme by path and runs it before the router, so
@@ -203,13 +216,21 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) htt
 // API paths take the Authorization: Bearer environment key; the session events
 // subtree and the skill read routes are dual-auth (a worker's Bearer key or the
 // management x-api-key); everything else takes the management x-api-key.
-func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
+func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) http.Handler {
 	work := requireEnvironmentKey(pool, next)
-	mgmt := requireAPIKey(pool, next)
+	mgmt := dispatchManagementAuth(pool, v, next)
 	gate := requireGateToken(pool, next)
-	sessionEvents := dispatchSessionEventsAuth(pool, next)
-	skillReads := dualAuth(requireEnvironmentKey(pool, next), mgmt)
-	fileReads := dualAuth(requireEnvironmentKey(pool, next), mgmt)
+	// Built once and shared by every lane that can reach a human: the verifier
+	// is safe for concurrent use and the middleware holds no per-request state.
+	// nil when identity is disabled, which is what makes every dual-auth branch
+	// below collapse to exactly its previous behaviour.
+	var human http.Handler
+	if v != nil {
+		human = requireIdentity(pool, v, next)
+	}
+	sessionEvents := dispatchSessionEventsAuth(pool, v, human, next)
+	skillReads := dualAuth(v, requireEnvironmentKey(pool, next), human, mgmt)
+	fileReads := dualAuth(v, requireEnvironmentKey(pool, next), human, mgmt)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Classify on the escaped path, splitting only on real '/' — the segment
 		// structure ServeMux routes on (an encoded %2F stays within one segment).
@@ -237,18 +258,95 @@ func dispatchAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			skillReads.ServeHTTP(w, r)
 		case r.Method == http.MethodGet && isFileReadPath(p):
 			fileReads.ServeHTTP(w, r)
+		case isConsolePath(p):
+			// Explicit, though it resolves exactly as the default arm does.
+			// consoleapi.go's header comment argued that /api/ needs no arm
+			// because every other predicate is a /v1/ test or an exact match on
+			// the gate path — and asked that "a future off-/v1 lane must
+			// re-check this rather than assume the prefix rule covers
+			// everything". This is that lane, and this arm is the re-check made
+			// permanent: the console namespace's auth is now a stated fact at
+			// the dispatcher rather than a property inherited from a fallthrough.
+			mgmt.ServeHTTP(w, r)
 		default:
 			mgmt.ServeHTTP(w, r)
 		}
 	})
 }
 
+// dispatchManagementAuth is the management arm's credential dispatch: the
+// machine key first, the human lane second, and today's 401 when neither is
+// offered (#56, plan 31).
+//
+// Order is the security property. A non-empty x-api-key wins outright and keeps
+// its frozen semantics — full authority, no role model — because a key IS its
+// authority, which is the reference's own model and what bootstrap, CI and BYO
+// automation depend on. Only when no key is offered does the human lane get to
+// look, so an assertion header or a Bearer riding alongside a management key can
+// never vouch for it, and a caller cannot downgrade a route's role requirement
+// by attaching a second credential.
+//
+// With identity disabled this is requireAPIKey itself, unwrapped — no lane, no
+// role check, no dispatch, which is the contract IDENTITY_MODE=disabled carries.
+// That contract is byte-for-byte on every request shape but one: the duplicate
+// x-api-key refusal inside requireAPIKey is unconditional, so a repeated field
+// that header order used to resolve is now a 401 even with identity off. It is
+// deliberately not gated on v — one rule in both places is what keeps lane
+// selection and authentication from disagreeing about which value is the key,
+// and gating it would make the same malformed request answer differently in two
+// deployments. No client sends one; the change only ever denies.
+func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) http.Handler {
+	mgmt := requireAPIKey(pool, next)
+	if v == nil {
+		return mgmt
+	}
+	human := requireIdentity(pool, v, next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if apiKeyOffered(r) {
+			mgmt.ServeHTTP(w, r)
+			return
+		}
+		if _, ok := identityCredential(r, v); ok {
+			human.ServeHTTP(w, r)
+			return
+		}
+		// Neither credential: requireAPIKey produces the same "missing
+		// x-api-key" 401 it always has. Deliberately not a new message — an
+		// unauthenticated caller learns nothing about whether SSO is enabled.
+		mgmt.ServeHTTP(w, r)
+	})
+}
+
 // dualAuth picks between a worker's environment-key lane and management auth
 // by the rule dispatchSessionEventsAuth documents: the env lane only when a
 // Bearer is present AND no non-empty x-api-key is; otherwise management.
-func dualAuth(env, mgmt http.Handler) http.Handler {
+//
+// With identity enabled the Bearer branch splits once more, because two
+// different credentials now arrive in the same header. A JWT silhouette (two
+// dots) goes to the human lane; anything else stays the worker's environment
+// key. The discrimination is one-way safe: an environment key this platform
+// minted is `sk-map-env01-` + base64url, which has no dots at all, so a real key
+// can never be read as a JWT. The reverse — a JWT misread as an environment key
+// — cannot happen either, since the check is on the JWT shape.
+//
+// The residual case is a GRANDFATHERED pre-0021 key, whose value the operator
+// chose and which could in principle contain two dots. It would misroute to the
+// human lane and fail verification there: a 401, fail-closed, never an
+// over-authorization. docs/self-hosted-security.md §6 already tells operators to
+// reissue those keys, and the list shows them by their empty name and absent
+// expiry.
+//
+// In trusted_proxy mode Bearer is never a human credential (identityCredential
+// reads only the assertion header), so this branch stays exactly what it was and
+// the assertion is consulted afterwards, inside the management arm — machine
+// lanes first, always.
+func dualAuth(v *identity.Verifier, env, human, mgmt http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := bearerToken(r); ok && r.Header.Get("x-api-key") == "" {
+		if token, ok := bearerToken(r); ok && !apiKeyOffered(r) {
+			if human != nil && v.Mode() == identity.ModeOIDC && identity.LooksLikeJWT(token) {
+				human.ServeHTTP(w, r)
+				return
+			}
 			env.ServeHTTP(w, r)
 			return
 		}
@@ -270,8 +368,52 @@ func dualAuth(env, mgmt http.Handler) http.Handler {
 // on the environment lane, which still validates the key and scopes it to its own
 // environment. Mutating session CRUD (create/update/delete/archive/list) is not
 // routed here, so the environment key never reaches it.
-func dispatchSessionEventsAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
-	return dualAuth(requireEnvironmentKeyForSession(pool, next), requireAPIKey(pool, next))
+func dispatchSessionEventsAuth(pool *pgxpool.Pool, v *identity.Verifier, human, next http.Handler) http.Handler {
+	return dualAuth(v, requireEnvironmentKeyForSession(pool, next), human,
+		dispatchManagementAuth(pool, v, next))
+}
+
+// apiKeyOffered reports whether the request carries a usable management key —
+// the question every lane decision turns on, asked in one place so the two
+// dispatchers cannot answer it differently.
+//
+// It reads EVERY x-api-key field, not Header.Get's first. HTTP lets a field
+// repeat, Go's server preserves each value in order, and Get returns only value
+// zero — so `x-api-key:` (empty) ahead of a real one would read as "no key
+// offered" and move a machine caller onto a lane the machine-first rule exists
+// to keep them off.
+//
+// A REPEATED field counts as offered whatever its values, so it lands on the key
+// lane, where requireAPIKey refuses it outright. That pairing is the point: no
+// real client sends a credential header twice, and answering "which value wins"
+// in two places with two different rules is what produced the bug this helper
+// fixes. One rule — a duplicate is an ambiguous credential, and an ambiguous
+// credential is a 401.
+//
+// A single empty value still counts as absent, which is the documented
+// pre-existing rule dispatchSessionEventsAuth relies on: it is not a usable
+// credential, and treating it as one would knock a Bearer worker off its lane.
+//
+// The Authorization header has the same duplication exposure and needs no such
+// helper: bearerToken reads Get, so a leading empty field makes the request look
+// like it carries no Bearer at all — which denies, never over-authorizes.
+func apiKeyOffered(r *http.Request) bool {
+	values := r.Header.Values("x-api-key")
+	if len(values) > 1 {
+		return true
+	}
+	return len(values) == 1 && values[0] != ""
+}
+
+// isConsolePath reports whether p is under the off-wire /api/ console namespace.
+//
+// A prefix test, not an exact match on the two console patterns: the namespace
+// is the unit that dispatches, so a route added to consoleapi.go later joins the
+// same lane by existing rather than by someone remembering to widen this. The
+// 405 and 404 fallbacks registered on those patterns are covered too, which is
+// what keeps an unauthenticated caller from learning a path exists.
+func isConsolePath(p string) bool {
+	return p == "/api" || strings.HasPrefix(p, "/api/")
 }
 
 // isWorkPath reports whether p is under a work API route:
@@ -396,12 +538,41 @@ func methodNotAllowed(r *http.Request) *apiError {
 		"method " + r.Method + " is not allowed on " + r.URL.Path}
 }
 
+// roleGate is the adapters' min parameter for the handful of routes that cannot
+// use an adapter — the streaming and header-writing handlers, which own their
+// own response. Same check, same place (beside the path), so the completeness
+// test slice 3 adds can read every route's requirement from one file.
+func roleGate(min identity.Role, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := requireRole(r.Context(), min); err != nil {
+			writeError(w, r, err)
+			return
+		}
+		h(w, r)
+	}
+}
+
 // handle adapts a typed handler to http.HandlerFunc: JSON out, error envelope
 // on failure. The reference returns 200 for every successful call it answers
 // with a body, including creates; the bodiless exception is Stop, which uses
 // handleNoContent.
-func (s *server) handle(fn func(*http.Request) (any, error)) http.HandlerFunc {
+//
+// min is the route's authorization requirement, and it sits here — beside the
+// path, at the single place every route is declared — for the reason
+// requireEnvironmentKeyForSession already established: authorization is checked
+// where the route is defined, not somewhere a reader has to go find. It applies
+// to the identity lane alone; requireRole is a no-op on every machine lane.
+//
+// identity.RoleNone means "not yet annotated", and it DENIES on the identity
+// lane (see requireRole). Plan 31 slice 2 registers almost everything that way
+// on purpose: the lane is born fail-closed and slice 3 relaxes each route as it
+// annotates it, so a route that is forgotten stays shut rather than open.
+func (s *server) handle(min identity.Role, fn func(*http.Request) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := requireRole(r.Context(), min); err != nil {
+			writeError(w, r, err)
+			return
+		}
 		v, err := fn(r)
 		if err != nil {
 			writeError(w, r, err)
@@ -413,8 +584,12 @@ func (s *server) handle(fn func(*http.Request) (any, error)) http.HandlerFunc {
 
 // handleNoContent adapts a typed handler whose success carries no body: the
 // same error envelope as handle, but a bodiless 204 instead of 200 + JSON.
-func (s *server) handleNoContent(fn func(*http.Request) error) http.HandlerFunc {
+func (s *server) handleNoContent(min identity.Role, fn func(*http.Request) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := requireRole(r.Context(), min); err != nil {
+			writeError(w, r, err)
+			return
+		}
 		if err := fn(r); err != nil {
 			writeError(w, r, err)
 			return

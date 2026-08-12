@@ -69,6 +69,16 @@ func authenticate(ctx context.Context, pool *pgxpool.Pool, key string) (string, 
 // request context as the audit principal (sessions.created_by).
 func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A repeated field is refused before the value is read. HTTP allows one,
+		// no real client sends one, and Header.Get would silently pick the first —
+		// so without this the answer to "which key authenticated?" would depend on
+		// header order, and it would differ from the answer apiKeyOffered gives
+		// when choosing the lane. One rule in both places: a duplicate credential
+		// is ambiguous, and ambiguous is a 401.
+		if len(r.Header.Values("x-api-key")) > 1 {
+			writeError(w, r, errAuth("multiple x-api-key headers"))
+			return
+		}
 		key := r.Header.Get("x-api-key")
 		if key == "" {
 			writeError(w, r, errAuth("missing x-api-key header"))
@@ -87,7 +97,26 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	})
 }
 
+// principalFrom is the audit answer to "who made this request" — the value
+// sessions.created_by records. It resolves either lane's principal: the api key's
+// name on the machine lane, and the human's `principal_` id on the identity lane
+// (plan 31 slice 2, #56).
+//
+// Reading only ctxKeyPrincipal was the pre-plan-31 shape, when a machine key was
+// the only thing that could reach a mutation. Left that way, the moment slice 3
+// lets a human create a session the row would record NO creator at all — silently,
+// since created_by is nullable and nothing checks it. The whole point of a stable
+// `principal_` id is that an audit trail can name the human it belongs to.
+//
+// The machine lane wins when both are somehow set, matching dispatch: only one is
+// ever populated today, and if that ever changed, the credential that
+// authenticated the request is the machine one.
 func principalFrom(ctx context.Context) string {
-	p, _ := ctx.Value(ctxKeyPrincipal).(string)
-	return p
+	if p, _ := ctx.Value(ctxKeyPrincipal).(string); p != "" {
+		return p
+	}
+	if p, ok := identityFrom(ctx); ok {
+		return p.ID
+	}
+	return ""
 }
