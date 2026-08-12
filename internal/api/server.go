@@ -177,7 +177,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	// redirect. Splitting the routes across nested muxes let those redirects
 	// answer an unauthenticated request before auth ran.
 	mux.HandleFunc("GET /v1/environments/{id}/work", s.handle(identity.RoleNone, s.listWork))
-	mux.HandleFunc("GET /v1/environments/{id}/work/poll", s.pollWork)                                // emits trace headers; not a typed handler
+	mux.HandleFunc("GET /v1/environments/{id}/work/poll", roleGate(identity.RoleNone, s.pollWork))   // emits trace headers; not a typed handler
 	mux.HandleFunc("GET /v1/environments/{id}/work/stats", s.handle(identity.RoleNone, s.statsWork)) // literal segment beats {work_id}
 	mux.HandleFunc("GET /v1/environments/{id}/work/{work_id}", s.handle(identity.RoleNone, s.getWork))
 	mux.HandleFunc("POST /v1/environments/{id}/work/{work_id}", s.handle(identity.RoleNone, s.updateWork)) // metadata patch

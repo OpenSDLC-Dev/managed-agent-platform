@@ -315,8 +315,14 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	if std.Subject == "" {
 		return Identity{}, reject("missing sub")
 	}
-	// OIDC Core §2: a subject identifier "MUST NOT exceed 255 ASCII characters in
-	// length". Enforced rather than assumed, and REFUSED rather than truncated —
+	// A 255-BYTE bound, from OIDC Core §2's "MUST NOT exceed 255 ASCII characters
+	// in length". The two coincide for any conforming subject, since ASCII is one
+	// byte per character, and the byte form is the stricter of the two for a
+	// non-conforming one — which is the direction to err in, and cheaper than
+	// counting runes. A non-ASCII sub is deliberately NOT refused outright: the
+	// spec says it should not happen, but denying every human on a provider that
+	// emits one would be a large penalty for a producer's conformance bug that
+	// costs this package nothing. Refused rather than truncated —
 	// the sub is half the key a principal row is stored under, so shortening one
 	// would merge two humans who share a prefix. Refusing costs nothing real: no
 	// conforming provider mints a longer one, while an unbounded sub rides inside

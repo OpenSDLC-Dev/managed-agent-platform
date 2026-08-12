@@ -594,7 +594,7 @@ or `b64` header is refused outright and equally early, since go-jose permits `cr
 separately honours a bare `b64` (verifying over the raw payload) while RFC 7797 §7 forbids `b64` in
 a JWT at all; `iss` is
 exact, `aud` must contain the configured audience, `azp` is checked when `aud` carries several,
-and non-empty `sub` and `exp` are required because go-jose checks neither. `sub` is additionally bounded at OIDC Core §2's own 255 characters and **refused** rather than truncated past it — it is half the key a principal row is stored under, so shortening one would merge two humans sharing a prefix, while an unbounded one rides inside the token cap and past PostgreSQL's B-tree tuple limit. The returned `Identity.Issuer` is the **configured** issuer, not the token's: they differ for exactly one provider (Google mints two spellings of one identity), and returning whichever arrived would store that human twice under two principal ids. Every rejection is one
+and non-empty `sub` and `exp` are required because go-jose checks neither. `sub` is additionally bounded at **255 bytes** — the number OIDC Core §2 states in characters ("MUST NOT exceed 255 ASCII characters"), identical for a conforming subject and stricter for a non-conforming one; a non-ASCII `sub` is not refused outright, since denying every human on a provider with that conformance bug would cost far more than it buys — and **refused** rather than truncated past it, because `sub` is half the key a principal row is stored under, so shortening one would merge two humans sharing a prefix, while an unbounded one rides inside the token cap and past PostgreSQL's B-tree tuple limit. The returned `Identity.Issuer` is the **configured** issuer, not the token's: they differ for exactly one provider (Google mints two spellings of one identity), and returning whichever arrived would store that human twice under two principal ids. Every rejection is one
 `*Error` whose `Error()` is a constant string, the detail behind `Reason()` for the caller's log —
 no oracle distinguishes expired from bad-signature from wrong-audience, and no log line or error
 carries a token byte or a URL credential (a key-set URL may be a signed URL whose query string is
@@ -892,7 +892,10 @@ executes without complaint and that instance would have refused.
   platform above. Configured, a human's token is verified against its issuer's JWKS —
   algorithm allowlist, exact `iss`, `aud` containment plus `azp`, required `sub`/`exp`,
   keys only from the key set and only while its bounded lifetime holds — and never
-  minted here; every rejection is one indistinguishable 401. The machine lanes always
+  minted here; every **credential** rejection is one indistinguishable 401, which is
+  what makes the 500 from a failed principal provisioning meaningful rather than
+  noise: it says the credential was good and the database was not, so an operator is
+  not sent hunting the IdP for an outage. The machine lanes always
   resolve first, so a second credential can never change which lane, and so which role
   check, a request takes. The request's role is computed from the IdP's claim on **that
   request** through the operator's map: `principals` records who signed in, never what

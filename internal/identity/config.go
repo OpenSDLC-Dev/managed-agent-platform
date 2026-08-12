@@ -73,9 +73,11 @@ const (
 	maxRSAExponent  = 1<<31 - 1
 	clockSkewLeeway = 60 * time.Second
 	maxTokenBytes   = 16 << 10 // Entra with many groups reaches roughly 8 KiB
-	// maxSubjectBytes is OIDC Core §2's own bound on a subject identifier ("MUST
-	// NOT exceed 255 ASCII characters in length"). Unlike the profile fields this
-	// one REFUSES rather than truncates — see the check in Verify.
+	// maxSubjectBytes bounds a subject identifier in BYTES, at the number OIDC
+	// Core §2 states in characters ("MUST NOT exceed 255 ASCII characters in
+	// length"). Identical for a conforming subject, stricter for a non-conforming
+	// one. Unlike the profile fields this one REFUSES rather than truncates — see
+	// the check in Verify.
 	maxSubjectBytes = 255
 	maxRoleValues   = 100
 	maxClaimDepth   = 8
