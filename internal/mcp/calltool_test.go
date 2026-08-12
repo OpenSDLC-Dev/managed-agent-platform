@@ -520,13 +520,16 @@ func TestConnectRefusesAnUnparseableURLWithoutQuotingIt(t *testing.T) {
 // platform continues inside the server. Both request kinds carry it — a listing
 // that lost it would break the discovery half of the same trace.
 //
-// It also pins the boundary of that claim, which is the reason to connect here
-// under the traced context rather than through the shared helper: the handshake
-// is the SDK's to build and takes no caller metadata, so a traced Connect
-// reaches the server untraced. A trace covers this client from its first
-// request, not from its first packet. Pinned because it is the kind of gap a
-// reader assumes away, and because an SDK that later grew the hook should
-// surface here as a failing test rather than as a quietly better wire.
+// It also pins where that route stops and what covers the rest, which is the
+// reason to connect here under the traced context rather than through the shared
+// helper. `_meta` reaches the two requests this package issues and no further:
+// the handshake is the SDK's to build and takes no caller metadata. The HTTP
+// header does reach it, because the transport is this package's — so the trace
+// covers a connection from its first packet after all, and the case that needs
+// it most is a connection that fails and never issues a request at all. Both are
+// asserted, in both directions: the header on every request the server saw, and
+// the continued absence of `_meta` on the handshake, so an SDK that later grows
+// the hook surfaces here as a failing test rather than as a quietly better wire.
 func TestRequestsCarryW3CTraceContext(t *testing.T) {
 	t.Parallel()
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
@@ -539,6 +542,10 @@ func TestRequestsCarryW3CTraceContext(t *testing.T) {
 	listed, called := &atomic.Pointer[json.RawMessage]{}, &atomic.Pointer[json.RawMessage]{}
 	var handshakeMu sync.Mutex
 	handshake := map[string]json.RawMessage{}
+	// The traceparent HTTP header per method, which is the route that reaches
+	// the handshake. Guarded by the same mutex: the handshake and the two
+	// requests below are separate connections' worth of goroutines.
+	headers := map[string]string{}
 	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
 		return sdk.NewServer(&sdk.Implementation{Name: "meta-server", Version: "1"}, nil)
 	}, nil)
@@ -559,6 +566,11 @@ func TestRequestsCarryW3CTraceContext(t *testing.T) {
 			return
 		}
 		params := req.Params
+		if req.Method != "" {
+			handshakeMu.Lock()
+			headers[req.Method] = r.Header.Get("traceparent")
+			handshakeMu.Unlock()
+		}
 		var result map[string]any
 		switch req.Method {
 		case "tools/list":
@@ -614,6 +626,20 @@ func TestRequestsCarryW3CTraceContext(t *testing.T) {
 	defer handshakeMu.Unlock()
 	if len(handshake) == 0 {
 		t.Fatal("no handshake request reached the server, so the gap this asserts was never exercised")
+	}
+	// Every request, the handshake's included, carries the header — that is the
+	// route the SDK cannot withhold, since the transport is this package's. The
+	// assertion is over what the server actually saw rather than over a list
+	// written here, so a negotiation that grows or loses a request stays covered.
+	for method, got := range headers {
+		if got != want {
+			t.Errorf("%s traceparent header = %q, want %q", method, got, want)
+		}
+	}
+	for method := range handshake {
+		if _, seen := headers[method]; !seen {
+			t.Errorf("handshake request %s was recorded with no header entry", method)
+		}
 	}
 	for method, params := range handshake {
 		var decoded struct {

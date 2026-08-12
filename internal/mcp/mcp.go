@@ -307,6 +307,7 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		httpClient = DefaultClient
 	}
 	httpClient = withResponseLimit(httpClient)
+	httpClient = withTraceContext(httpClient)
 	if cfg.BearerToken != "" {
 		httpClient = withBearer(httpClient, cfg.BearerToken, endpoint)
 	}
@@ -520,8 +521,10 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 // design principle 3). Not every request on the wire, and the difference is the
 // SDK's: it builds the handshake itself (`server/discover`, and a legacy
 // negotiation's `initialize` and `notifications/initialized`) with no hook for a
-// caller's metadata, so those reach the server untraced. A traced connection is
-// therefore traced from its first *request*, not from its first packet. MCP 2026-07-28 documents the convention and pins the key
+// caller's metadata, so no `_meta` reaches them. What reaches them instead is
+// the HTTP header the transport writes ([withTraceContext]) — the transport
+// being this package's, unlike the handshake bodies — so a traced connection is
+// traced from its first packet after all, by the other of the two routes. MCP 2026-07-28 documents the convention and pins the key
 // names to the bare `traceparent`, `tracestate` and `baggage` — deliberately not
 // namespaced like the protocol's own `io.modelcontextprotocol/*` keys, so that a
 // carrier written by any OpenTelemetry SDK drops in unrenamed (SEP-414).
@@ -999,6 +1002,56 @@ func (t *limitedTransport) give(n int64) {
 // dot) drop the token rather than send it, and the request fails as
 // unauthenticated instead of leaking. A normalizing comparison would trade that
 // direction for the other one.
+// withTraceContext puts W3C trace context on every request this client sends,
+// as HTTP headers, which is the one propagation route that does not depend on
+// the SDK giving a caller somewhere to put it.
+//
+// [requestMeta] carries the same context in `_meta` on the two requests this
+// package issues itself, per the convention MCP 2026-07-28 documents (SEP-414),
+// and that is the route a spec-aware MCP server reads. It cannot reach the
+// handshake: the SDK builds `server/discover` — and a legacy negotiation's
+// `initialize` and `notifications/initialized` — with no hook for a caller's
+// metadata. Concluding from that that a connection is untraceable before its
+// first request was a mistake in the reasoning rather than in the SDK: the
+// transport is this package's, so the headers are.
+//
+// Design principle 3 is what makes the difference worth a round tripper. Every
+// cross-process call propagates OTel context, and a handshake is a cross-process
+// call; the case that needs it most is the one with no later request to carry it,
+// a connection that fails, whose spans on the server would otherwise correlate
+// with nothing. The two routes are complementary rather than redundant — a
+// server reading `_meta` sees SEP-414's carrier, a server or gateway reading
+// headers sees the same trace — and both are the propagator's own output, so
+// neither translates anything.
+//
+// It rides above the response limit and below the bearer wrapper for no reason
+// other than order-independence: none of the three reads what the others write.
+func withTraceContext(client *http.Client) *http.Client {
+	copied := *client
+	copied.Transport = &traceTransport{base: client.Transport}
+	return &copied
+}
+
+type traceTransport struct{ base http.RoundTripper }
+
+func (t *traceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	carrier := map[string]string{}
+	telemetry.Inject(req.Context(), carrier)
+	if len(carrier) > 0 {
+		// Cloned rather than mutated: a RoundTripper does not own the request it
+		// is handed, and net/http may retry it.
+		req = req.Clone(req.Context())
+		for k, v := range carrier {
+			req.Header.Set(k, v)
+		}
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
+}
+
 func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Client {
 	copied := *client
 	copied.Transport = &bearerTransport{
