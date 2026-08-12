@@ -764,8 +764,15 @@ jobs:
           np="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor-networkpolicy.yaml)"
           echo "$np" | grep -q '^kind: NetworkPolicy$' \
             || { echo "the bundled IdP must ship its NetworkPolicy" >&2; exit 1; }
-          echo "$np" | grep -q 'app.kubernetes.io/component: casdoor' \
-            || { echo "the NetworkPolicy does not select the IdP pod" >&2; exit 1; }
+          # Anchored INSIDE spec.podSelector, not anywhere in the document: the
+          # same component label sits in metadata.labels, so a bare grep stayed
+          # green with the selector deleted — and a NetworkPolicy whose selector
+          # is empty applies to every pod in the namespace, which is a different
+          # policy than the one this asserts.
+          echo "$np" | awk '/^  podSelector:/ { f = 1; next } /^  [a-z]/ { f = 0 } f' \
+            | grep -q 'app.kubernetes.io/component: casdoor' \
+            || { echo "the NetworkPolicy's podSelector does not select the IdP pod" >&2
+                 echo "$np" >&2; exit 1; }
           # An EMPTY `from` means "all sources" to Kubernetes, so the one shape
           # that must never render is the one that looks exactly like this policy
           # and admits everything.
