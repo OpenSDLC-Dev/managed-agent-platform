@@ -10,9 +10,10 @@ control plane resolves each request to a principal holding one of three
 claim-mapped roles. Machine credentials and every documented CLI/SDK flow are
 untouched. Six slices; slices 1–2 have landed ([#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369), [#370](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/370)), slice 3 is next.
 
-[Plan 29](./docs/plan/29_mcp-toolset.md) — MCP end to end (#45), in flight on
-its own branch: slices 1–2 have landed (wire correctness; then the MCP client,
-the `mcp_catalogs` per-session snapshot and the executor's discovery driver).
+[Plan 29](./docs/plan/29_mcp-toolset.md) — MCP end to end (#45) runs in parallel
+on its own branch, so Tasks below stays plan 31's and plan 29's progress is here:
+slices 1–2 have landed (wire correctness; then the MCP client, the
+`mcp_catalogs` per-session snapshot and the executor's discovery driver).
 Slice 3 — confirmation gating — is next; nothing is offered to a model yet.
 
 ## Tasks
