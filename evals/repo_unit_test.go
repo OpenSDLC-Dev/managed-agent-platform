@@ -1,9 +1,42 @@
 package evals
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
+
+// The oracle's clone error is scrubbed of the credential in both forms it can
+// take, because go-git copies up to a kilobyte of a refusing host's response
+// body into the error it returns and that error reaches a t.Fatalf — a public
+// step log in CI.
+//
+// The base64 case is the one that earns the test. GitHub Actions masks a
+// secret's literal bytes in a log and not its basic-auth encoding, so a host
+// that echoed the Authorization header back would publish a perfectly usable
+// credential through the one form the platform's own masking does not cover.
+func TestScrubRepoTokenRemovesBothFormsOfTheCredential(t *testing.T) {
+	const token = "github_pat_ExampleValueThatIsNotAToken"
+	blob := base64.StdEncoding.EncodeToString([]byte(repoTokenUsername + ":" + token))
+	msg := "unauthorized: Basic " + blob + " was rejected for " + token
+
+	got := scrubRepoToken(msg, token)
+	if strings.Contains(got, token) {
+		t.Errorf("the raw token survived the scrub: %q", got)
+	}
+	if strings.Contains(got, blob) {
+		t.Errorf("the basic-auth encoding survived the scrub: %q", got)
+	}
+	if !strings.Contains(got, "unauthorized") {
+		t.Errorf("the scrub ate the message it was meant to preserve: %q", got)
+	}
+
+	// An unconfigured token must leave the message alone rather than redact
+	// against the empty string, which matches at every position.
+	if got := scrubRepoToken(msg, ""); got != msg {
+		t.Errorf("scrubRepoToken with no token rewrote the message: %q", got)
+	}
+}
 
 // The repo-root .env reader repo_test.go carries its own copy of, because
 // modeltest's is unexported. Offline, so it runs on every `make verify`.

@@ -32,20 +32,32 @@
   the two documents that count it: #331 took the set from fourteen to fifteen
   without touching either, and README.md and `docs/ARCHITECTURE.md` read
   "fourteen" for three weeks until the parking made them accidentally true again.
-  The count is fifteen once more, and a trial added or dropped without updating
-  those documents now fails the merge gate instead of drifting quietly. Both
-  reviewers on the parking PR asked for this, and it is deliberately landing with
-  the restore rather than after it.
+  The count is fifteen once more, and adding or dropping a trial now fails the
+  merge gate until the pinned list moves with it, with the failure naming both
+  documents. The second check is a tripwire rather than a proof — it asserts the
+  spelled count appears in each file at all, which survives a reflow of the
+  paragraph but could be fooled by the same word arriving for an unrelated
+  reason. Both reviewers on the parking PR asked for this, and it is deliberately
+  landing with the restore rather than after it.
 
-  **The fixture token joins the artifact scrub.** `TranscriptCarriesNoRepoToken`
-  asserts the token never reaches the transcript, but the run where that grader
-  fires is precisely the run whose artifacts would carry it: a failed trial's
-  whole transcript is written to `evals/artifacts/`, and `evals.yml` uploads that
-  directory unconditionally from a public repository, whose workflow artifacts
-  anyone can download. The scrub already covered the model endpoint's
-  credentials; it now covers this one too, so the single run that proves a leak
-  is not also the run that publishes it. The grader is unaffected — it reads the
-  live events in memory, and the scrub runs on the way to disk and nowhere else.
+  **The fixture's token and its passphrase both join the artifact scrub.** A
+  failed trial's whole transcript is written to `evals/artifacts/`, and
+  `evals.yml` uploads that directory unconditionally from a public repository,
+  whose workflow artifacts anyone can download. For the token that closes the
+  gap `TranscriptCarriesNoRepoToken` cannot: the run where that grader fires is
+  precisely the run whose artifacts would carry what it caught. The passphrase
+  matters more. On a trial that fails for any *other* reason — a grader the model
+  tripped, a flaky turn — the passphrase is sitting in the agent's own final
+  message, and every other answer-style trial can publish its answer harmlessly
+  because it planted a fresh one for that trial, while this fixed fixture would
+  be burned permanently and every later run would silently prove nothing. Two
+  smaller holes on the same theme close with it: the trial's clone oracle now
+  removes the token from a failing clone's error before that error reaches
+  `t.Fatalf` and a public step log — go-git copies a refusing host's response
+  body into its error, which is the exposure `internal/executor` already scrubs
+  at the production clone's boundary — and that clone is now deadline-bounded,
+  so a blackholed route fails the trial instead of hanging the run past the point
+  where `go test -timeout` panics and the report is never written.
 
   **The `.env` reader in `evals/repo_test.go` has tests.** Its comment claimed it
   reads a line "exactly as modeltest and webtooltest read the same file" — a

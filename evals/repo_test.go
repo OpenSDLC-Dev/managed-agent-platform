@@ -3,7 +3,9 @@ package evals
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-git/v5"
@@ -52,6 +55,12 @@ const passphraseFile = "PASSPHRASE.txt"
 // repoEvalMount is where the fixture repository is mounted. Stated rather than
 // defaulted so a grader can assert the agent reached exactly it.
 const repoEvalMount = "/workspace/fixture"
+
+// cloneOracleTimeout bounds the oracle's own clone (see clonePassphrase). Two
+// minutes is far more than a few-kilobyte fixture needs and far less than the
+// suite's 120m budget, which is the number that matters: this exists so a stall
+// fails the trial rather than wedging the run.
+const cloneOracleTimeout = 2 * time.Minute
 
 // RepoFixture attaches a github_repository resource to the session at create.
 // The url and token are not fields: they are one deployment's credentials, and
@@ -171,51 +180,77 @@ func TranscriptCarriesNoRepoToken() Grader {
 	}
 }
 
-// repoSecrets is the fixture token as an artifact-scrub entry (see secretsOf,
-// which supplies the model endpoint's).
+// repoSecrets is every fixture value the artifacts must never publish: the
+// authorization token, and the passphrase itself. secretsOf supplies the model
+// endpoint's half of the same set.
 //
-// TranscriptCarriesNoRepoToken asserts the token never reaches the transcript —
-// but the run where that grader fires is precisely the run whose artifacts would
-// carry it. A failed trial's whole transcript is dumped to evals/artifacts/, and
-// evals.yml uploads that directory unconditionally from a public repository,
-// whose workflow artifacts anyone can download. So the one run that proves the
-// token leaked must not also be the run that publishes it. The grader still
-// reads the live events in memory, because the scrub runs on the way to disk and
-// nowhere else.
+// The token is the obvious one. TranscriptCarriesNoRepoToken asserts it never
+// reaches the transcript — but the run where that grader fires is precisely the
+// run whose artifacts would carry it, since a failed trial's whole transcript is
+// dumped to evals/artifacts/ and evals.yml uploads that directory
+// unconditionally from a public repository, whose workflow artifacts anyone can
+// download.
 //
-// Nil when unconfigured rather than a one-element slice holding "": scrub skips
-// empty entries, but a caller that appended one would be relying on that.
+// The passphrase is the one that matters more, and it is not hypothetical: on a
+// trial that fails for any *other* reason — a grader the model tripped, a flaky
+// turn — the passphrase is sitting in the agent's own final message, and that
+// transcript is what gets uploaded. Every other answer-style trial plants a
+// fresh {{RECALL}} per trial, so publishing one costs nothing; this fixture is
+// fixed, so a single publication burns it permanently and every later run of
+// this trial silently proves nothing.
+//
+// Both are resolved here, before the first trial, rather than when the grader
+// first wants the passphrase: grading is not the only path to an artifact write
+// — a trial that aborts in its drive records through runAndGrade's defer without
+// a grader ever running — and the cost is one shallow clone of a few kilobytes,
+// shared with the grader through the same sync.Once.
 func repoSecrets() []string {
+	var out []string
 	if token := repoResolve(RepoTokenEnv); token != "" {
-		return []string{token}
+		out = append(out, token)
 	}
-	return nil
+	// Best effort: an unconfigured or unreachable fixture is not this function's
+	// failure to report. repoConfig fails the trial that needs it, naming the
+	// name that was missing, and the grader raises this same cached error.
+	if pass, err := repoPassphraseValue(); err == nil {
+		out = append(out, pass)
+	}
+	return out
 }
 
-// repoPassphrase clones the fixture repository in-process and returns the
-// passphrase, once per run: every trial that grades against it wants the same
-// bytes, and re-cloning per grader would spend network for nothing.
-//
-// Nothing inside the once may call t.Fatal. That is runtime.Goexit, and Once
-// marks itself done on the way out regardless — so the next caller would sail
-// past with an empty passphrase, which strings.Contains treats as present in
-// everything. A grader that passes because its expectation is missing is worse
-// than no grader, so the failure travels back as an error and is raised here.
-var repoPassphrase = func() func(*testing.T) string {
+// repoPassphraseValue clones the fixture repository in-process and returns the
+// passphrase, once per run: every caller wants the same bytes, and re-cloning
+// per grader would spend network for nothing.
+var repoPassphraseValue = func() func() (string, error) {
 	var (
 		once sync.Once
 		val  string
 		err  error
 	)
-	return func(t *testing.T) string {
-		t.Helper()
+	return func() (string, error) {
 		once.Do(func() { val, err = clonePassphrase() })
-		if err != nil {
-			t.Fatalf("read %s from the fixture repository: %v", passphraseFile, err)
-		}
-		return val
+		return val, err
 	}
 }()
+
+// repoPassphrase is repoPassphraseValue for a grader, raising the failure.
+//
+// It is raised here rather than inside the once because t.Fatal is
+// runtime.Goexit, and Once marks itself done on the way out regardless — so the
+// next caller would sail past with an empty passphrase, which strings.Contains
+// treats as present in everything. A grader that passes because its expectation
+// is missing is worse than no grader.
+func repoPassphrase(t *testing.T) string {
+	t.Helper()
+	val, err := repoPassphraseValue()
+	if err != nil {
+		t.Fatalf("read %s from the fixture repository: %v", passphraseFile, err)
+	}
+	return val
+}
+
+// repoTokenUsername is the basic-auth username GitHub wants beside a token.
+const repoTokenUsername = "x-access-token"
 
 func clonePassphrase() (string, error) {
 	url, token, err := repoConfigErr()
@@ -223,14 +258,30 @@ func clonePassphrase() (string, error) {
 		return "", err
 	}
 	fs := memfs.New()
+	// Bounded, because the alternative is not a slow run but a lost one: a
+	// blackholed route leaves this clone hanging until `go test -timeout` panics
+	// the process from testing's alarm goroutine, and that is the one exit that
+	// never runs runAndGrade's deferred recordTrial — so the wedged run would
+	// spend its whole budget and still write no evidence for the trial that
+	// wedged. Generous for a fixture of a few kilobytes; short against 120m.
+	ctx, cancel := context.WithTimeout(context.Background(), cloneOracleTimeout)
+	defer cancel()
 	// Depth 1: the oracle wants the tip's content, not the history. The
 	// materialization under test is deliberately full — see decision 1.
-	if _, err := git.CloneContext(context.Background(), memory.NewStorage(), fs, &git.CloneOptions{
+	if _, err := git.CloneContext(ctx, memory.NewStorage(), fs, &git.CloneOptions{
 		URL:   url,
-		Auth:  &githttp.BasicAuth{Username: "x-access-token", Password: token},
+		Auth:  &githttp.BasicAuth{Username: repoTokenUsername, Password: token},
 		Depth: 1,
 	}); err != nil {
-		return "", err
+		// go-git copies up to a kilobyte of a refusing host's response body into
+		// the error it returns, and a host that names the credential it rejected
+		// has already decoded it — the exposure internal/executor scrubs at its
+		// own clone boundary (scrubTokenErr), measured there against a fixture
+		// that echoes the header back. This error ends up in a t.Fatalf, so in
+		// CI it lands in a public step log; GitHub masks a secret's literal
+		// bytes and not its base64 basic-auth form, so both go. Nothing here
+		// classifies the error, so a plain string loses nothing.
+		return "", errors.New(scrubRepoToken(err.Error(), token))
 	}
 	f, err := fs.Open(passphraseFile)
 	if err != nil {
@@ -246,6 +297,20 @@ func clonePassphrase() (string, error) {
 		return "", fmt.Errorf("%s is empty; it must hold the passphrase the trial asks for", passphraseFile)
 	}
 	return got, nil
+}
+
+// scrubRepoToken removes the fixture token from a message in both forms it can
+// appear in — raw, and the base64 blob go-git puts after "Basic ". The pair is
+// what internal/executor/repoclone.go removes at the production clone's own
+// boundary; this is the same rule for the oracle's, kept as a separate copy
+// because that one is unexported and a test package must not reach for it.
+func scrubRepoToken(msg, token string) string {
+	if token == "" {
+		return msg
+	}
+	msg = strings.ReplaceAll(msg, token, "[redacted]")
+	blob := base64.StdEncoding.EncodeToString([]byte(repoTokenUsername + ":" + token))
+	return strings.ReplaceAll(msg, blob, "[redacted]")
 }
 
 // repoResolve reads one name from the environment, falling back to the repo-root

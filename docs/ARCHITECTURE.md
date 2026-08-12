@@ -1006,8 +1006,9 @@ tasks driving whole sessions through the public API against a real model, graded
 code-only with per-trial nonces and Platform/Model/Either failure classing. `repo-answer`
 is the one trial whose expected answer is not nonce-derived — it lives in a fixed private
 GitHub fixture repository, whose privacy stands in for the nonce a fixed remote cannot
-carry (#358). The registered set is pinned by an offline test, so a trial added or dropped
-without updating the counts stated here and in README.md fails `make verify`. The tier stays out
+carry (#358). The registered set is pinned by an offline test, so adding or dropping a trial
+fails `make verify` until that pinned list moves with it, and the failure names the two
+documents — this one and README.md — whose spelled-out counts must move too. The tier stays out
 of the merge gate — it spends money and minutes — but a scheduled workflow
 (`.github/workflows/evals.yml`, daily plus manual dispatch) runs it against the `MODEL_*`
 and `EVAL_GITHUB_REPO_*` secrets of the `evals` deployment environment — which admits only the default branch, so a

@@ -77,13 +77,20 @@ var recorder struct {
 }
 
 func recordMeta(cfg modeltest.Config) {
+	// Two sources, because the run has two sets of values the artifacts must
+	// never carry: the model endpoint's credentials (secretsOf) and the
+	// repo-answer fixture's token and passphrase (repoSecrets).
+	//
+	// Gathered before the lock: repoSecrets resolves the passphrase from the
+	// fixture's remote, and holding the recorder's mutex across a network clone
+	// would block every trial's artifact flush behind it for no reason.
+	secrets := append(secretsOf(cfg), repoSecrets()...)
+
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	recorder.rep.Model = cfg.Model
 	recorder.rep.Endpoint = endpointHost(cfg.BaseURL)
-	// Two sources, because the run has two credentials: the model endpoint's
-	// (secretsOf) and the repo-answer fixture's (repoSecrets).
-	recorder.secrets = append(secretsOf(cfg), repoSecrets()...)
+	recorder.secrets = secrets
 }
 
 // recordTrial adds a trial's outcome to the run and flushes the artifacts.

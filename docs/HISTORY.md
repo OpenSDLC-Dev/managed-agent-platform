@@ -2159,10 +2159,13 @@ the network and what behaved was the platform. WSL on that machine cannot reach 
 the host's proxy is invisible to a NAT-mode WSL, so `api.github.com` answers and `github.com`
 times out — and `materializeRepos` met it exactly as designed: a `session.error` of
 `type: github_repository_clone_error` with `reason: network`, then `reason: timeout`, carrying
-`retry_status: retrying`, and one retry. The event carried the repository URL and **not** the
-token, which is this plan's `scrubToken` path holding on the likeliest clone failure there is.
-The green run above was obtained by pointing the test process at the host proxy; nothing in the
-repository depends on that, and GitHub's own runners reach `github.com` directly.
+`retry_status: retrying`, and one retry. Neither the event nor the log line beside it carried
+the token, and the two get there by different routes worth keeping straight: `emitRepoCloneError`
+builds its payload from a fixed message and never receives the clone error at all, so the event
+is token-free by construction, while the executor's own `slog` line *does* carry go-git's error
+text and is what `scrubTokenErr` stands over. The green run above was obtained by pointing the
+test process at the host proxy; nothing in the repository depends on that, and GitHub's own
+runners reach `github.com` directly.
 
 **CI cannot prove this on a branch.** The `evals` environment admits only `main`, so a
 `workflow_dispatch` from a PR branch gets no secrets at all. The CI half of the proof is a

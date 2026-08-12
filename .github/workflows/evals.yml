@@ -114,10 +114,11 @@ jobs:
           # The URL is a secret rather than a variable although it is not a
           # credential: a variable is rendered into the step log, and repo-answer
           # is the one answer-style trial with no per-trial nonce, so the
-          # fixture's privacy is doing that job. (It is masked in the log only —
-          # the brain injects the URL into the system prompt, so it still reaches
-          # the transcript this job uploads. What the privacy protects is the
-          # passphrase, and that rests on the repository requiring auth.)
+          # fixture's privacy is doing that job. That masking covers this log and
+          # nothing else — a clone failure records the URL in its own
+          # session.error payload, which rides the transcript this job uploads.
+          # Knowing the URL grants nothing: what protects the passphrase is that
+          # the repository refuses an unauthenticated fetch.
           EVAL_GITHUB_REPO_URL: ${{ secrets.EVAL_GITHUB_REPO_URL }}
           EVAL_GITHUB_REPO_TOKEN: ${{ secrets.EVAL_GITHUB_REPO_TOKEN }}
         run: make eval
