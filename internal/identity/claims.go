@@ -4,22 +4,31 @@ import "strings"
 
 // claimAt resolves a configured claim name against a decoded claim set.
 //
-// A name with no dot is a single map key. A name containing a dot resolves ONLY
-// as a path — never additionally as a literal key of that name.
+// Three cases, and which one applies is decided by the CONFIGURED NAME alone:
 //
-// That ordering is the security-relevant one, and it is the reverse of the
-// obvious "exact key first, walk as a fallback". With a configured claim name of
-// resource_access.console.roles (the Keycloak shape), any IdP surface that lets a
-// user place a FLAT claim literally named "resource_access.console.roles" — a
-// self-service attribute, a mapper over a user-editable profile field — would
-// silently outrank the real nested claim, and the user would map their own role.
-// Path-only turns that escalation into a denial, and costs nothing: a dotless
-// name is unambiguous and still takes the flat lookup.
+//   - a name with no dot is a single map key;
+//   - a name that is URI-shaped (it contains "://") is a single map key too,
+//     dots and all — this is the namespaced-custom-claim convention Auth0
+//     requires and Okta and Entra also use, e.g.
+//     "https://corp.example/roles". Splitting it on "." would walk
+//     ["https://corp", "example", "com/roles"], find nothing, and deny every
+//     human on those providers with nothing in any log to say why;
+//   - any other dotted name is a PATH, walked segment by segment — the Keycloak
+//     shape, "resource_access.console.roles".
+//
+// Deciding from the name and never from the token is the security property. The
+// alternative shape, "try the flat key and fall back to walking", lets the TOKEN
+// choose the interpretation: an IdP surface that lets a user place a flat claim
+// literally named "resource_access.console.roles" — a self-service attribute, a
+// mapper over a user-editable profile field — would silently outrank the real
+// nested claim, and the user would map their own role. Here the operator's
+// configured name fixes the reading before any token is seen, so no claim a
+// token carries can switch it.
 func claimAt(claims map[string]any, name string) any {
 	if claims == nil || name == "" {
 		return nil
 	}
-	if !strings.Contains(name, ".") {
+	if !strings.Contains(name, ".") || strings.Contains(name, "://") {
 		return claims[name]
 	}
 	parts := strings.Split(name, ".")

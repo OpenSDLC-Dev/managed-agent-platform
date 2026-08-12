@@ -244,6 +244,49 @@ func TestMintRawBuildsUnsignableTokens(t *testing.T) {
 	})
 }
 
+// TestEveryKeyIsDistinct guards the fixture's own foundation. The key pool was
+// once a ring — pooledRSA took i%len over three keys, and NewIdP consumes index 0
+// — so the third rotation published a NEW kid over key material byte-identical to
+// the first key's. Every "this key stopped verifying" assertion in the rotation
+// and retirement tests would then have been vacuous, and a verifier regression
+// that fell back to trying every key in the set would still have passed them.
+//
+// Nothing else in the suite would notice, which is why this is asserted directly
+// rather than inferred.
+func TestEveryKeyIsDistinct(t *testing.T) {
+	t.Parallel()
+	p := NewIdP(t)
+
+	kids := []string{p.ActiveKID()}
+	for range 5 {
+		kids = append(kids, p.Rotate(t))
+	}
+	kids = append(kids, p.AddKey(t, "RS512"), p.AddECKey(t), p.AddECKey(t), p.AddECKey(t), p.AddECKey(t))
+
+	if len(slices.Compact(slices.Sorted(slices.Values(kids)))) != len(kids) {
+		t.Fatalf("kids are not unique: %v", kids)
+	}
+
+	// Key MATERIAL, not just the label: the collision this guards against gave
+	// two different kids the same key.
+	seen := map[string]string{}
+	for _, kid := range kids {
+		key, ok := p.key(kid)
+		if !ok {
+			t.Fatalf("no key %q", kid)
+		}
+		der, err := x509.MarshalPKIXPublicKey(key.pub)
+		if err != nil {
+			t.Fatalf("marshal %q: %v", kid, err)
+		}
+		fingerprint := string(der)
+		if prev, dup := seen[fingerprint]; dup {
+			t.Fatalf("kids %q and %q publish identical key material", prev, kid)
+		}
+		seen[fingerprint] = kid
+	}
+}
+
 func TestRotateRetireAndCounters(t *testing.T) {
 	t.Parallel()
 	p := NewIdP(t)

@@ -112,10 +112,18 @@ func getJSON(ctx context.Context, c *http.Client, target string, timeout time.Du
 	return nil
 }
 
-// redactURL renders a URL for a log line or an error with the two components
-// that can carry a credential removed: the userinfo and the query. A provider
-// that hands out a signed key-set URL puts its token in the query, and both logs
-// and errors travel further than the process.
+// redactURL renders a URL for a log line or an error with the components that
+// carry credentials in practice removed: the userinfo, the query, the fragment,
+// and the opaque form. A provider that hands out a signed key-set URL puts its
+// token in the query, and both logs and errors travel further than the process.
+//
+// The scheme, host and PATH survive on purpose, and that is the limit of the
+// claim: an operator reading "key set fetch failed" needs to know which endpoint
+// it was, and /oauth2/v3/certs versus /.well-known/jwks.json is the whole
+// diagnostic. A provider that embeds a secret in a path segment would still have
+// it logged — nothing here can tell a secret path from a routing one, and
+// blanking the path would cost every legitimate reader the answer to protect a
+// shape no provider in the compatibility set uses.
 func redactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -124,6 +132,11 @@ func redactURL(raw string) string {
 	u.User = nil
 	if u.RawQuery != "" {
 		u.RawQuery = "redacted"
+	}
+	if u.Opaque != "" {
+		// Opaque is everything after "scheme:" when there is no "//" — one blob
+		// with no structure to inspect, so none of it is quotable.
+		u.Opaque = "redacted"
 	}
 	u.Fragment = ""
 	return u.String()
@@ -161,7 +174,15 @@ func requireIssuerURL(raw string) error {
 func parseHTTPSURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%q is not a URL: %w", redactURL(raw), err)
+		// url.Error's message quotes the input verbatim, so the cause is NOT
+		// wrapped here: redacting the prefix while wrapping an error that reprints
+		// the whole URL would redact nothing. Only the parser's own reason is
+		// kept, which is what an operator needs anyway.
+		var uerr *url.Error
+		if errors.As(err, &uerr) && uerr.Err != nil {
+			err = uerr.Err
+		}
+		return nil, fmt.Errorf("%q is not a URL: %v", redactURL(raw), err)
 	}
 	if u.Host == "" {
 		return nil, fmt.Errorf("%q has no host", redactURL(raw))

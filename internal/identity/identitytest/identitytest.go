@@ -30,35 +30,45 @@ import (
 // keyPool pre-generates the expensive keys once per test binary. RSA generation
 // costs tens of milliseconds, and a suite that starts an IdP per subtest would
 // otherwise pay it every time.
+//
+// The pool is a CACHE, never a ring. An earlier version took i%len, which made
+// the pool's size a silent correctness bound: NewIdP consumes index 0, so the
+// third rotation wrapped and published a brand-new kid over key material
+// byte-identical to the first key's. Every rotation and retirement test — the
+// ones this fixture exists for — then asserted "this key stopped verifying"
+// against a key that was still in the set under another name, and a regression
+// that fell back to trying every key would have passed. Growing on demand costs
+// one keygen the first time an index is reached and nothing after.
 var keyPool = struct {
-	once sync.Once
-	rsa  []*rsa.PrivateKey
-	ec   []*ecdsa.PrivateKey
+	mu  sync.Mutex
+	rsa []*rsa.PrivateKey
+	ec  []*ecdsa.PrivateKey
 }{}
 
 func pooledRSA(i int) *rsa.PrivateKey {
-	keyPool.once.Do(generatePool)
-	return keyPool.rsa[i%len(keyPool.rsa)]
-}
-
-func pooledEC(i int) *ecdsa.PrivateKey {
-	keyPool.once.Do(generatePool)
-	return keyPool.ec[i%len(keyPool.ec)]
-}
-
-func generatePool() {
-	for i := 0; i < 3; i++ {
-		rk, err := rsa.GenerateKey(rand.Reader, 2048)
+	keyPool.mu.Lock()
+	defer keyPool.mu.Unlock()
+	for len(keyPool.rsa) <= i {
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
 			panic("identitytest: generate RSA key: " + err.Error())
 		}
-		keyPool.rsa = append(keyPool.rsa, rk)
-		ek, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		keyPool.rsa = append(keyPool.rsa, k)
+	}
+	return keyPool.rsa[i]
+}
+
+func pooledEC(i int) *ecdsa.PrivateKey {
+	keyPool.mu.Lock()
+	defer keyPool.mu.Unlock()
+	for len(keyPool.ec) <= i {
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			panic("identitytest: generate EC key: " + err.Error())
 		}
-		keyPool.ec = append(keyPool.ec, ek)
+		keyPool.ec = append(keyPool.ec, k)
 	}
+	return keyPool.ec[i]
 }
 
 // signingKey is one key the fake provider can sign with and publish.

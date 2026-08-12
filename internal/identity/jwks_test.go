@@ -117,10 +117,37 @@ func jwksXWantFetches(t *testing.T, idp *identitytest.IdP, want int, why string)
 // The counter increments at the top of the handler, before BlockJWKS holds it
 // open, so this observes that a flight is genuinely in progress rather than
 // guessing at timing — and it never sleeps.
-func jwksXAwaitFetch(idp *identitytest.IdP, n int) {
+//
+// It takes *testing.T and gives up rather than spinning forever. The tests that
+// call it have a handler parked on a channel, so the shape a regression takes
+// here is "the second fetch never happens": an unbounded spin would then hold
+// the whole test binary until the package timeout, with no message naming the
+// test. The deadline is wall-clock on purpose — it bounds a hang, and the frozen
+// clock every other assertion uses cannot.
+func jwksXAwaitFetch(t *testing.T, idp *identitytest.IdP, n int) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
 	for idp.Fetches() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("waited for %d key-set fetches, provider served %d", n, idp.Fetches())
+		}
 		runtime.Gosched()
 	}
+}
+
+// jwksXRelease closes a handler-release channel exactly once, from the test body
+// AND from cleanup.
+//
+// Both callers matter. httptest.Server.Close blocks until every outstanding
+// request returns, and NewIdP registers that Close with t.Cleanup — so a t.Fatalf
+// between BlockJWKS and the release would leave the handler parked forever and
+// the cleanup blocked behind it, turning a failing assertion into a hung binary
+// whose message is never printed.
+func jwksXRelease(t *testing.T, release chan struct{}) func() {
+	t.Helper()
+	once := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(once)
+	return once
 }
 
 func TestKeySetColdThenWarm(t *testing.T) {
@@ -367,6 +394,7 @@ func TestKeySetSingleFlight(t *testing.T) {
 	clock.Advance(identity.RefreshCooldownForTest)
 
 	release := make(chan struct{})
+	releaseOnce := jwksXRelease(t, release)
 	idp.BlockJWKS(release)
 
 	const goroutines = 8
@@ -383,8 +411,8 @@ func TestKeySetSingleFlight(t *testing.T) {
 	// One goroutine is inside the blocked handler and the rest are queued behind
 	// its flight. Nothing can complete until this channel closes, so releasing
 	// here is deterministic rather than a timing guess.
-	jwksXAwaitFetch(idp, 2)
-	close(release)
+	jwksXAwaitFetch(t, idp, 2)
+	releaseOnce()
 	wg.Wait()
 
 	for i, err := range errs {
@@ -406,6 +434,7 @@ func TestKeySetWaiterCancellationDoesNotKillFlight(t *testing.T) {
 	clock.Advance(identity.RefreshCooldownForTest)
 
 	release := make(chan struct{})
+	releaseOnce := jwksXRelease(t, release)
 	idp.BlockJWKS(release)
 
 	// The leader. Its fetch is detached from the caller's context, so it is the
@@ -415,7 +444,7 @@ func TestKeySetWaiterCancellationDoesNotKillFlight(t *testing.T) {
 		_, err := v.Verify(context.Background(), token)
 		leader <- err
 	}()
-	jwksXAwaitFetch(idp, 2)
+	jwksXAwaitFetch(t, idp, 2)
 
 	// A waiter that abandons. The flight cannot have completed — the handler is
 	// held open — so this deterministically takes the ctx.Done() branch.
@@ -430,7 +459,7 @@ func TestKeySetWaiterCancellationDoesNotKillFlight(t *testing.T) {
 		t.Fatalf("abandoning waiter: Verify err = %v, want ErrUnauthenticated", err)
 	}
 
-	close(release)
+	releaseOnce()
 	if err := <-leader; err != nil {
 		t.Errorf("flight leader: Verify: %v", err)
 	}
@@ -518,7 +547,7 @@ func TestKeySetFetchDeadline(t *testing.T) {
 	release := make(chan struct{})
 	// Released before the fixture closes its server — which waits for outstanding
 	// requests — because t.Cleanup runs last-registered-first.
-	t.Cleanup(func() { close(release) })
+	jwksXRelease(t, release)
 	idp.BlockJWKS(release)
 
 	jwksXVerifyRejected(t, v, unknown, "unknown kid with the key set hanging")

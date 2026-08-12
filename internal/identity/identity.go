@@ -67,13 +67,17 @@
 //
 // # Logs and errors
 //
-// No log line and no error carries a token byte or a URL credential. A key-set
-// URL may be a signed URL whose query string IS the credential, so every URL
-// reaching a log or an error goes through redactURL, and a transport error is
-// wrapped by its CAUSE rather than by *url.Error, whose message quotes the URL.
+// No log line and no error carries a token byte, and no URL reaches either
+// without going through redactURL first — a key-set URL may be a signed URL
+// whose query string IS the credential. That covers the userinfo, the query, the
+// fragment and the opaque form; the scheme, host and path survive on purpose,
+// because which endpoint failed is the diagnostic. An error from the transport
+// or from url.Parse is reduced to its CAUSE rather than wrapped, since both
+// quote the URL verbatim in their own message.
+//
 // The one attacker-supplied value logged on purpose is the kid, truncated, at
-// Debug: it is the diagnostic that answers which key a provider rotated to, and
-// it is not a credential. TestLogsCarryNoCredentials reads the actual output.
+// Debug: it answers which key a provider rotated to, and it is not a credential.
+// TestLogsCarryNoCredentials reads the actual output.
 //
 // # kid is required
 //

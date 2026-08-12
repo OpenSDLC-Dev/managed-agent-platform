@@ -476,6 +476,55 @@ func TestNewRefusesAnIssuerWithAQueryOrFragment(t *testing.T) {
 	}
 }
 
+// TestNewValidatesTheAssertionHeaderAgainstTheMode pins the pairing the API
+// layer's lane dispatch depends on. AssertionHeader() == "" is the documented
+// signal for oidc mode, so the two mismatches are not cosmetic: a trusted_proxy
+// verifier without a header has the dispatch read the header named "", which
+// nothing ever matches, and an oidc verifier WITH one has it read a request
+// header the client controls instead of Authorization.
+func TestNewValidatesTheAssertionHeaderAgainstTheMode(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		mode   identity.Mode
+		header string
+	}{
+		{name: "trusted_proxy without a header", mode: identity.ModeTrustedProxy},
+		{name: "oidc with a header", mode: identity.ModeOIDC, header: "x-goog-iap-jwt-assertion"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := identitytest.NewIdP(t)
+			cfg := discoveryXConfig(p.Issuer(), p.Client(), identitytest.NewClock(discoveryXBase).Now)
+			cfg.Mode, cfg.AssertionHeader = tc.mode, tc.header
+
+			v, err := identity.New(context.Background(), cfg)
+			discoveryXWantBootError(t, v, err)
+			if got := p.Discoveries(); got != 0 {
+				t.Errorf("Discoveries() = %d, want 0 — the pairing is checked before any network call", got)
+			}
+		})
+	}
+}
+
+// TestNewRefusesAZeroClock closes a silent trap rather than an attack.
+// go-jose's jwt.Expected treats a zero Time as "use time.Now()"
+// (jwt/validation.go), and Config.Now is exported precisely so later slices can
+// drive expiry — so a fake clock starting at time.Time{}, the natural zero value,
+// would validate exp/nbf/iat against the real wall clock while the key-set TTL
+// ran against the fake one. Nothing would say so.
+func TestNewRefusesAZeroClock(t *testing.T) {
+	t.Parallel()
+	p := identitytest.NewIdP(t)
+	cfg := discoveryXConfig(p.Issuer(), p.Client(), func() time.Time { return time.Time{} })
+
+	v, err := identity.New(context.Background(), cfg)
+	discoveryXWantBootError(t, v, err)
+	if got := p.Discoveries(); got != 0 {
+		t.Errorf("Discoveries() = %d, want 0 — the clock is checked before any network call", got)
+	}
+}
+
 func TestNewRefusesModeDisabled(t *testing.T) {
 	t.Parallel()
 	// Disabled is FromEnv's case, and it is the one state that must be

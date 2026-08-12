@@ -105,6 +105,65 @@ func configXIAP(over map[string]string) map[string]string {
 	return m
 }
 
+// TestConfigAlgorithmsIsACopy pins that a parsed Config never aliases the
+// package's own allowlist.
+//
+// `defaultAlgorithms` is the settled list AND the thing the validator consults,
+// so handing a caller its backing array would let one in-place write on a
+// returned Config redefine what every later verifier in the process accepts —
+// HS256 included, which is the algorithm the whole design refuses structurally.
+// The gcp-iap preset has the same exposure, and preset.go's promise that its
+// literals are "pinned by a test" is only true for values nobody can edit.
+//
+// Sequential, not parallel: it deliberately writes to the shared slice, and the
+// point is that the write goes nowhere.
+func TestConfigAlgorithmsIsACopy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want []string
+	}{
+		{name: "oidc default", env: configXOIDC(nil),
+			want: []string{"RS256", "RS512", "ES256", "ES384", "ES512"}},
+		{name: "custom proxy with no override", env: configXCustom(nil),
+			want: []string{"RS256", "RS512", "ES256", "ES384", "ES512"}},
+		{name: "gcp-iap preset", env: configXIAP(nil), want: []string{"ES256"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first, err := identity.ConfigFromEnv(configXEnv(tc.env))
+			if err != nil {
+				t.Fatalf("ConfigFromEnv: %v", err)
+			}
+			if !slices.Equal(first.Algorithms, tc.want) {
+				t.Fatalf("Algorithms = %v, want %v", first.Algorithms, tc.want)
+			}
+
+			// The hostile edit: a caller mutating the slice it was handed.
+			first.Algorithms[0] = "HS256"
+
+			second, err := identity.ConfigFromEnv(configXEnv(tc.env))
+			if err != nil {
+				t.Fatalf("ConfigFromEnv after the mutation: %v", err)
+			}
+			if !slices.Equal(second.Algorithms, tc.want) {
+				t.Errorf("Algorithms = %v after a caller edited an earlier Config, want %v",
+					second.Algorithms, tc.want)
+			}
+			if slices.Contains(second.Algorithms, "HS256") {
+				t.Error("HS256 reached a later Config: the allowlist is aliased, not copied")
+			}
+		})
+	}
+
+	// And the validator itself, which is what actually gates New: an edit must not
+	// have made a MAC algorithm configurable.
+	if _, err := identity.ConfigFromEnv(configXEnv(configXCustom(map[string]string{
+		configXVarProxyAlgs: "HS256",
+	}))); err == nil {
+		t.Error("HS256 was accepted as an allowlist value")
+	}
+}
+
 // configXWantErr fails when err is nil, and when its text does not name every
 // fragment the operator needs to fix the deployment. These are boot errors
 // printed to a console, so naming the defective variable is the whole point —

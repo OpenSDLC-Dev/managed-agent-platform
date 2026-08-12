@@ -48,6 +48,20 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 	if cfg.Audience == "" {
 		return nil, errors.New("identity: an audience is required")
 	}
+	// The header and the mode must agree, for the same reason the role map is
+	// checked here: ConfigFromEnv is not the only caller, and Config's own doc
+	// invites building one literally. AssertionHeader() == "" is the documented
+	// signal for oidc mode, so a trusted_proxy verifier without a header would
+	// have the API layer read the header named "" — a lane that can never match —
+	// while an oidc verifier WITH one would have it read an attacker-settable
+	// request header instead of Authorization.
+	switch {
+	case cfg.Mode == ModeTrustedProxy && cfg.AssertionHeader == "":
+		return nil, fmt.Errorf("identity: mode %s needs an assertion header", ModeTrustedProxy)
+	case cfg.Mode == ModeOIDC && cfg.AssertionHeader != "":
+		return nil, fmt.Errorf("identity: mode %s takes no assertion header, got %q",
+			ModeOIDC, cfg.AssertionHeader)
+	}
 	if len(cfg.RoleMap) == 0 {
 		return nil, errors.New("identity: a role map is required")
 	}
@@ -83,6 +97,16 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
+	}
+	// A clock reading the zero time is refused rather than tolerated. go-jose's
+	// jwt.Expected treats a zero Time as "use time.Now()" (jwt/validation.go), so
+	// a Config.Now starting at time.Time{} — the natural zero value, and an easy
+	// thing for a later slice's fake clock to be — would validate exp, nbf and
+	// iat against the real wall clock while the key-set TTL and the cooldown ran
+	// against the fake one. Silent, and in the direction where an expired token
+	// can verify.
+	if now().IsZero() {
+		return nil, errors.New("identity: Config.Now returns the zero time")
 	}
 	algNames := cfg.Algorithms
 	if len(algNames) == 0 {
@@ -123,7 +147,7 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 	if err != nil {
 		return nil, fmt.Errorf("identity: %w", err)
 	}
-	v.keys.keys, v.keys.fetchedAt, v.keys.lastTry = keys, now(), now()
+	v.keys.install(keys)
 
 	slog.Info("identity configured",
 		"mode", string(cfg.Mode), "issuer", cfg.Issuer, "audience", cfg.Audience,
@@ -214,7 +238,17 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	var std jwt.Claims
 	all := map[string]any{}
 	if err := tok.Claims(key.pub, &std, &all); err != nil {
-		return Identity{}, reject("signature invalid")
+		// One call does two jobs — verify, then unmarshal into both destinations —
+		// so its error covers a bad signature AND a payload that will not decode
+		// (an "aud" that is a number, an "exp" that is a string, a payload that is
+		// a JSON array). Reporting the second as "signature invalid" sends an
+		// operator hunting a key rotation for what is a provider emitting the
+		// wrong claim type, and the reason vocabulary is their whole diagnostic
+		// surface. go-jose's sentinel separates the two exactly.
+		if errors.Is(err, jose.ErrCryptoFailure) {
+			return Identity{}, reject("signature invalid")
+		}
+		return Identity{}, reject("claims did not decode")
 	}
 
 	if std.Issuer != v.issuer {
@@ -246,10 +280,23 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	}
 
 	return Identity{
-		Issuer:      std.Issuer,
-		Subject:     std.Subject,
-		Email:       stringClaim(all, v.emailClaim),
-		DisplayName: stringClaim(all, v.nameClaim),
+		Issuer:  std.Issuer,
+		Subject: std.Subject,
+		// Bounded, because these two are the only fields whose length the token
+		// alone decides, and a later slice persists them. Under maxTokenBytes a
+		// claim can reach roughly 12 KiB, which is a valid login turning into an
+		// insert failure against a bounded column. Truncating keeps the login
+		// working and the descriptive value intact; neither field carries any
+		// authority, so nothing is decided on the bytes dropped.
+		//
+		// Note for the slice that persists them: Email is NOT verified here.
+		// Requiring email_verified would deny every human on the many providers
+		// that never emit it, and this package has no use for the claim beyond
+		// display. Anything that MATCHES or LINKS on an email must make its own
+		// verification decision — on an IdP with self-service profile attributes,
+		// Casdoor included, the user chooses this string.
+		Email:       truncate(stringClaim(all, v.emailClaim), maxProfileBytes),
+		DisplayName: truncate(stringClaim(all, v.nameClaim), maxProfileBytes),
 		// RoleNone is not an error: the principal is authenticated with no
 		// authority, and a role-gated route refuses it.
 		Role: strongestRole(roleValues(claimAt(all, v.rolesClaim)), v.roleMap),

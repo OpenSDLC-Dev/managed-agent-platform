@@ -597,9 +597,11 @@ logged on purpose is the `kid`, truncated, at Debug). `Role` (`viewer` <
 divergence that never appears on a `/v1` path or in a `/v1` body, and `AtLeast` fails closed at
 both ends, so a mis-annotated route denies. Roles come from a configurable claim on every request
 and are never stored — the IdP stays authoritative — reduced to the single strongest mapped value
-by rank, so neither claim order nor map iteration order can change the answer; a dotted claim name
-resolves as a path only, never additionally as a flat key of that name, because the reverse lets a
-user-settable flat claim outrank a nested one. Key material is a kid-indexed set with a **bounded
+by rank, so neither claim order nor map iteration order can change the answer; how a claim NAME is
+read is fixed by the name and never by the token — a URI-shaped name (`https://corp.example/roles`,
+the namespaced convention Auth0 requires) is one flat key, any other dotted name
+(`resource_access.console.roles`, the Keycloak shape) is a path — because the alternative, trying
+the flat key and falling back to walking, lets a user-settable flat claim outrank a nested one. Key material is a kid-indexed set with a **bounded
 lifetime**: a five-minute TTL checked before the map lookup (so a key the provider removed stops
 verifying within that bound rather than living in the cache forever), a thirty-second refresh
 cooldown, hand-rolled single-flight under the same mutex as the cache, a per-fetch deadline, a
