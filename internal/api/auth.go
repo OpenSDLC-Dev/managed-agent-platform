@@ -97,7 +97,26 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	})
 }
 
+// principalFrom is the audit answer to "who made this request" — the value
+// sessions.created_by records. It resolves either lane's principal: the api key's
+// name on the machine lane, and the human's `principal_` id on the identity lane
+// (plan 31 slice 2, #56).
+//
+// Reading only ctxKeyPrincipal was the pre-plan-31 shape, when a machine key was
+// the only thing that could reach a mutation. Left that way, the moment slice 3
+// lets a human create a session the row would record NO creator at all — silently,
+// since created_by is nullable and nothing checks it. The whole point of a stable
+// `principal_` id is that an audit trail can name the human it belongs to.
+//
+// The machine lane wins when both are somehow set, matching dispatch: only one is
+// ever populated today, and if that ever changed, the credential that
+// authenticated the request is the machine one.
 func principalFrom(ctx context.Context) string {
-	p, _ := ctx.Value(ctxKeyPrincipal).(string)
-	return p
+	if p, _ := ctx.Value(ctxKeyPrincipal).(string); p != "" {
+		return p
+	}
+	if p, ok := identityFrom(ctx); ok {
+		return p.ID
+	}
+	return ""
 }

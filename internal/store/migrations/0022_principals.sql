@@ -26,9 +26,9 @@
 -- survives the deletion as an opaque id. No retention timer ships with the
 -- platform on purpose — an erasure regime wants the row gone quickly and an
 -- audit regime wants it stable while created_by still resolves, and either
--- default is silently wrong for the other. docs/self-hosted-security.md
--- documents the last_seen_at-based DELETE an operator runs on their own
--- schedule.
+-- default is silently wrong for the other. docs/self-hosted-security.md § 8
+-- (Principal retention) carries the last_seen_at-based DELETE an operator runs
+-- on their own schedule, and the two consequences to know before running it.
 CREATE TABLE principals (
     id            text PRIMARY KEY,          -- principal_… (domain.NewID)
     issuer        text NOT NULL,
