@@ -1,7 +1,26 @@
 ---
-status: in-progress
+status: archived
 issue: "#56"
 ---
+
+> **Archived 2026-08-12 — completed on slices 1–4 and the slice 6 acceptance.**
+> #56 keeps its multi-tenant half (never in scope here — see Out of scope).
+> **Slice 5, the api-key issuance surface, did not ship**: it is gated below on
+> a live observation of the reference console's key-management dialect, which
+> needs an authenticated Anthropic console account and creates real credentials
+> in it, so this plan's own provision applied and the slice moved to
+> [#378](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/378)
+> carrying what recording it needs — rather than shipping a guessed dialect.
+> Everything else is delivered: slices 1–4 as
+> [#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369),
+> [#370](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/370),
+> [#371](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/371) and
+> [#374](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/374), and
+> slice 6's acceptance run — a real Casdoor token minted by authorization-code +
+> PKCE, a viewer refused a mutation, an admin issuing an environment key, and a
+> real `ant beta:worker poll` authenticating with it — is recorded in
+> [docs/HISTORY.md](../HISTORY.md). The delivery record is that file and
+> CHANGELOG.md.
 
 # Console SSO and RBAC: pluggable identity, platform-enforced roles (plan 31)
 
