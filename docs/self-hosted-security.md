@@ -693,6 +693,137 @@ id: older sessions keep pointing at the old one. If your audit obligations need
 `created_by` to stay resolvable, retain rows at least as long as you retain sessions,
 and delete the sessions first.
 
+### 9. Single sign-on and the bundled identity provider
+
+The platform is a **relying party and never an identity provider**: it verifies a
+token against the issuer you name and mints none of its own. So the IdP is yours to
+choose, and there are two shapes. Point `IDENTITY_OIDC_ISSUER` at the provider your
+organization already runs — Keycloak, Entra ID, Cognito, Okta, `accounts.google.com`,
+anything standards-compliant — or, for a deployment that has no IdP at all, run the
+**bundled Casdoor** the compose `iam` profile ships
+([deploy/compose/README.md](../deploy/compose/README.md)).
+
+**If you already have an IdP, point the platform straight at it.** The bundled Casdoor
+is a *local-account* IdP — users, groups, MFA, an admin UI, an OIDC OP — and
+deliberately **not a federation hub**. Casdoor can federate to around a hundred
+upstream OAuth/OIDC/SAML/LDAP providers, and this bundle configures **zero**. Adding
+your corporate IdP as an upstream provider inside it would route every one of your
+users through the exact code path the posture below exists to avoid; naming that IdP
+as the platform's issuer routes them through none of it.
+
+**One transport rule applies to whichever you pick.** `internal/identity` requires an
+`https` key-set URL, and the guarded dialer beneath it then refuses loopback addresses
+outright — so a plain-HTTP IdP cannot be wired to this platform at all, and there is no
+flag to relax it. Terminate TLS in front of your IdP, and if that certificate comes
+from a private CA, give the control plane `SSL_CERT_FILE` pointing at the root — and
+know what that variable does, because it is narrower than it reads: it **replaces** Go's
+default certificate-FILE list rather than adding to it, and public roots keep working
+only because the separate scan of the certificate DIRECTORY still runs. On an image
+whose roots live only in a file, setting it would drop every public CA. Set it when you
+have a private CA to trust, and leave it unset otherwise — which is why the compose
+bundle makes it part of the `iam` profile rather than a default. One failure
+mode to recognize: Go ignores a CA file it cannot open without saying so, so a
+`SSL_CERT_FILE` the control plane's user cannot read surfaces as a hard boot error out
+of the verifier's warming key fetch, never as a permissions message.
+
+#### The CERT/CC VU#780781 posture, stated plainly
+
+Casdoor is bundled with its security record priced in rather than hidden. CERT/CC
+VU#780781 (published 2026-05-28) covers **nine CVEs affecting versions ≤ 2.362.0**;
+coordination with the vendor failed — *"we have not received a statement from the
+vendor"* — and the advisories name no fixed version. So for eight of the nine it is the
+**configuration**, not a patch note, that answers them, and that is why the hardening
+is not optional decoration. Verified against Casdoor's source at v3.152.0:
+
+| CVE | Where it lives | What answers it here |
+|---|---|---|
+| **CVE-2026-9090** (9.1) — signing certificate taken from the incoming `SAMLResponse` | SAML service provider | **The pinned version fixes it.** Patched silently upstream in v2.387.0 (commit `d14674e6`, 2026-04-05, seven weeks before disclosure); the bundle pins `casbin/casdoor:3.152.0`, far past it |
+| **CVE-2026-9093 / 9095 / 9096 / 9098** — no audience check, no replay protection, time bounds ignored, unsolicited responses accepted | SAML service provider | **Voided twice over.** The path is reached only through a configured SAML upstream provider, and there are none; and the SP routes are **refused outright at the proxy**, so the code is not reachable over the network either |
+| **CVE-2026-9091** (MFA bypass) and **CVE-2026-9092** (9.1, unverified-email account takeover) | The **upstream-provider binding** path — *any* social or OAuth upstream, not only SAML | **Voided by zero upstream providers.** Nothing else mitigates these two; they are unpatched and they are the reason the next paragraph is a requirement |
+| **CVE-2026-9094** — cross-organization escalation | Multi-organization deployments | **Voided by keeping one populated organization.** The seed creates exactly one organization for people, and public signup is off, so there is no second tenant to escalate across. A Casdoor always also has its own `built-in`, which holds only Casdoor's administrator — see the organization note below, and the account note on why the seed owns that administrator's password rather than leaving Casdoor's documented default on it |
+| **CVE-2026-9097** (9.8) — a revoked JWT accepted in token exchange | The token-exchange grant | **Voided by not enabling the grant.** The seeded application's `grantTypes` lists `authorization_code` and `refresh_token` and nothing else; token lifetime is a second bound (`expireInHours`, seeded at 24) |
+
+**Zero upstream providers is a security requirement, not a default nobody got around
+to changing.** Configuring one — a "sign in with Google" button, your corporate SAML —
+re-opens CVE-2026-9091 and CVE-2026-9092, the highest-severity pair still unpatched, on
+a path nothing in the deployment can then close. If you want corporate identity, use it
+as the platform's issuer directly rather than federating it through Casdoor.
+
+**The SAML and CAS surfaces are refused, not merely unused.** Casdoor serves its API
+and its login UI from one port, so the browser must be able to reach it and
+"keep it on an internal network" is not available as a control — which is why the
+bundle publishes only a reverse proxy and leaves Casdoor's own port unpublished. The
+proxy answers 404 to `/api/get-saml-login`, `/api/acs`, `/api/saml/metadata`,
+`/api/saml/redirect/*` and the whole `/cas/*` tree, taken verbatim from Casdoor's
+router; the authorization-code routes this deployment actually uses
+(`/login/oauth/*`, `/api/login/oauth/*`) are deliberately left alone. If you front the
+bundle with your own ingress instead, carry that block list across — it is the second
+half of the SAML mitigation above.
+
+**The organization those people live in is a security choice, not a label.** The seed
+creates one of its own, `map`, and puts every human there rather than in Casdoor's
+`built-in` — a user in `built-in` is a Casdoor **global administrator**, so the separate
+organization is the whole difference between a platform `viewer` and someone who can
+reconfigure the identity provider. It is also why every `IDENTITY_ROLE_MAP` key is
+spelled `map/platform-admins` and friends: a Casdoor group reaches the token as
+`organization/name`, so the organization's name is part of the authorization policy, and
+renaming it without updating the map unmaps every human at once.
+
+#### What rides inside a Casdoor token
+
+Worth knowing before you decide where those tokens are allowed to travel, and measured
+on a real token from the seeded stack rather than read off a struct. Casdoor's **`JWT`
+token format embeds the user record** in the payload, and the bundle must use that
+format: the alternative `JWT-Standard` drops `groups` from the token, and `groups` is
+where the roles this platform maps actually ride. A JWT payload is base64url, not
+encrypted, so whoever holds the token can read all of it.
+
+What that record contains is better than the description sounds and not nothing:
+`password`, `totpSecret` and `hash` all come back **blanked**, but `passwordSalt`
+**does** ride in the token. A salt is not a secret the way a password is — its job is
+to defeat precomputation across users, and it buys an attacker nothing without the hash
+that is not there — but it is a per-user value out of the IdP's own user table that
+leaves the IdP with every token issued. So treat one of these tokens as *the user
+record*, not as a handful of claims: keep it out of logs and proxy traces, keep the
+lifetime short, and do not hand it to a third party the way an opaque access token
+could be handed over.
+
+#### What you own
+
+- **Bumping the image.** The bundle pins a version; keeping it current is yours.
+  Casdoor ships several releases a week, and the posture above is version-sensitive —
+  re-read it when you bump, because the mitigation for eight of the nine CVEs is
+  configuration that a future release could rename or restructure.
+- **Everything dev-shaped about the compose profile.** It seeds **well-known dev
+  accounts**, publishes the proxy on loopback only, and keeps the IdP's users in a
+  second database inside the same bundled Postgres — so `docker compose down -v`
+  destroys the user store along with the platform's data, and the regenerated signing
+  certificate invalidates every token issued before the wipe. None of that is a
+  production posture; it is a laptop's. Real accounts, real secrets, and a database
+  lifecycle you actually chose are the price of running this bundle for real.
+- **Editing what the seed created — and knowing which edits survive.** The compose bundle
+  keeps `initDataNewOnly=false` deliberately, because it is the only setting under which
+  the seed owns Casdoor's own `built-in/admin`: Casdoor creates that global administrator,
+  with its publicly documented default password, *before* it reads the seed file, so
+  `true` would leave that credential in place on every boot. The cost is that every
+  entity the seed **names** is re-applied on restart, so an edit to those four accounts,
+  to the `map-console` application (its 24-hour token lifetime included) or to the three
+  groups reverts. Entities the seed does not name are untouched, so a user you add in the
+  admin UI survives. Change a seeded value in the seed file, not in the UI; change
+  anything else wherever you like. The Helm chart shares that seed byte for byte and makes
+  the same choice for the same reason, with two differences that follow from a cluster IdP
+  being *published* where a laptop's is not: the three demo accounts above are dropped from
+  the render entirely, and `built-in/admin`'s password comes from the required
+  `casdoor.adminPassword` rather than this file — so on Kubernetes there is no committed
+  credential to replace, only one you supply.
+- **The role mapping itself.** Roles come from claims on every request, so the group
+  membership in your IdP *is* the authorization policy — §8 above and
+  [docs/ARCHITECTURE.md](./ARCHITECTURE.md#security-invariants) cover what the platform
+  does and does not store. A claim value that maps to nothing yields no role and is
+  denied everywhere, which is the fail-closed direction but also the shape a
+  misconfiguration takes: if every human is refused, check the claim name and the map
+  before you suspect the token.
+
 ### Host and runtime isolation
 
 The sandbox runs untrusted, model-directed commands, so the strength of the

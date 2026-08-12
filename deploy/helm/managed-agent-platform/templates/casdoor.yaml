@@ -1,0 +1,163 @@
+{{- if .Values.casdoor.enabled -}}
+{{- $origin := include "map.casdoorOrigin" . -}}
+{{- /* The one equality the chart owns both sides of, so it is checked here rather
+       than left to fail in production. `origin` becomes the `iss` claim of every
+       token Casdoor mints and the verifier compares `iss` EXACTLY — a mismatch is
+       invisible until a human logs in and receives the same uniform 401 a forged
+       token gets, with nothing in either process naming the cause. Only when the
+       identity lane is actually configured for OIDC: deploying the IdP first and
+       wiring identity second is a supported order, and the empty issuer must not
+       fail that render. */ -}}
+{{- if and (eq .Values.identity.mode "oidc") .Values.identity.oidc.issuer -}}
+{{- if ne .Values.identity.oidc.issuer $origin -}}
+{{- fail (printf "identity.oidc.issuer %q must equal the bundled IdP's origin %q (https:// + casdoor.ingress.host): that origin is the `iss` claim of every token Casdoor mints, and the verifier compares it exactly." .Values.identity.oidc.issuer $origin) -}}
+{{- end -}}
+{{- end -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "map.fullname" . }}-casdoor
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: casdoor
+spec:
+  # ClusterIP, never NodePort or LoadBalancer. The Ingress is the only way in
+  # precisely because that is where the SAML and CAS surfaces are refused; a node
+  # port or a load balancer would be a second entrance carrying none of those
+  # rules, and the NetworkPolicy beside it would have nothing left to enforce.
+  type: ClusterIP
+  selector:
+    {{- include "map.selectorLabels" (dict "ctx" . "component" "casdoor") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "map.fullname" . }}-casdoor
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: casdoor
+spec:
+  # One replica, not configurable: the seed is applied on boot and the admin UI
+  # writes straight to the database, so a second replica buys availability for a
+  # process whose state is already in Postgres and costs a second seeder.
+  replicas: 1
+  # And Recreate, because `replicas: 1` alone does not deliver one seeder. The
+  # default RollingUpdate rounds maxSurge up to 1, so an upgrade — which the
+  # checksum annotations below deliberately trigger whenever the seed or the DSN
+  # changes — starts the new pod before the old one goes away. Both would run
+  # `--createDatabase=true` and re-apply init_data.json (initDataNewOnly is false
+  # by design) against the same database at the same time. Old-stops-then-new-
+  # starts costs a few seconds of login downtime on a single-replica IdP that has
+  # none to lose anyway.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "casdoor") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pod when the seed or the DSN changes on upgrade: the seed is
+        # read at boot and nowhere else, so an edited one takes effect only on a
+        # restart, and a rotated database password not at all until then.
+        checksum/casdoor-init-data: {{ include (print $.Template.BasePath "/casdoor-init-data-secret.yaml") . | sha256sum | quote }}
+        checksum/casdoor-secret: {{ include (print $.Template.BasePath "/casdoor-secret.yaml") . | sha256sum | quote }}
+      labels:
+        {{- include "map.labels" . | nindent 8 }}
+        app.kubernetes.io/component: casdoor
+    spec:
+      {{- include "map.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: casdoor
+          image: {{ .Values.casdoor.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # An ARGUMENT to the image's own ENTRYPOINT ["/server"] — `args`, never
+          # `command`, which would replace it. `--createDatabase` is what lets
+          # Casdoor own its database rather than needing one created for it.
+          args: ["--createDatabase=true"]
+          env:
+            # Casdoor reads conf/app.conf, but conf.GetConfigString consults the
+            # environment first for every key, so the whole configuration lives
+            # here and no config file is mounted. The names are Casdoor's own
+            # camelCase keys, not an invention of this chart.
+            - name: driverName
+              value: postgres
+            - name: dataSourceName
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "map.fullname" . }}-casdoor
+                  key: datasource-name
+            # Required despite being documented as MySQL-only: InitAdapter passes
+            # it to CREATE DATABASE "<dbName>", which panics on an empty string.
+            # The DSN's own dbname= token is separate and equally required — see
+            # casdoor-secret.yaml.
+            - name: dbName
+              value: {{ .Values.casdoor.database.name | quote }}
+            # The URL the BROWSER uses, and therefore the `iss` claim. Left empty,
+            # Casdoor derives the issuer from the request's Host header and `iss`
+            # varies per client, which the verifier's exact comparison rejects.
+            - name: origin
+              value: {{ $origin | quote }}
+            - name: httpport
+              value: "8000"
+            - name: initDataFile
+              value: /init_data.json
+            # false, the shipped default, kept deliberately: it is the only
+            # setting under which the seed owns `built-in/admin`. Casdoor's
+            # InitDb() creates that global administrator on the documented
+            # password `123` before reading the seed, so with true the ConfigMap's
+            # entry for it is skipped and the default survives behind the Ingress.
+            # Measured both ways against 3.152.0.
+            #
+            # The cost was measured too, and is narrower than it looks: on
+            # restart, entities NAMED in the seed are re-applied — the
+            # organization, the application, the three groups and the admin
+            # account — so admin-UI edits to those revert, while entities the seed
+            # does not name are untouched. The accounts an operator creates for
+            # their people survive; the token lifetime on `map-console` does not,
+            # and is a values change rather than a UI change.
+            - name: initDataNewOnly
+              value: "false"
+            # Ships as a file logger writing under /logs, which the image's uid
+            # cannot create in a root-owned "/". `kubectl logs` wants the console
+            # adapter anyway.
+            - name: logConfig
+              value: '{"adapter":"console"}'
+          ports:
+            - name: http
+              containerPort: 8000
+          # TCP, like the platform's own processes: Casdoor serves its API and its
+          # UI from this one port, and a probe on a specific route would be this
+          # chart asserting something about Casdoor's router that it has no reason
+          # to know.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            # subPath, so the mount is the file itself at the path initDataFile
+            # names — the image's working directory is "/", and mounting the
+            # ConfigMap as a directory there is not something to attempt.
+            - name: init-data
+              mountPath: /init_data.json
+              subPath: init_data.json
+              readOnly: true
+          {{- with .Values.casdoor.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: init-data
+          secret:
+            secretName: {{ include "map.fullname" . }}-casdoor-init-data
+{{- end -}}

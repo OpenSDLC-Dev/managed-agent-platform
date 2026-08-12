@@ -11,6 +11,9 @@
 # They are placeholders now (see below) and the workflow supplies the real ones,
 # so the acceptance record covers every line here EXCEPT those five — and the
 # five are re-proved on every deploy, by two different means rather than one.
+# The `identity:` block postdates that run entirely and is not covered by it:
+# it says so where it sits, along with what it presumes that this environment
+# does not yet provide.
 # The three IDENTITIES are read back out of the cluster by the step after
 # `helm upgrade`, which compares each ServiceAccount's annotation against the
 # variable it came from. The two IMAGE halves are not read back and do not need
@@ -27,6 +30,13 @@
 # and one that names one operator's project, registry and identities hands a
 # reader a target list and ties the project to a cluster nobody cloning it can
 # reach.
+#
+# The `identity:` block adds two more such values — the IAP audience carries a
+# project NUMBER, and the role map names a person — and they are placeholders for
+# the same reason. What differs is that **no repository variable supplies the
+# real ones today**: a deployment that actually puts IAP in front sets them here
+# or on the `helm` command line, which is why both placeholders are written to
+# fail closed rather than to look plausible.
 #
 # The keys stay here rather than being deleted, and that is the deliberate half
 # of the choice: `helm template -f <this>` on its own is what CI runs against this
@@ -130,6 +140,94 @@ minio:
   enabled: false
 openbao:
   enabled: false
+
+# Single sign-on (docs/plan/31_console-sso-rbac.md, #56). On GCP the identity
+# provider is Google's: IAP terminates the human login in front of the control
+# plane and Cloud Identity Platform or Workspace does the SSO — so no Casdoor is
+# deployed here and the chart's `casdoor.enabled` stays at its default false.
+#
+# **This block postdates the acceptance run the header describes**, and it
+# configures the platform half of a front door this environment does not have
+# yet: the control plane is published as a plain-HTTP L4 LoadBalancer with no
+# domain (`controlplane.service.type` below), and IAP lives on an HTTPS load
+# balancer. So what deploys today is the lane, with nothing in front of it to
+# mint an assertion. Machine credentials are untouched by that — `x-api-key` and
+# worker environment keys resolve on their own lanes before any assertion is
+# consulted — which is why the pipeline's smoke check behaves identically with
+# the lane on.
+#
+# `trusted_proxy` + `gcp-iap` is one preset and two consequences worth stating.
+#
+# The preset fixes the assertion header (`x-goog-iap-jwt-assertion`), the issuer
+# (`https://cloud.google.com/iap`), the key set (Google's global gstatic JWK set)
+# and the algorithm (ES256) in CODE — internal/identity/preset.go — and
+# internal/identity/config.go REFUSES a deployment that tries to override one:
+# `IDENTITY_PROXY_PRESET=gcp-iap supplies IDENTITY_PROXY_HEADER; unset it` is a
+# boot error, not a warning. `proxy.header`, `proxy.issuer`, `proxy.keysUrl` and
+# `proxy.algs` are therefore deliberately absent below rather than forgotten.
+#
+# And it makes the control plane's STARTUP depend on reaching www.gstatic.com:
+# the verifier warms its key set at construction, and a fetch that fails is a
+# boot error rather than a 500 on the first human's first request
+# (internal/identity/verifier.go, New). The nodes are private and egress through
+# Cloud NAT, so the reach exists — but it is a new dependency of a boot that used
+# to need only Postgres, and `helm upgrade --wait --atomic` turns a failure of it
+# into a rolled-back deploy.
+#
+# Those two facts together are why `mode` below ships EMPTY, and it is the one
+# value in this block a real deployment changes. There is no IAP in front of this
+# environment, so an enabled lane grants no human anything today; what it would
+# add is a boot dependency on an external host to a deploy that needs only
+# Postgres, on the `--wait --atomic` path where a transient fetch failure becomes
+# a rollback. Cost with no benefit until the HTTPS front door exists. The keys
+# stay, spelled and placed exactly as a working deployment wants them, so turning
+# the lane on is `mode: trusted_proxy` plus a real audience — one line and one
+# value, not a reconstruction of this block. It also keeps this file consistent
+# with the chart, where `identity.mode` and `casdoor.enabled` are both off by
+# default and nothing in the platform turns itself on.
+identity:
+  mode: "" # IDENTITY_MODE — `trusted_proxy` once IAP fronts the control plane
+  proxy:
+    preset: gcp-iap # IDENTITY_PROXY_PRESET
+    # The one verification parameter the preset cannot supply, and the entire
+    # tenant boundary of this mode. The gstatic key set is global across every
+    # Google Cloud customer, so another customer's IAP assertion is signed by a
+    # key this deployment trusts and is refused by `aud` and nothing else
+    # (internal/identity/preset.go states exactly this). The header is also
+    # caller-supplied on a public address here, so what refuses a forged one is
+    # the signature over Google's key set plus this value — there is no third
+    # check behind them.
+    #
+    # A placeholder that fails CLOSED, in the same spirit as `registry.invalid`
+    # above: project number 0 and backend service 0 name nothing that can exist,
+    # so every assertion fails `aud`, while the value still satisfies the
+    # `/projects/` shape check that would otherwise refuse the boot. The real one
+    # is `terraform -chdir=deploy/gcp/environment output -raw
+    # identity_proxy_audience`, once `iap_backend_service` names the backend
+    # service IAP is enabled on.
+    audience: "/projects/0/global/backendServices/0" # IDENTITY_PROXY_AUDIENCE
+  claims:
+    # IAP's assertion identifies the PERSON — subject and email — rather than the
+    # directory groups they belong to, so the roles claim is the email claim and
+    # the map below names people. Nothing in the platform presumes that: an IdP
+    # that does place a group claim in the assertion is configured by pointing
+    # this at its name instead.
+    roles: email # IDENTITY_CLAIM_ROLES
+  # Claim value → role, which the chart joins into IDENTITY_ROLE_MAP. Placeholder,
+  # and fail-closed for the reason the audience is: RFC 2606 reserves `.invalid`,
+  # so no mailbox under it can exist and this entry can never match a verified
+  # assertion.
+  #
+  # A claim value may contain neither `,` nor `=` — parseRoleMap in
+  # internal/identity/config.go splits on both, and a value carrying one fails
+  # startup rather than mapping something unintended. Email and Google group
+  # addresses are unaffected.
+  #
+  # Mapping is the authorization; IAP membership is only admission. An
+  # authenticated human whose email matches no entry here holds no role and is
+  # refused by every role-gated route — 403, not 401.
+  roleMap:
+    "admin@your-domain.invalid": admin
 
 controlplane:
   # LoadBalancer is what makes the API reachable at all: this deployment has no

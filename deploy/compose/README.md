@@ -66,6 +66,7 @@ and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 | `TAVILY_API_KEY` / `JINA_API_KEY` / `WEBSEARCH_BASE_URL` / `WEBFETCH_BASE_URL` | The executor's web-tool backends (docs/plan/15_web-tools.md). No `TAVILY_API_KEY` leaves `web_search` unconfigured; neither `JINA_API_KEY` nor `WEBFETCH_BASE_URL` leaves `web_fetch` unconfigured (each answers the model with an error naming what is missing). Empty base URLs mean the public endpoints. |
 | `WEBTOOL_ALLOWED_DOMAINS` | Comma-separated operator allowlist for both web tools (#225); empty = unrestricted. An entry is a bare hostname, an IPv4 literal, or a `*.`-wildcard, validated at startup: a bare entry admits **only that exact host**, `*.example.com` admits **subdomains but not the apex** — list both to get both. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector for traces, metrics **and logs**; empty disables telemetry export entirely. Set to `jaeger:4317` with the observability profile — but note Jaeger ingests **traces only**, so each failed log-export batch prints one `Unimplemented … LogsService` line to stderr. Point at a collector that takes all three (an OTel Collector, Grafana Alloy) to silence it. |
+| `IDENTITY_MODE`, its five `IDENTITY_*` companions, and `SSL_CERT_FILE` | Human single sign-on (docs/plan/31_console-sso-rbac.md). Empty — the default — is off: the control plane reads none of the others and management auth stays `x-api-key` only. All seven move together, `SSL_CERT_FILE` included, or the control plane cannot verify the bundled IdP's certificate and exits at boot; see [Single sign-on](#single-sign-on-optional) below. |
 
 The **model routing** file (mounted into the brain at
 `/etc/map/model-providers.json`) is a **JSON array** of routes, each with `model`
@@ -150,11 +151,111 @@ stderr, one line per failed batch. Harmless — traces still arrive, and the
 platform's own logs still reach the console — but if you want the logs stored
 and the noise gone, put an OTel Collector at `4317` and let it fan out.
 
+## Single sign-on (optional)
+
+```sh
+# in .env: uncomment all seven SSO lines — the six IDENTITY_* and SSL_CERT_FILE
+# (they ship commented out in .env.example)
+docker compose --profile iam up --build
+```
+
+Two services join the stack (docs/plan/31_console-sso-rbac.md,
+[#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56)): **casdoor**, a
+local-account OIDC provider, so "the platform's default IAM works out of the box" is true
+on a laptop; and **idp**, a small Caddy proxy that is the only published way to reach it.
+The sign-in page is `http://localhost:8000`. Nothing else about the stack changes — with
+the profile off, `IDENTITY_MODE` stays empty and management auth is `x-api-key` only.
+
+The seven variables move as a set, because `IDENTITY_MODE` gates the rest: with it unset the
+control plane reads none of the others, so uncommenting six of seven changes nothing. The
+seventh, `SSL_CERT_FILE`, is the one whose absence is not silent — leave it commented and
+the control plane cannot verify the proxy's certificate, so it exits at boot with
+`x509: certificate signed by unknown authority` and restarts forever.
+`.env.example` carries the full reasoning; the short version is
+
+- `IDENTITY_MODE=oidc` — the relying-party mode;
+- `IDENTITY_OIDC_ISSUER=http://localhost:8000` — must equal the IdP's `origin` byte for
+  byte, because that value becomes the `iss` claim and the verifier compares it exactly;
+- `IDENTITY_OIDC_AUDIENCE=map-console-dev` — the application's **client id**, which is what
+  Casdoor puts in `aud`;
+- `IDENTITY_OIDC_JWKS_URL=https://idp:8443/.well-known/jwks` — a different host on purpose,
+  and **not** optional here (see the proxy, below);
+- `IDENTITY_CLAIM_ROLES=groups` — Casdoor's `roles` claim carries role *objects* and the
+  platform reads only string values out of a claim, so mapping `roles` would give every
+  human no role at all, which is denied everywhere. `groups` carries strings;
+- `IDENTITY_ROLE_MAP=map/platform-admins=admin,…` — the group names are spelled
+  `organization/name`, which is where the `map/` prefix comes from.
+
+Three accounts are seeded, one per role:
+
+| Sign in as | Password | Casdoor group | Platform role |
+|---|---|---|---|
+| `map-admin` | `map-admin-dev` | `map/platform-admins` | `admin` |
+| `map-dev` | `map-dev-dev` | `map/platform-devs` | `developer` |
+| `map-viewer` | `map-viewer-dev` | `map/platform-read` | `viewer` |
+
+They live in a seeded `map` organization rather than Casdoor's `built-in`, whose users are
+all Casdoor global administrators. **These are well-known dev credentials** — committed in
+`casdoor-init-data.json`, the same status as the `BAO_STATIC_KEY` default above — which is
+why the proxy publishes on loopback (`IDP_BIND`/`IDP_PORT`), and why anything past a laptop
+replaces them before it exposes the port.
+
+Casdoor's own administrator is separate from all three — `built-in/admin`, password
+`map-iam-admin-dev` — and it is the login for the IdP's admin UI, where you add real users
+and put them in groups. The seed **resets** that password, because Casdoor's own default
+for the account is the publicly documented `123`. It is not a platform principal (no group,
+no role); it is simply the fourth dev credential to replace.
+
+One restart behaviour to know, since it is what lets the seed own that password: the
+profile keeps `initDataNewOnly=false`, so every entity the seed **names** is re-applied on
+each start. Edits to the four accounts, the three groups, or the `map-console` application
+— its 24-hour token lifetime included — therefore revert; make those in
+`casdoor-init-data.json` instead. Anything the seed does not name, such as a user you add
+in the admin UI, is untouched and survives.
+
+The platform never runs the browser flow itself. A client does authorization-code + PKCE
+against `http://localhost:8000` as client `map-console-dev` (the seeded redirect URI is
+`http://localhost:5173/callback`) and sends the resulting ID token to the control plane as
+`Authorization: Bearer <jwt>`; the control plane verifies it and resolves the role.
+
+**The proxy is the only way in, and that is an enforced control rather than advice.**
+Casdoor serves its API and its UI from one port, so the browser has to reach it and
+"keep it on the internal network" is not available as a control — which is why `casdoor`
+publishes nothing and `idp` does. The proxy has two jobs. It answers 404 to Casdoor's SAML
+and CAS surfaces (`/api/get-saml-login`, `/api/acs`, `/api/saml/metadata`,
+`/api/saml/redirect/*`, `/cas/*`) — routes this stack uses none of, and where five of the
+nine CERT/CC VU#780781 CVEs live; see
+[docs/self-hosted-security.md](../../docs/self-hosted-security.md) §9. And it terminates
+TLS on a second, unpublished listener (`https://idp:8443`) for the control plane, because
+`internal/identity` requires an `https` key-set URL and its dial guard then refuses
+loopback addresses outright — so a plain-HTTP IdP cannot be wired to this platform at all.
+Caddy issues that certificate from a local CA generated on first boot into the `idpca`
+volume, which the control plane mounts read-only and trusts through `SSL_CERT_FILE` — the
+seventh variable you uncommented, and empty in the default stack on purpose, because that
+variable REPLACES Go's default certificate-file list rather than adding to it; nothing
+private is committed. The control plane waits
+for the proxy's healthcheck, which fetches the key set through the whole chain — a
+misconfigured IdP is a boot failure by design (the verifier makes one warming key fetch at
+startup), so the wait is what keeps that from firing on a stack that is merely still
+starting.
+
+Casdoor keeps its users in a **second database inside the bundled Postgres** — `casdoor`,
+created on first boot by the server's own `--createDatabase=true`, beside
+`managed_agent_platform`. One container, two databases, one `pgdata` volume. So
+`docker compose down -v` takes the IdP's user store with everything else: the three
+accounts, any you added, group membership, and the built-in signing certificate Casdoor
+mints when it initializes an empty database. The next `up` re-seeds the accounts and mints
+a **different** signing key, so every token issued before the wipe stops verifying — worth
+knowing before you drop volumes mid-debugging with a token open in a terminal.
+
 ## Teardown
 
 ```sh
 docker compose down          # stop and remove containers
 docker compose down -v       # also drop the volumes (wipes all data — Postgres,
                              # MinIO, and OpenBao together; ciphertext and its
-                             # transit key live and die as a pair)
+                             # transit key live and die as a pair). With the `iam`
+                             # profile that includes the IdP: its user store shares
+                             # the Postgres volume, and its signing certificate is
+                             # minted afresh on the next boot (see above)
 ```

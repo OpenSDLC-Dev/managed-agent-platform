@@ -1,0 +1,40 @@
+# The second chart state CI lints and renders: the identity lane on, with the
+# bundled IdP behind it (docs/plan/31_console-sso-rbac.md, #56). Layered ON TOP of
+# example-values.yaml, which supplies the required values the platform itself
+# needs. Not a real deployment: the host and the client secret are placeholders.
+#
+# The four values below are one configuration and each is load-bearing:
+#   - claims.roles is `groups`, not `roles`. Casdoor's `roles` claim carries role
+#     OBJECTS and the platform collects only string values out of a claim, so
+#     mapping `roles` would give every human no role and deny them everywhere.
+#   - roleMap keys are spelled organization/name, because that is how Casdoor
+#     writes a group, and the seeded organization is `map`.
+#   - oidc.audience is the application's CLIENT ID: that is what Casdoor puts in
+#     `aud`. The chart refuses a render where it disagrees with
+#     casdoor.console.clientId.
+#   - oidc.issuer is `https://` + casdoor.ingress.host, byte for byte, because
+#     that origin becomes the `iss` claim. The chart refuses a mismatch here too.
+identity:
+  mode: oidc
+  oidc:
+    issuer: https://idp.ci.example
+    audience: map-console
+  claims:
+    roles: groups
+  roleMap:
+    map/platform-admins: admin
+    map/platform-devs: developer
+    map/platform-read: viewer
+
+casdoor:
+  enabled: true
+  adminPassword: ci-placeholder-admin-password
+  console:
+    clientSecret: ci-placeholder-client-secret
+    redirectURIs:
+      - https://console.ci.example/callback
+  ingress:
+    className: nginx
+    host: idp.ci.example
+    tls:
+      secretName: ci-placeholder-idp-tls

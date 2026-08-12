@@ -140,6 +140,39 @@ output "network" {
   description = "The VPC this environment created. Named because a second environment in the same project must not reuse it — the peering range is reserved per network."
 }
 
+# ---------------------------------------------------------------------------
+# Single sign-on. The one value the gcp-iap preset cannot preset, emitted in the
+# exact shape the platform reads it in, because the shape is easy to get subtly
+# wrong by hand and the consequence of getting it wrong is not a broken login.
+# ---------------------------------------------------------------------------
+
+output "identity_proxy_audience" {
+  # The same comprehension idiom as docker_hub_mirror above, and for the same
+  # reason: zero elements when IAP is unwired, one when it is, and join() states
+  # that arity directly instead of catching an out-of-range index.
+  value = join("", [
+    for b in data.google_compute_backend_service.iap :
+    "/projects/${data.google_project.current.number}/global/backendServices/${b.generated_id}"
+  ])
+  description = <<-EOT
+    IDENTITY_PROXY_AUDIENCE — the chart's identity.proxy.audience — or empty when
+    var.iap_backend_service is unset.
+
+    This single value is the whole tenant boundary of trusted_proxy mode, and
+    that is not a figure of speech. The gcp-iap preset verifies against
+    https://www.gstatic.com/iap/verify/public_key-jwk, which is GLOBAL across
+    every Google Cloud customer (internal/identity/preset.go says so at length),
+    so every customer's IAP assertion is signed by a key this deployment trusts.
+    What separates them is the audience: an assertion minted for another backend
+    service — anyone's — fails `aud` and nothing else would have stopped it.
+
+    The project NUMBER, not the project id, and the backend service's
+    server-assigned numeric id, not its name. Both come from the data sources
+    rather than from a variable, so what this prints cannot disagree with what
+    the IAM bindings in iam.tf admit people to.
+  EOT
+}
+
 output "docker_hub_mirror" {
   # A comprehension over the count'd resource: zero elements when the mirror is
   # off, one when it is on, and join makes that "" or the prefix. It states the

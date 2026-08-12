@@ -475,6 +475,228 @@ localCipher:
 gcpKMS:
   keyName: ""
 
+# -- Human single sign-on and the three platform roles
+# (docs/plan/31_console-sso-rbac.md, #56). The control plane is a plain OIDC
+# relying party with no vendor SDK, and this block is its whole configuration: it
+# lands verbatim on the controlplane container as the IDENTITY_* variables
+# internal/identity/config.go reads. The chart injects it whatever else is
+# deployed, so an external provider — Keycloak, Entra ID, Cognito,
+# accounts.google.com — needs nothing from the `casdoor` block below.
+#
+# `mode: ""` is DISABLED, and it is the default: with IDENTITY_MODE unset the
+# control plane reads none of the other variables, no Bearer JWT is accepted
+# anywhere, and management auth stays `x-api-key` exactly as it was before this
+# block existed. The chart renders no IDENTITY_* entry at all in that state — not
+# even the pair that would say "disabled" — so upgrading an existing release does
+# not change its controlplane pod spec and does not roll it.
+#
+# Whatever the platform refuses, it refuses at STARTUP, loudly and by variable
+# name: an unreachable issuer, an empty role map, a malformed pair, a role outside
+# admin/developer/viewer. The chart does not restate those rules. It refuses only
+# what it alone can see — the encoding separators below, and the two equalities it
+# owns both sides of when the bundled IdP is on.
+identity:
+  # -- IDENTITY_MODE: "" (disabled) · oidc · trusted_proxy.
+  mode: ""
+  # -- Mode `oidc`. `issuer` is the discovery root AND the exact `iss` the
+  # verifier compares against; `audience` is the client id the console's tokens
+  # are minted for (`aud` must contain it). `jwksURL` skips discovery entirely,
+  # for a provider whose discovery document is absent or wrong.
+  #
+  # Both URLs must be https — internal/identity/fetch.go requires an https key
+  # set and its dial guard then refuses loopback addresses outright, so a
+  # plain-HTTP provider cannot be wired to this platform at all — and the
+  # control plane must be able to resolve and reach them from inside the
+  # cluster, with a certificate its trust store already accepts.
+  oidc:
+    issuer: ""
+    audience: ""
+    jwksURL: ""
+  # -- Mode `trusted_proxy`: the cloud vendor terminated authentication and hands
+  # the control plane a signed assertion header (the unsigned convenience headers
+  # are never read). Preset `gcp-iap` supplies the header, issuer, key set and
+  # algorithms itself and takes ONLY `audience` — the IAP backend-service
+  # audience, `/projects/N/global/backendServices/ID`; setting any of the other
+  # four beside it is a startup error, because those four names ARE the issuer and
+  # the key source. Preset `custom` is the escape hatch for any other proxy whose
+  # assertion is a JWT against a JWKS: it needs `header`, `issuer`, `audience` and
+  # `keysURL`, and `algs` narrows the signature allowlist (default
+  # RS256,RS512,ES256,ES384,ES512).
+  proxy:
+    preset: ""
+    header: ""
+    issuer: ""
+    audience: ""
+    keysURL: ""
+    algs: ""
+  # -- Claim names, for a provider that does not use the defaults (`roles` /
+  # `email` / `name`). The roles claim is the load-bearing one: the platform
+  # collects STRING values out of it, so a provider that puts objects there maps
+  # to nothing, every human authenticates and holds no role, and every role-gated
+  # route answers 403. Casdoor is exactly that provider — its `roles` claim
+  # carries role objects — which is why the bundle below wants `roles: groups`.
+  claims:
+    roles: ""
+    email: ""
+    name: ""
+  # -- Claim value → platform role (`admin` | `developer` | `viewer`), written as
+  # a map and encoded by the chart into the `value=role,value=role` string
+  # IDENTITY_ROLE_MAP takes. A principal whose claims map to nothing holds no role
+  # and is denied everywhere, so this map is the whole grant. With the bundled
+  # Casdoor the keys are group names, spelled organization/name:
+  #   roleMap:
+  #     map/platform-admins: admin
+  #     map/platform-devs: developer
+  #     map/platform-read: viewer
+  roleMap: {}
+
+# -- The bundled identity provider (docs/plan/31_console-sso-rbac.md, #56): a
+# pinned Casdoor rendered from first-party templates, OFF by default. It is here
+# because this project's target deployment is a private cluster with no cloud
+# IdP, and "the platform's default IAM works out of the box" has to mean Helm
+# there, not only compose on a laptop. An enterprise with its own provider leaves
+# this off and points `identity.oidc` straight at that provider — Casdoor is a
+# local-account IdP here, never a federation hub.
+#
+# First-party rather than the upstream casdoor-helm subchart, whose QA shipped a
+# release that ignored its Postgres values and silently fell back to SQLite: an
+# IdP that quietly loses its user store is worse than one rendered here in fifty
+# lines. Owning the templates means owning their lifecycle — image tag, database,
+# seed, CVE tracking — which docs/self-hosted-security.md states rather than
+# implies.
+#
+# HARDENED BY DEFAULT, because of CERT/CC VU#780781 (nine Casdoor CVEs, no vendor
+# statement, no named fixed version): the image is pinned past the release that
+# silently fixed the worst of them; the seed configures ZERO upstream providers
+# (the binding path two 9.1-severity ones live on), one populated organization
+# beside Casdoor's own `built-in` and no self-service signup into either (which
+# is the accurate form — a Casdoor always has two), a `built-in/admin` password
+# the operator supplies rather than the documented default, and a grant list
+# without token exchange;
+# the Ingress refuses the SAML and CAS surfaces outright; and the NetworkPolicy
+# leaves the ingress controller as the only way to reach the pod, so those
+# refusals cannot be walked around.
+casdoor:
+  enabled: false
+  # -- Pinned deliberately, bumped deliberately, never floating. The tag is
+  # `3.152.0` — NOT `v3.152.0`, which is not a published tag at all.
+  image: casbin/casdoor:3.152.0
+  # -- The IdP's own administrator password, REQUIRED when enabled. Casdoor's
+  # InitDb() creates a `built-in/admin` account — a Casdoor GLOBAL administrator,
+  # who can reconfigure the provider that guards this platform — on the publicly
+  # documented default password `123`, before it ever reads the seed. Measured
+  # against 3.152.0: with `initDataNewOnly: true` the seed's entry for that
+  # account is skipped and `123` keeps working, so the chart sets false and the
+  # seed owns the account. Left empty the chart refuses to render, because the
+  # alternative is publishing that default through an Ingress.
+  #
+  # It rides the seed ConfigMap in plaintext and Casdoor hashes it on ingest, so
+  # its database holds bcrypt and never this value — verified on both the first
+  # boot and the re-apply path. Hashing it at render time instead was tried and
+  # rejected: bcrypt salts randomly, so every render would differ, `helm upgrade`
+  # would roll the IdP pod on unchanged values and Argo/Flux would never converge.
+  # The trade is the one console.clientSecret already makes — anyone who can read
+  # this release's Secrets can read it. Not auto-generated, for the same reason
+  # console.clientSecret is not.
+  #
+  # ROTATE IT HERE, never in Casdoor's admin UI. `initDataNewOnly` is false, so
+  # the seed re-applies on every boot and this account is one it names: a password
+  # changed in the UI is restored to this value the next time the pod restarts,
+  # which is worse than not rotating because the operator believes it is done.
+  # Change the value and `helm upgrade` — the seed's checksum rolls the pod, so
+  # the new password is live when the rollout finishes.
+  #
+  # QUOTE IT, along with console.clientSecret and console.clientId. All three land
+  # in JSON Casdoor unmarshals into string fields, and an all-digit password left
+  # unquoted is a number to YAML: the seed then fails to load and `123` survives
+  # on the account this value exists to take over. A long one is rounded before it
+  # gets that far. The chart refuses a non-string rather than rendering one, so
+  # this is a render error and not a silent boot failure — but quote it.
+  adminPassword: ""
+  # -- The OIDC application the seed creates for the console.
+  #
+  # `clientId` is what Casdoor puts in `aud`, so `identity.oidc.audience` must
+  # equal it — the chart refuses a render where the two disagree rather than
+  # leaving every token to fail `aud` behind a uniform 401 nobody can tell from a
+  # forged one.
+  #
+  # `clientSecret` is REQUIRED when enabled and is not auto-generated, the same
+  # rule postgresql.password and the MinIO/OpenBao credentials follow (a
+  # generated credential is unstable under `helm template`/GitOps). It rides the
+  # seed Secret, because a mounted JSON file is how Casdoor is seeded — so anyone
+  # who can read this release's Secrets can read it. Rotate it HERE and
+  # `helm upgrade`, not in the admin UI: the seed names this application, so a
+  # secret changed in the UI is restored on the next pod restart, and an operator
+  # who rotated there would be trusting a credential that quietly came back.
+  #
+  # `redirectURIs` are the console's callback URLs, and they belong here rather
+  # than in the admin UI: the seed is re-applied on every restart (see
+  # adminPassword above), so the application it names is restored to what this
+  # file says and a URI added through the UI is gone at the next reschedule.
+  # REQUIRED when enabled, for a reason worth stating because its absence is the
+  # only one that surfaces late: the seed's own callback is a laptop's
+  # (http://localhost:5173/callback) and is replaced unconditionally, so an empty
+  # list registers an OIDC application with no callback at all and every login
+  # ends in a redirect_uri mismatch — at the first sign-in, not at install.
+  console:
+    clientId: map-console
+    clientSecret: ""
+    redirectURIs: []
+  # -- How the browser reaches the IdP, and the one entrance the deny rules are
+  # attached to. `host` is REQUIRED when enabled: it is also the `origin` Casdoor
+  # is configured with, which becomes the `iss` claim of every token it mints, so
+  # `identity.oidc.issuer` must equal `https://<host>` — again a render-time
+  # refusal rather than a silent 401 wall.
+  #
+  # The host MUST be served over HTTPS, whether by the `tls.secretName` below or
+  # by the controller's own default certificate: the platform refuses a
+  # plain-HTTP issuer and key set outright, so the origin is `https://` and
+  # nothing else. The chart offers no hook for trusting a private CA — the
+  # control plane fetches JWKS from this host with the trust store its image
+  # already has, so use a certificate that store accepts (cert-manager with a
+  # public issuer, or a cluster-wide trust bundle).
+  ingress:
+    className: ""
+    annotations: {}
+    host: ""
+    tls:
+      secretName: ""
+  # -- Casdoor's database. Left empty, the chart derives a DSN against the
+  # bundled Postgres for a database of Casdoor's own — `name` below, which it
+  # creates on first boot (`--createDatabase=true`). REQUIRED when the bundled
+  # Postgres is off, and note that Casdoor takes a keyword/value DSN rather than
+  # a URL:
+  #   user=map password=… host=pg.internal port=5432 sslmode=require dbname=casdoor
+  # The `dbname=` token inside it is load-bearing (Postgres does not take the
+  # separate dbName key into the DSN) and must name the same database as `name`.
+  database:
+    name: casdoor
+    dataSourceName: ""
+  # -- Pod ingress restricted to the ingress controller. This is what makes the
+  # Ingress's SAML/CAS deny rules a control rather than advice: reach the pod by
+  # any other route — another workload in the namespace, a port-forward from a
+  # service account that can make one — and those rules are simply not on the
+  # path.
+  #
+  # `from` is a list of NetworkPolicyPeer objects, passed through verbatim, and
+  # it must be non-empty: an empty `from` means "all sources" to Kubernetes,
+  # which is the exact opposite of the intent, so the chart refuses one. The
+  # default names the namespace the most common controller installs into, by the
+  # label the API server puts on every Namespace itself. A peer that names the
+  # wrong controller fails visibly — the login page stops answering — rather than
+  # silently.
+  #
+  # Ingress-only: Casdoor still has to reach Postgres. Set `enabled: false` on a
+  # cluster whose CNI does not enforce policy, or whose policy is managed
+  # centrally.
+  networkPolicy:
+    enabled: true
+    from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx
+  resources: {}
+
 # -- Reference a pre-created Secret instead of letting the chart create one. When
 # set, the chart creates NO Secret and every process reads credentials from this
 # one, which must carry keys: controlplane-api-key, model-providers.json,

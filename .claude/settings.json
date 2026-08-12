@@ -1,7 +1,4 @@
 {
-  "enabledPlugins": {
-    "gopls-lsp@claude-plugins-official": true
-  },
   "permissions": {
     "allow": [
       "Bash(go build:*)",
@@ -27,11 +24,12 @@
     ],
     "deny": [
       "Read(./.env)",
-      "Read(./.env.*)",
       "Read(./**/.env)",
-      "Read(./**/.env.*)",
       "Read(./model-providers.json)",
       "Read(./**/model-providers.json)"
     ]
+  },
+  "enabledPlugins": {
+    "gopls-lsp@claude-plugins-official": true
   }
 }

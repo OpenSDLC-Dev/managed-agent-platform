@@ -126,6 +126,105 @@ crash-looping.
 {{- end -}}
 
 {{/*
+The IDENTITY_* env entries for the control plane — the human-auth lane
+(docs/plan/31_console-sso-rbac.md, #56). Rendered inside the controlplane
+container's `env:` list, like map.commonEnv above. No other process has a human
+lane, so no other Deployment includes this.
+
+Emits NOTHING while identity.mode is empty, and that is not a shortcut around a
+default: `IDENTITY_MODE` unset and `IDENTITY_MODE=disabled` are one state to
+internal/identity's ConfigFromEnv, which returns immediately and reads none of the
+other variables. Rendering the pair explicitly would therefore add an env entry to
+every existing release without changing any behaviour — and roll its control-plane
+pods on upgrade to do it.
+
+Each remaining variable is emitted only when set, so the platform's own defaults
+(the `roles`/`email`/`name` claim names, the five-algorithm allowlist) come from
+the binary rather than being restated here in a second place they could drift.
+*/}}
+{{- define "map.identityEnv" -}}
+{{- $identity := .Values.identity -}}
+{{- if $identity.mode }}
+- name: IDENTITY_MODE
+  value: {{ $identity.mode | quote }}
+{{- /* A dict, like map.blobEnv's: the twelve are uniform, and `range` over a map
+       is sorted by key, so a given values file always renders the same list. */}}
+{{- range $var, $value := dict
+      "IDENTITY_OIDC_ISSUER" $identity.oidc.issuer
+      "IDENTITY_OIDC_AUDIENCE" $identity.oidc.audience
+      "IDENTITY_OIDC_JWKS_URL" $identity.oidc.jwksURL
+      "IDENTITY_PROXY_PRESET" $identity.proxy.preset
+      "IDENTITY_PROXY_HEADER" $identity.proxy.header
+      "IDENTITY_PROXY_ISSUER" $identity.proxy.issuer
+      "IDENTITY_PROXY_AUDIENCE" $identity.proxy.audience
+      "IDENTITY_PROXY_KEYS_URL" $identity.proxy.keysURL
+      "IDENTITY_PROXY_ALGS" $identity.proxy.algs
+      "IDENTITY_CLAIM_ROLES" $identity.claims.roles
+      "IDENTITY_CLAIM_EMAIL" $identity.claims.email
+      "IDENTITY_CLAIM_NAME" $identity.claims.name }}
+{{- if $value }}
+- name: {{ $var }}
+  value: {{ $value | quote }}
+{{- end }}
+{{- end }}
+{{- /* The role map is written as a map — the shape it is — and encoded here into
+       the flat `value=role,value=role` the verifier parses, so nobody hand-writes
+       an env-var dialect (the same trade sandboxPlacement makes). A YAML map also
+       makes a duplicate source value impossible to express, which is the one
+       defect the verifier calls out as a silent authority change.
+
+       `,` and `=` are this encoding's separators, so a claim value or a role
+       carrying one would render as a DIFFERENT, still-valid map that the verifier
+       accepts without complaint. Neither is legal in a role name, and a group name
+       containing one cannot be configured through IDENTITY_ROLE_MAP at all, so
+       refusing here costs nothing and turns the encoding's one silent failure into
+       a render error. Non-strings are refused for the reason the node selector
+       refuses them: Helm decodes an unquoted value in a file as float64, which
+       renders as something no role name ever is. */}}
+{{- /* An empty map is not a valid deployment of this lane, and it is the one
+       omission whose consequence is not a denied human but a dead control plane:
+       parseRoleMap answers "IDENTITY_ROLE_MAP is required and must map at least
+       one claim value", FromEnv propagates it, and the process exits — so the
+       machine lanes go down with the human one. The chart refuses the other
+       values whose absence is fatal; this one is fatal to more than itself. */}}
+{{- if not $identity.roleMap }}
+{{- fail "identity.roleMap must map at least one claim value when identity.mode is set: the control plane refuses to start without it, so an empty map does not merely deny humans, it takes the whole process down at boot — machine lanes included." }}
+{{- end }}
+{{- $pairs := list }}
+{{- range $value, $role := $identity.roleMap }}
+{{- if not (kindIs "string" $role) }}
+{{- fail (printf "identity.roleMap[%s]: a role must be one of the quoted strings admin, developer or viewer (got %s)" $value (kindOf $role)) }}
+{{- end }}
+{{- if or (contains "," $value) (contains "=" $value) (contains "," $role) (contains "=" $role) }}
+{{- fail (printf "identity.roleMap[%s]=%s: neither a claim value nor a role may contain ',' or '=' — they separate entries in IDENTITY_ROLE_MAP" $value $role) }}
+{{- end }}
+{{- $pairs = append $pairs (printf "%s=%s" $value $role) }}
+{{- end }}
+{{- with $pairs }}
+- name: IDENTITY_ROLE_MAP
+  value: {{ join "," . | quote }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+The bundled IdP's external URL: `https://` + the ingress host, and nothing else.
+
+It is one value with two jobs, which is why it is computed in one place. Casdoor
+takes it as `origin` — the base of every redirect its login page issues, and the
+`iss` claim of every token it mints — and the verifier compares `iss` exactly, so
+identity.oidc.issuer has to equal this string byte for byte. The scheme is not a
+knob: the platform refuses a plain-HTTP issuer and key set, so an http origin here
+would be an IdP this control plane could not be wired to.
+*/}}
+{{- define "map.casdoorOrigin" -}}
+{{- if not .Values.casdoor.ingress.host -}}
+{{- fail "casdoor.ingress.host is required when casdoor.enabled: it is the address the browser reaches the IdP on, and Casdoor stamps it into every token as the `iss` claim." -}}
+{{- end -}}
+{{- printf "https://%s" .Values.casdoor.ingress.host -}}
+{{- end -}}
+
+{{/*
 The Cloud SQL Auth Proxy sidecar (#269), rendered under the podSpec of each
 process that opens the database — the controlplane, the brain and the executor.
 Emits nothing at all unless cloudSQLProxy.enabled. Call with the root context at

@@ -278,3 +278,34 @@ resource "google_artifact_registry_repository_iam_member" "build_pusher" {
 
   member = "serviceAccount:${var.cloud_build_service_account}"
 }
+
+# ---------------------------------------------------------------------------
+# Identity-Aware Proxy (docs/plan/31_console-sso-rbac.md, #56). Two things live
+# here and neither is the proxy itself — see var.iap_backend_service for why
+# nothing in this configuration creates it.
+#
+# The data source exists for ONE attribute: the backend service's server-assigned
+# numeric id, which is what the IAP assertion's audience is built from. Reading it
+# rather than taking it as a second variable is deliberate — the audience and the
+# IAM bindings then cannot name different backend services, and an operator who
+# transcribes an id wrong learns it from a login failure long after the apply.
+#
+# Bound per backend service rather than project-wide
+# (google_iap_web_iam_member, which covers every IAP-protected resource in the
+# project): this grant should admit people to the control plane and to nothing
+# else the project may later put behind IAP.
+# ---------------------------------------------------------------------------
+
+data "google_compute_backend_service" "iap" {
+  count = var.iap_backend_service == "" ? 0 : 1
+
+  name = var.iap_backend_service
+}
+
+resource "google_iap_web_backend_service_iam_member" "console_users" {
+  for_each = toset(var.iap_members)
+
+  web_backend_service = var.iap_backend_service
+  role                = "roles/iap.httpsResourceAccessor"
+  member              = each.value
+}

@@ -41,6 +41,10 @@ jobs:
     env:
       CHART: deploy/helm/managed-agent-platform
       VALUES: deploy/helm/managed-agent-platform/ci/example-values.yaml
+      # The chart's second state (docs/plan/31_console-sso-rbac.md, #56): the
+      # identity lane on, with the bundled IdP behind it. Layered ON TOP of
+      # $VALUES, which supplies what the platform itself requires.
+      IAM_VALUES: deploy/helm/managed-agent-platform/ci/iam-values.yaml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,6 +55,8 @@ jobs:
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: helm lint
         run: helm lint "$CHART" -f "$VALUES"
+      - name: helm lint (identity lane + bundled IdP)
+        run: helm lint "$CHART" -f "$VALUES" -f "$IAM_VALUES"
       - name: helm template renders (smoke)
         run: helm template t "$CHART" -f "$VALUES" > /dev/null
       - name: brain model-providers file is the JSON array the loader requires
@@ -645,6 +651,171 @@ jobs:
           echo "$rendered" | awk '$1 == "path:" && $2 == "/minio/health/ready" { exit 1 }' \
             || { echo "/minio/health/ready answers 200 before the object layer can serve S3; no probe may gate on it (#216)" >&2; exit 1; }
           echo "ok: minio readiness probe is $p"
+      - name: the identity lane is off by default and complete when set
+        # Off by default has a stronger meaning here than "no behaviour change":
+        # IDENTITY_MODE unset and IDENTITY_MODE=disabled are ONE state to
+        # internal/identity, so rendering the pair explicitly would change every
+        # existing release's controlplane pod spec — and roll its pods on upgrade
+        # — to say something the platform already assumed.
+        run: |
+          helm template t "$CHART" -f "$VALUES" | grep -q 'IDENTITY_' \
+            && { echo "default values must render no IDENTITY_* env at all" >&2; exit 1; }
+          # Only the control plane has a human lane. The brain and the executor
+          # never see a user token, so handing them the issuer, the audience and
+          # the role map would be configuration with no reader.
+          for tpl in brain executor; do
+            helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only "templates/$tpl-deployment.yaml" \
+              | grep -q 'IDENTITY_' \
+              && { echo "$tpl has no identity lane and must not receive its configuration" >&2; exit 1; }
+          done
+          # A mode with no role map renders a control plane that cannot boot:
+          # parseRoleMap refuses an empty IDENTITY_ROLE_MAP, FromEnv propagates it
+          # and the process exits, so the MACHINE lanes go down with the human one.
+          # Refused at render, like every other value whose absence is fatal.
+          err="$(helm template t "$CHART" -f "$VALUES" --set identity.mode=oidc \
+            --set identity.oidc.issuer=https://idp.ci.example \
+            --set identity.oidc.audience=map-console 2>&1 >/dev/null)" \
+            && { echo "identity.mode with an empty roleMap must fail the render" >&2; exit 1; }
+          echo "$err" | grep -q 'identity.roleMap must map at least one claim value' \
+            || { echo "the empty-roleMap render failed for the wrong reason: $err" >&2; exit 1; }
+          out="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/controlplane-deployment.yaml)"
+          # The variable NAME and its VALUE together: these names are read verbatim
+          # by internal/identity/config.go and nothing else in the release would
+          # notice a misspelled one — an unread variable leaves the lane disabled,
+          # which is a deployment that authenticates nobody and looks fine.
+          for pair in 'IDENTITY_MODE oidc' 'IDENTITY_OIDC_ISSUER https://idp.ci.example' \
+                      'IDENTITY_OIDC_AUDIENCE map-console' 'IDENTITY_CLAIM_ROLES groups'; do
+            set -- $pair
+            echo "$out" | grep -A1 "name: $1\$" | grep -q "value: \"$2\"" \
+              || { echo "$1 did not reach the control plane as $2" >&2
+                   echo "$out" | grep -A1 "name: $1\$" >&2; exit 1; }
+          done
+          # IDENTITY_CLAIM_ROLES is the one whose wrong value fails silently in
+          # the worst direction: Casdoor's `roles` claim carries role OBJECTS and
+          # the platform collects only strings out of a claim, so the default maps
+          # every human to no role — everyone authenticates, nobody is authorized.
+          # `groups` is asserted above because the bundle depends on it.
+          #
+          # The role map is the one value the chart ENCODES rather than passes
+          # through — a YAML map into the flat `value=role,...` the verifier
+          # parses, sorted by claim value the way `range` over a map renders.
+          # Nothing else would notice the two sides drifting.
+          want='value: "map/platform-admins=admin,map/platform-devs=developer,map/platform-read=viewer"'
+          echo "$out" | grep -A1 'name: IDENTITY_ROLE_MAP' | grep -qF "$want" \
+            || { echo "the role map did not render as the encoding the verifier parses" >&2
+                 echo "  want: $want" >&2
+                 echo "$out" | grep -A1 'name: IDENTITY_ROLE_MAP' >&2; exit 1; }
+          # `,` and `=` are that encoding's separators, so a claim value carrying
+          # one would render as a DIFFERENT, still-valid map the verifier accepts
+          # without complaint — a silent authority change. A non-string role is
+          # refused for the reason the node selector refuses one: a values file
+          # decodes an unquoted number as float64.
+          for bad in '"a,b": admin' '"a=b": admin' 'group: 42'; do
+            printf 'identity:\n  mode: oidc\n  oidc:\n    issuer: https://idp.example\n    audience: x\n  roleMap:\n    %s\n' "$bad" > /tmp/bad-rolemap.yaml
+            if helm template t "$CHART" -f "$VALUES" -f /tmp/bad-rolemap.yaml >/dev/null 2>&1; then
+              echo "a roleMap entry of {$bad} rendered instead of failing" >&2; exit 1
+            fi
+          done
+          echo "ok: identity lane"
+      - name: the bundled IdP refuses the SAML and CAS surfaces, and nothing else reaches it
+        # The other half of the bundle's hardening posture: the "ships no default
+        # credential" step below owns the seed and its credentials, this one owns
+        # the way in. VU#780781 is a cluster of Casdoor CVEs,
+        # five of them on the SAML service-provider path, and none of them can be
+        # configured away: routers/router.go registers those routes whatever is
+        # set, and one process serves the API and the login UI from one port, so
+        # "keep it internal" is not available as a control. What is available is
+        # an Ingress that routes those paths nowhere and a NetworkPolicy that
+        # leaves the Ingress as the only way to the pod — which is a control only
+        # while BOTH render.
+        run: |
+          refuses() {
+            local want="$1"; shift
+            local err
+            err="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" "$@" 2>&1 >/dev/null)" \
+              && { echo "rendered instead of failing: $*" >&2; exit 1; }
+            echo "$err" | grep -qF "$want" \
+              || { echo "refused for the wrong reason (wanted: $want)" >&2; echo "$err" >&2; exit 1; }
+          }
+          # The refusals are READ OUT of the compose proxy's config rather than
+          # restated here. The two enforcement points are a Caddyfile and an
+          # Ingress, nothing else joins them, and a rule added to one and not the
+          # other is exactly the gap the advisory makes expensive.
+          want="$(sed -n 's|^[[:space:]]*@saml path ||p' deploy/compose/idp-proxy.Caddyfile \
+            | tr ' ' '\n' | sed 's|/\*$||' | sort)"
+          [ -n "$want" ] || { echo "no '@saml path' line in deploy/compose/idp-proxy.Caddyfile" >&2; exit 1; }
+          # Anchored to the Ingress document AND to the deny backend: what matters
+          # is the paths routed AWAY from Casdoor, and a bare path list would pass
+          # on rules pointing back at it.
+          got="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor-ingress.yaml \
+            | awk '/^kind: Ingress$/ { ing = 1 }
+                   ing && $1 == "-" && $2 == "path:" { p = $3 }
+                   ing && /-casdoor-deny$/ { print p }' | tr -d '"' | sort)"
+          [ "$want" = "$got" ] \
+            || { echo "the Ingress does not deny exactly the paths the compose proxy refuses" >&2
+                 echo "  caddyfile: $(echo "$want" | tr '\n' ' ')" >&2
+                 echo "  ingress  : $(echo "$got" | tr '\n' ' ')" >&2; exit 1; }
+          # ...and the deny backend must stay a Service nothing can serve. Given a
+          # selector it would resolve to pods and every refusal above would become
+          # a route.
+          helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor-ingress.yaml \
+            | awk '/-casdoor-deny$/ { svc = 1 } svc && $1 == "selector:" { exit 1 }' \
+            || { echo "the deny Service must have no selector" >&2; exit 1; }
+          np="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor-networkpolicy.yaml)"
+          echo "$np" | grep -q '^kind: NetworkPolicy$' \
+            || { echo "the bundled IdP must ship its NetworkPolicy" >&2; exit 1; }
+          # Anchored INSIDE spec.podSelector, not anywhere in the document: the
+          # same component label sits in metadata.labels, so a bare grep stayed
+          # green with the selector deleted — and a NetworkPolicy whose selector
+          # is empty applies to every pod in the namespace, which is a different
+          # policy than the one this asserts.
+          echo "$np" | awk '/^  podSelector:/ { f = 1; next } /^  [a-z]/ { f = 0 } f' \
+            | grep -q 'app.kubernetes.io/component: casdoor' \
+            || { echo "the NetworkPolicy's podSelector does not select the IdP pod" >&2
+                 echo "$np" >&2; exit 1; }
+          # An EMPTY `from` means "all sources" to Kubernetes, so the one shape
+          # that must never render is the one that looks exactly like this policy
+          # and admits everything.
+          refuses 'must name at least one peer' --set-json 'casdoor.networkPolicy.from=[]'
+          dep="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor.yaml)"
+          echo "$dep" | grep -q 'type: ClusterIP' \
+            || { echo "the IdP Service must be ClusterIP" >&2; exit 1; }
+          echo "$dep" | grep -qE 'type: (NodePort|LoadBalancer)' \
+            && { echo "the IdP Service must never be NodePort or LoadBalancer — that is a second entrance with none of the deny rules on it" >&2; exit 1; }
+          # `origin` is the `iss` claim of every token Casdoor mints and the
+          # verifier compares `iss` exactly, so it must be the ingress host — and
+          # https, the only scheme the platform accepts for an issuer or a key set.
+          echo "$dep" | grep -A1 'name: origin$' | grep -q 'value: "https://idp.ci.example"' \
+            || { echo "origin is not https://<casdoor.ingress.host>" >&2
+                 echo "$dep" | grep -A1 'name: origin$' >&2; exit 1; }
+          refuses "must equal the bundled IdP's origin" --set 'identity.oidc.issuer=https://wrong.example'
+          refuses 'casdoor.ingress.host is required' --set 'casdoor.ingress.host='
+          cm="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor-init-data-secret.yaml)"
+          # tokenFormat JWT: the alternative, JWT-Standard, drops `roles`,
+          # `permissions` and `groups` from the token entirely, which would leave
+          # IDENTITY_ROLE_MAP nothing to map and every human no role.
+          echo "$cm" | grep -q '"tokenFormat": "JWT"' \
+            || { echo "the seeded application must mint JWT (not JWT-Standard) tokens" >&2; exit 1; }
+          # The grant CVE-2026-9097 (9.8, a revoked JWT accepted) lives on, and
+          # self-service signup into the provider that guards the platform.
+          echo "$cm" | grep -q 'token-exchange' \
+            && { echo "the token-exchange grant must not be enabled" >&2; exit 1; }
+          echo "$cm" | grep -q '"enableSignUp": false' \
+            || { echo "public signup must be off" >&2; exit 1; }
+          # Casdoor needs a database of its own; with the bundled Postgres off the
+          # chart has nothing to derive a DSN from, and says so rather than
+          # rendering an IdP that cannot start.
+          refuses 'casdoor.database.dataSourceName is required' \
+            --set postgresql.enabled=false \
+            --set externalDatabase.url='postgres://u:p@db.example:5432/x?sslmode=require'
+          # Deploying the IdP first and wiring the identity lane second is a
+          # supported order, so an unconfigured lane must not fail that render.
+          helm template t "$CHART" -f "$VALUES" --set casdoor.enabled=true \
+            --set casdoor.adminPassword=x --set casdoor.console.clientSecret=y \
+            --set 'casdoor.console.redirectURIs[0]=https://console.example/callback' \
+            --set casdoor.ingress.host=idp.example > /dev/null \
+            || { echo "casdoor.enabled with identity.mode empty must render" >&2; exit 1; }
+          echo "ok: the IdP's refusals and its single entrance"
       - name: required-value guard fires (missing controlplane.apiKey)
         run: |
           if helm template t "$CHART" --set image.tag=x \
@@ -731,6 +902,118 @@ jobs:
             || { echo "the render does not bind to the pre-created Secret map-platform" >&2; exit 1; }
           echo "ok: deploy.yml writes exactly the seven keys the render reads"
           echo "required, so unset would wedge the pods: $(echo "$needs" | tr '\n' ' ')"
+      - name: the bundled IdP is off by default and ships no default credential
+        run: |
+          # One seed, two deployment targets. The chart patches what differs per
+          # deployment at render time rather than forking a second file, so the
+          # copies must not drift — the ConfigMap template says so, and this is
+          # what makes that true.
+          cmp deploy/compose/casdoor-init-data.json "$CHART/files/casdoor-init-data.json" \
+            || { echo "the compose and chart seeds have drifted" >&2; exit 1; }
+          # Off by default: no Casdoor object may appear in a default render.
+          helm template t "$CHART" -f "$VALUES" | grep -qi 'casdoor' \
+            && { echo "default values must not deploy the bundled IdP" >&2; exit 1; }
+          idp=(--set casdoor.enabled=true --set casdoor.ingress.host=idp.example.test
+               --set 'casdoor.console.redirectURIs[0]=https://console.example/callback')
+          # The three values the chart refuses to invent. adminPassword is the one
+          # that matters most: Casdoor creates a GLOBAL administrator on the
+          # publicly documented password `123` before it reads the seed, so a
+          # chart that let this render would publish that through an Ingress.
+          # redirectURIs is the one whose absence is not a startup failure but a
+          # login failure — the seed's own callback is a laptop's and is replaced
+          # unconditionally, so an empty list registers an application no
+          # authorization-code request can ever complete against.
+          for miss in adminPassword console.clientSecret console.redirectURIs; do
+            args=("${idp[@]}" --set casdoor.adminPassword=pw --set casdoor.console.clientSecret=cs)
+            err="$(helm template t "$CHART" -f "$VALUES" "${args[@]}" --set "casdoor.$miss=null" 2>&1 >/dev/null)" \
+              && { echo "casdoor.$miss missing must fail the render" >&2; exit 1; }
+            echo "$err" | grep -q "casdoor.$miss is required" \
+              || { echo "the render without casdoor.$miss failed for the wrong reason: $err" >&2; exit 1; }
+          done
+          # The seed carries two credentials — the console's OAuth client secret
+          # and a Casdoor GLOBAL administrator's password — so it must not be a
+          # ConfigMap. `get configmaps` is routinely granted where `get secrets`
+          # is not, and ConfigMaps sit outside encryption-at-rest defaults.
+          helm template t "$CHART" -f "$VALUES" "${idp[@]}" --set casdoor.adminPassword=pw \
+            --set casdoor.console.clientSecret=cs --show-only templates/casdoor-init-data-secret.yaml \
+            | grep -q '^kind: Secret$' \
+            || { echo "the seed must render as a Secret, not a ConfigMap" >&2; exit 1; }
+          # A single-replica IdP that re-applies its seed on boot must not be
+          # rolled: the default RollingUpdate rounds maxSurge up to 1, so an
+          # upgrade would run two seeders and two --createDatabase against one
+          # database.
+          helm template t "$CHART" -f "$VALUES" "${idp[@]}" --set casdoor.adminPassword=pw \
+            --set casdoor.console.clientSecret=cs --show-only templates/casdoor.yaml \
+            | grep -q 'type: Recreate' \
+            || { echo "the bundled IdP must use the Recreate strategy" >&2; exit 1; }
+          full=("${idp[@]}" --set casdoor.adminPassword=pw --set casdoor.console.clientSecret=cs)
+          seed="$(helm template t "$CHART" -f "$VALUES" "${full[@]}" \
+            --show-only templates/casdoor-init-data-secret.yaml)"
+          # The three demo accounts are real, working credentials on a laptop.
+          # None may reach a published cluster IdP.
+          for u in map-admin map-dev map-viewer; do
+            echo "$seed" | grep -q "\"name\": \"$u\"" \
+              && { echo "the chart seeded the demo account $u" >&2; exit 1; }
+          done
+          # ...while Casdoor's own administrator IS seeded, carrying the operator's
+          # password for Casdoor itself to hash on apply. Leaving the account out
+          # would not remove it, only leave `123` on it.
+          echo "$seed" | grep -q '"name": "admin"' \
+            || { echo "the chart did not re-own built-in/admin" >&2; exit 1; }
+          echo "$seed" | grep -q '"passwordType": "plain"' \
+            || { echo "built-in/admin must be seeded plain so Casdoor hashes it" >&2; exit 1; }
+          # Deterministic renders are the reason it is seeded plain rather than
+          # hashed here: bcrypt salts randomly, so a hash-at-render chart changes
+          # this ConfigMap — and the Deployment checksum that tracks it — on every
+          # render, rolling the IdP pod on unchanged values and leaving Argo/Flux
+          # permanently OutOfSync. Same values in, same bytes out.
+          again="$(helm template t "$CHART" -f "$VALUES" "${full[@]}" \
+            --show-only templates/casdoor-init-data-secret.yaml)"
+          [ "$seed" = "$again" ] \
+            || { echo "two renders of identical values differ: the IdP will roll on every sync" >&2; exit 1; }
+          # ...and it only takes effect because init data is allowed to re-apply.
+          # With initDataNewOnly true, Casdoor skips the entry and keeps `123`.
+          helm template t "$CHART" -f "$VALUES" "${full[@]}" --show-only templates/casdoor.yaml \
+            | grep -A1 'name: initDataNewOnly' | grep -q 'value: "false"' \
+            || { echo "initDataNewOnly must be false or the seeded admin password is ignored" >&2; exit 1; }
+          # A value YAML did not read as a string must be refused, not rendered.
+          # These land in JSON Casdoor unmarshals into string fields, so a number
+          # abandons the whole seed — which leaves `123` on the global
+          # administrator while looking exactly like a successful deploy. Both
+          # input paths, because they differ: `--set` parses an integer, a values
+          # FILE parses a float64, and a long float64 is silently rounded (the
+          # same hazard the sandbox-hardening knobs hit, one JSON document on).
+          cat > /tmp/casdoor-unquoted.yaml <<'YAML'
+          casdoor:
+            adminPassword: 12345678901234567890
+            console:
+              clientSecret: cs
+          YAML
+          for bad in "--set casdoor.adminPassword=12345678 --set casdoor.console.clientSecret=cs" \
+                     "-f /tmp/casdoor-unquoted.yaml"; do
+            err="$(helm template t "$CHART" -f "$VALUES" "${idp[@]}" $bad 2>&1 >/dev/null)" \
+              && { echo "an unquoted credential must fail the render: $bad" >&2; exit 1; }
+            echo "$err" | grep -q 'must be a quoted string' \
+              || { echo "the unquoted render failed for the wrong reason: $err" >&2; exit 1; }
+          done
+          # ...and a quoted one still reaches the seed as a JSON string.
+          helm template t "$CHART" -f "$VALUES" "${idp[@]}" \
+            --set-string casdoor.adminPassword=12345678 --set casdoor.console.clientSecret=cs \
+            --show-only templates/casdoor-init-data-secret.yaml \
+            | grep -q '"password": "12345678"' \
+            || { echo "a quoted credential did not render as a JSON string" >&2; exit 1; }
+          # The audience Casdoor mints is the client id, so a render where the two
+          # disagree is refused rather than left to fail every token behind a 401.
+          # roleMap is set here only so this render reaches the audience check:
+          # a mode with an empty role map is itself refused, one template earlier.
+          err="$(helm template t "$CHART" -f "$VALUES" "${full[@]}" \
+            --set identity.mode=oidc --set identity.oidc.issuer=https://idp.example.test \
+            --set 'identity.roleMap.map/platform-admins=admin' \
+            --set identity.oidc.audience=wrong 2>&1 >/dev/null)" \
+            && { echo "an audience that is not the client id must fail the render" >&2; exit 1; }
+          echo "$err" | grep -q 'must equal casdoor.console.clientId' \
+            || { echo "the mismatched-audience render failed for the wrong reason: $err" >&2; exit 1; }
+          echo "ok: bundled IdP is off by default, seeds no demo account, and owns its admin password"
 
   # The GCP staging Terraform (docs/plan/20, Decision 9). fmt and validate need
   # no credentials, no state and no GCP project, which is what lets them run on

@@ -1,0 +1,54 @@
+# The bundled IdP's only entrance (docs/plan/31_console-sso-rbac.md, #56).
+#
+# Two jobs, both enforced rather than advised:
+#
+#  1. Refuse Casdoor's SAML and CAS surfaces. VU#780781 concerns a cluster of
+#     Casdoor CVEs, five of which live on the SAML SP path (/api/acs and its
+#     login entry point). We use none of SAML or CAS — the console speaks OIDC
+#     authorization-code + PKCE — so the safest configuration is for those
+#     routes to not exist. Casdoor serves its API and UI from one port, so the
+#     browser must be able to reach it; "internal-only networking" is therefore
+#     not available as a control, and this proxy is.
+#
+#  2. Terminate TLS for the control plane. internal/identity/fetch.go requires
+#     an https key-set URL and its dial guard then refuses loopback addresses
+#     with no exception, so a plain-HTTP IdP cannot be wired to this platform at
+#     all. The browser keeps plain HTTP on :8000 (which is also the issuer, and
+#     so the `iss` claim); the control plane fetches keys from :8443 over a
+#     certificate this proxy issues from its own local CA.
+
+{
+	# No admin API: nothing here is reconfigured at runtime, and it would be
+	# another listener inside the stack.
+	admin off
+}
+
+(saml_deny) {
+	# Path-only, method-agnostic on purpose: Casdoor registers
+	# /api/saml/redirect/:owner/:application for ANY method, so matching on the
+	# method would leave a hole. The whole /cas/ tree goes because we use no part
+	# of CAS, which is simpler to reason about than enumerating its validators.
+	#
+	# Deliberately NOT blocked: /login/oauth/* and /api/login/oauth/* — that is
+	# the authorization-code flow this platform actually uses.
+	@saml path /api/get-saml-login /api/acs /api/saml/metadata /api/saml/redirect/* /cas/*
+	respond @saml "not found" 404
+}
+
+# The browser's entrance, and the issuer. Plain HTTP is correct here: this is
+# what `origin` and IDENTITY_OIDC_ISSUER are set to, it is published on loopback
+# only, and the accounts behind it are well-known dev credentials.
+http://:8000 {
+	import saml_deny
+	reverse_proxy casdoor:8000
+}
+
+# The control plane's entrance, unpublished. `tls internal` issues from a local
+# CA generated on first boot and stored in the idpca volume, which the control
+# plane mounts read-only and trusts through SSL_CERT_FILE — so nothing private
+# is committed and nothing expires on a schedule anyone has to remember.
+https://idp:8443 {
+	tls internal
+	import saml_deny
+	reverse_proxy casdoor:8000
+}

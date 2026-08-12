@@ -45,9 +45,10 @@ which consumes what lands here and must trail it.
    lookup. The rejected options and their evidence are recorded in
    docs/HISTORY.md.)* Casdoor is a *deployment default*, not a code dependency: any
    compliant IdP (Keycloak, Entra ID, Cognito, Google) replaces it by config.
-   The bundle ships with the hardening posture in Architecture — pinned
-   v3.152.0, zero upstream providers, single organization, token-exchange
-   grant disabled, SAML routes blocked — because of CERT/CC VU#780781 (see
+   The bundle ships with the hardening posture in Architecture — pinned to the
+   `3.152.0` image tag, zero upstream providers, one populated organization
+   beside Casdoor's own `built-in` and no signup into either,
+   token-exchange grant disabled, SAML routes blocked — because of CERT/CC VU#780781 (see
    Ground truth; the risk is stated in docs, not hidden). It ships in two of
    the three deployment targets, settled with the user 2026-08-12: **compose**
    (the `iam` profile) and **Helm** (first-party templates behind
@@ -473,35 +474,90 @@ required role, never the caller's.
 
 ### The Casdoor bundle — hardened by default
 
-`deploy/compose` gains an optional `iam` profile: a pinned `casbin/casdoor`
-image — **v3.152.0**, the latest release at writing and far past the
-verified-fixed v2.387.0; bumped deliberately, never floating — backed by its
-own database in the existing Postgres
-container, seeded with: one organization, one application (the console as
-OIDC client — code + PKCE, the console's redirect URL), **zero upstream
-providers**, public signup off, the token-exchange grant off, and a role
-claim (`roles`) emitted in tokens so `IDENTITY_ROLE_MAP` has something to
-map.
+**Corrected on 2026-08-12, during slice 4, against a *running*
+`casbin/casdoor:3.152.0`.** This section was first written from Casdoor's
+source, and the source read plausibly and wrong: four of the mechanics
+specified below do not hold on the wire, and three more were missing
+entirely. Every one of them fails *silently* — the shape it produces is a
+stack that boots, logs people in, and authorizes nobody — which is why they
+are corrected in place here rather than left for slice 6's acceptance to
+rediscover. The three that change what an operator configures: the role claim
+is `groups`, the audience is the application's client id, and TLS in front of
+the IdP is mandatory rather than good practice.
 
-**The bootstrap contract, verified against `casdoor@master` on 2026-08-12**
-(the mechanics are named here because two of them are load-bearing and a
-plausible guess gets them backwards). Casdoor reads `conf/app.conf`, but
+`deploy/compose` gains an optional `iam` profile: a pinned Casdoor image —
+**`casbin/casdoor:3.152.0`**, and the image tag carries no `v` where the
+release name does, so `casbin/casdoor:v3.152.0` is a manifest that does not
+exist; the latest release at writing and far past the verified-fixed
+v2.387.0; bumped deliberately, never floating — backed by its own database in
+the existing Postgres container, seeded with: one organization of its own
+(**not** `built-in`, whose users are Casdoor global administrators — its REST
+API refuses to create one there at all, and the separate organization is what
+keeps a platform viewer from being someone who can reconfigure the IdP; the
+init-data loader is a different path and does write there, which is how the seed
+takes ownership of `built-in/admin` from its documented default password),
+one application (the console as
+OIDC client — code + PKCE, the console's redirect URL) whose **client id is
+what `IDENTITY_OIDC_AUDIENCE` must name**, because the client id is what
+Casdoor puts in `aud`, **zero upstream providers**, public signup off, the
+token-exchange grant off, and the three platform roles carried as **groups**.
+
+**The role claim is `groups`, not `roles`.** Decoded from a real token,
+Casdoor's `roles` claim is an array of role *objects*, and `roleValues`
+collects only the string elements of an array and drops the rest
+(internal/identity/claims.go) — so mapping `roles` gives every human no role,
+and no role is denied on every route. `groups` arrives as strings spelled
+`organization/name`, so the profile sets `IDENTITY_CLAIM_ROLES=groups` and
+every `IDENTITY_ROLE_MAP` key carries the seeded organization's prefix. The
+seed creates groups rather than the role entities this plan first specified.
+
+**TLS in front of the IdP is not optional.** `internal/identity`'s fetch
+requires an `https` key-set URL and the guarded dialer beneath it then refuses
+loopback addresses with no exception, so a plain-HTTP IdP cannot be wired to
+this platform at all — the two rules close on each other. The reverse proxy
+the SAML block already required therefore has a second job: it terminates TLS
+on a second listener for the control plane's key fetch, issuing from a local
+CA generated on first boot, which the control plane trusts through
+`SSL_CERT_FILE`. The browser keeps plain HTTP on the issuer listener, which is
+what `iss` must equal, so nothing private is committed and the Go-side rule is
+not weakened. One consequence the Helm and GCP halves inherit: the control
+plane must be able to *read* that CA file, and Go ignores a CA file it cannot
+open without saying so — the failure then surfaces as a boot error out of the
+verifier's warming key fetch rather than as a permissions message.
+
+**The bootstrap contract.** Casdoor reads `conf/app.conf`, but
 `conf.GetConfigString` consults `os.LookupEnv` first for every key, so the
 profile configures it entirely through environment variables of the same
 camelCase names and mounts no config file: `driverName=postgres`;
-`dataSourceName=…dbname=casdoor` — the separate `dbName` key is appended to
-the DSN for MySQL only, so Postgres must repeat the database inside the DSN;
-`origin` set to the **proxy's** external URL, because that value becomes the
-`iss` claim and must equal `IDENTITY_OIDC_ISSUER`; and the entrypoint's
-`--createDatabase=true` so the database exists on first boot. Seed data is a
-checked-in `init_data.json` mounted at `/init_data.json` (the image's
-working directory is `/`; the path comes from the `initDataFile` key). The
-two load-bearing settings: **`initDataNewOnly=true`** — the shipped default
-is `false`, and with `false` every entity in the file is deleted and re-added
-on *every* start, so an unattended restart silently wipes operator edits;
-and **`tokenFormat: "JWT"`** (the default) — `JWT-Standard` drops `roles`,
-`permissions`, and `groups` from the token entirely, which would leave
-`IDENTITY_ROLE_MAP` nothing to map. The seeded application sets
+`dataSourceName=…dbname=casdoor`, because Postgres does not take the separate
+`dbName` key into the DSN *and* because `refineDataSourceNameForPostgres`
+rewrites `dbname=<x>` to `dbname=postgres` to reach the maintenance database
+for `CREATE DATABASE` — with no `dbname=` token that rewrite is a no-op and
+the create runs against the wrong database; `dbName=casdoor` **as well**,
+despite the key being described as MySQL-only, since `InitAdapter` passes it
+to `CREATE DATABASE "<dbName>"` and panics on an empty string; `origin` set to
+the **proxy's** external URL, because that value becomes the `iss` claim and
+must equal `IDENTITY_OIDC_ISSUER`; and `--createDatabase=true` as an argument
+to the standard image's `/server` entrypoint so the database exists on first
+boot (the ALLINONE image's entrypoint drops `"$@"`, would swallow it, and
+would then fall back to SQLite). Seed data is a checked-in `init_data.json`
+mounted at `/init_data.json` (the image's working directory is `/`; the path
+comes from the `initDataFile` key). **`initDataNewOnly` stays at its shipped
+`false`, not the `true` first specified here** *(measured both ways against
+3.152.0: `InitDb` creates Casdoor's own `built-in/admin` — a global
+administrator whose default password is publicly documented — **before** the
+seed file is read, so under `true` the seed's entry for that account is skipped
+and the default credential survives every boot; under `false` the seeded hash
+wins and the default is refused)*. The cost of `false` is bounded, and was
+measured rather than assumed: every entity the seed **names** is re-applied on
+each start, so an operator's edits to those revert, while an entity the seed
+does not name — a user added through the admin UI — is untouched.
+
+**`tokenFormat` and `grantTypes` are `init_data.json` fields on the
+application, not environment keys** — set in compose they are simply ignored.
+`tokenFormat: "JWT"` (the default) is the load-bearing one: `JWT-Standard`
+drops `roles`, `permissions` and `groups` from the token entirely, which would
+leave `IDENTITY_ROLE_MAP` nothing to map. The seeded application also sets
 `enableSignUp: false` and a `grantTypes` list without
 `urn:ietf:params:oauth:grant-type:token-exchange`; `authorization_code`
 stays enabled regardless of that list (`IsGrantTypeValid` special-cases it),
@@ -509,7 +565,8 @@ which is the grant we want. `tokenSigningMethod` stays `RS256`, inside the
 verifier's allowlist.
 
 The `iam` profile fronts Casdoor with a minimal reverse proxy — an enforced
-control, not advice: the browser must reach Casdoor to log in, so
+control, not advice, and the same proxy that terminates the TLS above: the
+browser must reach Casdoor to log in, so
 internal-only networking is not available; Casdoor's own port (8000, one
 process serving both API and UI) stays unpublished, only the proxy's is
 exposed, and the acceptance run curls the blocked routes expecting the
@@ -528,10 +585,16 @@ a local-account IdP, not a federation hub.
 always injects `identity.*` (mode/issuer/audience/claims/role map) into the
 controlplane Deployment; `casdoor.enabled` (default `false`) additionally
 renders a thin set of **first-party** templates — Deployment, Service, a
-Secret, and a ConfigMap carrying the same `init_data.json` — driven by the
-same environment contract the compose profile uses (`initDataNewOnly=true`
-and `tokenFormat: "JWT"` included), with `origin` pointed at the chart's
-ingress host. First-party rather than the upstream `casdoor-helm` subchart,
+Secret, and a second Secret carrying the same `init_data.json` — driven by the
+same environment contract the compose profile uses — `initDataNewOnly` included,
+which both targets set to `false` for the same measured reason, the chart
+additionally dropping the three laptop demo accounts (real, working credentials
+that must not reach a published host) and taking `built-in/admin`'s password from
+a required value, seeded plaintext so Casdoor hashes it and the render stays
+byte-stable under GitOps — and the same seed fields
+(`tokenFormat: "JWT"` and the groups that carry the roles), with `origin` pointed at the chart's ingress host and the
+key-set URL it injects necessarily `https` — the rule above admits nothing
+else. First-party rather than the upstream `casdoor-helm` subchart,
 whose QA shipped a release that ignored its Postgres values and silently fell
 back to SQLite: an IdP that quietly loses its user store is worse than one we
 render ourselves in fifty lines. The reason the chart carries it at all is

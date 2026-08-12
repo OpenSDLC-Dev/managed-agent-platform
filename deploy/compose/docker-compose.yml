@@ -137,6 +137,31 @@ services:
       BAO_ADDR: http://openbao:8200
       BAO_TOKEN: ${BAO_PLATFORM_TOKEN:-map-bao-dev-token}
       BAO_TRANSIT_KEY: ${BAO_TRANSIT_KEY:-map-secrets}
+      # Human SSO (docs/plan/31_console-sso-rbac.md, #56). Empty is disabled,
+      # which is the default: with IDENTITY_MODE unset the control plane reads
+      # none of the rest and management auth stays x-api-key only. The `iam`
+      # profile below sets these; see README.md's "Single sign-on" section.
+      IDENTITY_MODE: ${IDENTITY_MODE:-}
+      IDENTITY_OIDC_ISSUER: ${IDENTITY_OIDC_ISSUER:-}
+      IDENTITY_OIDC_AUDIENCE: ${IDENTITY_OIDC_AUDIENCE:-}
+      IDENTITY_OIDC_JWKS_URL: ${IDENTITY_OIDC_JWKS_URL:-}
+      IDENTITY_CLAIM_ROLES: ${IDENTITY_CLAIM_ROLES:-}
+      IDENTITY_ROLE_MAP: ${IDENTITY_ROLE_MAP:-}
+      # The bundled IdP's certificate is issued by the proxy's own local CA, so
+      # the control plane has to trust it to fetch JWKS over TLS. Empty by
+      # default, and deliberately not defaulted to the CA path: SSL_CERT_FILE
+      # REPLACES Go's default certificate-FILE list rather than adding to it
+      # (crypto/x509 loadSystemRoots), so pointing it at the CA is only survivable
+      # because the separate directory scan of /etc/ssl/certs still finds the
+      # public roots. That is a property of this image — debian:stable-slim with
+      # ca-certificates — not of the configuration, and a slimmer base whose roots
+      # are only a file would silently lose every public root for outbound TLS to
+      # MinIO, the model endpoint, OTLP and MCP. The `iam` profile's seventh
+      # variable supplies it; see .env.example.
+      SSL_CERT_FILE: ${SSL_CERT_FILE:-}
+    volumes:
+      # Read-only: the control plane consumes the CA the proxy generates.
+      - idpca:/etc/idp-ca:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -144,6 +169,14 @@ services:
         condition: service_healthy
       openbao-init:
         condition: service_completed_successfully
+      # required: false is load-bearing, not defensive. A profiled service named
+      # as a hard dependency makes `docker compose config` fail for the DEFAULT
+      # project ("depends on undefined service"), which is CI's first compose
+      # step. With it, the default stack ignores idp entirely and `--profile iam`
+      # still waits for it to be healthy.
+      idp:
+        condition: service_healthy
+        required: false
     ports:
       # Bound to loopback by default: the committed CONTROLPLANE_API_KEY is a
       # well-known placeholder, so the API must not be reachable from the LAN.
@@ -282,11 +315,101 @@ services:
       - "16686:16686" # Jaeger UI
       - "4317:4317"   # OTLP/gRPC (point OTEL_EXPORTER_OTLP_ENDPOINT at jaeger:4317)
 
+  # The bundled identity provider (docs/plan/31_console-sso-rbac.md, #56): a
+  # local-account IdP so "the platform's default IAM works out of the box" is
+  # true on a laptop. Enterprises federating their own provider point
+  # IDENTITY_OIDC_ISSUER straight at it and never start this profile.
+  #
+  # Unpublished on purpose — only the proxy below is reachable. Casdoor serves
+  # its API and UI from one port, and several of its routes are the SAML/CAS
+  # surfaces we refuse to expose (VU#780781); publishing 8000 here would put
+  # them back on the network beside the login page.
+  casdoor:
+    image: casbin/casdoor:3.152.0
+    profiles: ["iam"]
+    # The STANDARD image: ENTRYPOINT ["/server"], so this is an argument to the
+    # server. The ALLINONE image's entrypoint drops "$@" and would swallow it,
+    # then silently fall back to SQLite.
+    command: ["--createDatabase=true"]
+    environment:
+      # Casdoor reads conf/app.conf, but conf.GetConfigString consults the
+      # environment first for every key, so the whole configuration lives here
+      # and no config file is mounted.
+      driverName: postgres
+      # dbname= inside the DSN is doubly load-bearing. Postgres does not take the
+      # separate dbName key into the DSN, and refineDataSourceNameForPostgres
+      # rewrites `dbname=<x>` to `dbname=postgres` to reach the maintenance
+      # database for CREATE DATABASE — with no dbname= token that rewrite is a
+      # no-op and the create runs against the wrong database. host must not be
+      # localhost: ReplaceDataSourceNameByDocker rewrites that to 172.17.0.1.
+      dataSourceName: "user=map password=${POSTGRES_PASSWORD:-map} host=postgres port=5432 sslmode=disable dbname=casdoor"
+      # And dbName is still required despite the above: InitAdapter passes it to
+      # CREATE DATABASE "<dbName>", which panics on an empty string.
+      dbName: casdoor
+      # Becomes the `iss` claim, so it must equal IDENTITY_OIDC_ISSUER byte for
+      # byte. Left empty Casdoor derives the issuer from the request Host header
+      # and `iss` varies per client, which the verifier's exact comparison
+      # rejects. This is the URL the BROWSER uses; the control plane reaches
+      # JWKS over TLS through the proxy instead (IDENTITY_OIDC_JWKS_URL).
+      origin: ${IDENTITY_OIDC_ISSUER:-http://localhost:8000}
+      httpport: "8000"
+      initDataFile: /init_data.json
+      # false is the shipped default and is kept deliberately, because it is the
+      # only setting under which the seed owns built-in/admin. Casdoor's InitDb()
+      # creates that account — a global administrator, password 123, documented
+      # publicly — BEFORE it reads this file, so with true our entry for it is
+      # skipped and the default credential survives every boot. Measured both
+      # ways against 3.152.0: with true the stored hash stays Casdoor's, with
+      # false it is ours and 123 is refused.
+      #
+      # The cost is bounded and was measured too: on restart, entities named in
+      # the seed are re-applied, so edits to those four revert; entities the seed
+      # does not name are untouched. A user added in the UI survives.
+      initDataNewOnly: "false"
+      # Ships as a file logger writing under /logs, which uid 1000 cannot create
+      # in a root-owned "/". Console keeps it in `docker compose logs` anyway.
+      logConfig: '{"adapter":"console"}'
+    volumes:
+      - ./casdoor-init-data.json:/init_data.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The only way in. Two jobs: refuse the SAML and CAS surfaces, and terminate
+  # TLS for the control plane — internal/identity/fetch.go requires an https
+  # JWKS URL and its dial guard then refuses loopback addresses outright, so a
+  # plain-HTTP IdP cannot be wired to this platform at all.
+  idp:
+    image: caddy:2.10-alpine
+    profiles: ["iam"]
+    volumes:
+      - ./idp-proxy.Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddy's local CA lives here and is generated on first boot, so no private
+      # key is committed. The control plane mounts this read-only to trust it.
+      - idpca:/data
+    ports:
+      # Loopback only: the seeded accounts are well-known dev credentials.
+      - "${IDP_BIND:-127.0.0.1}:${IDP_PORT:-8000}:8000"
+    healthcheck:
+      # Proves the whole chain the control plane depends on — proxy, Casdoor, and
+      # the key set itself — so `depends_on: idp: service_healthy` means the
+      # verifier's warming fetch at startup will find keys rather than fail boot.
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8000/.well-known/jwks"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      casdoor:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   pgdata:
   miniodata:
   baodata:
   baoinit:
+  idpca:
 
 networks:
   # Named explicitly so the executor's SANDBOX_DOCKER_GATE_NETWORK above can

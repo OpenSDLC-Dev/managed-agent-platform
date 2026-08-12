@@ -23,6 +23,13 @@ and upgrade lifecycle. The platform speaks plain S3 — any compatible store
 On Google Cloud there is a third object-storage option, `gcsObjectStorage`,
 which reaches Cloud Storage natively and carries no credential at all (#240).
 
+A fourth optional in-cluster service is the **identity provider** — a bundled,
+hardened **Casdoor** behind `casdoor.enabled` (default off), for the private
+cluster that has no cloud IdP to point `identity.oidc` at. It follows the same
+rule as the other three: first-party templates rather than a subchart, and a
+deployment with its own provider leaves it off. See
+[Single sign-on and roles](#single-sign-on-and-roles-identity-casdoor).
+
 The **BYOC worker is deliberately not in this chart** — it runs on the customer's own
 compute, outside the platform cluster, and reaches the control plane only over the wire.
 
@@ -306,6 +313,151 @@ bounds plaintext plus AAD together. Nothing in a resource name says which you
 have. Real credential material — OAuth and bearer tokens, environment-variable
 values — sits orders of magnitude below either.
 
+## Single sign-on and roles (`identity.*`, `casdoor.*`)
+
+Humans authenticate through an OIDC provider and the control plane resolves each
+request to a principal holding one of three roles — `admin`, `developer`,
+`viewer` — enforced per route (docs/plan/31_console-sso-rbac.md,
+[#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56)). The
+`identity` block is that configuration and the chart injects it into the
+controlplane Deployment always; `casdoor.enabled` additionally deploys a bundled
+provider for clusters that have none.
+
+**Off is the default and means exactly today's platform.** With `identity.mode`
+empty the chart renders no `IDENTITY_*` env at all — `IDENTITY_MODE` unset and
+`IDENTITY_MODE=disabled` are one state to the control plane — so upgrading an
+existing release does not change its controlplane pod spec, no Bearer JWT is
+accepted anywhere, and `x-api-key` remains the only management credential. The
+machine lanes never change: the management key keeps full authority with no role
+model, and worker environment keys are untouched.
+
+```bash
+# Any compliant provider — Keycloak, Entra ID, Cognito, accounts.google.com.
+--set identity.mode=oidc \
+--set identity.oidc.issuer=https://idp.example.com/realms/platform \
+--set identity.oidc.audience=<the console's client id> \
+--set 'identity.roleMap.platform-admins=admin' \
+--set 'identity.roleMap.platform-devs=developer'
+```
+
+`identity.roleMap` is written as a **map** — claim value to role — and the chart
+encodes it into the flat `value=role,...` the verifier parses; a claim value or
+role containing `,` or `=` fails the render, because it would encode as a
+different, still-valid map. A principal whose claims map to nothing holds **no
+role** and is denied on every route, so this map is the whole grant.
+`identity.claims.roles` names the claim those values come from (default `roles`).
+
+Everything else the platform refuses, it refuses at **startup** and by variable
+name — an unreachable issuer, an empty role map, a malformed pair, a role outside
+the three. Both URLs must be `https`: the verifier requires an https key set and
+its dial guard refuses loopback, so a plain-HTTP provider cannot be wired to this
+platform at all, and the control plane must be able to reach the issuer from
+inside the cluster with a certificate its image's trust store already accepts.
+
+Behind a cloud vendor's authenticating proxy, use `trusted_proxy` instead — the
+shipped preset is Google's IAP, which supplies the header, issuer, key set and
+algorithms itself and takes only the backend-service audience:
+
+```bash
+--set identity.mode=trusted_proxy \
+--set identity.proxy.preset=gcp-iap \
+--set identity.proxy.audience=/projects/123456789/global/backendServices/987654321
+```
+
+### The bundled provider (`casdoor.enabled`, default `false`)
+
+For the private cluster with no cloud IdP — the deployment this project exists
+for — `casdoor.enabled=true` renders a pinned Casdoor from **first-party**
+templates: a Deployment, a **ClusterIP** Service, two Secrets — one holding its
+DSN, one holding its seed — an Ingress, and a NetworkPolicy. First-party rather
+than the upstream `casdoor-helm` subchart, whose QA shipped a release that
+ignored its Postgres values and silently fell back to SQLite. Owning the
+templates means owning their lifecycle — image tag, database, seed, CVE tracking.
+
+```bash
+--set casdoor.enabled=true \
+--set casdoor.ingress.host=idp.example.com \
+--set casdoor.ingress.tls.secretName=idp-tls \
+--set casdoor.adminPassword=$(openssl rand -hex 24) \
+--set casdoor.console.clientSecret=$(openssl rand -hex 24) \
+--set 'casdoor.console.redirectURIs[0]=https://console.example.com/callback' \
+--set identity.mode=oidc \
+--set identity.oidc.issuer=https://idp.example.com \
+--set identity.oidc.audience=map-console \
+--set identity.claims.roles=groups \
+--set 'identity.roleMap.map/platform-admins=admin' \
+--set 'identity.roleMap.map/platform-devs=developer' \
+--set 'identity.roleMap.map/platform-read=viewer'
+```
+
+Four of those values are load-bearing in ways a plausible guess gets backwards,
+each measured against a running 3.152.0 rather than read off its structs:
+
+- **`identity.claims.roles` is `groups`, not `roles`.** Casdoor's `roles` claim
+  carries role **objects**, and the platform collects only string values out of a
+  claim — so mapping `roles` gives every human no role and denies them
+  everywhere. `groups` arrives as strings spelled `organization/name`, which is
+  why the map keys carry the seeded organization, `map`.
+- **The audience is the application's client id**, because that is what Casdoor
+  puts in `aud`.
+- **The issuer is `https://` + `casdoor.ingress.host`, byte for byte**, because
+  the chart configures that as Casdoor's `origin` and Casdoor stamps it into
+  every token as `iss`, which the verifier compares exactly.
+- **The host must be served over HTTPS**, by `tls.secretName` or by the
+  controller's own default certificate, for the reason above.
+
+The last two are the pair the chart owns both sides of, so a mismatch on either
+**fails the render** rather than leaving every login to end in the same uniform
+401 a forged token gets. So do a missing `casdoor.ingress.host`, `adminPassword`,
+`console.clientSecret`, `console.clientId` or `console.redirectURIs`; an
+`identity.roleMap` that maps nothing while `identity.mode` is set; any of those
+credentials written unquoted, so YAML read it as a number or a bool; and a missing
+`casdoor.database.dataSourceName` when the bundled Postgres is off.
+
+**Hardened by default**, because of CERT/CC VU#780781 — nine Casdoor CVEs, no
+vendor statement and no named fixed version:
+
+- The image is **pinned** (`casbin/casdoor:3.152.0`) past the release that
+  silently fixed the worst of them, and bumping it is a deliberate change.
+- The seed configures **zero upstream providers** (the binding path two
+  9.1-severity ones live on), **one populated organization** beside Casdoor's own
+  `built-in` (which voids the cross-org escalation), **no self-service signup**,
+  and a grant list **without token exchange** (CVE-2026-9097, 9.8).
+- The **Ingress refuses the SAML and CAS surfaces** — `/api/acs`,
+  `/api/get-saml-login`, `/api/saml/metadata`, `/api/saml/redirect`, `/cas` — by
+  routing them to a Service with no endpoints. They cannot be turned off in
+  Casdoor: its router registers them whatever is configured, and one process
+  serves the API and the login UI from one port, so "keep it internal" is not
+  available as a control. CI reads that path list out of the compose proxy's
+  config, so the two enforcement points cannot drift.
+- The **NetworkPolicy admits pod ingress only from the ingress controller**,
+  which is what makes those refusals a control rather than advice — reach the pod
+  another way and they are simply not on the path. Its default peer names the
+  namespace `ingress-nginx`; point `casdoor.networkPolicy.from` at your own
+  controller, or set `enabled: false` if your CNI does not enforce policy.
+
+Two operational facts worth knowing before you turn it on. **The chart owns
+Casdoor's own administrator**: `casdoor.adminPassword` replaces the documented
+default `123` on the `built-in/admin` account, which Casdoor creates itself
+before reading the seed — that account is a Casdoor global administrator, so
+treat the value as a bootstrap credential and rotate it by changing your values
+and upgrading — **not** at first login, because the seed restores this account on
+the next restart and a password changed in the UI would quietly come back. It
+rides the seed Secret in plaintext (Casdoor hashes it on ingest and the plaintext
+never reaches its database), next to `console.clientSecret`, which is there on the
+same terms — anyone who can read this release's Secrets can read both. And **the seed is re-applied on every restart**, which is the only
+setting under which it can own that password: entities the seed names — the
+organization, the `map-console` application, the three groups, that account — are
+restored from your values on each boot, so change them in values rather than in
+the admin UI. Accounts you create for your people are not named by the seed and
+survive.
+
+The three groups the seed creates — `map/platform-admins`, `map/platform-devs`,
+`map/platform-read` — are what `identity.roleMap` keys on. Create your operators
+in the `map` organization and put each in one of them; the compose bundle's three
+demo accounts are deliberately **not** seeded here, since they carry documented
+passwords and this IdP is published.
+
 ## Security notes
 
 - **Sandbox Pod network isolation.** The executor launches sandbox Pods in the release
@@ -365,6 +517,18 @@ processes; `otlp.insecure=true` to export without TLS.
 | `controlplane.serviceAccount.annotations` / `brain.serviceAccount.annotations` / `executor.serviceAccount.annotations` | `{}` | annotations on each component's ServiceAccount; `iam.gke.io/gcp-service-account` is how the Google-native backends authenticate. Which ones you need depends on the backend: `gcsObjectStorage` needs **all three**, since every process reaches object storage; `gcpKMS` needs only the controlplane and executor, the two that receive the cipher env; the brain otherwise needs one only for the Cloud SQL Auth Proxy |
 | `cloudSQLProxy.enabled` / `.instanceConnectionName` | `false` / `""` (required when enabled) | run the Cloud SQL Auth Proxy as a native sidecar in all three deployments (below). The name is `PROJECT:REGION:INSTANCE`, never an address |
 | `cloudSQLProxy.image` / `.privateIP` / `.resources` | `gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.24.1` / `true` / `{}` | proxy image, whether to pass `--private-ip` (what an instance with no public address needs), and its resources |
+| `identity.mode` | `""` (disabled) | `oidc` or `trusted_proxy` turns on the human lane; empty renders no `IDENTITY_*` env at all and leaves `x-api-key` the only management credential |
+| `identity.oidc.issuer` / `.audience` / `.jwksURL` | `""` | Mode `oidc`: discovery root and exact `iss`; the client id tokens are minted for; an optional key-set URL that skips discovery. Both URLs must be `https` |
+| `identity.proxy.preset` / `.audience` / `.header` / `.issuer` / `.keysURL` / `.algs` | `""` | Mode `trusted_proxy`: `gcp-iap` needs only `audience` (the backend-service audience) and refuses the rest; `custom` needs header, issuer, audience and keysURL |
+| `identity.claims.roles` / `.email` / `.name` | `""` (platform defaults `roles`/`email`/`name`) | claim names. With the bundled Casdoor `roles` must be `groups` — its `roles` claim carries objects, which map to nothing |
+| `identity.roleMap` | `{}` | claim value → `admin`/`developer`/`viewer`, as a map; the chart encodes it for the verifier. No mapped value means no role, which is denied everywhere |
+| `casdoor.enabled` | `false` | deploy the bundled Casdoor (Deployment, ClusterIP Service, a Secret for its DSN, a Secret for its seed, Ingress with the SAML/CAS deny rules, NetworkPolicy) |
+| `casdoor.adminPassword` / `casdoor.console.clientSecret` | `""` (both required when enabled) | the password the seed puts on Casdoor's own `built-in/admin` (replacing the documented default), and the console's OAuth client secret. Not auto-generated; both ride the seed Secret, and both rotate by changing these values and upgrading rather than in the admin UI |
+| `casdoor.ingress.host` | `""` (required when enabled) | the IdP's external host — also its `origin`, so `identity.oidc.issuer` must equal `https://<host>`. Must be served over HTTPS |
+| `casdoor.ingress.className` / `.annotations` / `.tls.secretName` | `""` / `{}` / `""` | IngressClass, annotations, and the TLS Secret for that host |
+| `casdoor.console.clientId` / `.redirectURIs` | `map-console` / `[]` (both required when enabled) | the seeded OIDC application's client id (which `identity.oidc.audience` must equal) and the console's callback URLs. The seed's own callback is a laptop's and is replaced at render, so an empty list would register an application every login fails against — the chart refuses it instead |
+| `casdoor.database.name` / `.dataSourceName` | `casdoor` / `""` | Casdoor's own database; the DSN is derived against the bundled Postgres, and required (keyword/value form, not a URL) when that is off |
+| `casdoor.networkPolicy.enabled` / `.from` | `true` / the `ingress-nginx` namespace | admit pod ingress only from your ingress controller. An empty `from` fails the render — to Kubernetes it would mean "all sources" |
 | `existingSecret` | `""` | reference a pre-created Secret instead of inlining |
 | `executor.sandboxImage` | `debian:stable-slim` | base image for sandbox Pods |
 | `executor.gateImage` | `""` (gate off) | per-session egress-gate sidecar image (`--target gate` build); setting it opts `limited` / vault-attached sessions into the gate — allowed_hosts enforcement plus vault-credential substitution at egress. The sidecar needs `CAP_NET_ADMIN` (no `restricted` Pod Security on the namespace) and, as a native sidecar, Kubernetes >= 1.29 (the render fails on older clusters); unset keeps the fail-closed route-flush |

@@ -152,6 +152,21 @@ resource "google_project_service" "required" {
     "servicenetworking.googleapis.com",
     "sqladmin.googleapis.com",
     "storage.googleapis.com",
+    # IAP, for the access bindings in iam.tf. Enabled unconditionally although
+    # both IAP variables default to off, for the same reason compute is named
+    # above rather than relied upon: a configuration should name the APIs its own
+    # resources call. In practice it will already be on by the time a binding is
+    # applied — enabling IAP on the backend service is what turns it on, and that
+    # step precedes naming the backend service here — so this is the
+    # configuration saying what it uses, not a step the operator is waiting on.
+    #
+    # No OAuth brand or client is enabled or declared anywhere, and that is not an
+    # omission: the IAP OAuth Admin APIs were shut down on 2026-03-19 and the
+    # provider's own google_iap_brand carries the deprecation notice saying so, so
+    # there is no brand left to manage. IAP uses its Google-managed OAuth client
+    # and there is no client secret for Terraform to hold — which suits this tree,
+    # where no secret VALUE is in either state file by design.
+    "iap.googleapis.com",
     # The acceptance ships traces to Cloud Trace through an in-cluster OTel
     # Collector (plan 20, Decision 5). telemetry.googleapis.com is Google's OTLP
     # ingest service and is the endpoint Decision 5's collector posts to; whether

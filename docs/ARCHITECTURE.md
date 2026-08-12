@@ -809,7 +809,16 @@ annotatable ServiceAccount, and `cloudSQLProxy.enabled` adds the Cloud SQL Auth
 Proxy as a native sidecar to all three deployments at once, off by default);
 `deploy/compose/docker-compose.yml` is the local stack (one multi-stage image for all
 four binaries, bundled Postgres + MinIO + OpenBao with its init one-shot,
-loopback-bound control plane, optional Jaeger profile).
+loopback-bound control plane, optional Jaeger profile). Its optional `iam` profile is
+the bundled identity provider (plan 31 slice 4): a pinned Casdoor holding local
+accounts in a second database inside the same Postgres, reachable only through a Caddy
+proxy that 404s the SAML and CAS surfaces — Casdoor serves API and UI from one port, so
+the browser must reach it and internal-only networking is not available as a control —
+and that also terminates TLS on a second listener for the control plane's key fetch,
+because `internal/identity`'s https rule and its dial guard together leave a
+plain-HTTP IdP unwirable. The control plane trusts that proxy's first-boot local CA
+through `SSL_CERT_FILE`, and reads the whole `IDENTITY_*` block only when
+`IDENTITY_MODE` is set, so the default stack is unchanged.
 
 `deploy/gcp` is Terraform for the GCP staging environment (docs/plan/20, Decision 9) —
 developer tooling for GCP deployment only, never a dependency of the platform, its build,
