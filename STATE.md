@@ -4,21 +4,27 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 29](./docs/plan/29_mcp-toolset.md) — the MCP client and `mcp_toolset` end to end
-(#45): an agent configured with an `mcp_toolset` gets no tools today, and this plan
-closes that with discovery, gating, credential injection and the reference's failure
-semantics. Seven slices, two landed.
+[Plan 32](./docs/plan/32_management-api-keys.md) — management API keys (#378):
+named, expiring, admin-issued over the console API, mirroring the reference
+dialect recorded live on 2026-08-13. Tasks below is its progress.
+
+[Plan 29](./docs/plan/29_mcp-toolset.md) — the MCP client and `mcp_toolset` end
+to end (#45) runs in parallel on its own branch; slices 1–2 have landed
+([#343](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/343),
+[#352](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/352),
+[#377](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/377)) and its
+remaining slices are tracked on that branch, not here.
 
 ## Tasks
 
-- [x] Slice 1 — wire correctness: bidirectional reference validation, nested
-      `mcp_toolset` shape validation, resolved-config echo ([#343](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/343)).
-- [x] Slice 2 — `internal/mcp` + catalog: the client and the shared dial-address guard
-      ([#352](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/352)), then the `mcp_catalogs` migration and the executor's
-      `mcp_exec` discovery driver ([#377](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/377)). Nothing offered to the model yet.
-- [ ] Slice 3 — gate machinery: `confirmableToolUseTypes`, MCP-shaped denial/interrupt.
-- [ ] Slice 4 — activation: brain expansion, `agent.mcp_tool_use`, the execution driver,
-      four-way settlement, output spill. **#45's acceptance criterion is met here.**
-- [ ] Slice 5 — credentials: matching, injection, OAuth refresh, `mcp_authentication_failed`.
-- [ ] Slice 6 — networking polish: `allow_mcp_servers`, retry escalation, `mcp_connection_failed`.
-- [ ] Slice 7 — evals, the live tier, the `ant` acceptance transcript, archiving.
+- [ ] Slice 1 — the lifecycle in the schema, no new surface: migration 0024
+      (`status` replacing `revoked_at`, `expires_at`, `partial_key_hint`,
+      `created_by`; `api_keys_one_live` narrowed to the rows nobody issued),
+      `authenticate` honouring status and expiry against the database clock,
+      `EnsureAPIKey` recording a hint and keeping rotation-by-restart.
+- [ ] Slice 2 — the console surface: issue (returning the resource plus
+      `raw_key`), list (bare array, archived rows included), update status and
+      name. Admin-gated, `/api/console/organizations/{org}/workspaces/{ws}/api_keys`.
+- [ ] Slice 3 — DIVERGENCES entries, a management-key section in
+      docs/self-hosted-security.md, and an acceptance run: issue a key, drive
+      `/v1` with it, disable it, re-enable it, archive it.

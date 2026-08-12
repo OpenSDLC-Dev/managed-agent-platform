@@ -45,7 +45,7 @@ func TestAuthRejectsRevokedKey(t *testing.T) {
 		t.Fatalf("second key before revocation: %d, want 200", res.StatusCode)
 	}
 
-	if _, err := s.pool.Exec(ctx, "UPDATE api_keys SET revoked_at = now() WHERE name = 'second'"); err != nil {
+	if _, err := s.pool.Exec(ctx, "UPDATE api_keys SET status = 'archived' WHERE name = 'second'"); err != nil {
 		t.Fatalf("revoke key: %v", err)
 	}
 	res = s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": second})

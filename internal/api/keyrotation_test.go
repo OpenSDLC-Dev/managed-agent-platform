@@ -129,7 +129,7 @@ func TestConcurrentAPIKeyMintsLeaveOneLiveKey(t *testing.T) {
 	})
 
 	if live := countLive(t, pool,
-		"SELECT count(*) FROM api_keys WHERE name = $1 AND revoked_at IS NULL", "boot"); live != 1 {
+		"SELECT count(*) FROM api_keys WHERE name = $1 AND status = 'active'", "boot"); live != 1 {
 		t.Fatalf("live api_keys after %d concurrent mints = %d, want 1", racers, live)
 	}
 }
@@ -157,7 +157,7 @@ func TestConcurrentSameValueAPIKeyMintsAllSucceed(t *testing.T) {
 		t.Errorf("same-value concurrent mints succeeded = %d/%d; a simultaneous rollout must not fail a replica", succeeded, racers)
 	}
 	if live := countLive(t, pool,
-		"SELECT count(*) FROM api_keys WHERE name = $1 AND revoked_at IS NULL", "bootstrap"); live != 1 {
+		"SELECT count(*) FROM api_keys WHERE name = $1 AND status = 'active'", "bootstrap"); live != 1 {
 		t.Errorf("live api_keys = %d, want 1", live)
 	}
 }
@@ -181,11 +181,11 @@ func TestAPIKeyValueRepointsToAnotherName(t *testing.T) {
 	}
 
 	if live := countLive(t, pool,
-		"SELECT count(*) FROM api_keys WHERE name = $1 AND revoked_at IS NULL", "second"); live != 1 {
+		"SELECT count(*) FROM api_keys WHERE name = $1 AND status = 'active'", "second"); live != 1 {
 		t.Errorf("live keys under second = %d, want 1", live)
 	}
 	if live := countLive(t, pool,
-		"SELECT count(*) FROM api_keys WHERE name = $1 AND revoked_at IS NULL", "first"); live != 0 {
+		"SELECT count(*) FROM api_keys WHERE name = $1 AND status = 'active'", "first"); live != 0 {
 		t.Errorf("live keys under first = %d, want 0 (the value moved)", live)
 	}
 }
@@ -209,12 +209,22 @@ func TestSchemaForbidsASecondLiveAPIKey(t *testing.T) {
 		t.Error("a second live api key was accepted; one name must have one live credential")
 	}
 
-	// Revoked rows are not duplicates: the index is partial so rotation history
+	// Archived rows are not duplicates: the index is partial so rotation history
 	// accumulates freely, and a second name keeps its own live slot.
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO api_keys (id, name, key_hash, revoked_at) VALUES ($1, $2, $3, now())`,
-		"apikey_revoked", "boot", "third-hash"); err != nil {
-		t.Errorf("a revoked row was rejected, so the index is not partial: %v", err)
+		`INSERT INTO api_keys (id, name, key_hash, status) VALUES ($1, $2, $3, 'archived')`,
+		"apikey_archived", "boot", "third-hash"); err != nil {
+		t.Errorf("an archived row was rejected, so the index is not partial: %v", err)
+	}
+
+	// Nor is a console-issued row: the index covers only the rows EnsureAPIKey
+	// owns, which are exactly the ones nobody issued. This is the whole point of
+	// keying it on created_by — an admin may issue a live key sharing a name with
+	// the bootstrap credential, as the reference allows (plan 32).
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO api_keys (id, name, key_hash, created_by) VALUES ($1, $2, $3, $4)`,
+		"apikey_issued", "boot", "fourth-hash", "principal_someone"); err != nil {
+		t.Errorf("a console-issued row sharing a live name was rejected: %v", err)
 	}
 	if err := api.EnsureAPIKey(ctx, pool, "other", "ak-other"); err != nil {
 		t.Errorf("a second logical name was refused its own live key: %v", err)

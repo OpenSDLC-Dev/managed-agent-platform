@@ -31,7 +31,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 23
+const wantMigrations = 24
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -411,14 +411,26 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	}
 
 	// Rewind to the pre-0013 schema, then stage the state the race produced.
-	// Only api_keys_one_live is dropped: migration 0021 already retired the
-	// environment_keys half, so there is no index there to remove. Replaying 0013
-	// recreates it in this throwaway database — the repair, not the index, is what
-	// this test is about, and a fresh deployment's chain ends with 0021 dropping
-	// it again.
+	//
+	// 0024 has to be rewound with it, and not merely for tidiness: it drops the
+	// api_keys.revoked_at column 0013's repair writes, so replaying 0013 alone
+	// against a current schema fails on a missing column — an impossible state
+	// anyway, since a real upgrade runs 0013 first and 0024 after. Rewinding both
+	// replays that real order, which makes this test cover one thing more than it
+	// used to: that 0024's backfill correctly turns what 0013's repair produced
+	// (revoked duplicates) into archived rows.
+	//
+	// The environment_keys half needs no such rewind — 0021 already retired its
+	// index and kept its revoked_at — so only the api_keys side is reconstructed.
 	for _, q := range []string{
-		`DROP INDEX api_keys_one_live`,
-		`DELETE FROM schema_migrations WHERE version = '0013_key_rotation_one_live.sql'`,
+		`DROP INDEX api_keys_one_live_unissued`,
+		`DROP INDEX api_keys_created_at_idx`,
+		`ALTER TABLE api_keys ADD COLUMN revoked_at timestamptz`,
+		`UPDATE api_keys SET revoked_at = now() WHERE status <> 'active'`,
+		`ALTER TABLE api_keys DROP COLUMN status,
+		   DROP COLUMN expires_at, DROP COLUMN partial_key_hint, DROP COLUMN created_by`,
+		`DELETE FROM schema_migrations
+		   WHERE version IN ('0013_key_rotation_one_live.sql', '0024_api_keys_lifecycle.sql')`,
 	} {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			t.Fatalf("rewind %q: %v", q, err)
@@ -454,9 +466,9 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	// One live row per slot, and the survivor is the newest — the row a mint
 	// would have left live had the race not happened.
 	for _, tc := range []struct{ what, query, want string }{
-		{"api_keys/boot", `SELECT id FROM api_keys WHERE name = 'boot' AND revoked_at IS NULL`, "apikey_dup2"},
+		{"api_keys/boot", `SELECT id FROM api_keys WHERE name = 'boot' AND status = 'active'`, "apikey_dup2"},
 		{"environment_keys/env_1", `SELECT id FROM environment_keys WHERE environment_id = 'env_1' AND revoked_at IS NULL`, "envkey_dup2"},
-		{"api_keys/other", `SELECT id FROM api_keys WHERE name = 'other' AND revoked_at IS NULL`, "apikey_other"},
+		{"api_keys/other", `SELECT id FROM api_keys WHERE name = 'other' AND status = 'active'`, "apikey_other"},
 		{"environment_keys/env_2", `SELECT id FROM environment_keys WHERE environment_id = 'env_2' AND revoked_at IS NULL`, "envkey_other"},
 	} {
 		rows, err := pool.Query(ctx, tc.query)
