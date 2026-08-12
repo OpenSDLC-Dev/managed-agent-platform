@@ -14,10 +14,12 @@ every user action, and `created_by` can only ever name a key row. End state:
 bundled as the hardened self-host default** and a **trusted-proxy mode**
 (Google Cloud IAP first) for deployments where the cloud vendor terminates
 auth — and the control plane resolves each request to a **principal** with one
-of three roles (`admin` / `developer` / `viewer`) enforced per route. The
-`/v1` wire surface, the `ant` CLI, and every SDK flow are byte-identical
-before and after: machine credentials (`x-api-key`, environment keys) are
-untouched, and SSO never appears on the wire. The work spans two repos: this
+of three roles (`admin` / `developer` / `viewer`) enforced per route. Every
+documented CLI and SDK flow — management `x-api-key`, worker environment keys
+— behaves identically before and after, and the browser flow never touches
+the platform; the identity lane's one observable `/v1` addition (a Bearer JWT
+accepted where today only environment keys ride Bearer) is invisible to those
+flows and lands as a declared DIVERGENCES entry. The work spans two repos: this
 plan covers the platform half (verifier, principals, roles, deployment
 wiring); the console half — the browser OAuth dance and forwarding the user's
 token instead of a server-held god key — is managed-agent-console's plan 08,
@@ -49,9 +51,10 @@ which consumes what lands here and must trail it.
    claim-name + value→role mapping. An authenticated principal whose claims
    map to no role holds no authority (fail-closed).
 4. **This plan is SSO + RBAC only.** Multi-tenant activation is deliberately
-   out (the user: not needed now). It stays tracked by #56; the Roadmap
-   section records what it would add. `ant auth login` compatibility is also
-   out — recorded as a divergence and a roadmap item, not built.
+   out (the user: not needed now); it stays tracked by #56, and its sizing is
+   recorded under Out of scope. `ant auth login` compatibility is also out —
+   recorded as a divergence with its full obligation list (Out of scope), not
+   built.
 
 ## Out of scope
 
@@ -64,8 +67,17 @@ which consumes what lands here and must trail it.
   pre-announces, with tests expected at 2–3× the production diff. No
   structural obstacle; this plan's principals and key-issuance surfaces are
   its prerequisites.)
-- **`ant auth login` against this platform.** The obligations are known
-  precisely (Ground truth / Roadmap) and deliberately not taken on.
+- **`ant auth login` against this platform.** Deliberately not taken on; the
+  obligation list is recorded here because the DIVERGENCES entry needs it: a
+  console host serving `GET /oauth/authorize` and the
+  `/oauth/code/callback?app=anthropic-cli` manual-code page; `POST
+  /v1/oauth/token` with all three grants (authorization_code, refresh_token,
+  RFC 7523 jwt-bearer — the last also being the reference-native path from an
+  enterprise IdP to a *machine* credential) and the `organization`/`account`/
+  `workspace` response blocks (login hard-fails without a bound workspace);
+  `anthropic-beta: oauth-2025-04-20` and `anthropic-workspace-id` on
+  authenticated requests. Doing any of this becomes work only through a
+  GitHub issue.
 - **End-user identity.** Design principle 5 stands: sessions stay
   user-agnostic; end-user ↔ session ownership remains an application-layer
   concern. This plan authenticates *operators of the platform*, nothing else.
@@ -75,7 +87,8 @@ which consumes what lands here and must trail it.
   API, SCIM, consuming `/api/enforce`): the platform never calls the IdP —
   it only verifies tokens.
 - **A `/v1/organizations/*` Admin API** with an admin-key credential class
-  (the reference's shape for org management): roadmap, not now.
+  (the reference's shape for org management): not in this plan; a future
+  GitHub issue if ever.
 
 ## Ground truth
 
@@ -227,8 +240,11 @@ from env config following the `SECRETS_BACKEND` optional-backend pattern
 
 **The shared verifier** is the security core both modes consume: given
 {issuer, audience(s), key source, allowed algorithms, claim mappings}, it
-verifies a compact JWT — signature via JWKS (kid-indexed cache; refresh on
-unknown kid, rate-limited; no static certs), `iss` exact, `aud` contains,
+verifies a compact JWT — signature via JWKS (kid-indexed cache with a
+bounded lifetime: refreshed on unknown `kid` under a rate limit, expired on a
+minutes-order TTL so a key the IdP removes stops verifying within that bound
+instead of living in the cache forever, and a `kid` still absent after a
+fresh fetch is rejected; no static certs), `iss` exact, `aud` contains,
 `exp`/`nbf` with ≤60s leeway, algorithm from an explicit allowlist (RS256/
 RS512/ES256/ES384/ES512 — never `none`, never HS*) — and returns a verified
 claim set. Claim mapping then produces the identity: subject (`sub`), email
@@ -242,21 +258,41 @@ signature / wrong audience.
 
 **Mode A — `oidc` (the RP seam).** Config: issuer URL (drives
 `/.well-known/openid-configuration` discovery at startup; JWKS URI can be
-overridden), audience (the console application's client id), claim mappings.
-The platform never runs the browser flow — the console BFF does
-authorization-code + PKCE against the IdP (console plan 08) and forwards the
-user's token on every platform call as `Authorization: Bearer <jwt>`; the
-platform statelessly verifies. Headless humans use any OIDC-native tool to
-obtain a token from the IdP and curl with it. One mode covers Casdoor,
-Keycloak, Entra ID, Cognito, accounts.google.com, and any other compliant OP.
+overridden), audience, claim mappings. **The accepted credential is pinned,
+not inferred: a JWT whose `aud` contains `IDENTITY_OIDC_AUDIENCE` —
+canonically the OIDC ID token of the deployment's console application**
+(guaranteed JWT-shaped by OIDC Core, where an OAuth access token may be
+opaque; an IdP that mints JWT access tokens carrying that audience works
+identically, but nothing assumes one). The platform never runs the browser
+flow — the console BFF does authorization-code + PKCE against the IdP
+(console plan 08) and forwards the user's token per platform call as
+`Authorization: Bearer <jwt>`; the platform statelessly verifies. The
+recipient question is answered by configuration: the deployment registers
+that OIDC client *for this platform's console*, `IDENTITY_OIDC_AUDIENCE`
+names it, and a token minted for any other client fails `aud` — within the
+deployment the forwarded ID token is a bearer credential, bounded by TLS and
+the IdP's token lifetime, which the Casdoor seed keeps short. Headless humans
+run the same code flow with any OIDC-native tool against the same client and
+curl with the resulting ID token. One mode covers Casdoor, Keycloak, Entra
+ID, Cognito, accounts.google.com, and any other compliant OP.
 
 **Mode B — `trusted_proxy` (the vendor-terminated seam).** Config: assertion
-header name + verifier settings, with two shipped presets — `gcp-iap`
+header name + verifier settings, with one shipped preset — `gcp-iap`
 (`x-goog-iap-jwt-assertion`, ES256, `iss https://cloud.google.com/iap`,
-gstatic JWK set, audience `/projects/N/global/backendServices/ID`) and
-`aws-alb` (`x-amzn-oidc-data`, ES256, the regional public-key endpoint,
-signer validation mandatory) — plus a `custom` escape hatch. A missing or
-invalid assertion is 401; the unsigned convenience headers are never read.
+gstatic JWK set, audience `/projects/N/global/backendServices/ID`) — plus a
+`custom` escape hatch for any proxy whose assertion is a JWT against a JWKS.
+An `aws-alb` preset is deliberately **not** shipped: ALB's assertion is not
+JWKS-shaped (a per-`kid` PEM endpoint, signer/issuer claims in the JWT
+*header*, and a mandatory expected-signer ARN check — the 2024 ALBeast
+bypass, CVE-2024-8901, is exactly apps skipping it), so it needs its own key
+source and config, and gets a GitHub issue when someone needs it. A missing
+or invalid assertion is 401; the unsigned convenience headers are never read.
+The supported topology is stated, not assumed: **the proxy fronts the control
+plane's own backend service** — the console reaches the platform through the
+same protected path, so every request carries an assertion audience-bound to
+the *platform's* backend (`IDENTITY_PROXY_AUDIENCE`), and an assertion minted
+for some other backend fails `aud` by design; machine traffic (`/v1` keys,
+workers) rides a separate, non-proxied backend at the load balancer.
 GCIP-behind-IAP needs nothing more; direct-GCIP login UI is a console
 frontend option, never a Go-core concern.
 
@@ -267,7 +303,7 @@ Config (all `IDENTITY_*`, controlplane only):
 | `IDENTITY_MODE` | `disabled` (default) · `oidc` · `trusted_proxy` |
 | `IDENTITY_OIDC_ISSUER` / `IDENTITY_OIDC_AUDIENCE` | Mode A: discovery root; expected `aud` |
 | `IDENTITY_OIDC_JWKS_URL` | optional override when discovery is absent/wrong |
-| `IDENTITY_PROXY_PRESET` | Mode B: `gcp-iap` · `aws-alb` · `custom` |
+| `IDENTITY_PROXY_PRESET` | Mode B: `gcp-iap` · `custom` |
 | `IDENTITY_PROXY_HEADER` / `_ISSUER` / `_AUDIENCE` / `_KEYS_URL` / `_ALGS` | Mode B `custom` fields |
 | `IDENTITY_CLAIM_ROLES` / `IDENTITY_CLAIM_EMAIL` | claim names (defaults `roles` / `email`) |
 | `IDENTITY_ROLE_MAP` | value→role pairs, e.g. `platform-admins=admin,eng=developer,everyone=viewer` |
@@ -293,7 +329,6 @@ CREATE TABLE principals (
     last_seen_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (issuer, subject)
 );
-ALTER TABLE api_keys ADD COLUMN principal_id text REFERENCES principals(id);
 ```
 
 - Principals are **JIT-provisioned**: the first verified request upserts by
@@ -303,8 +338,12 @@ ALTER TABLE api_keys ADD COLUMN principal_id text REFERENCES principals(id);
   the IdP stays authoritative per request.
 - `principal_` joins the private-id family (`envkey_`, `apikey_`, `gtk_`) —
   **not** `domain.knownPrefixes`; it never appears on a `/v1` path.
-- `api_keys.principal_id` is nullable: the bootstrap key predates identity
-  (`EnsureAPIKey` leaves it NULL); the slice-5 issuance surface sets it.
+- `api_keys` is untouched here: key ownership (`principal_id`) arrives only
+  with slice 5's own migration, alongside whatever the observed dialect
+  requires — nothing lands ahead of the slice that needs it (migrations are
+  immutable once merged), and a key minted by a key-lane caller with no
+  principal would carry NULL ownership: ownership is audit metadata, never
+  authority.
 - `sessions.created_by` now records whichever principal acted: the api-key
   row id on the key lane (unchanged) or the `principal_…` id on the identity
   lane. Still audit-only, still never rendered.
@@ -328,8 +367,11 @@ identity lane (a grandfathered pre-0021 environment key is caller-supplied
 text that could in principle contain two dots — it would misroute to a 401,
 fail-closed; docs/self-hosted-security.md §6 already tells operators to
 reissue those). In `trusted_proxy` mode the identity lane keys on the
-assertion header instead of a Bearer; `x-api-key` and environment-key lanes
-are untouched in both modes. The `/api/` console namespace gets the explicit
+assertion header instead of a Bearer, and precedence is explicit:
+environment-key paths and `x-api-key` resolve on their machine lanes first,
+the assertion is consulted only after both, and an assertion riding alongside
+a machine credential never vouches for it — each collision pair is pinned by
+a test. The `/api/` console namespace gets the explicit
 dispatch arm consoleapi.go:24–37 said a future lane must bring: same
 credential dispatch (management key or identity), so the plan-30 routes keep
 working for headless operators while gaining the role gate.
@@ -341,13 +383,20 @@ the one place every route is declared, and the `s.handle`/`s.handleNoContent`
 adapters (server.go:403–424) gain a minimum-role parameter, so each
 registration carries its requirement next to its path (the pattern
 `requireEnvironmentKeyForSession` set: authorization checked where the route
-is defined). The matrix:
+is defined). Three identity-reachable routes are registered outside those
+adapters — the streaming handlers `GET /v1/sessions/{id}/events/stream`,
+`GET /v1/skills/{id}/versions/{version}/content`, and
+`GET /v1/files/{id}/content` (server.go:73, 103, 109) — and each carries the
+same minimum-role check explicitly (all three are `viewer` reads); a
+completeness test walks the registrations and fails on any identity-reachable
+route without a role. (`GET …/work/poll` is also adapter-free but lives on
+the environment-key lane, which identity dispatch never reaches.) The matrix:
 
 | Role | May |
 |---|---|
-| `viewer` | GET/HEAD on every management and console resource (no plaintext credential ever renders anywhere, so reads are safe wholesale) |
-| `developer` | viewer + all resource CRUD and session lifecycle: agents, environments, sessions (create/events/interrupt/archive), skills, files, session resources, vault CRUD |
-| `admin` | developer + every credential surface: environment-key issue/list/revoke (the plan-30 routes — the reference gates its "Generate environment key" behind Console roles; ours now has the gate), vault *credential* create/update/delete, and the slice-5 api-key surface |
+| `viewer` | GET/HEAD on every management and console resource **except the environment-key routes** (vault-credential reads render sealed metadata only, so they stay viewer-safe; the env-key section is gated whole, as the reference console gates its equivalent page) |
+| `developer` | viewer + all resource CRUD and session lifecycle: agents, environments, sessions (create/events/interrupt/archive), skills, files, session resources, and vault CRUD (the container, not its credentials) |
+| `admin` | developer + the credential surfaces, enumerated: environment-key issue/list/revoke (the plan-30 routes — the reference gates its "Generate environment key" behind Console roles; ours now has the gate); vault-credential create/update/delete/archive and `mcp_oauth_validate` (server.go:87–93); the slice-5 api-key surface |
 
 Checks apply **only to the identity lane** (the key lane has no roles to
 check). Denial is the new house 403 — `{"type":"error","error":{"type":
@@ -399,7 +448,7 @@ matching IAP variables and docs.
 
 1. **`internal/identity`: the verifier and both modes.** The shared verifier
    (JWKS cache, alg allowlist, iss/aud/exp discipline), claim→role mapping,
-   discovery, the `gcp-iap`/`aws-alb` presets, and config parsing — pure
+   discovery, the `gcp-iap` preset, and config parsing — pure
    library + contract tests against a local fake IdP (httptest JWKS server:
    key rotation, unknown kid, wrong aud/iss/alg, expiry skew, ES256+RS256,
    nested role claims). No route touched; `make verify` green proves nothing
@@ -407,17 +456,20 @@ matching IAP variables and docs.
 2. **Principals + the identity lane.** The migration; JIT provisioning;
    `dispatchAuth`'s credential dispatch and the `/api/` arm; dual-auth
    discrimination; the context principal; `created_by` widening; the
-   `permission_error` envelope. First enforcement: the console env-key routes
-   require `admin`. Tests over real HTTP: a Casdoor-shaped and an IAP-shaped
+   `permission_error` envelope; the `s.handle`/`s.handleNoContent`
+   minimum-role parameter lands here (the mechanism), with its first use: the
+   console env-key routes require `admin`. Tests over real HTTP: a Casdoor-shaped and an IAP-shaped
    token both authenticate; wrong iss/aud/alg/expired all 401 uniformly;
    Bearer on management paths with `IDENTITY_MODE=disabled` still 401s; an
    environment key on a console route still 401s; `x-api-key` behavior
    byte-identical throughout.
-3. **The role matrix across the route tables.** The `s.handle` role
-   parameter; annotations per the matrix; per-resource tests (viewer 403 on
-   every mutation, developer 403 on every credential surface, admin green;
-   the key lane untouched by all of it). Wire-compat rung: the `/v1` route
-   table diff is empty; no response shape changes.
+3. **The role matrix across the route tables.** The slice-2 mechanism
+   applied everywhere per the matrix, including explicit checks on the three
+   adapter-free streaming routes, plus the route-table completeness test;
+   per-resource tests (viewer 403 on every mutation and on the env-key list,
+   developer 403 on every credential surface, admin green; the key lane
+   untouched by all of it). Wire-compat rung: the `/v1` route table diff is
+   empty; no response shape changes for key-authenticated callers.
 4. **Deployment wiring.** The compose `iam` profile with the hardened Casdoor
    seed; helm `identity.*` values; the GCP Terraform IAP variables and docs;
    docs/self-hosted-security.md's SSO section.
@@ -446,7 +498,9 @@ after slice 2 merges and is tracked there, not here.
   any done-claim, per CLAUDE.md.
 - Wire-compat rung: the `/v1` route-table diff stays empty across all slices;
   `ant beta:agents/environments/sessions` and `ant beta:worker poll` against
-  the local server behave identically with identity disabled and enabled.
+  the local server behave identically with identity disabled and enabled; the
+  identity lane's Bearer acceptance on `/v1` is resolved against its
+  DIVERGENCES entry, not waved through as invisible.
 - Security-sensitive slices (1, 2) get the full dual review regardless of
   diff shape; slice 6's acceptance transcript is the plan's exit criterion.
 
@@ -455,7 +509,8 @@ after slice 2 merges and is tracked there, not here.
 - **Deliberate**: the reference API host serves `POST /v1/oauth/token`
   (authorization_code + refresh_token + jwt-bearer; pkg/cmd/cmd_auth.go,
   sdk config/federation.go) — this platform does not; `ant auth login`,
-  OAuth profiles, and OIDC federation against it are unsupported (Roadmap).
+  OAuth profiles, and OIDC federation against it are unsupported (the Out of
+  scope entry records the full obligation list).
   `/v1` management calls here accept the deployment IdP's JWTs as Bearer
   where the reference accepts its console-OAuth tokens — both off-wire to
   every documented CLI/SDK management and worker flow, which ride
@@ -470,19 +525,3 @@ after slice 2 merges and is tracked there, not here.
   key" is undocumented; `admin`-only here is a local judgment (the
   reference's Developer role *can* manage API keys, so a future recording
   may justify relaxing the env-key gate to `developer`).
-
-## Roadmap (recorded, deliberately not built)
-
-- **`ant auth login` compatibility** — the full obligation list is known:
-  a console host serving `GET /oauth/authorize` and the
-  `/oauth/code/callback?app=anthropic-cli` manual-code page; `POST
-  /v1/oauth/token` with all three grants and the `organization`/`account`/
-  `workspace` response blocks (login hard-fails without a bound workspace);
-  `anthropic-beta: oauth-2025-04-20` and `anthropic-workspace-id` on
-  authenticated requests.
-- **RFC 7523 federation** (`fdrl_` rules, service accounts) — the
-  reference-native path from an enterprise IdP to a *machine* credential.
-- **A `/v1/organizations/*` Admin API** with an admin-key credential class,
-  mirroring the reference's documented surface.
-- **Multi-tenant activation** (#56): principal-scoped tenancy over the
-  reserved columns; sized in Out of scope.
