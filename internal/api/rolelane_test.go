@@ -289,8 +289,10 @@ func TestAHumanCreatedSessionRecordsThePrincipal(t *testing.T) {
 
 // TestEnvironmentKeyLaneIsUntouchedByRoles pins the other half of the promise:
 // annotating 53 routes changed nothing for machine callers. The work API carries
-// identity.RoleNone precisely because identity never reaches it, and a worker's
-// environment key must keep working exactly as it did.
+// identity.RoleNone because a worker holds no role for requireRole to check —
+// which is a different statement from "identity never arrives here", and that one
+// is false (see TestAnEncodedPathCannotSlipPastTheWorkLane). Either way a
+// worker's environment key must keep working exactly as it did.
 func TestEnvironmentKeyLaneIsUntouchedByRoles(t *testing.T) {
 	s := newLaneServer(t)
 	envID := s.env()

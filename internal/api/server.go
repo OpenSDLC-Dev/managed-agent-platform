@@ -577,11 +577,14 @@ func roleGate(min identity.Role, h http.HandlerFunc) http.HandlerFunc {
 // identity.RoleNone DENIES on the identity lane (see requireRole), which is what
 // makes the floor safe: slice 2 registered every route there and slice 3 relaxed
 // them one at a time, so a route nobody annotates stays shut rather than open.
-// The routes still carrying it are the ones identity never reaches — the work API
-// and the gate config — where it means "no role to check" rather than "denied",
-// and TestEveryIdentityReachableRouteDeclaresARole is what keeps the two readings
-// from being confused: it fails on an identity-reachable route left at the floor
-// AND on a machine-lane route given a role.
+// The routes still carrying it are the machine lanes — the work API and the gate
+// config. Normally spelled, they dispatch away from identity before min is read.
+// Percent-encoded, they do not: dispatchAuth classifies the escaped path and
+// ServeMux matches the decoded one, so those spellings reach the identity lane
+// and RoleNone is what refuses them. It is a live denial there, not a placeholder.
+// TestEveryIdentityReachableRouteDeclaresARole keeps the two uses of the constant
+// apart: it fails on an identity-reachable route left at the floor, and on a
+// machine-lane route that declares a role or declares none at all.
 func (s *server) handle(min identity.Role, fn func(*http.Request) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := requireRole(r.Context(), min); err != nil {
