@@ -8,7 +8,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 humans authenticate through any standards-compliant OIDC provider, and the
 control plane resolves each request to a principal holding one of three
 claim-mapped roles. Machine credentials and every documented CLI/SDK flow are
-untouched. Six slices; slices 1–2 have landed ([#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369), [#370](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/370)), slice 3 is in review.
+untouched. Six slices; the enforcement point is complete and slices 1–3 have
+landed ([#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369), [#370](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/370), [#371](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/371)); slice 4 is deployment wiring, in progress.
 
 ## Tasks
 
