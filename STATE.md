@@ -7,8 +7,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 [Plan 29](./docs/plan/29_mcp-toolset.md) — the MCP client and `mcp_toolset` end to end
 (#45): an agent configured with an `mcp_toolset` gets no tools today, and this plan
 closes that with discovery, gating, credential injection and the reference's failure
-semantics. Seven slices, two landed. (Plan 31, console SSO and RBAC, archived
-2026-08-12 — its record is docs/HISTORY.md and its own plan file.)
+semantics. Seven slices, two landed.
 
 ## Tasks
 
