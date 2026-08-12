@@ -181,6 +181,15 @@ the binary rather than being restated here in a second place they could drift.
        a render error. Non-strings are refused for the reason the node selector
        refuses them: Helm decodes an unquoted value in a file as float64, which
        renders as something no role name ever is. */}}
+{{- /* An empty map is not a valid deployment of this lane, and it is the one
+       omission whose consequence is not a denied human but a dead control plane:
+       parseRoleMap answers "IDENTITY_ROLE_MAP is required and must map at least
+       one claim value", FromEnv propagates it, and the process exits — so the
+       machine lanes go down with the human one. The chart refuses the other
+       values whose absence is fatal; this one is fatal to more than itself. */}}
+{{- if not $identity.roleMap }}
+{{- fail "identity.roleMap must map at least one claim value when identity.mode is set: the control plane refuses to start without it, so an empty map does not merely deny humans, it takes the whole process down at boot — machine lanes included." }}
+{{- end }}
 {{- $pairs := list }}
 {{- range $value, $role := $identity.roleMap }}
 {{- if not (kindIs "string" $role) }}

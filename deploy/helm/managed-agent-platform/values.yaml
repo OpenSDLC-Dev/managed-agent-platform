@@ -625,6 +625,11 @@ casdoor:
   # than in the admin UI: the seed is re-applied on every restart (see
   # adminPassword above), so the application it names is restored to what this
   # file says and a URI added through the UI is gone at the next reschedule.
+  # REQUIRED when enabled, for a reason worth stating because its absence is the
+  # only one that surfaces late: the seed's own callback is a laptop's
+  # (http://localhost:5173/callback) and is replaced unconditionally, so an empty
+  # list registers an OIDC application with no callback at all and every login
+  # ends in a redirect_uri mismatch — at the first sign-in, not at install.
   console:
     clientId: map-console
     clientSecret: ""

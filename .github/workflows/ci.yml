@@ -668,6 +668,16 @@ jobs:
               | grep -q 'IDENTITY_' \
               && { echo "$tpl has no identity lane and must not receive its configuration" >&2; exit 1; }
           done
+          # A mode with no role map renders a control plane that cannot boot:
+          # parseRoleMap refuses an empty IDENTITY_ROLE_MAP, FromEnv propagates it
+          # and the process exits, so the MACHINE lanes go down with the human one.
+          # Refused at render, like every other value whose absence is fatal.
+          err="$(helm template t "$CHART" -f "$VALUES" --set identity.mode=oidc \
+            --set identity.oidc.issuer=https://idp.ci.example \
+            --set identity.oidc.audience=map-console 2>&1 >/dev/null)" \
+            && { echo "identity.mode with an empty roleMap must fail the render" >&2; exit 1; }
+          echo "$err" | grep -q 'identity.roleMap must map at least one claim value' \
+            || { echo "the empty-roleMap render failed for the wrong reason: $err" >&2; exit 1; }
           out="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/controlplane-deployment.yaml)"
           # The variable NAME and its VALUE together: these names are read verbatim
           # by internal/identity/config.go and nothing else in the release would
@@ -773,7 +783,7 @@ jobs:
                  echo "$dep" | grep -A1 'name: origin$' >&2; exit 1; }
           refuses "must equal the bundled IdP's origin" --set 'identity.oidc.issuer=https://wrong.example'
           refuses 'casdoor.ingress.host is required' --set 'casdoor.ingress.host='
-          cm="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor-init-data-configmap.yaml)"
+          cm="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor-init-data-secret.yaml)"
           # tokenFormat JWT: the alternative, JWT-Standard, drops `roles`,
           # `permissions` and `groups` from the token entirely, which would leave
           # IDENTITY_ROLE_MAP nothing to map and every human no role.
@@ -895,21 +905,42 @@ jobs:
           # Off by default: no Casdoor object may appear in a default render.
           helm template t "$CHART" -f "$VALUES" | grep -qi 'casdoor' \
             && { echo "default values must not deploy the bundled IdP" >&2; exit 1; }
-          idp=(--set casdoor.enabled=true --set casdoor.ingress.host=idp.example.test)
-          # The two credentials the chart refuses to invent. adminPassword is the
-          # one that matters most: Casdoor creates a GLOBAL administrator on the
+          idp=(--set casdoor.enabled=true --set casdoor.ingress.host=idp.example.test
+               --set 'casdoor.console.redirectURIs[0]=https://console.example/callback')
+          # The three values the chart refuses to invent. adminPassword is the one
+          # that matters most: Casdoor creates a GLOBAL administrator on the
           # publicly documented password `123` before it reads the seed, so a
           # chart that let this render would publish that through an Ingress.
-          for miss in adminPassword console.clientSecret; do
+          # redirectURIs is the one whose absence is not a startup failure but a
+          # login failure — the seed's own callback is a laptop's and is replaced
+          # unconditionally, so an empty list registers an application no
+          # authorization-code request can ever complete against.
+          for miss in adminPassword console.clientSecret console.redirectURIs; do
             args=("${idp[@]}" --set casdoor.adminPassword=pw --set casdoor.console.clientSecret=cs)
-            err="$(helm template t "$CHART" -f "$VALUES" "${args[@]}" --set "casdoor.$miss=" 2>&1 >/dev/null)" \
+            err="$(helm template t "$CHART" -f "$VALUES" "${args[@]}" --set "casdoor.$miss=null" 2>&1 >/dev/null)" \
               && { echo "casdoor.$miss missing must fail the render" >&2; exit 1; }
             echo "$err" | grep -q "casdoor.$miss is required" \
               || { echo "the render without casdoor.$miss failed for the wrong reason: $err" >&2; exit 1; }
           done
+          # The seed carries two credentials — the console's OAuth client secret
+          # and a Casdoor GLOBAL administrator's password — so it must not be a
+          # ConfigMap. `get configmaps` is routinely granted where `get secrets`
+          # is not, and ConfigMaps sit outside encryption-at-rest defaults.
+          helm template t "$CHART" -f "$VALUES" "${idp[@]}" --set casdoor.adminPassword=pw \
+            --set casdoor.console.clientSecret=cs --show-only templates/casdoor-init-data-secret.yaml \
+            | grep -q '^kind: Secret$' \
+            || { echo "the seed must render as a Secret, not a ConfigMap" >&2; exit 1; }
+          # A single-replica IdP that re-applies its seed on boot must not be
+          # rolled: the default RollingUpdate rounds maxSurge up to 1, so an
+          # upgrade would run two seeders and two --createDatabase against one
+          # database.
+          helm template t "$CHART" -f "$VALUES" "${idp[@]}" --set casdoor.adminPassword=pw \
+            --set casdoor.console.clientSecret=cs --show-only templates/casdoor.yaml \
+            | grep -q 'type: Recreate' \
+            || { echo "the bundled IdP must use the Recreate strategy" >&2; exit 1; }
           full=("${idp[@]}" --set casdoor.adminPassword=pw --set casdoor.console.clientSecret=cs)
           seed="$(helm template t "$CHART" -f "$VALUES" "${full[@]}" \
-            --show-only templates/casdoor-init-data-configmap.yaml)"
+            --show-only templates/casdoor-init-data-secret.yaml)"
           # The three demo accounts are real, working credentials on a laptop.
           # None may reach a published cluster IdP.
           for u in map-admin map-dev map-viewer; do
@@ -929,7 +960,7 @@ jobs:
           # render, rolling the IdP pod on unchanged values and leaving Argo/Flux
           # permanently OutOfSync. Same values in, same bytes out.
           again="$(helm template t "$CHART" -f "$VALUES" "${full[@]}" \
-            --show-only templates/casdoor-init-data-configmap.yaml)"
+            --show-only templates/casdoor-init-data-secret.yaml)"
           [ "$seed" = "$again" ] \
             || { echo "two renders of identical values differ: the IdP will roll on every sync" >&2; exit 1; }
           # ...and it only takes effect because init data is allowed to re-apply.
@@ -960,7 +991,7 @@ jobs:
           # ...and a quoted one still reaches the seed as a JSON string.
           helm template t "$CHART" -f "$VALUES" "${idp[@]}" \
             --set-string casdoor.adminPassword=12345678 --set casdoor.console.clientSecret=cs \
-            --show-only templates/casdoor-init-data-configmap.yaml \
+            --show-only templates/casdoor-init-data-secret.yaml \
             | grep -q '"password": "12345678"' \
             || { echo "a quoted credential did not render as a JSON string" >&2; exit 1; }
           # The audience Casdoor mints is the client id, so a render where the two

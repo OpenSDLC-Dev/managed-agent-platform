@@ -523,7 +523,7 @@ processes; `otlp.insecure=true` to export without TLS.
 | `casdoor.adminPassword` / `casdoor.console.clientSecret` | `""` (both required when enabled) | the password the seed puts on Casdoor's own `built-in/admin` (replacing the documented default), and the console's OAuth client secret. Not auto-generated; both ride the seed ConfigMap |
 | `casdoor.ingress.host` | `""` (required when enabled) | the IdP's external host — also its `origin`, so `identity.oidc.issuer` must equal `https://<host>`. Must be served over HTTPS |
 | `casdoor.ingress.className` / `.annotations` / `.tls.secretName` | `""` / `{}` / `""` | IngressClass, annotations, and the TLS Secret for that host |
-| `casdoor.console.clientId` / `.redirectURIs` | `map-console` / `[]` | the seeded OIDC application's client id (which `identity.oidc.audience` must equal) and the console's callback URLs |
+| `casdoor.console.clientId` / `.redirectURIs` | `map-console` / `[]` (both required when enabled) | the seeded OIDC application's client id (which `identity.oidc.audience` must equal) and the console's callback URLs. The seed's own callback is a laptop's and is replaced at render, so an empty list would register an application every login fails against — the chart refuses it instead |
 | `casdoor.database.name` / `.dataSourceName` | `casdoor` / `""` | Casdoor's own database; the DSN is derived against the bundled Postgres, and required (keyword/value form, not a URL) when that is off |
 | `casdoor.networkPolicy.enabled` / `.from` | `true` / the `ingress-nginx` namespace | admit pod ingress only from your ingress controller. An empty `from` fails the render — to Kubernetes it would mean "all sources" |
 | `existingSecret` | `""` | reference a pre-created Secret instead of inlining |

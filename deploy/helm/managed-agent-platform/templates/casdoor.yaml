@@ -45,6 +45,16 @@ spec:
   # writes straight to the database, so a second replica buys availability for a
   # process whose state is already in Postgres and costs a second seeder.
   replicas: 1
+  # And Recreate, because `replicas: 1` alone does not deliver one seeder. The
+  # default RollingUpdate rounds maxSurge up to 1, so an upgrade — which the
+  # checksum annotations below deliberately trigger whenever the seed or the DSN
+  # changes — starts the new pod before the old one goes away. Both would run
+  # `--createDatabase=true` and re-apply init_data.json (initDataNewOnly is false
+  # by design) against the same database at the same time. Old-stops-then-new-
+  # starts costs a few seconds of login downtime on a single-replica IdP that has
+  # none to lose anyway.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "map.selectorLabels" (dict "ctx" . "component" "casdoor") | nindent 6 }}
@@ -54,7 +64,7 @@ spec:
         # Roll the pod when the seed or the DSN changes on upgrade: the seed is
         # read at boot and nowhere else, so an edited one takes effect only on a
         # restart, and a rotated database password not at all until then.
-        checksum/casdoor-init-data: {{ include (print $.Template.BasePath "/casdoor-init-data-configmap.yaml") . | sha256sum | quote }}
+        checksum/casdoor-init-data: {{ include (print $.Template.BasePath "/casdoor-init-data-secret.yaml") . | sha256sum | quote }}
         checksum/casdoor-secret: {{ include (print $.Template.BasePath "/casdoor-secret.yaml") . | sha256sum | quote }}
       labels:
         {{- include "map.labels" . | nindent 8 }}
@@ -148,6 +158,6 @@ spec:
           {{- end }}
       volumes:
         - name: init-data
-          configMap:
-            name: {{ include "map.fullname" . }}-casdoor-init-data
+          secret:
+            secretName: {{ include "map.fullname" . }}-casdoor-init-data
 {{- end -}}

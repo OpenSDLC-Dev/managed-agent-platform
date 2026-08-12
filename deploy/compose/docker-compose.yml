@@ -148,11 +148,17 @@ services:
       IDENTITY_CLAIM_ROLES: ${IDENTITY_CLAIM_ROLES:-}
       IDENTITY_ROLE_MAP: ${IDENTITY_ROLE_MAP:-}
       # The bundled IdP's certificate is issued by the proxy's own local CA, so
-      # the control plane has to trust it to fetch JWKS over TLS. Go reads this
-      # file *in addition to* scanning /etc/ssl/certs, so the public roots keep
-      # working, and a missing file (the default stack, no `iam` profile) is
-      # skipped silently rather than being an error.
-      SSL_CERT_FILE: ${SSL_CERT_FILE:-/etc/idp-ca/caddy/pki/authorities/local/root.crt}
+      # the control plane has to trust it to fetch JWKS over TLS. Empty by
+      # default, and deliberately not defaulted to the CA path: SSL_CERT_FILE
+      # REPLACES Go's default certificate-FILE list rather than adding to it
+      # (crypto/x509 loadSystemRoots), so pointing it at the CA is only survivable
+      # because the separate directory scan of /etc/ssl/certs still finds the
+      # public roots. That is a property of this image — debian:stable-slim with
+      # ca-certificates — not of the configuration, and a slimmer base whose roots
+      # are only a file would silently lose every public root for outbound TLS to
+      # MinIO, the model endpoint, OTLP and MCP. The `iam` profile's seventh
+      # variable supplies it; see .env.example.
+      SSL_CERT_FILE: ${SSL_CERT_FILE:-}
     volumes:
       # Read-only: the control plane consumes the CA the proxy generates.
       - idpca:/etc/idp-ca:ro
