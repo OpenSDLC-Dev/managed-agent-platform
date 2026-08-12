@@ -368,7 +368,13 @@ CREATE TABLE principals (
   access when their token expires — nothing platform-side keeps them in. An
   operator may DELETE a stale row at any time: `created_by` is a plain text
   column, not a foreign key, so audit history survives as an opaque id. The
-  SSO docs section says all of this.
+  SSO docs section says all of this — including the deliberate absence: the
+  platform ships **no** timer that deletes principals. Retention is a policy
+  choice that differs per deployment (an erasure regime wants the row gone
+  soon; an audit regime wants it stable while `created_by` still points at
+  it), and either default is silently wrong for the other; so the platform
+  keeps the data minimal, documents the `last_seen_at`-based DELETE an
+  operator runs on their own schedule, and leaves the schedule to them.
 - `principal_` joins the private-id family (`envkey_`, `apikey_`, `gtk_`) —
   **not** `domain.knownPrefixes`; it never appears on a `/v1` path.
 - `api_keys` is untouched here: key ownership (`principal_id`) arrives only
@@ -388,12 +394,24 @@ CREATE TABLE principals (
 
 - non-empty `x-api-key` → `requireAPIKey`, **full authority, no role model**
   — the machine key's semantics are frozen (bootstrap, CI, BYO automation,
-  and the reference's own model: a key *is* its authority);
-- else `Authorization: Bearer` with a JWT silhouette (two dots) and
-  `IDENTITY_MODE=oidc` → the identity lane: verify, resolve principal,
-  attach `{principal_id, roles}` to context, enforce the route's role —
-  **default-deny: a route with no explicit role annotation answers 403 on
-  this lane**, so the lane is fail-closed from the moment it exists;
+  and the reference's own model: a key *is* its authority). This is the one
+  way to reach an `admin` route without an `admin` claim, and it is
+  deliberate, not a gap in the gate: in an SSO deployment **no browser
+  session and no console process holds a management key** (decision 2 — the
+  BFF forwards the user's token instead of acting with a god key), so the
+  key lane is reachable only by whoever holds the deployment's root
+  credential, which is what "root credential" means. Narrowing it further is
+  slice 5's job (named, principal-owned keys) and, past that, an
+  admin-key credential class (Out of scope);
+- else, when `IDENTITY_MODE` is not `disabled`, the identity lane —
+  `IDENTITY_MODE=oidc` takes an `Authorization: Bearer` with a JWT
+  silhouette (two dots); `IDENTITY_MODE=trusted_proxy` takes the configured
+  assertion header instead and ignores Bearer entirely — then: verify,
+  resolve principal, attach `{principal_id, roles}` to context, enforce the
+  route's role — **default-deny: a route with no explicit role annotation
+  answers 403 on this lane**, so the lane is fail-closed from the moment it
+  exists. The two modes are mutually exclusive by config; neither ever falls
+  back to the other;
 - else → 401 exactly as today.
 
 On the dual-auth worker paths, discrimination extends the existing rule:
@@ -401,12 +419,11 @@ On the dual-auth worker paths, discrimination extends the existing rule:
 identity lane (a grandfathered pre-0021 environment key is caller-supplied
 text that could in principle contain two dots — it would misroute to a 401,
 fail-closed; docs/self-hosted-security.md §6 already tells operators to
-reissue those). In `trusted_proxy` mode the identity lane keys on the
-assertion header instead of a Bearer, and precedence is explicit:
-environment-key paths and `x-api-key` resolve on their machine lanes first,
-the assertion is consulted only after both, and an assertion riding alongside
-a machine credential never vouches for it — each collision pair is pinned by
-a test. The `/api/` console namespace gets the explicit
+reissue those). Precedence in `trusted_proxy` mode is explicit for the same
+reason: environment-key paths and `x-api-key` resolve on their machine lanes
+first, the assertion is consulted only after both, and an assertion riding
+alongside a machine credential never vouches for it — each collision pair is
+pinned by a test. The `/api/` console namespace gets the explicit
 dispatch arm consoleapi.go:24–37 said a future lane must bring: same
 credential dispatch (management key or identity), so the plan-30 routes keep
 working for headless operators while gaining the role gate.
@@ -452,12 +469,44 @@ container, seeded with: one organization, one application (the console as
 OIDC client — code + PKCE, the console's redirect URL), **zero upstream
 providers**, public signup off, the token-exchange grant off, and a role
 claim (`roles`) emitted in tokens so `IDENTITY_ROLE_MAP` has something to
-map. The `iam` profile fronts Casdoor with a minimal reverse proxy that blocks
-`POST /api/acs`, `GET /api/get-saml-login`, and the unused SAML-IdP/CAS
-routes — an enforced control, not advice: the browser must reach Casdoor to
-log in, so internal-only networking is not available; Casdoor's own port
-stays unpublished, only the proxy's is exposed, and the acceptance run curls
-the blocked routes expecting the refusal. docs/self-hosted-security.md gains an SSO section stating the
+map.
+
+**The bootstrap contract, verified against `casdoor@master` on 2026-08-12**
+(the mechanics are named here because two of them are load-bearing and a
+plausible guess gets them backwards). Casdoor reads `conf/app.conf`, but
+`conf.GetConfigString` consults `os.LookupEnv` first for every key, so the
+profile configures it entirely through environment variables of the same
+camelCase names and mounts no config file: `driverName=postgres`;
+`dataSourceName=…dbname=casdoor` — the separate `dbName` key is appended to
+the DSN for MySQL only, so Postgres must repeat the database inside the DSN;
+`origin` set to the **proxy's** external URL, because that value becomes the
+`iss` claim and must equal `IDENTITY_OIDC_ISSUER`; and the entrypoint's
+`--createDatabase=true` so the database exists on first boot. Seed data is a
+checked-in `init_data.json` mounted at `/init_data.json` (the image's
+working directory is `/`; the path comes from the `initDataFile` key). The
+two load-bearing settings: **`initDataNewOnly=true`** — the shipped default
+is `false`, and with `false` every entity in the file is deleted and re-added
+on *every* start, so an unattended restart silently wipes operator edits;
+and **`tokenFormat: "JWT"`** (the default) — `JWT-Standard` drops `roles`,
+`permissions`, and `groups` from the token entirely, which would leave
+`IDENTITY_ROLE_MAP` nothing to map. The seeded application sets
+`enableSignUp: false` and a `grantTypes` list without
+`urn:ietf:params:oauth:grant-type:token-exchange`; `authorization_code`
+stays enabled regardless of that list (`IsGrantTypeValid` special-cases it),
+which is the grant we want. `tokenSigningMethod` stays `RS256`, inside the
+verifier's allowlist.
+
+The `iam` profile fronts Casdoor with a minimal reverse proxy — an enforced
+control, not advice: the browser must reach Casdoor to log in, so
+internal-only networking is not available; Casdoor's own port (8000, one
+process serving both API and UI) stays unpublished, only the proxy's is
+exposed, and the acceptance run curls the blocked routes expecting the
+refusal. The block list is verbatim from `routers/router.go`: `GET
+/api/get-saml-login` and `POST /api/acs` (the SP role, where five of the nine
+CVEs live), `GET /api/saml/metadata` and `* /api/saml/redirect/{owner}/
+{application}` (the IdP role we do not use), and the
+`/cas/{organization}/{application}/…` family including `POST …/samlValidate`.
+docs/self-hosted-security.md gains an SSO section stating the
 VU#780781 posture plainly: which CVEs the configuration voids, which the
 pinned version fixes (9090), and that enterprises federating their own IdP
 should point `IDENTITY_OIDC_ISSUER` straight at it — the bundled Casdoor is
@@ -466,9 +515,11 @@ a local-account IdP, not a federation hub.
 **Helm carries the same bundle, values-gated and off by default.** The chart
 always injects `identity.*` (mode/issuer/audience/claims/role map) into the
 controlplane Deployment; `casdoor.enabled` (default `false`) additionally
-renders a thin set of **first-party** templates — Deployment, Service, and a
-Secret — configured exactly as the compose profile seeds it, blocked SAML
-routes included. First-party rather than the upstream `casdoor-helm` subchart,
+renders a thin set of **first-party** templates — Deployment, Service, a
+Secret, and a ConfigMap carrying the same `init_data.json` — driven by the
+same environment contract the compose profile uses (`initDataNewOnly=true`
+and `tokenFormat: "JWT"` included), with `origin` pointed at the chart's
+ingress host. First-party rather than the upstream `casdoor-helm` subchart,
 whose QA shipped a release that ignored its Postgres values and silently fell
 back to SQLite: an IdP that quietly loses its user store is worse than one we
 render ourselves in fifty lines. The reason the chart carries it at all is
@@ -476,7 +527,14 @@ this project's own premise — the target deployment is a private cluster with
 no cloud IdP, and "the platform's default IAM works out of the box" has to
 mean Helm there, not only compose on a laptop. Owning the templates means
 owning their lifecycle (image tag, database, secret, CVE tracking), which the
-SSO docs state rather than imply.
+SSO docs state rather than imply. The SAML block is enforced here too, in the
+shape Kubernetes gives: the chart's Ingress carries the same deny rules for
+`POST /api/acs`, `GET /api/get-saml-login`, and the SAML-IdP/CAS paths, the
+Service is `ClusterIP` (never `NodePort` or `LoadBalancer`), and a
+NetworkPolicy admits pod ingress only from the ingress controller — so a
+browser reaches Casdoor exclusively through the path that denies those
+routes. Both chart states go through `helm lint` and a render assertion, the
+enabled one asserting the deny rules and the NetworkPolicy are present.
 
 **On GCP the identity provider is Google's, not ours.** `deploy/gcp` wires
 `trusted_proxy` + `gcp-iap` in front of the control plane, with Cloud Identity
