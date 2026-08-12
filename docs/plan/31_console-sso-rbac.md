@@ -141,7 +141,8 @@ which consumes what lands here and must trail it.
   multi-organization; Casbin RBAC with roles/groups deliverable as token
   claims (per-application token format, array-typed claim control). Go +
   Postgres, one light container, Apache-2.0, ~14k stars, multiple releases
-  per week (v3.151.0 on 2026-08-11).
+  per week (v3.152.0, 2026-08-11, is the latest at writing — v3.151.0 landed
+  the same day).
 - **CERT/CC VU#780781 (published 2026-05-28): nine CVEs affecting
   ≤ 2.362.0**, coordination with the vendor failed ("we have not received a
   statement from the vendor"), and the advisories name no fixed version.
@@ -438,8 +439,9 @@ required role, never the caller's.
 ### The Casdoor bundle — hardened by default
 
 `deploy/compose` gains an optional `iam` profile: a pinned `casbin/casdoor`
-image (a v3.x tag ≥ the verified-fixed v2.387.0; exact tag pinned at landing
-and bumped deliberately), backed by its own database in the existing Postgres
+image — **v3.152.0**, the latest release at writing and far past the
+verified-fixed v2.387.0; bumped deliberately, never floating — backed by its
+own database in the existing Postgres
 container, seeded with: one organization, one application (the console as
 OIDC client — code + PKCE, the console's redirect URL), **zero upstream
 providers**, public signup off, the token-exchange grant off, and a role
