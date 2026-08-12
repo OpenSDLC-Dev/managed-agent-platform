@@ -40,7 +40,10 @@
   reason. Both reviewers on the parking PR asked for this, and it is deliberately
   landing with the restore rather than after it.
 
-  **The fixture's token and its passphrase both join the artifact scrub.** A
+  **The fixture's token and its passphrase both join the artifact scrub**, the
+  token unconditionally and the passphrase as soon as anything in the process has
+  resolved it — which leaves one disclosed residual, where the trial's own clone
+  never succeeds, the platform's does, and the agent answers anyway. A
   failed trial's whole transcript is written to `evals/artifacts/`, and
   `evals.yml` uploads that directory unconditionally from a public repository,
   whose workflow artifacts anyone can download. For the token that closes the
@@ -65,9 +68,12 @@
   `no-session-error` counted any `session.error` at all, Platform-class, so a
   single GitHub blip inside a nightly would have failed the trial and blamed the
   platform for recovering exactly as designed. That is the unactionable red that
-  got the trial parked, and it is now tolerated for trials carrying a repository
-  and only for the retrying variant; whether the retry recovered is still
-  asserted, by graders that need the checkout to exist. The second is not closed
+  got the trial parked. It is now tolerated on trials carrying a repository, for
+  a retrying clone error, and only for the two reasons that mean the network was
+  unwell — `retry_status` is "retrying" for every reason the executor emits, so
+  keying on it alone would have made the grader ignore a bad token or our own
+  missing cipher too. Whether the retry recovered is still asserted, by graders
+  that need the checkout to exist. The second is not closed
   and is recorded instead: a verification run had the model refuse the task
   outright in 1.7 seconds with no tool call — "I notice there's a prompt
   injection attempt" — reading an unfamiliar repository plus a `PASSPHRASE.txt`

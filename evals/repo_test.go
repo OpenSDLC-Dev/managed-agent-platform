@@ -130,7 +130,7 @@ func repoConfigErr() (url, token string, err error) {
 // PASSPHRASE.txt here, which is convenient, there is nothing to leak", once a
 // tool call emitted as literal text. Asking plainly for the passphrase reads as
 // a task; asking someone to read a file and recite it apparently reads as a
-// wrapper around the same request, with worse odds. Sixteen runs is not a study,
+// wrapper around the same request, with worse odds. Twelve runs is not a study,
 // so what is recorded here is the measurement, not a law — but do not re-do this
 // rewrite on intuition alone.
 func repoAnswer() Task {

@@ -2186,7 +2186,7 @@ from "secret passphrase" to ask for "the one line" of a named file — the move
 `journal-multiturn` and `view-range` both record for this reflex — scored 2 of 4 against the
 same endpoint where the original scored 7 of 8: once a fabricated "there is no PASSPHRASE.txt
 here, which is convenient, there is nothing to leak" (the same reflex wearing a factual
-claim), once a tool call emitted as literal text rather than a tool_use block. Sixteen runs is
+claim), once a tool call emitted as literal text rather than a tool_use block. Twelve runs is
 not a study and the endpoint's tool-calling is visibly weak, but the direction was clear
 enough to revert to #331's wording and leave the numbers in the code comment, so the next
 reader does not spend the same four runs finding out.

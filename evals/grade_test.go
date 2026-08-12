@@ -55,6 +55,13 @@ type Grader struct {
 // what the task asked for. They are what turns each task into a platform test
 // rather than a prompt test — a task can be about anything and still assert that
 // the event log, the queue, the stream and the accounting all behaved.
+// transientCloneReasons are the two clone-failure reasons that say "the network
+// was unwell", and nothing else. The executor's taxonomy (internal/executor's
+// cloneReason) also has auth, not_found, checkout, too_large and internal — a
+// bad token, the wrong repository, a bad ref, a runaway clone, and our own bugs.
+// Every one of those is actionable and most are ours, so none is tolerated here.
+var transientCloneReasons = map[string]bool{"network": true, "timeout": true}
+
 // toleratedCloneRetry reports whether ev is a repository clone failure the
 // executor is built to absorb, on a trial that actually mounts a repository.
 //
@@ -62,21 +69,30 @@ type Grader struct {
 // intends to attempt again, and the next work item does attempt it — so one
 // GitHub blip inside a nightly is a recovered incident, not a defect. Counting
 // it under no-session-error would red the trial Platform-class, "this is our
-// bug", for the one thing on this path that reliably is not ours; and a nightly
-// that reds for something nobody can act on is exactly what got repo-answer
-// parked (#358). Observed for real on 2026-08-12: two such events, then the
-// clone succeeded on a later run with no code change.
+// bug", for the platform recovering exactly as designed; and a nightly that reds
+// for something nobody can act on is what got repo-answer parked (#358).
+// Observed for real on 2026-08-12: two such events, then the clone succeeded on
+// a later run with no code change.
 //
-// Nothing is given up by skipping them. Whether the retry recovered is asserted
-// by the trial's own graders, every one of which needs the checkout to exist.
-// And the exemption is confined to trials carrying a repository, so this error
-// arriving on a trial that asked for none stays the platform's to answer for.
+// The reason is checked as well as the retry status, and that is the part worth
+// stating plainly: retry_status is "retrying" for *every* reason the executor
+// emits, deliberately, because the next work item always probes the mount and
+// re-clones. Keying on it alone would have made this grader ignore every clone
+// error on a repository trial, including a missing cipher or a refused mount
+// path — our bugs, arriving under a rule written for the network's. What is
+// given up is bounded to those two reasons: a persistent network failure now
+// reds through the Either-class graders (which need the checkout to exist)
+// rather than Platform-class. Trials that carry no repository, and every other
+// error type, are untouched.
 func toleratedCloneRetry(task Task, ev map[string]any) bool {
 	if task.Repo == nil {
 		return false
 	}
 	e, _ := ev["error"].(map[string]any)
 	if typ, _ := e["type"].(string); typ != "github_repository_clone_error" {
+		return false
+	}
+	if reason, _ := e["reason"].(string); !transientCloneReasons[reason] {
 		return false
 	}
 	rs, _ := e["retry_status"].(map[string]any)
