@@ -52,66 +52,66 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	s := &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs, cipher: cipher}
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /v1/agents", s.handle(identity.RoleNone, s.createAgent))
-	mux.HandleFunc("GET /v1/agents", s.handle(identity.RoleNone, s.listAgents))
-	mux.HandleFunc("GET /v1/agents/{id}", s.handle(identity.RoleNone, s.getAgent))
-	mux.HandleFunc("POST /v1/agents/{id}", s.handle(identity.RoleNone, s.updateAgent)) // update is POST on the wire, not PATCH
-	mux.HandleFunc("GET /v1/agents/{id}/versions", s.handle(identity.RoleNone, s.listAgentVersions))
-	mux.HandleFunc("POST /v1/agents/{id}/archive", s.handle(identity.RoleNone, s.archiveAgent))
+	mux.HandleFunc("POST /v1/agents", s.handle(identity.RoleDeveloper, s.createAgent))
+	mux.HandleFunc("GET /v1/agents", s.handle(identity.RoleViewer, s.listAgents))
+	mux.HandleFunc("GET /v1/agents/{id}", s.handle(identity.RoleViewer, s.getAgent))
+	mux.HandleFunc("POST /v1/agents/{id}", s.handle(identity.RoleDeveloper, s.updateAgent)) // update is POST on the wire, not PATCH
+	mux.HandleFunc("GET /v1/agents/{id}/versions", s.handle(identity.RoleViewer, s.listAgentVersions))
+	mux.HandleFunc("POST /v1/agents/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveAgent))
 
-	mux.HandleFunc("POST /v1/environments", s.handle(identity.RoleNone, s.createEnvironment))
-	mux.HandleFunc("GET /v1/environments", s.handle(identity.RoleNone, s.listEnvironments))
-	mux.HandleFunc("GET /v1/environments/{id}", s.handle(identity.RoleNone, s.getEnvironment))
-	mux.HandleFunc("POST /v1/environments/{id}", s.handle(identity.RoleNone, s.updateEnvironment))
-	mux.HandleFunc("DELETE /v1/environments/{id}", s.handle(identity.RoleNone, s.deleteEnvironment))
-	mux.HandleFunc("POST /v1/environments/{id}/archive", s.handle(identity.RoleNone, s.archiveEnvironment))
+	mux.HandleFunc("POST /v1/environments", s.handle(identity.RoleDeveloper, s.createEnvironment))
+	mux.HandleFunc("GET /v1/environments", s.handle(identity.RoleViewer, s.listEnvironments))
+	mux.HandleFunc("GET /v1/environments/{id}", s.handle(identity.RoleViewer, s.getEnvironment))
+	mux.HandleFunc("POST /v1/environments/{id}", s.handle(identity.RoleDeveloper, s.updateEnvironment))
+	mux.HandleFunc("DELETE /v1/environments/{id}", s.handle(identity.RoleDeveloper, s.deleteEnvironment))
+	mux.HandleFunc("POST /v1/environments/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveEnvironment))
 
-	mux.HandleFunc("POST /v1/sessions", s.handle(identity.RoleNone, s.createSession))
-	mux.HandleFunc("GET /v1/sessions", s.handle(identity.RoleNone, s.listSessions))
-	mux.HandleFunc("GET /v1/sessions/{id}", s.handle(identity.RoleNone, s.getSession))
-	mux.HandleFunc("POST /v1/sessions/{id}", s.handle(identity.RoleNone, s.updateSession))
-	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handle(identity.RoleNone, s.deleteSession))
-	mux.HandleFunc("POST /v1/sessions/{id}/archive", s.handle(identity.RoleNone, s.archiveSession))
+	mux.HandleFunc("POST /v1/sessions", s.handle(identity.RoleDeveloper, s.createSession))
+	mux.HandleFunc("GET /v1/sessions", s.handle(identity.RoleViewer, s.listSessions))
+	mux.HandleFunc("GET /v1/sessions/{id}", s.handle(identity.RoleViewer, s.getSession))
+	mux.HandleFunc("POST /v1/sessions/{id}", s.handle(identity.RoleDeveloper, s.updateSession))
+	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handle(identity.RoleDeveloper, s.deleteSession))
+	mux.HandleFunc("POST /v1/sessions/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveSession))
 
-	mux.HandleFunc("POST /v1/sessions/{id}/events", s.handle(identity.RoleNone, s.sendSessionEvents))
-	mux.HandleFunc("GET /v1/sessions/{id}/events", s.handle(identity.RoleNone, s.listSessionEvents))
-	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", roleGate(identity.RoleNone, s.streamSessionEvents))
+	mux.HandleFunc("POST /v1/sessions/{id}/events", s.handle(identity.RoleDeveloper, s.sendSessionEvents))
+	mux.HandleFunc("GET /v1/sessions/{id}/events", s.handle(identity.RoleViewer, s.listSessionEvents))
+	mux.HandleFunc("GET /v1/sessions/{id}/events/stream", roleGate(identity.RoleViewer, s.streamSessionEvents))
 
-	mux.HandleFunc("GET /v1/sessions/{id}/resources", s.handle(identity.RoleNone, s.listSessionResources))
-	mux.HandleFunc("POST /v1/sessions/{id}/resources", s.handle(identity.RoleNone, s.addSessionResource))
-	mux.HandleFunc("GET /v1/sessions/{id}/resources/{rid}", s.handle(identity.RoleNone, s.getSessionResource))
-	mux.HandleFunc("POST /v1/sessions/{id}/resources/{rid}", s.handle(identity.RoleNone, s.updateSessionResource))
-	mux.HandleFunc("DELETE /v1/sessions/{id}/resources/{rid}", s.handle(identity.RoleNone, s.deleteSessionResource))
+	mux.HandleFunc("GET /v1/sessions/{id}/resources", s.handle(identity.RoleViewer, s.listSessionResources))
+	mux.HandleFunc("POST /v1/sessions/{id}/resources", s.handle(identity.RoleDeveloper, s.addSessionResource))
+	mux.HandleFunc("GET /v1/sessions/{id}/resources/{rid}", s.handle(identity.RoleViewer, s.getSessionResource))
+	mux.HandleFunc("POST /v1/sessions/{id}/resources/{rid}", s.handle(identity.RoleDeveloper, s.updateSessionResource))
+	mux.HandleFunc("DELETE /v1/sessions/{id}/resources/{rid}", s.handle(identity.RoleDeveloper, s.deleteSessionResource))
 
-	mux.HandleFunc("POST /v1/vaults", s.handle(identity.RoleNone, s.createVault))
-	mux.HandleFunc("GET /v1/vaults", s.handle(identity.RoleNone, s.listVaults))
-	mux.HandleFunc("GET /v1/vaults/{id}", s.handle(identity.RoleNone, s.getVault))
-	mux.HandleFunc("POST /v1/vaults/{id}", s.handle(identity.RoleNone, s.updateVault))
-	mux.HandleFunc("DELETE /v1/vaults/{id}", s.handle(identity.RoleNone, s.deleteVault))
-	mux.HandleFunc("POST /v1/vaults/{id}/archive", s.handle(identity.RoleNone, s.archiveVault))
-	mux.HandleFunc("POST /v1/vaults/{id}/credentials", s.handle(identity.RoleNone, s.createVaultCredential))
-	mux.HandleFunc("GET /v1/vaults/{id}/credentials", s.handle(identity.RoleNone, s.listVaultCredentials))
-	mux.HandleFunc("GET /v1/vaults/{id}/credentials/{cid}", s.handle(identity.RoleNone, s.getVaultCredential))
-	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}", s.handle(identity.RoleNone, s.updateVaultCredential))
-	mux.HandleFunc("DELETE /v1/vaults/{id}/credentials/{cid}", s.handle(identity.RoleNone, s.deleteVaultCredential))
-	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}/archive", s.handle(identity.RoleNone, s.archiveVaultCredential))
-	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}/mcp_oauth_validate", s.handle(identity.RoleNone, s.validateVaultCredential))
+	mux.HandleFunc("POST /v1/vaults", s.handle(identity.RoleDeveloper, s.createVault))
+	mux.HandleFunc("GET /v1/vaults", s.handle(identity.RoleViewer, s.listVaults))
+	mux.HandleFunc("GET /v1/vaults/{id}", s.handle(identity.RoleViewer, s.getVault))
+	mux.HandleFunc("POST /v1/vaults/{id}", s.handle(identity.RoleDeveloper, s.updateVault))
+	mux.HandleFunc("DELETE /v1/vaults/{id}", s.handle(identity.RoleDeveloper, s.deleteVault))
+	mux.HandleFunc("POST /v1/vaults/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveVault))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials", s.handle(identity.RoleAdmin, s.createVaultCredential))
+	mux.HandleFunc("GET /v1/vaults/{id}/credentials", s.handle(identity.RoleViewer, s.listVaultCredentials))
+	mux.HandleFunc("GET /v1/vaults/{id}/credentials/{cid}", s.handle(identity.RoleViewer, s.getVaultCredential))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}", s.handle(identity.RoleAdmin, s.updateVaultCredential))
+	mux.HandleFunc("DELETE /v1/vaults/{id}/credentials/{cid}", s.handle(identity.RoleAdmin, s.deleteVaultCredential))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}/archive", s.handle(identity.RoleAdmin, s.archiveVaultCredential))
+	mux.HandleFunc("POST /v1/vaults/{id}/credentials/{cid}/mcp_oauth_validate", s.handle(identity.RoleAdmin, s.validateVaultCredential))
 
-	mux.HandleFunc("POST /v1/skills", s.handle(identity.RoleNone, s.createSkill))
-	mux.HandleFunc("GET /v1/skills", s.handle(identity.RoleNone, s.listSkills))
-	mux.HandleFunc("GET /v1/skills/{id}", s.handle(identity.RoleNone, s.getSkill))
-	mux.HandleFunc("DELETE /v1/skills/{id}", s.handle(identity.RoleNone, s.deleteSkill))
-	mux.HandleFunc("POST /v1/skills/{id}/versions", s.handle(identity.RoleNone, s.createSkillVersion))
-	mux.HandleFunc("GET /v1/skills/{id}/versions", s.handle(identity.RoleNone, s.listSkillVersions))
-	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}", s.handle(identity.RoleNone, s.getSkillVersion))
-	mux.HandleFunc("DELETE /v1/skills/{id}/versions/{version}", s.handle(identity.RoleNone, s.deleteSkillVersion))
-	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}/content", roleGate(identity.RoleNone, s.downloadSkillVersion)) // streams the archive; not a typed handler
+	mux.HandleFunc("POST /v1/skills", s.handle(identity.RoleDeveloper, s.createSkill))
+	mux.HandleFunc("GET /v1/skills", s.handle(identity.RoleViewer, s.listSkills))
+	mux.HandleFunc("GET /v1/skills/{id}", s.handle(identity.RoleViewer, s.getSkill))
+	mux.HandleFunc("DELETE /v1/skills/{id}", s.handle(identity.RoleDeveloper, s.deleteSkill))
+	mux.HandleFunc("POST /v1/skills/{id}/versions", s.handle(identity.RoleDeveloper, s.createSkillVersion))
+	mux.HandleFunc("GET /v1/skills/{id}/versions", s.handle(identity.RoleViewer, s.listSkillVersions))
+	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}", s.handle(identity.RoleViewer, s.getSkillVersion))
+	mux.HandleFunc("DELETE /v1/skills/{id}/versions/{version}", s.handle(identity.RoleDeveloper, s.deleteSkillVersion))
+	mux.HandleFunc("GET /v1/skills/{id}/versions/{version}/content", roleGate(identity.RoleViewer, s.downloadSkillVersion)) // streams the archive; not a typed handler
 
-	mux.HandleFunc("POST /v1/files", s.handle(identity.RoleNone, s.createFile))
-	mux.HandleFunc("GET /v1/files", s.handle(identity.RoleNone, s.listFiles))
-	mux.HandleFunc("GET /v1/files/{id}", s.handle(identity.RoleNone, s.getFile))
-	mux.HandleFunc("DELETE /v1/files/{id}", s.handle(identity.RoleNone, s.deleteFile))
-	mux.HandleFunc("GET /v1/files/{id}/content", roleGate(identity.RoleNone, s.downloadFile)) // streams the object; not a typed handler
+	mux.HandleFunc("POST /v1/files", s.handle(identity.RoleDeveloper, s.createFile))
+	mux.HandleFunc("GET /v1/files", s.handle(identity.RoleViewer, s.listFiles))
+	mux.HandleFunc("GET /v1/files/{id}", s.handle(identity.RoleViewer, s.getFile))
+	mux.HandleFunc("DELETE /v1/files/{id}", s.handle(identity.RoleDeveloper, s.deleteFile))
+	mux.HandleFunc("GET /v1/files/{id}/content", roleGate(identity.RoleViewer, s.downloadFile)) // streams the object; not a typed handler
 
 	// The console API — off the /v1 wire, mirroring the reference console's own
 	// private path so a console-facing endpoint has a convention rather than an
@@ -243,9 +243,20 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) h
 		// management auth), so an environment key never reaches a management-only
 		// handler. (Classifying on the decoded r.URL.Path instead would let that
 		// %2F reach the CRUD handler under env-key auth.) The reverse case is
-		// fail-closed and driverless: a request that percent-encodes a literal
-		// route segment (e.g. /%65vents) is not recognized as a worker route and
-		// falls to management auth — a 401, never an over-authorization.
+		// fail-closed and driverless, but by two different mechanisms depending
+		// on whether identity is configured. A request that percent-encodes a
+		// literal route segment (e.g. /%65vents, or /%77ork) is not recognized as
+		// a worker route and falls to management auth, and ServeMux then decodes
+		// the segment and matches the machine-lane registration anyway. With no
+		// verifier that is a 401 — no key, no entry. With one, the request can
+		// instead take the HUMAN lane and reach that registration, where what
+		// refuses it is the role: those routes are registered identity.RoleNone,
+		// which no role satisfies, so it is a 403. Hence RoleNone on the work and
+		// gate registrations is load-bearing rather than decorative
+		// (TestAnEncodedPathCannotSlipPastTheWorkLane). Under a management key the
+		// handlers are reached with requireRole a no-op, and what closes them is
+		// their own scoping — workScope's environment check and getGateConfig's
+		// empty session id — not this dispatcher.
 		p := r.URL.EscapedPath()
 		switch {
 		case isWorkPath(p):
@@ -563,10 +574,17 @@ func roleGate(min identity.Role, h http.HandlerFunc) http.HandlerFunc {
 // where the route is defined, not somewhere a reader has to go find. It applies
 // to the identity lane alone; requireRole is a no-op on every machine lane.
 //
-// identity.RoleNone means "not yet annotated", and it DENIES on the identity
-// lane (see requireRole). Plan 31 slice 2 registers almost everything that way
-// on purpose: the lane is born fail-closed and slice 3 relaxes each route as it
-// annotates it, so a route that is forgotten stays shut rather than open.
+// identity.RoleNone DENIES on the identity lane (see requireRole), which is what
+// makes the floor safe: slice 2 registered every route there and slice 3 relaxed
+// them one at a time, so a route nobody annotates stays shut rather than open.
+// The routes still carrying it are the machine lanes — the work API and the gate
+// config. Normally spelled, they dispatch away from identity before min is read.
+// Percent-encoded, they do not: dispatchAuth classifies the escaped path and
+// ServeMux matches the decoded one, so those spellings reach the identity lane
+// and RoleNone is what refuses them. It is a live denial there, not a placeholder.
+// TestEveryIdentityReachableRouteDeclaresARole keeps the two uses of the constant
+// apart: it fails on an identity-reachable route left at the floor, and on a
+// machine-lane route that declares a role or declares none at all.
 func (s *server) handle(min identity.Role, fn func(*http.Request) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := requireRole(r.Context(), min); err != nil {

@@ -98,11 +98,15 @@ func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler
 // Default-deny falls out of Role.AtLeast rather than being coded here. AtLeast
 // fails closed at both ends — a minimum that is not one of the three roles
 // denies, and RoleNone satisfies nothing — and identity.RoleNone is not one of
-// the three. So a route
-// registered with RoleNone (plan 31 slice 2 registers every route that way
-// except the environment-key surface; slice 3 annotates them) denies every
-// human, and a human whose claims mapped to nothing denies everywhere. Neither
-// case needs a branch, and neither can be forgotten.
+// the three. So a route registered with RoleNone denies every human, and a human
+// whose claims mapped to nothing denies everywhere. Neither case needs a branch,
+// and neither can be forgotten. Slice 3 annotated every identity-reachable route
+// per the plan's matrix; the registrations still at RoleNone are the machine
+// lanes. Usually this function has already returned nil for those, min unread —
+// but not always, and the exception is the reason they keep RoleNone rather than
+// nothing: dispatchAuth classifies the escaped path while ServeMux matches the
+// decoded one, so a percent-encoded spelling of a work or gate route arrives HERE,
+// on the identity lane, with a real principal. RoleNone is what turns it away.
 func requireRole(ctx context.Context, min identity.Role) error {
 	p, onIdentityLane := identityFrom(ctx)
 	if !onIdentityLane {

@@ -9,12 +9,15 @@ import (
 
 // TestPrincipalFromResolvesEitherLane pins what sessions.created_by records.
 //
-// It is an in-package test because it cannot yet be reached over HTTP: slice 2
-// registers every mutation at identity.RoleNone, so no human can create a session
-// to observe the column. That is exactly why the test exists here rather than
-// waiting for slice 3 — the failure it guards is silent (created_by is nullable,
-// and nothing downstream checks it), so the first evidence of it would be an
-// audit trail that had been quietly recording nothing.
+// It is an in-package test of the resolution rule itself — bare context, machine
+// lane, human lane, and both set at once, which no single HTTP request can
+// exhibit. It was written when slice 2 registered every mutation at
+// identity.RoleNone and no human could create a session at all; slice 3 opened
+// POST /v1/sessions to developer, and the end-to-end half now has its own test
+// over real HTTP (TestAHumanCreatedSessionRecordsThePrincipal). Both are worth
+// keeping: the failure they guard is silent, since created_by is nullable and
+// nothing downstream checks it, so the first evidence would be an audit trail
+// that had been quietly recording nothing.
 func TestPrincipalFromResolvesEitherLane(t *testing.T) {
 	t.Parallel()
 
