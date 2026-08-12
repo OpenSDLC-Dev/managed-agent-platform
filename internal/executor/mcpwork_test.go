@@ -118,6 +118,66 @@ func (h *harness) catalog(t *testing.T) map[string]catalogEntry {
 	return out
 }
 
+// TestDiscoveryStoresOnlyABoundedListing is the cap seen from the outside, and
+// it exists because TestStorableToolsCapsTheListing cannot see this: that test
+// calls storableTools directly, so it stays green wherever — or whether — the
+// driver applies it. What matters to the database is that a real server offering
+// more than the cap allows produces a bounded row, so this drives one and reads
+// the row back.
+func TestDiscoveryStoresOnlyABoundedListing(t *testing.T) {
+	// Eight tools of 64 KiB of description each: half a megabyte offered against
+	// a quarter-megabyte cap, so the row must hold a strict prefix of them.
+	var offered []mcptest.Tool
+	for i := 0; i < 8; i++ {
+		offered = append(offered, mcptest.Tool{
+			Name:        fmt.Sprintf("tool_%d", i),
+			Description: strings.Repeat("x", 64<<10),
+		})
+	}
+	url := mcptest.Server(t, offered...)
+	h := mcpHarness(t)
+	h.declareMCPServers(t, [2]string{"github", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	got := h.catalog(t)["github"]
+	if got.status != "ready" {
+		t.Fatalf("row = %+v, want the listing stored", got)
+	}
+	if len(got.tools) == 0 || len(got.tools) >= len(offered) {
+		t.Fatalf("stored %d of %d tools, want a bounded prefix of them", len(got.tools), len(offered))
+	}
+	var size int
+	for _, tool := range got.tools {
+		size += len(tool.Name) + len(tool.Description) + len(tool.InputSchema)
+	}
+	if size > maxCatalogTools {
+		t.Errorf("row holds %d bytes of server-chosen text, want at most %d", size, maxCatalogTools)
+	}
+}
+
+// TestTheDiscoveryBudgetDefaultsToFiveMinutes pins the one number in this
+// driver's configuration that nothing else would notice changing. The budget is
+// what stands between a server that accepts a connection and never answers and
+// every other session's work on the host, and its default is quoted in three
+// places an operator reads — the Config comment, the Helm value and the compose
+// file — none of which a test can check. A non-positive value resolves to the
+// default rather than to "no bound", so an operator who unsets the variable, or
+// writes 0 expecting to disable it, gets the bound instead.
+func TestTheDiscoveryBudgetDefaultsToFiveMinutes(t *testing.T) {
+	for _, supplied := range []time.Duration{0, -time.Second} {
+		cfg := Config{MCPDiscoveryTimeout: supplied}.withDefaults()
+		if want := 5 * time.Minute; cfg.MCPDiscoveryTimeout != want {
+			t.Errorf("MCPDiscoveryTimeout %v resolved to %v, want %v", supplied, cfg.MCPDiscoveryTimeout, want)
+		}
+	}
+	// A supplied bound is not overridden, or the variable would do nothing.
+	if got := (Config{MCPDiscoveryTimeout: 90 * time.Second}).withDefaults().MCPDiscoveryTimeout; got != 90*time.Second {
+		t.Errorf("a supplied budget resolved to %v, want it kept", got)
+	}
+}
+
 // TestDiscoveryWritesTheCatalogAndWakesTheBrain is the driver's happy path: an
 // mcp_exec item reaches every declared server, records what it offers, and
 // chains the model turn the discovery was for. The tools land in the Anthropic

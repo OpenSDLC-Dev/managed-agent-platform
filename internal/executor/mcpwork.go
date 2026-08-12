@@ -56,8 +56,13 @@ type mcpServerRef struct {
 
 // catalogRow is one server's discovery outcome on its way to mcp_catalogs.
 type catalogRow struct {
-	name   string
-	url    string
+	name string
+	url  string
+	// tools is the listing, already storable when set — bounded and stripped by
+	// storableTools where it was produced, for the reason reason gives below: a
+	// server chooses it, one listing is bounded only by a whole connection's
+	// response budget, and the pass walks up to maxAgentMCPServers of them in a
+	// row before anything settles.
 	tools  []mcp.Tool
 	status string // "ready" or "failed", the column's CHECK
 	// reason is why it failed, empty on "ready", and already storable when set:
@@ -249,7 +254,7 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 		row.reason = err.Error()
 		return row
 	}
-	row.status, row.reason, row.tools = "ready", "", tools
+	row.status, row.reason, row.tools = "ready", "", storableTools(tools)
 	return row
 }
 
@@ -636,7 +641,7 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 		if declared[r.name] != r.url {
 			continue
 		}
-		toolsJSON, err := json.Marshal(storableTools(r.tools))
+		toolsJSON, err := json.Marshal(r.tools)
 		if err != nil {
 			return fmt.Errorf("encode mcp catalog tools for %q: %w", r.name, err)
 		}

@@ -503,19 +503,28 @@ func TestConnectFailureRedactsCredentialsInTheURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("Connect reported success against a port nothing listens on")
 	}
-	const prefix = "mcp: connect to http://127.0.0.1:1:"
+	// Exact, and that exactness is the whole assertion: this package's half of the
+	// message ends at the space before the wrapped error, so anything the
+	// redaction let through — the userinfo, the path, the query — lands inside
+	// the compared span and fails the match. A loop checking the same literal
+	// against a list of secrets would only compare the literal with itself; this
+	// is the version that can go red.
+	const prefix = "mcp: connect to http://127.0.0.1:1: "
 	if !strings.HasPrefix(err.Error(), prefix) {
 		t.Fatalf("error %q does not open by naming the endpoint it failed to reach (%q)", err, prefix)
 	}
-	for _, secret := range []string{"s3cr3t-token", "ghp_alice", "QUERYSECRET", "api_key", "/mcp"} {
-		if strings.Contains(prefix, secret) {
-			t.Errorf("this package's own prefix %q carries %q from the endpoint", prefix, secret)
-		}
-	}
-	// The password is the one thing absent from the whole message, because
-	// net/http masks it in its own half as well.
+	// The password is the one secret absent from the *whole* message, because
+	// net/http masks it in its own half too. The username and query are not, by
+	// design — see the doc comment — so asserting their absence here would assert
+	// something this package does not deliver.
 	if strings.Contains(err.Error(), "s3cr3t-token") {
 		t.Errorf("error carries the URL's password: %v", err)
+	}
+	for _, leaked := range []string{"ghp_alice", "QUERYSECRET", "api_key", "/mcp"} {
+		if strings.Contains(prefix, leaked) {
+			t.Fatalf("the expected prefix %q was written to include %q, so this test "+
+				"no longer pins the redaction", prefix, leaked)
+		}
 	}
 }
 
