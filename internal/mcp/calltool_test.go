@@ -371,6 +371,42 @@ func TestCallToolStillSucceedsWhenATrulyEmptyAnswerComesBack(t *testing.T) {
 	}
 }
 
+// TestCallToolContainsAPanicInsideTheClientLibrary is the call side of the
+// containment the listing already has, for a second and unrelated nil
+// dereference in the same SDK.
+//
+// `"inputRequests": {"x": null}` is legal JSON. InputRequestMap.UnmarshalJSON
+// decodes it into a map[string]*raw, checks only that the map itself is
+// non-nil, and then reads a field off every value — so the nil value is
+// dereferenced *during* the result decode, on the calling goroutine. The
+// endpoint is customer-supplied and the eventual caller is an executor shared
+// by every session on the host, where a Go panic is not confined to the
+// goroutine that raised it.
+//
+// If a later SDK release nil-checks the element, this test goes red rather than
+// quietly green — the assertion wants an error, and a clean empty result is not
+// one. That is the notice to rewrite it, where silence would let the recover
+// outlive the bug it exists for. What it must never do is crash.
+func TestCallToolContainsAPanicInsideTheClientLibrary(t *testing.T) {
+	t.Parallel()
+	url, _ := serveToolCall(t, func(json.RawMessage) map[string]any {
+		return map[string]any{
+			"content":       []any{map[string]any{"type": "text", "text": "hi"}},
+			"inputRequests": map[string]any{"x": nil},
+		}
+	})
+
+	// Reaching the next line at all is most of the assertion: an uncontained
+	// panic ends the test binary rather than failing this test.
+	res, err := connect(t, url).CallTool(context.Background(), "echo", json.RawMessage(`{"q":"x"}`))
+	if err == nil {
+		t.Fatalf("CallTool reported success on a response the client library cannot parse: %+v", res)
+	}
+	if !strings.Contains(err.Error(), "panicked") {
+		t.Errorf("error %q does not say the client library panicked", err)
+	}
+}
+
 // TestCallToolRefusesAnInputRequiredAnswerItCannotFulfil pins the one multi
 // round-trip shape that reaches this package. The SDK's client middleware
 // drives its retry loop off a non-nil `inputRequests` map, so an answer that

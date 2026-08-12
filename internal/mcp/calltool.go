@@ -112,7 +112,7 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 	if len(arguments) > 0 {
 		args = arguments
 	}
-	res, err := c.session.CallTool(ctx, &sdk.CallToolParams{
+	res, err := c.callTool(ctx, &sdk.CallToolParams{
 		Meta:      requestMeta(ctx),
 		Name:      name,
 		Arguments: args,
@@ -150,6 +150,30 @@ func (c *Conn) CallTool(ctx context.Context, name string, arguments json.RawMess
 			"types a tool result cannot carry", name, len(res.Content))
 	}
 	return out, nil
+}
+
+// callTool sends the call, converting a panic inside the SDK into an error —
+// the same containment [Conn.listPage] gives the listing, at the other of this
+// package's two SDK call sites, for a second and unrelated nil dereference.
+//
+// A result's `inputRequests` decodes through InputRequestMap.UnmarshalJSON
+// (mcp/protocol.go), which unmarshals the wire into a map[string]*raw, checks
+// only that the map itself is non-nil, and then reads a field off every value
+// in it. A server answering `"inputRequests": {"x": null}` therefore panics the
+// client, and it panics *during* the decode, on this goroutine, inside this
+// frame — so a recover here contains it and nothing further out is needed.
+// (The listing's panic is a different bug in a different place: a nil element
+// of a `[]*Tool` dereferenced after the decode by post-decode validation. The
+// content blocks are safe; the SDK nil-checks those, and this platform's own
+// guard against a nil embedded resource sits after the decode in
+// convertContent.)
+func (c *Conn) callTool(ctx context.Context, params *sdk.CallToolParams) (res *sdk.CallToolResult, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			res, err = nil, fmt.Errorf("the MCP client library panicked on this server's response: %v", r)
+		}
+	}()
+	return c.session.CallTool(ctx, params)
 }
 
 // convertContent translates the SDK's content blocks into this package's.

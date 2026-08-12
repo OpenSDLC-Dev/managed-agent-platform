@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -264,40 +265,107 @@ func storableTools(tools []mcp.Tool) []mcp.Tool {
 // the client.)
 const maxCatalogReason = 2000
 
-// urlInText matches a URL as it appears inside an error message. The trailing
-// class is deliberately wide: it is trimmed below, and matching too much and
-// trimming is safe where matching too little would leave a credential behind.
-var urlInText = regexp.MustCompile(`(?i)https?://[^\s"'<>]+`)
+// urlInText matches a URL as it appears inside an error message.
+//
+// It stops only at whitespace and at the angle brackets, which are not legal
+// in a URL unescaped. Notably it does *not* stop at a quote: `'` is an RFC 3986
+// sub-delim and legal in a query, so a class that excluded it would end the
+// match early and leave whatever followed — `?note='&api_key=SECRET` — sitting
+// in the text beside a host that looks redacted. Quotes are handled by the
+// trailing trim instead, which is the safe direction: over-matching costs a
+// URL that reads less precisely, while under-matching costs the credential.
+var urlInText = regexp.MustCompile(`(?i)https?://[^\s<>]+`)
 
 // storableReason is the catalog's gate for the text half of a row, as
 // storableTools is for the tools half.
 //
-// It redacts first. An mcp_servers entry is customer-supplied and may carry a
-// credential in its userinfo or its query — `?api_key=` is a common MCP server
-// convention — and a failure reason is derived text that reaches a stored
-// column, which later slices surface to the model and the API. The client
-// redacts the endpoint in its own messages, but that covers only the password
-// (url.URL.Redacted), and only the messages it writes: net/http names the full
-// URL in a transport error, and a server's own error text may quote it back.
-// So every URL-shaped substring is cut down to scheme://host here, at the
-// boundary where the text becomes storage, rather than at each of the places it
-// can come from. That covers the credential as this platform put it on the
-// wire, since a URL is the only shape it travels in; what it does not cover is a
-// server quoting its own copy back in an error message of its own writing,
-// which no text rule could catch and which tells that server nothing it did not
-// already receive.
+// It redacts first, by value and then by shape. An mcp_servers entry is
+// customer-supplied and may carry a credential in its userinfo or its query —
+// `?api_key=` is a common MCP server convention — and a failure reason is
+// derived text that reaches a stored column, which later slices surface to the
+// model and the API. The client redacts the endpoint in its own messages, but
+// that covers only the password (url.URL.Redacted), and only the messages it
+// writes: net/http names the URL in a transport error, and a server's own error
+// text may quote it back.
 //
-// Then NUL, for the reason storableTools gives, and then the cap. Truncation is
-// re-validated as UTF-8: cutting a byte slice mid-rune leaves a sequence
-// Postgres rejects on a text column, which is the same wedge the NUL strip
-// exists to prevent, arriving by the door opened to prevent it.
-func storableReason(reason string) string {
+// By value is what makes this reliable, and shape alone is what cannot be. The
+// endpoint is a string this driver holds, so the renderings a message can
+// contain are enumerable — the declared bytes, url.URL's own String and
+// Redacted, net/http's `***` variant, and any of those escaped through %q — and
+// each is replaced outright. A pattern cannot reach the same place: a URL is
+// recognized in prose by where it *ends*, and a space has to end it, yet
+// `?agent=my agent&api_key=…` is a URL this platform accepts and dials, so a
+// matcher would stop mid-query and leave the rest of it in the text beside a
+// host that reads as redacted. The pattern pass stays as the second one, for
+// the URLs this platform did not supply and cannot enumerate — a redirect
+// target, or one a server names in its own message.
+//
+// What neither pass covers is a server quoting its own copy of the credential
+// back in text of its own writing, which no rule over text could catch and
+// which tells that server nothing it did not already receive. Nor is this the
+// credential's first arrival at rest: the same row stores the endpoint verbatim
+// in `url`, as `sessions.resolved_agent` already does. Keeping it out of
+// *derived* text is the point — that is what a later slice hands to a model.
+//
+// Then NUL, for the reason storableTools gives, and then UTF-8 twice, for two
+// different reasons. Postgres rejects an invalid byte sequence on a text column
+// exactly as it rejects a NUL, and faults the item the same way — so the text
+// is validated once as it arrives, because a server chooses it and need not
+// send UTF-8 at all (Go's HTTP parser accepts obs-text in a header value, and
+// an SDK error that quotes such a header back carries those bytes into here),
+// and once more after the cap, because cutting a byte slice mid-rune produces
+// the same invalid sequence out of input that was clean.
+func storableReason(reason, endpoint string) string {
+	for _, form := range endpointRenderings(endpoint) {
+		reason = strings.ReplaceAll(reason, form.text, form.safe)
+	}
 	reason = urlInText.ReplaceAllStringFunc(reason, redactURL)
 	reason = toolset.SanitizeText(reason)
+	reason = strings.ToValidUTF8(reason, "")
 	if len(reason) > maxCatalogReason {
 		reason = strings.ToValidUTF8(reason[:maxCatalogReason], "") + "…"
 	}
 	return reason
+}
+
+// endpointRenderings lists the ways the declared endpoint can appear in a
+// failure message, each paired with what it should be replaced by.
+//
+// Four writers put it there, and they do not agree on a spelling. This package
+// uses url.URL.Redacted, whose password is `xxxxx`; net/http writes the same
+// URL with `***` instead; the declared bytes reach a message unaltered wherever
+// something echoes the configuration rather than the parsed URL; and url.Error
+// renders through %q, which escapes an embedded quote or backslash and so
+// matches none of the first three. Enumerating them is possible only because
+// the endpoint is known here — which is the whole reason this pass exists.
+func endpointRenderings(endpoint string) []struct{ text, safe string } {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return nil
+	}
+	safe := u.Scheme + "://" + u.Host
+	written := []string{endpoint, u.String(), u.Redacted()}
+	if _, hasPassword := u.User.Password(); hasPassword {
+		written = append(written, strings.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1))
+	}
+	// Each of those again as %q renders it, without the surrounding quotes:
+	// those belong to the sentence around the URL, not to the URL.
+	for _, form := range written[:len(written):len(written)] {
+		if quoted := strconv.Quote(form); len(quoted) > 2 {
+			written = append(written, quoted[1:len(quoted)-1])
+		}
+	}
+
+	var out []struct{ text, safe string }
+	seen := map[string]bool{"": true, safe: true}
+	for _, form := range written {
+		if seen[form] {
+			continue
+		}
+		seen[form] = true
+		out = append(out, struct{ text, safe string }{form, safe})
+	}
+	return out
 }
 
 // redactURL reduces one matched URL to its scheme and host, keeping whatever
@@ -419,7 +487,7 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 		}
 		var reason any
 		if r.reason != "" {
-			reason = storableReason(r.reason)
+			reason = storableReason(r.reason, r.url)
 		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status, error, fetched_at)

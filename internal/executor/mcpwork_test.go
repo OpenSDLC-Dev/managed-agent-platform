@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -549,8 +551,8 @@ func TestAFailureReasonKeepsTheServersCredentialsOutOfTheCatalog(t *testing.T) {
 // on a text column, re-opening by the back door the wedge the NUL strip closes.
 func TestStorableReasonRedactsTruncatesAndSanitizes(t *testing.T) {
 	t.Run("every url is cut to scheme and host", func(t *testing.T) {
-		got := storableReason(`mcp: connect to https://u:p@mcp.example:8443/x?token=SECRET: ` +
-			`Post "https://u:p@mcp.example:8443/x?token=SECRET": dial tcp: refused`)
+		const endpoint = `https://u:p@mcp.example:8443/x?token=SECRET`
+		got := storableReason(`mcp: connect to `+endpoint+`: Post "`+endpoint+`": dial tcp: refused`, endpoint)
 		for _, secret := range []string{"SECRET", "token", "u:p", "/x"} {
 			if strings.Contains(got, secret) {
 				t.Errorf("reason %q still carries %q", got, secret)
@@ -564,16 +566,113 @@ func TestStorableReasonRedactsTruncatesAndSanitizes(t *testing.T) {
 		}
 	})
 
+	t.Run("a quote inside the url does not end the redaction early", func(t *testing.T) {
+		// An apostrophe is an RFC 3986 sub-delim and legal in a query, so a
+		// server URL may carry one ahead of its credential. A matcher that
+		// stopped at it would leave the credential in the text *next to a host
+		// that looks redacted*, which reads as a redaction that worked.
+		const endpoint = `https://mcp.example/x?note='&api_key=SECRET`
+		got := storableReason(`mcp: connect to `+endpoint+`: dial tcp: refused`, endpoint)
+		for _, secret := range []string{"SECRET", "api_key"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("reason %q still carries %q past the apostrophe", got, secret)
+			}
+		}
+		if !strings.Contains(got, "dial tcp: refused") {
+			t.Errorf("reason %q lost the cause", got)
+		}
+	})
+
+	t.Run("a raw space inside the url does not end the redaction early", func(t *testing.T) {
+		// The case no character class can reach: a URL is recognized in prose
+		// by where it ends, and a space has to end it — yet this is a URL the
+		// platform accepts and dials, so the pattern pass stops mid-query. Only
+		// knowing the endpoint by value closes it.
+		const endpoint = `http://mcp.example/mcp?agent=my agent&api_key=SECRET`
+		got := storableReason(`mcp: connect to `+endpoint+`: Post "`+endpoint+`": dial tcp: refused`, endpoint)
+		for _, secret := range []string{"SECRET", "api_key"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("reason %q still carries %q past the space", got, secret)
+			}
+		}
+		if !strings.Contains(got, "http://mcp.example") {
+			t.Errorf("reason %q no longer names the host", got)
+		}
+	})
+
+	// Four writers spell the same endpoint four ways, and each rendering below
+	// carries a space so the pattern pass cannot reach it: what is under test is
+	// that the *value* pass enumerates that rendering, not that something else
+	// happens to catch it.
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		render   func(t *testing.T, endpoint string) string
+	}{{
+		name:     "net/http's masked password",
+		endpoint: `https://u:p@mcp.example/x?q=a b&api_key=SECRET`,
+		render: func(t *testing.T, endpoint string) string {
+			t.Helper()
+			u, err := url.Parse(endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// net/http writes `***` where url.URL.Redacted writes `xxxxx`.
+			return strings.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1)
+		},
+	}, {
+		name:     "url.Error's %q escaping",
+		endpoint: `https://mcp.example/x?q=a "b" c&api_key=SECRET`,
+		render: func(t *testing.T, endpoint string) string {
+			t.Helper()
+			quoted := strconv.Quote(endpoint)
+			return quoted[1 : len(quoted)-1]
+		},
+	}, {
+		name:     "url.URL.Redacted's own",
+		endpoint: `https://u:p@mcp.example/x?q=a b&api_key=SECRET`,
+		render: func(t *testing.T, endpoint string) string {
+			t.Helper()
+			u, err := url.Parse(endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return u.Redacted()
+		},
+	}} {
+		t.Run("a rendering by "+tc.name+" is redacted too", func(t *testing.T) {
+			rendered := tc.render(t, tc.endpoint)
+			got := storableReason("mcp: connect to "+rendered+": refused", tc.endpoint)
+			for _, secret := range []string{"SECRET", "api_key", "u:p"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("reason %q still carries %q (from %q)", got, secret, rendered)
+				}
+			}
+		})
+	}
+
 	t.Run("a NUL never reaches the column", func(t *testing.T) {
-		if got := storableReason("before\x00after"); strings.Contains(got, "\x00") {
+		if got := storableReason("before\x00after", ""); strings.Contains(got, "\x00") {
 			t.Errorf("reason %q still carries a NUL", got)
+		}
+	})
+
+	t.Run("invalid utf-8 shorter than the cap is still repaired", func(t *testing.T) {
+		// Postgres refuses an invalid byte sequence on a text column exactly as
+		// it refuses a NUL, and faults the item the same way. The bytes need
+		// not come from a truncation: Go's HTTP parser accepts obs-text in a
+		// header value, so a server that answers with one in `Mcp-Session-Id`
+		// has it quoted back inside an SDK error and stored from here.
+		got := storableReason("mcp: list tools: session id \xff\xfe rejected", "")
+		if !utf8.ValidString(got) {
+			t.Errorf("reason %q is not valid utf-8 and will fault the insert", got)
 		}
 	})
 
 	t.Run("an oversized reason is capped and stays valid utf-8", func(t *testing.T) {
 		// A multi-byte rune straddling the cut: with maxCatalogReason bytes of
 		// ASCII ahead of it, the cap lands inside the "…" that follows.
-		got := storableReason(strings.Repeat("x", maxCatalogReason-1) + "…" + strings.Repeat("y", 100))
+		got := storableReason(strings.Repeat("x", maxCatalogReason-1)+"…"+strings.Repeat("y", 100), "")
 		if len(got) > maxCatalogReason+8 {
 			t.Errorf("reason kept %d bytes, want it capped near %d", len(got), maxCatalogReason)
 		}
