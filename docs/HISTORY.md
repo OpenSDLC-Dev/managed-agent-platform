@@ -38,6 +38,57 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Console SSO and RBAC (plan 31, #56) — slice 1's dependency decision: rejected alternatives, 2026-08-12
+
+Plan 31's Scope decision 1 originally named `coreos/go-oidc` + `golang.org/x/oauth2`
+as the verifier's foundation. Slice 1 overturned it, and the plan text is amended
+in the same PR. What a changelog cannot hold is why the two alternatives lost, so
+it is recorded here.
+
+**Evaluated and rejected: `coreos/go-oidc`.** Two of the plan's own requirements
+are unimplementable on it. Its `oidc.NewRemoteKeySet` caches until an unknown
+`kid` forces a refetch and exposes no TTL, so a key the provider has *removed*
+keeps verifying indefinitely — while the same plan's Architecture section requires
+a minutes-order bound on exactly that. And `oidc.Config` carries a single
+`ClientID`; the library's documented route to multi-audience or `azp` checking is
+`SkipClientIDCheck: true` plus a hand-written audience policy. Between the two,
+adopting it would have meant writing the security core anyway *and* carrying a new
+module (which itself depends on go-jose and `x/oauth2`).
+
+**Evaluated and rejected: hand-rolling compact-JWS and JWK parsing.** The
+argument for it was attack surface — that linking a JOSE library puts an HMAC
+verifier and a JWE decrypter in the binary, kept unreachable only by our
+allowlist. That premise is false for this binary: `go list -deps ./cmd/controlplane`
+already prints `github.com/go-jose/go-jose/v4` *and* its `/cipher` package,
+reached through `internal/blob/gcs` → `cloud.google.com/go/storage` → grpc/xds →
+`go-spiffe`. Hand-rolling would therefore have removed nothing from the binary
+while adding roughly 250 statements of security-critical parsing. Positively,
+go-jose closes algorithm confusion *structurally* rather than by discipline: the
+allowlist is a required parameter of `jwt.ParseSigned`, so `alg:none` and HS256
+are refused inside the parser before any key lookup.
+
+**What the adopted route still leaves to us**, and therefore what slice 1's tests
+pin: go-jose skips `exp` when the claim is absent and never checks `sub`, knows
+nothing of `azp`, does not fetch or bound the lifetime of a key set, does not
+bound an RSA modulus or require an odd exponent, does not parse `key_ops` at all,
+and does not enforce a JWK's declared `alg` against the JWS header. One more is a
+correctness trap rather than a gap: `jose.JSONWebKeySet` has no set-level
+`UnmarshalJSON`, and `JSONWebKey.UnmarshalJSON` errors on any `kty` it cannot
+build, so decoding a set whole would let one entry a provider is entitled to
+publish (an X25519 encryption key, a future `kty`) fail the *entire* set and take
+every signing key with it — a boot failure, then uniform 401s once the cache
+expires. `parseKeySet` therefore decodes per entry and skips the unusable, as
+RFC 7517 §5 directs.
+
+**One deliberate extension of the plan's enumerated boot errors.** The plan lists
+five startup rejections; slice 1 adds a sixth — setting
+`IDENTITY_PROXY_HEADER`, `_ISSUER`, `_KEYS_URL` or `_ALGS` while
+`IDENTITY_PROXY_PRESET=gcp-iap` fails startup rather than being ignored. Those
+four variables *are* the verification parameters, and silently discarding an
+operator's attempt to change them is not a warning-grade event.
+
+---
+
 ## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (runs 2026-08-10 and 2026-08-11) — ✅ #43 passed; the deferred work-item-pull criterion passed too (#363 closed)
 
 #43's acceptance criterion, quoted rather than paraphrased: *"An operator can

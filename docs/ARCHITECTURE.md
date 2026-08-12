@@ -576,6 +576,48 @@ the query guards the vault's own `archived_at` directly, not only the credential
 stale credential row. This package does the store read and cipher call; `internal/egress` stays
 I/O-free.
 
+### internal/identity
+
+The platform's human-authentication boundary (docs/plan/31_console-sso-rbac.md slice 1) — a
+strict OIDC relying party over `github.com/go-jose/go-jose/v4`, with no vendor SDK and, as of
+slice 1, no route yet consuming it. `Verify` authenticates one compact JWT and returns an
+`Identity` (issuer, subject, email, display name, `Role`): the signature allowlist is a required
+parameter of go-jose's parser, so `alg:none` and HS256 are refused before any key lookup; `iss` is
+exact, `aud` must contain the configured audience, `azp` is checked when `aud` carries several,
+and non-empty `sub` and `exp` are required because go-jose checks neither. Every rejection is one
+`*Error` whose `Error()` is a constant string, the detail behind `Reason()` for the caller's log —
+no oracle distinguishes expired from bad-signature from wrong-audience. `Role` (`viewer` <
+`developer` < `admin`, plus `RoleNone`) is deliberately not a `domain` type: it is a declared
+divergence that never appears on a `/v1` path or in a `/v1` body, and `AtLeast` fails closed at
+both ends, so a mis-annotated route denies. Roles come from a configurable claim on every request
+and are never stored — the IdP stays authoritative — reduced to the single strongest mapped value
+by rank, so neither claim order nor map iteration order can change the answer; a dotted claim name
+resolves as a path only, never additionally as a flat key of that name, because the reverse lets a
+user-settable flat claim outrank a nested one. Key material is a kid-indexed set with a **bounded
+lifetime**: a five-minute TTL checked before the map lookup (so a key the provider removed stops
+verifying within that bound rather than living in the cache forever), a thirty-second refresh
+cooldown, hand-rolled single-flight under the same mutex as the cache, a per-fetch deadline, a
+128 KiB body cap, and no redirects — over `internal/dialguard`'s address guard, because the
+`jwks_uri` this package fetches arrives inside the remote issuer's discovery document. Two modes
+share that one verifier: `oidc` (discovery from the issuer, or a pinned `IDENTITY_OIDC_JWKS_URL`
+that skips it) and `trusted_proxy` (a signed assertion header; the `gcp-iap` preset pins Google's
+header, issuer, ES256 and global key set, which is why its audience is required and is the entire
+tenant boundary). `FromEnv` returns `(nil, nil)` when `IDENTITY_MODE` is unset or `disabled` —
+the optional-dependency shape `blob.Store` and `secrets.Cipher` already use, concrete-typed so
+`== nil` is correct — and every other misconfiguration fails startup rather than open.
+
+### internal/identity/identitytest
+
+The fake OpenID Provider the verifier's tests drive: an httptest discovery document and JWK Set,
+minting for all five allowed algorithms, rotation and retirement, request counters, and the
+failure overrides a verifier must survive (malformed or oversize key sets, non-200s, redirects, a
+blocked handler for the single-flight and deadline paths). `MintRaw` assembles a token by hand
+because the two that matter most cannot be built through any signing library — the `alg:none`
+forgery and the key-confusion token MACed with the published RSA public key's DER. It deliberately
+does **not** import `internal/identity`: with no cycle, that package's own in-package tests may use
+it and so may any later consumer. `Clock` is an atomic test clock, so a `-race` run may advance
+time while verifications are in flight — the suite contains no sleeps.
+
 ### internal/gatetoken
 
 The scoped bearer credential a session's egress gate presents to the controlplane's internal
@@ -666,6 +708,8 @@ mounted, per-test key names, and the shared cipher contract suite —
 `internal/secrets/gcpkms/gcpkmstest` runs that same suite against an in-process fake
 Cloud KMS gRPC server, and carries the `RUN_LIVE_KMS_TESTS=1` consent gate for the tier
 that calls the real service.
+`internal/identity/identitytest` is the identity verifier's fake OpenID Provider, described
+under its own heading above; like the other fixtures it stays out of the coverage denominator.
 `internal/webtool/webtooltest` is the webtool seam's suite-and-consent twin: the shared
 Searcher/Fetcher contract suites (hit mapping, credential-never-in-an-error, cap
 semantics, torn bodies, zero-network URL rejection) plus the `RUN_LIVE_WEB_TESTS=1`
