@@ -298,6 +298,31 @@ func TestRoleValuesCap(t *testing.T) {
 	}
 }
 
+// TestRoleValuesCapCountsElementsNotStrings is the cap's real question, and the
+// two readings differ in the direction that matters. Counting only the strings
+// COLLECTED would let a claim pad itself past the limit with values that cost a
+// loop iteration each and are not strings — nulls here — and still be read at
+// any depth: the cap defeated by construction, with the padded-past value being
+// the one that grants admin. Counting elements EXAMINED bounds the work as
+// stated, and where the two disagree it drops a role rather than granting one.
+func TestRoleValuesCapCountsElementsNotStrings(t *testing.T) {
+	t.Parallel()
+
+	raw := make([]any, 0, maxRoleValues+1)
+	for range maxRoleValues {
+		raw = append(raw, nil)
+	}
+	raw = append(raw, "platform-admins")
+
+	if got := roleValues(raw); len(got) != 0 {
+		t.Fatalf("roleValues = %q, want nothing: the string sits past the cap", got)
+	}
+	// The control: one fewer pad and the same value is inside the cap and read.
+	if got := roleValues(raw[1:]); len(got) != 1 || got[0] != "platform-admins" {
+		t.Fatalf("roleValues = %q, want the value that sits inside the cap", got)
+	}
+}
+
 // TestSpaceDelimitedScalarIsOneValue pins that a scalar roles claim is never
 // split on spaces. Splitting would invent OAuth `scope` semantics the design
 // never asked for, and it would let the single claim value "eng admin" match a

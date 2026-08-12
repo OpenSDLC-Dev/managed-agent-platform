@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -71,7 +72,7 @@ var productionClient = &http.Client{
 // Content-Type is deliberately not enforced: too many providers get it wrong, and
 // the body having to parse is the real check.
 func getJSON(ctx context.Context, c *http.Client, target string, timeout time.Duration, v any) error {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
@@ -80,25 +81,52 @@ func getJSON(ctx context.Context, c *http.Client, target string, timeout time.Du
 	}
 	req.Header.Set("Accept", "application/json")
 
+	safe := redactURL(target)
 	resp, err := c.Do(req)
 	if err != nil {
-		return fmt.Errorf("get %s: %w", target, err)
+		// *url.Error's own message quotes the URL verbatim, and a signed key URL
+		// carries its credential in the query string. Wrapping its CAUSE instead
+		// drops the quoted URL while keeping the chain intact, so errors.Is still
+		// finds context.DeadlineExceeded and the dial guard's refusal underneath.
+		cause := err
+		var uerr *url.Error
+		if errors.As(err, &uerr) && uerr.Err != nil {
+			cause = uerr.Err
+		}
+		return fmt.Errorf("get %s: %w", safe, cause)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("get %s: status %d", target, resp.StatusCode)
+		return fmt.Errorf("get %s: status %d", safe, resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxIdPBytes+1))
 	if err != nil {
-		return fmt.Errorf("read %s: %w", target, err)
+		return fmt.Errorf("read %s: %w", safe, err)
 	}
 	if len(body) > maxIdPBytes {
-		return fmt.Errorf("get %s: body exceeds %d bytes", target, maxIdPBytes)
+		return fmt.Errorf("get %s: body exceeds %d bytes", safe, maxIdPBytes)
 	}
 	if err := json.Unmarshal(body, v); err != nil {
-		return fmt.Errorf("decode %s: %w", target, err)
+		return fmt.Errorf("decode %s: %w", safe, err)
 	}
 	return nil
+}
+
+// redactURL renders a URL for a log line or an error with the two components
+// that can carry a credential removed: the userinfo and the query. A provider
+// that hands out a signed key-set URL puts its token in the query, and both logs
+// and errors travel further than the process.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<unparseable url>"
+	}
+	u.User = nil
+	if u.RawQuery != "" {
+		u.RawQuery = "redacted"
+	}
+	u.Fragment = ""
+	return u.String()
 }
 
 // requireHTTPS is the scheme rule: https, or http to a loopback host.
@@ -107,26 +135,53 @@ func getJSON(ctx context.Context, c *http.Client, target string, timeout time.Du
 // (anthropic-sdk-go internal/auth/https.go). Userinfo in the URL is refused: a
 // credential smuggled into a key URL is never a legitimate configuration.
 func requireHTTPS(raw string) error {
+	_, err := parseHTTPSURL(raw)
+	return err
+}
+
+// requireIssuerURL adds the issuer identifier's own rule to the scheme rule:
+// OIDC Discovery §2 says an issuer identifier MUST NOT carry a query or a
+// fragment. It is enforced because iss is compared as an exact string — two URLs
+// differing only in a query would otherwise be two issuers for one provider, and
+// the discovery path appends /.well-known/... to whatever it is given, which a
+// query silently breaks.
+func requireIssuerURL(raw string) error {
+	u, err := parseHTTPSURL(raw)
+	if err != nil {
+		return err
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return fmt.Errorf("%q has a query or fragment; an issuer identifier must have neither", redactURL(raw))
+	}
+	return nil
+}
+
+// parseHTTPSURL is requireHTTPS's shared body, returning the parsed URL so the
+// issuer rule can add its own checks without parsing twice.
+func parseHTTPSURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("%q is not a URL: %w", raw, err)
+		return nil, fmt.Errorf("%q is not a URL: %w", redactURL(raw), err)
 	}
 	if u.Host == "" {
-		return fmt.Errorf("%q has no host", raw)
+		return nil, fmt.Errorf("%q has no host", redactURL(raw))
 	}
 	if u.User != nil {
-		return fmt.Errorf("%q carries credentials in the URL", raw)
+		// Redacted: the whole point of refusing this URL is that it carries a
+		// credential, and quoting it verbatim would copy that credential into
+		// the operator's startup log.
+		return nil, fmt.Errorf("%q carries credentials in the URL", redactURL(raw))
 	}
 	switch u.Scheme {
 	case "https":
-		return nil
+		return u, nil
 	case "http":
 		if isLoopbackHost(u.Hostname()) {
-			return nil
+			return u, nil
 		}
-		return fmt.Errorf("%q is http to a non-loopback host; https is required", raw)
+		return nil, fmt.Errorf("%q is http to a non-loopback host; https is required", redactURL(raw))
 	default:
-		return fmt.Errorf("%q has scheme %q; https is required", raw, u.Scheme)
+		return nil, fmt.Errorf("%q has scheme %q; https is required", redactURL(raw), u.Scheme)
 	}
 }
 

@@ -1,7 +1,9 @@
 package identity
 
 import (
+	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
@@ -9,9 +11,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"net/http"
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
 )
@@ -191,6 +195,24 @@ func TestParseKeySetSkipsUnusableEntries(t *testing.T) {
 		"x":   jwksXB64(make([]byte, 32)),
 	}
 
+	// Ed25519: the OKP curve go-jose DOES build, so the entry decodes into a real
+	// ed25519.PublicKey that Valid and IsPublic both accept. Only the type switch's
+	// default arm stops it, and it carries no alg precisely so the declared-alg
+	// filter cannot be the rule that drops it — EdDSA is off the allowlist by
+	// decision, and this is the assertion that the decision reaches key material
+	// and not only algorithm names.
+	edPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate Ed25519 fixture key: %v", err)
+	}
+	ed := map[string]any{
+		"kty": "OKP",
+		"crv": "Ed25519",
+		"kid": "ed25519-1",
+		"use": "sig",
+		"x":   jwksXB64(edPub),
+	}
+
 	// Symmetric material: go-jose decodes it happily into a []byte, and only the
 	// Valid/IsPublic rule keeps it from ever verifying anything. Deliberately
 	// carries no alg, so no other rule can be the one that drops it.
@@ -208,7 +230,7 @@ func TestParseKeySetSkipsUnusableEntries(t *testing.T) {
 	hmacAlg := jwksXRSA("hs256")
 	hmacAlg["alg"] = "HS256"
 
-	body := jwksXSet(t, unknownKty, okp, oct, encOnly, kidless, hmacAlg, jwksXRSA("good"))
+	body := jwksXSet(t, unknownKty, okp, ed, oct, encOnly, kidless, hmacAlg, jwksXRSA("good"))
 
 	keys := jwksXParse(t, body, jwksXAlgs())
 	jwksXWantKIDs(t, keys, "good")
@@ -250,6 +272,16 @@ func TestParseKeySetRejectsWeakRSAKeys(t *testing.T) {
 		{name: "even exponent", entry: jwksXRSAModulus("even-e", jwksXModulus(minRSABits), 4)},
 		{name: "unit exponent", entry: jwksXRSAModulus("unit-e", jwksXModulus(minRSABits), 1)},
 		{name: "exponent three", entry: jwksXRSAModulus("three-e", jwksXModulus(minRSABits), 3), usable: true},
+		// crypto/rsa's own ceiling, applied at parse time. Above it go-jose's
+		// int(big.Int.Int64()) decode would keep some low-order remnant of the
+		// published exponent, so the entry must go rather than become another key.
+		{name: "exactly the exponent ceiling", usable: true,
+			entry: jwksXRSAModulus("max-e", jwksXModulus(minRSABits), maxRSAExponent)},
+		{name: "above the exponent ceiling",
+			entry: jwksXRSAModulus("huge-e", jwksXModulus(minRSABits), maxRSAExponent+2)},
+		// A modulus is a product of odd primes, so an even one is not a modulus.
+		{name: "even modulus",
+			entry: jwksXRSAModulus("even-n", new(big.Int).Lsh(big.NewInt(1), minRSABits-1), 65537)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -455,3 +487,88 @@ func TestParseKeySetEmptyIsAnError(t *testing.T) {
 		})
 	}
 }
+
+// TestLeadFlightOutlivesTheLeadersCancellation pins where the detachment lives.
+// The refresh is SHARED: whichever request happened to lead it may hang up, and
+// the fetch every other caller is parked on must still complete. getJSON honours
+// its context (TestGetJSONHonoursCallerCancellation), so the insulation has to be
+// applied here, at the point the fetch stops belonging to one caller.
+func TestLeadFlightOutlivesTheLeadersCancellation(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	srv, client := fetchXServe(t, func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(jwksXSet(t, jwksXRSA("k1")))
+	})
+	t.Cleanup(releaseOnce)
+
+	k := newKeySet(srv.URL, client, defaultAlgorithms, time.Now)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		k.mu.Lock()
+		k.leadFlight(ctx) // releases and re-acquires k.mu
+		k.mu.Unlock()
+	}()
+
+	<-started // the fetch is in flight and the handler is holding it open
+	cancel()
+	releaseOnce()
+	<-done
+
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.keys["k1"]; !ok {
+		t.Fatalf("the leader's cancellation killed the shared fetch: keys = %v", k.keys)
+	}
+	if k.fetchedAt.IsZero() {
+		t.Error("fetchedAt was never stamped, so the flight did not succeed")
+	}
+}
+
+// TestGetReleasesTheMutexWhenTheFetchPanics is a liveness test, not a
+// correctness one. net/http recovers a panicking handler per connection, so a
+// mutex left locked by a panic unwinding out of get would not crash the process —
+// it would leave it running with every later authentication deadlocked on a lock
+// nobody can release. The deferred unlock in get is what prevents that, and this
+// is the only test that can tell the two apart.
+func TestGetReleasesTheMutexWhenTheFetchPanics(t *testing.T) {
+	t.Parallel()
+
+	k := newKeySet("https://idp.example/jwks", panicClient(), defaultAlgorithms, time.Now)
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the fixture transport did not panic, so this test asserted nothing")
+			}
+		}()
+		_, _ = k.get(context.Background(), "k1")
+	}()
+
+	// TryLock is the whole assertion: it can only succeed if the panic path left
+	// the mutex free. A plain Lock would hang the test binary on the bug instead
+	// of failing it.
+	if !k.mu.TryLock() {
+		t.Fatal("get left the key set's mutex locked after the fetch panicked")
+	}
+	k.mu.Unlock()
+}
+
+// panicClient returns a client whose transport panics, standing in for any panic
+// raised beneath leadFlight.
+func panicClient() *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		panic("identity test: transport panic")
+	})}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

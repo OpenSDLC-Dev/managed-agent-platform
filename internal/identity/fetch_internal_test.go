@@ -241,12 +241,15 @@ func TestGetJSONDeadline(t *testing.T) {
 	}
 }
 
-func TestGetJSONDetachesCallerCancellation(t *testing.T) {
+func TestGetJSONHonoursCallerCancellation(t *testing.T) {
 	t.Parallel()
-	// context.WithoutCancel, asserted rather than assumed: one caller leading a
-	// key-set flight and then hanging up must not fail the fetch every other
-	// caller is waiting on. Trace context still rides along — that is a value,
-	// and values survive WithoutCancel — but cancellation does not.
+	// getJSON itself honours the context it is handed — which is what makes a
+	// caller's deadline real at startup, where New fetches directly and an
+	// unreachable IdP must fail the boot rather than hang past it.
+	//
+	// Detaching the SHARED refresh from whichever caller happened to lead it is a
+	// separate property, and it lives one layer up in leadFlight, where the
+	// sharing is: TestLeadFlightOutlivesTheLeadersCancellation covers it.
 	started := make(chan struct{})
 	release := make(chan struct{})
 	releaseOnce := sync.OnceFunc(func() { close(release) })
@@ -259,26 +262,47 @@ func TestGetJSONDetachesCallerCancellation(t *testing.T) {
 	t.Cleanup(releaseOnce)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	type result struct {
-		doc map[string]any
-		err error
-	}
-	done := make(chan result, 1)
+	done := make(chan error, 1)
 	go func() {
 		var doc map[string]any
-		done <- result{doc, getJSON(ctx, client, srv.URL, time.Minute, &doc)}
+		done <- getJSON(ctx, client, srv.URL, time.Minute, &doc)
 	}()
 
 	<-started // the request is in flight and the handler is holding it open
 	cancel()
-	if ctx.Err() == nil {
-		t.Fatal("the caller's context is not cancelled, so this test asserted nothing")
+	err := <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("getJSON = %v, want the caller's cancellation to reach the fetch", err)
 	}
 	releaseOnce()
+}
 
-	got := <-done
-	if got.err != nil {
-		t.Fatalf("getJSON = %v, want the fetch to outlive its caller's cancellation", got.err)
+func TestGetJSONErrorsDropTheURLButKeepTheChain(t *testing.T) {
+	t.Parallel()
+	// The two halves of one rule. A key-set URL can be a signed URL whose query
+	// string IS the credential, so no error may quote it; but an error nobody can
+	// match with errors.Is is a debugging dead end, so the cause must survive.
+	release := make(chan struct{})
+	srv, client := fetchXServe(t, func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		_, _ = w.Write([]byte(`{}`))
+	})
+	t.Cleanup(func() { close(release) })
+
+	target := srv.URL + "/keys?access_token=super-secret"
+	var got map[string]any
+	err := getJSON(context.Background(), client, target, 50*time.Millisecond, &got)
+	if err == nil {
+		t.Fatal("getJSON returned before the handler answered")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("getJSON = %v, want the deadline to survive errors.Is", err)
+	}
+	if strings.Contains(err.Error(), "super-secret") {
+		t.Errorf("getJSON error quotes the query credential: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "redacted") {
+		t.Errorf("getJSON error = %q, want the query replaced with the redaction marker", err.Error())
 	}
 }
 

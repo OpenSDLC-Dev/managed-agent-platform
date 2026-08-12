@@ -344,6 +344,11 @@ func TestConfigFromEnvIssuerScheme(t *testing.T) {
 		{name: "empty", issuer: "", err: true},
 		{name: "no host", issuer: "https://", err: true},
 		{name: "credentials in the url", issuer: "https://u:p@h/", err: true},
+		// An OIDC issuer identifier carries neither (Discovery §2). Both would
+		// also break the discovery URL, which is built by appending to this.
+		{name: "query", issuer: "https://idp.example?tenant=acme", err: true},
+		{name: "empty query", issuer: "https://idp.example?", err: true},
+		{name: "fragment", issuer: "https://idp.example#f", err: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

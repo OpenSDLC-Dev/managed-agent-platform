@@ -372,6 +372,110 @@ func TestNewFailsOnEmptyKeySet(t *testing.T) {
 	}
 }
 
+// TestNewValidatesTheRoleMap covers the boundary ConfigFromEnv does not: a
+// Config built literally, which is how every test and every later slice
+// constructs one. An empty claim value is the dangerous shape — a roles claim
+// carrying "" would then be granted whatever it maps to — and a role string
+// outside the three is a typo that would silently grant nothing while looking
+// configured.
+func TestNewValidatesTheRoleMap(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		m    map[string]identity.Role
+	}{
+		{name: "empty claim value", m: map[string]identity.Role{"": identity.RoleAdmin}},
+		{name: "empty value beside a good one", m: map[string]identity.Role{
+			"platform-admins": identity.RoleAdmin, "": identity.RoleViewer}},
+		{name: "unknown role", m: map[string]identity.Role{"eng": identity.Role("superuser")}},
+		{name: "RoleNone as a target", m: map[string]identity.Role{"eng": identity.RoleNone}},
+		{name: "role differing only in case", m: map[string]identity.Role{"eng": identity.Role("Admin")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := identitytest.NewIdP(t)
+			cfg := discoveryXConfig(p.Issuer(), p.Client(), identitytest.NewClock(discoveryXBase).Now)
+			cfg.RoleMap = tc.m
+
+			v, err := identity.New(context.Background(), cfg)
+			discoveryXWantBootError(t, v, err)
+			if got, fetches := p.Discoveries(), p.Fetches(); got != 0 || fetches != 0 {
+				t.Errorf("Discoveries() = %d, Fetches() = %d, want 0 and 0 — the role map is refused before any network call", got, fetches)
+			}
+		})
+	}
+}
+
+// TestNewCopiesTheRoleMap pins that authority stops being editable once New
+// returns. The map is the whole role policy; keeping the caller's would make
+// every live Verify race a caller that still holds it, and would let a mutation
+// anywhere in the process silently change who is an admin.
+func TestNewCopiesTheRoleMap(t *testing.T) {
+	t.Parallel()
+	p := identitytest.NewIdP(t)
+	clock := identitytest.NewClock(discoveryXBase)
+	cfg := discoveryXConfig(p.Issuer(), p.Client(), clock.Now)
+	caller := map[string]identity.Role{"platform-admins": identity.RoleAdmin}
+	cfg.RoleMap = caller
+
+	v, err := identity.New(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// The caller escalates its own map after construction, exactly as a config
+	// reload or a careless test helper would.
+	caller["everyone"] = identity.RoleAdmin
+	delete(caller, "platform-admins")
+
+	claims := p.Claims(discoveryXAudience, clock.Now())
+	claims["roles"] = []any{"everyone"}
+	got, err := v.Verify(context.Background(), p.Mint(t, claims))
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got.Role != identity.RoleNone {
+		t.Errorf("Role = %q for a value added to the caller's map after New; want %q",
+			got.Role, identity.RoleNone)
+	}
+
+	claims["roles"] = []any{"platform-admins"}
+	got, err = v.Verify(context.Background(), p.Mint(t, claims))
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got.Role != identity.RoleAdmin {
+		t.Errorf("Role = %q for a value DELETED from the caller's map after New; want %q — "+
+			"the verifier keeps the policy it was built with", got.Role, identity.RoleAdmin)
+	}
+}
+
+// TestNewRefusesAnIssuerWithAQueryOrFragment pins the issuer identifier's own
+// rule (OIDC Discovery §2). It matters twice over: iss is compared as an exact
+// string, and the discovery path is built by appending to the issuer, which a
+// query silently breaks.
+func TestNewRefusesAnIssuerWithAQueryOrFragment(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, suffix string }{
+		{name: "query", suffix: "?tenant=acme"},
+		{name: "empty query", suffix: "?"},
+		{name: "fragment", suffix: "#frag"},
+		{name: "both", suffix: "?tenant=acme#frag"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := identitytest.NewIdP(t)
+			cfg := discoveryXConfig(p.Issuer()+tc.suffix, p.Client(), identitytest.NewClock(discoveryXBase).Now)
+
+			v, err := identity.New(context.Background(), cfg)
+			discoveryXWantBootError(t, v, err)
+			if got := p.Discoveries(); got != 0 {
+				t.Errorf("Discoveries() = %d, want 0 — the issuer is refused before any network call", got)
+			}
+		})
+	}
+}
+
 func TestNewRefusesModeDisabled(t *testing.T) {
 	t.Parallel()
 	// Disabled is FromEnv's case, and it is the one state that must be

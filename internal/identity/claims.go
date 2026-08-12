@@ -51,18 +51,22 @@ func stringClaim(claims map[string]any, name string) string {
 //
 // A scalar string is one value — NOT split on spaces, which would be inventing
 // OAuth scope semantics nobody asked for. An array contributes its string
-// elements and silently drops the rest. Anything else contributes none. At most
-// maxRoleValues are read.
+// elements and silently drops the rest. Anything else contributes none.
+//
+// The cap bounds the elements EXAMINED, not the strings collected. Capping the
+// output instead would let a claim pad itself past the limit with non-strings
+// and still be read at any depth, which is the whole cap defeated; and where the
+// two differ, this direction drops a role rather than granting one.
 func roleValues(v any) []string {
 	switch t := v.(type) {
 	case string:
 		return []string{t}
 	case []any:
+		if len(t) > maxRoleValues {
+			t = t[:maxRoleValues]
+		}
 		out := make([]string, 0, len(t))
 		for _, e := range t {
-			if len(out) == maxRoleValues {
-				break
-			}
 			if s, ok := e.(string); ok {
 				out = append(out, s)
 			}

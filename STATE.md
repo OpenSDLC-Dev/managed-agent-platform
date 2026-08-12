@@ -8,7 +8,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 humans authenticate through any standards-compliant OIDC provider, and the
 control plane resolves each request to a principal holding one of three
 claim-mapped roles. Machine credentials and every documented CLI/SDK flow are
-untouched. Six slices; slice 1 is in flight.
+untouched. Six slices; slice 1 has landed, slice 2 is next.
 
 ## Tasks
 

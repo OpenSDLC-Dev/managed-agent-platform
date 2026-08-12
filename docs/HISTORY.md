@@ -89,6 +89,58 @@ operator's attempt to change them is not a warning-grade event.
 
 ---
 
+## Console SSO and RBAC (plan 31, #56) — slice 1's security review: what was fixed, and the two findings refuted, 2026-08-12
+
+The Codex security pass over `internal/identity` returned eight findings. Six were
+confirmed against the source and fixed in the same PR; the changelog carries the
+resulting behaviour. Recorded here is only what a changelog cannot hold — the two
+findings **refuted with evidence** rather than fixed, so the next reviewer does not
+re-raise them, and the one fix whose reasoning is a judgement call.
+
+**Refuted: `azp` should be checked whenever present, and extra audiences should be
+rejected.** The reviewer's reading is OIDC Core's SHOULD for `azp` and its
+MUST-not-accept-untrusted-audiences rule. The implemented rule — `aud` must contain
+the configured audience, and `azp` must equal it when `aud` names several — is the
+plan's settled Scope text, and it is not weaker where it differs. A token whose
+`aud` names this console *is* a token whose issuer named this console as an
+audience; that is the authorization signal, and `azp` is advisory beside it.
+Tightening to "`azp` must equal our audience whenever present" would break the
+ordinary deployment where the audience is an API/resource identifier while `azp` is
+the client id — Keycloak and Entra both emit exactly that shape. Rejecting a token
+that additionally names a third-party audience protects that third party, not this
+platform, and only after `azp` has already established the token was issued to us.
+Revisit only with a real provider that motivates it, behind a config flag rather
+than a silent tightening.
+
+**Refuted: `key_ops` duplicates and `use`/`key_ops` inconsistency should be
+rejected** (RFC 7517 §4.3's MUST-NOT-duplicate). `usableKey` already requires
+`use ∈ {"", "sig"}` *and* `verify ∈ key_ops` when `key_ops` is present, and this
+package has exactly one use for a key: verifying a signature. A duplicated
+`"verify"`, or an extra `"encrypt"` alongside it, therefore authorizes nothing
+further — the violation cannot change the decision. Enforcing it would add an
+unbounded O(n²) scan over a provider-controlled list (`maxKeys` bounds the number
+of keys, nothing bounds one key's `key_ops`), which is a denial-of-service seam
+opened to enforce a producer-conformance rule with no consequence here.
+
+**A judgement call, stated rather than buried: the `kid` is still logged.** The
+review flagged writing an attacker-controlled `kid` to a Debug line. It is kept,
+truncated to 64 bytes, at Debug only, because it is the single diagnostic that
+answers "which key did the provider rotate to" when logins start failing; slog
+escapes control bytes, and the truncation is what bounds the log-volume
+amplification the reviewer was pointing at. Everything else the review named —
+URL query strings and userinfo in logs and errors — is now redacted, including
+inside transport errors, whose `*url.Error` quotes the URL verbatim (the fix wraps
+the *cause*, so `errors.Is` still reaches `context.DeadlineExceeded`).
+
+**A note for whoever reads the mutex code.** The panic-safety fix in `keySet.get`
+is not defensive habit. `net/http` recovers a panicking handler per connection, so
+a panic unwinding out of `get` while the cache mutex was held would leave the
+process **alive** with every later authentication blocked forever on a lock nobody
+can release. `TestGetReleasesTheMutexWhenTheFetchPanics` uses `TryLock` precisely
+so the bug fails the suite instead of hanging it.
+
+---
+
 ## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (runs 2026-08-10 and 2026-08-11) — ✅ #43 passed; the deferred work-item-pull criterion passed too (#363 closed)
 
 #43's acceptance criterion, quoted rather than paraphrased: *"An operator can
