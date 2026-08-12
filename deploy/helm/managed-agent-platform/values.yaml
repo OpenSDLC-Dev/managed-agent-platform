@@ -596,9 +596,15 @@ casdoor:
   # rejected: bcrypt salts randomly, so every render would differ, `helm upgrade`
   # would roll the IdP pod on unchanged values and Argo/Flux would never converge.
   # The trade is the one console.clientSecret already makes — anyone who can read
-  # ConfigMaps in this namespace can read it — so treat it as a bootstrap
-  # credential and change it in the admin UI if that boundary matters. Not
-  # auto-generated, for the same reason console.clientSecret is not.
+  # this release's Secrets can read it. Not auto-generated, for the same reason
+  # console.clientSecret is not.
+  #
+  # ROTATE IT HERE, never in Casdoor's admin UI. `initDataNewOnly` is false, so
+  # the seed re-applies on every boot and this account is one it names: a password
+  # changed in the UI is restored to this value the next time the pod restarts,
+  # which is worse than not rotating because the operator believes it is done.
+  # Change the value and `helm upgrade` — the seed's checksum rolls the pod, so
+  # the new password is live when the rollout finishes.
   #
   # QUOTE IT, along with console.clientSecret and console.clientId. All three land
   # in JSON Casdoor unmarshals into string fields, and an all-digit password left
@@ -617,9 +623,11 @@ casdoor:
   # `clientSecret` is REQUIRED when enabled and is not auto-generated, the same
   # rule postgresql.password and the MinIO/OpenBao credentials follow (a
   # generated credential is unstable under `helm template`/GitOps). It rides the
-  # seed ConfigMap because a mounted JSON file is how Casdoor is seeded — so
-  # anyone who can read ConfigMaps in this namespace can read it. Treat it as a
-  # bootstrap value and rotate it in Casdoor's admin UI if that boundary matters.
+  # seed Secret, because a mounted JSON file is how Casdoor is seeded — so anyone
+  # who can read this release's Secrets can read it. Rotate it HERE and
+  # `helm upgrade`, not in the admin UI: the seed names this application, so a
+  # secret changed in the UI is restored on the next pod restart, and an operator
+  # who rotated there would be trusting a credential that quietly came back.
   #
   # `redirectURIs` are the console's callback URLs, and they belong here rather
   # than in the admin UI: the seed is re-applied on every restart (see

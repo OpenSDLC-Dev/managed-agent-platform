@@ -584,7 +584,7 @@ a local-account IdP, not a federation hub.
 always injects `identity.*` (mode/issuer/audience/claims/role map) into the
 controlplane Deployment; `casdoor.enabled` (default `false`) additionally
 renders a thin set of **first-party** templates — Deployment, Service, a
-Secret, and a ConfigMap carrying the same `init_data.json` — driven by the
+Secret, and a second Secret carrying the same `init_data.json` — driven by the
 same environment contract the compose profile uses — `initDataNewOnly` included,
 which both targets set to `false` for the same measured reason, the chart
 additionally dropping the three laptop demo accounts (real, working credentials

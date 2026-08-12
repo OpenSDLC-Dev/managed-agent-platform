@@ -368,8 +368,8 @@ algorithms itself and takes only the backend-service audience:
 
 For the private cluster with no cloud IdP — the deployment this project exists
 for — `casdoor.enabled=true` renders a pinned Casdoor from **first-party**
-templates: a Deployment, a **ClusterIP** Service, a Secret holding its DSN, a
-ConfigMap holding its seed, an Ingress, and a NetworkPolicy. First-party rather
+templates: a Deployment, a **ClusterIP** Service, two Secrets — one holding its
+DSN, one holding its seed — an Ingress, and a NetworkPolicy. First-party rather
 than the upstream `casdoor-helm` subchart, whose QA shipped a release that
 ignored its Postgres values and silently fell back to SQLite. Owning the
 templates means owning their lifecycle — image tag, database, seed, CVE tracking.
@@ -438,11 +438,12 @@ Two operational facts worth knowing before you turn it on. **The chart owns
 Casdoor's own administrator**: `casdoor.adminPassword` replaces the documented
 default `123` on the `built-in/admin` account, which Casdoor creates itself
 before reading the seed — that account is a Casdoor global administrator, so
-treat the value as a bootstrap credential and change it at first login. It rides
-the seed ConfigMap in plaintext (Casdoor hashes it on ingest and the plaintext
-never reaches its database), next to `console.clientSecret`, which has always
-been there on the same terms — anyone who can read ConfigMaps in the namespace
-can read both. And **the seed is re-applied on every restart**, which is the only
+treat the value as a bootstrap credential and rotate it by changing your values
+and upgrading — **not** at first login, because the seed restores this account on
+the next restart and a password changed in the UI would quietly come back. It
+rides the seed Secret in plaintext (Casdoor hashes it on ingest and the plaintext
+never reaches its database), next to `console.clientSecret`, which is there on the
+same terms — anyone who can read this release's Secrets can read both. And **the seed is re-applied on every restart**, which is the only
 setting under which it can own that password: entities the seed names — the
 organization, the `map-console` application, the three groups, that account — are
 restored from your values on each boot, so change them in values rather than in
@@ -519,8 +520,8 @@ processes; `otlp.insecure=true` to export without TLS.
 | `identity.proxy.preset` / `.audience` / `.header` / `.issuer` / `.keysURL` / `.algs` | `""` | Mode `trusted_proxy`: `gcp-iap` needs only `audience` (the backend-service audience) and refuses the rest; `custom` needs header, issuer, audience and keysURL |
 | `identity.claims.roles` / `.email` / `.name` | `""` (platform defaults `roles`/`email`/`name`) | claim names. With the bundled Casdoor `roles` must be `groups` — its `roles` claim carries objects, which map to nothing |
 | `identity.roleMap` | `{}` | claim value → `admin`/`developer`/`viewer`, as a map; the chart encodes it for the verifier. No mapped value means no role, which is denied everywhere |
-| `casdoor.enabled` | `false` | deploy the bundled Casdoor (Deployment, ClusterIP Service, Secret, seed ConfigMap, Ingress with the SAML/CAS deny rules, NetworkPolicy) |
-| `casdoor.adminPassword` / `casdoor.console.clientSecret` | `""` (both required when enabled) | the password the seed puts on Casdoor's own `built-in/admin` (replacing the documented default), and the console's OAuth client secret. Not auto-generated; both ride the seed ConfigMap |
+| `casdoor.enabled` | `false` | deploy the bundled Casdoor (Deployment, ClusterIP Service, a Secret for its DSN, a Secret for its seed, Ingress with the SAML/CAS deny rules, NetworkPolicy) |
+| `casdoor.adminPassword` / `casdoor.console.clientSecret` | `""` (both required when enabled) | the password the seed puts on Casdoor's own `built-in/admin` (replacing the documented default), and the console's OAuth client secret. Not auto-generated; both ride the seed Secret, and both rotate by changing these values and upgrading rather than in the admin UI |
 | `casdoor.ingress.host` | `""` (required when enabled) | the IdP's external host — also its `origin`, so `identity.oidc.issuer` must equal `https://<host>`. Must be served over HTTPS |
 | `casdoor.ingress.className` / `.annotations` / `.tls.secretName` | `""` / `{}` / `""` | IngressClass, annotations, and the TLS Secret for that host |
 | `casdoor.console.clientId` / `.redirectURIs` | `map-console` / `[]` (both required when enabled) | the seeded OIDC application's client id (which `identity.oidc.audience` must equal) and the console's callback URLs. The seed's own callback is a laptop's and is replaced at render, so an empty list would register an application every login fails against — the chart refuses it instead |
