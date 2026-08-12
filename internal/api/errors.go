@@ -17,6 +17,11 @@ const (
 	errTypeNotFound        = "not_found_error"
 	errTypeAPI             = "api_error"
 	errTypeRequestTooLarge = "request_too_large" // 413, per the public API docs
+	// errTypePermission is the identity lane's denial (#56, plan 31). It is the
+	// reference's own taxonomy rather than an invention: its scope failures are
+	// 403 permission_error. It exists only for the human lane — a machine key
+	// carries no role, so nothing on the key lane can produce it.
+	errTypePermission = "permission_error"
 )
 
 // apiError is an error that maps onto the Anthropic wire error envelope.
@@ -44,6 +49,18 @@ func errAuth(message string) *apiError {
 	return &apiError{http.StatusUnauthorized, errTypeAuthentication, message}
 }
 
+// errForbidden is the identity lane's denial: the caller authenticated, and the
+// role their provider gave them is not enough for this route.
+//
+// Like errAuth it takes a plain string rather than a format, and for a sharper
+// reason: the message names the ROLE THE ROUTE REQUIRES and never the caller's.
+// Telling a viewer "you are a viewer" turns every 403 into a probe that maps the
+// caller's own authority, and telling them nothing at all leaves an operator
+// unable to explain the denial. Naming the requirement does neither.
+func errForbidden(message string) *apiError {
+	return &apiError{http.StatusForbidden, errTypePermission, message}
+}
+
 type ctxKey int
 
 const (
@@ -51,6 +68,7 @@ const (
 	ctxKeyPrincipal
 	ctxKeyEnvironment // the environment a worker's Bearer key is scoped to
 	ctxKeySession     // the session a gate's Bearer token is scoped to
+	ctxKeyIdentity    // the verified human a request authenticated as (plan 31)
 )
 
 func requestIDFrom(ctx context.Context) string {

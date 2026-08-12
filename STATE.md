@@ -8,7 +8,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 humans authenticate through any standards-compliant OIDC provider, and the
 control plane resolves each request to a principal holding one of three
 claim-mapped roles. Machine credentials and every documented CLI/SDK flow are
-untouched. Six slices; slice 1 has landed, slice 2 is next.
+untouched. Six slices; slice 1 is in review ([#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369) — CI green, all ten bot threads settled and resolved), slice 2 is in review behind it.
 
 ## Tasks
 
@@ -16,9 +16,10 @@ untouched. Six slices; slice 1 has landed, slice 2 is next.
       cache, algorithm allowlist, `iss`/`aud`/`sub`/`exp`/`azp` discipline),
       claim→role mapping, OIDC discovery, the `gcp-iap` preset, env config,
       and the `identitytest` fake provider. No route touched.
-- [ ] Slice 2 — the principals migration and JIT provisioning; the identity
-      lane in `dispatchAuth`, default-deny; `permission_error`; the console
-      environment-key routes require `admin`.
+- [x] Slice 2 — the `principals` migration and JIT provisioning; the identity
+      lane in `dispatchAuth` (machine credentials first, JWT-silhouette split,
+      an explicit `/api/` arm); the per-route minimum role and `permission_error`;
+      default-deny everywhere, with the console environment-key routes at `admin`.
 - [ ] Slice 3 — the role matrix across the `/v1` and `/api/` route tables,
       plus the completeness test.
 - [ ] Slice 4 — deployment wiring: the compose `iam` profile (Casdoor

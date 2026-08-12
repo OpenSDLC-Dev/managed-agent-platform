@@ -73,6 +73,10 @@ const (
 	maxRSAExponent  = 1<<31 - 1
 	clockSkewLeeway = 60 * time.Second
 	maxTokenBytes   = 16 << 10 // Entra with many groups reaches roughly 8 KiB
+	// maxSubjectBytes is OIDC Core §2's own bound on a subject identifier ("MUST
+	// NOT exceed 255 ASCII characters in length"). Unlike the profile fields this
+	// one REFUSES rather than truncates — see the check in Verify.
+	maxSubjectBytes = 255
 	maxRoleValues   = 100
 	maxClaimDepth   = 8
 	maxLoggedKID    = 64 // attacker-controlled; truncate before logging
@@ -233,6 +237,19 @@ func configureCustomProxy(cfg *Config, getenv func(string) string) error {
 	cfg.AssertionHeader = strings.TrimSpace(getenv(envProxyHeader))
 	if cfg.AssertionHeader == "" {
 		return fmt.Errorf("%s=%s needs %s", envProxyPreset, PresetCustom, envProxyHeader)
+	}
+	// A machine credential's header cannot also be the proxy's assertion header.
+	// trusted_proxy mode's whole discipline is that Authorization is NEVER read as
+	// a human credential — it is where a worker's environment key arrives — and
+	// naming it here would quietly invert that: the API layer would read a raw
+	// Authorization value as an assertion, and a worker's Bearer key would be
+	// handed to the verifier instead of the key lane. x-api-key is refused for the
+	// same reason, one lane further up.
+	for _, reserved := range []string{"authorization", "x-api-key"} {
+		if strings.EqualFold(cfg.AssertionHeader, reserved) {
+			return fmt.Errorf("%s must not be %q; that header carries a machine credential",
+				envProxyHeader, cfg.AssertionHeader)
+		}
 	}
 	cfg.Issuer = strings.TrimSpace(getenv(envProxyIssuer))
 	if cfg.Issuer == "" {

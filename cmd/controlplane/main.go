@@ -69,6 +69,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	blobbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/backend"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
@@ -161,9 +162,25 @@ func run(ctx context.Context) error {
 		slog.Info("secrets cipher not configured; vault credential storage will report the absence")
 	}
 
+	// Human authentication is optional the same way, and constructing it here is
+	// what makes a misconfigured IdP a boot failure rather than a 500 on the
+	// first human's first request: New performs discovery and one warming key
+	// fetch. Without it (IDENTITY_MODE unset or disabled) the surface is
+	// byte-for-byte what it was — no lane, no role check, machine credentials
+	// unchanged.
+	verifier, err := identity.FromEnv(ctx)
+	if err != nil {
+		return err
+	}
+	if verifier == nil {
+		slog.Info("identity not configured; human SSO is off and management auth remains x-api-key only")
+	} else {
+		slog.Info("identity configured", "mode", string(verifier.Mode()))
+	}
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: api.NewHandler(pool, blobs, cipher),
+		Handler: api.NewHandler(pool, blobs, cipher, verifier),
 		// Slow-client bounds: auth runs inside the handler, so unauthenticated
 		// connections must not be able to sit open indefinitely.
 		ReadHeaderTimeout: 10 * time.Second,

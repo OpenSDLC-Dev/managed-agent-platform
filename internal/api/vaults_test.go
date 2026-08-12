@@ -821,7 +821,7 @@ func TestVaultRoutesRequireManagementAuth(t *testing.T) {
 // configuration error; metadata CRUD stays available (plan 12 D1).
 func TestCredentialPathsWithoutCipher(t *testing.T) {
 	pool := newPoolWithKey(t)
-	srv := httptest.NewServer(api.NewHandler(pool, nil, nil))
+	srv := httptest.NewServer(api.NewHandler(pool, nil, nil, nil))
 	t.Cleanup(srv.Close)
 	s := &tserver{t: t, url: srv.URL, pool: pool}
 

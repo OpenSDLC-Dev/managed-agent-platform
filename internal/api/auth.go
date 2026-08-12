@@ -69,6 +69,16 @@ func authenticate(ctx context.Context, pool *pgxpool.Pool, key string) (string, 
 // request context as the audit principal (sessions.created_by).
 func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A repeated field is refused before the value is read. HTTP allows one,
+		// no real client sends one, and Header.Get would silently pick the first —
+		// so without this the answer to "which key authenticated?" would depend on
+		// header order, and it would differ from the answer apiKeyOffered gives
+		// when choosing the lane. One rule in both places: a duplicate credential
+		// is ambiguous, and ambiguous is a 401.
+		if len(r.Header.Values("x-api-key")) > 1 {
+			writeError(w, r, errAuth("multiple x-api-key headers"))
+			return
+		}
 		key := r.Header.Get("x-api-key")
 		if key == "" {
 			writeError(w, r, errAuth("missing x-api-key header"))

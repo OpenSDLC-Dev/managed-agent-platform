@@ -794,7 +794,7 @@ func TestDeleteSessionSurvivesCheckpointDeleteFailure(t *testing.T) {
 		t.Fatalf("local.New: %v", err)
 	}
 	pool := newPoolWithKey(t)
-	srv := httptest.NewServer(api.NewHandler(pool, failingDeleteBlobStore{Store: blobtest.Mem()}, cipher))
+	srv := httptest.NewServer(api.NewHandler(pool, failingDeleteBlobStore{Store: blobtest.Mem()}, cipher, nil))
 	t.Cleanup(srv.Close)
 	s := &tserver{t: t, url: srv.URL, pool: pool}
 

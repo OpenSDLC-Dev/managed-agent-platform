@@ -74,7 +74,7 @@ func newTestServerWithCipher(t *testing.T, cipher secrets.Cipher) *tserver {
 	t.Helper()
 	pool := newPoolWithKey(t)
 	blobs := blobtest.Mem()
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher))
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, nil))
 	t.Cleanup(srv.Close)
 	return &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs}
 }
