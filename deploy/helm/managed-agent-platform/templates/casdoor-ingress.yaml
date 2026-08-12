@@ -1,0 +1,92 @@
+{{- if .Values.casdoor.enabled -}}
+{{- $fullname := include "map.fullname" . -}}
+{{- /* Through the origin helper, so the host this Ingress serves and the origin
+       Casdoor mints tokens for cannot come apart, and so a missing host is the
+       helper's one refusal wherever it is first needed. */ -}}
+{{- $host := include "map.casdoorOrigin" . | trimPrefix "https://" -}}
+{{/*
+The bundled IdP's only entrance, and the Kubernetes shape of the compose
+Caddyfile's refusals (deploy/compose/idp-proxy.Caddyfile).
+
+VU#780781 concerns a cluster of Casdoor CVEs, five of which live on the SAML
+service-provider path. This deployment uses no part of SAML or CAS — the console
+speaks OIDC authorization-code + PKCE — so the safest configuration is for those
+routes not to exist. They cannot be turned off in Casdoor: routers/router.go
+registers them whatever is configured, and one process serves the API and the
+login UI from one port, so "keep it internal" is not available as a control. The
+Ingress is.
+
+Ingress has no deny primitive, so the refusal is built from the two things it does
+have. The paths below are routed to a Service with NO SELECTOR and therefore no
+endpoints, which a controller answers with 503 — compose answers 404, and what
+matters in both is that the request never reaches Casdoor. And the Ingress spec
+gives precedence to the LONGEST matching path, so these five take their subtrees
+away from the `/` rule beneath them by the spec's own rule rather than by a
+controller's ordering.
+
+Prefix on every entry, method-agnostic like the Caddyfile's own path matcher: an
+Ingress cannot match a method at all, and /api/saml/redirect/:owner/:application
+is registered for ANY method, so matching one would have left a hole anyway. The
+whole /cas/ tree goes because no part of CAS is used, which is simpler to reason
+about than enumerating its validators. Deliberately NOT denied: /login/oauth/* and
+/api/login/oauth/*, which are the authorization-code flow this platform uses.
+*/}}
+{{- $samlDeny := list "/api/get-saml-login" "/api/acs" "/api/saml/metadata" "/api/saml/redirect" "/cas" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-casdoor-deny
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: casdoor
+spec:
+  # Deliberately selectorless: nothing backs it, and nothing may. This Service
+  # exists to be a backend that cannot serve, so the denied paths resolve to a
+  # refusal instead of to Casdoor.
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}-casdoor
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: casdoor
+  {{- with .Values.casdoor.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.casdoor.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.casdoor.ingress.tls.secretName }}
+  tls:
+    - hosts:
+        - {{ $host | quote }}
+      secretName: {{ . | quote }}
+  {{- end }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          {{- range $samlDeny }}
+          - path: {{ . | quote }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-casdoor-deny
+                port:
+                  number: 8000
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-casdoor
+                port:
+                  number: 8000
+{{- end -}}

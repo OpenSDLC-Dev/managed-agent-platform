@@ -16,6 +16,25 @@ Reach the API from your shell:
   # ANTHROPIC_BASE_URL; the ant CLI's management commands ignore it — pass
   # --base-url instead.
 
+{{- if .Values.casdoor.enabled }}
+
+The bundled identity provider is at {{ include "map.casdoorOrigin" . }} — serve that host over
+HTTPS, which the platform requires of an issuer and a key set and does not
+negotiate. Sign in as `admin` in the `built-in` organization, with the
+casdoor.adminPassword you set; that account is a Casdoor GLOBAL administrator, so
+treat the value as a bootstrap credential and change it here first.
+
+Then create your operators in the `map` organization and put each in one of the
+seeded groups — map/platform-admins, map/platform-devs, map/platform-read. Those
+names are what identity.roleMap keys on, and a human in none of them authenticates
+and holds no role, which every role-gated route answers 403.
+
+The seed is re-applied on every restart (initDataNewOnly=false, which is what
+lets it own the admin account's password), so admin-UI edits to the entities it
+names — that organization, the map-console application, those three groups, that
+account — do not survive a restart. Accounts you create are not named by the seed
+and do survive. Change what the seed says in your values, not in the UI.
+{{- end }}
 {{- if not .Values.otlp.endpoint }}
 
 Note: OTLP export is off (otlp.endpoint is empty). Set otlp.endpoint to ship traces/metrics/logs.

@@ -42,6 +42,7 @@ spec:
             {{- include "map.commonEnv" . | nindent 12 }}
             {{- include "map.blobEnv" . | nindent 12 }}
             {{- include "map.secretsEnv" . | nindent 12 }}
+            {{- include "map.identityEnv" . | nindent 12 }}
           readinessProbe:
             tcpSocket:
               port: http

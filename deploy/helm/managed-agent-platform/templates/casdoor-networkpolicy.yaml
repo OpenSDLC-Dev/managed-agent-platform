@@ -1,0 +1,35 @@
+{{- if and .Values.casdoor.enabled .Values.casdoor.networkPolicy.enabled -}}
+{{/*
+What makes the Ingress's SAML/CAS refusals a control rather than advice: with pod
+ingress admitted only from the ingress controller, there is no second path to
+Casdoor for those rules not to be on.
+
+Ingress-only — `policyTypes` names Ingress and nothing else — because Casdoor
+still has to reach Postgres, and because egress is not the direction this is about.
+Kubelet probes arrive from the node rather than from a pod and are outside what a
+peer selector can express; the common CNIs allow them, and one that does not needs
+an ipBlock peer for its nodes added to `from`.
+*/}}
+{{- if not .Values.casdoor.networkPolicy.from -}}
+{{- fail "casdoor.networkPolicy.from must name at least one peer: an EMPTY from means \"all sources\" to Kubernetes, so a policy with one would admit exactly what this policy exists to refuse. Name your ingress controller, or set casdoor.networkPolicy.enabled=false to manage the policy elsewhere." -}}
+{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "map.fullname" . }}-casdoor
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: casdoor
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "casdoor") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- toYaml .Values.casdoor.networkPolicy.from | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 8000
+{{- end -}}

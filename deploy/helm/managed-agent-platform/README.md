@@ -306,6 +306,148 @@ bounds plaintext plus AAD together. Nothing in a resource name says which you
 have. Real credential material — OAuth and bearer tokens, environment-variable
 values — sits orders of magnitude below either.
 
+## Single sign-on and roles (`identity.*`, `casdoor.*`)
+
+Humans authenticate through an OIDC provider and the control plane resolves each
+request to a principal holding one of three roles — `admin`, `developer`,
+`viewer` — enforced per route (docs/plan/31_console-sso-rbac.md,
+[#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56)). The
+`identity` block is that configuration and the chart injects it into the
+controlplane Deployment always; `casdoor.enabled` additionally deploys a bundled
+provider for clusters that have none.
+
+**Off is the default and means exactly today's platform.** With `identity.mode`
+empty the chart renders no `IDENTITY_*` env at all — `IDENTITY_MODE` unset and
+`IDENTITY_MODE=disabled` are one state to the control plane — so upgrading an
+existing release does not change its controlplane pod spec, no Bearer JWT is
+accepted anywhere, and `x-api-key` remains the only management credential. The
+machine lanes never change: the management key keeps full authority with no role
+model, and worker environment keys are untouched.
+
+```bash
+# Any compliant provider — Keycloak, Entra ID, Cognito, accounts.google.com.
+--set identity.mode=oidc \
+--set identity.oidc.issuer=https://idp.example.com/realms/platform \
+--set identity.oidc.audience=<the console's client id> \
+--set 'identity.roleMap.platform-admins=admin' \
+--set 'identity.roleMap.platform-devs=developer'
+```
+
+`identity.roleMap` is written as a **map** — claim value to role — and the chart
+encodes it into the flat `value=role,...` the verifier parses; a claim value or
+role containing `,` or `=` fails the render, because it would encode as a
+different, still-valid map. A principal whose claims map to nothing holds **no
+role** and is denied on every route, so this map is the whole grant.
+`identity.claims.roles` names the claim those values come from (default `roles`).
+
+Everything else the platform refuses, it refuses at **startup** and by variable
+name — an unreachable issuer, an empty role map, a malformed pair, a role outside
+the three. Both URLs must be `https`: the verifier requires an https key set and
+its dial guard refuses loopback, so a plain-HTTP provider cannot be wired to this
+platform at all, and the control plane must be able to reach the issuer from
+inside the cluster with a certificate its image's trust store already accepts.
+
+Behind a cloud vendor's authenticating proxy, use `trusted_proxy` instead — the
+shipped preset is Google's IAP, which supplies the header, issuer, key set and
+algorithms itself and takes only the backend-service audience:
+
+```bash
+--set identity.mode=trusted_proxy \
+--set identity.proxy.preset=gcp-iap \
+--set identity.proxy.audience=/projects/123456789/global/backendServices/987654321
+```
+
+### The bundled provider (`casdoor.enabled`, default `false`)
+
+For the private cluster with no cloud IdP — the deployment this project exists
+for — `casdoor.enabled=true` renders a pinned Casdoor from **first-party**
+templates: a Deployment, a **ClusterIP** Service, a Secret holding its DSN, a
+ConfigMap holding its seed, an Ingress, and a NetworkPolicy. First-party rather
+than the upstream `casdoor-helm` subchart, whose QA shipped a release that
+ignored its Postgres values and silently fell back to SQLite. Owning the
+templates means owning their lifecycle — image tag, database, seed, CVE tracking.
+
+```bash
+--set casdoor.enabled=true \
+--set casdoor.ingress.host=idp.example.com \
+--set casdoor.ingress.tls.secretName=idp-tls \
+--set casdoor.adminPassword=$(openssl rand -hex 24) \
+--set casdoor.console.clientSecret=$(openssl rand -hex 24) \
+--set 'casdoor.console.redirectURIs[0]=https://console.example.com/callback' \
+--set identity.mode=oidc \
+--set identity.oidc.issuer=https://idp.example.com \
+--set identity.oidc.audience=map-console \
+--set identity.claims.roles=groups \
+--set 'identity.roleMap.map/platform-admins=admin' \
+--set 'identity.roleMap.map/platform-devs=developer' \
+--set 'identity.roleMap.map/platform-read=viewer'
+```
+
+Four of those values are load-bearing in ways a plausible guess gets backwards,
+each measured against a running 3.152.0 rather than read off its structs:
+
+- **`identity.claims.roles` is `groups`, not `roles`.** Casdoor's `roles` claim
+  carries role **objects**, and the platform collects only string values out of a
+  claim — so mapping `roles` gives every human no role and denies them
+  everywhere. `groups` arrives as strings spelled `organization/name`, which is
+  why the map keys carry the seeded organization, `map`.
+- **The audience is the application's client id**, because that is what Casdoor
+  puts in `aud`.
+- **The issuer is `https://` + `casdoor.ingress.host`, byte for byte**, because
+  the chart configures that as Casdoor's `origin` and Casdoor stamps it into
+  every token as `iss`, which the verifier compares exactly.
+- **The host must be served over HTTPS**, by `tls.secretName` or by the
+  controller's own default certificate, for the reason above.
+
+The last two are the pair the chart owns both sides of, so a mismatch on either
+**fails the render** rather than leaving every login to end in the same uniform
+401 a forged token gets. So do a missing `casdoor.ingress.host`, `adminPassword`,
+or `console.clientSecret`, and a missing `casdoor.database.dataSourceName` when
+the bundled Postgres is off.
+
+**Hardened by default**, because of CERT/CC VU#780781 — nine Casdoor CVEs, no
+vendor statement and no named fixed version:
+
+- The image is **pinned** (`casbin/casdoor:3.152.0`) past the release that
+  silently fixed the worst of them, and bumping it is a deliberate change.
+- The seed configures **zero upstream providers** (the binding path two
+  9.1-severity ones live on), **one populated organization** beside Casdoor's own
+  `built-in` (which voids the cross-org escalation), **no self-service signup**,
+  and a grant list **without token exchange** (CVE-2026-9097, 9.8).
+- The **Ingress refuses the SAML and CAS surfaces** — `/api/acs`,
+  `/api/get-saml-login`, `/api/saml/metadata`, `/api/saml/redirect`, `/cas` — by
+  routing them to a Service with no endpoints. They cannot be turned off in
+  Casdoor: its router registers them whatever is configured, and one process
+  serves the API and the login UI from one port, so "keep it internal" is not
+  available as a control. CI reads that path list out of the compose proxy's
+  config, so the two enforcement points cannot drift.
+- The **NetworkPolicy admits pod ingress only from the ingress controller**,
+  which is what makes those refusals a control rather than advice — reach the pod
+  another way and they are simply not on the path. Its default peer names the
+  namespace `ingress-nginx`; point `casdoor.networkPolicy.from` at your own
+  controller, or set `enabled: false` if your CNI does not enforce policy.
+
+Two operational facts worth knowing before you turn it on. **The chart owns
+Casdoor's own administrator**: `casdoor.adminPassword` replaces the documented
+default `123` on the `built-in/admin` account, which Casdoor creates itself
+before reading the seed — that account is a Casdoor global administrator, so
+treat the value as a bootstrap credential and change it at first login. It rides
+the seed ConfigMap in plaintext (Casdoor hashes it on ingest and the plaintext
+never reaches its database), next to `console.clientSecret`, which has always
+been there on the same terms — anyone who can read ConfigMaps in the namespace
+can read both. And **the seed is re-applied on every restart**, which is the only
+setting under which it can own that password: entities the seed names — the
+organization, the `map-console` application, the three groups, that account — are
+restored from your values on each boot, so change them in values rather than in
+the admin UI. Accounts you create for your people are not named by the seed and
+survive.
+
+The three groups the seed creates — `map/platform-admins`, `map/platform-devs`,
+`map/platform-read` — are what `identity.roleMap` keys on. Create your operators
+in the `map` organization and put each in one of them; the compose bundle's three
+demo accounts are deliberately **not** seeded here, since they carry documented
+passwords and this IdP is published.
+
 ## Security notes
 
 - **Sandbox Pod network isolation.** The executor launches sandbox Pods in the release

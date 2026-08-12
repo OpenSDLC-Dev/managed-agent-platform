@@ -402,6 +402,99 @@ account is created here; the **annotation** on that KSA comes from the chart val
 `namespace` and `release_name` are what the binding names — install the chart somewhere
 else and ADC fails at pod startup rather than denying a permission later.
 
+## Single sign-on: Google's identity provider, not ours
+
+[docs/plan/31_console-sso-rbac.md](../../docs/plan/31_console-sso-rbac.md) bundles a
+hardened Casdoor as the self-host default IdP — in compose, and in the Helm chart behind
+`casdoor.enabled`. **This environment deploys none of it**, and that is the plan's decision
+rather than a gap: on GCP the identity provider is Google's, so Cloud Identity Platform or
+Workspace does the SSO behind Identity-Aware Proxy, `casdoor.enabled` stays `false`, and the
+platform runs `IDENTITY_MODE=trusted_proxy` with the `gcp-iap` preset.
+
+**The preset is most of the configuration, and it refuses to be talked out of any of it.**
+[`internal/identity/preset.go`](../../internal/identity/preset.go) fixes the assertion header
+(`x-goog-iap-jwt-assertion`), the issuer (`https://cloud.google.com/iap`), the key set
+(`https://www.gstatic.com/iap/verify/public_key-jwk`) and the algorithm (ES256).
+Supplying `IDENTITY_PROXY_HEADER`, `_ISSUER`, `_KEYS_URL` or `_ALGS` beside it is a **boot
+error** — `configureGCPIAP` in [`internal/identity/config.go`](../../internal/identity/config.go)
+answers `IDENTITY_PROXY_PRESET=gcp-iap supplies IDENTITY_PROXY_HEADER; unset it` — not a
+variable that is quietly ignored. So the chart's values carry exactly `identity.mode`,
+`identity.proxy.preset`, `identity.proxy.audience`, `identity.claims.roles` and
+`identity.roleMap`, and [`staging-values.yaml`](./staging-values.yaml) sets those five and
+no more.
+
+**The audience is the whole tenant boundary, and calling it configuration undersells it.**
+The gstatic key set is global across every Google Cloud customer, so every customer's IAP
+assertion is signed by a key this deployment trusts; what separates them is `aud`. An empty
+or wrong audience is not a broken login, it is cross-customer authentication — which is why
+`configureGCPIAP` requires the value and rejects anything not shaped `/projects/…`. This
+configuration therefore derives it rather than asking anyone to transcribe it:
+
+| Knob | Where | What it does |
+| --- | --- | --- |
+| `iap_backend_service` | `environment/terraform.tfvars` | Names the backend service IAP is enabled on. Empty (the default) wires nothing at all. |
+| `iap_members` | same | The IAM member strings admitted, each granted `roles/iap.httpsResourceAccessor` on that backend service. `allUsers`/`allAuthenticatedUsers` are refused by the variable's validation. |
+| `identity_proxy_audience` | `terraform output` → the chart's `identity.proxy.audience` | `/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID`, composed from the project's number and the backend service's server-assigned numeric id. |
+
+Nothing here creates the backend service, because nothing here can: a GKE Ingress or Gateway
+creates it at admission time, under a generated name of the form
+`k8s1-HASH-NAMESPACE-SERVICE-PORT-HASH`. `gcloud compute backend-services list --global`
+names it, and **it changes when the Service behind it is recreated** — a stale value fails
+every human login while every machine credential keeps working, which is the quiet half of
+that failure. The audience is read back from the live backend service rather than taken as a
+second variable, so what the output prints and what the IAM bindings admit people to cannot
+name different backend services.
+
+**Terraform does not create the OAuth consent screen or the OAuth client, and as of March
+2026 it could not.** The provider says so itself — `terraform validate` on a
+`google_iap_brand` resource against `hashicorp/google` 7.42.0 answers:
+
+```text
+Warning: Deprecated Resource
+This resource is deprecated on Jan 22, 2025. After Jan 19, 2026 the
+`google_iap_brand` Terraform resource will no longer function as intended due to
+the deprecation of the IAP OAuth Admin APIs. New projects will not be able to use
+these APIs. March 19, 2026 The IAP OAuth Admin APIs will be permanently shut down.
+Access to this feature will no longer be available.
+```
+
+Two further reasons would have kept it out even before that date, and they are worth
+recording because "add the brand to Terraform" is the obvious-looking next step: an IAP
+brand has **no delete at all**, so it belongs to the durable half by the same argument the
+KMS key does; and `google_iap_client` exports its `secret`, which would put a live credential
+in a state file this configuration promises holds none ("No secret value is in either
+configuration", above). Configure the consent screen in the Cloud console, use IAP's
+Google-managed OAuth client where you can, and treat a custom client as an out-of-band
+credential like the Workload Identity Federation provider already is.
+
+**Roles come from the email claim, because an IAP assertion names a person rather than their
+groups.** `identity.claims.roles: email` points the mapper at the claim the assertion
+actually carries, and `identity.roleMap` maps addresses to `admin` / `developer` / `viewer`.
+Two consequences to hold on to. A claim value may contain neither `,` nor `=` — `parseRoleMap`
+splits on both, and a value carrying one fails startup rather than mapping something
+unintended; email and Google group addresses are unaffected. And **admission is not
+authorization**: `iap_members` decides who reaches the control plane, the role map decides
+what they may do, and a human who passes IAP and matches no entry in the map holds no role
+and is refused by every role-gated route — 403, not 401. An IdP that does place a group claim
+in the assertion is configured by pointing `identity.claims.roles` at that name instead;
+nothing in the platform presumes `email`.
+
+**The topology is a requirement, not a diagram.** The proxy must front the *control plane's
+own* backend service, so that every human request carries an assertion audience-bound to it
+and the browser reaches the platform directly rather than through a server-to-server console
+hop — which would make IAP authenticate the console's workload identity and collapse every
+user onto one principal. Machine traffic (`/v1` keys, worker environment keys) rides a
+**separate, non-proxied backend** at the load balancer.
+
+**None of this is switched on here, and the reason is one line above it in this file.** IAP
+lives on an HTTPS load balancer; this environment publishes the control plane as a
+plain-HTTP L4 LoadBalancer with no domain, so there is no backend service to enable IAP on
+and nothing for a certificate to be issued against. Both variables default to empty, the
+audience output is then empty, and `staging-values.yaml` ships the platform half — the lane
+— with fail-closed placeholders and a note saying exactly that. Building the front door is
+the GKE Gateway work [docs/deploy-gcp.md](../../docs/deploy-gcp.md#exposing-the-control-plane)
+describes; these knobs are what configures IAP once it exists.
+
 ## Continuous delivery
 
 Everything above is the manual path, and it stays the manual path. What

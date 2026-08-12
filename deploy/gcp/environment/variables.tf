@@ -348,3 +348,96 @@ variable "docker_hub_mirror" {
   EOT
   default     = true
 }
+
+# ---------------------------------------------------------------------------
+# Identity-Aware Proxy — the human front door (docs/plan/31_console-sso-rbac.md,
+# #56). On GCP the identity provider is Google's: IAP terminates the login and
+# Cloud Identity Platform or Workspace does the SSO, so no Casdoor is deployed
+# here and the chart's casdoor.enabled stays false. The platform side is
+# IDENTITY_MODE=trusted_proxy with the gcp-iap preset, which fixes the assertion
+# header, the issuer, the key set and the algorithm in CODE
+# (internal/identity/preset.go) and refuses an attempt to override any of them at
+# startup (internal/identity/config.go, configureGCPIAP) — so the only
+# verification parameter a deployment supplies is the audience, and these
+# variables are how it is derived rather than transcribed.
+#
+# Both default to OFF, and off is what this environment ships: IAP sits on an
+# HTTPS load balancer and this one has none. The control plane is published as a
+# plain-HTTP L4 LoadBalancer with no domain (staging-values.yaml,
+# controlplane.service.type), so there is no backend service to enable IAP on and
+# nothing for a certificate to be issued against. Building that front door is the
+# GKE Gateway work docs/deploy-gcp.md's "Exposing the control plane" describes;
+# these variables are what configures IAP once it exists, not a switch that
+# creates it.
+# ---------------------------------------------------------------------------
+
+variable "iap_backend_service" {
+  type        = string
+  description = <<-EOT
+    Name of the backend service IAP is enabled on — the one fronting the control
+    plane. Empty (the default) wires no IAP at all: no IAM binding is created and
+    the identity_proxy_audience output is empty.
+
+    A variable rather than a resource because nothing here creates it. A GKE
+    Ingress or Gateway does, at admission time, under a generated name of the
+    form k8s1-HASH-NAMESPACE-SERVICE-PORT-HASH. Read it back with
+
+        gcloud compute backend-services list --global --project YOUR_PROJECT
+
+    and expect it to CHANGE when the Service behind it is recreated: the audience
+    is derived from this, and a stale one fails every human login while every
+    machine credential keeps working — which is the quiet half of that failure.
+
+    Set it before the backend service exists and the plan fails on the data
+    source that reads it, which is the loud half and the one worth having.
+
+    The topology the plan requires is not expressible here and is stated instead:
+    the proxy must front the CONTROL PLANE's own backend service, so every human
+    request carries an assertion audience-bound to it, and machine traffic — /v1
+    keys and worker environment keys — must ride a SEPARATE, non-proxied backend
+    at the load balancer.
+  EOT
+  default     = ""
+}
+
+variable "iap_members" {
+  type        = list(string)
+  description = <<-EOT
+    Who IAP admits, as IAM member strings — user:alice@example.com,
+    group:platform@example.com, domain:example.com. Each is granted
+    roles/iap.httpsResourceAccessor on var.iap_backend_service. Empty (the
+    default) admits nobody, which is the right default for a door not yet built.
+
+    Admission is not authorization, and the two are configured in different
+    places. Passing IAP only means the platform receives a verified assertion;
+    what that human may DO comes from the role map (the chart's
+    identity.roleMap → IDENTITY_ROLE_MAP), and a claim value mapping to no role
+    holds no authority at all (internal/identity, fail-closed). So a member listed
+    here and absent from the role map reaches the control plane and is refused by
+    every role-gated route — 403, not 401.
+  EOT
+  default     = []
+
+  # The prefix is required rather than assumed, and that also refuses allUsers and
+  # allAuthenticatedUsers by construction. Both are accepted by the IAM API on
+  # this binding, and either one hands the public — every Google account on the
+  # internet, in the second case — a verified assertion at the door this variable
+  # exists to be.
+  validation {
+    condition = alltrue([
+      for m in var.iap_members :
+      can(regex("^(user|group|domain|serviceAccount):[^ ]+$", m))
+    ])
+    error_message = "every iap_members entry must be an IAM member string — user:…, group:…, domain:… or serviceAccount:…. allUsers and allAuthenticatedUsers are refused: either one admits the public."
+  }
+
+  # Cross-variable, which Terraform allows from 1.9 and this configuration already
+  # requires 1.11 for. Without it the for_each in iam.tf plans one binding per
+  # member against an EMPTY backend-service name — a plan that reads as though the
+  # grants were about to be made, and an API call that refuses them. This moves
+  # that from apply time to plan time, and to the variable that caused it.
+  validation {
+    condition     = length(var.iap_members) == 0 || var.iap_backend_service != ""
+    error_message = "iap_members needs iap_backend_service — a grant with no backend service to land on would be silently dropped rather than applied."
+  }
+}

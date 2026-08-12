@@ -348,10 +348,18 @@ services:
       origin: ${IDENTITY_OIDC_ISSUER:-http://localhost:8000}
       httpport: "8000"
       initDataFile: /init_data.json
-      # The shipped default is false, which DELETES and re-adds every seeded
-      # entity on every start — an unattended restart would silently discard an
-      # operator's edits. Not optional polish.
-      initDataNewOnly: "true"
+      # false is the shipped default and is kept deliberately, because it is the
+      # only setting under which the seed owns built-in/admin. Casdoor's InitDb()
+      # creates that account — a global administrator, password 123, documented
+      # publicly — BEFORE it reads this file, so with true our entry for it is
+      # skipped and the default credential survives every boot. Measured both
+      # ways against 3.152.0: with true the stored hash stays Casdoor's, with
+      # false it is ours and 123 is refused.
+      #
+      # The cost is bounded and was measured too: on restart, entities named in
+      # the seed are re-applied, so edits to those four revert; entities the seed
+      # does not name are untouched. A user added in the UI survives.
+      initDataNewOnly: "false"
       # Ships as a file logger writing under /logs, which uid 1000 cannot create
       # in a root-owned "/". Console keeps it in `docker compose logs` anyway.
       logConfig: '{"adapter":"console"}'

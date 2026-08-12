@@ -1,0 +1,93 @@
+{{- if .Values.casdoor.enabled -}}
+{{/*
+The seed Casdoor reads at boot (initDataFile), one file for two deployment
+targets. files/casdoor-init-data.json is a BYTE-FOR-BYTE copy of
+deploy/compose/casdoor-init-data.json — CI compares them — because the seed is not
+hand-written: its entities were created through Casdoor's own API and read back,
+so the account items and the signup/signin item lists are Casdoor's own rather
+than a guess at them. What genuinely differs per deployment is patched below
+instead of forked into a second file that would drift.
+
+Two of its settings are the hardening the plan asks for, and they live in this
+file rather than in the environment because that is where Casdoor takes them:
+`tokenFormat: "JWT"` — the alternative, JWT-Standard, drops `roles`,
+`permissions` and `groups` from the token entirely, which would leave
+identity.roleMap nothing to map — and a `grantTypes` list without
+urn:ietf:params:oauth:grant-type:token-exchange, the grant CVE-2026-9097 (9.8,
+revoked JWT accepted) lives on. authorization_code stays enabled regardless of
+that list (IsGrantTypeValid special-cases it), which is the grant the console
+uses.
+*/}}
+{{- $seed := .Files.Get "files/casdoor-init-data.json" | fromJson -}}
+{{- if not $seed.applications -}}
+{{- fail "files/casdoor-init-data.json has no applications: the seed's shape changed and the patches in casdoor-init-data-configmap.yaml no longer apply." -}}
+{{- end -}}
+{{- /* The three demo accounts compose seeds for a laptop are real, working
+       credentials — verified by logging in as each against a running 3.152.0 —
+       and a published cluster IdP must not carry documented passwords, so they
+       are dropped here. The organization, the application and the GROUPS stay:
+       the groups are what identity.roleMap keys on, and NOTES.txt tells the
+       operator to create their own users against them.
+
+       The FOURTH account is kept and re-owned. Casdoor's InitDb() creates
+       `built-in/admin` — a Casdoor global administrator — on the publicly
+       documented password `123` before the seed is read, so leaving it out does
+       not remove it; it only leaves the default in place behind the Ingress. The
+       entry is taken from the seed rather than written here, so its shape stays
+       Casdoor's own, and only the password is replaced.
+
+       passwordType "plain" hands Casdoor the plaintext and lets IT hash — not
+       because hashing here was hard, but because sprig's htpasswd salts randomly,
+       so two renders of identical values differ, the ConfigMap and the
+       Deployment's checksum annotation change every time, and `helm upgrade`
+       rolls the IdP pod while Argo/Flux sit permanently OutOfSync. That is the
+       instability values.yaml refuses for postgresql.password and the MinIO and
+       OpenBao credentials, and it would be worse here for arriving silently.
+       Measured against 3.152.0 rather than assumed: Casdoor stores bcrypt on the
+       first boot AND through the re-apply path this file's initDataNewOnly=false
+       takes every restart — the plaintext never reaches its database. The cost
+       is that it does reach this ConfigMap, next to console.clientSecret, which
+       has always been there on the same terms. */ -}}
+{{- if not .Values.casdoor.adminPassword -}}
+{{- fail "casdoor.adminPassword is required when casdoor.enabled: Casdoor creates a global administrator `built-in/admin` on the publicly documented default password `123`, and the chart will not publish that through an Ingress. It is not auto-generated, the rule console.clientSecret follows." -}}
+{{- end -}}
+{{- $admin := dict -}}
+{{- range $seed.users -}}
+{{- if and (eq .owner "built-in") (eq .name "admin") -}}
+{{- $admin = . -}}
+{{- end -}}
+{{- end -}}
+{{- if not $admin -}}
+{{- fail "files/casdoor-init-data.json no longer carries the built-in/admin entry this chart re-owns: without it the deployed IdP keeps Casdoor's default password `123` for its global administrator." -}}
+{{- end -}}
+{{- $_ := set $admin "password" .Values.casdoor.adminPassword -}}
+{{- $_ = set $admin "passwordType" "plain" -}}
+{{- $_ = set $seed "users" (list $admin) -}}
+{{- $app := index $seed.applications 0 -}}
+{{- if not .Values.casdoor.console.clientSecret -}}
+{{- fail "casdoor.console.clientSecret is required when casdoor.enabled: the chart does not auto-generate it (a generated credential is unstable under `helm template`/GitOps, the rule postgresql.password and the MinIO/OpenBao credentials follow). It is the console's OAuth client secret." -}}
+{{- end -}}
+{{- /* The second equality the chart owns both sides of: Casdoor puts the
+       application's CLIENT ID in `aud`, and a token whose aud does not contain
+       the configured audience is refused with the same uniform 401 as a forged
+       one. Checked only when the identity lane is configured for OIDC, so that
+       deploying the IdP first and wiring identity second still renders. */ -}}
+{{- if and (eq .Values.identity.mode "oidc") .Values.identity.oidc.audience -}}
+{{- if ne .Values.identity.oidc.audience .Values.casdoor.console.clientId -}}
+{{- fail (printf "identity.oidc.audience %q must equal casdoor.console.clientId %q: Casdoor puts the client id in `aud`, and the verifier requires its configured audience to appear there." .Values.identity.oidc.audience .Values.casdoor.console.clientId) -}}
+{{- end -}}
+{{- end -}}
+{{- $_ = set $app "clientId" .Values.casdoor.console.clientId -}}
+{{- $_ = set $app "clientSecret" .Values.casdoor.console.clientSecret -}}
+{{- $_ = set $app "redirectUris" .Values.casdoor.console.redirectURIs -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "map.fullname" . }}-casdoor-init-data
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: casdoor
+data:
+  init_data.json: |
+    {{- toPrettyJson $seed | nindent 4 }}
+{{- end -}}
