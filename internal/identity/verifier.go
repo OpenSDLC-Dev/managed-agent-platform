@@ -176,17 +176,26 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		return Identity{}, reject("not a verifiable JWS")
 	}
 	hdr := tok.Headers[0]
-	// Any crit at all is refused, and refused HERE — before the key lookup, so a
-	// junk token cannot even reach the network.
+	// Neither crit nor b64 may appear, and both are refused HERE — before the key
+	// lookup, so a junk token cannot even reach the network. go-jose files both
+	// under ExtraHeaders because its sanitized() switch names neither.
 	//
-	// go-jose's own check is weaker than it looks: it allows a crit naming "b64"
-	// (shared.go's supportedCritical), and RFC 7797 §7 says a JWT MUST NOT use
-	// b64 — an unencoded payload is exactly the kind of thing two parsers
-	// disagree about. Nothing this package needs is negotiated through crit, so
-	// "present" is the whole test. go-jose files crit under ExtraHeaders because
-	// its sanitized() switch does not name it.
-	if _, ok := hdr.ExtraHeaders[jose.HeaderKey("crit")]; ok {
-		return Identity{}, reject("crit header present")
+	// crit: go-jose's own check is weaker than it looks, allowing a crit that
+	// names "b64" (shared.go's supportedCritical). Nothing this package needs is
+	// negotiated through crit, so "present" is the whole test.
+	//
+	// b64 is checked separately rather than only through crit because go-jose
+	// honours it either way: computeAuthData (jws.go) reads b64 from the
+	// protected header with no reference to crit, and verifies over the raw
+	// payload when it is false. RFC 7797 §7 says a JWT MUST NOT use b64 at all.
+	// No attacker can reach this — the protected header is signed, so adding b64
+	// breaks the signature — but a provider minting one would hand us a token
+	// other verifiers read differently, and that is a difference to refuse
+	// rather than absorb.
+	for _, name := range [...]jose.HeaderKey{"crit", "b64"} {
+		if _, ok := hdr.ExtraHeaders[name]; ok {
+			return Identity{}, reject("crit or b64 header present")
+		}
 	}
 	if hdr.KeyID == "" {
 		return Identity{}, reject("no kid")

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -563,9 +564,24 @@ func TestVerifyRejectsCritHeader(t *testing.T) {
 		token := keyed.signClaims(t, jose.RS256, claims, map[jose.HeaderKey]any{"crit": crit})
 		got, err := v.Verify(context.Background(), token)
 		ie := verifierXRejected(t, "crit "+strings.Join(crit, ","), got, err)
-		if want := "crit header present"; ie.Reason() != want {
+		if want := "crit or b64 header present"; ie.Reason() != want {
 			t.Errorf("crit %v: Reason() = %q, want %q — the rejection must be the crit rule, "+
 				"not a later step", crit, ie.Reason(), want)
+		}
+	}
+
+	// b64 WITHOUT crit, which the crit rule alone would let through while go-jose
+	// still honours it: computeAuthData reads b64 from the protected header with
+	// no reference to crit and verifies over the raw payload when it is false.
+	// Unreachable for an attacker — the protected header is signed — but a
+	// provider that minted one would hand us a token other verifiers read
+	// differently.
+	for _, b64 := range []any{false, true} {
+		token := keyed.signClaims(t, jose.RS256, claims, map[jose.HeaderKey]any{"b64": b64})
+		got, err := v.Verify(context.Background(), token)
+		ie := verifierXRejected(t, fmt.Sprintf("bare b64:%v", b64), got, err)
+		if want := "crit or b64 header present"; ie.Reason() != want {
+			t.Errorf("bare b64:%v: Reason() = %q, want %q", b64, ie.Reason(), want)
 		}
 	}
 

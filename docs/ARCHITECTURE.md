@@ -583,8 +583,9 @@ strict OIDC relying party over `github.com/go-jose/go-jose/v4`, with no vendor S
 slice 1, no route yet consuming it. `Verify` authenticates one compact JWT and returns an
 `Identity` (issuer, subject, email, display name, `Role`): the signature allowlist is a required
 parameter of go-jose's parser, so `alg:none` and HS256 are refused before any key lookup; a `crit`
-header is refused outright and equally early, since go-jose's own check permits `crit:["b64"]`
-while RFC 7797 §7 forbids `b64` in a JWT; `iss` is
+or `b64` header is refused outright and equally early, since go-jose permits `crit:["b64"]` and
+separately honours a bare `b64` (verifying over the raw payload) while RFC 7797 §7 forbids `b64` in
+a JWT at all; `iss` is
 exact, `aud` must contain the configured audience, `azp` is checked when `aud` carries several,
 and non-empty `sub` and `exp` are required because go-jose checks neither. Every rejection is one
 `*Error` whose `Error()` is a constant string, the detail behind `Reason()` for the caller's log —
