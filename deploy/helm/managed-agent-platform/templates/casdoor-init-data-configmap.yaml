@@ -22,6 +22,25 @@ uses.
 {{- if not $seed.applications -}}
 {{- fail "files/casdoor-init-data.json has no applications: the seed's shape changed and the patches in casdoor-init-data-configmap.yaml no longer apply." -}}
 {{- end -}}
+{{- /* Every value patched below lands in JSON that Casdoor unmarshals into a
+       string field, so a value YAML did not read as a string is refused here
+       rather than rendered. It is not pedantry: `adminPassword: 12345678`
+       unquoted is a number to YAML and renders as the JSON number 12345678,
+       which fails Casdoor's unmarshal, which abandons the seed, which leaves
+       `123` on the global administrator this file exists to take ownership of —
+       silently, and looking exactly like success. A long one is worse than
+       refused, it is CHANGED: 12345678901234567890 renders as
+       ...567000, a password nobody typed. `adminPassword: yes` is `true`. The
+       same float64 hazard the sandbox-hardening knobs hit, one JSON document
+       further along. Quote it. */ -}}
+{{- range $k, $v := dict
+      "casdoor.adminPassword" .Values.casdoor.adminPassword
+      "casdoor.console.clientSecret" .Values.casdoor.console.clientSecret
+      "casdoor.console.clientId" .Values.casdoor.console.clientId -}}
+{{- if ne (kindOf $v) "string" -}}
+{{- fail (printf "%s must be a quoted string, but YAML read it as %s. Casdoor unmarshals it into a string field, so an unquoted value abandons the whole seed — and an unquoted long number is silently rounded before it ever gets there. Write it as \"%v\"." $k (kindOf $v) $v) -}}
+{{- end -}}
+{{- end -}}
 {{- /* The three demo accounts compose seeds for a laptop are real, working
        credentials — verified by logging in as each against a running 3.152.0 —
        and a published cluster IdP must not carry documented passwords, so they

@@ -937,6 +937,32 @@ jobs:
           helm template t "$CHART" -f "$VALUES" "${full[@]}" --show-only templates/casdoor.yaml \
             | grep -A1 'name: initDataNewOnly' | grep -q 'value: "false"' \
             || { echo "initDataNewOnly must be false or the seeded admin password is ignored" >&2; exit 1; }
+          # A value YAML did not read as a string must be refused, not rendered.
+          # These land in JSON Casdoor unmarshals into string fields, so a number
+          # abandons the whole seed — which leaves `123` on the global
+          # administrator while looking exactly like a successful deploy. Both
+          # input paths, because they differ: `--set` parses an integer, a values
+          # FILE parses a float64, and a long float64 is silently rounded (the
+          # same hazard the sandbox-hardening knobs hit, one JSON document on).
+          cat > /tmp/casdoor-unquoted.yaml <<'YAML'
+          casdoor:
+            adminPassword: 12345678901234567890
+            console:
+              clientSecret: cs
+          YAML
+          for bad in "--set casdoor.adminPassword=12345678 --set casdoor.console.clientSecret=cs" \
+                     "-f /tmp/casdoor-unquoted.yaml"; do
+            err="$(helm template t "$CHART" -f "$VALUES" "${idp[@]}" $bad 2>&1 >/dev/null)" \
+              && { echo "an unquoted credential must fail the render: $bad" >&2; exit 1; }
+            echo "$err" | grep -q 'must be a quoted string' \
+              || { echo "the unquoted render failed for the wrong reason: $err" >&2; exit 1; }
+          done
+          # ...and a quoted one still reaches the seed as a JSON string.
+          helm template t "$CHART" -f "$VALUES" "${idp[@]}" \
+            --set-string casdoor.adminPassword=12345678 --set casdoor.console.clientSecret=cs \
+            --show-only templates/casdoor-init-data-configmap.yaml \
+            | grep -q '"password": "12345678"' \
+            || { echo "a quoted credential did not render as a JSON string" >&2; exit 1; }
           # The audience Casdoor mints is the client id, so a render where the two
           # disagree is refused rather than left to fail every token behind a 401.
           err="$(helm template t "$CHART" -f "$VALUES" "${full[@]}" \

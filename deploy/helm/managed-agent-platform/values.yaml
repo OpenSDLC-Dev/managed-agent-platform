@@ -599,6 +599,13 @@ casdoor:
   # ConfigMaps in this namespace can read it — so treat it as a bootstrap
   # credential and change it in the admin UI if that boundary matters. Not
   # auto-generated, for the same reason console.clientSecret is not.
+  #
+  # QUOTE IT, along with console.clientSecret and console.clientId. All three land
+  # in JSON Casdoor unmarshals into string fields, and an all-digit password left
+  # unquoted is a number to YAML: the seed then fails to load and `123` survives
+  # on the account this value exists to take over. A long one is rounded before it
+  # gets that far. The chart refuses a non-string rather than rendering one, so
+  # this is a render error and not a silent boot failure — but quote it.
   adminPassword: ""
   # -- The OIDC application the seed creates for the console.
   #
