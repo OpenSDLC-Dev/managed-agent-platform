@@ -770,16 +770,26 @@ func TestValidateToolConfirmations(t *testing.T) {
 			fmt.Sprintf(`events[0]: tool_use_id %q does not name a tool use in this session`, id))
 	})
 
-	// Only agent.tool_use is confirmable, and the restriction lives in the
-	// WHERE clause — so an ask-gated custom or MCP tool use falls out as
-	// ErrNoRows and is reported as missing, not as ungated. Counter-intuitive
-	// but correct; a refactor moving the predicate would change the message.
+	// A custom tool is not confirmable, and the restriction lives in the WHERE
+	// clause — so an ask-gated custom tool use falls out as ErrNoRows and is
+	// reported as missing, not as ungated. Counter-intuitive but correct; a
+	// refactor moving the predicate would change the message.
 	t.Run("non-confirmable kinds report missing, not ungated", func(t *testing.T) {
-		for _, typ := range []domain.EventType{domain.EventAgentCustomToolUse, domain.EventAgentMCPToolUse} {
-			sid := newSession(t, pool)
-			id := toolUse(t, log, sid, typ, `"ask"`)
-			wantErrIs(t, validate(sid, inConfirm(id.String())),
-				fmt.Sprintf(`events[0]: tool_use_id %q does not name a tool use in this session`, id))
+		sid := newSession(t, pool)
+		id := toolUse(t, log, sid, domain.EventAgentCustomToolUse, `"ask"`)
+		wantErrIs(t, validate(sid, inConfirm(id.String())),
+			fmt.Sprintf(`events[0]: tool_use_id %q does not name a tool use in this session`, id))
+	})
+
+	// An MCP tool use is confirmable: the reference keys the confirmation on
+	// tool_use_id for both families ("The id of the agent.tool_use or
+	// agent.mcp_tool_use event this result corresponds to"), so a human
+	// approving an MCP call sends exactly what they send for a built-in.
+	t.Run("an MCP tool use is confirmable", func(t *testing.T) {
+		sid := newSession(t, pool)
+		id := toolUse(t, log, sid, domain.EventAgentMCPToolUse, `"ask"`)
+		if err := validate(sid, inConfirm(id.String())); err != nil {
+			t.Errorf("confirmation of an ask-gated MCP call rejected: %v", err)
 		}
 	})
 
@@ -938,13 +948,15 @@ func TestUnconfirmedAskEvents(t *testing.T) {
 		}
 	})
 
-	t.Run("only built-in tool uses qualify", func(t *testing.T) {
+	// Both platform-executed families block the gate; a custom tool never does,
+	// because the client runs it and the platform gates nothing it cannot stop.
+	t.Run("only platform-executed tool uses qualify", func(t *testing.T) {
 		sid := newSession(t, pool)
 		toolUse(t, log, sid, domain.EventAgentCustomToolUse, `"ask"`)
-		toolUse(t, log, sid, domain.EventAgentMCPToolUse, `"ask"`)
+		mcp := toolUse(t, log, sid, domain.EventAgentMCPToolUse, `"ask"`)
 		id := ask(t, log, sid)
-		if got := list(t, sid, nil); !slices.Equal(got, []string{id.String()}) {
-			t.Errorf("ids = %v, want just the agent.tool_use %s", got, id)
+		if got := list(t, sid, nil); !slices.Equal(got, []string{mcp.String(), id.String()}) {
+			t.Errorf("ids = %v, want the MCP %s and the built-in %s, in log order", got, mcp, id)
 		}
 	})
 

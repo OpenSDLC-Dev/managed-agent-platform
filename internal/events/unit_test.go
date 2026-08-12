@@ -43,6 +43,35 @@ func TestChunkTextEscapeBudget(t *testing.T) {
 	}
 }
 
+// White-box: the two tables that decide gating have to agree, and the way they
+// can drift is silent. confirmableToolUseTypes says which calls a human may be
+// asked about; toolUseAnswer says what answers each family when the human says
+// no (or a user.interrupt abandons it). A confirmable family missing from the
+// answer table has no denial shape at all, so its denial would fail at the one
+// moment a session depends on it. An answer that is an inbound type would land
+// with a NULL processed_at unless the synthesis stamped it, since the store
+// stamps only what it emits itself — and a result carrying a session_thread_id
+// would invent a field neither agent.* result declares on the wire.
+//
+// This is a test rather than a runtime check because the drift is a compile-time
+// fact about two package-level variables: unreachable code cannot be exercised,
+// and an assertion that cannot fail is not a guard.
+func TestEveryConfirmableFamilyHasAnOutboundAnswer(t *testing.T) {
+	for _, typ := range confirmableToolUseTypes {
+		answer, ok := toolUseAnswer[domain.EventType(typ)]
+		if !ok {
+			t.Errorf("%s is confirmable but no result event answers it", typ)
+			continue
+		}
+		if answer.result.Inbound() {
+			t.Errorf("%s is answered by %s, an inbound type the store does not stamp", typ, answer.result)
+		}
+		if answer.thread {
+			t.Errorf("%s is answered by %s, which the table marks as carrying a session_thread_id", typ, answer.result)
+		}
+	}
+}
+
 // White-box: a dropped event_delta must poison the remainder of its preview
 // (prefix, never an interior hole), and the next event_start resets it.
 func TestDispatchDropsDeltasAsPrefix(t *testing.T) {
