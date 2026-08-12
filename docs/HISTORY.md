@@ -353,7 +353,8 @@ Both minted tokens decode exactly as the platform requires:
   (`env_rkjmgx2tdf1k7v7ta89jbsan`), both authenticated by nothing but the Casdoor
   token.
 - **Viewer is refused the same mutations.** `POST /v1/agents` → **403**, body
-  `{"type":"permission_error","message":"this route requires the developer role"}`;
+  `{"error":{"message":"this route requires the developer role","type":"permission_error"},"request_id":"req_…","type":"error"}`
+  — the wire error envelope, with the refusal in its `error` member;
   `POST /v1/environments` → **403**. The same token reads: `GET /v1/agents` →
   **200**. Role, not authentication, is what separates the two.
 - **The console key surface is admin-only.** Viewer on

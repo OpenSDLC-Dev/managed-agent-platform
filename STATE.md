@@ -4,22 +4,26 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**none.**
+[Plan 29](./docs/plan/29_mcp-toolset.md) — the MCP client and `mcp_toolset` end to end
+(#45), developed on its own branch: an agent configured with an `mcp_toolset` gets no
+tools today, and this plan closes that with discovery, gating, credential injection and
+the reference's failure semantics. Seven slices; Tasks below is its progress.
 
-[Plan 31](./docs/plan/31_console-sso-rbac.md) — console SSO and RBAC (#56) —
-archived 2026-08-12 on what it shipped: slices 1–4
-([#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369),
-[#370](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/370),
-[#371](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/371),
-[#374](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/374)) and an
-acceptance run proving the chain end to end — a real Casdoor token minted by
-code+PKCE, a viewer refused a mutation, an admin issuing an environment key over
-the console API, and a real `ant beta:worker poll` authenticating with it
-(docs/HISTORY.md). Slice 5, the api-key issuance surface, did not ship: it is
-gated on a live observation of the reference console's dialect, so it moved to
-[#378](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/378) under
-the plan's own provision rather than shipping an invented dialect.
+[Plan 31](./docs/plan/31_console-sso-rbac.md) — console SSO and RBAC (#56) — archived
+2026-08-12 on slices 1–4 and an acceptance run (docs/HISTORY.md). Slice 5, the api-key
+issuance surface, moved to [#378](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/378)
+under the plan's own provision rather than shipping an invented dialect.
 
 ## Tasks
 
-None in flight. The backlog is [GitHub issues](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues).
+- [x] Slice 1 — wire correctness: bidirectional reference validation, nested
+      `mcp_toolset` shape validation, resolved-config echo ([#343](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/343)).
+- [ ] Slice 2 — `internal/mcp` + catalog: the client and the shared dial-address guard
+      landed ([#352](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/352)); the `mcp_catalogs` migration and the executor's
+      discovery driver are in review ([#377](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/377)).
+- [ ] Slice 3 — gate machinery: `confirmableToolUseTypes`, MCP-shaped denial/interrupt.
+- [ ] Slice 4 — activation: brain expansion, `agent.mcp_tool_use`, the execution driver,
+      four-way settlement, output spill. **#45's acceptance criterion is met here.**
+- [ ] Slice 5 — credentials: matching, injection, OAuth refresh, `mcp_authentication_failed`.
+- [ ] Slice 6 — networking polish: `allow_mcp_servers`, retry escalation, `mcp_connection_failed`.
+- [ ] Slice 7 — evals, the live tier, the `ant` acceptance transcript, archiving.
