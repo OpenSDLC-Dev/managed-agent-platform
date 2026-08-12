@@ -98,11 +98,11 @@ func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler
 // Default-deny falls out of Role.AtLeast rather than being coded here. AtLeast
 // fails closed at both ends — a minimum that is not one of the three roles
 // denies, and RoleNone satisfies nothing — and identity.RoleNone is not one of
-// the three. So a route
-// registered with RoleNone (plan 31 slice 2 registers every route that way
-// except the environment-key surface; slice 3 annotates them) denies every
-// human, and a human whose claims mapped to nothing denies everywhere. Neither
-// case needs a branch, and neither can be forgotten.
+// the three. So a route registered with RoleNone denies every human, and a human
+// whose claims mapped to nothing denies everywhere. Neither case needs a branch,
+// and neither can be forgotten. Slice 3 annotated every identity-reachable route
+// per the plan's matrix; the registrations still at RoleNone are the machine
+// lanes, where this function has already returned nil before min is read.
 func requireRole(ctx context.Context, min identity.Role) error {
 	p, onIdentityLane := identityFrom(ctx)
 	if !onIdentityLane {

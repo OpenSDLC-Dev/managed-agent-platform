@@ -259,24 +259,34 @@ func TestIdentityLaneProvisionsOnceAndRefreshes(t *testing.T) {
 	}
 }
 
-// TestIdentityLaneDefaultDenies is the property that makes the lane safe to ship
-// before slice 3 annotates any route: a route carrying no role requirement
-// refuses every human, however strong their role, while the same route still
-// serves the management key.
+// TestIdentityLaneDefaultDenies is the half of default-deny that survives slice
+// 3. Slice 2 could show it with any route, since every route sat at the floor;
+// now that the matrix has relaxed them, the property lives at the other end of
+// Role.AtLeast: a human the deployment's role map does not recognise satisfies
+// nothing, so they are refused on the most permissive route there is, while the
+// same route still serves the management key.
+//
+// This is what an unmapped group looks like in practice — a real person, a valid
+// token, an IdP group nobody mapped — and it must never read as permission.
 func TestIdentityLaneDefaultDenies(t *testing.T) {
 	s := newLaneServer(t)
 
-	for _, role := range []string{"platform-read", "platform-devs", "platform-admins"} {
-		status, errType := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", s.token(role), nil))
+	for _, claim := range []string{"unmapped-group", "Platform-Read", "platform-read-only"} {
+		status, errType := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", s.token(claim), nil))
 		if status != http.StatusForbidden {
-			t.Errorf("GET /v1/agents as %s: status %d, want 403", role, status)
+			t.Errorf("GET /v1/agents as %q: status %d, want 403 — an unmapped claim value is not a role", claim, status)
 		}
 		if errType != "permission_error" {
-			t.Errorf("GET /v1/agents as %s: error type %q, want permission_error", role, errType)
+			t.Errorf("GET /v1/agents as %q: error type %q, want permission_error", claim, errType)
 		}
 	}
 
-	// The control: the same unannotated route, the same server, the machine key.
+	// A token carrying no role claim at all is the same case, reached differently.
+	if status, _ := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", s.token(), nil)); status != http.StatusForbidden {
+		t.Errorf("GET /v1/agents with no role claim: status %d, want 403", status)
+	}
+
+	// The control: the same route, the same server, the machine key.
 	if status, _ := s.do(http.MethodGet, "/v1/agents", nil); status != http.StatusOK {
 		t.Errorf("GET /v1/agents with x-api-key: status %d, want 200 — the key lane has no role to check", status)
 	}
@@ -584,7 +594,14 @@ func TestEnvironmentKeyCannotReachAConsoleRoute(t *testing.T) {
 // TestDualAuthDiscriminatesByCredentialShape covers the branch that now carries
 // two different Bearer credentials. An environment key is sk-map-env01- plus
 // base64url and holds no dots, so it can never be read as a JWT; a JWT goes to
-// the human lane, where slice 2's default-deny refuses it.
+// the human lane and is role-checked there.
+//
+// The human token deliberately carries an UNMAPPED claim value, so the 403 that
+// proves which lane served the request comes from the caller having no role
+// rather than from the route's requirement. That keeps this test about credential
+// shape, which is its subject, and leaves the matrix to TestRoleMatrixIsEnforced-
+// OnEveryRoute — otherwise annotating these two routes would silently turn the
+// lane assertion below into a tautology.
 func TestDualAuthDiscriminatesByCredentialShape(t *testing.T) {
 	s := newLaneServer(t)
 	agent := createAgent(t, s.tserver, map[string]any{"name": "a", "model": "m"})
@@ -607,8 +624,9 @@ func TestDualAuthDiscriminatesByCredentialShape(t *testing.T) {
 		}
 
 		// A human token on the same route takes the identity lane, and is refused
-		// there by default-deny rather than being mistaken for a worker credential.
-		status, errType := laneStatus(t, s.bearer(http.MethodGet, route, s.token("platform-admins"), nil))
+		// there for having no role rather than being mistaken for a worker
+		// credential — which would have served it.
+		status, errType := laneStatus(t, s.bearer(http.MethodGet, route, s.token("unmapped-group"), nil))
 		if status != http.StatusForbidden {
 			t.Errorf("human token on %s: status %d, want 403", route, status)
 		}

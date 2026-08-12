@@ -804,8 +804,11 @@ with tracking issues, not silent omissions:
   repo's plan 07. Three limits are stated rather than papered over: this is a
   management-credential surface, so it delegates no authority the management
   `x-api-key` did not already carry and there is no separate "can mint worker
-  keys" role; and a key still cannot be scoped to less than its whole
-  environment. A third limit was lifted on 2026-08-11: the acceptance now also
+  keys" role — a human reaching it over SSO needs the general `admin` role
+  (plan 31, [#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56)),
+  the whole surface including the listing, while the management key itself
+  remains ungated because it has always meant full authority; and a key still
+  cannot be scoped to less than its whole environment. A third limit was lifted on 2026-08-11: the acceptance now also
   covers a worker *executing* a pulled tool call on such a key — a real
   `ant beta:worker` claimed a `tool_exec` item, ran `bash` in-process and settled
   the result back, closing

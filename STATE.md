@@ -8,7 +8,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 humans authenticate through any standards-compliant OIDC provider, and the
 control plane resolves each request to a principal holding one of three
 claim-mapped roles. Machine credentials and every documented CLI/SDK flow are
-untouched. Six slices; slices 1–2 have landed ([#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369), [#370](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/370)), slice 3 is next.
+untouched. Six slices; slices 1–2 have landed ([#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369), [#370](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/370)), slice 3 is in review.
 
 ## Tasks
 
@@ -20,8 +20,10 @@ untouched. Six slices; slices 1–2 have landed ([#369](https://github.com/OpenS
       lane in `dispatchAuth` (machine credentials first, JWT-silhouette split,
       an explicit `/api/` arm); the per-route minimum role and `permission_error`;
       default-deny everywhere, with the console environment-key routes at `admin`.
-- [ ] Slice 3 — the role matrix across the `/v1` and `/api/` route tables,
-      plus the completeness test.
+- [x] Slice 3 — the role matrix across the `/v1` and `/api/` route tables
+      (23 viewer / 25 developer / 5 admin; work + gate routes stay role-free),
+      the three streaming routes checked explicitly, and the source-parsing
+      completeness test that fails on a route without a role.
 - [ ] Slice 4 — deployment wiring: the compose `iam` profile (Casdoor
       v3.152.0, hardened), Helm `identity.*`, GCP IAP Terraform, docs.
 - [ ] Slice 5 — the api-key issuance surface, gated on a live observation of
