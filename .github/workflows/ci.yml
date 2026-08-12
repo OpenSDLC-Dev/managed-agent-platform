@@ -812,6 +812,7 @@ jobs:
           # supported order, so an unconfigured lane must not fail that render.
           helm template t "$CHART" -f "$VALUES" --set casdoor.enabled=true \
             --set casdoor.adminPassword=x --set casdoor.console.clientSecret=y \
+            --set 'casdoor.console.redirectURIs[0]=https://console.example/callback' \
             --set casdoor.ingress.host=idp.example > /dev/null \
             || { echo "casdoor.enabled with identity.mode empty must render" >&2; exit 1; }
           echo "ok: the IdP's refusals and its single entrance"
@@ -1003,8 +1004,11 @@ jobs:
             || { echo "a quoted credential did not render as a JSON string" >&2; exit 1; }
           # The audience Casdoor mints is the client id, so a render where the two
           # disagree is refused rather than left to fail every token behind a 401.
+          # roleMap is set here only so this render reaches the audience check:
+          # a mode with an empty role map is itself refused, one template earlier.
           err="$(helm template t "$CHART" -f "$VALUES" "${full[@]}" \
             --set identity.mode=oidc --set identity.oidc.issuer=https://idp.example.test \
+            --set 'identity.roleMap.map/platform-admins=admin' \
             --set identity.oidc.audience=wrong 2>&1 >/dev/null)" \
             && { echo "an audience that is not the client id must fail the render" >&2; exit 1; }
           echo "$err" | grep -q 'must equal casdoor.console.clientId' \
