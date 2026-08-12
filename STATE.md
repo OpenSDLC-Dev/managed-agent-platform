@@ -14,6 +14,10 @@ the reference's failure semantics. Seven slices; Tasks below is its progress.
 issuance surface, moved to [#378](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/378)
 under the plan's own provision rather than shipping an invented dialect.
 
+[Plan 29](./docs/plan/29_mcp-toolset.md) — MCP end to end (#45) runs in parallel
+on its own branch, so Tasks below is plan 31's: slices 1–2 have landed (wire
+correctness; the client, `mcp_catalogs`, the discovery driver), slice 3 is next.
+
 ## Tasks
 
 - [x] Slice 1 — wire correctness: bidirectional reference validation, nested

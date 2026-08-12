@@ -29,6 +29,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -39,6 +40,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -59,6 +61,17 @@ import (
 // minutes bound the listing across its pages rather than any single one of them.
 // A caller supplying its own client sets that policy itself, and may set none —
 // which is the case the fallback exists for.
+//
+// None of the deadlines here is exact, and the overshoot is the SDK's: when a
+// caller's context ends a request that is still outstanding, the SDK tells the
+// server so with a `notifications/cancelled`, and it sends that on a context
+// deliberately detached from the one that just ended (context.WithoutCancel)
+// with a 5-second timeout of its own. Against a server that has stopped
+// answering, that notification is itself unanswerable, so every cancelled call
+// costs up to five seconds after its deadline — twice over for a connection,
+// which may have both a `server/discover` and a legacy `initialize` in flight.
+// Callers that bound a whole pass should treat these as budgets that stop the
+// work rather than ceilings on the wall clock.
 const DialTimeout = 30 * time.Second
 
 // ListTimeout bounds a whole listing rather than one request in it. Pagination
@@ -276,13 +289,25 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	}
 	endpoint, err := url.Parse(cfg.URL)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: server URL %q: %w", cfg.URL, err)
+		// url.Error renders the URL it could not parse through %q, so wrapping
+		// it whole would put the configured string — userinfo and query
+		// included — into the message. Nothing here can redact that string:
+		// redaction needs a parsed URL, and this is the branch where there is
+		// none. So the cause travels and the URL does not, which costs the
+		// reader the offset the message would have pointed at and keeps a
+		// credential out of every log line that renders this error.
+		var parseErr *url.Error
+		if errors.As(err, &parseErr) {
+			return nil, fmt.Errorf("mcp: the server url could not be parsed: %w", parseErr.Err)
+		}
+		return nil, fmt.Errorf("mcp: the server url could not be parsed")
 	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = DefaultClient
 	}
 	httpClient = withResponseLimit(httpClient)
+	httpClient = withTraceContext(httpClient)
 	if cfg.BearerToken != "" {
 		httpClient = withBearer(httpClient, cfg.BearerToken, endpoint)
 	}
@@ -316,7 +341,16 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		if conn := transport.conn; conn != nil {
 			_ = conn.Close()
 		}
-		return nil, fmt.Errorf("mcp: connect to %s: %w", cfg.URL, connErr)
+		// Scheme and host, not the URL: an mcp_servers URL may carry a
+		// credential in three places and this error is a stored column by the
+		// time the executor's discovery pass is done with it. url.URL.Redacted
+		// is not enough and reads as though it were — it masks the password
+		// alone, leaving a token-as-username (`https://ghp_…@host`, a common MCP
+		// convention) and a `?api_key=` query in full. What survives here is
+		// what an operator needs to know which server failed; net/http's own
+		// half of the message redacts its password and keeps the rest, which is
+		// why the executor redacts this string again by value before storing it.
+		return nil, fmt.Errorf("mcp: connect to %s://%s: %w", endpoint.Scheme, endpoint.Host, connErr)
 	}
 	return &Conn{session: session}, nil
 }
@@ -476,7 +510,44 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 			res, err = nil, fmt.Errorf("the MCP client library panicked on this server's response: %v", r)
 		}
 	}()
-	return c.session.ListTools(ctx, &sdk.ListToolsParams{Cursor: cursor})
+	return c.session.ListTools(ctx, &sdk.ListToolsParams{Meta: requestMeta(ctx), Cursor: cursor})
+}
+
+// requestMeta is the `_meta` this platform puts on the MCP requests it issues
+// itself — the listing and the call.
+//
+// It carries W3C trace context, so a trace that starts in the brain reaches the
+// MCP server's own spans rather than stopping at this process's edge (CLAUDE.md
+// design principle 3). Not every request on the wire, and the difference is the
+// SDK's: it builds the handshake itself (`server/discover`, and a legacy
+// negotiation's `initialize` and `notifications/initialized`) with no hook for a
+// caller's metadata, so no `_meta` reaches them. What reaches them instead is
+// the HTTP header the transport writes ([withTraceContext]) — the transport
+// being this package's, unlike the handshake bodies — so a traced connection is
+// traced from its first packet after all, by the other of the two routes. MCP 2026-07-28 documents the convention and pins the key
+// names to the bare `traceparent`, `tracestate` and `baggage` — deliberately not
+// namespaced like the protocol's own `io.modelcontextprotocol/*` keys, so that a
+// carrier written by any OpenTelemetry SDK drops in unrenamed (SEP-414).
+// internal/telemetry propagates trace context alone, so `baggage` never appears
+// and the carrier's keys are already the spec's; nothing here translates
+// anything, which is the point of the convention.
+//
+// The SDK fills the protocol's own `_meta` keys itself and only where they are
+// absent (injectRequestMeta), so a map supplied here is added to rather than
+// replaced. Nil when no span is active, which says "nothing to add" rather than
+// changing what goes out: `_meta` is `omitempty`, so an empty map would be
+// omitted from the request just the same.
+func requestMeta(ctx context.Context) sdk.Meta {
+	carrier := map[string]string{}
+	telemetry.Inject(ctx, carrier)
+	if len(carrier) == 0 {
+		return nil
+	}
+	meta := make(sdk.Meta, len(carrier))
+	for k, v := range carrier {
+		meta[k] = v
+	}
+	return meta
 }
 
 // usableName reports whether a server's tool name can be offered to a model.
@@ -931,6 +1002,56 @@ func (t *limitedTransport) give(n int64) {
 // dot) drop the token rather than send it, and the request fails as
 // unauthenticated instead of leaking. A normalizing comparison would trade that
 // direction for the other one.
+// withTraceContext puts W3C trace context on every request this client sends,
+// as HTTP headers, which is the one propagation route that does not depend on
+// the SDK giving a caller somewhere to put it.
+//
+// [requestMeta] carries the same context in `_meta` on the two requests this
+// package issues itself, per the convention MCP 2026-07-28 documents (SEP-414),
+// and that is the route a spec-aware MCP server reads. It cannot reach the
+// handshake: the SDK builds `server/discover` — and a legacy negotiation's
+// `initialize` and `notifications/initialized` — with no hook for a caller's
+// metadata. Concluding from that that a connection is untraceable before its
+// first request was a mistake in the reasoning rather than in the SDK: the
+// transport is this package's, so the headers are.
+//
+// Design principle 3 is what makes the difference worth a round tripper. Every
+// cross-process call propagates OTel context, and a handshake is a cross-process
+// call; the case that needs it most is the one with no later request to carry it,
+// a connection that fails, whose spans on the server would otherwise correlate
+// with nothing. The two routes are complementary rather than redundant — a
+// server reading `_meta` sees SEP-414's carrier, a server or gateway reading
+// headers sees the same trace — and both are the propagator's own output, so
+// neither translates anything.
+//
+// It rides above the response limit and below the bearer wrapper for no reason
+// other than order-independence: none of the three reads what the others write.
+func withTraceContext(client *http.Client) *http.Client {
+	copied := *client
+	copied.Transport = &traceTransport{base: client.Transport}
+	return &copied
+}
+
+type traceTransport struct{ base http.RoundTripper }
+
+func (t *traceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	carrier := map[string]string{}
+	telemetry.Inject(req.Context(), carrier)
+	if len(carrier) > 0 {
+		// Cloned rather than mutated: a RoundTripper does not own the request it
+		// is handed, and net/http may retry it.
+		req = req.Clone(req.Context())
+		for k, v := range carrier {
+			req.Header.Set(k, v)
+		}
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
+}
+
 func withBearer(client *http.Client, token string, endpoint *url.URL) *http.Client {
 	copied := *client
 	copied.Transport = &bearerTransport{

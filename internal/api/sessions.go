@@ -887,6 +887,37 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		// mcp_servers is one of only two mid-session-mutable agent fields, and
+		// a patch is a full replacement — so a server may have been removed or
+		// repointed. A catalog row describes the tools one endpoint reported,
+		// so every row this agent no longer declares at that url is dropped in
+		// the same transaction as the patch: a listing that outlived its
+		// endpoint would reach the model as tools that are not there. The
+		// executor's discovery pass rebuilds what is still declared on the next
+		// turn. A patch that clears mcp_servers leaves empty arrays, which match
+		// nothing and so delete the session's rows outright — the
+		// removed-everything case, and the reason this is a NOT EXISTS rather
+		// than an IN list.
+		names, urls := []string{}, []string{}
+		for _, item := range agent.MCPServers {
+			var probe struct {
+				Name string `json:"name"`
+				URL  string `json:"url"`
+			}
+			if json.Unmarshal(item, &probe) != nil {
+				continue
+			}
+			names, urls = append(names, probe.Name), append(urls, probe.URL)
+		}
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM mcp_catalogs
+			  WHERE session_id = $1
+			    AND NOT EXISTS (
+			        SELECT 1 FROM unnest($2::text[], $3::text[]) AS s(name, url)
+			         WHERE s.name = mcp_catalogs.server_name AND s.url = mcp_catalogs.url)`,
+			id, names, urls); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := tx.QueryRow(ctx,
