@@ -172,10 +172,21 @@ openbao:
 # (internal/identity/verifier.go, New). The nodes are private and egress through
 # Cloud NAT, so the reach exists — but it is a new dependency of a boot that used
 # to need only Postgres, and `helm upgrade --wait --atomic` turns a failure of it
-# into a rolled-back deploy. `mode: ""` takes the whole lane back out, in one
-# line, without disturbing anything else in this file.
+# into a rolled-back deploy.
+#
+# Those two facts together are why `mode` below ships EMPTY, and it is the one
+# value in this block a real deployment changes. There is no IAP in front of this
+# environment, so an enabled lane grants no human anything today; what it would
+# add is a boot dependency on an external host to a deploy that needs only
+# Postgres, on the `--wait --atomic` path where a transient fetch failure becomes
+# a rollback. Cost with no benefit until the HTTPS front door exists. The keys
+# stay, spelled and placed exactly as a working deployment wants them, so turning
+# the lane on is `mode: trusted_proxy` plus a real audience — one line and one
+# value, not a reconstruction of this block. It also keeps this file consistent
+# with the chart, where `identity.mode` and `casdoor.enabled` are both off by
+# default and nothing in the platform turns itself on.
 identity:
-  mode: trusted_proxy # IDENTITY_MODE
+  mode: "" # IDENTITY_MODE — `trusted_proxy` once IAP fronts the control plane
   proxy:
     preset: gcp-iap # IDENTITY_PROXY_PRESET
     # The one verification parameter the preset cannot supply, and the entire

@@ -409,7 +409,8 @@ hardened Casdoor as the self-host default IdP — in compose, and in the Helm ch
 `casdoor.enabled`. **This environment deploys none of it**, and that is the plan's decision
 rather than a gap: on GCP the identity provider is Google's, so Cloud Identity Platform or
 Workspace does the SSO behind Identity-Aware Proxy, `casdoor.enabled` stays `false`, and the
-platform runs `IDENTITY_MODE=trusted_proxy` with the `gcp-iap` preset.
+human lane the platform runs here is `IDENTITY_MODE=trusted_proxy` with the `gcp-iap` preset
+— configured below, and left switched off until there is an IAP to switch it on behind.
 
 **The preset is most of the configuration, and it refuses to be talked out of any of it.**
 [`internal/identity/preset.go`](../../internal/identity/preset.go) fixes the assertion header
@@ -420,8 +421,8 @@ error** — `configureGCPIAP` in [`internal/identity/config.go`](../../internal/
 answers `IDENTITY_PROXY_PRESET=gcp-iap supplies IDENTITY_PROXY_HEADER; unset it` — not a
 variable that is quietly ignored. So the chart's values carry exactly `identity.mode`,
 `identity.proxy.preset`, `identity.proxy.audience`, `identity.claims.roles` and
-`identity.roleMap`, and [`staging-values.yaml`](./staging-values.yaml) sets those five and
-no more.
+`identity.roleMap`, and [`staging-values.yaml`](./staging-values.yaml) carries those five and
+no more — `mode` empty for now, the other four spelled as a working deployment wants them.
 
 **The audience is the whole tenant boundary, and calling it configuration undersells it.**
 The gstatic key set is global across every Google Cloud customer, so every customer's IAP
@@ -489,9 +490,14 @@ user onto one principal. Machine traffic (`/v1` keys, worker environment keys) r
 **None of this is switched on here, and the reason is one line above it in this file.** IAP
 lives on an HTTPS load balancer; this environment publishes the control plane as a
 plain-HTTP L4 LoadBalancer with no domain, so there is no backend service to enable IAP on
-and nothing for a certificate to be issued against. Both variables default to empty, the
-audience output is then empty, and `staging-values.yaml` ships the platform half — the lane
-— with fail-closed placeholders and a note saying exactly that. Building the front door is
+and nothing for a certificate to be issued against. Both variables default to empty and the
+audience output is then empty; `staging-values.yaml` carries the platform half spelled out
+but with `identity.mode` empty, so the lane is off. That is deliberate rather than
+unfinished: enabling it would grant no human anything without a proxy in front, while adding
+a dependency on an external key set to a boot that otherwise needs only Postgres — and the
+pipeline deploys with `--wait --atomic`, where a transient fetch failure becomes a rolled-back
+release. Turning it on once the front door exists is `mode: trusted_proxy` plus a real
+audience, with everything else in that block already in place. Building the front door is
 the GKE Gateway work [docs/deploy-gcp.md](../../docs/deploy-gcp.md#exposing-the-control-plane)
 describes; these knobs are what configures IAP once it exists.
 
