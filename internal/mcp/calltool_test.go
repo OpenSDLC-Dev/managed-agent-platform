@@ -42,7 +42,19 @@ func serveTool(t *testing.T, handle sdk.ToolHandler) string {
 // result has no business carrying — and an SDK server produces none of it.
 func serveToolCall(t *testing.T, result func(params json.RawMessage) map[string]any) (url string, seen *atomic.Pointer[json.RawMessage]) {
 	t.Helper()
+	url, seen, _ = serveToolCallWithHeaders(t, result)
+	return url, seen
+}
+
+// serveToolCallWithHeaders is serveToolCall plus the traceparent header of every
+// request the fixture saw, keyed by JSON-RPC method — the handshake's included,
+// which is the half no `_meta` can speak for.
+func serveToolCallWithHeaders(t *testing.T, result func(params json.RawMessage) map[string]any) (
+	url string, seen *atomic.Pointer[json.RawMessage], headers func() map[string]string) {
+	t.Helper()
 	seen = &atomic.Pointer[json.RawMessage]{}
+	var mu sync.Mutex
+	seenHeaders := map[string]string{}
 	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
 		return sdk.NewServer(&sdk.Implementation{Name: "raw-call-server", Version: "1"}, nil)
 	}, nil)
@@ -59,10 +71,18 @@ func serveToolCall(t *testing.T, result func(params json.RawMessage) map[string]
 			Params json.RawMessage `json:"params"`
 		}
 		if json.Unmarshal(body, &req) != nil || req.Method != "tools/call" {
+			if req.Method != "" {
+				mu.Lock()
+				seenHeaders[req.Method] = r.Header.Get("traceparent")
+				mu.Unlock()
+			}
 			inner.ServeHTTP(w, r)
 			return
 		}
 		params := req.Params
+		mu.Lock()
+		seenHeaders[req.Method] = r.Header.Get("traceparent")
+		mu.Unlock()
 		seen.Store(&params)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -72,7 +92,15 @@ func serveToolCall(t *testing.T, result func(params json.RawMessage) map[string]
 		})
 	}))
 	t.Cleanup(ts.Close)
-	return ts.URL, seen
+	return ts.URL, seen, func() map[string]string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make(map[string]string, len(seenHeaders))
+		for k, v := range seenHeaders {
+			out[k] = v
+		}
+		return out
+	}
 }
 
 func connect(t *testing.T, url string) *mcp.Conn {
@@ -661,7 +689,7 @@ func TestRequestsCarryW3CTraceContext(t *testing.T) {
 // so an empty map and a nil one put identical bytes on the wire.
 func TestRequestsWithoutATraceCarryNoTraceparent(t *testing.T) {
 	t.Parallel()
-	url, seen := serveToolCall(t, func(json.RawMessage) map[string]any {
+	url, seen, headers := serveToolCallWithHeaders(t, func(json.RawMessage) map[string]any {
 		return map[string]any{"content": []any{}}
 	})
 
@@ -676,5 +704,16 @@ func TestRequestsWithoutATraceCarryNoTraceparent(t *testing.T) {
 	}
 	if _, ok := decoded.Meta["traceparent"]; ok {
 		t.Errorf("_meta carries a traceparent with no active span: %v", decoded.Meta)
+	}
+	// Both carriers, or the assertion covers the one route and leaves the other
+	// free to invent a header out of an empty carrier.
+	got := headers()
+	if len(got) == 0 {
+		t.Fatal("no request reached the server, so nothing was asserted")
+	}
+	for method, header := range got {
+		if header != "" {
+			t.Errorf("%s carries a traceparent header %q with no active span", method, header)
+		}
 	}
 }
