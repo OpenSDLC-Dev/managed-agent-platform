@@ -139,6 +139,75 @@ process **alive** with every later authentication blocked forever on a lock nobo
 can release. `TestGetReleasesTheMutexWhenTheFetchPanics` uses `TryLock` precisely
 so the bug fails the suite instead of hanging it.
 
+### The second review round: the claim-name reading, and three go-jose boundaries
+
+The Claude reviewer (Opus 5) and a Codex re-review of the fixes each returned a
+further set. Both independently reached the same conclusion about the RSA
+exponent ceiling, and it is the most instructive item in the slice.
+
+**The exponent ceiling was checked one step too late, and the first fix was
+nearly useless.** `usableKey` bounded `pub.E`, but go-jose has already reduced the
+published exponent to `int(big.Int.Int64())` (`encoding.go:193`) by then, and
+`Int64` on an oversized value yields its **low 64 bits**. A published exponent of
+`2^64 + 65537` therefore arrives as an ordinary `65537` — odd, ≥ 3, far under the
+ceiling — and no rule applied to `pub.E` can see the difference. The bound only
+ever caught the `(2^31, 2^63]` window, and on the `linux/arm` target `make
+crossbuild` compiles it is dead code entirely, since `int` is 32 bits there. The
+real fix reads the raw `e` member from the JWK, where the published value is still
+intact. `TestParseKeySetRejectsATruncatedExponent` asserts the truncation happens
+before asserting the entry is skipped, so the test cannot quietly stop testing
+anything if go-jose changes.
+
+**The claim-name reading was reversed, and the reasoning is worth keeping.** Slice
+1 resolved a dotted claim name as a path ONLY, never as a flat key, to stop an IdP
+surface that lets a user place a claim literally named
+`resource_access.console.roles` from outranking the real nested one. That rule
+silently broke the namespaced-custom-claim convention Auth0 *requires* and Okta
+and Entra also use: `https://corp.example/roles` was split into
+`["https://corp", "example", "com/roles"]`, resolved to nothing, and denied every
+human on those providers with nothing in any log to say why. The fix keeps the
+security property and drops the breakage by deciding from the **configured name**
+rather than from the token: a URI-shaped name (one containing `://`) is a flat
+key, any other dotted name is a path. The rejected alternative was "try the flat
+key, fall back to walking" — that one lets the *token* choose the reading, which
+is the escalation the original rule existed to prevent.
+
+**A null `crit` is accepted, deliberately.** `"crit":null` decodes to a nil
+`*json.RawMessage`, and go-jose's `sanitized()` skips those (`shared.go:416`), so
+it never reaches `ExtraHeaders` and the presence rule never sees it. This is safe
+because a null confers nothing to hide: go-jose's own `getCritical` returns no
+names for it, and `getB64` returns the default `true` for a null `b64`, so neither
+member can declare an extension or change how the payload is read. The test
+asserts the acceptance rather than omitting the case, so a go-jose change fires
+there instead of in production.
+
+**Refuted: the discovered `jwks_uri` should be https-only, with no loopback
+exception.** The exception is not what protects production — the dial guard is,
+and `fetch.go` already states that with the guard wired, http-to-loopback URLs are
+dead in production, fail-closed. The exception is live only when an operator has
+replaced `Config.HTTPClient` and thereby taken the guard off, which the field's
+own documentation calls owning the consequence. It is also load-bearing for the
+fake provider, which every discovery test reaches over http loopback.
+
+**Refuted: `redactURL` should blank the path too.** It removes the userinfo, the
+query, the fragment and the opaque form, and keeps scheme, host and path on
+purpose: `key set fetch failed` is only actionable if it says *which* endpoint,
+and `/oauth2/v3/certs` versus `/.well-known/jwks.json` is the whole diagnostic.
+Nothing can distinguish a secret path segment from a routing one, so blanking it
+would cost every legitimate reader the answer to protect a shape no provider in
+the compatibility set uses. The package doc now states that boundary exactly
+instead of claiming more than the function delivers.
+
+**Refuted: `email_verified` should be required.** Many providers never emit it, so
+requiring it would deny every human on those deployments. Nothing in this package
+derives authority from the email — roles come from the roles claim alone — so an
+unverified address is a display string, not a privilege. What the fix does add is
+a length bound on `Email` and `DisplayName`, since those are the only fields whose
+length the token alone decides and a later slice persists them; and a note at the
+assignment telling that slice that anything MATCHING or LINKING on the address
+must make its own verification decision, because on an IdP with self-service
+profile attributes — Casdoor included — the user chooses that string.
+
 ---
 
 ## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (runs 2026-08-10 and 2026-08-11) — ✅ #43 passed; the deferred work-item-pull criterion passed too (#363 closed)

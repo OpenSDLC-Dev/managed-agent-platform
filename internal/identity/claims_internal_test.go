@@ -119,6 +119,53 @@ func TestClaimAtDottedPathOnly(t *testing.T) {
 	})
 }
 
+// TestClaimAtURINamespacedName covers the convention Auth0 REQUIRES for custom
+// claims and Okta and Entra also use. Those names contain dots inside a hostname,
+// so treating every dotted name as a path would split
+// "https://corp.example/roles" into ["https://corp", "example", "com/roles"],
+// resolve nothing, and deny every human on those providers with nothing in any
+// log to say why.
+//
+// The escalation property survives because the reading is chosen by the
+// CONFIGURED NAME, never by what the token happens to carry: the last subtest
+// shows a token cannot make a URI-shaped name walk, and TestClaimAtDottedPathOnly
+// above shows it cannot make a path-shaped name resolve flat.
+func TestClaimAtURINamespacedName(t *testing.T) {
+	t.Parallel()
+
+	t.Run("https namespaced claim resolves whole", func(t *testing.T) {
+		t.Parallel()
+		claims := claimsXDecode(t, `{"https://corp.example/roles": ["platform-admins"]}`)
+		got := roleValues(claimAt(claims, "https://corp.example/roles"))
+		if len(got) != 1 || got[0] != "platform-admins" {
+			t.Errorf("claimAt = %#v, want the namespaced claim read as one key", got)
+		}
+	})
+
+	t.Run("the whole role pipeline, end to end", func(t *testing.T) {
+		t.Parallel()
+		claims := claimsXDecode(t, `{"https://corp.example/roles": ["platform-admins"]}`)
+		roles := map[string]Role{"platform-admins": RoleAdmin}
+		if got := strongestRole(roleValues(claimAt(claims, "https://corp.example/roles")), roles); got != RoleAdmin {
+			t.Errorf("role = %q, want %q — an Auth0-shaped deployment must not silently deny everyone", got, RoleAdmin)
+		}
+	})
+
+	t.Run("a token cannot make a URI name walk", func(t *testing.T) {
+		t.Parallel()
+		// Both readings are present in the token. The URI-shaped configured name
+		// takes the flat key, so the crafted nested structure is unreachable.
+		claims := claimsXDecode(t, `{
+			"https://corp.example/roles": ["viewer-value"],
+			"https://corp": {"example/roles": ["admin-value"]}
+		}`)
+		got := roleValues(claimAt(claims, "https://corp.example/roles"))
+		if len(got) != 1 || got[0] != "viewer-value" {
+			t.Errorf("claimAt = %#v, want the flat value: a URI-shaped name never walks", got)
+		}
+	})
+}
+
 func TestClaimAtNestedThreeDeep(t *testing.T) {
 	t.Parallel()
 	// Both shapes a real Keycloak token carries.

@@ -90,10 +90,17 @@ func jwksXModulus(bits int) *big.Int {
 // An empty kid omits the member entirely, which is how a real kid-less entry
 // arrives.
 func jwksXRSAModulus(kid string, n *big.Int, e int) map[string]any {
+	return jwksXRSABig(kid, n, big.NewInt(int64(e)))
+}
+
+// jwksXRSABig is the same with an exponent too large for an int — the only way
+// to express what go-jose's decode does to an oversized "e", since the truncation
+// happens before any Go int can hold the published value.
+func jwksXRSABig(kid string, n, e *big.Int) map[string]any {
 	entry := map[string]any{
 		"kty": "RSA",
 		"n":   jwksXB64(n.Bytes()),
-		"e":   jwksXB64(big.NewInt(int64(e)).Bytes()),
+		"e":   jwksXB64(e.Bytes()),
 		"alg": "RS256",
 		"use": "sig",
 	}
@@ -294,6 +301,57 @@ func TestParseKeySetRejectsWeakRSAKeys(t *testing.T) {
 			jwksXWantKIDs(t, keys, want...)
 		})
 	}
+}
+
+// TestParseKeySetRejectsATruncatedExponent is the case a check on the DECODED
+// exponent structurally cannot see, and the reason the ceiling reads the raw
+// member instead.
+//
+// go-jose decodes "e" as int(big.Int.Int64()) (encoding.go:193), and Int64 on an
+// oversized value yields the low 64 bits. So a published exponent of 2^64+65537
+// arrives as a perfectly ordinary 65537: odd, ≥ 3, and far under the ceiling. Any
+// rule applied to pub.E therefore admits it, and the key installed is one the
+// provider never published — it verifies signatures the provider cannot make and
+// refuses the ones it can.
+//
+// The control matters as much as the case: the same modulus with a real 65537
+// must still be usable, or the test would pass on a rule that rejects everything.
+func TestParseKeySetRejectsATruncatedExponent(t *testing.T) {
+	t.Parallel()
+
+	wrapped := new(big.Int).Add(new(big.Int).Lsh(big.NewInt(1), 64), big.NewInt(65537))
+	n := jwksXModulus(minRSABits)
+
+	t.Run("the truncation is real", func(t *testing.T) {
+		t.Parallel()
+		// Stated rather than assumed: without the raw-member check this entry is
+		// indistinguishable from the honest one below.
+		var jwk jose.JSONWebKey
+		entry, err := json.Marshal(jwksXRSABig("wrapped", n, wrapped))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := json.Unmarshal(entry, &jwk); err != nil {
+			t.Fatalf("go-jose refused the entry outright: %v", err)
+		}
+		pub, ok := jwk.Key.(*rsa.PublicKey)
+		if !ok {
+			t.Fatalf("decoded key is %T, want *rsa.PublicKey", jwk.Key)
+		}
+		if pub.E != 65537 {
+			t.Fatalf("go-jose decoded e as %d, want 65537 — the truncation this test "+
+				"is about no longer happens, so the raw-member check may be revisited", pub.E)
+		}
+	})
+
+	t.Run("skipped, and the honest key beside it survives", func(t *testing.T) {
+		t.Parallel()
+		keys := jwksXParse(t, jwksXSet(t,
+			jwksXRSABig("wrapped", n, wrapped),
+			jwksXRSAModulus("honest", n, 65537),
+		), jwksXAlgs())
+		jwksXWantKIDs(t, keys, "honest")
+	})
 }
 
 // TestParseKeySetAcceptsValidEC pins that EC needs no extra rule here — go-jose
@@ -545,8 +603,15 @@ func TestGetReleasesTheMutexWhenTheFetchPanics(t *testing.T) {
 
 	func() {
 		defer func() {
-			if recover() == nil {
+			// The sentinel is asserted, not merely "something panicked": an
+			// unrelated panic raised before the transport ever ran would otherwise
+			// satisfy this test while proving nothing about the fetch path.
+			switch got := recover(); got {
+			case panicSentinel:
+			case nil:
 				t.Error("the fixture transport did not panic, so this test asserted nothing")
+			default:
+				t.Errorf("recovered %v, want the fixture's own panic %q", got, panicSentinel)
 			}
 		}()
 		_, _ = k.get(context.Background(), "k1")
@@ -561,11 +626,15 @@ func TestGetReleasesTheMutexWhenTheFetchPanics(t *testing.T) {
 	k.mu.Unlock()
 }
 
+// panicSentinel is the value the fixture transport panics with, so the test can
+// tell its own panic from any other.
+const panicSentinel = "identity test: transport panic"
+
 // panicClient returns a client whose transport panics, standing in for any panic
 // raised beneath leadFlight.
 func panicClient() *http.Client {
 	return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		panic("identity test: transport panic")
+		panic(panicSentinel)
 	})}
 }
 

@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"slices"
 	"sync"
@@ -136,25 +138,41 @@ func (k *keySet) lookupLocked(kid string) (verifyKey, bool) {
 	return key, ok
 }
 
+// install replaces the key set and stamps both clocks from ONE reading. The two
+// timestamps are one instant by design — the TTL and the cooldown must not start
+// from two different ones — and this is the only writer, so New's warm-up cannot
+// drift from what a refresh does. Takes k.mu itself.
+func (k *keySet) install(keys map[string]verifyKey) {
+	stamp := k.now()
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.keys, k.fetchedAt, k.lastTry = keys, stamp, stamp
+}
+
 // leadFlight performs one fetch as the flight leader. The caller holds k.mu on
 // entry; leadFlight releases it for the duration of the fetch and holds it again
 // on return.
 //
 // Completion is deferred so the flight always finishes: a panicking fetch would
 // otherwise leave inflight non-nil and block every later caller on a channel
-// nobody closes. ok is set on the success line alone, so a panic can neither
-// install a nil key set nor stamp fetchedAt.
+// nobody closes. stamp is read BEFORE the deferred cleanup rather than inside it
+// for the same reason — k.now() is caller-supplied, and a clock that panics
+// during cleanup would strand inflight non-nil with its channel never closed,
+// which is the exact failure the defer exists to prevent. ok is set on the
+// success line alone, so a panic can neither install a nil key set nor stamp
+// fetchedAt.
 func (k *keySet) leadFlight(ctx context.Context) {
 	ch := make(chan struct{})
 	k.inflight, k.lastTry = ch, k.now()
 	k.mu.Unlock()
 
 	var fetched map[string]verifyKey
+	var stamp time.Time
 	ok := false
 	defer func() {
 		k.mu.Lock()
 		if ok {
-			k.keys, k.fetchedAt = fetched, k.now()
+			k.keys, k.fetchedAt = fetched, stamp
 		}
 		k.inflight = nil
 		close(ch)
@@ -170,6 +188,7 @@ func (k *keySet) leadFlight(ctx context.Context) {
 		slog.WarnContext(ctx, "identity: key set fetch failed", "url", redactURL(k.url), "err", err)
 		return
 	}
+	stamp = k.now()
 	slog.InfoContext(ctx, "identity: key set refreshed", "url", redactURL(k.url), "keys", len(fetched))
 	ok = true
 }
@@ -199,12 +218,17 @@ type rawKeySet struct {
 	Keys []json.RawMessage `json:"keys"`
 }
 
-// rawKeyMeta carries the two fields jose.JSONWebKey cannot report usefully:
-// key_ops (absent from its raw struct entirely) and use (read here so both come
-// from one decode).
+// rawKeyMeta carries the three fields jose.JSONWebKey cannot report usefully:
+// key_ops (absent from its raw struct entirely), use, and the RSA exponent as
+// PUBLISHED. E has to come from here because by the time go-jose hands over an
+// rsa.PublicKey the exponent is already int(big.Int.Int64()) (encoding.go), and
+// Int64 on an oversized value yields its low 64 bits — so a published exponent
+// of 2^64+65537 arrives as a perfectly ordinary 65537 and no check applied
+// afterwards can tell the difference.
 type rawKeyMeta struct {
 	Use    string   `json:"use"`
 	KeyOps []string `json:"key_ops"`
+	E      string   `json:"e"`
 }
 
 // parseKeySet decodes and filters, returning the kid-indexed usable keys.
@@ -233,7 +257,7 @@ func parseKeySet(body []byte, algs map[string]bool, url string) (map[string]veri
 			skipped++
 			continue
 		}
-		key, ok := usableKey(&jwk, meta.Use, meta.KeyOps, algs)
+		key, ok := usableKey(&jwk, meta, algs)
 		if !ok {
 			skipped++
 			continue
@@ -248,7 +272,14 @@ func parseKeySet(body []byte, algs map[string]bool, url string) (map[string]veri
 		out[jwk.KeyID] = key
 	}
 	if skipped > 0 {
-		slog.Warn("identity: skipped unusable JWKs", "url", safe, "count", skipped)
+		// Debug, not Warn: skipping entries is the healthy steady state, not an
+		// incident. This function exists BECAUSE a compliant provider publishes
+		// keys it cannot use — Keycloak and Entra both put encryption keys beside
+		// signing keys — so at Warn every refresh of a correctly configured
+		// deployment would log one, and an operator who has learned to filter it
+		// is an operator who will filter the one that mattered. A set with
+		// nothing usable left is still a hard error below.
+		slog.Debug("identity: skipped unusable JWKs", "url", safe, "count", skipped)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("key set %s has no usable keys", safe)
@@ -263,17 +294,17 @@ func parseKeySet(body []byte, algs map[string]bool, url string) (map[string]veri
 // off-curve point, so EC needs nothing more here. It does not bound an RSA
 // modulus, does not require an odd exponent, does not parse key_ops at all, and
 // does not enforce a JWK's declared alg.
-func usableKey(jwk *jose.JSONWebKey, use string, keyOps []string, algs map[string]bool) (verifyKey, bool) {
+func usableKey(jwk *jose.JSONWebKey, meta rawKeyMeta, algs map[string]bool) (verifyKey, bool) {
 	if jwk.KeyID == "" {
 		return verifyKey{}, false // unaddressable: selection is kid-indexed
 	}
 	if !jwk.Valid() || !jwk.IsPublic() {
 		return verifyKey{}, false // drops oct symmetric material and private keys
 	}
-	if use != "" && use != "sig" {
+	if meta.Use != "" && meta.Use != "sig" {
 		return verifyKey{}, false // an encryption key must never verify
 	}
-	if len(keyOps) > 0 && !slices.Contains(keyOps, "verify") {
+	if len(meta.KeyOps) > 0 && !slices.Contains(meta.KeyOps, "verify") {
 		return verifyKey{}, false
 	}
 	if jwk.Algorithm != "" && !algs[jwk.Algorithm] {
@@ -290,12 +321,17 @@ func usableKey(jwk *jose.JSONWebKey, use string, keyOps []string, algs map[strin
 			return verifyKey{}, false
 		}
 		// Go bounds the exponent's magnitude at verify time but does not require
-		// it odd. The upper bound is not redundant with that check: go-jose
-		// decodes "e" as int(big.Int.Int64()) (encoding.go:193), and Int64 on an
-		// oversized value yields its low 64 bits, so a published exponent above
-		// the range silently becomes a DIFFERENT, plausible one. Skipping the
-		// entry outright beats installing a key the provider never published.
-		if pub.E < 3 || pub.E%2 == 0 || pub.E > maxRSAExponent {
+		// it odd.
+		if pub.E < 3 || pub.E%2 == 0 {
+			return verifyKey{}, false
+		}
+		// The ceiling is applied to the PUBLISHED exponent, not to pub.E, and the
+		// difference is the whole point: go-jose has already reduced an oversized
+		// e to its low 64 bits, so 2^64+65537 reaches here indistinguishable from
+		// an ordinary 65537 and would install a key the provider never published.
+		// Reading the raw member is the only place the truncation is still
+		// visible.
+		if !exponentInRange(meta.E) {
 			return verifyKey{}, false
 		}
 	case *ecdsa.PublicKey:
@@ -306,6 +342,22 @@ func usableKey(jwk *jose.JSONWebKey, use string, keyOps []string, algs map[strin
 		return verifyKey{}, false
 	}
 	return verifyKey{alg: jwk.Algorithm, pub: jwk.Key}, true
+}
+
+// exponentInRange reports whether the JWK's published "e" is within crypto/rsa's
+// own ceiling, read from the base64url member rather than from the decoded int.
+//
+// It is deliberately a bound on the PUBLISHED value: an entry whose exponent
+// cannot survive the trip into an rsa.PublicKey intact is skipped, rather than
+// installed as a key that verifies signatures the provider cannot make. An
+// unparseable member is skipped too — go-jose would have failed the entry
+// anyway, so this only decides which check gets there first.
+func exponentInRange(raw string) bool {
+	b, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil || len(b) == 0 {
+		return false
+	}
+	return new(big.Int).SetBytes(b).Cmp(big.NewInt(maxRSAExponent)) <= 0
 }
 
 // truncate bounds an attacker-controlled string before it reaches a log. slog

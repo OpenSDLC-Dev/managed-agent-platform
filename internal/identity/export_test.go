@@ -16,6 +16,7 @@ const (
 	ClockSkewLeewayForTest = clockSkewLeeway
 	MaxRoleValuesForTest   = maxRoleValues
 	MaxClaimDepthForTest   = maxClaimDepth
+	MaxProfileBytesForTest = maxProfileBytes
 )
 
 // SetFetchTimeoutForTest shortens one verifier's key-fetch deadline, retiring the

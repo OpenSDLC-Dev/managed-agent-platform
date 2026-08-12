@@ -570,6 +570,33 @@ func TestVerifyRejectsCritHeader(t *testing.T) {
 		}
 	}
 
+	// crit whose value is not an array of strings at all. The presence test does
+	// not care what the value is, which is what makes the rule "any crit" rather
+	// than "any crit go-jose could parse".
+	for _, odd := range []any{"b64", 7, map[string]any{"b64": true}, []any{}} {
+		token := keyed.signClaims(t, jose.RS256, claims, map[jose.HeaderKey]any{"crit": odd})
+		got, err := v.Verify(context.Background(), token)
+		verifierXRejected(t, fmt.Sprintf("crit %#v", odd), got, err)
+	}
+
+	// The one exception, asserted rather than left to be discovered: "crit":null
+	// is ACCEPTED, because go-jose never surfaces it. rawHeader decodes a JSON
+	// null to a nil *RawMessage and sanitized() skips those (shared.go:416), so it
+	// never reaches ExtraHeaders.
+	//
+	// That is safe, and the reason is not "go-jose hides it" — it is that a null
+	// confers nothing to hide. go-jose's own getCritical returns no names for it
+	// (shared.go:340), and getB64 returns the default true for a null b64, so
+	// neither member can declare an extension or change how the payload is read.
+	// A null crit is semantically the member being absent.
+	//
+	// This row exists so that if go-jose ever starts surfacing nulls, or starts
+	// reading meaning into one, the change fails here and someone re-reads this
+	// paragraph instead of finding out in production.
+	nullCrit := keyed.signClaims(t, jose.RS256, claims, map[jose.HeaderKey]any{"crit": nil})
+	got, err := v.Verify(context.Background(), nullCrit)
+	verifierXAccepted(t, `crit:null is indistinguishable from absent`, got, err, verifierXWant(keyed.idp))
+
 	// b64 WITHOUT crit, which the crit rule alone would let through while go-jose
 	// still honours it: computeAuthData reads b64 from the protected header with
 	// no reference to crit and verifies over the raw payload when it is false.
@@ -585,7 +612,7 @@ func TestVerifyRejectsCritHeader(t *testing.T) {
 		}
 	}
 
-	got, err := v.Verify(context.Background(), keyed.signClaims(t, jose.RS256, claims, nil))
+	got, err = v.Verify(context.Background(), keyed.signClaims(t, jose.RS256, claims, nil))
 	verifierXAccepted(t, "the same signer with no crit header", got, err, verifierXWant(keyed.idp))
 }
 
@@ -1513,6 +1540,111 @@ func TestVerifyRoleClaimTypes(t *testing.T) {
 		want.Role = identity.RoleNone
 		verifierXAccepted(t, "absent roles", got, err, want)
 	})
+}
+
+// TestVerifyDistinguishesADecodeFailureFromABadSignature pins the two apart in
+// the reason vocabulary. go-jose's Claims does both jobs in one call — verify,
+// then unmarshal into every destination — so a genuinely IdP-signed token whose
+// payload will not decode arrives as an error from the same line as a forgery.
+// Collapsing them sends an operator hunting a key rotation for what is a provider
+// emitting the wrong claim type, and the reason is their whole diagnostic
+// surface. Both still fail, and both still return the same constant Error() to
+// the caller — only Reason() differs.
+func TestVerifyDistinguishesADecodeFailureFromABadSignature(t *testing.T) {
+	t.Parallel()
+	keyed := verifierXNewKeyed(t, "RS256")
+	v := keyed.verifier(t)
+
+	t.Run("payload that will not decode", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name    string
+			payload []byte
+		}{
+			{name: "aud is a number", payload: verifierXJSON(t, map[string]any{
+				"iss": keyed.idp.Issuer(), "sub": "user-1", "aud": 5,
+				"exp": keyed.clock.Now().Add(time.Hour).Unix(),
+			})},
+			{name: "exp is a string", payload: verifierXJSON(t, map[string]any{
+				"iss": keyed.idp.Issuer(), "sub": "user-1", "aud": verifierXAudience,
+				"exp": "1800000000",
+			})},
+			{name: "payload is a JSON array", payload: []byte(`["not","an","object"]`)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				token := keyed.sign(t, jose.RS256, tc.payload, nil)
+				got, err := v.Verify(context.Background(), token)
+				ie := verifierXRejected(t, tc.name, got, err)
+				if want := "claims did not decode"; ie.Reason() != want {
+					t.Errorf("Reason() = %q, want %q — the signature is genuine here", ie.Reason(), want)
+				}
+			})
+		}
+	})
+
+	t.Run("tampered signature", func(t *testing.T) {
+		t.Parallel()
+		// The control. Same key, same claims, one byte of the signature changed —
+		// so the ONLY difference from an accepted token is the signature itself.
+		token := keyed.signClaims(t, jose.RS256, keyed.claims(), nil)
+		parts := strings.Split(token, ".")
+		if len(parts) != 3 {
+			t.Fatalf("minted token has %d segments, want 3", len(parts))
+		}
+		flipped := []byte(parts[2])
+		if flipped[0] == 'A' {
+			flipped[0] = 'B'
+		} else {
+			flipped[0] = 'A'
+		}
+		tampered := parts[0] + "." + parts[1] + "." + string(flipped)
+
+		got, err := v.Verify(context.Background(), tampered)
+		ie := verifierXRejected(t, "tampered signature", got, err)
+		if want := "signature invalid"; ie.Reason() != want {
+			t.Errorf("Reason() = %q, want %q", ie.Reason(), want)
+		}
+	})
+}
+
+// TestVerifyBoundsTheProfileFields pins the cap on the two fields whose length
+// the token alone decides and a later slice persists. Neither carries authority,
+// so truncating keeps the login working rather than turning a valid one into an
+// insert failure against a bounded column.
+func TestVerifyBoundsTheProfileFields(t *testing.T) {
+	t.Parallel()
+	idp, clock, v := verifierXFixture(t)
+
+	claims := verifierXClaims(idp, clock)
+	claims["email"] = strings.Repeat("a", identity.MaxProfileBytesForTest+500)
+	claims["name"] = strings.Repeat("b", identity.MaxProfileBytesForTest+1)
+
+	got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+	if err != nil {
+		t.Fatalf("Verify: %v — an oversized descriptive claim is not an authentication failure", err)
+	}
+	if len(got.Email) != identity.MaxProfileBytesForTest {
+		t.Errorf("len(Email) = %d, want the cap %d", len(got.Email), identity.MaxProfileBytesForTest)
+	}
+	if len(got.DisplayName) != identity.MaxProfileBytesForTest {
+		t.Errorf("len(DisplayName) = %d, want the cap %d", len(got.DisplayName), identity.MaxProfileBytesForTest)
+	}
+	if got.Role != identity.RoleAdmin {
+		t.Errorf("Role = %q, want %q — bounding a descriptive field must not touch authority",
+			got.Role, identity.RoleAdmin)
+	}
+
+	// A normal-length address is returned whole, so the cap is a cap and not a
+	// truncation everything hits.
+	claims["email"], claims["name"] = "ada@example.test", "Ada Lovelace"
+	got, err = v.Verify(context.Background(), idp.Mint(t, claims))
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if got.Email != "ada@example.test" || got.DisplayName != "Ada Lovelace" {
+		t.Errorf("Email/DisplayName = %q/%q, want them untouched", got.Email, got.DisplayName)
+	}
 }
 
 // syncBufferX is a concurrency-safe log sink. slog.SetDefault is process-wide, so

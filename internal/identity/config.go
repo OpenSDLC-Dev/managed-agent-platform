@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -75,6 +76,10 @@ const (
 	maxRoleValues   = 100
 	maxClaimDepth   = 8
 	maxLoggedKID    = 64 // attacker-controlled; truncate before logging
+	// maxProfileBytes bounds the two descriptive Identity fields. Generous for a
+	// real name or address (RFC 5321 caps an email path at 254) and far under the
+	// ~12 KiB a claim could otherwise reach inside maxTokenBytes.
+	maxProfileBytes = 320
 )
 
 // defaultAlgorithms is the settled allowlist. Widening it is a deliberate change
@@ -164,7 +169,7 @@ func configureOIDC(cfg *Config, getenv func(string) string) error {
 	// Mode A has no allowlist override — the five-algorithm default is its whole
 	// contract — but the parsed Config still carries it, so a caller reading a
 	// Config knows the allowlist without also knowing New's defaulting rule.
-	cfg.Algorithms = defaultAlgorithms
+	cfg.Algorithms = slices.Clone(defaultAlgorithms)
 	warnIgnored(getenv, envProxyPreset, envProxyHeader, envProxyIssuer,
 		envProxyAudience, envProxyKeysURL, envProxyAlgs)
 	return nil
@@ -207,7 +212,9 @@ func configureGCPIAP(cfg *Config, getenv func(string) string) error {
 	cfg.AssertionHeader = gcpIAPPreset.Header
 	cfg.Issuer = gcpIAPPreset.Issuer
 	cfg.JWKSURL = gcpIAPPreset.KeysURL
-	cfg.Algorithms = gcpIAPPreset.Algorithms
+	// Cloned: preset.go's promise that its literals are pinned by a test holds
+	// only for values a caller cannot reach and edit in place.
+	cfg.Algorithms = slices.Clone(gcpIAPPreset.Algorithms)
 	cfg.Audience = aud
 	return nil
 }
@@ -305,9 +312,14 @@ func parseRoleMap(s string) (map[string]Role, error) {
 
 // parseAlgorithms parses a comma-separated allowlist against defaultAlgorithms.
 // An empty value takes all five; an unknown or empty element is an error.
+//
+// The default is CLONED rather than returned. defaultAlgorithms is the package's
+// settled allowlist and the thing allowedAlgorithm consults, so handing a caller
+// its backing array would let one in-place edit of a returned Config redefine
+// what every later verifier in the process accepts — HS256 included.
 func parseAlgorithms(s string) ([]string, error) {
 	if strings.TrimSpace(s) == "" {
-		return defaultAlgorithms, nil
+		return slices.Clone(defaultAlgorithms), nil
 	}
 	fields := strings.Split(s, ",")
 	out := make([]string, 0, len(fields))
