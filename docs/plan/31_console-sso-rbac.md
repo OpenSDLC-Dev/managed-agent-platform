@@ -34,9 +34,15 @@ which consumes what lands here and must trail it.
    RP role). Casdoor is a *deployment default*, not a code dependency: any
    compliant IdP (Keycloak, Entra ID, Cognito, Google) replaces it by config.
    The bundle ships with the hardening posture in Architecture — pinned
-   version ≥ v2.387.0, zero upstream providers, single organization,
-   token-exchange grant disabled, SAML routes blocked — because of CERT/CC
-   VU#780781 (see Ground truth; the risk is stated in docs, not hidden).
+   v3.152.0, zero upstream providers, single organization, token-exchange
+   grant disabled, SAML routes blocked — because of CERT/CC VU#780781 (see
+   Ground truth; the risk is stated in docs, not hidden). It ships in two of
+   the three deployment targets, settled with the user 2026-08-12: **compose**
+   (the `iam` profile) and **Helm** (first-party templates behind
+   `casdoor.enabled`, default off, because the on-prem cluster is this
+   project's core deployment and needs the default IAM too). **GCP uses
+   Google's own IdP and SSO** — Cloud Identity Platform or Workspace behind
+   IAP — so no Casdoor is deployed there.
 2. **Enforcement lives in the control plane** — the reference's own shape
    (Ground truth: roles gate what humans can mint and manage; the API server
    enforces per-credential authority). The platform verifies the user's token
@@ -455,13 +461,29 @@ the blocked routes expecting the refusal. docs/self-hosted-security.md gains an 
 VU#780781 posture plainly: which CVEs the configuration voids, which the
 pinned version fixes (9090), and that enterprises federating their own IdP
 should point `IDENTITY_OIDC_ISSUER` straight at it — the bundled Casdoor is
-a local-account IdP, not a federation hub. Helm: `identity.*` values
-(mode/issuer/audience/claims/role map) injected into the controlplane
-Deployment; no Casdoor subchart in v1 (its chart QA is weak — the
-casdoor-helm Postgres-values bug — and a hard dependency on a pinned image is
-cleaner); the values doc shows wiring an existing IdP and, for GKE,
-`trusted_proxy` + `gcp-iap` with the Terraform under deploy/gcp growing the
-matching IAP variables and docs.
+a local-account IdP, not a federation hub.
+
+**Helm carries the same bundle, values-gated and off by default.** The chart
+always injects `identity.*` (mode/issuer/audience/claims/role map) into the
+controlplane Deployment; `casdoor.enabled` (default `false`) additionally
+renders a thin set of **first-party** templates — Deployment, Service, and a
+Secret — configured exactly as the compose profile seeds it, blocked SAML
+routes included. First-party rather than the upstream `casdoor-helm` subchart,
+whose QA shipped a release that ignored its Postgres values and silently fell
+back to SQLite: an IdP that quietly loses its user store is worse than one we
+render ourselves in fifty lines. The reason the chart carries it at all is
+this project's own premise — the target deployment is a private cluster with
+no cloud IdP, and "the platform's default IAM works out of the box" has to
+mean Helm there, not only compose on a laptop. Owning the templates means
+owning their lifecycle (image tag, database, secret, CVE tracking), which the
+SSO docs state rather than imply.
+
+**On GCP the identity provider is Google's, not ours.** `deploy/gcp` wires
+`trusted_proxy` + `gcp-iap` in front of the control plane, with Cloud Identity
+Platform or Workspace behind IAP doing the SSO; no Casdoor is deployed there
+and `casdoor.enabled` stays `false`. The Terraform grows the matching IAP
+variables (backend-service audience, the OAuth brand/client, the IAM bindings
+that admit users) and the docs to go with them.
 
 ## Docs that move with the change
 
@@ -509,7 +531,10 @@ matching IAP variables and docs.
    untouched by all of it). Wire-compat rung: the `/v1` route table diff is
    empty; no response shape changes for key-authenticated callers.
 4. **Deployment wiring.** The compose `iam` profile with the hardened Casdoor
-   seed; helm `identity.*` values; the GCP Terraform IAP variables and docs;
+   seed; the Helm `identity.*` values plus the `casdoor.enabled` first-party
+   templates (default off, same hardened configuration, chart-lint and render
+   tests for both states); the GCP Terraform IAP variables and docs, where
+   Google's own IdP does the SSO and no Casdoor is deployed;
    docs/self-hosted-security.md's SSO section.
 5. **The api-key issuance surface** — `admin`-gated minting of named,
    principal-owned management keys, retiring hand-edited `CONTROLPLANE_API_KEY`
