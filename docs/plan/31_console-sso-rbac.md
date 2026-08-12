@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 issue: "#56"
 ---
 
@@ -28,10 +28,22 @@ which consumes what lands here and must trail it.
 ## Scope decisions settled with the user on 2026-08-12
 
 1. **Default bundled IdP: Casdoor, hardened.** The core stays a generic OIDC
-   relying party (`coreos/go-oidc` + `golang.org/x/oauth2`; **no
-   casdoor-go-sdk** — its JWT verification pins a static certificate where
-   go-oidc follows JWKS rotation, so the vendor SDK is strictly worse for the
-   RP role). Casdoor is a *deployment default*, not a code dependency: any
+   relying party with **no vendor SDK**, built directly on `go-jose/v4`.
+   *(Amended 2026-08-12, during slice 1, from "`coreos/go-oidc` +
+   `golang.org/x/oauth2`".* `casdoor-go-sdk` was and stays excluded: its JWT
+   verification pins a static certificate where a JWKS follower rotates.
+   `coreos/go-oidc` is excluded too, on this plan's own terms — its
+   `RemoteKeySet` has no cache TTL, and the Architecture section below
+   requires a key the provider has removed to stop verifying within a
+   minutes-order bound; its single `ClientID` also cannot express the
+   multi-audience/`azp` rule below, so adopting it would mean writing the
+   security core anyway *plus* carrying a new module. `golang.org/x/oauth2`
+   is unneeded because the browser flow lives in the console repo.
+   `go-jose/v4` was already in the controlplane binary transitively, so the
+   direct dependency adds no module, and its parser takes the signature
+   allowlist as a required argument — `alg:none` and HS256 die before any key
+   lookup. The rejected options and their evidence are recorded in
+   docs/HISTORY.md.)* Casdoor is a *deployment default*, not a code dependency: any
    compliant IdP (Keycloak, Entra ID, Cognito, Google) replaces it by config.
    The bundle ships with the hardening posture in Architecture — pinned
    v3.152.0, zero upstream providers, single organization, token-exchange

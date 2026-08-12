@@ -4,19 +4,25 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 29](./docs/plan/29_mcp-toolset.md) — the MCP client and `mcp_toolset` wired
-end to end (#45); #45's acceptance criterion is met at the end of slice 4.
-**GCP continuous delivery** — plan-less, delivered and green; the record is in
-[docs/HISTORY.md](./docs/HISTORY.md). One task remains and blocks every session.
+[Plan 31](./docs/plan/31_console-sso-rbac.md) — console SSO and RBAC (#56):
+humans authenticate through any standards-compliant OIDC provider, and the
+control plane resolves each request to a principal holding one of three
+claim-mapped roles. Machine credentials and every documented CLI/SDK flow are
+untouched. Six slices; slice 1 has landed, slice 2 is next.
 
 ## Tasks
 
-- [x] Plan 29 slice 1 — `mcp_toolset` wire correctness on every spec-resolving
-      surface, plus the resolved-config echo.
-- [ ] Plan 29 slice 2 — the `internal/mcp` client landed. Open: `mcp_catalogs`
-      migration + store, `Conn.CallTool` (slice 4 needs it), the `mcp_exec`
-      driver and its egress check.
-- [ ] Plan 29 slices 3–7 — confirmation gating; brain expansion and execution;
-      vault credentials; networking; evals, `ant` acceptance, archive.
-- [ ] Replace the GCP staging `model-providers` placeholder (real endpoint, fake
-      key) with a live route before a session runs there (`deploy/gcp/README.md`).
+- [x] Slice 1 — `internal/identity`: the shared JWT verifier (bounded JWKS
+      cache, algorithm allowlist, `iss`/`aud`/`sub`/`exp`/`azp` discipline),
+      claim→role mapping, OIDC discovery, the `gcp-iap` preset, env config,
+      and the `identitytest` fake provider. No route touched.
+- [ ] Slice 2 — the principals migration and JIT provisioning; the identity
+      lane in `dispatchAuth`, default-deny; `permission_error`; the console
+      environment-key routes require `admin`.
+- [ ] Slice 3 — the role matrix across the `/v1` and `/api/` route tables,
+      plus the completeness test.
+- [ ] Slice 4 — deployment wiring: the compose `iam` profile (Casdoor
+      v3.152.0, hardened), Helm `identity.*`, GCP IAP Terraform, docs.
+- [ ] Slice 5 — the api-key issuance surface, gated on a live observation of
+      the reference console's dialect.
+- [ ] Slice 6 — acceptance against a real Casdoor token, then archive.

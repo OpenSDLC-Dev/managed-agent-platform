@@ -38,6 +38,223 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Console SSO and RBAC (plan 31, #56) — slice 1's dependency decision: rejected alternatives, 2026-08-12
+
+Plan 31's Scope decision 1 originally named `coreos/go-oidc` + `golang.org/x/oauth2`
+as the verifier's foundation. Slice 1 overturned it, and the plan text is amended
+in the same PR. What a changelog cannot hold is why the two alternatives lost, so
+it is recorded here.
+
+**Evaluated and rejected: `coreos/go-oidc`.** Two of the plan's own requirements
+are unimplementable on it. Its `oidc.NewRemoteKeySet` caches until an unknown
+`kid` forces a refetch and exposes no TTL, so a key the provider has *removed*
+keeps verifying indefinitely — while the same plan's Architecture section requires
+a minutes-order bound on exactly that. And `oidc.Config` carries a single
+`ClientID`; the library's documented route to multi-audience or `azp` checking is
+`SkipClientIDCheck: true` plus a hand-written audience policy. Between the two,
+adopting it would have meant writing the security core anyway *and* carrying a new
+module (which itself depends on go-jose and `x/oauth2`).
+
+**Evaluated and rejected: hand-rolling compact-JWS and JWK parsing.** The
+argument for it was attack surface — that linking a JOSE library puts an HMAC
+verifier and a JWE decrypter in the binary, kept unreachable only by our
+allowlist. That premise is false for this binary: `go list -deps ./cmd/controlplane`
+already prints `github.com/go-jose/go-jose/v4` *and* its `/cipher` package,
+reached through `internal/blob/gcs` → `cloud.google.com/go/storage` → grpc/xds →
+`go-spiffe`. Hand-rolling would therefore have removed nothing from the binary
+while adding roughly 250 statements of security-critical parsing. Positively,
+go-jose closes algorithm confusion *structurally* rather than by discipline: the
+allowlist is a required parameter of `jwt.ParseSigned`, so `alg:none` and HS256
+are refused inside the parser before any key lookup.
+
+**What the adopted route still leaves to us**, and therefore what slice 1's tests
+pin: go-jose skips `exp` when the claim is absent and never checks `sub`, knows
+nothing of `azp`, does not fetch or bound the lifetime of a key set, does not
+bound an RSA modulus or require an odd exponent, does not parse `key_ops` at all,
+and does not enforce a JWK's declared `alg` against the JWS header. One more is a
+correctness trap rather than a gap: `jose.JSONWebKeySet` has no set-level
+`UnmarshalJSON`, and `JSONWebKey.UnmarshalJSON` errors on any `kty` it cannot
+build, so decoding a set whole would let one entry a provider is entitled to
+publish (an X25519 encryption key, a future `kty`) fail the *entire* set and take
+every signing key with it — a boot failure, then uniform 401s once the cache
+expires. `parseKeySet` therefore decodes per entry and skips the unusable, as
+RFC 7517 §5 directs.
+
+**One deliberate extension of the plan's enumerated boot errors.** The plan lists
+five startup rejections; slice 1 adds a sixth — setting
+`IDENTITY_PROXY_HEADER`, `_ISSUER`, `_KEYS_URL` or `_ALGS` while
+`IDENTITY_PROXY_PRESET=gcp-iap` fails startup rather than being ignored. Those
+four variables *are* the verification parameters, and silently discarding an
+operator's attempt to change them is not a warning-grade event.
+
+---
+
+## Console SSO and RBAC (plan 31, #56) — slice 1's security review: what was fixed, and the two findings refuted, 2026-08-12
+
+The Codex security pass over `internal/identity` returned eight findings. Six were
+confirmed against the source and fixed in the same PR; the changelog carries the
+resulting behaviour. Recorded here is only what a changelog cannot hold — the two
+findings **refuted with evidence** rather than fixed, so the next reviewer does not
+re-raise them, and the one fix whose reasoning is a judgement call.
+
+**Refuted: `azp` should be checked whenever present, and extra audiences should be
+rejected.** The reviewer's reading is OIDC Core's SHOULD for `azp` and its
+MUST-not-accept-untrusted-audiences rule. The implemented rule — `aud` must contain
+the configured audience, and `azp` must equal it when `aud` names several — is the
+plan's settled Scope text, and it is not weaker where it differs. A token whose
+`aud` names this console *is* a token whose issuer named this console as an
+audience; that is the authorization signal, and `azp` is advisory beside it.
+Tightening to "`azp` must equal our audience whenever present" would break the
+ordinary deployment where the audience is an API/resource identifier while `azp` is
+the client id — Keycloak and Entra both emit exactly that shape. Rejecting a token
+that additionally names a third-party audience protects that third party, not this
+platform, and only after `azp` has already established the token was issued to us.
+Revisit only with a real provider that motivates it, behind a config flag rather
+than a silent tightening.
+
+**Refuted: `key_ops` duplicates and `use`/`key_ops` inconsistency should be
+rejected** (RFC 7517 §4.3's MUST-NOT-duplicate). `usableKey` already requires
+`use ∈ {"", "sig"}` *and* `verify ∈ key_ops` when `key_ops` is present, and this
+package has exactly one use for a key: verifying a signature. A duplicated
+`"verify"`, or an extra `"encrypt"` alongside it, therefore authorizes nothing
+further — the violation cannot change the decision. Enforcing it would add an
+unbounded O(n²) scan over a provider-controlled list (`maxKeys` bounds the number
+of keys, nothing bounds one key's `key_ops`), which is a denial-of-service seam
+opened to enforce a producer-conformance rule with no consequence here.
+
+**A judgement call, stated rather than buried: the `kid` is still logged.** The
+review flagged writing an attacker-controlled `kid` to a Debug line. It is kept,
+truncated to 64 bytes, at Debug only, because it is the single diagnostic that
+answers "which key did the provider rotate to" when logins start failing; slog
+escapes control bytes, and the truncation is what bounds the log-volume
+amplification the reviewer was pointing at. Everything else the review named —
+URL query strings and userinfo in logs and errors — is now redacted, including
+inside transport errors, whose `*url.Error` quotes the URL verbatim (the fix wraps
+the *cause*, so `errors.Is` still reaches `context.DeadlineExceeded`).
+
+**A note for whoever reads the mutex code.** The panic-safety fix in `keySet.get`
+is not defensive habit. `net/http` recovers a panicking handler per connection, so
+a panic unwinding out of `get` while the cache mutex was held would leave the
+process **alive** with every later authentication blocked forever on a lock nobody
+can release. `TestGetReleasesTheMutexWhenTheFetchPanics` uses `TryLock` precisely
+so the bug fails the suite instead of hanging it.
+
+### The second review round: the claim-name reading, and three go-jose boundaries
+
+The Claude reviewer (Opus 5) and a Codex re-review of the fixes each returned a
+further set. Both independently reached the same conclusion about the RSA
+exponent ceiling, and it is the most instructive item in the slice.
+
+**The exponent ceiling was checked one step too late, and the first fix was
+nearly useless.** `usableKey` bounded `pub.E`, but go-jose has already reduced the
+published exponent to `int(big.Int.Int64())` (`encoding.go:193`) by then, and
+`Int64` on an oversized value yields its **low 64 bits**. A published exponent of
+`2^64 + 65537` therefore arrives as an ordinary `65537` — odd, ≥ 3, far under the
+ceiling — and no rule applied to `pub.E` can see the difference. The bound only
+ever caught the `(2^31, 2^63]` window, and on the `linux/arm` target `make
+crossbuild` compiles it is dead code entirely, since `int` is 32 bits there. The
+real fix reads the raw `e` member from the JWK, where the published value is still
+intact. `TestParseKeySetRejectsATruncatedExponent` asserts the truncation happens
+before asserting the entry is skipped, so the test cannot quietly stop testing
+anything if go-jose changes.
+
+**The claim-name reading was reversed, and the reasoning is worth keeping.** Slice
+1 resolved a dotted claim name as a path ONLY, never as a flat key, to stop an IdP
+surface that lets a user place a claim literally named
+`resource_access.console.roles` from outranking the real nested one. That rule
+silently broke the namespaced-custom-claim convention Auth0 *requires* and Okta
+and Entra also use: `https://corp.example/roles` was split into
+`["https://corp", "example", "com/roles"]`, resolved to nothing, and denied every
+human on those providers with nothing in any log to say why. The fix keeps the
+security property and drops the breakage by deciding from the **configured name**
+rather than from the token: a URI-shaped name (one containing `://`) is a flat
+key, any other dotted name is a path. The rejected alternative was "try the flat
+key, fall back to walking" — that one lets the *token* choose the reading, which
+is the escalation the original rule existed to prevent.
+
+**A null `crit` is accepted, deliberately.** `"crit":null` decodes to a nil
+`*json.RawMessage`, and go-jose's `sanitized()` skips those (`shared.go:416`), so
+it never reaches `ExtraHeaders` and the presence rule never sees it. This is safe
+because a null confers nothing to hide: go-jose's own `getCritical` returns no
+names for it, and `getB64` returns the default `true` for a null `b64`, so neither
+member can declare an extension or change how the payload is read. The test
+asserts the acceptance rather than omitting the case, so a go-jose change fires
+there instead of in production.
+
+**Refuted: the discovered `jwks_uri` should be https-only, with no loopback
+exception.** The exception is not what protects production — the dial guard is,
+and `fetch.go` already states that with the guard wired, http-to-loopback URLs are
+dead in production, fail-closed. The exception is live only when an operator has
+replaced `Config.HTTPClient` and thereby taken the guard off, which the field's
+own documentation calls owning the consequence. It is also load-bearing for the
+fake provider, which every discovery test reaches over http loopback.
+
+**Refuted: `redactURL` should blank the path too.** It removes the userinfo, the
+query, the fragment and the opaque form, and keeps scheme, host and path on
+purpose: `key set fetch failed` is only actionable if it says *which* endpoint,
+and `/oauth2/v3/certs` versus `/.well-known/jwks.json` is the whole diagnostic.
+Nothing can distinguish a secret path segment from a routing one, so blanking it
+would cost every legitimate reader the answer to protect a shape no provider in
+the compatibility set uses. The package doc now states that boundary exactly
+instead of claiming more than the function delivers.
+
+**Refuted: `email_verified` should be required.** Many providers never emit it, so
+requiring it would deny every human on those deployments. Nothing in this package
+derives authority from the email — roles come from the roles claim alone — so an
+unverified address is a display string, not a privilege. What the fix does add is
+a length bound on `Email` and `DisplayName`, since those are the only fields whose
+length the token alone decides and a later slice persists them; and a note at the
+assignment telling that slice that anything MATCHING or LINKING on the address
+must make its own verification decision, because on an IdP with self-service
+profile attributes — Casdoor included — the user chooses that string.
+
+### The third round: the PR's own bots, and a truncation that defeated itself
+
+Ten review threads on [#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369)
+from the Codex connector and CodeRabbit. Eight were confirmed and fixed; the
+changelog carries the behaviour. Three are worth recording.
+
+**`truncate` cut on a byte boundary, which reintroduced the failure it existed to
+prevent.** The bound on `Email` and `DisplayName` was added in the second round so
+that an oversized claim could not turn a valid login into an insert failure
+against a bounded column. Cutting `s[:n]` through a multi-byte UTF-8 sequence
+leaves trailing bytes that are not valid UTF-8, and a UTF8 PostgreSQL database
+refuses exactly those on insert — so any non-ASCII display name whose cap landed
+mid-rune produced the insert failure the bound was for, and slice 2 is what makes
+that reachable, since slice 2 is what persists the fields. Proven rather than
+argued: with the byte cut restored, `TestVerifyBoundsTheProfileFieldsOnARuneBoundary`
+reports `DisplayName` ending `\xe4\xb8`. Trimming the incomplete tail is enough
+because the input is always valid UTF-8 already — these strings come out of
+`encoding/json`, which replaces malformed bytes with U+FFFD while unquoting — and a
+genuine U+FFFD survives, since `DecodeLastRuneInString` reports it with size 3
+while a stray byte comes back with size 1.
+
+**Google mints two spellings of its issuer, and exact comparison rejected one.**
+`iss` is compared exactly, on purpose. Google documents an ID token's `iss` as
+"always `https://accounts.google.com` or `accounts.google.com`" and emits both,
+while OIDC Core §2 requires an issuer identifier to be an https URL — so the
+scheme-less form cannot be configured here, and a deployment pointed at Google
+would boot cleanly and then 401 an arbitrary half of its logins. The allowance
+added is one hard-coded pair, keyed on the exact configured string: no operator
+input widens it, no other deployment reaches it, and both spellings denote one
+issuer identity whose key set is the same either way. A provider that violates the
+spec differently gets an issue, not a second special case.
+
+**Refuted in mechanism, fixed in substance: the log-presence guard.** CodeRabbit
+argued that `TestLogsCarryNoCredentials`'s four presence assertions could be
+satisfied by another test's lines, because `slog.SetDefault` is process-wide and
+"parallel subtests of earlier tests resume while this sequential test runs". That
+mechanism does not hold: a top-level test that calls `t.Parallel()` parks until
+every sequential top-level test has finished, so nothing in this package writes to
+the sink concurrently with that test today. What *was* wrong is what the finding
+pointed at sideways — the sink's own comment claimed every assertion below it was
+about absence, and the presence block is not. Both are now fixed: the comment says
+what the two kinds of assertion are, and each presence check is qualified by the
+fixture's own key-set host, so the guard no longer depends on a scheduling
+property a later `t.Parallel()` could quietly remove.
+
+---
+
 ## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (runs 2026-08-10 and 2026-08-11) — ✅ #43 passed; the deferred work-item-pull criterion passed too (#363 closed)
 
 #43's acceptance criterion, quoted rather than paraphrased: *"An operator can
