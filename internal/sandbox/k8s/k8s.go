@@ -1372,7 +1372,24 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 	// with the shell's own strerror text, plan 23); capped because the sandbox
 	// writes it.
 	out := &cappedBuffer{limit: 4096}
-	res, err := pd.client.exec(ctx, pd.name, containerName, argv, src, out, io.Discard)
+	// A write of no bytes opens no stdin stream, the way the bulk scripts that
+	// read no stdin are given none. Five CI stalls in one week hung here and
+	// nowhere else (#318): the exec for a zero-byte write opened a stdin stream,
+	// the client's copy of it finished and closed it at once, and the pod's side
+	// of that exec then never completed — stdout, stderr and the error stream all
+	// sat waiting for an EOF that never came, on an idle connection, until go
+	// test's package alarm killed the whole binary nine minutes later. Why the
+	// cluster loses that close is not established. That all five landed on one of
+	// the suite's two zero-byte writes, and none on the hundreds of writes that
+	// carry bytes, is. Asking for no stream removes the race rather than
+	// diagnosing it, and costs the script nothing: a container whose exec
+	// requested no stdin reads EOF immediately, so `tee | wc -c` still counts the
+	// zero that $3 is compared against.
+	stdin := src
+	if size == 0 {
+		stdin = nil
+	}
+	res, err := pd.client.exec(ctx, pd.name, containerName, argv, stdin, out, io.Discard)
 	if err != nil {
 		return pd.execErr(ctx, err)
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1429,6 +1430,63 @@ func TestExecWrapperMarksTheWatchdogsKill(t *testing.T) {
 	})
 }
 
+// The watchdog must not still be holding the exec's stderr when the command has
+// exited: a timed command would then return a poll interval late, every time.
+// Nothing in that is Kubernetes-specific — it is a property of the script's file
+// descriptors — so it is pinned here, on the host's shell, in milliseconds and
+// without a cluster in the measurement.
+//
+// An os.Pipe stands in for the exec's stderr because that is what it is: one
+// descriptor several processes in the pod inherit, which EOFs when the last of
+// them closes it — the kubelet copies until exactly that moment. cmd.Stderr
+// being an *os.File hands the child that descriptor directly, with no copying
+// goroutine in between, so Run returns when the wrapper exits and the parent's
+// own copy is then the only one left to close. A read that EOFs immediately
+// after means nothing inside outlived the command; one that blocks means a
+// straggler — the watchdog, asleep in its `sleep 1` — is still holding it.
+//
+// The bound is not a load measurement: by the time Run has returned, either the
+// pipe is already EOF or a live process is holding it, and 300ms is only the
+// margin for this process to be scheduled. The regression it separates from is a
+// whole poll interval, ~1s.
+func TestExecWrapperReleasesTheStreamWhenTheCommandExits(t *testing.T) {
+	env := setsidEnv(t)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	// The command writes to stderr so the pipe is proven to be the stream the
+	// wrapper hands the command, rather than a descriptor nothing ever reached —
+	// a pipe wired to nothing would EOF promptly for the wrong reason. Its
+	// deadline is long enough that the watchdog is still on its first sleep when
+	// the command exits, which is the moment under test.
+	cmd := exec.Command("/bin/bash", "-c", execWrapper, "map-exec", "echo hi >&2", "30", t.TempDir()+"/state")
+	cmd.Stderr = w
+	if env != nil {
+		cmd.Env = env
+	}
+	if err := cmd.Run(); err != nil {
+		_ = w.Close()
+		t.Fatalf("run execWrapper: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close the parent's end: %v", err)
+	}
+
+	if err := r.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Errorf("the exec's stderr did not EOF once the command exited (%v) — the watchdog is holding it open", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "hi" {
+		t.Errorf("the command's stderr = %q, want %q — it never reached the stream this asserts on", got, "hi")
+	}
+}
+
 // exitScript carries the mark home and takes the exec's state with it, so the
 // two halves are pinned together: a mark the provider cannot read is a lost
 // timeout, and one it does not remove is a file per timed-out command left in
@@ -2166,6 +2224,58 @@ func TestWriteScriptDrainsEveryEarlyExit(t *testing.T) {
 		}
 		gone(t, tmp)
 	})
+}
+
+// A write with nothing to write opens no stdin stream (#318). The stall it
+// removes is the cluster's, so no cluster can be made to stage it; what this
+// pins is the request the provider makes, which is the whole of its side of the
+// bargain. Same fake API server as the shed row below, and for the same reason:
+// an exec is not a typed call, so only the server the SPDY executor dials can
+// see what was asked. The upgrade it refuses is immaterial — the question is
+// what the query said before the refusal.
+//
+// The one-byte write is not decoration: without it this row passes just as well
+// against a provider that never asks for stdin at all, which would strand every
+// write that has bytes to deliver.
+func TestAnEmptyWriteAsksForNoStdinStream(t *testing.T) {
+	var mu sync.Mutex
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/exec") {
+			mu.Lock()
+			asked = append(asked, r.URL.Query().Get("stdin"))
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	rc := &rest.Config{Host: srv.URL}
+	cs, err := kubernetes.NewForConfig(rc)
+	if err != nil {
+		t.Fatalf("build the clientset: %v", err)
+	}
+	pd := &pod{
+		client:  &client{cs: cs, rest: rc, namespace: "default"},
+		name:    "map-sesn-x",
+		workdir: sandbox.DefaultWorkdir,
+	}
+	ctx := context.Background()
+	// Both fail on the refused upgrade; what they asked for is already recorded.
+	_ = pd.WriteFile(ctx, sandbox.DefaultWorkdir+"/empty.txt", nil)
+	_ = pd.WriteFile(ctx, sandbox.DefaultWorkdir+"/one.txt", []byte("x"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 2 {
+		t.Fatalf("the pod was asked to exec %d times, want 2 (one write each)", len(asked))
+	}
+	if asked[0] == "true" {
+		t.Error("a zero-byte write asked for a stdin stream — nothing will ever be written to it, and the pod's side of that exec is what #318 hung on")
+	}
+	if asked[1] != "true" {
+		t.Errorf("a one-byte write asked stdin=%q, want true — its bytes travel on that stream", asked[1])
+	}
 }
 
 // A batch that failed *because* its caller went away is the one whose residue
