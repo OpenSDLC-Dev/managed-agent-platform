@@ -13,11 +13,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	jose "github.com/go-jose/go-jose/v4"
 
@@ -74,10 +76,11 @@ func verifierXIdP(t *testing.T) (*identitytest.IdP, *identitytest.Clock) {
 	return identitytest.NewIdP(t), identitytest.NewClock(verifierXBase)
 }
 
-// verifierXNew builds an oidc-mode verifier over the provider, with the key URL
-// pinned so New skips discovery. adjust may reshape the Config first.
-func verifierXNew(t *testing.T, idp *identitytest.IdP, clock *identitytest.Clock, adjust func(*identity.Config)) *identity.Verifier {
-	t.Helper()
+// verifierXConfig is an oidc-mode Config over the provider, with the key URL
+// pinned so New skips discovery. adjust may reshape it. Separate from
+// verifierXNew because a test that expects New to REFUSE a config needs the
+// config without the t.Fatalf.
+func verifierXConfig(idp *identitytest.IdP, clock *identitytest.Clock, adjust func(*identity.Config)) identity.Config {
 	cfg := identity.Config{
 		Mode:       identity.ModeOIDC,
 		Issuer:     idp.Issuer(),
@@ -90,7 +93,13 @@ func verifierXNew(t *testing.T, idp *identitytest.IdP, clock *identitytest.Clock
 	if adjust != nil {
 		adjust(&cfg)
 	}
-	v, err := identity.New(context.Background(), cfg)
+	return cfg
+}
+
+// verifierXNew builds a verifier from that config and fails the test if New does.
+func verifierXNew(t *testing.T, idp *identitytest.IdP, clock *identitytest.Clock, adjust func(*identity.Config)) *identity.Verifier {
+	t.Helper()
+	v, err := identity.New(context.Background(), verifierXConfig(idp, clock, adjust))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -1647,9 +1656,122 @@ func TestVerifyBoundsTheProfileFields(t *testing.T) {
 	}
 }
 
+// TestVerifyBoundsTheProfileFieldsOnARuneBoundary is the other half of that cap,
+// and the half that decides whether it works at all. The bound exists so a long
+// claim cannot turn a valid login into an insert failure against a bounded
+// column; a cut through a multi-byte sequence leaves bytes a UTF8 PostgreSQL
+// database refuses, which would reintroduce that failure for every non-ASCII name
+// unlucky in its length.
+func TestVerifyBoundsTheProfileFieldsOnARuneBoundary(t *testing.T) {
+	t.Parallel()
+	idp, clock, v := verifierXFixture(t)
+
+	// Three-byte runes over a cap that is not a multiple of three, so the cut
+	// lands inside one whatever the cap's exact value.
+	const rune3 = "世"
+	claims := verifierXClaims(idp, clock)
+	claims["name"] = strings.Repeat(rune3, identity.MaxProfileBytesForTest)
+	claims["email"] = "a" + strings.Repeat(rune3, identity.MaxProfileBytesForTest)
+
+	got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	for _, f := range []struct{ what, value string }{
+		{"DisplayName", got.DisplayName}, {"Email", got.Email},
+	} {
+		if !utf8.ValidString(f.value) {
+			t.Errorf("%s is not valid UTF-8 after truncation: %q", f.what, f.value)
+		}
+		if len(f.value) > identity.MaxProfileBytesForTest {
+			t.Errorf("len(%s) = %d, want at most the cap %d", f.what, len(f.value),
+				identity.MaxProfileBytesForTest)
+		}
+		// At most one rune's worth of bytes may be given up to reach the boundary,
+		// so the bound stays a bound rather than a licence to return anything
+		// shorter.
+		if len(f.value) < identity.MaxProfileBytesForTest-utf8.UTFMax {
+			t.Errorf("len(%s) = %d, want within %d bytes of the cap %d", f.what,
+				len(f.value), utf8.UTFMax, identity.MaxProfileBytesForTest)
+		}
+	}
+}
+
+// TestVerifyAcceptsGooglesLegacyIssuerForm covers the one OP in the compatibility
+// set that mints two spellings of its issuer. Google documents an ID token's iss
+// as "always https://accounts.google.com or accounts.google.com", and only the
+// first is configurable here (the second is not a URL), so an exact comparison
+// would 401 half of a working deployment's logins — after a startup that
+// succeeded.
+func TestVerifyAcceptsGooglesLegacyIssuerForm(t *testing.T) {
+	t.Parallel()
+	idp, clock := verifierXIdP(t)
+	const google = "https://accounts.google.com"
+	v := verifierXNew(t, idp, clock, func(c *identity.Config) { c.Issuer = google })
+
+	for _, iss := range []string{google, "accounts.google.com"} {
+		claims := verifierXClaims(idp, clock)
+		claims["iss"] = iss
+		got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+		if err != nil {
+			t.Errorf("Verify with iss %q: %v — Google mints both forms", iss, err)
+			continue
+		}
+		if got.Issuer != iss {
+			t.Errorf("Issuer = %q, want the value the token carried, %q", got.Issuer, iss)
+		}
+	}
+
+	// The allowance is that one pair and nothing else: it is keyed on the exact
+	// configured string, so no other deployment inherits a second accepted issuer,
+	// and the scheme-less Google value is not accepted anywhere else either.
+	other := verifierXNew(t, idp, clock, nil)
+	for _, iss := range []string{"accounts.google.com", google} {
+		claims := verifierXClaims(idp, clock)
+		claims["iss"] = iss
+		if _, err := other.Verify(context.Background(), idp.Mint(t, claims)); err == nil {
+			t.Errorf("iss %q verified against a verifier configured for %q", iss, idp.Issuer())
+		}
+	}
+}
+
+// TestNewRefusesAnOverDeepClaimName pins that a claim path claimAt will not walk
+// is a BOOT error. Accepted instead, it resolves to nil on every request and the
+// deployment maps every human to RoleNone — a control plane that denies everyone,
+// with nothing in any log to say why.
+func TestNewRefusesAnOverDeepClaimName(t *testing.T) {
+	t.Parallel()
+	idp, clock := verifierXIdP(t)
+
+	deep := strings.Join(make([]string, identity.MaxClaimDepthForTest+2), ".") // depth+1 segments
+	for _, tc := range []struct {
+		what   string
+		adjust func(*identity.Config)
+	}{
+		{"roles", func(c *identity.Config) { c.RolesClaim = deep }},
+		{"email", func(c *identity.Config) { c.EmailClaim = deep }},
+		{"name", func(c *identity.Config) { c.NameClaim = deep }},
+	} {
+		if _, err := identity.New(context.Background(), verifierXConfig(idp, clock, tc.adjust)); err == nil {
+			t.Errorf("New accepted an over-deep %s claim name", tc.what)
+		}
+	}
+
+	// A URI-shaped name is one flat key however many dots it carries, so the
+	// namespaced convention Auth0 requires must not trip the depth check.
+	namespaced := "https://corp.example/a.b.c.d.e.f.g.h.i.j"
+	if _, err := identity.New(context.Background(),
+		verifierXConfig(idp, clock, func(c *identity.Config) { c.RolesClaim = namespaced })); err != nil {
+		t.Errorf("New refused the URI-shaped claim name %q: %v", namespaced, err)
+	}
+}
+
 // syncBufferX is a concurrency-safe log sink. slog.SetDefault is process-wide, so
-// lines from tests running in parallel land here too — which is why every
-// assertion below is about the ABSENCE of a string unique to this test.
+// the sink must tolerate concurrent writers, and the assertions built on it must
+// not depend on which test wrote a line. The secret assertions are about the
+// ABSENCE of a string unique to this test, which no other writer could produce;
+// the presence assertions qualify each message with this fixture's own key-set
+// host, so a line another verifier wrote can never satisfy them.
 type syncBufferX struct {
 	mu  sync.Mutex
 	buf strings.Builder
@@ -1720,14 +1842,33 @@ func TestLogsCarryNoCredentials(t *testing.T) {
 	}
 
 	logged := sink.String()
+	// Every presence check is qualified by THIS fixture's key-set host, which is a
+	// port no other test holds. The four messages are constants any verifier in
+	// this package emits, and the sink is process-wide, so an unqualified search
+	// would be a guard another writer could satisfy — and a guard that proves the
+	// canary checks below ran must not be satisfiable by anything but this test.
+	// (`identity configured` carries the host in jwks_url, the three key-set lines
+	// in url.)
+	host, err := url.Parse(signed)
+	if err != nil || host.Host == "" {
+		t.Fatalf("read the fixture's key-set host from %q: %v", signed, err)
+	}
 	for _, want := range []string{
 		"identity configured",
 		"identity: key set fetch failed",
 		"identity: key-set refresh rate-limited",
 		"identity: key set refreshed",
 	} {
-		if !strings.Contains(logged, want) {
-			t.Fatalf("the %q path never logged, so this test asserted nothing:\n%s", want, logged)
+		found := false
+		for _, line := range strings.Split(logged, "\n") {
+			if strings.Contains(line, want) && strings.Contains(line, host.Host) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("the %q path never logged for %s, so this test asserted nothing:\n%s",
+				want, host.Host, logged)
 		}
 	}
 	if strings.Contains(logged, canary) {

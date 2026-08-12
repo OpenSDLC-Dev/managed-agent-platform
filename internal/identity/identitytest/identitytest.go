@@ -16,6 +16,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -92,7 +93,13 @@ type IdP struct {
 	keys      []signingKey
 	active    string
 	published map[string]bool
-	minted    int
+	// One cursor per pool. A single shared counter would make an EC key's index
+	// skip an RSA one, and pooledRSA grows to whatever index it is handed — so a
+	// suite that added a few EC keys and then one RSA key would generate every
+	// intermediate 2048-bit RSA key it never uses, which is the cost the pool
+	// exists to avoid.
+	nextRSA int
+	nextEC  int
 
 	jwksBody     []byte
 	discoveryDoc map[string]any
@@ -233,10 +240,10 @@ func (p *IdP) AddKey(t *testing.T, alg string) string {
 	var priv, pub any
 	switch alg {
 	case "RS256", "RS512":
-		k := pooledRSA(p.next())
+		k := pooledRSA(p.nextRSAIndex())
 		priv, pub = k, &k.PublicKey
 	case "ES256":
-		k := pooledEC(p.next())
+		k := pooledEC(p.nextECIndex())
 		priv, pub = k, &k.PublicKey
 	case "ES384", "ES512":
 		curve := elliptic.P384()
@@ -253,7 +260,11 @@ func (p *IdP) AddKey(t *testing.T, alg string) string {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	kid := alg + "-" + string(rune('a'+len(p.keys)))
+	// A decimal index, not 'a'+n: past 26 keys that ran into punctuation and then
+	// non-ASCII. Uniqueness held either way — len(p.keys) only grows, under this
+	// lock — but a kid appears in test failures and in the truncated kid the
+	// verifier logs, and both should stay readable.
+	kid := fmt.Sprintf("%s-%d", alg, len(p.keys))
 	p.keys = append(p.keys, signingKey{kid: kid, alg: alg, priv: priv, pub: pub})
 	p.published[kid] = true
 	return kid
@@ -346,12 +357,20 @@ func (p *IdP) key(kid string) (signingKey, bool) {
 	return signingKey{}, false
 }
 
-// next returns a per-IdP counter for picking pooled keys.
-func (p *IdP) next() int {
+// nextRSAIndex and nextECIndex are the per-IdP, per-pool cursors for picking
+// pooled keys. Index 0 of each pool belongs to NewIdP's default key.
+func (p *IdP) nextRSAIndex() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.minted++
-	return p.minted
+	p.nextRSA++
+	return p.nextRSA
+}
+
+func (p *IdP) nextECIndex() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.nextEC++
+	return p.nextEC
 }
 
 func (p *IdP) serveDiscovery(w http.ResponseWriter, _ *http.Request) {
@@ -362,8 +381,19 @@ func (p *IdP) serveDiscovery(w http.ResponseWriter, _ *http.Request) {
 	if doc == nil {
 		doc = map[string]any{"issuer": p.Issuer(), "jwks_uri": p.JWKSURL()}
 	}
+	// Marshalled before the status and Content-Type are committed. SetDiscovery
+	// takes an arbitrary map, so a test can store something encoding/json refuses;
+	// streaming it would send a 200 and then truncate, and the failure would
+	// surface as a parse error at the verifier rather than at the fixture that
+	// caused it.
+	body, err := json.Marshal(doc)
+	if err != nil {
+		http.Error(w, "identitytest: marshal the discovery document: "+err.Error(),
+			http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(doc)
+	_, _ = w.Write(body)
 }
 
 func (p *IdP) serveJWKS(w http.ResponseWriter, _ *http.Request) {

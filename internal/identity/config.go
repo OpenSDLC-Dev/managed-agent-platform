@@ -86,6 +86,14 @@ const (
 // behind an issue, never a quiet edit: PS256 and EdDSA are absent on purpose.
 var defaultAlgorithms = []string{"RS256", "RS512", "ES256", "ES384", "ES512"}
 
+// Google's two spellings of one issuer identity. Only the first is configurable
+// — the second is not a URL, so requireIssuerURL refuses it — and only
+// acceptedIssuers reads them; see its doc comment for why the pair exists.
+const (
+	googleIssuer       = "https://accounts.google.com"
+	googleLegacyIssuer = "accounts.google.com"
+)
+
 // Environment variable names — exactly the plan's table and nothing invented.
 // Mode A has no algorithms override: the five-algorithm default is its whole
 // contract.
@@ -272,6 +280,11 @@ func valueOr(v, def string) string {
 
 // parseRoleMap parses IDENTITY_ROLE_MAP: comma-separated value=role pairs,
 // whitespace trimmed around each pair and around both sides of each '='.
+//
+// A claim value therefore cannot itself contain ',' or '='. A directory group
+// named in distinguished form (CN=platform-admins,OU=corp) is not configurable
+// here; map the short group name the IdP actually places in the roles claim.
+// Such a value fails startup rather than mapping something unintended.
 //
 // Every defect is an error rather than a dropped entry. A duplicate source in
 // particular: last-wins would be a silent authority change.

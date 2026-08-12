@@ -208,6 +208,51 @@ assignment telling that slice that anything MATCHING or LINKING on the address
 must make its own verification decision, because on an IdP with self-service
 profile attributes — Casdoor included — the user chooses that string.
 
+### The third round: the PR's own bots, and a truncation that defeated itself
+
+Ten review threads on [#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369)
+from the Codex connector and CodeRabbit. Eight were confirmed and fixed; the
+changelog carries the behaviour. Three are worth recording.
+
+**`truncate` cut on a byte boundary, which reintroduced the failure it existed to
+prevent.** The bound on `Email` and `DisplayName` was added in the second round so
+that an oversized claim could not turn a valid login into an insert failure
+against a bounded column. Cutting `s[:n]` through a multi-byte UTF-8 sequence
+leaves trailing bytes that are not valid UTF-8, and a UTF8 PostgreSQL database
+refuses exactly those on insert — so any non-ASCII display name whose cap landed
+mid-rune produced the insert failure the bound was for, and slice 2 is what makes
+that reachable, since slice 2 is what persists the fields. Proven rather than
+argued: with the byte cut restored, `TestVerifyBoundsTheProfileFieldsOnARuneBoundary`
+reports `DisplayName` ending `\xe4\xb8`. Trimming the incomplete tail is enough
+because the input is always valid UTF-8 already — these strings come out of
+`encoding/json`, which replaces malformed bytes with U+FFFD while unquoting — and a
+genuine U+FFFD survives, since `DecodeLastRuneInString` reports it with size 3
+while a stray byte comes back with size 1.
+
+**Google mints two spellings of its issuer, and exact comparison rejected one.**
+`iss` is compared exactly, on purpose. Google documents an ID token's `iss` as
+"always `https://accounts.google.com` or `accounts.google.com`" and emits both,
+while OIDC Core §2 requires an issuer identifier to be an https URL — so the
+scheme-less form cannot be configured here, and a deployment pointed at Google
+would boot cleanly and then 401 an arbitrary half of its logins. The allowance
+added is one hard-coded pair, keyed on the exact configured string: no operator
+input widens it, no other deployment reaches it, and both spellings denote one
+issuer identity whose key set is the same either way. A provider that violates the
+spec differently gets an issue, not a second special case.
+
+**Refuted in mechanism, fixed in substance: the log-presence guard.** CodeRabbit
+argued that `TestLogsCarryNoCredentials`'s four presence assertions could be
+satisfied by another test's lines, because `slog.SetDefault` is process-wide and
+"parallel subtests of earlier tests resume while this sequential test runs". That
+mechanism does not hold: a top-level test that calls `t.Parallel()` parks until
+every sequential top-level test has finished, so nothing in this package writes to
+the sink concurrently with that test today. What *was* wrong is what the finding
+pointed at sideways — the sink's own comment claimed every assertion below it was
+about absence, and the presence block is not. Both are now fixed: the comment says
+what the two kinds of assertion are, and each presence check is qualified by the
+fixture's own key-set host, so the guard no longer depends on a scheduling
+property a later `t.Parallel()` could quietly remove.
+
 ---
 
 ## Console-issued environment keys (plan 30, #43) — acceptance against the real `ant` CLI (runs 2026-08-10 and 2026-08-11) — ✅ #43 passed; the deferred work-item-pull criterion passed too (#363 closed)

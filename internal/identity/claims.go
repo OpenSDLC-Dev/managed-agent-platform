@@ -48,6 +48,23 @@ func claimAt(claims map[string]any, name string) any {
 	return cur
 }
 
+// claimNameTooDeep reports a configured name that claimAt would refuse to walk.
+// It lives here, immediately beside the rule it mirrors, because the two must
+// agree on what counts as a path: a URI-shaped name is one flat key however many
+// dots it carries, so no Auth0-style namespaced claim can trip this.
+//
+// New calls it so that an over-deep name is a BOOT error. Without that check the
+// configuration is accepted, claimAt resolves to nil on every request, and the
+// deployment maps every human to RoleNone — a control plane that denies everyone
+// with nothing in any log to say why, which is the worst shape a configuration
+// defect can take.
+func claimNameTooDeep(name string) bool {
+	if !strings.Contains(name, ".") || strings.Contains(name, "://") {
+		return false
+	}
+	return strings.Count(name, ".")+1 > maxClaimDepth
+}
+
 // stringClaim resolves name and returns it only when it decoded as a string. A
 // number, bool, array or object yields "" — never an error: a missing or
 // oddly-typed email is not an authentication failure.

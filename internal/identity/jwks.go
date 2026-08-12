@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	jose "github.com/go-jose/go-jose/v4"
 )
@@ -360,12 +361,32 @@ func exponentInRange(raw string) bool {
 	return new(big.Int).SetBytes(b).Cmp(big.NewInt(maxRSAExponent)) <= 0
 }
 
-// truncate bounds an attacker-controlled string before it reaches a log. slog
-// escapes control bytes but does not bound length, so an unbounded kid would be a
-// log-volume amplifier.
+// truncate bounds an attacker-controlled string to n BYTES, cutting only on a
+// rune boundary. slog escapes control bytes but does not bound length, so an
+// unbounded kid would be a log-volume amplifier; the two profile fields are
+// bounded for a different reason — a later slice persists them to a column.
+//
+// The rune boundary is what makes the second use correct rather than
+// self-defeating. A cut through a multi-byte sequence leaves bytes that are not
+// valid UTF-8, and a UTF8 PostgreSQL database refuses those on insert — which is
+// exactly the "valid login turning into an insert failure" the bound exists to
+// prevent, reintroduced by the bound itself for any non-ASCII name whose cap
+// lands mid-rune. Trimming the incomplete tail is sufficient because the input is
+// always valid UTF-8 already: these strings come out of encoding/json, which
+// replaces malformed bytes with U+FFFD while unquoting. A real U+FFFD survives —
+// DecodeLastRuneInString reports it with size 3, and only a size-1 RuneError is a
+// stray byte.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n]
+	out := s[:n]
+	for len(out) > 0 {
+		r, size := utf8.DecodeLastRuneInString(out)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		out = out[:len(out)-1]
+	}
+	return out
 }

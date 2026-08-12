@@ -152,7 +152,8 @@ func TestMintRoundTrip(t *testing.T) {
 
 	t.Run("named key signs with its own algorithm", func(t *testing.T) {
 		kid := p.AddECKey(t)
-		token := p.MintWith(t, kid, p.Claims("console", fixtureXNow))
+		claims := p.Claims("console", fixtureXNow)
+		token := p.MintWith(t, kid, claims)
 
 		hdr := fixtureXDecodeSegment(t, fixtureXSegments(t, token)[0])
 		if hdr["alg"] != "ES256" {
@@ -172,6 +173,11 @@ func TestMintRoundTrip(t *testing.T) {
 		var verified map[string]any
 		if err := tok.Claims(fixtureXPublicKey(t, p, kid), &verified); err != nil {
 			t.Fatalf("verify with the published key: %v", err)
+		}
+		// Compared, not merely decoded — as the RS256 case does. A signature that
+		// checks out says nothing about whether the payload is the one handed in.
+		if want := fixtureXThroughJSON(t, claims); !reflect.DeepEqual(verified, want) {
+			t.Errorf("verified claims = %v, want %v", verified, want)
 		}
 	})
 }

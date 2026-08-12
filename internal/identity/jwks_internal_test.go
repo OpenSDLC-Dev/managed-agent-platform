@@ -284,8 +284,13 @@ func TestParseKeySetRejectsWeakRSAKeys(t *testing.T) {
 		// published exponent, so the entry must go rather than become another key.
 		{name: "exactly the exponent ceiling", usable: true,
 			entry: jwksXRSAModulus("max-e", jwksXModulus(minRSABits), maxRSAExponent)},
+		// Through jwksXRSABig, not jwksXRSAModulus: maxRSAExponent+2 is the
+		// untyped constant 2147483649, which does not fit the int parameter on a
+		// 32-bit target and would stop this package compiling there — and this
+		// module cross-compiles ./internal/... for linux/arm.
 		{name: "above the exponent ceiling",
-			entry: jwksXRSAModulus("huge-e", jwksXModulus(minRSABits), maxRSAExponent+2)},
+			entry: jwksXRSABig("huge-e", jwksXModulus(minRSABits),
+				new(big.Int).Add(big.NewInt(maxRSAExponent), big.NewInt(2)))},
 		// A modulus is a product of odd primes, so an even one is not a modulus.
 		{name: "even modulus",
 			entry: jwksXRSAModulus("even-n", new(big.Int).Lsh(big.NewInt(1), minRSABits-1), 65537)},

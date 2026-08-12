@@ -179,12 +179,42 @@ func TestNewFailsOnIssuerMismatch(t *testing.T) {
 	v, err := identity.New(context.Background(),
 		discoveryXConfig(p.Issuer(), p.Client(), identitytest.NewClock(discoveryXBase).Now))
 	discoveryXWantBootError(t, v, err)
-	// A boot error names the defect — that is what an operator has to act on.
-	if err != nil && !strings.Contains(err.Error(), other) {
-		t.Errorf("error %q does not name the document's issuer %q", err, other)
+	// A boot error names the defect — that is what an operator has to act on —
+	// through the CONFIGURED issuer, which was validated before any request went
+	// out. The published value is deliberately absent; the next case says why.
+	if err != nil && !strings.Contains(err.Error(), p.Issuer()) {
+		t.Errorf("error %q does not name the configured issuer %q", err, p.Issuer())
+	}
+	if err != nil && strings.Contains(err.Error(), other) {
+		t.Errorf("error %q quotes the document's own issuer value", err)
 	}
 	if got := p.Fetches(); got != 0 {
 		t.Errorf("Fetches() = %d, want 0 — the mismatch aborts before any key is fetched", got)
+	}
+}
+
+// TestIssuerMismatchDoesNotQuoteTheDocument is why the case above asserts an
+// absence. The published issuer is remote input from an endpoint that has proved
+// nothing: it is bounded only by the body cap, so quoting it puts up to that many
+// bytes of a stranger's choosing into a startup error, and this package's own rule
+// is that a URL reaches a log or an error redacted, because one can be a signed
+// URL whose query string is the credential.
+func TestIssuerMismatchDoesNotQuoteTheDocument(t *testing.T) {
+	t.Parallel()
+	const canary = "SUPER-SECRET-CANARY"
+	p := identitytest.NewIdP(t)
+	p.SetDiscovery(map[string]any{
+		"issuer":   "https://user:" + canary + "@attacker.example/?access_token=" + canary,
+		"jwks_uri": p.JWKSURL(),
+	})
+
+	_, err := identity.New(context.Background(),
+		discoveryXConfig(p.Issuer(), p.Client(), identitytest.NewClock(discoveryXBase).Now))
+	if err == nil {
+		t.Fatal("New accepted a document naming a different issuer")
+	}
+	if strings.Contains(err.Error(), canary) {
+		t.Errorf("the boot error carries a credential from the published issuer: %v", err)
 	}
 }
 

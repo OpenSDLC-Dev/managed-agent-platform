@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -15,9 +17,12 @@ import (
 // Verifier verifies this deployment's identity credential. Safe for concurrent
 // use; built once per process.
 type Verifier struct {
-	mode       Mode
-	header     string
-	issuer     string
+	mode   Mode
+	header string
+	issuer string
+	// issuers is what an `iss` is actually compared against: cfg.Issuer, plus the
+	// one documented alternate form acceptedIssuers adds. Never operator-widened.
+	issuers    []string
 	audience   string
 	algs       []jose.SignatureAlgorithm
 	rolesClaim string
@@ -132,6 +137,7 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		mode:       cfg.Mode,
 		header:     cfg.AssertionHeader,
 		issuer:     cfg.Issuer,
+		issuers:    acceptedIssuers(cfg.Issuer),
 		audience:   cfg.Audience,
 		algs:       algs,
 		rolesClaim: valueOr(cfg.RolesClaim, "roles"),
@@ -140,6 +146,17 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		roleMap:    roleMap,
 		now:        now,
 		keys:       newKeySet(jwksURL, client, algNames, now),
+	}
+	// Checked on the DEFAULTED names, and here rather than in ConfigFromEnv, for
+	// the reason the role map is: New is the package's boundary and a Config can be
+	// built literally. claimNameTooDeep says what this prevents.
+	for _, c := range []struct{ what, name string }{
+		{envClaimRoles, v.rolesClaim}, {envClaimEmail, v.emailClaim}, {envClaimName, v.nameClaim},
+	} {
+		if claimNameTooDeep(c.name) {
+			return nil, fmt.Errorf("identity: %s %q is %d segments deep; at most %d are walked",
+				c.what, c.name, strings.Count(c.name, ".")+1, maxClaimDepth)
+		}
 	}
 
 	// Warm the key set so an unreachable or unusable key source is a boot error.
@@ -154,6 +171,31 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		"jwks_url", redactURL(jwksURL), "algorithms", algNames, "roles_claim", v.rolesClaim,
 		"mapped_values", len(roleMap))
 	return v, nil
+}
+
+// acceptedIssuers returns the `iss` values a token may carry for a configured
+// issuer: the configured value, and nothing else — except for Google's Sign in
+// with Google, the one OP in the compatibility set that mints two.
+//
+// OpenID Connect Core §2 requires an issuer identifier to be an https URL, and
+// this package requires one (requireIssuerURL), so `accounts.google.com` cannot
+// be configured. Google nonetheless documents that an ID token's iss is "always
+// https://accounts.google.com or accounts.google.com" and emits both, so an exact
+// comparison against the discovery document's `https://accounts.google.com`
+// rejects half of a correctly-configured deployment's logins — every one of them
+// after startup succeeded, which is the failure shape this package works hardest
+// to avoid.
+//
+// The allowance is one hard-coded pair and not a mechanism: no operator input
+// widens it, it is keyed on the exact configured string so no other deployment
+// can reach it, and it maps the two spellings of ONE issuer identity — the key
+// set that must sign the token is the same either way. A provider that violates
+// the spec differently gets an issue, not a second special case here.
+func acceptedIssuers(issuer string) []string {
+	if issuer == googleIssuer {
+		return []string{googleIssuer, googleLegacyIssuer}
+	}
+	return []string{issuer}
 }
 
 // FromEnv builds the verifier from the IDENTITY_* environment — the one
@@ -251,7 +293,7 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		return Identity{}, reject("claims did not decode")
 	}
 
-	if std.Issuer != v.issuer {
+	if !slices.Contains(v.issuers, std.Issuer) {
 		return Identity{}, reject("issuer mismatch")
 	}
 	if !std.Audience.Contains(v.audience) {
