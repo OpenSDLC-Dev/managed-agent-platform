@@ -93,6 +93,26 @@ func recordMeta(cfg modeltest.Config) {
 	recorder.secrets = secrets
 }
 
+// addRunSecret adds one more string to the run's scrub set, for a value that is
+// not knowable when recordMeta runs.
+//
+// The repo-answer fixture's passphrase is the case: it exists only once
+// something has cloned the fixture, which may first happen inside a grader, long
+// after the meta line was recorded. Registering it there rather than only at
+// startup is what keeps the scrub honest on the path that matters — a run whose
+// startup clone failed, whose platform clone then succeeded, and whose failing
+// trial is therefore about to have its transcript written out with the
+// passphrase in it. Every artifact is rendered fresh on every flush, so a secret
+// registered late still covers what was already written.
+func addRunSecret(s string) {
+	if s == "" {
+		return
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	recorder.secrets = append(recorder.secrets, s)
+}
+
 // recordTrial adds a trial's outcome to the run and flushes the artifacts.
 //
 // Flushing here rather than once at the end is what makes the artifacts survive

@@ -91,10 +91,14 @@ itself when its credentials rot is not a safety net.
 
 Configure the endpoint once in a gitignored repo-root `.env` — `MODEL_PROTOCOL`
 (`anthropic`|`openai`), `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_ID`, plus
-`TAVILY_API_KEY` / `JINA_API_KEY` for the web-backend tier and `GCS_BUCKET` for the Cloud
+`TAVILY_API_KEY` / `JINA_API_KEY` for the web-backend tier, `GCS_BUCKET` for the Cloud
 Storage tier (a bucket name, not a credential — that tier authenticates with Application
-Default Credentials) — and the live tiers
+Default Credentials), and `EVAL_GITHUB_REPO_URL` / `EVAL_GITHUB_REPO_TOKEN` for the eval
+suite's `repo-answer` trial (a **private** fixture repository holding a `PASSPHRASE.txt`,
+and a fine-grained Contents: Read-only token for it) — and the live tiers
 read it (the environment wins over the file). Never commit real credentials.
+`make eval` fails rather than skips without the fixture names, deliberately: a tier that
+went quiet when its configuration rotted would be a green run testing nothing.
 
 Those are *test* settings. What a running deployment reads is separate: `BLOB_BACKEND`
 picks the object-storage backend — unset or `s3` for any S3-compatible endpoint

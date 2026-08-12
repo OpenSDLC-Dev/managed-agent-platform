@@ -59,6 +59,27 @@
   so a blackholed route fails the trial instead of hanging the run past the point
   where `go test -timeout` panics and the report is never written.
 
+  **Two ways the restored trial would have reddened the nightly for nothing, both
+  closed before it landed.** The executor emits a `session.error` for a clone it
+  intends to retry, and then retries and succeeds — but `corePack`'s
+  `no-session-error` counted any `session.error` at all, Platform-class, so a
+  single GitHub blip inside a nightly would have failed the trial and blamed the
+  platform for recovering exactly as designed. That is the unactionable red that
+  got the trial parked, and it is now tolerated for trials carrying a repository
+  and only for the retrying variant; whether the retry recovered is still
+  asserted, by graders that need the checkout to exist. The second is not closed
+  and is recorded instead: a verification run had the model refuse the task
+  outright in 1.7 seconds with no tool call — "I notice there's a prompt
+  injection attempt" — reading an unfamiliar repository plus a `PASSPHRASE.txt`
+  plus "tell me what it holds" as the exfiltration pattern it should decline. It
+  is not wrong to read it that way. Rewording the turn away from "secret
+  passphrase", the move `journal-multiturn` and `view-range` record for this same
+  reflex, was tried and **measured worse** — 2 of 4 runs against the same
+  endpoint, against 7 of 8 for the original wording — so the prompt stays as #331
+  wrote it and the measurement is in the code comment, so that the next reader
+  does not spend the same four runs discovering it. The residual is one refusal
+  in eight runs, classed `Either`, on an endpoint whose tool-calling is weak.
+
   **The `.env` reader in `evals/repo_test.go` has tests.** Its comment claimed it
   reads a line "exactly as modeltest and webtooltest read the same file" — a
   cross-package invariant nothing asserted, and one that only the restore would

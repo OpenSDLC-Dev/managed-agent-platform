@@ -55,6 +55,35 @@ type Grader struct {
 // what the task asked for. They are what turns each task into a platform test
 // rather than a prompt test — a task can be about anything and still assert that
 // the event log, the queue, the stream and the accounting all behaved.
+// toleratedCloneRetry reports whether ev is a repository clone failure the
+// executor is built to absorb, on a trial that actually mounts a repository.
+//
+// The executor writes session.error with retry_status "retrying" for a clone it
+// intends to attempt again, and the next work item does attempt it — so one
+// GitHub blip inside a nightly is a recovered incident, not a defect. Counting
+// it under no-session-error would red the trial Platform-class, "this is our
+// bug", for the one thing on this path that reliably is not ours; and a nightly
+// that reds for something nobody can act on is exactly what got repo-answer
+// parked (#358). Observed for real on 2026-08-12: two such events, then the
+// clone succeeded on a later run with no code change.
+//
+// Nothing is given up by skipping them. Whether the retry recovered is asserted
+// by the trial's own graders, every one of which needs the checkout to exist.
+// And the exemption is confined to trials carrying a repository, so this error
+// arriving on a trial that asked for none stays the platform's to answer for.
+func toleratedCloneRetry(task Task, ev map[string]any) bool {
+	if task.Repo == nil {
+		return false
+	}
+	e, _ := ev["error"].(map[string]any)
+	if typ, _ := e["type"].(string); typ != "github_repository_clone_error" {
+		return false
+	}
+	rs, _ := e["retry_status"].(map[string]any)
+	status, _ := rs["type"].(string)
+	return status == "retrying"
+}
+
 func corePack(task Task) []Grader {
 	return []Grader{{
 		Name:  "idle-observed-on-stream",
@@ -92,7 +121,14 @@ func corePack(task Task) []Grader {
 		Name:  "no-session-error",
 		Class: Platform,
 		Check: func(_ *testing.T, tr *Trial) error {
-			if errs := eventsOfType(tr, "session.error"); len(errs) > 0 {
+			var errs []map[string]any
+			for _, ev := range eventsOfType(tr, "session.error") {
+				if toleratedCloneRetry(task, ev) {
+					continue
+				}
+				errs = append(errs, ev)
+			}
+			if len(errs) > 0 {
 				return fmt.Errorf("%d session.error event(s), first: %v", len(errs), errs[0])
 			}
 			return nil

@@ -41,10 +41,11 @@ func TestScrubRepoTokenRemovesBothFormsOfTheCredential(t *testing.T) {
 // The repo-root .env reader repo_test.go carries its own copy of, because
 // modeltest's is unexported. Offline, so it runs on every `make verify`.
 //
-// Until #358 nothing asserted any of this. While the trial was registered the
-// nightly at least executed the parser every run — it read the file, found
-// nothing, and failed — and parked, nothing executed it at all, so a drift would
-// have surfaced only on restore, on the one run nobody wants surprises in.
+// Until #358 nothing asserted any of this, and nothing exercised it either:
+// evals.yml writes no .env, so in CI repoDotEnv finds no file and returns before
+// this parser is reached, registered trial or not. It runs only where a
+// developer keeps a .env — which is to say, only where a drift in it would be
+// discovered by someone in the middle of something else.
 func TestParseRepoDotEnvReadsOnlyTheRepositoryKeys(t *testing.T) {
 	const file = `# a comment
 EVAL_GITHUB_REPO_URL=https://github.com/owner/repo
@@ -117,23 +118,52 @@ func TestParseRepoValueMatchesModeltestsRules(t *testing.T) {
 // the empty string in the step's env: block, and it must read as "unset" — a
 // nightly that fell back to a file for a name CI deliberately left blank would
 // be testing whatever was last on the runner's disk.
-func TestRepoResolvePrefersTheEnvironmentIncludingAnEmptyValue(t *testing.T) {
-	t.Setenv(RepoURLEnv, "https://github.com/owner/from-the-environment")
-	if got := repoResolve(RepoURLEnv); got != "https://github.com/owner/from-the-environment" {
-		t.Errorf("repoResolve(%s) = %q, want the environment's value", RepoURLEnv, got)
+//
+// Asserted through repoLookup rather than repoResolve so the file side is a
+// fixture instead of whatever the machine happens to have. Against the real
+// sources these rows would pass in CI by accident: evals.yml writes no .env, so
+// "the environment beat the file" holds there with no file to beat.
+func TestRepoLookupPrefersTheEnvironmentIncludingAnEmptyValue(t *testing.T) {
+	const fromFile = "https://github.com/owner/from-the-file"
+	file := map[string]string{RepoURLEnv: fromFile}
+	env := func(v string, ok bool) func(string) (string, bool) {
+		return func(string) (string, bool) { return v, ok }
 	}
-	t.Setenv(RepoURLEnv, "")
-	if got := repoResolve(RepoURLEnv); got != "" {
-		t.Errorf("repoResolve(%s) = %q after the environment set it empty, want \"\" — "+
-			"an explicit empty is the answer, not a fall-through to .env", RepoURLEnv, got)
+
+	if got := repoLookup(env("", false), file, RepoURLEnv); got != fromFile {
+		t.Errorf("with the name absent from the environment, repoLookup = %q, want the file's %q",
+			got, fromFile)
+	}
+	const fromEnv = "https://github.com/owner/from-the-environment"
+	if got := repoLookup(env(fromEnv, true), file, RepoURLEnv); got != fromEnv {
+		t.Errorf("repoLookup = %q, want the environment's %q", got, fromEnv)
+	}
+	if got := repoLookup(env("", true), file, RepoURLEnv); got != "" {
+		t.Errorf("with the environment setting the name empty, repoLookup = %q, want \"\" — "+
+			"an explicit empty is the answer, not a fall-through to the file", got)
 	}
 }
 
 // A name this file does not own never reaches the .env fallback, whatever the
-// file holds. The consent variable is the case that matters: RUN_EVALS deciding
-// whether to spend money must come from the environment and never from disk.
-func TestRepoResolveNeverReadsTheFileForAForeignName(t *testing.T) {
-	if got := repoResolve("RUN_EVALS_NOT_A_REPO_NAME"); got != "" {
-		t.Errorf("repoResolve of a foreign name = %q, want \"\"", got)
+// file holds. The consent variable is the case that matters: RUN_EVALS decides
+// whether the run spends money, so it must come from the environment and never
+// from disk.
+//
+// The fixture file deliberately carries the foreign name with a value, so the
+// filter is what makes the first row pass; the second row reads a name the
+// filter does allow, so a row that passed because the map was empty could not
+// hide here.
+func TestRepoLookupNeverReadsTheFileForAForeignName(t *testing.T) {
+	const foreign = "RUN_EVALS"
+	file := map[string]string{foreign: "1", RepoURLEnv: "https://github.com/owner/repo"}
+	unset := func(string) (string, bool) { return "", false }
+
+	if got := repoLookup(unset, file, foreign); got != "" {
+		t.Errorf("repoLookup(%s) = %q out of the file; consent must never come from disk",
+			foreign, got)
+	}
+	if got := repoLookup(unset, file, RepoURLEnv); got == "" {
+		t.Errorf("repoLookup(%s) returned nothing, but the fixture file carries it — the row "+
+			"above would then prove nothing", RepoURLEnv)
 	}
 }

@@ -20,9 +20,9 @@
   `evals/repo_test.go` keeps `repoAnswer()`, its two repo-specific graders and
   its clone oracle (the third grader, `ReadsFile`, lives in `grade_test.go` and
   is shared with the still-registered `file-answer`), and restoring it is putting
-  one call back in `tasks()`. Two documentation claims become true again as a
-  side effect rather than needing an edit: the task count is fourteen again
-  (README.md, `docs/ARCHITECTURE.md`), and the four `MODEL_*` secrets really are
+  one call back in `tasks()`. Two documentation claims became true again as a
+  side effect rather than needing an edit: the task count was fourteen once more
+  (README.md, `docs/ARCHITECTURE.md`), and the four `MODEL_*` secrets really were
   the scheduled job's whole configuration again. Three claims did need
   correcting, all of them the same defect — a rule stated as a status.
   `docs/ARCHITECTURE.md` said the eval job "is red until a maintainer configures"
@@ -30,12 +30,15 @@
   then; all four were configured on 2026-07-25 with the workflow's first run, and
   the job was red for an unrelated reason. `CLAUDE.md` described
   `GITHUB_EVAL_REPO_URL` / `GITHUB_EVAL_REPO_TOKEN` as live `.env` configuration
-  when nothing reads them while the trial is parked. #358 carries what restoring
-  it needs, including two findings that would otherwise have to be rediscovered:
+  when nothing read them while the trial was parked. #358 carried what restoring
+  it needed, including two findings that would otherwise have to be rediscovered:
   the fixture must be **private**, because `repo-answer` is the only answer-style
   trial with no per-trial nonce and its fixture's privacy *is* the nonce — made
   public, the passphrase is reachable from the sandbox over the network while
   `ReadsFile` (which matches the tool_use input and never the result) stays green
   with an empty mount; and the two names cannot be stored as GitHub secrets under
   that spelling at all, since GitHub forbids the `GITHUB_` prefix for both
-  secrets and variables at every scope.
+  secrets and variables at every scope. Both findings were acted on inside this
+  same release: the fixture was created and the trial restored, under the renamed
+  `EVAL_GITHUB_REPO_*` — see the restore entry. Read this one as the record of why
+  the trial was gone for a fortnight, not as the state of the suite today.

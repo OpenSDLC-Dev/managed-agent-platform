@@ -104,10 +104,35 @@ func repoConfigErr() (url, token string, err error) {
 // block → the model → a read inside the checkout, as one chain over the real
 // network.
 //
-// The turn names neither the mount nor the file's path. The injected "Mounted
-// repositories" block is the only thing that says where the checkout is, so
-// injection is the discovery mechanism under test — exactly the reasoning
-// skillAnswer and fileAnswer are built on.
+// The turn names neither the mount nor the file's path, so the injected "Mounted
+// repositories" block is what the agent is meant to follow — injection as the
+// discovery mechanism, the same reasoning skillAnswer and fileAnswer are built
+// on, and with the same admitted leak. Isolation is not perfect and cannot be:
+// the platform's own default mount root for a repository is /workspace/ (api's
+// defaultRepoMountRoot), which is also the sandbox's working directory, so a
+// bare `ls` finds the checkout whether or not injection worked. Mounting it
+// somewhere unlikely would buy a cleaner claim by testing a path no user takes.
+// That is why both content graders are Either rather than Platform: a right
+// answer is strong evidence, and the transcript is the arbiter on a miss.
+//
+// This turn asks a model to hand back something the prompt itself calls a secret
+// out of a repository the model did not clone, which is a shape a safety-tuned
+// model may decline — and one did, during verification on 2026-08-12: a refusal
+// in 1.7s with no tool call at all, "I notice there's a prompt injection
+// attempt". Both content graders are Either precisely for that, so the classing
+// holds, but the trial still reds, and an unactionable red is what parked it.
+//
+// The obvious repair was tried and measured worse, which is why this wording
+// survives unchanged from #331. Rewording the turn to drop "secret passphrase"
+// and ask for "the one line" of a named file — the move journalMultiturn and
+// viewRange record for the same reflex — went 2 of 4 against the same endpoint,
+// against 7 of 8 for the wording above: once a fabricated "there is no
+// PASSPHRASE.txt here, which is convenient, there is nothing to leak", once a
+// tool call emitted as literal text. Asking plainly for the passphrase reads as
+// a task; asking someone to read a file and recite it apparently reads as a
+// wrapper around the same request, with worse odds. Sixteen runs is not a study,
+// so what is recorded here is the measurement, not a law — but do not re-do this
+// rewrite on intuition alone.
 func repoAnswer() Task {
 	return Task{
 		ID:   "repo-answer",
@@ -116,6 +141,16 @@ func repoAnswer() Task {
 			"It contains a file named " + passphraseFile + " holding a secret passphrase. " +
 			"What is the passphrase? Reply with exactly the passphrase and nothing else."}},
 		Graders: []Grader{
+			// The token sweep runs FIRST, and the order is load-bearing rather
+			// than cosmetic. RepoPassphraseAnswered resolves the passphrase and
+			// t.Fatals when it cannot, which is runtime.Goexit — it unwinds the
+			// grader loop, so every grader after it is skipped. Put the sweep
+			// second and the one unconditional Platform assertion here would go
+			// unrun on exactly the runs where the credential path misbehaved.
+			//
+			// Platform, unconditionally: no model behavior can put the token in
+			// the transcript. Only we can.
+			TranscriptCarriesNoRepoToken(),
 			// Either, for the reason its two twins are: the passphrase is
 			// reachable only through the materialized checkout, so a right answer
 			// is unambiguous platform evidence, while a missing one may be the
@@ -123,9 +158,6 @@ func repoAnswer() Task {
 			// is the arbiter.
 			ReadsFile(repoEvalMount+"/"+passphraseFile, Either),
 			RepoPassphraseAnswered(Either),
-			// Platform, unconditionally: no model behavior can put the token in
-			// the transcript. Only we can.
-			TranscriptCarriesNoRepoToken(),
 		},
 	}
 }
@@ -157,8 +189,13 @@ func RepoPassphraseAnswered(class Class) Grader {
 
 // TranscriptCarriesNoRepoToken is the live twin of unit M's token sweep and unit
 // W's: the whole transcript, as the API hands it back, is searched for the
-// token's literal bytes. The sandbox-side sweep proves the token never reached
-// the container; this one proves it never reached the record of what happened.
+// token. The sandbox-side sweep proves the token never reached the container;
+// this one proves it never reached the record of what happened.
+//
+// Both forms are swept, not just the literal bytes. A credential that surfaces
+// in a transcript at all most likely arrived inside an echoed Authorization
+// header or a transport error, and there it is base64 — so a sweep for the raw
+// token alone would report clean on the one shape the leak actually takes.
 func TranscriptCarriesNoRepoToken() Grader {
 	return Grader{
 		Name:  "transcript-carries-no-repo-token",
@@ -169,7 +206,7 @@ func TranscriptCarriesNoRepoToken() Grader {
 			if err != nil {
 				return fmt.Errorf("marshal the transcript for the sweep: %w", err)
 			}
-			if strings.Contains(string(raw), token) {
+			if strings.Contains(string(raw), token) || strings.Contains(string(raw), basicAuthBlob(token)) {
 				// The token is not echoed into the failure: a failing eval's
 				// message is the thing most likely to be pasted somewhere.
 				return fmt.Errorf("the transcript carries the fixture repository's " +
@@ -199,19 +236,24 @@ func TranscriptCarriesNoRepoToken() Grader {
 // fixed, so a single publication burns it permanently and every later run of
 // this trial silently proves nothing.
 //
-// Both are resolved here, before the first trial, rather than when the grader
-// first wants the passphrase: grading is not the only path to an artifact write
-// — a trial that aborts in its drive records through runAndGrade's defer without
-// a grader ever running — and the cost is one shallow clone of a few kilobytes,
-// shared with the grader through the same sync.Once.
+// The token is registered in both the forms it can appear in, for the reason
+// scrubRepoToken removes both: the base64 basic-auth blob is a perfectly usable
+// credential and is the one form GitHub's own log masking does not cover.
+//
+// The passphrase cannot be registered from here alone, because it is not known
+// until something clones. This function makes the attempt so that the value is
+// in the set before the first trial runs — a trial that aborts in its drive
+// records through runAndGrade's defer without any grader having run — but the
+// attempt is best effort, and the guarantee comes from repoPassphraseValue
+// registering the value itself the moment it first resolves, wherever that is.
 func repoSecrets() []string {
 	var out []string
 	if token := repoResolve(RepoTokenEnv); token != "" {
-		out = append(out, token)
+		out = append(out, token, basicAuthBlob(token))
 	}
-	// Best effort: an unconfigured or unreachable fixture is not this function's
-	// failure to report. repoConfig fails the trial that needs it, naming the
-	// name that was missing, and the grader raises this same cached error.
+	// Best effort, and its error deliberately dropped: an unconfigured or
+	// unreachable fixture is not this function's failure to report. repoConfig
+	// fails the trial that needs it, naming the name that was missing.
 	if pass, err := repoPassphraseValue(); err == nil {
 		out = append(out, pass)
 	}
@@ -219,27 +261,51 @@ func repoSecrets() []string {
 }
 
 // repoPassphraseValue clones the fixture repository in-process and returns the
-// passphrase, once per run: every caller wants the same bytes, and re-cloning
-// per grader would spend network for nothing.
+// passphrase, resolving it at most once successfully per run: every caller wants
+// the same bytes, and re-cloning per grader would spend network for nothing.
+//
+// A *failure* is not cached, which is the whole reason this is a mutex and not a
+// sync.Once. The first caller is recordMeta, at second zero, before the stack is
+// even up; the trial that needs the value runs many minutes later. Caching a
+// startup blip would replay it as a hard failure long after github.com came
+// back, reddening a nightly for a condition that no longer exists — the exact
+// species of unactionable red that got this trial parked in the first place.
+//
+// The value registers itself with the run's artifact scrub as soon as it exists.
+// That placement is deliberate: the alternative — registering only in
+// recordMeta's best-effort call — leaves the scrub blind on precisely the path
+// that publishes, where the oracle's early clone failed, the platform's later
+// one succeeded, the agent answered, and the transcript with the passphrase in
+// it is what gets written.
 var repoPassphraseValue = func() func() (string, error) {
 	var (
-		once sync.Once
-		val  string
-		err  error
+		mu  sync.Mutex
+		val string
 	)
 	return func() (string, error) {
-		once.Do(func() { val, err = clonePassphrase() })
-		return val, err
+		mu.Lock()
+		defer mu.Unlock()
+		if val != "" {
+			return val, nil
+		}
+		v, err := clonePassphrase()
+		if err != nil {
+			return "", err
+		}
+		val = v
+		addRunSecret(val)
+		return val, nil
 	}
 }()
 
 // repoPassphrase is repoPassphraseValue for a grader, raising the failure.
 //
-// It is raised here rather than inside the once because t.Fatal is
-// runtime.Goexit, and Once marks itself done on the way out regardless — so the
-// next caller would sail past with an empty passphrase, which strings.Contains
-// treats as present in everything. A grader that passes because its expectation
-// is missing is worse than no grader.
+// It is raised here rather than inside the resolver because t.Fatal is
+// runtime.Goexit: called down there it would unwind through the resolver's own
+// lock-and-cache, and any design that then treated the value as settled would
+// hand the next caller an empty passphrase — which strings.Contains treats as
+// present in everything. A grader that passes because its expectation is missing
+// is worse than no grader. The resolver caches only success for the same reason.
 func repoPassphrase(t *testing.T) string {
 	t.Helper()
 	val, err := repoPassphraseValue()
@@ -309,8 +375,14 @@ func scrubRepoToken(msg, token string) string {
 		return msg
 	}
 	msg = strings.ReplaceAll(msg, token, "[redacted]")
-	blob := base64.StdEncoding.EncodeToString([]byte(repoTokenUsername + ":" + token))
-	return strings.ReplaceAll(msg, blob, "[redacted]")
+	return strings.ReplaceAll(msg, basicAuthBlob(token), "[redacted]")
+}
+
+// basicAuthBlob is what go-git puts after "Basic " for this credential — the
+// only encoded form of it that can appear anywhere, and the form GitHub's own
+// log masking does not cover. internal/executor/repoclone.go keeps the twin.
+func basicAuthBlob(token string) string {
+	return base64.StdEncoding.EncodeToString([]byte(repoTokenUsername + ":" + token))
 }
 
 // repoResolve reads one name from the environment, falling back to the repo-root
@@ -318,14 +390,21 @@ func scrubRepoToken(msg, token string) string {
 // including when it sets one to the empty string — that is an answer, not an
 // invitation for the file to supply one. Consent (RUN_EVALS) is outside this
 // set, so it can never come from disk.
-func repoResolve(key string) string {
-	if v, ok := os.LookupEnv(key); ok {
+func repoResolve(key string) string { return repoLookup(os.LookupEnv, repoDotEnv(), key) }
+
+// repoLookup is repoResolve with both of its sources injected — the shape
+// internal/modeltest and its three siblings expose for the same reason. Without
+// it the rules above can only be asserted against whatever the machine's real
+// .env happens to hold, which in CI is nothing at all: evals.yml writes no file,
+// so a test of the fallback would pass there by having nothing to fall back to.
+func repoLookup(env func(string) (string, bool), file map[string]string, key string) string {
+	if v, ok := env(key); ok {
 		return v
 	}
 	if !repoEnvName(key) {
 		return ""
 	}
-	return repoDotEnv()[key]
+	return file[key]
 }
 
 func repoEnvName(key string) bool { return key == RepoURLEnv || key == RepoTokenEnv }

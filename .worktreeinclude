@@ -8,8 +8,11 @@
 
 # The model endpoint for the live tiers: MODEL_PROTOCOL / MODEL_BASE_URL /
 # MODEL_API_KEY / MODEL_ID — plus the web-tool backend keys TAVILY_API_KEY /
-# JINA_API_KEY read the same way by internal/webtool/webtooltest (plan 15).
-# internal/modeltest opens this from the *repo root*,
+# JINA_API_KEY read the same way by internal/webtool/webtooltest (plan 15), and
+# EVAL_GITHUB_REPO_URL / EVAL_GITHUB_REPO_TOKEN read the same way again by
+# evals/repo_test.go for the repo-answer trial (plan 25, restored in #358) —
+# which is the name pair that makes this entry load-bearing for `make eval`
+# rather than merely convenient. internal/modeltest opens this from the *repo root*,
 # which inside a worktree is the worktree's own root (it resolves the path from
 # its own source file), so an uncopied .env is simply absent rather than
 # inherited from the main checkout. It has to be here because the opt-in

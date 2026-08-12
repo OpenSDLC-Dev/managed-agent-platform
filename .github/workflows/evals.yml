@@ -146,3 +146,12 @@ jobs:
           # summary step above has already reported; this must not pile a second,
           # less informative failure on top of it.
           if-no-files-found: warn
+          # Bounded rather than left at the repository default of up to 90 days.
+          # These are triage artifacts for a nightly — nobody reads a fortnight-old
+          # one — and this repository is public, so every upload is downloadable by
+          # anyone. Since #358 they can also carry the repo-answer fixture's
+          # identity, and on a narrow failure path its passphrase; a fixed fixture
+          # cannot be un-published by rotating it afterwards, because every
+          # artifact still inside the window keeps the old value readable. A week
+          # is longer than triage takes and far shorter than the default.
+          retention-days: 7

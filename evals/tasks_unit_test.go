@@ -1,6 +1,7 @@
 package evals
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -55,29 +56,44 @@ func TestTaskSetIsPinned(t *testing.T) {
 // fails when the set changes, but only a reader acts on its message, and the
 // drift it was written for happened because nobody read one.
 //
-// A tripwire, not a proof. It asserts the word appears in the file at all, which
-// survives a reflow of the paragraph but would be fooled by the same word
-// arriving for an unrelated reason. That is the right trade here: the failure it
-// must catch is a count left behind, and for that a substring is enough.
+// It matches the whole phrase each document states the count in, not the count
+// word alone. Alone would be fooled by the word arriving for an unrelated
+// reason, and that is not hypothetical: docs/ARCHITECTURE.md already says
+// "sixteen" about an nginx buffer, so a bare-word check would go quietly green
+// for that document the day a sixteenth trial is registered — the one day it has
+// to fire.
+//
+// Matched after collapsing whitespace, because both documents are hard-wrapped
+// and today's ARCHITECTURE.md already breaks this very phrase across two lines.
+// The cost is that rewording the sentence fails this test until the phrase here
+// is updated too; that is the intended direction — the sentence carrying the
+// count is not one to reword absent-mindedly.
 func TestDocsSpellTheTrialCount(t *testing.T) {
 	n := len(tasks())
 	if n < 0 || n >= len(countWords) {
 		t.Fatalf("the suite registers %d trials and this test cannot spell that number; "+
 			"extend countWords", n)
 	}
-	word := countWords[n]
 
-	for _, doc := range []string{"README.md", filepath.Join("docs", "ARCHITECTURE.md")} {
-		b, err := os.ReadFile(filepath.Join(evalsRepoRoot(), doc))
+	for _, doc := range []struct{ path, phrase string }{
+		{"README.md", "%s regression tasks"},
+		{filepath.Join("docs", "ARCHITECTURE.md"), "%s deterministic regression tasks"},
+	} {
+		b, err := os.ReadFile(filepath.Join(evalsRepoRoot(), doc.path))
 		if err != nil {
-			t.Fatalf("read %s: %v", doc, err)
+			t.Fatalf("read %s: %v", doc.path, err)
 		}
-		if !strings.Contains(strings.ToLower(string(b)), word) {
+		want := fmt.Sprintf(doc.phrase, countWords[n])
+		if !strings.Contains(collapseSpace(strings.ToLower(string(b))), want) {
 			t.Errorf("%s never says %q, but the suite registers %d trials and that document "+
-				"states the count in words", doc, word, n)
+				"states the count in words", doc.path, want, n)
 		}
 	}
 }
+
+// collapseSpace reduces every run of whitespace to a single space, so a phrase
+// a hard-wrapped document split across lines still matches.
+func collapseSpace(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // countWords spells the counts the check above can assert. Indexed by the
 // number, so countWords[15] is "fifteen". A suite that outgrows it fails loudly
