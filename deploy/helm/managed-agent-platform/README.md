@@ -23,6 +23,13 @@ and upgrade lifecycle. The platform speaks plain S3 — any compatible store
 On Google Cloud there is a third object-storage option, `gcsObjectStorage`,
 which reaches Cloud Storage natively and carries no credential at all (#240).
 
+A fourth optional in-cluster service is the **identity provider** — a bundled,
+hardened **Casdoor** behind `casdoor.enabled` (default off), for the private
+cluster that has no cloud IdP to point `identity.oidc` at. It follows the same
+rule as the other three: first-party templates rather than a subchart, and a
+deployment with its own provider leaves it off. See
+[Single sign-on and roles](#single-sign-on-and-roles-identity-casdoor).
+
 The **BYOC worker is deliberately not in this chart** — it runs on the customer's own
 compute, outside the platform cluster, and reaches the control plane only over the wire.
 
@@ -507,6 +514,18 @@ processes; `otlp.insecure=true` to export without TLS.
 | `controlplane.serviceAccount.annotations` / `brain.serviceAccount.annotations` / `executor.serviceAccount.annotations` | `{}` | annotations on each component's ServiceAccount; `iam.gke.io/gcp-service-account` is how the Google-native backends authenticate. Which ones you need depends on the backend: `gcsObjectStorage` needs **all three**, since every process reaches object storage; `gcpKMS` needs only the controlplane and executor, the two that receive the cipher env; the brain otherwise needs one only for the Cloud SQL Auth Proxy |
 | `cloudSQLProxy.enabled` / `.instanceConnectionName` | `false` / `""` (required when enabled) | run the Cloud SQL Auth Proxy as a native sidecar in all three deployments (below). The name is `PROJECT:REGION:INSTANCE`, never an address |
 | `cloudSQLProxy.image` / `.privateIP` / `.resources` | `gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.24.1` / `true` / `{}` | proxy image, whether to pass `--private-ip` (what an instance with no public address needs), and its resources |
+| `identity.mode` | `""` (disabled) | `oidc` or `trusted_proxy` turns on the human lane; empty renders no `IDENTITY_*` env at all and leaves `x-api-key` the only management credential |
+| `identity.oidc.issuer` / `.audience` / `.jwksURL` | `""` | Mode `oidc`: discovery root and exact `iss`; the client id tokens are minted for; an optional key-set URL that skips discovery. Both URLs must be `https` |
+| `identity.proxy.preset` / `.audience` / `.header` / `.issuer` / `.keysURL` / `.algs` | `""` | Mode `trusted_proxy`: `gcp-iap` needs only `audience` (the backend-service audience) and refuses the rest; `custom` needs header, issuer, audience and keysURL |
+| `identity.claims.roles` / `.email` / `.name` | `""` (platform defaults `roles`/`email`/`name`) | claim names. With the bundled Casdoor `roles` must be `groups` — its `roles` claim carries objects, which map to nothing |
+| `identity.roleMap` | `{}` | claim value → `admin`/`developer`/`viewer`, as a map; the chart encodes it for the verifier. No mapped value means no role, which is denied everywhere |
+| `casdoor.enabled` | `false` | deploy the bundled Casdoor (Deployment, ClusterIP Service, Secret, seed ConfigMap, Ingress with the SAML/CAS deny rules, NetworkPolicy) |
+| `casdoor.adminPassword` / `casdoor.console.clientSecret` | `""` (both required when enabled) | the password the seed puts on Casdoor's own `built-in/admin` (replacing the documented default), and the console's OAuth client secret. Not auto-generated; both ride the seed ConfigMap |
+| `casdoor.ingress.host` | `""` (required when enabled) | the IdP's external host — also its `origin`, so `identity.oidc.issuer` must equal `https://<host>`. Must be served over HTTPS |
+| `casdoor.ingress.className` / `.annotations` / `.tls.secretName` | `""` / `{}` / `""` | IngressClass, annotations, and the TLS Secret for that host |
+| `casdoor.console.clientId` / `.redirectURIs` | `map-console` / `[]` | the seeded OIDC application's client id (which `identity.oidc.audience` must equal) and the console's callback URLs |
+| `casdoor.database.name` / `.dataSourceName` | `casdoor` / `""` | Casdoor's own database; the DSN is derived against the bundled Postgres, and required (keyword/value form, not a URL) when that is off |
+| `casdoor.networkPolicy.enabled` / `.from` | `true` / the `ingress-nginx` namespace | admit pod ingress only from your ingress controller. An empty `from` fails the render — to Kubernetes it would mean "all sources" |
 | `existingSecret` | `""` | reference a pre-created Secret instead of inlining |
 | `executor.sandboxImage` | `debian:stable-slim` | base image for sandbox Pods |
 | `executor.gateImage` | `""` (gate off) | per-session egress-gate sidecar image (`--target gate` build); setting it opts `limited` / vault-attached sessions into the gate — allowed_hosts enforcement plus vault-credential substitution at egress. The sidecar needs `CAP_NET_ADMIN` (no `restricted` Pod Security on the namespace) and, as a native sidecar, Kubernetes >= 1.29 (the render fails on older clusters); unset keeps the fail-closed route-flush |
