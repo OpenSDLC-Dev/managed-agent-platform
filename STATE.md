@@ -25,10 +25,10 @@ landed ([#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369),
       (23 viewer / 25 developer / 5 admin; work + gate routes stay role-free),
       the three streaming routes checked explicitly, and the source-parsing
       completeness test that fails on a route without a role.
-- [x] Slice 4 — deployment wiring: compose's `iam` profile (Casdoor 3.152.0
-      behind a SAML-denying, TLS-terminating proxy), the same seed rendered by
-      Helm without its demo accounts and owning `built-in/admin`, GCP's IAP
-      `trusted_proxy` Terraform, and the docs for all three.
+- [x] Slice 4 — deployment wiring ([#374](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/374)):
+      compose's `iam` profile (Casdoor 3.152.0 behind a SAML-denying,
+      TLS-terminating proxy), the same seed rendered by Helm without its demo
+      accounts and owning `built-in/admin`, GCP's IAP `trusted_proxy` Terraform.
 - [ ] Slice 5 — the api-key issuance surface, gated on a live observation of
       the reference console's dialect.
 - [ ] Slice 6 — acceptance against a real Casdoor token, then archive.

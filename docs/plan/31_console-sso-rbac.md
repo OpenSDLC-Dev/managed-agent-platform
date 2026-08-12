@@ -46,7 +46,8 @@ which consumes what lands here and must trail it.
    docs/HISTORY.md.)* Casdoor is a *deployment default*, not a code dependency: any
    compliant IdP (Keycloak, Entra ID, Cognito, Google) replaces it by config.
    The bundle ships with the hardening posture in Architecture — pinned to the
-   `3.152.0` image tag, zero upstream providers, single organization,
+   `3.152.0` image tag, zero upstream providers, one populated organization
+   beside Casdoor's own `built-in` and no signup into either,
    token-exchange grant disabled, SAML routes blocked — because of CERT/CC VU#780781 (see
    Ground truth; the risk is stated in docs, not hidden). It ships in two of
    the three deployment targets, settled with the user 2026-08-12: **compose**

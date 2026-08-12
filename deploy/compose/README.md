@@ -66,7 +66,7 @@ and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 | `TAVILY_API_KEY` / `JINA_API_KEY` / `WEBSEARCH_BASE_URL` / `WEBFETCH_BASE_URL` | The executor's web-tool backends (docs/plan/15_web-tools.md). No `TAVILY_API_KEY` leaves `web_search` unconfigured; neither `JINA_API_KEY` nor `WEBFETCH_BASE_URL` leaves `web_fetch` unconfigured (each answers the model with an error naming what is missing). Empty base URLs mean the public endpoints. |
 | `WEBTOOL_ALLOWED_DOMAINS` | Comma-separated operator allowlist for both web tools (#225); empty = unrestricted. An entry is a bare hostname, an IPv4 literal, or a `*.`-wildcard, validated at startup: a bare entry admits **only that exact host**, `*.example.com` admits **subdomains but not the apex** — list both to get both. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector for traces, metrics **and logs**; empty disables telemetry export entirely. Set to `jaeger:4317` with the observability profile — but note Jaeger ingests **traces only**, so each failed log-export batch prints one `Unimplemented … LogsService` line to stderr. Point at a collector that takes all three (an OTel Collector, Grafana Alloy) to silence it. |
-| `IDENTITY_MODE` and its five `IDENTITY_*` companions | Human single sign-on (docs/plan/31_console-sso-rbac.md). Empty — the default — is off: the control plane reads none of the other five and management auth stays `x-api-key` only. All six move together; see [Single sign-on](#single-sign-on-optional) below. |
+| `IDENTITY_MODE`, its five `IDENTITY_*` companions, and `SSL_CERT_FILE` | Human single sign-on (docs/plan/31_console-sso-rbac.md). Empty — the default — is off: the control plane reads none of the others and management auth stays `x-api-key` only. All seven move together, `SSL_CERT_FILE` included, or the control plane cannot verify the bundled IdP's certificate and exits at boot; see [Single sign-on](#single-sign-on-optional) below. |
 
 The **model routing** file (mounted into the brain at
 `/etc/map/model-providers.json`) is a **JSON array** of routes, each with `model`
@@ -154,7 +154,8 @@ and the noise gone, put an OTel Collector at `4317` and let it fan out.
 ## Single sign-on (optional)
 
 ```sh
-# in .env: uncomment all six IDENTITY_* lines (they ship commented out in .env.example)
+# in .env: uncomment all seven SSO lines — the six IDENTITY_* and SSL_CERT_FILE
+# (they ship commented out in .env.example)
 docker compose --profile iam up --build
 ```
 
@@ -165,8 +166,11 @@ on a laptop; and **idp**, a small Caddy proxy that is the only published way to 
 The sign-in page is `http://localhost:8000`. Nothing else about the stack changes — with
 the profile off, `IDENTITY_MODE` stays empty and management auth is `x-api-key` only.
 
-The six variables move as a set, because `IDENTITY_MODE` gates the rest: with it unset the
-control plane reads none of the others, so uncommenting five of six changes nothing.
+The seven variables move as a set, because `IDENTITY_MODE` gates the rest: with it unset the
+control plane reads none of the others, so uncommenting six of seven changes nothing. The
+seventh, `SSL_CERT_FILE`, is the one whose absence is not silent — leave it commented and
+the control plane cannot verify the proxy's certificate, so it exits at boot with
+`x509: certificate signed by unknown authority` and restarts forever.
 `.env.example` carries the full reasoning; the short version is
 
 - `IDENTITY_MODE=oidc` — the relying-party mode;
@@ -226,8 +230,10 @@ TLS on a second, unpublished listener (`https://idp:8443`) for the control plane
 `internal/identity` requires an `https` key-set URL and its dial guard then refuses
 loopback addresses outright — so a plain-HTTP IdP cannot be wired to this platform at all.
 Caddy issues that certificate from a local CA generated on first boot into the `idpca`
-volume, which the control plane mounts read-only and trusts through `SSL_CERT_FILE`,
-already wired in the compose file; nothing private is committed. The control plane waits
+volume, which the control plane mounts read-only and trusts through `SSL_CERT_FILE` — the
+seventh variable you uncommented, and empty in the default stack on purpose, because that
+variable REPLACES Go's default certificate-file list rather than adding to it; nothing
+private is committed. The control plane waits
 for the proxy's healthcheck, which fetches the key set through the whole chain — a
 misconfigured IdP is a boot failure by design (the verifier makes one warming key fetch at
 startup), so the wait is what keeps that from firing on a stack that is merely still

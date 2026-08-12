@@ -715,8 +715,13 @@ as the platform's issuer routes them through none of it.
 `https` key-set URL, and the guarded dialer beneath it then refuses loopback addresses
 outright — so a plain-HTTP IdP cannot be wired to this platform at all, and there is no
 flag to relax it. Terminate TLS in front of your IdP, and if that certificate comes
-from a private CA, give the control plane `SSL_CERT_FILE` pointing at the root (Go
-reads it *in addition to* the system roots, so public CAs keep working). One failure
+from a private CA, give the control plane `SSL_CERT_FILE` pointing at the root — and
+know what that variable does, because it is narrower than it reads: it **replaces** Go's
+default certificate-FILE list rather than adding to it, and public roots keep working
+only because the separate scan of the certificate DIRECTORY still runs. On an image
+whose roots live only in a file, setting it would drop every public CA. Set it when you
+have a private CA to trust, and leave it unset otherwise — which is why the compose
+bundle makes it part of the `iam` profile rather than a default. One failure
 mode to recognize: Go ignores a CA file it cannot open without saying so, so a
 `SSL_CERT_FILE` the control plane's user cannot read surfaces as a hard boot error out
 of the verifier's warming key fetch, never as a permissions message.

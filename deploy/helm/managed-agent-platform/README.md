@@ -409,8 +409,10 @@ each measured against a running 3.152.0 rather than read off its structs:
 The last two are the pair the chart owns both sides of, so a mismatch on either
 **fails the render** rather than leaving every login to end in the same uniform
 401 a forged token gets. So do a missing `casdoor.ingress.host`, `adminPassword`,
-or `console.clientSecret`, and a missing `casdoor.database.dataSourceName` when
-the bundled Postgres is off.
+`console.clientSecret`, `console.clientId` or `console.redirectURIs`; an
+`identity.roleMap` that maps nothing while `identity.mode` is set; any of those
+credentials written unquoted, so YAML read it as a number or a bool; and a missing
+`casdoor.database.dataSourceName` when the bundled Postgres is off.
 
 **Hardened by default**, because of CERT/CC VU#780781 — nine Casdoor CVEs, no
 vendor statement and no named fixed version:
