@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 	"time"
 
@@ -147,6 +148,13 @@ type Config struct {
 	// tolerated clone failures (too_large / timeout), never as a failed run.
 	RepoCloneTimeout  time.Duration
 	RepoCloneMaxBytes int64
+	// MCPDiscoveryTimeout bounds one mcp_exec pass across all of the session's
+	// MCP servers, for the reason the clone budgets exist: the dials are serial
+	// and the endpoints are third-party, so an unbounded pass would hold this
+	// process's single work goroutine and disrupt unrelated sessions. A server
+	// the pass does not reach in time is recorded as a tolerated failure, never
+	// as a failed run.
+	MCPDiscoveryTimeout time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -170,6 +178,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RepoCloneMaxBytes <= 0 {
 		c.RepoCloneMaxBytes = 1 << 30
+	}
+	if c.MCPDiscoveryTimeout <= 0 {
+		c.MCPDiscoveryTimeout = 5 * time.Minute
 	}
 	return c
 }
@@ -202,6 +213,11 @@ type Executor struct {
 	// webAllowed, when non-nil, restricts the web tools' hosts (webwork.go).
 	// Nil means no allowlist is configured — unrestricted, today's default.
 	webAllowed *egress.HostSet
+	// mcpHTTP replaces the HTTP client the MCP driver's connections use
+	// (mcpwork.go). Nil — production — selects mcp.DefaultClient and the
+	// dial-address guard it carries; a test sets its own so a fixture on
+	// loopback, which that guard exists to refuse, is reachable.
+	mcpHTTP *http.Client
 	// onFault, when set, receives every per-item fault. Left nil in production
 	// (the queue's reclaim is the recovery); tests set it to observe faults.
 	onFault func(*queue.Item, error)
@@ -277,7 +293,7 @@ func (e *Executor) Run(ctx context.Context) error {
 func (e *Executor) step(ctx context.Context) (bool, error) {
 	// Faults are reported by the processors themselves, from inside their
 	// spans — see report. kindOffset is loop-local state: Run is one goroutine.
-	kinds := [3]queue.Kind{queue.WebExec, queue.ToolExec, queue.OutputsHarvest}
+	kinds := [4]queue.Kind{queue.WebExec, queue.ToolExec, queue.OutputsHarvest, queue.MCPExec}
 	start := e.kindOffset
 	e.kindOffset = (e.kindOffset + 1) % len(kinds)
 	for i := range kinds {
@@ -294,6 +310,8 @@ func (e *Executor) step(ctx context.Context) (bool, error) {
 			_ = e.processWeb(ctx, item)
 		case queue.OutputsHarvest:
 			_ = e.processHarvest(ctx, item)
+		case queue.MCPExec:
+			_ = e.processMCP(ctx, item)
 		default:
 			_ = e.process(ctx, item)
 		}
@@ -693,11 +711,16 @@ func toolResultEvent(useID domain.ID, res toolset.Result) (events.NewEvent, erro
 // lock: the egress policy, the snapshot's skills and file mounts, and the
 // attached vault ids that drive credential resolution.
 type sessionRun struct {
+	// envConfig is the environment's whole config, not only its networking
+	// block: a policy decision that must distinguish a cloud environment from a
+	// self_hosted one needs the kind, which lives on the config (mcpwork.go).
+	envConfig  domain.EnvironmentConfig
 	networking domain.Networking
 	skills     []skillRef
 	files      []fileRef
 	repos      []repoRef
 	vaultIDs   []string
+	mcpServers []mcpServerRef
 }
 
 // sessionForRun loads the session's egress policy, its snapshot's skills
@@ -745,7 +768,8 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 		return sessionRun{}, false, err
 	}
 	var agent struct {
-		Skills []skillRef `json:"skills"`
+		Skills     []skillRef     `json:"skills"`
+		MCPServers []mcpServerRef `json:"mcp_servers"`
 	}
 	if err := json.Unmarshal(agentJSON, &agent); err != nil {
 		return sessionRun{}, false, err
@@ -761,11 +785,13 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 		return sessionRun{}, false, err
 	}
 	return sessionRun{
+		envConfig:  cfg,
 		networking: cfg.Networking,
 		skills:     agent.Skills,
 		files:      resources,
 		repos:      repos,
 		vaultIDs:   vaultIDs,
+		mcpServers: agent.MCPServers,
 	}, true, tx.Commit(ctx)
 }
 

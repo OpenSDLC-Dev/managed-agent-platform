@@ -11,6 +11,10 @@ claim-mapped roles. Machine credentials and every documented CLI/SDK flow are
 untouched. Six slices; the enforcement point is complete and slices 1–3 have
 landed ([#369](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/369), [#370](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/370), [#371](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/371)) and slice 4 (deployment wiring) is in review.
 
+[Plan 29](./docs/plan/29_mcp-toolset.md) — MCP end to end (#45) runs in parallel
+on its own branch, so Tasks below is plan 31's: slices 1–2 have landed (wire
+correctness; the client, `mcp_catalogs`, the discovery driver), slice 3 is next.
+
 ## Tasks
 
 - [x] Slice 1 — `internal/identity`: the shared JWT verifier (bounded JWKS

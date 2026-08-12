@@ -49,9 +49,9 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 	// Custom tools are real Messages-API tool definitions minus the union
 	// discriminator; an agent_toolset entry expands to the built-in tools it
 	// enables (bash/read/write/edit/glob/grep), which the executor runs in the
-	// sandbox. mcp_toolset still waits for the discovery driver that fills a
-	// server's catalog — the MCP client itself landed in plan 29 slice 2, but
-	// nothing calls it yet — documented.
+	// sandbox. An mcp_toolset expands to nothing here yet: the catalog its
+	// tools would come from is filled by the executor's discovery driver, but
+	// reading it at request assembly is a later slice — documented.
 	for _, raw := range agent.Tools {
 		var probe struct {
 			Type        string          `json:"type"`
@@ -282,11 +282,11 @@ func buildRequest(agent domain.ResolvedAgent, history []domain.Event, skillsBloc
 // each tool's use commits under and — for platform built-ins — its permission
 // policy. A custom tool is client-executed (agent.custom_tool_use) and carries
 // no policy; an agent_toolset tool is platform-executed (agent.tool_use) and
-// carries a policy; mcp_toolset waits for the discovery driver that fills a
-// server's catalog, so its tools are not offered and never appear here. A name
-// the model calls that is in neither map falls back to custom at emission — the
-// client can reject it — since the platform only runs names it recognises as
-// its own.
+// carries a policy; an mcp_toolset's tools are not offered to the model yet —
+// the catalog the executor's discovery driver fills is not read at request
+// assembly — so they never appear here. A name the model calls that is in
+// neither map falls back to custom at emission — the client can reject it —
+// since the platform only runs names it recognises as its own.
 //
 // The built-in names come from toolset.Policies' keys (every enabled tool,
 // which is exactly what Tools offers), so classify resolves each entry once and

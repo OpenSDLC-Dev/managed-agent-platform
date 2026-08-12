@@ -39,6 +39,14 @@ const (
 	// self_hosted sandbox is unreachable from the platform; the reference
 	// worker has no file lane).
 	OutputsHarvest Kind = "outputs_harvest"
+	// MCPExec is the MCP work (docs/plan/29_mcp-toolset.md): the executor's
+	// MCP driver discovers a session's MCP servers' tools into mcp_catalogs
+	// and later answers the session's MCP tool calls. Like WebExec it runs in
+	// the platform executor's process for cloud AND self_hosted sessions
+	// alike — the SDK states three times that MCP tools are server-side, the
+	// work API has no MCP surface, and the BYOC worker's contract is
+	// agent.tool_use + agent.custom_tool_use only — so Poll never serves it.
+	MCPExec Kind = "mcp_exec"
 )
 
 // ErrLeaseLost reports that the item is no longer this claimant's: its lease
@@ -136,13 +144,13 @@ func New(pool *pgxpool.Pool) *Queue { return &Queue{pool: pool} }
 func (q *Queue) Enqueue(ctx context.Context, db DB, envID, sessionID domain.ID, kind Kind) (bool, error) {
 	// Only executor-consumed work carries a trace context — tool_exec
 	// (consumed by the cloud executor's Claim and the BYOC worker's poll),
-	// web_exec (the executor's web driver), and outputs_harvest (the
-	// deliverables snapshot) — so their consumer spans parent on the
-	// enqueuing turn. A model_turn drives the brain, which opens its own
-	// model_request span per turn and never reads this back, so capturing it
-	// there would only persist an unread payload; leave it NULL.
+	// web_exec (the executor's web driver), outputs_harvest (the deliverables
+	// snapshot), and mcp_exec (the MCP driver) — so their consumer spans
+	// parent on the enqueuing turn. A model_turn drives the brain, which opens
+	// its own model_request span per turn and never reads this back, so
+	// capturing it there would only persist an unread payload; leave it NULL.
 	var traceCtx any
-	if kind == ToolExec || kind == WebExec || kind == OutputsHarvest {
+	if kind == ToolExec || kind == WebExec || kind == OutputsHarvest || kind == MCPExec {
 		traceCtx = traceContextArg(ctx)
 	}
 	tag, err := db.Exec(ctx,
