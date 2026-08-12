@@ -385,7 +385,9 @@ offering MCP tools to a model is a later slice.
 
 The address floor under the two code paths that resolve a host a customer named — a vault
 credential's MCP server or token endpoint (`internal/api/vaultvalidate.go`), an agent's
-`mcp_servers` entry (`internal/mcp`). Both are live. Extracted from the validate probe in
+`mcp_servers` entry (`internal/mcp`). One of the two dials today: the probe runs on a live API
+route, while the MCP arm has its caller in the executor's discovery driver but no production path
+enqueues that driver's work item until plan 29 slice 4. Extracted from the validate probe in
 plan 29 slice 2 so both callers enforce one rule rather than two copies of it. It is not a universal
 egress check and reading it as one would misplace two neighbours: the `github_repository`
 clone dials a stored URL whose host is pinned to the literal `github.com` by the

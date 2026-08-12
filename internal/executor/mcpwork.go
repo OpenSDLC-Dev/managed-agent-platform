@@ -533,8 +533,10 @@ func egressRefusal(cfg domain.EnvironmentConfig, host string) string {
 // mcpEgressAllowed reports whether the environment's networking policy admits a
 // dial to host.
 //
-// What decides is whether a policy is *there*, not which kind of environment
-// carries it. A self_hosted environment has no networking block by
+// What decides is the policy's type, not which kind of environment carries it
+// — and type rather than presence, because a value struct cannot tell an
+// absent networking block from one that names no type: both decode to an
+// empty type, and both read here as no policy. A self_hosted environment has no networking block by
 // construction — its config normalizes to exactly {"type":"self_hosted"}, the
 // REST surface rejecting every other field, and the reference documents
 // networking on cloud environments only — so with no block there is nothing to
