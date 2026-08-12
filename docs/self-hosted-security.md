@@ -794,7 +794,8 @@ with tracking issues, not silent omissions:
   [#225](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/225)
 - **Environment-key issuance UX** — **closed (#43); the console screens remain.**
   Keys are issued, listed and revoked through the console API (§6 above) — off
-  the `/v1` wire, management-authenticated, one key per host — so no operator has
+  the `/v1` wire, reached with either the management `x-api-key` or an SSO
+  identity holding `admin`, one key per host — so no operator has
   to seed a key into the database any more, and the curl workflow above is the
   whole story for a headless deployment. Accepted end to end on 2026-08-10
   against a real `ant beta:worker` on a console-issued key, including per-host

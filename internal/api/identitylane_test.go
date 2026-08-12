@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity/identitytest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 )
 
 // The identity lane over real HTTP, against a real fake OpenID Provider. Two
@@ -76,7 +78,16 @@ func newLaneServerWith(t *testing.T, adjust func(*identity.Config)) *laneServer 
 
 	pool := newPoolWithKey(t)
 	blobs := blobtest.Mem()
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, nil, v))
+	// A real cipher, matching newTestServer. With nil, the vault-credential write
+	// routes answer errSecretsUnavailable — a 500 — and the role-matrix test's
+	// admin rows would pass only for as long as body decoding keeps failing
+	// first, turning a secrets-configuration detail into a load-bearing part of
+	// an authorization test.
+	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, v))
 	t.Cleanup(srv.Close)
 	return &laneServer{
 		tserver: &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs},

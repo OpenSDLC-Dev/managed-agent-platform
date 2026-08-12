@@ -1,6 +1,8 @@
 package api_test
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -18,11 +20,45 @@ import (
 // what must always appear on a denied one is a 403 — which is why the table can
 // cover every identity-reachable route instead of a sample.
 
-// matrixRoute is one route and the role the plan's matrix assigns it.
+// matrixRoute is one route and the role the plan's matrix assigns it. path is
+// the ServeMux PATTERN, not a request path, so TestTheMatrixCoversEveryAnnotated-
+// Route can compare this table against the registrations parsed out of server.go
+// and fail if a route is added to one and not the other.
 type matrixRoute struct {
 	method string
 	path   string
 	min    identity.Role
+}
+
+// pattern renders the route as it is registered: "GET /v1/agents/{id}".
+func (r matrixRoute) pattern() string { return r.method + " " + r.path }
+
+// request turns the pattern into a path that can actually be sent, substituting
+// an id that deliberately does not exist. Which id does not matter: a 404 and a
+// 400 are equally good proof that the role check let the request reach the
+// handler, and neither can be reached at all by a caller the check denies.
+func (r matrixRoute) request() string {
+	id := "x"
+	switch seg := strings.SplitN(strings.TrimPrefix(r.path, "/v1/"), "/", 2)[0]; seg {
+	case "agents":
+		id = "agent_nonexistent"
+	case "environments":
+		id = "env_nonexistent"
+	case "sessions":
+		id = "sesn_nonexistent"
+	case "vaults":
+		id = "vlt_nonexistent"
+	case "skills":
+		id = "skill_nonexistent"
+	case "files":
+		id = "file_nonexistent"
+	}
+	return strings.NewReplacer(
+		"{id}", id,
+		"{rid}", "sesrsc_nonexistent",
+		"{cid}", "vcrd_nonexistent",
+		"{version}", "1",
+	).Replace(r.path)
 }
 
 // roleMatrix mirrors docs/plan/31_console-sso-rbac.md's table, route for route:
@@ -31,13 +67,13 @@ type matrixRoute struct {
 // the credential surfaces, enumerated rather than inferred.
 func roleMatrix() []matrixRoute {
 	const (
-		agent = "/v1/agents/agent_nonexistent"
-		env   = "/v1/environments/env_nonexistent"
-		sesn  = "/v1/sessions/sesn_nonexistent"
-		vault = "/v1/vaults/vlt_nonexistent"
-		cred  = vault + "/credentials/vcrd_nonexistent"
-		skill = "/v1/skills/skill_nonexistent"
-		file  = "/v1/files/file_nonexistent"
+		agent = "/v1/agents/{id}"
+		env   = "/v1/environments/{id}"
+		sesn  = "/v1/sessions/{id}"
+		vault = "/v1/vaults/{id}"
+		cred  = vault + "/credentials/{cid}"
+		skill = "/v1/skills/{id}"
+		file  = "/v1/files/{id}"
 	)
 	v, d, a := identity.RoleViewer, identity.RoleDeveloper, identity.RoleAdmin
 
@@ -59,8 +95,8 @@ func roleMatrix() []matrixRoute {
 		{"GET", sesn + "/events", v}, {"POST", sesn + "/events", d},
 		{"GET", sesn + "/events/stream", v},
 		{"GET", sesn + "/resources", v}, {"POST", sesn + "/resources", d},
-		{"GET", sesn + "/resources/sesrsc_x", v},
-		{"POST", sesn + "/resources/sesrsc_x", d}, {"DELETE", sesn + "/resources/sesrsc_x", d},
+		{"GET", sesn + "/resources/{rid}", v},
+		{"POST", sesn + "/resources/{rid}", d}, {"DELETE", sesn + "/resources/{rid}", d},
 
 		// Vaults: the container is developer CRUD, the credentials inside it are
 		// admin — reads excepted, which render sealed metadata only.
@@ -73,9 +109,9 @@ func roleMatrix() []matrixRoute {
 
 		// Skills, including the archive download.
 		{"GET", "/v1/skills", v}, {"GET", skill, v}, {"GET", skill + "/versions", v},
-		{"GET", skill + "/versions/1", v}, {"GET", skill + "/versions/1/content", v},
+		{"GET", skill + "/versions/{version}", v}, {"GET", skill + "/versions/{version}/content", v},
 		{"POST", "/v1/skills", d}, {"DELETE", skill, d},
-		{"POST", skill + "/versions", d}, {"DELETE", skill + "/versions/1", d},
+		{"POST", skill + "/versions", d}, {"DELETE", skill + "/versions/{version}", d},
 
 		// Files, including the content download.
 		{"GET", "/v1/files", v}, {"GET", file, v}, {"GET", file + "/content", v},
@@ -87,82 +123,167 @@ func TestRoleMatrixIsEnforcedOnEveryRoute(t *testing.T) {
 	s := newLaneServer(t)
 
 	// One token per tier, minted once: the matrix is about routes, not tokens.
+	//
+	// RoleNone is a real caller here, not a placeholder — a person the deployment
+	// authenticated whose IdP groups map to nothing. It is the only tier that is
+	// denied on EVERY route, which makes it the denied-case control for the
+	// viewer routes: without it, every tier under test would satisfy a viewer
+	// minimum, and a viewer check that stopped running entirely would still see
+	// each row pass on the handler's own 404.
 	tokens := map[identity.Role]string{
+		identity.RoleNone:      s.token("unmapped-group"),
 		identity.RoleViewer:    s.token("platform-read"),
 		identity.RoleDeveloper: s.token("platform-devs"),
 		identity.RoleAdmin:     s.token("platform-admins"),
 	}
+	callers := []identity.Role{identity.RoleNone, identity.RoleViewer, identity.RoleDeveloper, identity.RoleAdmin}
 
 	for _, route := range roleMatrix() {
-		for _, caller := range []identity.Role{identity.RoleViewer, identity.RoleDeveloper, identity.RoleAdmin} {
-			res := s.bearer(route.method, route.path, tokens[caller], nil)
+		for _, caller := range callers {
+			res := s.bearer(route.method, route.request(), tokens[caller], nil)
 			status, errType, raw := laneRead(t, res)
 			allowed := caller.AtLeast(route.min)
+			who := string(caller)
+			if caller == identity.RoleNone {
+				who = "a caller with no mapped role"
+			}
 
 			switch {
 			case allowed && status == http.StatusForbidden:
-				t.Errorf("%s %s: %s was denied, but the matrix puts this route at %s",
-					route.method, route.path, caller, route.min)
+				t.Errorf("%s: %s was denied, but the matrix puts this route at %s",
+					route.pattern(), who, route.min)
 			case allowed && status == http.StatusUnauthorized:
-				t.Errorf("%s %s: %s got 401; a verified token must never read as no credential",
-					route.method, route.path, caller)
+				t.Errorf("%s: %s got 401; a verified token must never read as no credential",
+					route.pattern(), who)
 			case allowed && status >= 500:
-				t.Errorf("%s %s: %s got %d — the role check passed but the handler failed (%v)",
-					route.method, route.path, caller, status, laneMessage(t, raw))
+				t.Errorf("%s: %s got %d — the role check passed but the handler failed (%v)",
+					route.pattern(), who, status, laneMessage(t, raw))
 			case !allowed && status != http.StatusForbidden:
-				t.Errorf("%s %s: %s got %d, want 403 — the matrix puts this route at %s",
-					route.method, route.path, caller, status, route.min)
+				t.Errorf("%s: %s got %d, want 403 — the matrix puts this route at %s",
+					route.pattern(), who, status, route.min)
 			case !allowed:
 				if errType != "permission_error" {
-					t.Errorf("%s %s: %s denied with error type %q, want permission_error",
-						route.method, route.path, caller, errType)
+					t.Errorf("%s: %s denied with error type %q, want permission_error",
+						route.pattern(), who, errType)
 				}
 				// The denial names the ROUTE's requirement, never the caller's
 				// own role: an operator's real question is "what does this need",
 				// and echoing the caller's role back leaks nothing useful.
 				if msg := laneMessage(t, raw); !strings.Contains(msg, string(route.min)) {
-					t.Errorf("%s %s: %s denied with %q, which does not name the required %s role",
-						route.method, route.path, caller, msg, route.min)
+					t.Errorf("%s: %s denied with %q, which does not name the required %s role",
+						route.pattern(), who, msg, route.min)
 				}
 			}
 		}
 	}
 }
 
-// TestEnvironmentKeySurfaceIsAdminOnly covers the one console surface, which the
-// matrix deliberately keeps whole at admin — listing included, because which
-// hosts hold live credentials and what they are named is itself an inventory.
-// It needs a real environment, so it is separate from the table above.
-func TestEnvironmentKeySurfaceIsAdminOnly(t *testing.T) {
+// TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd covers the direction a
+// deny-only suite cannot: that the gate lets the right caller THROUGH.
+//
+// Who is denied on this surface is already pinned over real HTTP by
+// TestIdentityLaneEnvironmentKeyRoutesRequireAdmin (viewer and developer on the
+// list, the issue and the revoke). What nothing asserted is the allow path of
+// handleNoContent, which exactly two routes use — this revoke at admin, and the
+// work-API stop, whose lane has no role to check. So a regression that made
+// handleNoContent deny every human would have passed the whole suite, and the
+// completeness test cannot see it either: parsing the route table proves a role
+// is DECLARED, never that the adapter honours it at runtime.
+func TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd(t *testing.T) {
 	s := newLaneServer(t)
 	envID := s.env()
-	list := consoleTokens(envID)
+	admin := s.token("platform-admins")
 
-	for _, tc := range []struct {
-		role  string
-		allow bool
-	}{
-		{"platform-read", false},
-		{"platform-devs", false},
-		{"platform-admins", true},
-	} {
-		res := s.bearer(http.MethodGet, list, s.token(tc.role), nil)
-		status, errType, raw := laneRead(t, res)
-		if tc.allow {
-			if status != http.StatusOK {
-				t.Errorf("%s listing environment keys: status %d, want 200 (%v)", tc.role, status, laneMessage(t, raw))
-			}
-			continue
-		}
-		if status != http.StatusForbidden {
-			t.Errorf("%s listing environment keys: status %d, want 403 — the env-key surface is gated whole", tc.role, status)
-		}
-		if errType != "permission_error" {
-			t.Errorf("%s: error type %q, want permission_error", tc.role, errType)
-		}
-		if msg := laneMessage(t, raw); !strings.Contains(msg, string(identity.RoleAdmin)) {
-			t.Errorf("%s: denial %q does not name the required admin role", tc.role, msg)
-		}
+	// Issue: noStore(handle(admin, …)). The response is the OAuth-shaped
+	// {access_token, expires_in}; the key's id comes from the listing.
+	status, _, raw := laneRead(t, s.bearer(http.MethodPost, consoleTokens(envID), admin,
+		map[string]any{"name": "build-host-1"}))
+	if status != http.StatusOK {
+		t.Fatalf("admin issuing an environment key: status %d (%v)", status, laneMessage(t, raw))
+	}
+	var issued map[string]any
+	if err := json.Unmarshal([]byte(raw), &issued); err != nil {
+		t.Fatalf("decode issued key: %v", err)
+	}
+	if token, _ := issued["access_token"].(string); token == "" {
+		t.Fatalf("issued response carried no access_token: %s", raw)
+	}
+
+	// List: handle(admin, …), and the id to revoke.
+	status, _, raw = laneRead(t, s.bearer(http.MethodGet, consoleTokens(envID), admin, nil))
+	if status != http.StatusOK {
+		t.Fatalf("admin listing environment keys: status %d (%v)", status, laneMessage(t, raw))
+	}
+	var listed map[string]any
+	if err := json.Unmarshal([]byte(raw), &listed); err != nil {
+		t.Fatalf("decode listing: %v", err)
+	}
+	rows := listData(t, listed)
+	if len(rows) != 1 {
+		t.Fatalf("listed %d keys, want the 1 just issued", len(rows))
+	}
+	keyID, _ := rows[0]["id"].(string)
+	if !strings.HasPrefix(keyID, "envkey_") {
+		t.Fatalf("listed id = %q, want the envkey_ prefix", keyID)
+	}
+
+	// Revoke: handleNoContent(admin, …), whose success is a bodiless 204.
+	res := s.bearer(http.MethodPost, consoleRevoke(envID, keyID), admin, nil)
+	body, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		t.Fatalf("read revoke response: %v", err)
+	}
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("admin revoking: status %d, body %q, want 204", res.StatusCode, body)
+	}
+	if len(body) != 0 {
+		t.Errorf("204 carried a body: %q", body)
+	}
+}
+
+// TestAHumanCreatedSessionRecordsThePrincipal closes the loop slice 2 could only
+// test in-package. Its note there said the audit column could not be observed
+// over HTTP because every mutation sat at RoleNone, so no human could create a
+// session — and that slice 3 would make it reachable. It does: POST /v1/sessions
+// is developer now, so the column can be watched from outside, and this asserts
+// what principalFrom actually wrote.
+//
+// The failure it guards is silent by construction: created_by is nullable and
+// nothing downstream reads it, so a human-created session that recorded nobody
+// would look exactly like a working one until someone needed the audit trail.
+func TestAHumanCreatedSessionRecordsThePrincipal(t *testing.T) {
+	s := newLaneServer(t)
+	agent := createAgent(t, s.tserver, map[string]any{"name": "a", "model": "m"})
+	envID := s.env()
+
+	status, _, raw := laneRead(t, s.bearer(http.MethodPost, "/v1/sessions", s.token("platform-devs"),
+		map[string]any{"agent": agent["id"], "environment_id": envID}))
+	if status != http.StatusOK {
+		t.Fatalf("a developer creating a session: status %d (%v)", status, laneMessage(t, raw))
+	}
+	var session map[string]any
+	if err := json.Unmarshal([]byte(raw), &session); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	sessionID, _ := session["id"].(string)
+
+	var createdBy *string
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT created_by FROM sessions WHERE id = $1`, sessionID).Scan(&createdBy); err != nil {
+		t.Fatalf("read created_by: %v", err)
+	}
+	if createdBy == nil || *createdBy == "" {
+		t.Fatal("created_by is empty on a session a human created; the audit trail records nobody")
+	}
+
+	// And it is the principal's id, not the api key's name and not the subject.
+	var principalID string
+	if err := s.pool.QueryRow(t.Context(), `SELECT id FROM principals`).Scan(&principalID); err != nil {
+		t.Fatalf("read principal: %v", err)
+	}
+	if *createdBy != principalID {
+		t.Errorf("created_by = %q, want the principal id %q", *createdBy, principalID)
 	}
 }
 

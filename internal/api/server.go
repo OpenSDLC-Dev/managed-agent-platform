@@ -243,9 +243,20 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) h
 		// management auth), so an environment key never reaches a management-only
 		// handler. (Classifying on the decoded r.URL.Path instead would let that
 		// %2F reach the CRUD handler under env-key auth.) The reverse case is
-		// fail-closed and driverless: a request that percent-encodes a literal
-		// route segment (e.g. /%65vents) is not recognized as a worker route and
-		// falls to management auth — a 401, never an over-authorization.
+		// fail-closed and driverless, but by two different mechanisms depending
+		// on whether identity is configured. A request that percent-encodes a
+		// literal route segment (e.g. /%65vents, or /%77ork) is not recognized as
+		// a worker route and falls to management auth, and ServeMux then decodes
+		// the segment and matches the machine-lane registration anyway. With no
+		// verifier that is a 401 — no key, no entry. With one, the request can
+		// instead take the HUMAN lane and reach that registration, where what
+		// refuses it is the role: those routes are registered identity.RoleNone,
+		// which no role satisfies, so it is a 403. Hence RoleNone on the work and
+		// gate registrations is load-bearing rather than decorative
+		// (TestAnEncodedPathCannotSlipPastTheWorkLane). Under a management key the
+		// handlers are reached with requireRole a no-op, and what closes them is
+		// their own scoping — workScope's environment check and getGateConfig's
+		// empty session id — not this dispatcher.
 		p := r.URL.EscapedPath()
 		switch {
 		case isWorkPath(p):
