@@ -29,6 +29,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -288,11 +289,18 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	}
 	endpoint, err := url.Parse(cfg.URL)
 	if err != nil {
-		// The url.Error being wrapped already quotes the URL it could not
-		// parse, so naming it again would put a second copy of a string that
-		// may carry userinfo into the message. One copy is the most this can
-		// be reduced to without discarding the reason the parse failed.
-		return nil, fmt.Errorf("mcp: server URL: %w", err)
+		// url.Error renders the URL it could not parse through %q, so wrapping
+		// it whole would put the configured string — userinfo and query
+		// included — into the message. Nothing here can redact that string:
+		// redaction needs a parsed URL, and this is the branch where there is
+		// none. So the cause travels and the URL does not, which costs the
+		// reader the offset the message would have pointed at and keeps a
+		// credential out of every log line that renders this error.
+		var parseErr *url.Error
+		if errors.As(err, &parseErr) {
+			return nil, fmt.Errorf("mcp: the server url could not be parsed: %w", parseErr.Err)
+		}
+		return nil, fmt.Errorf("mcp: the server url could not be parsed")
 	}
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
@@ -332,12 +340,16 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		if conn := transport.conn; conn != nil {
 			_ = conn.Close()
 		}
-		// Redacted, not raw: an mcp_servers URL may carry userinfo, and this
-		// error is a stored column by the time the executor's discovery pass is
-		// done with it. net/http already redacts the password out of its own
-		// half of the message (`Post "http://user:***@host"`), so a raw prefix
-		// here would be the one copy of the secret in the whole string.
-		return nil, fmt.Errorf("mcp: connect to %s: %w", endpoint.Redacted(), connErr)
+		// Scheme and host, not the URL: an mcp_servers URL may carry a
+		// credential in three places and this error is a stored column by the
+		// time the executor's discovery pass is done with it. url.URL.Redacted
+		// is not enough and reads as though it were — it masks the password
+		// alone, leaving a token-as-username (`https://ghp_…@host`, a common MCP
+		// convention) and a `?api_key=` query in full. What survives here is
+		// what an operator needs to know which server failed; net/http's own
+		// half of the message redacts its password and keeps the rest, which is
+		// why the executor redacts this string again by value before storing it.
+		return nil, fmt.Errorf("mcp: connect to %s://%s: %w", endpoint.Scheme, endpoint.Host, connErr)
 	}
 	return &Conn{session: session}, nil
 }

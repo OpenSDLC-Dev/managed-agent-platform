@@ -66,6 +66,17 @@ type Content struct {
 // Two minutes because that is what a tool call gets on this platform already
 // (toolset.DefaultTimeout), and an MCP tool is a tool: a remote one should not
 // outlive a local one by default.
+//
+// It is a ceiling on the aggregate and not a promise about how long a call may
+// run, and under [DefaultClient] it is not the binding constraint at all: that
+// client sets Timeout to [DialTimeout], a whole-request cap net/http applies to
+// the body read as well, and a `tools/call` response is not complete until the
+// tool is. So a call through the production client is bounded at thirty seconds
+// and an MCP tool that takes longer fails every time, whatever this constant
+// says — the same relationship [ListTimeout] has with that cap, where the
+// aggregate bounds the pages and the client bounds each one. Whether an MCP tool
+// deserves a client of its own with a longer request cap is a question for the
+// slice that first calls one; today nothing does, so nothing here answers it.
 const CallTimeout = 2 * time.Minute
 
 // CallTool runs one tool on the connected server and returns its answer.

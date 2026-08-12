@@ -521,25 +521,39 @@ func TestAgentVersionEchoResolved(t *testing.T) {
 func TestSessionAgentPatchInvalidatesTheMCPCatalog(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
+	// "alias" is a second name for "keep"'s endpoint. Two names may share one
+	// URL — nothing forbids it, and a `configs[]` entry addresses the name —
+	// so the pair is what forces the match to compare both: were it the url
+	// alone, dropping "alias" would leave its row standing behind the URL
+	// "keep" still declares, and the model would be offered a server the agent
+	// no longer has.
+	alias := map[string]any{"type": "url", "name": "alias", "url": "https://mcp.example/keep"}
 	created := createSession(t, s, map[string]any{
 		"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
-			"mcp_servers": []any{mcpServer("keep"), mcpServer("move"), mcpServer("drop")},
-			"tools":       []any{mcpToolset("keep"), mcpToolset("move"), mcpToolset("drop")}},
+			"mcp_servers": []any{mcpServer("keep"), mcpServer("move"), mcpServer("drop"), alias},
+			"tools": []any{mcpToolset("keep"), mcpToolset("move"), mcpToolset("drop"),
+				mcpToolset("alias")}},
 		"environment_id": envID,
 	})
 	sid := created["id"].(string)
 
-	for _, name := range []string{"keep", "move", "drop"} {
+	for _, row := range [][2]string{
+		{"keep", "https://mcp.example/keep"},
+		{"move", "https://mcp.example/move"},
+		{"drop", "https://mcp.example/drop"},
+		{"alias", "https://mcp.example/keep"},
+	} {
 		if _, err := s.pool.Exec(context.Background(),
 			`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status)
 			 VALUES ($1, $2, $3, '[]'::jsonb, 'ready')`,
-			sid, name, "https://mcp.example/"+name); err != nil {
-			t.Fatalf("seed catalog row %q: %v", name, err)
+			sid, row[0], row[1]); err != nil {
+			t.Fatalf("seed catalog row %q: %v", row[0], err)
 		}
 	}
 
-	// "keep" is unchanged, "move" is repointed, "drop" is gone. The tools move
-	// with them, since a dangling toolset would reject the patch outright.
+	// "keep" is unchanged, "move" is repointed, "drop" and "alias" are gone.
+	// The tools move with them, since a dangling toolset would reject the patch
+	// outright.
 	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
 		"agent": map[string]any{
 			"mcp_servers": []any{

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -446,37 +445,72 @@ func TestCallToolOnAConnectionThatWasNeverOpened(t *testing.T) {
 	}
 }
 
-// TestConnectFailureRedactsCredentialsInTheURL pins that a failed connection
-// does not carry the endpoint's password. An `mcp_servers` entry's url is
-// customer-supplied and may hold userinfo, and the executor's discovery pass
-// stores this error text in a database column — so the wrapper naming the
-// endpoint is the one place a secret could enter it. net/http already redacts
-// its own half of the message; this is ours.
+// TestConnectFailureRedactsCredentialsInTheURL pins what this package writes
+// about a failed connection, and — just as deliberately — what it does not.
 //
-// Both halves are asserted: a message that dropped the endpoint entirely would
-// pass a check for the password's absence while leaving an operator unable to
-// tell which server failed. The second assertion is on this package's own
-// prefix rather than on the host appearing somewhere in the string, because the
-// SDK error being wrapped names the host too — a substring check would be
-// satisfied by that alone and would say nothing about what this package wrote.
+// What it writes is scheme and host, nothing else. url.URL.Redacted is not
+// enough for that and reads as though it were: it masks the password alone,
+// leaving a token-as-username (`https://ghp_...@host`, a common MCP convention)
+// and an `?api_key=` query in full. The expectation is spelled out here rather
+// than derived from a url.URL method, so a change to how this package redacts
+// has to be written twice — once as behaviour, once as the sentence an operator
+// reads.
+//
+// What it does not write is a guarantee about the whole message. The wrapped
+// transport error is net/http's, and net/http names the URL it dialled with
+// only the password masked, so the username and query survive inside it and no
+// wrapper here can reach them without discarding the cause. The assertion below
+// is therefore on this package's own prefix, up to the wrapped error, and the
+// guarantee for text that gets *stored* belongs to the consumer that stores it:
+// the executor's storableReason redacts by value before any of this reaches a
+// column. Asserting the whole string were clean would be asserting something
+// this package cannot deliver, and would go green only by accident of which
+// fields the fixture URL happened to carry.
 func TestConnectFailureRedactsCredentialsInTheURL(t *testing.T) {
 	t.Parallel()
 	// Port 1 on loopback: nothing listens, so the connection is refused and the
 	// error is the one a discovery pass would record.
-	const raw = "http://alice:s3cr3t-token@127.0.0.1:1/mcp"
+	const raw = "http://ghp_alice:s3cr3t-token@127.0.0.1:1/mcp?api_key=QUERYSECRET"
 	_, err := mcp.Connect(context.Background(), mcp.Config{URL: raw, HTTPClient: loopbackClient()})
 	if err == nil {
 		t.Fatal("Connect reported success against a port nothing listens on")
 	}
+	const prefix = "mcp: connect to http://127.0.0.1:1:"
+	if !strings.HasPrefix(err.Error(), prefix) {
+		t.Fatalf("error %q does not open by naming the endpoint it failed to reach (%q)", err, prefix)
+	}
+	for _, secret := range []string{"s3cr3t-token", "ghp_alice", "QUERYSECRET", "api_key", "/mcp"} {
+		if strings.Contains(prefix, secret) {
+			t.Errorf("this package's own prefix %q carries %q from the endpoint", prefix, secret)
+		}
+	}
+	// The password is the one thing absent from the whole message, because
+	// net/http masks it in its own half as well.
 	if strings.Contains(err.Error(), "s3cr3t-token") {
 		t.Errorf("error carries the URL's password: %v", err)
 	}
-	endpoint, perr := url.Parse(raw)
-	if perr != nil {
-		t.Fatal(perr)
+}
+
+// TestConnectRefusesAnUnparseableURLWithoutQuotingIt is the sibling path, and
+// the one with no parsed URL to redact from: url.Parse fails, so the only
+// rendering available is the configured string itself, and url.Error would put
+// it into the message through %q. The cause travels and the string does not.
+func TestConnectRefusesAnUnparseableURLWithoutQuotingIt(t *testing.T) {
+	t.Parallel()
+	// A raw control character is a byte url.Parse rejects outright.
+	const raw = "http://ghp_alice:s3cr3t-token@mcp.example/mcp?api_key=QUERYSECRET\x7f"
+	_, err := mcp.Connect(context.Background(), mcp.Config{URL: raw})
+	if err == nil {
+		t.Fatal("Connect accepted a url net/url cannot parse")
 	}
-	if want := "mcp: connect to " + endpoint.Redacted() + ":"; !strings.HasPrefix(err.Error(), want) {
-		t.Errorf("error %q does not open by naming the endpoint it failed to reach (%q)", err, want)
+	for _, secret := range []string{"s3cr3t-token", "ghp_alice", "QUERYSECRET", "mcp.example"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error carries %q from the unparseable url: %v", secret, err)
+		}
+	}
+	// The reason survives, or the message says nothing an operator can act on.
+	if !strings.Contains(err.Error(), "could not be parsed") {
+		t.Errorf("error %q does not say the url could not be parsed", err)
 	}
 }
 

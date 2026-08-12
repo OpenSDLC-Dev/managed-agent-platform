@@ -199,6 +199,12 @@ services:
       # defaults, 1 GiB and 5m.
       EXECUTOR_REPO_CLONE_MAX_BYTES: ${EXECUTOR_REPO_CLONE_MAX_BYTES:-}
       EXECUTOR_REPO_CLONE_TIMEOUT: ${EXECUTOR_REPO_CLONE_TIMEOUT:-}
+      # One MCP discovery pass, across every server a session's agent declares
+      # (plan 29). The dials are serial and this process runs one work item at a
+      # time, so the budget is what keeps a server that accepts a connection and
+      # never answers from holding every other session's work behind it. Empty =
+      # the binary's default, 5m.
+      EXECUTOR_MCP_DISCOVERY_TIMEOUT: ${EXECUTOR_MCP_DISCOVERY_TIMEOUT:-}
       # Sandbox containment (#65). The executor applies its own defaults when
       # these are unset — 512 processes, 2 CPUs, and the NET_RAW/SETUID/SETGID
       # drops — so they are here to be *lowered* or turned off (0, or `none` for

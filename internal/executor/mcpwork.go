@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
@@ -60,7 +60,15 @@ type catalogRow struct {
 	url    string
 	tools  []mcp.Tool
 	status string // "ready" or "failed", the column's CHECK
-	reason string // why it failed; empty on "ready"
+	// reason is why it failed, empty on "ready", and already storable when set:
+	// every producer passes it through storableReason before it lands here, so
+	// nothing holds a server's unbounded text and the settlement stores it as it
+	// stands.
+	reason string
+	// notReached marks a row the pass never dialled — the budget ran out first.
+	// Its reason is a fallback rather than a finding, so the settlement keeps
+	// whatever an earlier pass recorded instead.
+	notReached bool
 }
 
 // processMCP runs one mcp_exec item to completion. It mirrors processWeb — the
@@ -174,10 +182,17 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 	for _, s := range servers {
 		// The budget is spent, but the item's own context is alive: the servers
 		// still unreached are this pass's failures, not the item's. They get the
-		// ordinary failed row, which the next turn re-attempts.
+		// ordinary failed row, which the next turn re-attempts — but the reason
+		// on it does not displace one an earlier pass earned. "Ran out of time"
+		// says what this pass did, and a server that was refused by the egress
+		// policy last turn already has the answer an operator needs; overwriting
+		// that with a scheduling artifact would make the row read as though the
+		// clock were the problem. So this reason is a fallback for a server that
+		// has none yet, applied in the settlement's upsert.
 		if budget.Err() != nil && ctx.Err() == nil {
 			rows = append(rows, catalogRow{name: s.Name, url: s.URL, status: "failed",
-				reason: "this discovery pass ran out of time before reaching the server"})
+				reason:     "this discovery pass ran out of time before reaching the server",
+				notReached: true})
 			continue
 		}
 		rows = append(rows, e.discoverServer(budget, cfg, s))
@@ -190,13 +205,27 @@ func (e *Executor) discoverServers(ctx context.Context, cfg domain.EnvironmentCo
 
 // discoverServer reaches one server.
 //
-// The reason it writes is a stored column and an mcp_servers entry may carry
-// userinfo, so the reasons written here name the host and nothing more. The two
-// that come from elsewhere are covered at their source rather than here: an
-// error out of the MCP client names the endpoint with its userinfo redacted,
-// and net/http redacts its own half of a transport message.
-func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentConfig, s mcpServerRef) catalogRow {
-	row := catalogRow{name: s.Name, url: s.URL, status: "failed"}
+// The reason it writes is a stored column and an mcp_servers entry may carry a
+// credential in its userinfo or its query, so the reasons written here name the
+// host and nothing more. The ones that come from elsewhere are not covered at
+// their source, and it would be easy to assume they were: the MCP client
+// redacts the endpoint in the prefix *it* writes, but the transport error it
+// wraps is net/http's, which names the URL it dialled with only the password
+// masked — the username and query ride along. That is why storableReason
+// redacts by value here rather than trusting what arrives.
+func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentConfig, s mcpServerRef) (row catalogRow) {
+	// The reason is made storable here, where it is produced, rather than at
+	// settlement. A server chooses this text and a JSON-RPC error message is
+	// bounded only by a whole connection's response budget, so deferring the cap
+	// to the end of the pass would keep every declared server's megabytes alive
+	// in the executor's heap at once — and the redaction has to happen before
+	// anything holds the string anyway.
+	defer func() {
+		if row.reason != "" {
+			row.reason = storableReason(row.reason, row.url)
+		}
+	}()
+	row = catalogRow{name: s.Name, url: s.URL, status: "failed"}
 
 	parsed, err := url.Parse(s.URL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
@@ -235,23 +264,77 @@ func (e *Executor) discoverServer(ctx context.Context, cfg domain.EnvironmentCon
 // platform does not control, wedges that session's MCP discovery for good.
 //
 // Names and descriptions are Go strings and are stripped. A schema is raw JSON,
-// where a NUL is not a byte but the six characters `\u0000` - stripping that
-// textually would corrupt a schema whose own text happens to contain a literal
-// backslash-u-0000, so a schema carrying one costs its tool instead, the way
-// listTools already drops an entry it cannot faithfully hand to a model. A raw
-// 0x00 byte cannot arrive: JSON forbids it inside a string, and the decode that
-// produced these bytes would have rejected it.
+// where a NUL is not a byte but the six characters `\u0000` — and those same
+// six characters, written literally, are how a JSON Schema says "no control
+// characters" (`"pattern": "^[^\\u0000-\\u001f]*$"`). Searching the bytes for them
+// cannot tell the two apart, and reading the escape as a NUL costs a tool whose
+// schema uses a routine idiom — so the schema is decoded instead and its strings
+// are examined for the code point itself. A schema that does carry one costs its
+// tool, the way listTools already drops an entry it cannot faithfully hand to a
+// model, and so does one that will not decode at all. A raw 0x00 byte cannot
+// arrive: JSON forbids it inside a string, and the decode that produced these
+// bytes would have rejected it.
+//
+// The listing is capped as well, which the sibling text column has needed from
+// the start and this one no less: `tools` is server-chosen text with no length of
+// its own, bounded only by a whole connection's mcp.MaxResponseBytes budget, and
+// at maxAgentMCPServers servers that is a hundred and sixty megabytes of jsonb
+// for one session — copied again into every other session the same agent starts,
+// since the catalog is deliberately per-session rather than shared. Tools are
+// kept in the order the server reported them until the next one would not fit,
+// and the rest are dropped rather than truncated: half a schema is a contract the
+// server never published, and dropping is already what this function does with a
+// tool it cannot store.
 func storableTools(tools []mcp.Tool) []mcp.Tool {
 	out := make([]mcp.Tool, 0, len(tools))
+	budget := maxCatalogTools
 	for _, t := range tools {
-		if bytes.Contains(t.InputSchema, []byte(`\u0000`)) {
+		if schemaCarriesNUL(t.InputSchema) {
 			continue
 		}
 		t.Name = toolset.SanitizeText(t.Name)
 		t.Description = toolset.SanitizeText(t.Description)
+		size := len(t.Name) + len(t.Description) + len(t.InputSchema)
+		if size > budget {
+			break
+		}
+		budget -= size
 		out = append(out, t)
 	}
 	return out
+}
+
+// schemaCarriesNUL reports whether a decoded input schema holds the NUL code
+// point in a string or a key — the thing Postgres refuses on jsonb — as opposed
+// to the escape sequence spelling it, which is ordinary schema text. A schema
+// that will not decode is reported as carrying one: it cannot be vouched for,
+// and the caller's answer to both is the same.
+func schemaCarriesNUL(schema json.RawMessage) bool {
+	var decoded any
+	if err := json.Unmarshal(schema, &decoded); err != nil {
+		return true
+	}
+	return valueCarriesNUL(decoded)
+}
+
+func valueCarriesNUL(v any) bool {
+	switch t := v.(type) {
+	case string:
+		return strings.ContainsRune(t, 0)
+	case []any:
+		for _, e := range t {
+			if valueCarriesNUL(e) {
+				return true
+			}
+		}
+	case map[string]any:
+		for k, e := range t {
+			if strings.ContainsRune(k, 0) || valueCarriesNUL(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // maxCatalogReason caps a stored failure reason. A `failed` row is re-attempted
@@ -264,6 +347,15 @@ func storableTools(tools []mcp.Tool) []mcp.Tool {
 // the url the agent declares — and each entry is validated on the way out of
 // the client.)
 const maxCatalogReason = 2000
+
+// maxCatalogTools caps one row's listing, counted over the names, descriptions
+// and schemas a server chose — the bytes it controls — rather than over the
+// marshaled row, so the cap means the same thing whatever the encoder does with
+// it. A quarter of a megabyte is far past any catalog meant to be offered to a
+// model: a hundred tools averaging a kilobyte of schema and prose each fit
+// inside it, and a request carrying more would be an unusable one. It exists for
+// the listing that is not meant to be offered at all.
+const maxCatalogTools = 256 << 10
 
 // urlInText matches a URL as it appears inside an error message.
 //
@@ -338,32 +430,59 @@ func storableReason(reason, endpoint string) string {
 // renders through %q, which escapes an embedded quote or backslash and so
 // matches none of the first three. Enumerating them is possible only because
 // the endpoint is known here — which is the whole reason this pass exists.
+//
+// Those four spell one URL, and the URL itself has a second spelling. An empty
+// port — `https://host:/mcp`, which url.Parse accepts and keeps — is deleted by
+// http.NewRequest before any request is sent (Go issue 14836), so a transport
+// error names a host the agent never declared and every rendering built from
+// the declared bytes misses it by one character. The normalized URL is
+// therefore enumerated alongside the declared one, each with its own four
+// forms. That is the whole of the divergence: net/http rewrites nothing else
+// about a URL on the way to an error, and this client follows no redirect, so
+// there is no third spelling to chase.
 func endpointRenderings(endpoint string) []struct{ text, safe string } {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" {
 		return nil
 	}
-	safe := u.Scheme + "://" + u.Host
-	written := []string{endpoint, u.String(), u.Redacted()}
-	if _, hasPassword := u.User.Password(); hasPassword {
-		written = append(written, strings.Replace(u.String(), u.User.String()+"@", u.User.Username()+":***@", 1))
-	}
-	// Each of those again as %q renders it, without the surrounding quotes:
-	// those belong to the sentence around the URL, not to the URL.
-	for _, form := range written[:len(written):len(written)] {
-		if quoted := strconv.Quote(form); len(quoted) > 2 {
-			written = append(written, quoted[1:len(quoted)-1])
-		}
+	variants := []*url.URL{u}
+	if normalized := strings.TrimSuffix(u.Host, ":"); normalized != u.Host {
+		withPortRemoved := *u
+		withPortRemoved.Host = normalized
+		variants = append(variants, &withPortRemoved)
 	}
 
 	var out []struct{ text, safe string }
-	seen := map[string]bool{"": true, safe: true}
-	for _, form := range written {
-		if seen[form] {
-			continue
+	seen := map[string]bool{"": true}
+	for i, v := range variants {
+		safe := v.Scheme + "://" + v.Host
+		seen[safe] = true
+		var written []string
+		if i == 0 {
+			// The declared bytes belong to the URL as parsed: url.Parse
+			// normalizes, so they may differ from everything it renders, and
+			// whatever echoes the configuration rather than the parsed URL
+			// writes them unaltered.
+			written = append(written, endpoint)
 		}
-		seen[form] = true
-		out = append(out, struct{ text, safe string }{form, safe})
+		written = append(written, v.String(), v.Redacted())
+		if _, hasPassword := v.User.Password(); hasPassword {
+			written = append(written, strings.Replace(v.String(), v.User.String()+"@", v.User.Username()+":***@", 1))
+		}
+		// Each of those again as %q renders it, without the surrounding quotes:
+		// those belong to the sentence around the URL, not to the URL.
+		for _, form := range written[:len(written):len(written)] {
+			if quoted := strconv.Quote(form); len(quoted) > 2 {
+				written = append(written, quoted[1:len(quoted)-1])
+			}
+		}
+		for _, form := range written {
+			if seen[form] {
+				continue
+			}
+			seen[form] = true
+			out = append(out, struct{ text, safe string }{form, safe})
+		}
 	}
 	return out
 }
@@ -375,7 +494,18 @@ func redactURL(match string) string {
 	for len(match) > 0 && strings.ContainsRune(`.,:;!?)]}"'`, rune(match[len(match)-1])) {
 		trailing, match = match[len(match)-1:]+trailing, match[:len(match)-1]
 	}
+	// The trim is greedy because sentence punctuation is, and two of the
+	// characters it eats also end a URL: `]` closes an IPv6 literal, and `:`
+	// precedes a port. `https://[fd00::1]:` trims down to `https://[fd00::1`,
+	// which no longer parses — so what was trimmed is handed back one character
+	// at a time until it does. Giving back rather than never trimming is what
+	// keeps the ordinary case working: `https://host/x).` still parses with the
+	// punctuation attached, so a parse-first rule would never trim at all.
 	u, err := url.Parse(match)
+	for (err != nil || u.Host == "") && trailing != "" {
+		match, trailing = match+trailing[:1], trailing[1:]
+		u, err = url.Parse(match)
+	}
 	if err != nil || u.Host == "" {
 		return "[redacted url]" + trailing
 	}
@@ -403,25 +533,32 @@ func egressRefusal(cfg domain.EnvironmentConfig, host string) string {
 // mcpEgressAllowed reports whether the environment's networking policy admits a
 // dial to host.
 //
-// It decides on the environment **kind** first and treats an unrecognized
-// networking type as no policy at all, which is `gate.newPolicy`'s shape and is
-// the safe direction: a self_hosted environment has no networking block by
-// construction — its config normalizes to exactly {"type":"self_hosted"}, and
-// the reference documents networking on cloud environments only — while a cloud
-// environment always has one through the API, so a cloud config that names no
-// recognized policy is malformed rather than permissive. Reading a missing
-// discriminator as "unrestricted" would make that malformed row the one that
-// reaches everything: the schema constrains `config->>'type'` against the kind
-// and nothing constrains `config->'networking'`, and a config-preserving update
-// (packages, description) carries a stored value forward without revalidating
-// it.
+// What decides is whether a policy is *there*, not which kind of environment
+// carries it. A self_hosted environment has no networking block by
+// construction — its config normalizes to exactly {"type":"self_hosted"}, the
+// REST surface rejecting every other field, and the reference documents
+// networking on cloud environments only — so with no block there is nothing to
+// apply and the dial goes through. A cloud environment always has one through
+// the API. Either way a block that *is* present is a policy somebody meant, and
+// one naming no recognized type is malformed rather than permissive: it admits
+// nothing, which is `gate.newPolicy`'s shape and the safe direction.
+//
+// Reading a missing discriminator as "unrestricted" would make the malformed
+// row the one that reaches everything: the schema constrains `config->>'type'`
+// against the kind and nothing constrains `config->'networking'`, and a
+// config-preserving update (packages, description) carries a stored value
+// forward without revalidating it. Deciding on the kind first would do the same
+// thing one arm at a time — a `self_hosted` row is exactly the one the API
+// cannot have written a block onto, so a block found there came from an import,
+// a restore or a hand-written UPDATE, and skipping it because of the kind
+// would leave the refusal reachable on cloud rows alone.
 //
 // allow_mcp_servers "allows access to MCP server endpoints configured on the
 // agent" on top of allowed_hosts, and this is only ever asked about a server the
 // agent declared — discoverServers walks that array and nothing else — so under
 // the flag the host is admitted without a second list to check it against.
 func mcpEgressAllowed(cfg domain.EnvironmentConfig, host string) bool {
-	if cfg.Type == domain.EnvSelfHosted {
+	if cfg.Type == domain.EnvSelfHosted && cfg.Networking.Type == "" {
 		return true
 	}
 	switch cfg.Networking.Type {
@@ -453,6 +590,14 @@ func mcpEgressAllowed(cfg domain.EnvironmentConfig, host string) bool {
 // With it, both orders are correct: a patch that commits first is reflected in
 // what is read here, and one that commits after runs its own delete over what
 // this wrote.
+//
+// The same read re-checks that the session is still live, for the same reason
+// and over a much wider window: sessionForRun's check is minutes old by the time
+// a pass ends, and a session archived in between must not have rows written for
+// it or a turn chained on its behalf. Every other executor settlement gets this
+// from events.AppendInTx, which refuses an archived session under this very
+// lock; discovery appends no event, so it asks directly. The item is completed
+// either way — the work is done and there is nothing to retry.
 func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catalogRow) error {
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
@@ -461,10 +606,18 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var agentJSON []byte
+	var status string
+	var archivedAt *time.Time
 	if err := tx.QueryRow(ctx,
-		`SELECT resolved_agent FROM sessions WHERE id = $1 FOR UPDATE`,
-		item.SessionID.String()).Scan(&agentJSON); err != nil {
+		`SELECT resolved_agent, status, archived_at FROM sessions WHERE id = $1 FOR UPDATE`,
+		item.SessionID.String()).Scan(&agentJSON, &status, &archivedAt); err != nil {
 		return fmt.Errorf("read session agent: %w", err)
+	}
+	if status != string(domain.SessionRunning) || archivedAt != nil {
+		if err := e.queue.Complete(ctx, tx, item); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 	var agent struct {
 		MCPServers []mcpServerRef `json:"mcp_servers"`
@@ -487,15 +640,19 @@ func (e *Executor) settleMCP(ctx context.Context, item *queue.Item, rows []catal
 		}
 		var reason any
 		if r.reason != "" {
-			reason = storableReason(r.reason, r.url)
+			reason = r.reason
 		}
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status, error, fetched_at)
 			 VALUES ($1, $2, $3, $4::jsonb, $5, $6, now())
 			 ON CONFLICT (session_id, server_name) DO UPDATE SET
 			     url = EXCLUDED.url, tools = EXCLUDED.tools, status = EXCLUDED.status,
-			     error = EXCLUDED.error, fetched_at = EXCLUDED.fetched_at`,
-			item.SessionID.String(), r.name, r.url, string(toolsJSON), r.status, reason); err != nil {
+			     error = CASE WHEN $7::boolean
+			                  THEN COALESCE(mcp_catalogs.error, EXCLUDED.error)
+			                  ELSE EXCLUDED.error END,
+			     fetched_at = EXCLUDED.fetched_at`,
+			item.SessionID.String(), r.name, r.url, string(toolsJSON), r.status, reason,
+			r.notReached); err != nil {
 			return fmt.Errorf("write mcp catalog for %q: %w", r.name, err)
 		}
 	}

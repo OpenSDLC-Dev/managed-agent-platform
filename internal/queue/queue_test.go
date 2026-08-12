@@ -701,7 +701,10 @@ func TestCancelSessionTakesEveryLiveItem(t *testing.T) {
 	other, otherEnv := pgtest.NewSession(t, pool, "cloud")
 	q := queue.New(pool)
 
-	for _, kind := range []queue.Kind{queue.ModelTurn, queue.ToolExec} {
+	// Every kind a session can have in flight, mcp_exec included: cancel is
+	// written against the session rather than a kind list, and a test that
+	// enqueued a subset would stay green for a cancel that had grown one.
+	for _, kind := range []queue.Kind{queue.ModelTurn, queue.ToolExec, queue.WebExec, queue.OutputsHarvest, queue.MCPExec} {
 		if _, err := q.Enqueue(ctx, pool, envID, sessionID, kind); err != nil {
 			t.Fatal(err)
 		}

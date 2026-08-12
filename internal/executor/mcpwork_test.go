@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -280,6 +281,127 @@ func TestACloudEnvironmentNamingNoPolicyRefusesRatherThanAdmits(t *testing.T) {
 	}
 	if !strings.Contains(got.reason, "does not recognize") {
 		t.Errorf("reason = %q, want it to name the unrecognized policy as the cause", got.reason)
+	}
+}
+
+// TestASelfHostedEnvironmentNamingAPolicyIsHeldToIt is the same direction on
+// the other arm of the union, and it is the arm where the fail-open is easier
+// to miss: a self_hosted config is unconstrained *because* it carries no
+// networking block — the REST surface rejects every field but `type` and stores
+// exactly `{"type":"self_hosted"}` — so a row that does carry one was not
+// written through the API, and the block it carries is a policy somebody meant.
+// Ignoring it because of the kind would make the unrecognized-policy refusal
+// reachable on cloud rows alone, and the malformed row the permissive one.
+//
+// The reachable path is the same one the cloud test names: the schema
+// constrains `config->>'type'` against the kind and leaves `config->'networking'`
+// alone, so an import, a restore or a hand-written UPDATE produces this row.
+func TestASelfHostedEnvironmentNamingAPolicyIsHeldToIt(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	h := mcpHarness(t)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE environments SET kind = 'self_hosted', config = $2::jsonb WHERE id = $1`,
+		h.envID.String(), `{"type":"self_hosted","networking":{"type":"mesh"}}`); err != nil {
+		t.Fatalf("write the malformed config: %v", err)
+	}
+	h.declareMCPServers(t, [2]string{"github", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	got := h.catalog(t)["github"]
+	if got.status != "failed" {
+		t.Fatalf("row = %+v, want the dial refused: the config names a policy the platform does not recognize", got)
+	}
+	if !strings.Contains(got.reason, "does not recognize") {
+		t.Errorf("reason = %q, want it to name the unrecognized policy as the cause", got.reason)
+	}
+}
+
+// TestASelfHostedEnvironmentWithNoPolicyIsStillUnconstrained is the other half
+// of the pair, and the one that keeps the rung above from becoming a refusal of
+// every self_hosted session: the ordinary config — the only one the API can
+// write — carries no networking block, and nothing is applied to it.
+func TestASelfHostedEnvironmentWithNoPolicyIsStillUnconstrained(t *testing.T) {
+	url := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+	h := mcpHarness(t)
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE environments SET kind = 'self_hosted', config = '{"type":"self_hosted"}'::jsonb WHERE id = $1`,
+		h.envID.String()); err != nil {
+		t.Fatalf("write the config: %v", err)
+	}
+	h.declareMCPServers(t, [2]string{"github", url})
+	h.enqueueMCP(t)
+
+	h.stepOnce(t)
+
+	if got := h.catalog(t)["github"]; got.status != "ready" {
+		t.Errorf("row = %+v, want a self_hosted session's dial unconstrained", got)
+	}
+}
+
+// TestASessionEndedMidPassGetsNoRowsAndNoTurn pins the settlement's second
+// liveness check. A discovery pass may run for minutes, so the check
+// sessionForRun made when the item was claimed is stale by the time the rows are
+// written — and a session archived or terminated in between must not have
+// catalog rows written for it, nor a model turn chained on its behalf for a
+// brain to claim and drain. Every other executor settlement inherits this from
+// events.AppendInTx, which refuses an archived session under the same row lock;
+// discovery appends no event, so it has to ask.
+//
+// The end lands after the dials and before the settlement, which is the window
+// under test: the server is reachable and the pass succeeds, so nothing but the
+// check can be what suppresses the write. Both of the two ways a session stops
+// being live are driven, because they are separate conditions and a test for one
+// says nothing about the other.
+func TestASessionEndedMidPassGetsNoRowsAndNoTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  string
+	}{
+		{"archived", `UPDATE sessions SET archived_at = now() WHERE id = $1`},
+		{"terminated", `UPDATE sessions SET status = 'terminated' WHERE id = $1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url := mcptest.Server(t, mcptest.Tool{Name: "ok_tool"})
+			h := mcpHarness(t)
+			h.declareMCPServers(t, [2]string{"github", url})
+			h.enqueueMCP(t)
+
+			item, err := h.queue.Claim(context.Background(), queue.MCPExec, time.Minute)
+			if err != nil || item == nil {
+				t.Fatalf("claim: %+v %v", item, err)
+			}
+			sess, live, err := h.exec.sessionForRun(context.Background(), item)
+			if err != nil || !live {
+				t.Fatalf("sessionForRun: live=%v err=%v", live, err)
+			}
+			rows, err := h.exec.discoverServers(context.Background(), sess.envConfig, sess.mcpServers)
+			if err != nil {
+				t.Fatalf("discoverServers: %v", err)
+			}
+			if len(rows) != 1 || rows[0].status != "ready" {
+				t.Fatalf("rows = %+v, want the pass to have succeeded before the session ended", rows)
+			}
+
+			if _, err := h.pool.Exec(context.Background(), tc.end, h.sid.String()); err != nil {
+				t.Fatalf("end the session: %v", err)
+			}
+
+			if err := h.exec.settleMCP(context.Background(), item, rows); err != nil {
+				t.Fatalf("settleMCP: %v", err)
+			}
+
+			if cat := h.catalog(t); len(cat) != 0 {
+				t.Errorf("catalog rows = %v, want none written for a session that ended", cat)
+			}
+			if n := h.liveOf(t, queue.ModelTurn); n != 0 {
+				t.Errorf("live model_turn items = %d, want no turn chained for a session that ended", n)
+			}
+			if n := h.liveOf(t, queue.MCPExec); n != 0 {
+				t.Errorf("live mcp_exec items = %d, want the item completed rather than left to reclaim", n)
+			}
+		})
 	}
 }
 
@@ -639,6 +761,24 @@ func TestStorableReasonRedactsTruncatesAndSanitizes(t *testing.T) {
 			}
 			return u.Redacted()
 		},
+	}, {
+		// An empty port is legal and http.NewRequest deletes it (Go issue
+		// 14836), so net/http names a URL the agent never declared. The
+		// rendering is taken from a real request rather than written out here:
+		// what is under test is that the enumeration covers what the platform's
+		// own HTTP stack produces, and a hand-spelled copy would only test
+		// itself.
+		name:     "net/http's empty-port normalization",
+		endpoint: `https://u:p@mcp.example:/x?q=a b&api_key=SECRET`,
+		render: func(t *testing.T, endpoint string) string {
+			t.Helper()
+			req, err := http.NewRequest(http.MethodPost, endpoint, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return strings.Replace(req.URL.String(),
+				req.URL.User.String()+"@", req.URL.User.Username()+":***@", 1)
+		},
 	}} {
 		t.Run("a rendering by "+tc.name+" is redacted too", func(t *testing.T) {
 			rendered := tc.render(t, tc.endpoint)
@@ -650,6 +790,42 @@ func TestStorableReasonRedactsTruncatesAndSanitizes(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a url the driver never supplied is redacted by the pattern pass", func(t *testing.T) {
+		// The pass the other subtests cannot reach: they all hand storableReason
+		// the endpoint that appears in the text, so the by-value pass satisfies
+		// them and deleting the pattern pass leaves them green. A server naming
+		// a *different* credential-bearing URL in its own error text — an OAuth
+		// endpoint, a redirect target — is the case only the pattern can catch,
+		// because the driver has no value to enumerate for it.
+		got := storableReason(
+			`mcp: list tools: server said: token refresh at https://svc.example/oauth?client_secret=THIRDPARTY failed`,
+			"https://mcp.example/mcp")
+		for _, secret := range []string{"THIRDPARTY", "client_secret"} {
+			if strings.Contains(got, secret) {
+				t.Errorf("reason %q still carries %q from a url the driver did not supply", got, secret)
+			}
+		}
+		if !strings.Contains(got, "https://svc.example") {
+			t.Errorf("reason %q no longer names the host the server blamed", got)
+		}
+	})
+
+	t.Run("an ipv6 endpoint keeps its host", func(t *testing.T) {
+		// The trailing-punctuation trim eats `]` as readily as it eats a full
+		// stop, and an IPv6 authority ends in one. Trimmed away, the URL no
+		// longer parses and the whole thing becomes the fallback — so every
+		// failure reason for every IPv6-addressed server would lose the one
+		// piece of it an operator needs.
+		const endpoint = "https://[fd00::1]/mcp"
+		got := storableReason("mcp: connect to "+endpoint+": dial tcp: refused", endpoint)
+		if !strings.Contains(got, "https://[fd00::1]") {
+			t.Errorf("reason %q lost the ipv6 host", got)
+		}
+		if strings.Contains(got, "[redacted url]") {
+			t.Errorf("reason %q fell back to the placeholder for a url it could have named", got)
+		}
+	})
 
 	t.Run("a NUL never reaches the column", func(t *testing.T) {
 		if got := storableReason("before\x00after", ""); strings.Contains(got, "\x00") {
@@ -673,8 +849,11 @@ func TestStorableReasonRedactsTruncatesAndSanitizes(t *testing.T) {
 		// A multi-byte rune straddling the cut: with maxCatalogReason bytes of
 		// ASCII ahead of it, the cap lands inside the "…" that follows.
 		got := storableReason(strings.Repeat("x", maxCatalogReason-1)+"…"+strings.Repeat("y", 100), "")
-		if len(got) > maxCatalogReason+8 {
-			t.Errorf("reason kept %d bytes, want it capped near %d", len(got), maxCatalogReason)
+		// The cap plus the ellipsis the cut appends, and not a byte more: a
+		// looser bound leaves room for a truncation that keeps part of the
+		// straddling rune, which is the failure this arm exists to catch.
+		if want := maxCatalogReason + len("…"); len(got) > want {
+			t.Errorf("reason kept %d bytes, want at most %d", len(got), want)
 		}
 		if !utf8.ValidString(got) {
 			t.Errorf("capped reason is not valid utf-8: %q", got)
@@ -775,5 +954,71 @@ func TestNoTurnIsChainedWhileAToolCallIsUnanswered(t *testing.T) {
 	}
 	if n := h.liveOf(t, queue.ModelTurn); n != 0 {
 		t.Errorf("live model_turn items = %d: waking the brain now sends a request the API rejects", n)
+	}
+}
+
+// TestStorableToolsTellsANULFromTheEscapeThatSpellsIt pins the distinction the
+// byte search could not make. `"^[^\\u0000-\\u001f]*$"` is how a JSON Schema
+// says "no control characters": the value holds a backslash and the text u0000,
+// and re-marshaling escapes the backslash, so the bytes contain the six
+// characters a NUL is spelled with while the schema holds no NUL at all.
+// Dropping that tool costs an agent a tool over an idiom, and the drop is
+// silent — no row, no reason. A schema that does carry the code point still
+// costs its tool, because Postgres will not store it.
+func TestStorableToolsTellsANULFromTheEscapeThatSpellsIt(t *testing.T) {
+	nulInSchema, err := json.Marshal(map[string]any{"type": "object", "title": "a\u0000b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := []mcp.Tool{
+		{Name: "idiom", InputSchema: json.RawMessage(`{"type":"object","properties":` +
+			`{"q":{"type":"string","pattern":"^[^\\u0000-\\u001f]*$"}}}`)},
+		{Name: "real_nul", InputSchema: nulInSchema},
+		{Name: "undecodable", InputSchema: json.RawMessage(`{"type":`)},
+	}
+
+	got := storableTools(tools)
+	if len(got) != 1 || got[0].Name != "idiom" {
+		names := make([]string, 0, len(got))
+		for _, t := range got {
+			names = append(names, t.Name)
+		}
+		t.Fatalf("kept %v, want only the tool whose schema merely spells the escape", names)
+	}
+}
+
+// TestStorableToolsCapsTheListing pins the bound on the column a server fills.
+// `tools` is server-chosen text with no length of its own — a listing may run to
+// the whole response budget, and the catalog is per session, so the same agent
+// copies it into every session it starts. Tools are kept in the server's order
+// until the next would not fit, and dropped whole rather than truncated.
+func TestStorableToolsCapsTheListing(t *testing.T) {
+	const each = 64 << 10
+	var tools []mcp.Tool
+	for i := 0; i < 8; i++ {
+		tools = append(tools, mcp.Tool{
+			Name:        fmt.Sprintf("tool_%d", i),
+			Description: strings.Repeat("x", each),
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		})
+	}
+
+	got := storableTools(tools)
+	if len(got) == len(tools) {
+		t.Fatalf("kept all %d tools, want the listing capped", len(tools))
+	}
+	var size int
+	for _, tool := range got {
+		size += len(tool.Name) + len(tool.Description) + len(tool.InputSchema)
+	}
+	if size > maxCatalogTools {
+		t.Errorf("kept %d bytes of server-chosen text, want at most %d", size, maxCatalogTools)
+	}
+	// Kept in the server's own order, from the front: a cap that reordered or
+	// sampled would make the catalog depend on nothing the server can see.
+	for i, tool := range got {
+		if want := fmt.Sprintf("tool_%d", i); tool.Name != want {
+			t.Errorf("tool %d is %q, want %q — the cap must keep a prefix, in order", i, tool.Name, want)
+		}
 	}
 }
